@@ -1,19 +1,17 @@
-# Tiny Audio - ASR Learning Project
+# Tiny Audio - Learn ASR by Building One
 
-A tiny (300 line) model that combines a Whisper Encodder and SmolLM2 language model.  For research and learning on building ASR models.
+A minimal (~300 line) speech recognition model that combines Whisper's audio understanding with Hugging Face SmolLM2's text generation. Perfect for learning how modern ASR systems work by building and training your own.
 
-## Features
+## Why This Project
 
-- **Hybrid Architecture**: Leverages frozen Whisper encoder for robust audio understanding with SmolLM2 decoder for efficient text generation
-- **Parameter-Efficient**: Uses LoRA (Low-Rank Adaptation) for fine-tuning, drastically reducing trainable parameters
-- **Streaming Support**: Handles large-scale datasets (LibriSpeech, GigaSpeech, Common Voice) without memory constraints
-- **Flexible Configuration**: Hydra-based configuration system for easy experimentation
-- **Multi-Platform**: Supports local training (including Mac M1/M2) and cloud deployment (RunPod)
-- **Real-time Monitoring**: TensorBoard integration with WER tracking and prediction logging
+- **Actually Tiny**: The core model is just 300 lines of readable Python - small enough to understand completely
+- **Modern Architecture**: Combines a frozen Whisper encoder (for audio) with Hugging Face SmolLM2 decoder (for text) using LoRA adapters and a custom projection layer
+- **Trains on Consumer Hardware**: Works on your laptop (even M1/M2 Macs!) or scale up to GPUs
+- **Real Datasets**: Train on actual speech data from LibriSpeech, GigaSpeech, or Common Voice
+- **See Progress Live**: Watch your model improve in real-time with TensorBoard
+- **Experiment Freely**: Simple config files let you try different ideas without touching code
 
 ## Installation
-
-### Using uv (recommended)
 
 ```bash
 # Clone the repository
@@ -24,47 +22,16 @@ cd tiny-audio
 uv sync
 ```
 
-### Using pip
-
-```bash
-# Clone the repository
-git clone https://github.com/alexkroman/tiny-audio.git
-cd tiny-audio
-
-# Install in development mode
-pip install -e .
-
-# For CUDA support
-pip install -e ".[cuda]"
-
-# For development tools
-pip install -e ".[dev]"
-```
-
 ## Quick Start
 
-### Training on Sample Data
+### Training
 
 ```bash
-# Run with minimal configuration (great for testing)
-python src/train.py +experiments=mac_minimal
-
-# Run with default settings
+# Quick test run (20 steps, ~2 minutes)
 python src/train.py
-```
 
-### Production Training
-
-```bash
-# Large-scale training with streaming datasets
+# Production training with larger datasets
 python src/train.py +experiments=production
-
-# Custom configuration
-python src/train.py \
-    model.lora_r=64 \
-    model.lora_alpha=128 \
-    training.batch_size=16 \
-    training.learning_rate=5e-4
 ```
 
 ## Model Architecture
@@ -73,10 +40,10 @@ The system combines three key components:
 
 1. **Whisper Encoder**: Frozen `whisper-small` model for audio feature extraction (39M parameters, not trained)
 2. **Audio Projector**: Lightweight projection layer with RMSNorm and GELU activation to map audio features to text space
-3. **SmolLM2 Decoder**: Efficient language model with LoRA adapters (360M or 1.7B parameters, ~2% trained with LoRA)
+3. **Hugging Face SmolLM2 Decoder**: Efficient language model with LoRA adapters (360M or 1.7B parameters, ~2% trained with LoRA)
 
 ```python
-Audio Input � Whisper Encoder � Audio Projector � SmolLM2 + LoRA � Text Output
+Audio Input → Whisper Encoder → Audio Projector → Hugging Face SmolLM2 + LoRA → Text Output
 ```
 
 ## Configuration
@@ -112,21 +79,6 @@ Supports multiple ASR datasets through Hugging Face datasets:
 
 Datasets are automatically downloaded and cached locally.
 
-## Remote Training
-
-Deploy and train on RunPod GPUs:
-
-```bash
-# Deploy to RunPod
-python scripts/deploy_runpod.py
-
-# Start remote training session
-python scripts/start_remote_training.py
-
-# Attach to running session
-python scripts/attach_remote_session.py
-```
-
 ## Monitoring
 
 Training progress is logged to TensorBoard:
@@ -140,66 +92,6 @@ tensorboard --logdir outputs/
 # - Word Error Rate (WER)
 # - Learning rate schedule
 # - Sample predictions
-```
-
-## Performance
-
-| Model Config | Parameters | Trainable | WER (LibriSpeech test-clean) | Training Time (A40) |
-|-------------|-----------|-----------|-------------------------------|-------------------|
-| Small + LoRA | 399M | 8M (2%) | ~15% | 2 hours |
-| Large + LoRA | 1.7B | 34M (2%) | ~12% | 8 hours |
-
-*Note: Results are illustrative. Actual performance depends on training configuration and dataset.*
-
-## Development
-
-### Code Quality
-
-```bash
-# Run linter
-ruff check src/
-
-# Format code
-ruff format src/
-
-# Type checking
-mypy src/
-```
-
-### Testing
-
-```bash
-# Quick training test
-python src/train.py +experiments=mac_minimal
-
-# Verify model loading
-python -c "from src.modeling import ASRModel, ASRModelConfig; model = ASRModel(ASRModelConfig())"
-```
-
-## Mac-Specific Setup
-
-For Apple Silicon (M1/M2) devices:
-
-```bash
-# Set environment variables for MPS backend
-export PYTORCH_ENABLE_MPS_FALLBACK=1
-export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
-
-# Run training
-python src/train.py +experiments=mac_minimal
-```
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@software{tiny_audio_2024,
-  title = {Tiny Audio: Efficient ASR with Whisper + SmolLM2},
-  author = {Kroman, Alex},
-  year = {2024},
-  url = {https://github.com/alexkroman/tiny-audio}
-}
 ```
 
 ## Contributing
@@ -219,11 +111,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - OpenAI for the Whisper model
-- Hugging Face for SmolLM2 and the transformers library
+- Hugging Face for the SmolLM2 model and transformers library
 - The teams behind LibriSpeech, GigaSpeech, and Common Voice datasets
-
-## Contact
-
-Alex Kroman - alex@alexkroman.com
-
-Project Link: [https://github.com/alexkroman/tiny-audio](https://github.com/alexkroman/tiny-audio)

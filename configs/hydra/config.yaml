@@ -20,3 +20,11 @@ resume_from_checkpoint: null
 # Evaluation and prediction logging
 log_predictions_every_n_steps: 500  # How often to log predictions to TensorBoard
 log_predictions_samples: 10  # Number of samples to evaluate for predictions
+
+# Override training config with minimal settings for quick testing
+training:
+  output_dir: ./outputs/model
+  eval_steps: 10
+  save_steps: 10
+  max_steps: 20
+  gradient_accumulation_steps: 2
