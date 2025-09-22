@@ -6,8 +6,8 @@ A minimal (~300 line) speech recognition model that combines Whisper's audio und
 
 - **Actually Tiny**: The core model is just 300 lines of readable Python - small enough to understand completely
 - **Modern Architecture**: Combines a frozen Whisper encoder (for audio) with Hugging Face SmolLM2 decoder (for text) using LoRA adapters and a custom projection layer
-- **Trains on Consumer Hardware**: Works on your laptop (even M1/M2 Macs!) or scale up to GPUs
-- **Real Datasets**: Train on actual speech data from LibriSpeech, GigaSpeech, or Common Voice
+- **Trains on your Laptop**: Works on your laptop (even M1/M2 Macs!) or scale up to GPUs
+- **Real Datasets**: Train on actual speech data from LibriSpeech, GigaSpeech, and Common Voice
 - **See Progress Live**: Watch your model improve in real-time with TensorBoard
 - **Experiment Freely**: Simple config files let you try different ideas without touching code
 
@@ -39,7 +39,7 @@ python src/train.py +experiments=production
 The system combines three key components:
 
 1. **Whisper Encoder**: Frozen `whisper-small` model for audio feature extraction (39M parameters, not trained)
-2. **Audio Projector**: Lightweight projection layer with RMSNorm and GELU activation to map audio features to text space
+2. **Audio Projector**: Lightweight projection layer with LLamaRMSNorm and GELU activation to map audio features to text space
 3. **Hugging Face SmolLM2 Decoder**: Efficient language model with LoRA adapters (360M or 1.7B parameters, ~2% trained with LoRA)
 
 ```python
@@ -79,6 +79,40 @@ Supports multiple ASR datasets through Hugging Face datasets:
 
 Datasets are automatically downloaded and cached locally.
 
+## Cloud Training with RunPod
+
+The `scripts/` directory contains utilities for deploying and managing training on RunPod GPUs:
+
+### Scripts Overview
+
+- **`deploy_runpod.py`**: Syncs your code to a RunPod instance and sets up dependencies
+- **`start_remote_training.py`**: Starts a training session in a tmux window on the remote instance
+- **`attach_remote_session.py`**: Attaches to an existing tmux training session for monitoring
+
+### Quick RunPod Setup
+
+1. Create a RunPod account and launch a GPU pod with PyTorch template
+2. Add your SSH key to the pod
+3. Deploy and start training:
+
+```bash
+# Deploy code and setup environment (replace with your pod's host and port)
+python scripts/deploy_runpod.py --host <your-pod-id>.runpod.io --port 22
+
+# Start training in a tmux session
+python scripts/start_remote_training.py --host <your-pod-id>.runpod.io --port 22 --config production
+
+# Later, attach to monitor progress
+python scripts/attach_remote_session.py --host <your-pod-id>.runpod.io --port 22
+```
+
+The scripts handle:
+
+- Code synchronization via rsync
+- Dependency installation with uv
+- Session management with tmux (so training continues if you disconnect)
+- Automatic model checkpointing
+
 ## Monitoring
 
 Training progress is logged to TensorBoard:
@@ -94,22 +128,6 @@ tensorboard --logdir outputs/
 # - Sample predictions
 ```
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- OpenAI for the Whisper model
-- Hugging Face for the SmolLM2 model and transformers library
-- The teams behind LibriSpeech, GigaSpeech, and Common Voice datasets
