@@ -1,6 +1,6 @@
 # Tiny Audio - ASR Learning Project
 
-A lightweight, efficient Automatic Speech Recognition (ASR) system that combines OpenAI's Whisper encoder with SmolLM2 decoder using LoRA adapters for parameter-efficient fine-tuning.
+A tiny (300 line) model that combines a Whisper Encodder and SmolLM2 language model.  For research and learning on building ASR models.
 
 ## Features
 
