@@ -34,6 +34,22 @@ python src/train.py
 python src/train.py +experiments=production
 ```
 
+### Demo Usage
+
+```bash
+# Run with default settings (uses untrained model)
+python demo/gradio_app.py
+
+# Run with a trained model
+python demo/gradio_app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
+
+# Specify custom outputs directory
+python demo/gradio_app.py --outputs-dir path/to/audio/files
+
+# Create public link for sharing
+python demo/gradio_app.py --share
+```
+
 ## Model Architecture
 
 The system combines three key components:

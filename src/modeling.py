@@ -20,9 +20,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 class WhisperEncoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.whisper = WhisperModel.from_pretrained(
-            "openai/whisper-small", dtype="auto", token=False
-        )
+        self.whisper = WhisperModel.from_pretrained("openai/whisper-small", torch_dtype="auto")
 
         for param in self.whisper.parameters():
             param.requires_grad = False
@@ -96,11 +94,10 @@ class LLMDecoder(nn.Module):
 
         self.model = AutoModelForCausalLM.from_pretrained(
             decoder_model_name,
-            dtype="auto",
-            token=False,
             use_cache=False,
+            torch_dtype="auto",
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(decoder_model_name, token=False)
+        self.tokenizer = AutoTokenizer.from_pretrained(decoder_model_name)
 
         # Add padding token if missing to avoid HF warnings
         if self.tokenizer.pad_token is None:
