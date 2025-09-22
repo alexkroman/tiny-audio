@@ -49,10 +49,10 @@ cuda = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/asr-conformer-smollm2"
-Documentation = "https://github.com/yourusername/asr-conformer-smollm2#readme"
-Repository = "https://github.com/yourusername/asr-conformer-smollm2"
-Issues = "https://github.com/yourusername/asr-conformer-smollm2/issues"
+Homepage = "https://github.com/alexkroman/tiny-audio"
+Documentation = "https://github.com/alexkroman/tiny-audio#readme"
+Repository = "https://github.com/alexkroman/tiny-audio"
+Issues = "https://github.com/alexkroman/tiny-audio/issues"
 
 [tool.setuptools]
 packages = ["src"]

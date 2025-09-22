@@ -1,4 +1,4 @@
-# Tiny Audio - Efficient ASR with Whisper + SmolLM2
+# Tiny Audio - ASR Learning Project
 
 A lightweight, efficient Automatic Speech Recognition (ASR) system that combines OpenAI's Whisper encoder with SmolLM2 decoder using LoRA adapters for parameter-efficient fine-tuning.
 
@@ -17,7 +17,7 @@ A lightweight, efficient Automatic Speech Recognition (ASR) system that combines
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/tiny-audio.git
+git clone https://github.com/alexkroman/tiny-audio.git
 cd tiny-audio
 
 # Install with uv
@@ -28,7 +28,7 @@ uv sync
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/tiny-audio.git
+git clone https://github.com/alexkroman/tiny-audio.git
 cd tiny-audio
 
 # Install in development mode
@@ -76,7 +76,7 @@ The system combines three key components:
 3. **SmolLM2 Decoder**: Efficient language model with LoRA adapters (360M or 1.7B parameters, ~2% trained with LoRA)
 
 ```python
-Audio Input ’ Whisper Encoder ’ Audio Projector ’ SmolLM2 + LoRA ’ Text Output
+Audio Input ï¿½ Whisper Encoder ï¿½ Audio Projector ï¿½ SmolLM2 + LoRA ï¿½ Text Output
 ```
 
 ## Configuration
@@ -198,7 +198,7 @@ If you use this code in your research, please cite:
   title = {Tiny Audio: Efficient ASR with Whisper + SmolLM2},
   author = {Kroman, Alex},
   year = {2024},
-  url = {https://github.com/yourusername/tiny-audio}
+  url = {https://github.com/alexkroman/tiny-audio}
 }
 ```
 
@@ -226,4 +226,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 Alex Kroman - alex@alexkroman.com
 
-Project Link: [https://github.com/yourusername/tiny-audio](https://github.com/yourusername/tiny-audio)
+Project Link: [https://github.com/alexkroman/tiny-audio](https://github.com/alexkroman/tiny-audio)
