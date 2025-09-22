@@ -1,0 +1,13 @@
+# Large model configuration
+decoder_model_name: HuggingFaceTB/SmolLM2-360M-Instruct
+
+# LoRA configuration
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - v_proj
+  - k_proj
+  - o_proj

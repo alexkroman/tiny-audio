@@ -1,0 +1,63 @@
+# Mac-optimized training configuration
+output_dir: ./outputs/mac_model
+overwrite_output_dir: false
+
+# Training configuration
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 16
+eval_accumulation_steps: 1
+
+# Learning rate
+learning_rate: 5e-5
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+
+# Optimizer
+optim: adamw_torch
+adam_beta1: 0.9
+adam_beta2: 0.98
+adam_epsilon: 1e-8
+
+# Logging
+logging_dir: ./logs
+logging_steps: 10
+logging_first_step: true
+logging_nan_inf_filter: false
+report_to: []
+
+# Evaluation
+eval_strategy: steps
+eval_steps: 100
+
+# Saving
+save_strategy: steps
+save_steps: 100
+save_total_limit: 2
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+
+# Hub
+push_to_hub: false
+
+# Performance - Mac optimized
+dataloader_num_workers: 0  # Important for Mac
+dataloader_prefetch_factor: null  # Disable prefetching for streaming
+gradient_checkpointing: true
+fp16: false
+bf16: false
+dataloader_pin_memory: false  # Important for Mac
+max_grad_norm: 1.0
+
+# Misc
+seed: 42
+save_safetensors: true  # Required to avoid torch.load security issue
+disable_tqdm: false
+log_level: info
+
+# Required by HF Trainer
+remove_unused_columns: false
+label_names:
+  - labels

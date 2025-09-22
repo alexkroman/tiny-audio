@@ -1,0 +1,17 @@
+# @package _global_
+
+defaults:
+  - override /model: large
+  - override /data: production_streaming  # Use streaming for faster startup
+  - override /training: production
+
+# Resume from checkpoint (root level override)
+# resume_from_checkpoint: /workspace/outputs/2025-09-20/04-31-24/outputs/production_model/checkpoint-20000
+
+# Production-specific overrides
+training:
+  push_to_hub: false
+
+  # Streaming compatibility settings
+  dataloader_num_workers: 16  # Required for streaming datasets
+  dataloader_persistent_workers: true

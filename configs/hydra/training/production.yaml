@@ -1,0 +1,68 @@
+# Production training configuration
+output_dir: ./outputs/production_model
+overwrite_output_dir: false
+
+# Training configuration
+max_steps: 100000  # Use steps instead of epochs for streaming datasets
+per_device_train_batch_size: 4
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 4
+eval_accumulation_steps: 1
+
+# Learning rate
+learning_rate: 3e-5
+lr_scheduler_type: cosine_with_restarts
+warmup_ratio: 0.03  
+weight_decay: 0.01
+
+# Optimizer
+optim: adamw_8bit
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_epsilon: 1e-8
+
+# Logging
+logging_dir: ./logs
+logging_steps: 20
+logging_first_step: true
+logging_nan_inf_filter: false
+report_to:
+  - tensorboard
+
+# Evaluation
+eval_strategy: steps
+eval_steps: 500
+
+# Saving
+save_strategy: steps
+save_steps: 1000
+save_total_limit: 3
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+
+# Hub
+push_to_hub: true
+hub_model_id: "mazesmazes/asr"  # Change this to your repo
+hub_strategy: checkpoint  # Push every checkpoint
+hub_token: null  # Will use HF_TOKEN env var if not set
+hub_private_repo: true
+
+# Performance
+dataloader_num_workers: 6  # Optimized for 9 vCPUs (leave some for main process)
+gradient_checkpointing: true
+fp16: false
+bf16: true
+dataloader_pin_memory: true
+max_grad_norm: 1.0
+
+# Misc
+seed: 42
+save_safetensors: true
+disable_tqdm: false
+log_level: info
+
+# Required by HF Trainer
+remove_unused_columns: false
+label_names:
+  - labels
