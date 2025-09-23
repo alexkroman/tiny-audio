@@ -37,20 +37,20 @@ A minimal (~300 line) speech recognition model that combines Whisper's audio und
 1.  **Run a quick test training:**
     This will run for 20 steps and take approximately 2 minutes on a modern laptop.
     ```bash
-    python src/train.py
+    uv run python src/train.py
     ```
 
 2.  **Start a full production training:**
     This uses larger datasets and is recommended for achieving better performance.
     ```bash
-    python src/train.py +experiments=production
+    uv run python src/train.py +experiments=production
     ```
 
 3.  **Run the Gradio Demo:**
     Once you have a trained model, you can use the Gradio app to interact with it.
     ```bash
     # Make sure to replace the model path with your own
-    python demo/gradio_app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
+    uv run python demo/gradio_app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
     ```
 
 ## Model Architecture
@@ -81,13 +81,13 @@ You can easily override any configuration parameter from the command line:
 
 ```bash
 # Use a different model
-python src/train.py model=large
+uv run python src/train.py model=large
 
 # Use a different dataset
-python src/train.py data=production_streaming
+uv run python src/train.py data=production_streaming
 
 # Change training parameters
-python src/train.py training.max_steps=10000 training.eval_steps=500
+uv run python src/train.py training.max_steps=10000 training.eval_steps=500
 ```
 
 ## Cloud Training with RunPod
@@ -97,19 +97,19 @@ The `scripts/` directory contains utilities for deploying and managing training 
 1.  **Deploy your code:**
     This will sync your local code to the RunPod instance and install dependencies.
     ```bash
-    python scripts/deploy_runpod.py --host <your-pod-id>.runpod.io --port 22
+    uv run python scripts/deploy_runpod.py --host <your-pod-id>.runpod.io --port 22
     ```
 
 2.  **Start remote training:**
     This will start a training session in a `tmux` window on the remote instance.
     ```bash
-    python scripts/start_remote_training.py --host <your-pod-id>.runpod.io --port 22 --config production
+    uv run python scripts/start_remote_training.py --host <your-pod-id>.runpod.io --port 22 --config production
     ```
 
 3.  **Attach to the remote session:**
     You can attach to the `tmux` session to monitor the training progress.
     ```bash
-    python scripts/attach_remote_session.py --host <your-pod-id>.runpod.io --port 22
+    uv run python scripts/attach_remote_session.py --host <your-pod-id>.runpod.io --port 22
     ```
 
 ## Development
@@ -118,15 +118,15 @@ This project uses `ruff` for linting and formatting, and `mypy` for type checkin
 
 -   **Linting:**
     ```bash
-    ruff check src/
+    uv run ruff check src/
     ```
 -   **Formatting:**
     ```bash
-    ruff format src/
+    uv run ruff format src/
     ```
 -   **Type Checking:**
     ```bash
-    mypy src/
+    uv run mypy src/
     ```
 
 ## Monitoring
@@ -134,7 +134,7 @@ This project uses `ruff` for linting and formatting, and `mypy` for type checkin
 Training progress, including loss and Word Error Rate (WER), is logged to TensorBoard.
 
 ```bash
-tensorboard --logdir outputs/
+uv run tensorboard --logdir outputs/
 ```
 
 ## Project Structure
