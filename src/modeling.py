@@ -4,8 +4,6 @@ from typing import Optional, Union, cast
 
 import torch
 import torch.nn as nn
-import torchaudio
-import torchaudio.functional as torchaudio_functional
 from peft import LoraConfig, TaskType, get_peft_model
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
@@ -150,16 +148,37 @@ class ASRModel(PreTrainedModel):
         self.audio_projector = AudioProjector(audio_dim, text_dim)
         self.add_audio_special_tokens()
 
+        # Initialize feature extractor as None - will be loaded in from_pretrained
+        self.feature_extractor = None
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        """Load model and feature extractor.
+
+        This follows HuggingFace conventions and automatically handles:
+        - Loading the model weights
+        - Loading the feature extractor that was saved with the model
+        """
+        from transformers import WhisperFeatureExtractor
+
+        # Load the model using parent class method
+        model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
+
+        # Load feature extractor
+        model.feature_extractor = WhisperFeatureExtractor.from_pretrained(
+            pretrained_model_name_or_path
+        )
+
+        return model
+
     def save_pretrained(self, save_directory: str, **kwargs):
         """Save the model, tokenizer, and feature extractor."""
-        if not hasattr(self, "feature_extractor"):
-            raise AttributeError(
-                "The model does not have a `feature_extractor` attribute. "
-                "Please attach it to the model instance before saving."
-            )
         super().save_pretrained(save_directory, **kwargs)
         self.decoder.tokenizer.save_pretrained(save_directory)
-        self.feature_extractor.save_pretrained(save_directory)
+
+        # Save feature extractor if it exists
+        if self.feature_extractor is not None:
+            self.feature_extractor.save_pretrained(save_directory)
 
     def add_audio_special_tokens(self):
         """Add audio-specific special tokens for better audio-text alignment."""
@@ -334,50 +353,62 @@ class ASRModel(PreTrainedModel):
 
     @torch.no_grad()
     def transcribe(self, audio_path: str, **kwargs) -> str:
+        """Transcribe audio file using pipeline-style processing."""
+        from transformers.pipelines.audio_utils import ffmpeg_read
 
-        # Use backend="soundfile" to avoid deprecation warning
-        # This is the recommended approach until TorchCodec is available
-        waveform, sample_rate = torchaudio.load(audio_path, backend="soundfile")
+        # Use transformers' audio utilities for consistent loading
+        with open(audio_path, "rb") as f:
+            audio_bytes = f.read()
+        audio_array = ffmpeg_read(audio_bytes, sampling_rate=16000)
 
-        # Use torchaudio functional API for resampling
-        if sample_rate != 16000:
-            waveform = torchaudio_functional.resample(waveform, sample_rate, 16000)
-
-        # Convert to mono if stereo
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-
+        # Process through feature extractor (handles mono conversion internally)
         inputs = self.feature_extractor(
-            waveform.squeeze().numpy(),
+            audio_array,
             sampling_rate=16000,
             return_tensors="pt",
             return_attention_mask=True,
         )
 
-        audio_features = inputs.input_features.to(self.device)
-        attention_mask = inputs.get("attention_mask")
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(self.device)
+        # Move to device and generate
+        model_inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
+        # Set generation defaults with user overrides
         generate_kwargs = {
-            "max_new_tokens": 200,
-            "do_sample": False,
+            "max_new_tokens": kwargs.pop("max_new_tokens", 200),
+            "do_sample": kwargs.pop("do_sample", False),
+            "pad_token_id": self.decoder.tokenizer.pad_token_id,
+            "eos_token_id": self.decoder.tokenizer.eos_token_id,
+            **kwargs  # Allow any additional generation parameters
         }
 
-        if self.decoder.tokenizer.pad_token_id is not None:
-            generate_kwargs["pad_token_id"] = self.decoder.tokenizer.pad_token_id
-        if self.decoder.tokenizer.eos_token_id is not None:
-            generate_kwargs["eos_token_id"] = self.decoder.tokenizer.eos_token_id
-
-        generate_kwargs.update(kwargs)
-
+        # Generate transcription
         generated_ids = self.generate(
-            input_features=audio_features,
-            attention_mask=attention_mask,
+            input_features=model_inputs["input_features"],
+            attention_mask=model_inputs.get("attention_mask"),
             **generate_kwargs,
         )
 
         return cast(str, self.decoder.tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+
+    def pipeline(self, task: str = "automatic-speech-recognition", **kwargs):
+        """Create a HuggingFace pipeline for this model.
+
+        Args:
+            task: The task type (default: "automatic-speech-recognition")
+            **kwargs: Additional arguments for the pipeline
+
+        Returns:
+            A HuggingFace pipeline instance
+        """
+        from transformers import pipeline
+
+        return pipeline(
+            task,
+            model=self,
+            tokenizer=self.decoder.tokenizer,
+            feature_extractor=self.feature_extractor,
+            **kwargs
+        )
 
 
 AutoConfig.register("asr_model", ASRModelConfig)

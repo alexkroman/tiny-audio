@@ -85,8 +85,11 @@ uv run scripts/attach_remote_session.py --host <pod-id>.runpod.io --port 22
 ### Monitoring
 
 ```bash
-# Start TensorBoard to monitor training
-uv run tensorboard --logdir outputs/
+# Login to W&B (first time only)
+wandb login
+
+# View metrics in the W&B dashboard
+# Your runs will appear at https://wandb.ai/YOUR_USERNAME/tiny-audio
 ```
 
 ## Architecture
@@ -110,7 +113,7 @@ uv run tensorboard --logdir outputs/
    - `ASRDataCollator` (`src/train.py:68`): Handles audio preprocessing and
      tokenization
    - `PredictionLoggingCallback` (`src/train.py:177`): Logs predictions and WER
-     metrics to TensorBoard
+     metrics to W&B
 
 1. **Configuration System** (Hydra-based):
 

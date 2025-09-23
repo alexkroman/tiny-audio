@@ -12,12 +12,12 @@ import logging
 import sys
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple, Union, cast
+from typing import List, Optional, Tuple, Union
 
 import gradio as gr
+import numpy as np
+import soundfile as sf
 import torch
-import torchaudio
-from transformers import WhisperFeatureExtractor
 
 # Set up logging
 logging.basicConfig(
@@ -25,6 +25,10 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+from src.modeling import ASRModel
 
 
 class ASRDemo:
@@ -39,87 +43,19 @@ class ASRDemo:
         logger.info(f"Using device: {self.device}")
 
         # Handle outputs directory
-        outputs_path = Path(outputs_dir)
-        if not outputs_path.is_absolute():
-            # Check if we're in the demo directory or parent
-            if Path("wav_outputs").exists():
-                outputs_path = Path("wav_outputs")
-            elif Path("demo/wav_outputs").exists():
-                outputs_path = Path("demo/wav_outputs")
-            else:
-                outputs_path = Path(outputs_dir)
-
-        self.outputs_dir = outputs_path
+        self.outputs_dir = Path(outputs_dir)
+        if not self.outputs_dir.is_absolute():
+            self.outputs_dir = Path.cwd() / outputs_dir
         logger.info(f"Using outputs directory: {self.outputs_dir.absolute()}")
 
-        # Check if model_path is local or HuggingFace Hub
-        model_path_obj = Path(model_path)
-        is_local = model_path_obj.exists() and model_path_obj.is_dir()
-
-        if is_local:
-            logger.info(f"Loading model from local directory: {model_path}")
-            self._load_local_model(model_path)
-        else:
-            logger.info(f"Loading model from HuggingFace Hub: {model_path}")
-            self._load_hub_model(model_path)
+        # Load model with feature extractor
+        logger.info(f"Loading model from: {model_path}")
+        self.model = ASRModel.from_pretrained(model_path)
 
         # Move to device and set to eval mode
         self.model = self.model.to(self.device)
         self.model.eval()
         logger.info(f"Model loaded successfully with dtype: {self.model.dtype}")
-
-    def _load_local_model(self, model_path: str):
-        """Load model from local directory."""
-        model_path_obj = Path(model_path)
-
-        # Load modeling.py from the saved model directory
-        saved_modeling_path = model_path_obj / "modeling.py"
-        if saved_modeling_path.exists():
-            logger.info(f"Loading modeling.py from saved model: {saved_modeling_path}")
-            # Add the model path to sys.path temporarily to import the saved modeling
-            sys.path.insert(0, str(model_path_obj))
-            try:
-                from modeling import ASRModel  # type: ignore
-            finally:
-                # Remove the model path from sys.path
-                sys.path.pop(0)
-        else:
-            # Try to import from current directory or parent
-            try:
-                from modeling import ASRModel
-            except ImportError:
-                sys.path.append(str(Path(__file__).parent.parent))
-                from src.modeling import ASRModel  # type: ignore
-
-        # Load feature extractor and model
-        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(model_path)
-        self.model = ASRModel.from_pretrained(model_path)
-
-        # Attach feature extractor to the model
-        self.model.feature_extractor = self.feature_extractor
-
-    def _load_hub_model(self, model_name: str):
-        """Load model from HuggingFace Hub."""
-        # Try to import modeling module
-        try:
-            from modeling import ASRModel
-        except ImportError:
-            # Try parent directory
-            sys.path.append(str(Path(__file__).parent.parent))
-            try:
-                from src.modeling import ASRModel  # type: ignore
-            except ImportError:
-                raise ImportError(
-                    "Could not import ASRModel. Please ensure modeling.py is available "
-                    "in the current directory or src/ folder."
-                )
-
-        # Load feature extractor and model from HuggingFace Hub
-        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
-        self.model = ASRModel.from_pretrained(model_name)
-
-        # Attach feature extractor to the model
-        self.model.feature_extractor = self.feature_extractor
 
     def transcribe(self, audio_path: str) -> str:
         """Transcribe audio file to text.
@@ -133,14 +69,12 @@ class ASRDemo:
         try:
             with torch.no_grad():
                 result = self.model.transcribe(audio_path)
-            return cast(str, result) if result else "Could not generate transcription"
+            return result if result else "Could not generate transcription"
         except Exception as e:
             logger.error(f"Error transcribing audio: {e}")
             return f"Error: {str(e)}"
 
-    def process_audio(
-        self, audio_input: Union[str, Tuple[int, torch.Tensor], None]
-    ) -> str:
+    def process_audio(self, audio_input: Union[str, Tuple[int, np.ndarray], None]) -> str:
         """Process audio from microphone or file upload.
 
         Args:
@@ -159,12 +93,7 @@ class ASRDemo:
             # Create a temporary file to save the audio
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
                 temp_path = tmp_file.name
-                # Convert to tensor and save
-                audio_tensor = torch.tensor(audio_data).float()
-                if audio_tensor.dim() == 1:
-                    audio_tensor = audio_tensor.unsqueeze(0)
-                # Use backend="soundfile" to avoid deprecation warning
-                torchaudio.save(temp_path, audio_tensor, sample_rate, backend="soundfile")
+                sf.write(temp_path, audio_data, sample_rate)
 
             # Transcribe the temporary file
             result = self.transcribe(temp_path)
@@ -213,18 +142,8 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
     Returns:
         Gradio Blocks interface
     """
-
     # Initialize the demo
-    try:
-        asr_demo = ASRDemo(model_path, outputs_dir)
-    except Exception as e:
-        logger.error(f"Failed to initialize model: {e}")
-        # Create a fallback interface with error message
-        with gr.Blocks(title="ASR Demo - Error") as demo:
-            gr.Markdown("# ❌ Error Loading Model")
-            gr.Markdown(f"Failed to load model: {str(e)}")
-            gr.Markdown("Please check the model path and try again.")
-        return demo
+    asr_demo = ASRDemo(model_path, outputs_dir)
 
     # Create the interface
     with gr.Blocks(title="ASR Demo - Whisper + SmolLM2") as demo:
@@ -248,14 +167,6 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
                             lines=5,
                             placeholder="Transcription will appear here...",
                         )
-
-                # Add examples
-                gr.Examples(
-                    examples=[
-                        # You can add example audio files here
-                    ],
-                    inputs=audio_input,
-                )
 
             with gr.Tab("From Outputs Directory"):
                 with gr.Row():
@@ -290,22 +201,6 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
 
         # Connect the main transcribe button
         submit_btn.click(asr_demo.process_audio, inputs=[audio_input], outputs=[output_text])
-
-        # Add model info
-        with gr.Accordion("Model Information", open=False):
-            gr.Markdown(
-                """
-            **Model Architecture:**
-            - Encoder: Whisper-small (frozen)
-            - Decoder: SmolLM2-135M with LoRA adapters
-            - Audio Projector: RMSNorm + GELU activation
-
-            **Configuration:**
-            - LoRA rank: 32
-            - Target modules: q_proj, v_proj, k_proj, o_proj
-            - Max audio length: 30 seconds
-            """
-            )
 
     return demo
 

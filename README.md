@@ -212,10 +212,14 @@ checking.
 ## Monitoring
 
 Training progress, including loss and Word Error Rate (WER), is logged to
-TensorBoard.
+Weights & Biases (W&B).
 
 ```bash
-uv run tensorboard --logdir outputs/
+# Login to W&B (first time only)
+wandb login
+
+# View metrics in the W&B dashboard
+# Your runs will appear at https://wandb.ai/YOUR_USERNAME/tiny-audio
 ```
 
 ## Project Structure

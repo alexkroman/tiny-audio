@@ -4,6 +4,7 @@
 import argparse
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -113,7 +114,24 @@ def sync_project(host, port, project_root):
     return True
 
 
-def install_python_dependencies(host, port):
+def get_project_dependencies(project_root):
+    """Load dependencies from pyproject.toml."""
+    pyproject_path = project_root / "pyproject.toml"
+
+    with open(pyproject_path, "rb") as f:
+        pyproject = tomllib.load(f)
+
+    # Get base dependencies
+    dependencies = pyproject.get("project", {}).get("dependencies", [])
+
+    # Add cuda optional dependencies (bitsandbytes for GPU)
+    cuda_deps = pyproject.get("project", {}).get("optional-dependencies", {}).get("cuda", [])
+    dependencies.extend(cuda_deps)
+
+    return dependencies
+
+
+def install_python_dependencies(host, port, project_root):
     """Install Python dependencies using uv on RunPod."""
     print("\nInstalling Python dependencies...")
 
@@ -124,27 +142,14 @@ def install_python_dependencies(host, port):
     result = run_command(cmd_check, capture_output=True)
     print(f"Found: {result}")
 
-    # Install only the packages not provided by RunPod
-    required_packages = [
-        "transformers>=4.35.0",
-        "accelerate>=0.24.0",
-        "bitsandbytes",
-        "datasets==3.6.0",
-        "peft>=0.6.0",
-        "evaluate>=0.4.0",
-        "jiwer>=3.0.0",  # For WER (Word Error Rate) calculation
-        "tensorboard>=2.14.0",
-        "hydra-core>=1.3.0",
-        "omegaconf>=2.3.0",
-        "hf-transfer",  # For fast HuggingFace downloads
-        "ninja",  # For faster CUDA kernel compilation
-        "soundfile",
-        "librosa",  # Required by datasets for audio decoding
-    ]
+    # Get dependencies from pyproject.toml
+    required_packages = get_project_dependencies(project_root)
 
     packages_str = " ".join(f'"{pkg}"' for pkg in required_packages)
 
-    print(f"Installing: {', '.join(required_packages)}")
+    print(f"Installing packages from pyproject.toml:")
+    for pkg in required_packages:
+        print(f"  - {pkg}")
 
     # Use uv with --system to work with system Python and respect existing packages
     # The --system flag tells uv to use the system Python instead of creating a venv
@@ -192,7 +197,7 @@ def main():
 
     # Install Python dependencies
     if not args.skip_deps:
-        install_python_dependencies(args.host, args.port)
+        install_python_dependencies(args.host, args.port, project_root)
 
     print("\n" + "=" * 50)
     print("Deployment complete!")
