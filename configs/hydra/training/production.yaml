@@ -61,6 +61,7 @@ seed: 42
 save_safetensors: true
 disable_tqdm: false
 log_level: info
+ignore_data_skip: true  # Don't try to skip batches when resuming with streaming datasets
 
 # Required by HF Trainer
 remove_unused_columns: false
