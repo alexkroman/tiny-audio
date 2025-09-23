@@ -95,6 +95,35 @@ usage instructions.
    uv run demo/gradio_app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
    ```
 
+### Option 3: Deploy Demo to Hugging Face Spaces
+
+Deploy your demo as a public Hugging Face Space for easy sharing:
+
+1. **Create a new Space on Hugging Face:**
+   - Go to [https://huggingface.co/new-space](https://huggingface.co/new-space)
+   - Choose Gradio SDK
+   - Name your Space (e.g., "tiny-audio-demo")
+
+2. **Add the Space as a git remote:**
+   ```bash
+   cd demo
+   git remote add space https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE_NAME
+   ```
+
+3. **Push the demo to your Space:**
+   ```bash
+   git push space main:main
+   ```
+
+   The demo files (`app.py`, `requirements.txt`, `README.md`) are already configured
+   to work with Hugging Face Spaces. The app will automatically load the model from
+   the Hugging Face Hub.
+
+4. **Access your live demo:**
+   Your Space will be available at: `https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE_NAME`
+
+   See our example Space: [https://huggingface.co/spaces/mazesmazes/tiny-audio](https://huggingface.co/spaces/mazesmazes/tiny-audio)
+
 ## Model Architecture
 
 The model consists of three main components:
