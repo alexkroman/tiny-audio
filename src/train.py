@@ -188,12 +188,12 @@ class DataCollator:
             ]
             texts.append(self.tokenizer.apply_chat_template(messages, tokenize=False))
 
-        # Use tokenizer's pad method for cleaner padding
-        tokenized = self.tokenizer(texts, truncation=True, return_tensors=None)
-        batch = self.tokenizer.pad(
-            tokenized,
+        # Use tokenizer's __call__ method directly (faster for fast tokenizers)
+        batch = self.tokenizer(
+            texts,
             padding="longest",
-            return_tensors="pt"
+            truncation=True,
+            return_tensors="pt",
         )
         labels = batch["input_ids"].clone()
 
@@ -419,8 +419,10 @@ def main(cfg: DictConfig) -> None:
         if hub_token:
             training_args_dict["hub_token"] = hub_token
 
-    # Enable tf32 for better performance on compatible GPUs
-    training_args_dict.setdefault("tf32", True)
+    # Enable tf32 for better performance on compatible GPUs (production only)
+    # Only enable if bf16 is true (indicates GPU training) and not on Mac
+    if training_args_dict.get("bf16", False) and training_args_dict.get("dataloader_pin_memory", True):
+        training_args_dict.setdefault("tf32", True)
 
     training_args = TrainingArguments(**training_args_dict)
 
