@@ -104,22 +104,21 @@ Deploy your demo as a public Hugging Face Space for easy sharing:
    - Choose Gradio SDK
    - Name your Space (e.g., "tiny-audio-demo")
 
-2. **Add the Space as a git remote:**
+2. **Deploy using the automated script:**
    ```bash
-   cd demo
-   git remote add space https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE_NAME
+   # Deploy to default space (mazesmazes/tiny-audio)
+   uv run scripts/deploy_to_hf_space.py --force
+
+   # Deploy to your own space
+   uv run scripts/deploy_to_hf_space.py --space-url https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE --force
    ```
 
-3. **Push the demo to your Space:**
-   ```bash
-   git push space main:main
-   ```
+   The script automatically handles:
+   - Copying only the necessary demo files
+   - Creating a clean git repository
+   - Pushing to the Hugging Face Space
 
-   The demo files (`app.py`, `requirements.txt`, `README.md`) are already configured
-   to work with Hugging Face Spaces. The app will automatically load the model from
-   the Hugging Face Hub.
-
-4. **Access your live demo:**
+3. **Access your live demo:**
    Your Space will be available at: `https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE_NAME`
 
    See our example Space: [https://huggingface.co/spaces/mazesmazes/tiny-audio](https://huggingface.co/spaces/mazesmazes/tiny-audio)
