@@ -5,7 +5,9 @@ colorFrom: purple
 colorTo: blue
 sdk: gradio
 sdk_version: 4.44.0
+python_version: 3.11
 app_file: app.py
+pinned: false
 license: MIT
 models:
   - mazesmazes/tiny-audio
@@ -18,6 +20,9 @@ tags:
   - smollm
   - lora
 short_description: Efficient ASR with Whisper encoder and SmolLM2 decoder
+suggested_hardware: cpu-upgrade
+preload_from_hub:
+  - mazesmazes/tiny-audio
 ---
 
 # 🎤 Tiny Audio ASR Demo
