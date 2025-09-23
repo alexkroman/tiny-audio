@@ -10,6 +10,10 @@ This is an Automatic Speech Recognition (ASR) training pipeline that combines a 
 
 ### Setup and Dependencies
 ```bash
+# Set up Hugging Face token (required for GigaSpeech, Common Voice datasets)
+export HF_TOKEN='your-hugging-face-token'
+# Get a token from https://huggingface.co/settings/tokens
+
 # Install dependencies with uv (preferred)
 uv sync
 
@@ -123,6 +127,11 @@ The project uses Hydra's composition pattern:
 - `production`: Full training with streaming datasets and optimized settings
 
 ## Environment Variables
+
+For accessing gated datasets (GigaSpeech, Common Voice):
+```bash
+export HF_TOKEN='your-hugging-face-token'
+```
 
 For Mac with MPS acceleration issues:
 ```bash

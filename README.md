@@ -34,19 +34,25 @@ A minimal (~300 line) speech recognition model that combines Whisper's audio und
 
 ## Quick Start
 
-1.  **Run a quick test training:**
+1.  **Set up your Hugging Face token (required for some datasets):**
+    ```bash
+    export HF_TOKEN='your-hugging-face-token'
+    ```
+    You can get a token from [https://huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+
+2.  **Run a quick test training:**
     This will run for 20 steps and take approximately 2 minutes on a modern laptop.
     ```bash
     uv run python src/train.py
     ```
 
-2.  **Start a full production training:**
+3.  **Start a full production training:**
     This uses larger datasets and is recommended for achieving better performance.
     ```bash
     uv run python src/train.py +experiments=production
     ```
 
-3.  **Run the Gradio Demo:**
+4.  **Run the Gradio Demo:**
     Once you have a trained model, you can use the Gradio app to interact with it.
     ```bash
     # Make sure to replace the model path with your own
