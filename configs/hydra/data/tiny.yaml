@@ -1,0 +1,22 @@
+# Tiny dataset configuration for Mac local development
+datasets:
+  - name: librispeech_asr
+    configs:
+      - clean
+    train_splits:
+      - train.100
+    eval_splits:
+      - validation
+
+# Data filtering
+max_audio_seconds: 30.0  # Increased to accommodate longer samples
+max_text_words: 100
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+num_proc: 1
+max_train_samples: 20
+max_eval_samples: 5

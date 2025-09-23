@@ -37,9 +37,6 @@ python src/train.py +experiments=production
 ### Demo Usage
 
 ```bash
-# Run with default settings (uses untrained model)
-python demo/gradio_app.py
-
 # Run with a trained model
 python demo/gradio_app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
 

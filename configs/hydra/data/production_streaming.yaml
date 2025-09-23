@@ -1,0 +1,42 @@
+# Production dataset with streaming for faster startup
+datasets:
+  - name: librispeech_asr
+    configs:
+      - clean
+      - clean
+      - other
+    train_splits:
+      - train.100
+      - train.360
+      - train.500
+    eval_splits:
+      - validation
+      - validation
+      - validation
+
+  - name: gigaspeech
+    subset: m  # ~1000 hours (medium subset)
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+
+  - name: common_voice
+    language: en
+    train_splits:
+      - train  # Full train split for streaming
+    eval_splits:
+      - validation
+
+# Data filtering
+max_audio_seconds: 20.0
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+num_proc: 8  # Not used in streaming mode
+max_train_samples: null
+max_eval_samples: 500
+use_streaming: true  # Enable streaming mode for faster startup

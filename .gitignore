@@ -167,7 +167,6 @@ cython_debug/
 
 # Data directories
 ASR_Conformer_SmolLM2_Optimized/
-data/
 datasets/
 cache/
 logs/
