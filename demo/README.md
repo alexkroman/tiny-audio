@@ -7,8 +7,18 @@ sdk: gradio
 sdk_version: 4.44.0
 app_file: app.py
 pinned: false
+license: apache-2.0
 models:
   - mazesmazes/tiny-audio
+tags:
+  - audio
+  - speech
+  - asr
+  - automatic-speech-recognition
+  - whisper
+  - smollm
+  - lora
+short_description: Efficient ASR with Whisper encoder and SmolLM2 decoder
 ---
 
 # 🎤 Tiny Audio ASR Demo
