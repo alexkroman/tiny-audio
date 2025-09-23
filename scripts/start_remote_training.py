@@ -58,7 +58,7 @@ def start_training(host, port, experiment, session_name, env_vars=None):
     # Get the token from environment
     import os
 
-    hf_token = os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
+    hf_token = os.environ.get("HF_TOKEN", "")
 
     # Create a shell script to run on the remote
     training_script = f"""#!/bin/bash
@@ -69,7 +69,7 @@ export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
 export TORCH_HOME=/workspace/.cache/torch
 export HF_HUB_ENABLE_HF_TRANSFER=1
-export HUGGING_FACE_HUB_TOKEN="{hf_token}"  # Pass through from host
+export HF_TOKEN="{hf_token}"  # Pass through from host
 export DATASETS_PARALLEL=1  # Enable parallel dataset processing
 export HF_DATASETS_MULTIPROCESSING_MAX_WORKERS=8  # Optimized for 9 vCPUs
 export HF_DATASETS_DOWNLOAD_MANAGER_MAX_WORKERS=4  # Parallel downloads within each dataset

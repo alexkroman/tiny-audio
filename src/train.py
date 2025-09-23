@@ -89,6 +89,13 @@ def clean_gigaspeech_text(text: str) -> Optional[str]:
             if not cleaned or len(cleaned) < 3:
                 return None
 
+    # Replace punctuation tags with proper spacing
+    text = text.replace(" <COMMA>", ",")
+    text = text.replace(" <PERIOD>", ".")
+    text = text.replace(" <QUESTIONMARK>", "?")
+    text = text.replace(" <EXCLAMATIONPOINT>", "!")
+
+    # Handle any remaining tags without leading space (edge cases)
     text = text.replace("<COMMA>", ",")
     text = text.replace("<PERIOD>", ".")
     text = text.replace("<QUESTIONMARK>", "?")
@@ -223,7 +230,7 @@ def _load_single_dataset(
     from datasets import Audio
 
     dataset_name = dataset_info.name
-    token = os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    token = os.environ.get("HF_TOKEN")
 
     if dataset_name == "librispeech_asr":
         ds = load_dataset(
@@ -392,8 +399,16 @@ def main(cfg: DictConfig) -> None:
     training_args_dict = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_args_dict, dict), "Training args must be a dict"
 
+    # Convert output_dir to absolute path for clearer logging
+    output_dir = training_args_dict.get("output_dir", "./outputs")
+    training_args_dict["output_dir"] = os.path.abspath(output_dir)
+
+    # Also convert logging_dir to absolute path if present
+    if "logging_dir" in training_args_dict:
+        training_args_dict["logging_dir"] = os.path.abspath(training_args_dict["logging_dir"])
+
     if training_args_dict.get("push_to_hub", False) and not training_args_dict.get("hub_token"):
-        hub_token = os.environ.get("HUGGING_FACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
+        hub_token = os.environ.get("HF_TOKEN")
         if hub_token:
             training_args_dict["hub_token"] = hub_token
 
