@@ -375,9 +375,8 @@ class ASRModel(PreTrainedModel):
             **generate_kwargs,
         )
 
-        return cast(
-            str, self.decoder.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-        )
+        return cast(str, self.decoder.tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+
 
 AutoConfig.register("asr_model", ASRModelConfig)
 AutoModel.register(ASRModelConfig, ASRModel)

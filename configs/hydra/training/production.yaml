@@ -16,7 +16,7 @@ warmup_ratio: 0.03
 weight_decay: 0.01
 
 # Optimizer
-optim: adamw_8bit
+optim: adamw_torch_fused
 adam_beta1: 0.9
 adam_beta2: 0.999
 adam_epsilon: 1e-8
@@ -43,13 +43,15 @@ greater_is_better: false
 
 # Hub
 push_to_hub: true
-hub_model_id: "mazesmazes/asr"  # Change this to your repo
+hub_model_id: "mazesmazes/tiny-audio"  # Change this to your repo
 hub_strategy: checkpoint  # Push every checkpoint
 hub_token: null  # Will use HF_TOKEN env var if not set
-hub_private_repo: true
+hub_private_repo: false
 
 # Performance
-dataloader_num_workers: 6  # Optimized for 9 vCPUs (leave some for main process)
+dataloader_num_workers: 32  # Optimized for 9 vCPUs (leave some for main process)
+dataloader_persistent_workers: true
+dataloader_prefetch_factor: 8
 gradient_checkpointing: true
 fp16: false
 bf16: true

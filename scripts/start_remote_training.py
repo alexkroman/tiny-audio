@@ -77,9 +77,12 @@ export HF_DATASETS_DOWNLOAD_BATCH_SIZE=50  # Download multiple files in parallel
 export DATASETS_MAX_CONCURRENT_DOWNLOADS=4  # Max concurrent file downloads
 
 export TOKENIZERS_PARALLELISM=false  # Disable parallel tokenization to avoid deadlocks
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512  # Better memory management
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"  # Better memory allocation and management
+export CUDA_LAUNCH_BLOCKING=0  # Enable async CUDA operations for better performance
 export NCCL_P2P_DISABLE=0  # Enable GPU peer-to-peer communication
 export NCCL_IB_DISABLE=0  # Enable InfiniBand if available
+export NCCL_NSOCKS_PERTHREAD=8  # More sockets for data transfer
+export NCCL_SOCKET_NTHREADS=4  # More threads per socket
 {env_string}
 echo "===== Training Starting ====="
 echo "Experiment: {experiment}"

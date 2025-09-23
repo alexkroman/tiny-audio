@@ -6,12 +6,13 @@ defaults:
   - override /training: production
 
 # Resume from checkpoint (root level override)
-resume_from_checkpoint: /workspace/outputs/2025-09-23/13-51-01/outputs/production_model/checkpoint-16000
+# resume_from_checkpoint: /workspace/outputs/2025-09-23/13-51-01/outputs/production_model/checkpoint-16000  # Commented out - incompatible optimizer state
+resume_from_checkpoint: null
 
 # Production-specific overrides
 training:
-  push_to_hub: false
+  push_to_hub: true
 
   # Streaming compatibility settings
-  dataloader_num_workers: 16  # Required for streaming datasets
+  dataloader_num_workers: 32  # Leverage available vCPUs for faster data loading
   dataloader_persistent_workers: true

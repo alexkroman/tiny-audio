@@ -85,32 +85,25 @@ def clean_gigaspeech_text(text: str) -> Optional[str]:
     import re
 
     # Check if text contains garbage tags that would make it invalid
-    if re.search(r'<(SIL|MUSIC|NOISE|OTHER)>', text):
+    if re.search(r"<(SIL|MUSIC|NOISE|OTHER)>", text):
         # Remove garbage tags and check if anything meaningful remains
-        cleaned = re.sub(r'<(SIL|MUSIC|NOISE|OTHER)>', '', text).strip()
+        cleaned = re.sub(r"<(SIL|MUSIC|NOISE|OTHER)>", "", text).strip()
         if not cleaned or len(cleaned) < 3:
             return None
 
     # Replace punctuation tags with actual punctuation
-    punct_map = {
-        'COMMA': ',',
-        'PERIOD': '.',
-        'QUESTIONMARK': '?',
-        'EXCLAMATIONPOINT': '!'
-    }
+    punct_map = {"COMMA": ",", "PERIOD": ".", "QUESTIONMARK": "?", "EXCLAMATIONPOINT": "!"}
 
     # Replace punctuation tags (with or without leading space)
     text = re.sub(
-        r'\s*<(COMMA|PERIOD|QUESTIONMARK|EXCLAMATIONPOINT)>',
-        lambda m: punct_map[m.group(1)],
-        text
+        r"\s*<(COMMA|PERIOD|QUESTIONMARK|EXCLAMATIONPOINT)>", lambda m: punct_map[m.group(1)], text
     )
 
     # Remove any remaining garbage tags
-    text = re.sub(r'<(SIL|MUSIC|NOISE|OTHER)>', ' ', text)
+    text = re.sub(r"<(SIL|MUSIC|NOISE|OTHER)>", " ", text)
 
     # Normalize whitespace
-    text = ' '.join(text.split()).strip()
+    text = " ".join(text.split()).strip()
 
     return text if text else None
 
@@ -421,7 +414,9 @@ def main(cfg: DictConfig) -> None:
 
     # Enable tf32 for better performance on compatible GPUs (production only)
     # Only enable if bf16 is true (indicates GPU training) and not on Mac
-    if training_args_dict.get("bf16", False) and training_args_dict.get("dataloader_pin_memory", True):
+    if training_args_dict.get("bf16", False) and training_args_dict.get(
+        "dataloader_pin_memory", True
+    ):
         training_args_dict.setdefault("tf32", True)
 
     training_args = TrainingArguments(**training_args_dict)
@@ -455,9 +450,24 @@ def main(cfg: DictConfig) -> None:
     trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
     trainer.save_model()
 
+    # Copy MODEL_CARD.md as README.md for the model if it exists
+    model_card_path = Path("MODEL_CARD.md")
+    if model_card_path.exists():
+        model_output_dir = Path(training_args.output_dir)
+        target_readme = model_output_dir / "README.md"
+        shutil.copy2(model_card_path, target_readme)
+        print(f"✅ Copied MODEL_CARD.md to {target_readme}")
+
     if training_args.push_to_hub:
         print("\n🚀 Pushing final model to Hub...")
-        trainer.push_to_hub()
+        # The README.md in the output directory will be automatically uploaded as the model card
+        # Include TensorBoard logs when pushing to hub
+        kwargs = {}
+        if "tensorboard" in training_args.report_to:
+            kwargs["include_tensorboard_logs"] = True
+            print("📊 Including TensorBoard logs in push to Hub...")
+        trainer.push_to_hub(**kwargs)
+
 
 if __name__ == "__main__":
     main()
