@@ -1,5 +1,6 @@
 """ASR Model for Whisper-LLM integration"""
 
+from pathlib import Path
 from typing import Optional, Union, cast
 
 import torch
@@ -123,14 +124,14 @@ class LLMDecoder(nn.Module):
             bias="none",
             task_type=TaskType.CAUSAL_LM,
         )
-        self.model = get_peft_model(self.model, lora_config)
+        self.model = get_peft_model(self.model, lora_config)  # type: ignore[assignment]
 
     def forward(self, **kwargs):
         return self.model(**kwargs)
 
 
 class ASRModel(PreTrainedModel):
-    config_class = ASRModelConfig
+    config_class = ASRModelConfig  # type: ignore[assignment]
     base_model_prefix = "asr"
     supports_gradient_checkpointing = True
     _no_split_modules = ["WhisperEncoder", "LLMDecoder", "AudioProjector"]
@@ -171,7 +172,7 @@ class ASRModel(PreTrainedModel):
 
         return model
 
-    def save_pretrained(self, save_directory: str, **kwargs):
+    def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:  # type: ignore[override]
         """Save the model, tokenizer, and feature extractor."""
         super().save_pretrained(save_directory, **kwargs)
         self.decoder.tokenizer.save_pretrained(save_directory)
@@ -357,11 +358,13 @@ class ASRModel(PreTrainedModel):
         from transformers.pipelines.audio_utils import ffmpeg_read
 
         # Use transformers' audio utilities for consistent loading
-        with open(audio_path, "rb") as f:
+        with Path(audio_path).open("rb") as f:
             audio_bytes = f.read()
         audio_array = ffmpeg_read(audio_bytes, sampling_rate=16000)
 
         # Process through feature extractor (handles mono conversion internally)
+        if self.feature_extractor is None:
+            raise ValueError("Feature extractor is not initialized")
         inputs = self.feature_extractor(
             audio_array,
             sampling_rate=16000,
@@ -378,7 +381,7 @@ class ASRModel(PreTrainedModel):
             "do_sample": kwargs.pop("do_sample", False),
             "pad_token_id": self.decoder.tokenizer.pad_token_id,
             "eos_token_id": self.decoder.tokenizer.eos_token_id,
-            **kwargs  # Allow any additional generation parameters
+            **kwargs,  # Allow any additional generation parameters
         }
 
         # Generate transcription
@@ -402,12 +405,12 @@ class ASRModel(PreTrainedModel):
         """
         from transformers import pipeline
 
-        return pipeline(
+        return pipeline(  # type: ignore[call-overload]
             task,
             model=self,
             tokenizer=self.decoder.tokenizer,
             feature_extractor=self.feature_extractor,
-            **kwargs
+            **kwargs,
         )
 
 

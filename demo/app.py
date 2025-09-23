@@ -21,14 +21,13 @@ import torch
 
 # Set up logging
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
-from src.modeling import ASRModel
+from src.modeling import ASRModel  # noqa: E402
 
 
 class ASRDemo:
@@ -153,20 +152,19 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
         )
 
         with gr.Tabs():
-            with gr.Tab("Microphone/Upload"):
-                with gr.Row():
-                    with gr.Column():
-                        audio_input = gr.Audio(
-                            label="Audio Input", type="filepath", sources=["microphone", "upload"]
-                        )
-                        submit_btn = gr.Button("Transcribe", variant="primary")
+            with gr.Tab("Microphone/Upload"), gr.Row():
+                with gr.Column():
+                    audio_input = gr.Audio(
+                        label="Audio Input", type="filepath", sources=["microphone", "upload"]
+                    )
+                    submit_btn = gr.Button("Transcribe", variant="primary")
 
-                    with gr.Column():
-                        output_text = gr.Textbox(
-                            label="Transcription",
-                            lines=5,
-                            placeholder="Transcription will appear here...",
-                        )
+                with gr.Column():
+                    output_text = gr.Textbox(
+                        label="Transcription",
+                        lines=5,
+                        placeholder="Transcription will appear here...",
+                    )
 
             with gr.Tab("From Outputs Directory"):
                 with gr.Row():
@@ -213,7 +211,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="mazesmazes/tiny-audio",
-        help="Path to model (HuggingFace Hub or local directory)"
+        help="Path to model (HuggingFace Hub or local directory)",
     )
     parser.add_argument(
         "--outputs-dir",

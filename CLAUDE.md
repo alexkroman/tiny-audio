@@ -63,10 +63,16 @@ uv run ruff check src/ && uv run ruff format --check src/
 
 ```bash
 # Run the Gradio demo with a trained model
-uv run demo/gradio_app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
+uv run demo/app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
 
-# Run demo with default model search (looks for latest model)
-uv run demo/gradio_app.py
+# Run demo with default model (from HuggingFace Hub)
+uv run demo/app.py
+
+# Deploy demo to Hugging Face Spaces (public demo)
+uv run scripts/deploy_to_hf_space.py --force
+
+# Deploy to a custom Hugging Face Space
+uv run scripts/deploy_to_hf_space.py --space-url https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE --force
 ```
 
 ### Remote Training (RunPod)

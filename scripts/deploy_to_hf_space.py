@@ -22,9 +22,12 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 
-def run_command(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+def run_command(
+    cmd: list[str], cwd: Optional[Path] = None, check: bool = True
+) -> subprocess.CompletedProcess:
     """Run a shell command and return the result."""
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
@@ -39,7 +42,7 @@ def run_command(cmd: list[str], cwd: Path | None = None, check: bool = True) -> 
 def deploy_to_space(
     space_url: str = "https://huggingface.co/spaces/mazesmazes/tiny-audio",
     force: bool = False,
-    demo_dir: Path = Path("demo")
+    demo_dir: Path = Path("demo"),
 ) -> None:
     """Deploy demo files to a Hugging Face Space.
 
@@ -103,7 +106,7 @@ def deploy_to_space(
                 print("\n❌ Push failed: Space already has content.")
                 print("   Use --force to overwrite existing content.")
                 raise SystemExit(1)
-            elif result.returncode != 0:
+            if result.returncode != 0:
                 print(f"\n❌ Push failed: {result.stderr}")
                 raise SystemExit(1)
 
@@ -126,40 +129,31 @@ Examples:
 
   # Force push (overwrite existing)
   %(prog)s --force
-        """
+        """,
     )
 
     parser.add_argument(
         "--space-url",
         type=str,
         default="https://huggingface.co/spaces/mazesmazes/tiny-audio",
-        help="URL of the Hugging Face Space (default: mazesmazes/tiny-audio)"
+        help="URL of the Hugging Face Space (default: mazesmazes/tiny-audio)",
     )
 
     parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force push to overwrite existing Space content"
+        "--force", action="store_true", help="Force push to overwrite existing Space content"
     )
 
     parser.add_argument(
-        "--demo-dir",
-        type=Path,
-        default=Path("demo"),
-        help="Path to demo directory (default: demo)"
+        "--demo-dir", type=Path, default=Path("demo"), help="Path to demo directory (default: demo)"
     )
 
     args = parser.parse_args()
 
     try:
-        deploy_to_space(
-            space_url=args.space_url,
-            force=args.force,
-            demo_dir=args.demo_dir
-        )
+        deploy_to_space(space_url=args.space_url, force=args.force, demo_dir=args.demo_dir)
     except Exception as e:
         print(f"\n❌ Deployment failed: {e}")
-        raise SystemExit(1)
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":

@@ -4,8 +4,9 @@
 import argparse
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 
 def run_command(cmd, check=True, capture_output=False):
@@ -118,7 +119,7 @@ def get_project_dependencies(project_root):
     """Load dependencies from pyproject.toml."""
     pyproject_path = project_root / "pyproject.toml"
 
-    with open(pyproject_path, "rb") as f:
+    with pyproject_path.open("rb") as f:
         pyproject = tomllib.load(f)
 
     # Get base dependencies
@@ -147,7 +148,7 @@ def install_python_dependencies(host, port, project_root):
 
     packages_str = " ".join(f'"{pkg}"' for pkg in required_packages)
 
-    print(f"Installing packages from pyproject.toml:")
+    print("Installing packages from pyproject.toml:")
     for pkg in required_packages:
         print(f"  - {pkg}")
 

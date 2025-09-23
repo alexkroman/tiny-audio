@@ -414,10 +414,10 @@ def main(cfg: DictConfig) -> None:
     ):
         training_args_dict.setdefault("tf32", True)
 
-    training_args = TrainingArguments(**training_args_dict)
+    training_args = TrainingArguments(**training_args_dict)  # type: ignore[arg-type]
 
-    callbacks = [ModelingFileCopyCallback()]
-    if val_dataset and "tensorboard" in training_args.report_to:
+    callbacks: list[TrainerCallback] = [ModelingFileCopyCallback()]
+    if val_dataset and training_args.report_to and "tensorboard" in training_args.report_to:
         callbacks.append(
             PredictionLoggingCallback(
                 eval_dataset=val_dataset,
@@ -447,7 +447,7 @@ def main(cfg: DictConfig) -> None:
 
     model_card_path = Path("MODEL_CARD.md")
     if model_card_path.exists():
-        model_output_dir = Path(training_args.output_dir)
+        model_output_dir = Path(training_args.output_dir)  # type: ignore[arg-type]
         target_readme = model_output_dir / "README.md"
         shutil.copy2(model_card_path, target_readme)
         print(f"✅ Copied MODEL_CARD.md to {target_readme}")
@@ -455,7 +455,7 @@ def main(cfg: DictConfig) -> None:
     if training_args.push_to_hub:
         print("\n🚀 Pushing final model to Hub...")
         kwargs = {}
-        if "tensorboard" in training_args.report_to:
+        if training_args.report_to and "tensorboard" in training_args.report_to:
             kwargs["include_tensorboard_logs"] = True
             print("📊 Including TensorBoard logs in push to Hub...")
         trainer.push_to_hub(**kwargs)
