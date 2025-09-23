@@ -1,146 +1,161 @@
 # Tiny Audio - Learn ASR by Building One
 
-A minimal (~300 line) speech recognition model that combines Whisper's audio understanding with Hugging Face SmolLM2's text generation. Perfect for learning how modern ASR systems work by building and training your own.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/release/python-390/)
 
-## Why This Project
+A minimal (~300 line) speech recognition model that combines Whisper's audio understanding with Hugging Face's SmolLM2 for text generation. This project is designed to be a hands-on guide to understanding modern ASR systems by building and training your own.
 
-- **Actually Tiny**: The core model is just 300 lines of readable Python - small enough to understand completely
-- **Modern Architecture**: Combines a frozen Whisper encoder (for audio) with Hugging Face SmolLM2 decoder (for text) using LoRA adapters and a custom projection layer
-- **Trains on your Laptop**: Works on your laptop (even M1/M2 Macs!) or scale up to GPUs
-- **Real Datasets**: Train on actual speech data from LibriSpeech, GigaSpeech, and Common Voice
-- **See Progress Live**: Watch your model improve in real-time with TensorBoard
-- **Experiment Freely**: Simple config files let you try different ideas without touching code
+## Features
+
+- **Minimalist Core**: The core model is just 300 lines of readable Python, making it easy to understand completely.
+- **Modern Architecture**: Combines a frozen Whisper encoder with a SmolLM2 decoder using LoRA adapters and a custom projection layer.
+- **Laptop-Friendly**: Train on your local machine (including M1/M2 Macs) or scale up to powerful GPUs.
+- **Real-World Datasets**: Supports training on standard ASR datasets like LibriSpeech, GigaSpeech, and Common Voice.
+- **Live Monitoring**: Track your model's progress in real-time with TensorBoard integration.
+- **Flexible Configuration**: Easily experiment with different model sizes, datasets, and hyperparameters using Hydra.
 
 ## Installation
 
-```bash
-# Clone the repository
-git clone https://github.com/alexkroman/tiny-audio.git
-cd tiny-audio
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/alexkroman/tiny-audio.git
+    cd tiny-audio
+    ```
 
-# Install with uv
-uv sync
-```
+2.  **Install dependencies:**
+    This project uses `uv` for fast dependency management.
+    ```bash
+    uv sync
+    ```
+    Alternatively, you can use pip:
+    ```bash
+    pip install -e .
+    ```
 
 ## Quick Start
 
-### Training
+1.  **Run a quick test training:**
+    This will run for 20 steps and take approximately 2 minutes on a modern laptop.
+    ```bash
+    python src/train.py
+    ```
 
-```bash
-# Quick test run (20 steps, ~2 minutes)
-python src/train.py
+2.  **Start a full production training:**
+    This uses larger datasets and is recommended for achieving better performance.
+    ```bash
+    python src/train.py +experiments=production
+    ```
 
-# Production training with larger datasets
-python src/train.py +experiments=production
-```
-
-### Demo Usage
-
-```bash
-# Run with a trained model
-python demo/gradio_app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
-
-# Specify custom outputs directory
-python demo/gradio_app.py --outputs-dir path/to/audio/files
-
-# Create public link for sharing
-python demo/gradio_app.py --share
-```
+3.  **Run the Gradio Demo:**
+    Once you have a trained model, you can use the Gradio app to interact with it.
+    ```bash
+    # Make sure to replace the model path with your own
+    python demo/gradio_app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
+    ```
 
 ## Model Architecture
 
-The system combines three key components:
+The model consists of three main components:
 
-1. **Whisper Encoder**: Frozen `whisper-small` model for audio feature extraction (39M parameters, not trained)
-2. **Audio Projector**: Lightweight projection layer with LLamaRMSNorm and GELU activation to map audio features to text space
-3. **Hugging Face SmolLM2 Decoder**: Efficient language model with LoRA adapters (360M or 1.7B parameters, ~2% trained with LoRA)
+1.  **Whisper Encoder**: A frozen `whisper-small` model that extracts audio features. (39M parameters, not trained)
+2.  **Audio Projector**: A lightweight projection layer that maps audio features to the text embedding space.
+3.  **SmolLM2 Decoder**: An efficient language model from Hugging Face with LoRA adapters for parameter-efficient fine-tuning. (360M or 1.7B parameters, ~2% trained with LoRA)
 
-```python
-Audio Input → Whisper Encoder → Audio Projector → Hugging Face SmolLM2 + LoRA → Text Output
+```
+Audio Input → [Whisper Encoder] → [Audio Projector] → [SmolLM2 + LoRA] → Text Output
 ```
 
 ## Configuration
 
-The project uses Hydra for configuration management. Key configuration files:
+This project uses [Hydra](https://hydra.cc/) for configuration management. You can find the configuration files in the `configs/hydra` directory.
 
-- `configs/hydra/config.yaml` - Base configuration
-- `configs/hydra/model/` - Model architecture settings
-- `configs/hydra/data/` - Dataset configurations
-- `configs/hydra/training/` - Training hyperparameters
-- `configs/hydra/experiments/` - Pre-configured experiment setups
+-   `config.yaml`: The base configuration.
+-   `model/`: Model architecture settings.
+-   `data/`: Dataset configurations.
+-   `training/`: Training hyperparameters.
+-   `experiments/`: Pre-configured experiment setups that combine the above.
 
-### Example: Override Configuration
+### Overriding Configuration
+
+You can easily override any configuration parameter from the command line:
 
 ```bash
-# Change model size
+# Use a different model
 python src/train.py model=large
 
-# Use different dataset
+# Use a different dataset
 python src/train.py data=production_streaming
 
-# Modify training parameters
+# Change training parameters
 python src/train.py training.max_steps=10000 training.eval_steps=500
 ```
 
-## Datasets
-
-Supports multiple ASR datasets through Hugging Face datasets:
-
-- **LibriSpeech**: Clean and other subsets for English ASR
-- **GigaSpeech**: Large-scale English speech recognition
-- **Common Voice**: Multilingual community-collected speech data
-
-Datasets are automatically downloaded and cached locally.
-
 ## Cloud Training with RunPod
 
-The `scripts/` directory contains utilities for deploying and managing training on RunPod GPUs:
+The `scripts/` directory contains utilities for deploying and managing training on [RunPod](https://runpod.io) GPUs.
 
-### Scripts Overview
+1.  **Deploy your code:**
+    This will sync your local code to the RunPod instance and install dependencies.
+    ```bash
+    python scripts/deploy_runpod.py --host <your-pod-id>.runpod.io --port 22
+    ```
 
-- **`deploy_runpod.py`**: Syncs your code to a RunPod instance and sets up dependencies
-- **`start_remote_training.py`**: Starts a training session in a tmux window on the remote instance
-- **`attach_remote_session.py`**: Attaches to an existing tmux training session for monitoring
+2.  **Start remote training:**
+    This will start a training session in a `tmux` window on the remote instance.
+    ```bash
+    python scripts/start_remote_training.py --host <your-pod-id>.runpod.io --port 22 --config production
+    ```
 
-### Quick RunPod Setup
+3.  **Attach to the remote session:**
+    You can attach to the `tmux` session to monitor the training progress.
+    ```bash
+    python scripts/attach_remote_session.py --host <your-pod-id>.runpod.io --port 22
+    ```
 
-1. Create a RunPod account and launch a GPU pod with PyTorch template
-2. Add your SSH key to the pod
-3. Deploy and start training:
+## Development
 
-```bash
-# Deploy code and setup environment (replace with your pod's host and port)
-python scripts/deploy_runpod.py --host <your-pod-id>.runpod.io --port 22
+This project uses `ruff` for linting and formatting, and `mypy` for type checking.
 
-# Start training in a tmux session
-python scripts/start_remote_training.py --host <your-pod-id>.runpod.io --port 22 --config production
-
-# Later, attach to monitor progress
-python scripts/attach_remote_session.py --host <your-pod-id>.runpod.io --port 22
-```
-
-The scripts handle:
-
-- Code synchronization via rsync
-- Dependency installation with uv
-- Session management with tmux (so training continues if you disconnect)
-- Automatic model checkpointing
+-   **Linting:**
+    ```bash
+    ruff check src/
+    ```
+-   **Formatting:**
+    ```bash
+    ruff format src/
+    ```
+-   **Type Checking:**
+    ```bash
+    mypy src/
+    ```
 
 ## Monitoring
 
-Training progress is logged to TensorBoard:
+Training progress, including loss and Word Error Rate (WER), is logged to TensorBoard.
 
 ```bash
-# View training metrics
 tensorboard --logdir outputs/
-
-# Metrics tracked:
-# - Training/validation loss
-# - Word Error Rate (WER)
-# - Learning rate schedule
-# - Sample predictions
 ```
+
+## Project Structure
+
+```
+├── configs/            # Hydra configuration files
+├── demo/               # Gradio demo application
+├── scripts/            # Scripts for cloud deployment and training
+├── src/                # Source code
+│   ├── modeling.py     # The core ASR model
+│   └── train.py        # The training script
+├── .gitignore
+├── CLAUDE.md           # Notes for AI-assisted development
+├── pyproject.toml
+└── README.md
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to open an issue or submit a pull request.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
