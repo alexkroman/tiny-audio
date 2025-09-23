@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Gradio demo for ASR model with support for:
+Gradio app for ASR model with support for:
+- Loading from HuggingFace Hub
+- Loading from local directory
 - Microphone recording
 - File upload
 - Processing audio files from outputs directory
@@ -8,8 +10,9 @@ Gradio demo for ASR model with support for:
 
 import logging
 import sys
+import tempfile
 from pathlib import Path
-from typing import List, Optional, cast
+from typing import List, Optional, Tuple, Union, cast
 
 import gradio as gr
 import torch
@@ -18,21 +21,24 @@ from transformers import WhisperFeatureExtractor
 
 # Set up logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-
-# Add parent directory to path to import from src
-sys.path.append(str(Path(__file__).parent.parent))
-
 logger = logging.getLogger(__name__)
 
 
 class ASRDemo:
-    def __init__(self, model_path: Optional[str] = None, outputs_dir: str = "wav_outputs"):
+    def __init__(self, model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "wav_outputs"):
+        """Initialize the ASR demo with a model from HuggingFace Hub or local path.
+
+        Args:
+            model_path: HuggingFace model repository name or local directory path
+            outputs_dir: Directory containing audio files to process
+        """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
 
-        # Handle relative paths - make sure we find the directory
+        # Handle outputs directory
         outputs_path = Path(outputs_dir)
         if not outputs_path.is_absolute():
             # Check if we're in the demo directory or parent
@@ -46,69 +52,131 @@ class ASRDemo:
         self.outputs_dir = outputs_path
         logger.info(f"Using outputs directory: {self.outputs_dir.absolute()}")
 
-        # Load model and associated components
-        if not model_path or not Path(model_path).exists():
-            raise ValueError(f"Model path is required and must exist. Provided path: {model_path}")
+        # Check if model_path is local or HuggingFace Hub
+        model_path_obj = Path(model_path)
+        is_local = model_path_obj.exists() and model_path_obj.is_dir()
 
-        logger.info(f"Loading model from {model_path}")
+        if is_local:
+            logger.info(f"Loading model from local directory: {model_path}")
+            self._load_local_model(model_path)
+        else:
+            logger.info(f"Loading model from HuggingFace Hub: {model_path}")
+            self._load_hub_model(model_path)
+
+        # Move to device and set to eval mode
+        self.model = self.model.to(self.device)
+        self.model.eval()
+        logger.info(f"Model loaded successfully with dtype: {self.model.dtype}")
+
+    def _load_local_model(self, model_path: str):
+        """Load model from local directory."""
+        model_path_obj = Path(model_path)
 
         # Load modeling.py from the saved model directory
-        model_path_obj = Path(model_path)
         saved_modeling_path = model_path_obj / "modeling.py"
-
-        if not saved_modeling_path.exists():
-            raise ValueError(f"modeling.py not found in model directory: {saved_modeling_path}")
-
-        logger.info(f"Loading modeling.py from saved model: {saved_modeling_path}")
-        # Add the model path to sys.path temporarily to import the saved modeling
-        sys.path.insert(0, str(model_path_obj))
-        try:
-            from modeling import ASRModel  # type: ignore
-        finally:
-            # Remove the model path from sys.path
-            sys.path.pop(0)
+        if saved_modeling_path.exists():
+            logger.info(f"Loading modeling.py from saved model: {saved_modeling_path}")
+            # Add the model path to sys.path temporarily to import the saved modeling
+            sys.path.insert(0, str(model_path_obj))
+            try:
+                from modeling import ASRModel  # type: ignore
+            finally:
+                # Remove the model path from sys.path
+                sys.path.pop(0)
+        else:
+            # Try to import from current directory or parent
+            try:
+                from modeling import ASRModel
+            except ImportError:
+                sys.path.append(str(Path(__file__).parent.parent))
+                from src.modeling import ASRModel  # type: ignore
 
         # Load feature extractor and model
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(model_path)
-
-        logger.info("Loading ASR model...")
         self.model = ASRModel.from_pretrained(model_path)
 
         # Attach feature extractor to the model
         self.model.feature_extractor = self.feature_extractor
 
-        # Move to device
-        self.model = self.model.to(self.device)
-        self.model.eval()
+    def _load_hub_model(self, model_name: str):
+        """Load model from HuggingFace Hub."""
+        # Try to import modeling module
+        try:
+            from modeling import ASRModel
+        except ImportError:
+            # Try parent directory
+            sys.path.append(str(Path(__file__).parent.parent))
+            try:
+                from src.modeling import ASRModel  # type: ignore
+            except ImportError:
+                raise ImportError(
+                    "Could not import ASRModel. Please ensure modeling.py is available "
+                    "in the current directory or src/ folder."
+                )
 
-        logger.info(f"Model loaded with dtype: {self.model.dtype}")
+        # Load feature extractor and model from HuggingFace Hub
+        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
+        self.model = ASRModel.from_pretrained(model_name)
+
+        # Attach feature extractor to the model
+        self.model.feature_extractor = self.feature_extractor
 
     def transcribe(self, audio_path: str) -> str:
-        """Transcribe audio file to text."""
+        """Transcribe audio file to text.
+
+        Args:
+            audio_path: Path to the audio file
+
+        Returns:
+            Transcribed text
+        """
         try:
-            return cast(str, self.model.transcribe(audio_path))
+            with torch.no_grad():
+                result = self.model.transcribe(audio_path)
+            return cast(str, result) if result else "Could not generate transcription"
         except Exception as e:
             logger.error(f"Error transcribing audio: {e}")
             return f"Error: {str(e)}"
 
-    def process_audio(self, audio_input):
-        """Process audio from microphone or file upload."""
+    def process_audio(
+        self, audio_input: Union[str, Tuple[int, torch.Tensor], None]
+    ) -> str:
+        """Process audio from microphone or file upload.
+
+        Args:
+            audio_input: Audio input from Gradio (file path or tuple of sample_rate, audio_data)
+
+        Returns:
+            Transcribed text
+        """
         if audio_input is None:
             return "Please provide audio input"
 
-        # If audio_input is a tuple (sample_rate, audio_data) from microphone
+        # Handle microphone input (tuple of sample_rate, audio_data)
         if isinstance(audio_input, tuple):
             sample_rate, audio_data = audio_input
-            # Save temporary file
-            temp_path = "temp_audio.wav"
-            torchaudio.save(temp_path, torch.tensor(audio_data).unsqueeze(0), sample_rate)
+
+            # Create a temporary file to save the audio
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                temp_path = tmp_file.name
+                # Convert to tensor and save
+                audio_tensor = torch.tensor(audio_data).float()
+                if audio_tensor.dim() == 1:
+                    audio_tensor = audio_tensor.unsqueeze(0)
+                # Use backend="soundfile" to avoid deprecation warning
+                torchaudio.save(temp_path, audio_tensor, sample_rate, backend="soundfile")
+
+            # Transcribe the temporary file
             result = self.transcribe(temp_path)
-            Path(temp_path).unlink()
+
+            # Clean up temporary file
+            Path(temp_path).unlink(missing_ok=True)
             return result
-        # File path from upload
+
+        # Handle file upload (string path)
         return self.transcribe(audio_input)
 
-    def get_output_files(self):
+    def get_output_files(self) -> List[str]:
         """Get list of audio files from outputs directory."""
         audio_extensions = [".wav", ".mp3", ".flac", ".m4a", ".ogg"]
 
@@ -122,7 +190,7 @@ class ASRDemo:
         # Return relative paths as strings
         return [str(f.relative_to(self.outputs_dir)) for f in sorted(audio_files)]
 
-    def process_from_outputs(self, selected_file):
+    def process_from_outputs(self, selected_file: Optional[str]) -> str:
         """Process a file from the outputs directory."""
         if not selected_file:
             return "Please select a file"
@@ -135,11 +203,28 @@ class ASRDemo:
         return self.transcribe(str(file_path))
 
 
-def create_demo(model_path: Optional[str] = None, outputs_dir: str = "wav_outputs"):
-    """Create and return the Gradio interface."""
+def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "wav_outputs"):
+    """Create and return the Gradio interface.
+
+    Args:
+        model_path: HuggingFace model repository name or local path
+        outputs_dir: Directory containing audio files to process
+
+    Returns:
+        Gradio Blocks interface
+    """
 
     # Initialize the demo
-    asr_demo = ASRDemo(model_path, outputs_dir)
+    try:
+        asr_demo = ASRDemo(model_path, outputs_dir)
+    except Exception as e:
+        logger.error(f"Failed to initialize model: {e}")
+        # Create a fallback interface with error message
+        with gr.Blocks(title="ASR Demo - Error") as demo:
+            gr.Markdown("# ❌ Error Loading Model")
+            gr.Markdown(f"Failed to load model: {str(e)}")
+            gr.Markdown("Please check the model path and try again.")
+        return demo
 
     # Create the interface
     with gr.Blocks(title="ASR Demo - Whisper + SmolLM2") as demo:
@@ -230,7 +315,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="ASR Gradio Demo")
     parser.add_argument(
-        "--model", type=str, required=True, help="Path to trained model directory (required)"
+        "--model",
+        type=str,
+        default="mazesmazes/tiny-audio",
+        help="Path to model (HuggingFace Hub or local directory)"
     )
     parser.add_argument(
         "--outputs-dir",

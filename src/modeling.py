@@ -335,7 +335,9 @@ class ASRModel(PreTrainedModel):
     @torch.no_grad()
     def transcribe(self, audio_path: str, **kwargs) -> str:
 
-        waveform, sample_rate = torchaudio.load(audio_path)
+        # Use backend="soundfile" to avoid deprecation warning
+        # This is the recommended approach until TorchCodec is available
+        waveform, sample_rate = torchaudio.load(audio_path, backend="soundfile")
 
         # Use torchaudio functional API for resampling
         if sample_rate != 16000:
