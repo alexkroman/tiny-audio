@@ -5,7 +5,9 @@ from typing import Optional, Union, cast
 import torch
 import torch.nn as nn
 import torchaudio
+import torchaudio.functional as torchaudio_functional
 from peft import LoraConfig, TaskType, get_peft_model
+from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -23,11 +25,11 @@ class WhisperEncoder(nn.Module):
         super().__init__()
         self.whisper = WhisperModel.from_pretrained("openai/whisper-small", dtype="auto")
 
-        for param in self.whisper.parameters():
-            param.requires_grad = False
+        # Use HuggingFace utility to freeze parameters
+        self.whisper.requires_grad_(False)
+        self.whisper.eval()
 
         self.d_model = self.whisper.config.d_model
-        self.whisper.eval()
 
     def forward(
         self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
@@ -68,10 +70,11 @@ class AudioProjector(nn.Module):
         self.act = nn.GELU()
         self.linear_2 = nn.Linear(text_dim, text_dim, bias=True)
 
-        nn.init.normal_(self.linear_1.weight, mean=0.0, std=0.01)
-        nn.init.zeros_(self.linear_1.bias)
-        nn.init.normal_(self.linear_2.weight)
-        nn.init.zeros_(self.linear_2.bias)
+        # Use torch.nn.init methods consistently
+        torch.nn.init.normal_(self.linear_1.weight, mean=0.0, std=0.01)
+        torch.nn.init.zeros_(self.linear_1.bias)
+        torch.nn.init.xavier_normal_(self.linear_2.weight)
+        torch.nn.init.zeros_(self.linear_2.bias)
 
     def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.norm(audio_features)
@@ -99,6 +102,7 @@ class LLMDecoder(nn.Module):
         )
         self.tokenizer = AutoTokenizer.from_pretrained(decoder_model_name)
 
+        # Use HuggingFace's device check utility
         embeddings = self.model.get_input_embeddings()
         is_meta_device = (
             embeddings is not None
@@ -172,6 +176,7 @@ class ASRModel(PreTrainedModel):
         )
 
         if num_added > 0:
+            # Check if model is on meta device
             embeddings = self.decoder.model.get_input_embeddings()
             is_meta_device = (
                 embeddings is not None
@@ -186,6 +191,7 @@ class ASRModel(PreTrainedModel):
             else:
                 self.decoder.model.resize_token_embeddings(len(self.decoder.tokenizer))
 
+                # Initialize new embeddings with smart initialization
                 with torch.no_grad():
                     embeddings = self.decoder.model.get_input_embeddings()
                     if embeddings is not None and hasattr(embeddings, "weight"):
@@ -193,10 +199,10 @@ class ASRModel(PreTrainedModel):
                         mean_embedding = existing_embeds.mean(dim=0)
                         std_embedding = existing_embeds.std()
 
-                        for i in range(num_added):
-                            embeddings.weight[-num_added + i] = mean_embedding + torch.randn_like(
-                                embeddings.weight[0]
-                            ) * (std_embedding * 0.02)
+                        # Use torch.nn.init style initialization
+                        new_embeds = embeddings.weight[-num_added:]
+                        torch.nn.init.normal_(new_embeds, mean=0, std=std_embedding * 0.02)
+                        new_embeds.data.add_(mean_embedding)
 
         self.audio_start_id = self.decoder.tokenizer.convert_tokens_to_ids("<|audio_start|>")
         self.audio_end_id = self.decoder.tokenizer.convert_tokens_to_ids("<|audio_end|>")
@@ -259,8 +265,7 @@ class ASRModel(PreTrainedModel):
                 )
             )
 
-        from torch.nn.utils.rnn import pad_sequence
-
+        # Use imported pad_sequence
         inputs_embeds = pad_sequence(final_inputs_embeds, batch_first=True, padding_value=0.0)
         labels = pad_sequence(final_labels, batch_first=True, padding_value=-100)
         attention_mask = pad_sequence(final_attention_masks, batch_first=True, padding_value=0)
@@ -332,10 +337,11 @@ class ASRModel(PreTrainedModel):
 
         waveform, sample_rate = torchaudio.load(audio_path)
 
+        # Use torchaudio functional API for resampling
         if sample_rate != 16000:
-            resampler = torchaudio.transforms.Resample(sample_rate, 16000)
-            waveform = resampler(waveform)
+            waveform = torchaudio_functional.resample(waveform, sample_rate, 16000)
 
+        # Convert to mono if stereo
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
 

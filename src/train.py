@@ -82,30 +82,35 @@ def evaluate_samples(model, tokenizer, feature_extractor, eval_samples, device=N
 
 
 def clean_gigaspeech_text(text: str) -> Optional[str]:
-    garbage_tags = ["<SIL>", "<MUSIC>", "<NOISE>", "<OTHER>"]
-    for tag in garbage_tags:
-        if tag in text:
-            cleaned = text.replace(tag, "").strip()
-            if not cleaned or len(cleaned) < 3:
-                return None
+    import re
 
-    # Replace punctuation tags with proper spacing
-    text = text.replace(" <COMMA>", ",")
-    text = text.replace(" <PERIOD>", ".")
-    text = text.replace(" <QUESTIONMARK>", "?")
-    text = text.replace(" <EXCLAMATIONPOINT>", "!")
+    # Check if text contains garbage tags that would make it invalid
+    if re.search(r'<(SIL|MUSIC|NOISE|OTHER)>', text):
+        # Remove garbage tags and check if anything meaningful remains
+        cleaned = re.sub(r'<(SIL|MUSIC|NOISE|OTHER)>', '', text).strip()
+        if not cleaned or len(cleaned) < 3:
+            return None
 
-    # Handle any remaining tags without leading space (edge cases)
-    text = text.replace("<COMMA>", ",")
-    text = text.replace("<PERIOD>", ".")
-    text = text.replace("<QUESTIONMARK>", "?")
-    text = text.replace("<EXCLAMATIONPOINT>", "!")
+    # Replace punctuation tags with actual punctuation
+    punct_map = {
+        'COMMA': ',',
+        'PERIOD': '.',
+        'QUESTIONMARK': '?',
+        'EXCLAMATIONPOINT': '!'
+    }
 
-    for tag in garbage_tags:
-        text = text.replace(tag, " ")
+    # Replace punctuation tags (with or without leading space)
+    text = re.sub(
+        r'\s*<(COMMA|PERIOD|QUESTIONMARK|EXCLAMATIONPOINT)>',
+        lambda m: punct_map[m.group(1)],
+        text
+    )
 
-    text = " ".join(text.split())
-    text = text.strip()
+    # Remove any remaining garbage tags
+    text = re.sub(r'<(SIL|MUSIC|NOISE|OTHER)>', ' ', text)
+
+    # Normalize whitespace
+    text = ' '.join(text.split()).strip()
 
     return text if text else None
 
@@ -183,11 +188,12 @@ class DataCollator:
             ]
             texts.append(self.tokenizer.apply_chat_template(messages, tokenize=False))
 
-        batch = self.tokenizer(
-            texts,
+        # Use tokenizer's pad method for cleaner padding
+        tokenized = self.tokenizer(texts, truncation=True, return_tensors=None)
+        batch = self.tokenizer.pad(
+            tokenized,
             padding="longest",
-            truncation=True,
-            return_tensors="pt",
+            return_tensors="pt"
         )
         labels = batch["input_ids"].clone()
 
@@ -321,7 +327,7 @@ class ModelingFileCopyCallback(TrainerCallback):
         modeling_src = Path(__file__).parent / "modeling.py"
         if modeling_src.exists():
             modeling_dst = Path(args.output_dir) / "modeling.py"
-            shutil.copy2(modeling_src, modeling_dst)
+            shutil.copy(modeling_src, modeling_dst)
             print(f"✅ Copied modeling.py to {modeling_dst} for Hub upload")
 
 
@@ -334,7 +340,6 @@ class PredictionLoggingCallback(TrainerCallback):
         self.feature_extractor = feature_extractor
         self.cfg = cfg
         self.log_predictions_every_n_steps = log_predictions_every_n_steps
-        self.writer = None
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
         if state.global_step > 0 and state.global_step % self.log_predictions_every_n_steps == 0:
@@ -344,9 +349,11 @@ class PredictionLoggingCallback(TrainerCallback):
         if model is None:
             return
 
-        if self.writer is None:
-            self.writer = SummaryWriter(log_dir=args.logging_dir)
+        # Use context manager for SummaryWriter
+        with SummaryWriter(log_dir=args.logging_dir) as writer:
+            self._write_predictions(writer, state, model)
 
+    def _write_predictions(self, writer, state, model):
         model.eval()
 
         num_samples = getattr(self.cfg, "log_predictions_samples", 10)
@@ -358,7 +365,7 @@ class PredictionLoggingCallback(TrainerCallback):
             model, self.tokenizer, self.feature_extractor, eval_samples, device=model.device
         )
 
-        self.writer.add_scalar("eval/wer", wer, state.global_step)
+        writer.add_scalar("eval/wer", wer, state.global_step)
 
         predictions_text = []
         for i, (ref, pred) in enumerate(zip(references[:5], predictions[:5])):
@@ -367,7 +374,7 @@ class PredictionLoggingCallback(TrainerCallback):
             )
 
         full_text = "\n".join(predictions_text)
-        self.writer.add_text("eval/predictions", full_text, state.global_step)
+        writer.add_text("eval/predictions", full_text, state.global_step)
 
         print(f"📈 WER at step {state.global_step}: {wer:.2%}")
         print("\nSample predictions:")
@@ -385,7 +392,6 @@ def main(cfg: DictConfig) -> None:
     import os
 
     print(OmegaConf.to_yaml(cfg))
-    torch.set_float32_matmul_precision("high")
 
     model = create_asr_model(cfg)
     tokenizer = model.decoder.tokenizer
@@ -401,16 +407,20 @@ def main(cfg: DictConfig) -> None:
 
     # Convert output_dir to absolute path for clearer logging
     output_dir = training_args_dict.get("output_dir", "./outputs")
-    training_args_dict["output_dir"] = os.path.abspath(output_dir)
+    training_args_dict["output_dir"] = str(Path(output_dir).resolve())
 
     # Also convert logging_dir to absolute path if present
     if "logging_dir" in training_args_dict:
-        training_args_dict["logging_dir"] = os.path.abspath(training_args_dict["logging_dir"])
+        training_args_dict["logging_dir"] = str(Path(training_args_dict["logging_dir"]).resolve())
 
+    # Use HuggingFace token if push_to_hub is enabled
     if training_args_dict.get("push_to_hub", False) and not training_args_dict.get("hub_token"):
         hub_token = os.environ.get("HF_TOKEN")
         if hub_token:
             training_args_dict["hub_token"] = hub_token
+
+    # Enable tf32 for better performance on compatible GPUs
+    training_args_dict.setdefault("tf32", True)
 
     training_args = TrainingArguments(**training_args_dict)
 
