@@ -398,22 +398,17 @@ def main(cfg: DictConfig) -> None:
     training_args_dict = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_args_dict, dict), "Training args must be a dict"
 
-    # Convert output_dir to absolute path for clearer logging
     output_dir = training_args_dict.get("output_dir", "./outputs")
     training_args_dict["output_dir"] = str(Path(output_dir).resolve())
 
-    # Also convert logging_dir to absolute path if present
     if "logging_dir" in training_args_dict:
         training_args_dict["logging_dir"] = str(Path(training_args_dict["logging_dir"]).resolve())
 
-    # Use HuggingFace token if push_to_hub is enabled
     if training_args_dict.get("push_to_hub", False) and not training_args_dict.get("hub_token"):
         hub_token = os.environ.get("HF_TOKEN")
         if hub_token:
             training_args_dict["hub_token"] = hub_token
 
-    # Enable tf32 for better performance on compatible GPUs (production only)
-    # Only enable if bf16 is true (indicates GPU training) and not on Mac
     if training_args_dict.get("bf16", False) and training_args_dict.get(
         "dataloader_pin_memory", True
     ):
@@ -450,7 +445,6 @@ def main(cfg: DictConfig) -> None:
     trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
     trainer.save_model()
 
-    # Copy MODEL_CARD.md as README.md for the model if it exists
     model_card_path = Path("MODEL_CARD.md")
     if model_card_path.exists():
         model_output_dir = Path(training_args.output_dir)
@@ -460,8 +454,6 @@ def main(cfg: DictConfig) -> None:
 
     if training_args.push_to_hub:
         print("\n🚀 Pushing final model to Hub...")
-        # The README.md in the output directory will be automatically uploaded as the model card
-        # Include TensorBoard logs when pushing to hub
         kwargs = {}
         if "tensorboard" in training_args.report_to:
             kwargs["include_tensorboard_logs"] = True
