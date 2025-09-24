@@ -75,7 +75,7 @@ export HF_DATASETS_MULTIPROCESSING_MAX_WORKERS=8  # Optimized for 9 vCPUs
 export HF_DATASETS_DOWNLOAD_MANAGER_MAX_WORKERS=4  # Parallel downloads within each dataset
 export HF_DATASETS_DOWNLOAD_BATCH_SIZE=50  # Download multiple files in parallel
 export DATASETS_MAX_CONCURRENT_DOWNLOADS=4  # Max concurrent file downloads
-
+export TORCHINDUCTOR_COMPILE_THREADS=128
 export TOKENIZERS_PARALLELISM=false  # Disable parallel tokenization to avoid deadlocks
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"  # Better memory allocation and management
 export CUDA_LAUNCH_BLOCKING=0  # Enable async CUDA operations for better performance

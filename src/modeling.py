@@ -153,13 +153,6 @@ class ASRModel(PreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        """Load model, tokenizer, and feature extractor.
-
-        This follows HuggingFace conventions and automatically handles:
-        - Loading the model weights
-        - Loading the tokenizer that was saved with the model
-        - Loading the feature extractor that was saved with the model
-        """
         from transformers import WhisperFeatureExtractor
 
         # Override the model loading to not trigger embedding resizing
@@ -264,16 +257,13 @@ class ASRModel(PreTrainedModel):
     ):
         # Inference mode - when only input_features is provided (ASR pipeline)
         if input_features is not None and input_ids is None:
-            # Generate token IDs
             generated_ids = self.generate(
                 input_features, attention_mask=audio_attention_mask, **kwargs
             )
-            # Return a simple object that the pipeline can handle
             from transformers.modeling_outputs import CausalLMOutput
 
             return CausalLMOutput(logits=generated_ids.unsqueeze(-1).float())
 
-        # Training mode - require both input_ids and input_features
         if not (input_ids is not None and input_features is not None):
             raise ValueError("Both input_ids and input_features are required for training")
 
