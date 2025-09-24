@@ -22,7 +22,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 class WhisperEncoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.whisper = WhisperModel.from_pretrained("openai/whisper-small", dtype="auto")
+        self.whisper = WhisperModel.from_pretrained("openai/whisper-small")
 
         # Use HuggingFace utility to freeze parameters
         self.whisper.requires_grad_(False)

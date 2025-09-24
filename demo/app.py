@@ -9,7 +9,6 @@ Gradio app for ASR model with support for:
 """
 
 import logging
-import sys
 import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
@@ -18,16 +17,13 @@ import gradio as gr
 import numpy as np
 import soundfile as sf
 import torch
+from transformers import AutoModel
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-# Add parent directory to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
-from src.modeling import ASRModel  # noqa: E402
 
 
 class ASRDemo:
@@ -47,9 +43,10 @@ class ASRDemo:
             self.outputs_dir = Path.cwd() / outputs_dir
         logger.info(f"Using outputs directory: {self.outputs_dir.absolute()}")
 
-        # Load model with feature extractor
+        # Load model using AutoModel with trust_remote_code
+        # The model's modeling.py will be automatically downloaded and executed
         logger.info(f"Loading model from: {model_path}")
-        self.model = ASRModel.from_pretrained(model_path)
+        self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
 
         # Move to device and set to eval mode
         self.model = self.model.to(self.device)
@@ -67,6 +64,7 @@ class ASRDemo:
         """
         try:
             with torch.no_grad():
+                # The model's transcribe method handles everything
                 result = self.model.transcribe(audio_path)
             return result if result else "Could not generate transcription"
         except Exception as e:
@@ -141,8 +139,17 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
     Returns:
         Gradio Blocks interface
     """
-    # Initialize the demo
-    asr_demo = ASRDemo(model_path, outputs_dir)
+    try:
+        # Initialize the demo
+        asr_demo = ASRDemo(model_path, outputs_dir)
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        # Create a fallback interface with error message
+        with gr.Blocks(title="ASR Demo - Error") as demo:
+            gr.Markdown("# ❌ Error Loading Model")
+            gr.Markdown(f"Failed to load model: {str(e)}")
+            gr.Markdown("Please check that the model exists and try again.")
+        return demo
 
     # Create the interface
     with gr.Blocks(title="ASR Demo - Whisper + SmolLM2") as demo:
