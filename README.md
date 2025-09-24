@@ -92,7 +92,7 @@ usage instructions.
 
    ```bash
    # Make sure to replace the model path with your own
-   uv run demo/gradio_app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
+   uv run demo/app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
    ```
 
 ### Option 3: Deploy Demo to Hugging Face Spaces

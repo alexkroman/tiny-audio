@@ -42,7 +42,7 @@ making it accessible for learning and experimentation.
 
 - **Repository:**
   [github.com/alexkroman/tiny-audio](https://github.com/alexkroman/tiny-audio)
-- **Demo:** Available in the repository via `demo/gradio_app.py`
+- **Demo:** Available in the repository via `demo/app.py`
 
 ## Uses
 

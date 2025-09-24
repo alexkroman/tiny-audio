@@ -410,7 +410,7 @@ def main(cfg: DictConfig) -> None:
     ):
         training_args_dict.setdefault("tf32", True)
 
-    training_args = TrainingArguments(**training_args_dict)  # type: ignore[arg-type]
+    training_args = TrainingArguments(**training_args_dict)
 
     callbacks: list[TrainerCallback] = [ModelingFileCopyCallback()]
     if val_dataset and training_args.report_to and "tensorboard" in training_args.report_to:
@@ -446,7 +446,7 @@ def main(cfg: DictConfig) -> None:
     original_cwd = hydra.utils.get_original_cwd()
     model_card_path = Path(original_cwd) / "MODEL_CARD.md"
     if model_card_path.exists():
-        model_output_dir = Path(training_args.output_dir)  # type: ignore[arg-type]
+        model_output_dir = Path(training_args.output_dir)
         target_readme = model_output_dir / "README.md"
         shutil.copy2(model_card_path, target_readme)
         print(f"✅ Copied MODEL_CARD.md to {target_readme}")

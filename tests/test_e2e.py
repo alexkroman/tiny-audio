@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 def trained_model_path():
     # Use a fixed output directory for testing
     output_dir = "outputs/test_e2e_model"
-    
+
     # Use the mac_minimal experiment config for quick training
     cmd = [
         "uv",
@@ -37,7 +37,7 @@ def trained_model_path():
         pytest.fail(f"Training failed with return code {result.returncode}:\n{result.stderr}")
 
     model_path = Path(output_dir) / "outputs" / "mac_minimal_model"
-    
+
     if not model_path.exists():
         pytest.fail(f"Could not find saved model at expected path: {model_path}")
 

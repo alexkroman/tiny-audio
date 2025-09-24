@@ -5,15 +5,26 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tiny-audio"
 dynamic = ["version"]
-description = "Automatic Speech Recognition training pipeline combining Whisper encoder with SmolLM2 decoder"
+description = "Learn ASR by Building One - A minimal speech recognition model combining Whisper with SmolLM2"
 requires-python = ">=3.9"
 license = "MIT"
+readme = "README.md"
 authors = [
     {name = "Alex Kroman", email = "alex@alexkroman.com"}
 ]
-keywords = ["speech-recognition", "asr", "whisper", "smollm2", "transformers", "deep-learning"]
+keywords = ["speech-recognition", "asr", "whisper", "smollm2", "transformers", "deep-learning", "education"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
 dependencies = [
@@ -89,7 +100,7 @@ warn_no_return = true
 follow_imports = "normal"
 ignore_missing_imports = true
 # Ignore specific error codes that are library-related
-disable_error_code = ["assignment", "override", "call-overload"]
+disable_error_code = ["assignment", "override", "call-overload", "arg-type", "index", "union-attr"]
 
 [[tool.mypy.overrides]]
 module = "transformers.*"

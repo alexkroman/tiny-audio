@@ -202,6 +202,8 @@ wandb login
 - **Run tests after changes** to modeling.py or train.py: `uv run pytest tests/test_e2e.py -v`
 - **Frozen Whisper encoder** - The Whisper encoder MUST remain frozen (`requires_grad_(False)`) to preserve audio representations
 - **Audio projection initialization** - The projector uses scaled initialization (0.01x) to prevent gradient explosion
+- **ASR Pipeline Support** - The model's `forward` method detects inference mode (when only `input_features` is provided) and redirects to the `generate` method for compatibility with HuggingFace's ASR pipeline
+- **Fixed test output directory** - E2E tests now use a fixed output path `outputs/test_e2e_model` specified via `+output_dir=` override
 
 ## Configuration Structure
 
@@ -211,6 +213,7 @@ The project uses Hydra's composition pattern:
 - **Experiment presets**: `+experiments=mac_minimal`, `+experiments=production`
 - **Parameter overrides**: `model.lora_r=64 training.batch_size=8`
 - **Output structure**: `outputs/{date}/{time}/` with automatic timestamping
+- **Custom output directory**: Use `+output_dir=path/to/dir` to specify a custom output location
 - **Checkpoint resumption**: `resume_from_checkpoint=path/to/checkpoint`
 
 ### Available Experiments
