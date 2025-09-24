@@ -57,9 +57,7 @@ fp16: false
 bf16: true
 dataloader_pin_memory: true
 max_grad_norm: 1.0
-torch_compile: true
-torch_compile_backend: "inductor"
-torch_compile_mode: "default"
+torch_compile: false
 
 # Misc
 seed: 42

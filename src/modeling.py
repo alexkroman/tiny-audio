@@ -62,13 +62,14 @@ class ASRModelConfig(PretrainedConfig):
 
 
 class AudioProjector(nn.Module):
-    def __init__(self, audio_dim: int, text_dim: int):
+    def __init__(self, audio_dim: int, text_dim: int, initial_scale: float = 0.01):
         super().__init__()
         self.norm = RMSNorm(audio_dim, eps=1e-6)
 
         self.linear_1 = nn.Linear(audio_dim, text_dim, bias=True)
         self.act = nn.GELU()
         self.linear_2 = nn.Linear(text_dim, text_dim, bias=True)
+        self.scale = nn.Parameter(torch.tensor(initial_scale))
 
         torch.nn.init.normal_(self.linear_1.weight, mean=0.0, std=0.01)
         torch.nn.init.zeros_(self.linear_1.bias)
@@ -80,7 +81,7 @@ class AudioProjector(nn.Module):
         hidden_states = self.linear_1(hidden_states)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
-        result: torch.Tensor = hidden_states * 0.01
+        result: torch.Tensor = hidden_states * self.scale
         return result
 
 
@@ -97,8 +98,6 @@ class LLMDecoder(nn.Module):
             decoder_model_name,
             use_cache=False,
         )
-
-        self.tokenizer = None
 
         lora_config = LoraConfig(
             r=lora_r,
@@ -147,7 +146,6 @@ class ASRModel(PreTrainedModel):
         audio_dim = self.encoder.d_model
         self.audio_projector = AudioProjector(audio_dim, text_dim)
 
-        # Initialize but don't add tokens yet - will be done in from_pretrained or after init
         self._tokens_initialized = False
         self.add_audio_special_tokens()
 
@@ -155,7 +153,6 @@ class ASRModel(PreTrainedModel):
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
         from transformers import WhisperFeatureExtractor
 
-        # Override the model loading to not trigger embedding resizing
         kwargs["ignore_mismatched_sizes"] = True
         model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
         model.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
@@ -164,25 +161,17 @@ class ASRModel(PreTrainedModel):
         )
 
         model.decoder.tokenizer = model.tokenizer
-
-        # Just set the token IDs without resizing since they're already in the loaded model
         model.audio_start_id = model.tokenizer.convert_tokens_to_ids("<|audio_start|>")
         model.audio_end_id = model.tokenizer.convert_tokens_to_ids("<|audio_end|>")
         model.audio_pad_id = model.tokenizer.convert_tokens_to_ids("<|audio_pad|>")
         model.audio_chunk_id = model.tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
         model._tokens_initialized = True
 
-        # Always resize embeddings to match tokenizer vocabulary size
         model.decoder.model.resize_token_embeddings(len(model.tokenizer))
 
         return model
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
-        """Save the model, tokenizer, and feature extractor.
-
-        This properly saves all components to the same directory so they can be
-        loaded together with from_pretrained().
-        """
         import inspect
         import shutil
 
@@ -215,10 +204,8 @@ class ASRModel(PreTrainedModel):
 
         num_added = self.tokenizer.add_special_tokens({"additional_special_tokens": audio_tokens})
 
-        # Only resize if tokens were added and not on meta device
         if num_added > 0:
             try:
-                # Check if model is on meta device
                 if hasattr(self.decoder.model, "embeddings"):
                     embed_device = self.decoder.model.embeddings.weight.device
                 elif hasattr(self.decoder.model.model, "embed_tokens"):
@@ -229,7 +216,6 @@ class ASRModel(PreTrainedModel):
                 if embed_device.type != "meta":
                     self.decoder.model.resize_token_embeddings(len(self.tokenizer))
             except Exception:
-                # If we can't resize, it's probably because model is on meta device
                 pass
 
         self.audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
@@ -255,7 +241,6 @@ class ASRModel(PreTrainedModel):
         audio_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        # Inference mode - when only input_features is provided (ASR pipeline)
         if input_features is not None and input_ids is None:
             generated_ids = self.generate(
                 input_features, attention_mask=audio_attention_mask, **kwargs
@@ -320,6 +305,7 @@ class ASRModel(PreTrainedModel):
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         max_new_tokens: int = 100,
+        prompt: str = "Please transcribe the following audio recording.\n<|audio_chunk|>",
         **kwargs,
     ) -> torch.LongTensor:
         """Generate text from audio input."""
@@ -328,7 +314,6 @@ class ASRModel(PreTrainedModel):
         batch_size = audio_embeds.shape[0]
         embed_layer = self.decoder.model.get_input_embeddings()
 
-        prompt = "Please transcribe the following audio recording.\n<|audio_chunk|>"
         messages = [{"role": "user", "content": prompt}]
         prompt_ids = self.tokenizer.apply_chat_template(
             messages, return_tensors="pt", add_generation_prompt=True
