@@ -1,14 +1,12 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with
-code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-This is an Automatic Speech Recognition (ASR) training pipeline that combines a
-Whisper encoder with a SmolLM2 decoder using LoRA for parameter-efficient
-fine-tuning. The project uses Hydra for configuration management and supports
-both local and remote training on RunPod.
+This is an Automatic Speech Recognition (ASR) training pipeline that combines a Whisper encoder with a SmolLM2 decoder using LoRA for parameter-efficient fine-tuning. The project uses Hydra for configuration management and supports both local and remote training on RunPod.
+
+**📦 Pre-trained Model**: Available on [Hugging Face Hub](https://huggingface.co/mazesmazes/tiny-audio)
 
 ## Development Commands
 
@@ -80,6 +78,8 @@ uv run pytest --cov=src
 uv run pytest tests/test_e2e.py -v
 ```
 
+**Note**: The end-to-end test trains a minimal model with 5 steps and tests transcription functionality. It takes about 2-3 minutes to complete.
+
 ### Demo Application
 
 ```bash
@@ -117,6 +117,31 @@ wandb login
 
 # View metrics in the W&B dashboard
 # Your runs will appear at https://wandb.ai/YOUR_USERNAME/tiny-audio
+```
+
+## Project Structure
+
+```
+├── configs/hydra/      # Hydra configuration files
+│   ├── config.yaml     # Base configuration with defaults
+│   ├── model/          # Model configs (small.yaml, large.yaml)
+│   ├── data/           # Dataset configs (tiny.yaml, production_streaming.yaml)
+│   ├── training/       # Training configs (mac.yaml, production.yaml)
+│   └── experiments/    # Pre-configured experiment combinations
+├── demo/               # Gradio demo application
+│   └── app.py          # Interactive ASR demo with mic/file support
+├── scripts/            # Deployment and remote training utilities
+│   ├── deploy_runpod.py
+│   ├── start_remote_training.py
+│   ├── attach_remote_session.py
+│   └── deploy_to_hf_space.py
+├── src/                # Core source code
+│   ├── modeling.py     # ASR model implementation (~300 lines)
+│   └── train.py        # Training pipeline with Hydra integration
+├── tests/              # Test suite
+│   └── test_e2e.py     # End-to-end training and transcription test
+├── pyproject.toml      # Project dependencies and tool configurations
+└── README.md           # User-facing documentation
 ```
 
 ## Architecture
@@ -173,8 +198,10 @@ wandb login
 ### Important Code Guidelines
 
 - **NEVER use `torch_dtype` parameter** - It's deprecated. Don't use `dtype` either for `AutoModelForCausalLM.from_pretrained()` - let it auto-detect
-- **Always resize embeddings** when loading models to match tokenizer vocabulary size
-- **Run tests after changes** to modeling.py or train.py: `uv run pytest test_e2e.py -v`
+- **Always resize embeddings** when loading models to match tokenizer vocabulary size (`model.resize_token_embeddings(len(tokenizer))`)
+- **Run tests after changes** to modeling.py or train.py: `uv run pytest tests/test_e2e.py -v`
+- **Frozen Whisper encoder** - The Whisper encoder MUST remain frozen (`requires_grad_(False)`) to preserve audio representations
+- **Audio projection initialization** - The projector uses scaled initialization (0.01x) to prevent gradient explosion
 
 ## Configuration Structure
 
@@ -220,12 +247,16 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 
 ## Data Flow
 
-1. **Audio Input**: Raw audio (16kHz) → Whisper feature extractor → Log-mel
-   spectrogram
-1. **Encoder**: Spectrogram → Whisper encoder → Audio embeddings (1500 dim)
-1. **Projection**: Audio embeddings → RMSNorm → Linear → GELU → Linear → Text
-   space (2048/4096 dim)
-1. **Decoder**: Projected features + text prompt → SmolLM2 + LoRA → Generated
-   transcription
-1. **Loss Calculation**: Cross-entropy on text tokens only (audio tokens masked
-   with -100)
+1. **Audio Input**: Raw audio (16kHz) → Whisper feature extractor → Log-mel spectrogram
+2. **Encoder**: Spectrogram → Whisper encoder → Audio embeddings (1500 dim)
+3. **Projection**: Audio embeddings → RMSNorm → Linear → GELU → Linear → Text space (2048/4096 dim)
+4. **Decoder**: Projected features + text prompt → SmolLM2 + LoRA → Generated transcription
+5. **Loss Calculation**: Cross-entropy on text tokens only (audio tokens masked with -100)
+
+## Common Pitfalls to Avoid
+
+- **Model dtype issues**: Let transformers auto-detect dtype, don't specify it manually
+- **Gradient explosion**: Always use scaled initialization (0.01x) for the audio projector
+- **Memory issues on Mac**: Use environment variables `PYTORCH_ENABLE_MPS_FALLBACK=1` and `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0`
+- **Dataset access**: Ensure `HF_TOKEN` is set for gated datasets (GigaSpeech, Common Voice)
+- **Checkpoint compatibility**: When resuming training, ensure optimizer states are compatible

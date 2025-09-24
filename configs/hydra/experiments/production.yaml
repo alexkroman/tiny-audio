@@ -6,7 +6,7 @@ defaults:
   - override /training: production
 
 # Resume from checkpoint (root level override)
-# resume_from_checkpoint: /workspace/outputs/2025-09-23/13-51-01/outputs/production_model/checkpoint-16000  # Commented out - incompatible optimizer state
+#resume_from_checkpoint: /workspace/outputs/2025-09-23/21-58-09/outputs/production_model/checkpoint-27000
 resume_from_checkpoint: null
 
 # Production-specific overrides

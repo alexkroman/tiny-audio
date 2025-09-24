@@ -23,7 +23,7 @@ adam_epsilon: 1e-8
 
 # Logging
 logging_dir: ./logs
-logging_steps: 20
+logging_steps: 100
 logging_first_step: true
 logging_nan_inf_filter: false
 report_to:
@@ -49,7 +49,7 @@ hub_token: null  # Will use HF_TOKEN env var if not set
 hub_private_repo: false
 
 # Performance
-dataloader_num_workers: 32  # Optimized for 9 vCPUs (leave some for main process)
+dataloader_num_workers: 16  # Optimized for 9 vCPUs (leave some for main process)
 dataloader_persistent_workers: true
 dataloader_prefetch_factor: 8
 gradient_checkpointing: true

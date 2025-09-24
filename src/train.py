@@ -441,11 +441,15 @@ def main(cfg: DictConfig) -> None:
     trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
     trainer.save_model()
 
-    model_card_path = Path("MODEL_CARD.md")
+    # Copy MODEL_CARD.md as README.md from the original working directory
+    # Hydra changes the working directory, so we need to use the original path
+    original_cwd = hydra.utils.get_original_cwd()
+    model_card_path = Path(original_cwd) / "MODEL_CARD.md"
     if model_card_path.exists():
         model_output_dir = Path(training_args.output_dir)  # type: ignore[arg-type]
         target_readme = model_output_dir / "README.md"
         shutil.copy2(model_card_path, target_readme)
+        print(f"✅ Copied MODEL_CARD.md to {target_readme}")
 
     if training_args.push_to_hub:
         kwargs = {}
