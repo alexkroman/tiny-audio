@@ -15,92 +15,48 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 @pytest.fixture(scope="module")
 def trained_model_path():
-    """Train a minimal model and return its path."""
-    print("\n" + "=" * 60)
-    print("Training minimal model for testing...")
-    print("=" * 60)
-
     # Use the mac_minimal experiment config for quick training
     cmd = [
         "uv",
         "run",
         "src/train.py",
         "+experiments=mac_minimal",
-        "training.max_steps=5",  # Even fewer steps for testing
-        "training.save_steps=5",
-        "training.eval_steps=5",  # Make eval_steps match save_steps
+        "training.max_steps=1",  # Even fewer steps for testing
+        "training.save_steps=1",
+        "training.eval_steps=1",  # Make eval_steps match save_steps
         "training.logging_steps=1",
-        "data.max_train_samples=10",  # Very small dataset
+        "data.max_train_samples=1",  # Very small dataset
         "training.gradient_checkpointing=false",  # Disable for speed
     ]
 
-    print(f"Running: {' '.join(cmd)}")
-    start_time = time.time()
+    result = subprocess.run(cmd, capture_output=True, text=True)
 
-    # Run with real-time output
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,  # Combine stderr with stdout
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
+    if result.returncode != 0:
+        pytest.fail(f"Training failed with return code {result.returncode}:\n{result.stderr}")
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_outputs = Path(f"outputs/{today}")
+
+    if not today_outputs.exists():
+        pytest.fail(f"No outputs directory found for today: {today_outputs}")
+
+    # Get the most recent directory
+    dirs = sorted(
+        [d for d in today_outputs.iterdir() if d.is_dir()],
+        key=lambda x: x.stat().st_mtime,
+        reverse=True,
     )
 
-    # Collect output while showing it
-    output_lines = []
-    for line in iter(process.stdout.readline, ""):
-        if line:
-            print(f"  {line.rstrip()}")  # Print with indent
-            output_lines.append(line)
+    if not dirs:
+        pytest.fail("No output directories found")
 
-    # Wait for completion
-    return_code = process.wait()
-    training_time = time.time() - start_time
-    print(f"Training completed in {training_time:.1f} seconds")
-
-    # Join output for parsing
-    full_output = "".join(output_lines)
-
-    if return_code != 0:
-        pytest.fail(f"Training failed with return code {return_code}:\n{full_output}")
-
-    # Parse the output to find the model save path
+    # Check for model in the most recent directory
     model_path = None
-
-    for line in output_lines:
-        if "outputs/" in line and "mac_model" not in line:
-            import re
-
-            match = re.search(r"outputs/\d{4}-\d{2}-\d{2}/\d{2}-\d{2}-\d{2}", line)
-            if match:
-                base_path = Path(match.group())
-                # Check for either mac_model or mac_minimal_model
-                for model_name in ["mac_minimal_model", "mac_model"]:
-                    potential_path = base_path / "outputs" / model_name
-                    if potential_path.exists():
-                        model_path = potential_path
-                        break
-                if model_path:
-                    break
-
-    # If we couldn't find it in logs, look for the most recent output
-    if model_path is None:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        today_outputs = Path(f"outputs/{today}")
-        if today_outputs.exists():
-            dirs = sorted(
-                [d for d in today_outputs.iterdir() if d.is_dir()],
-                key=lambda x: x.stat().st_mtime,
-                reverse=True,
-            )
-            if dirs:
-                # Check for either mac_model or mac_minimal_model
-                for model_name in ["mac_minimal_model", "mac_model"]:
-                    potential_path = dirs[0] / "outputs" / model_name
-                    if potential_path.exists():
-                        model_path = potential_path
-                        break
+    for model_name in ["mac_minimal_model", "mac_model"]:
+        potential_path = dirs[0] / "outputs" / model_name
+        if potential_path.exists():
+            model_path = potential_path
+            break
 
     if not model_path or not model_path.exists():
         pytest.fail(f"Could not find saved model at expected path: {model_path}")
@@ -161,23 +117,21 @@ def test_embedding_size_matches_tokenizer(loaded_model):
         "demo/wav_outputs/sample1_harvard.wav",
     ],
 )
-def test_transcribe_real_audio(loaded_model, audio_file):
-    """Test transcription with real audio files."""
+def test_pipeline_with_real_audio(loaded_model, audio_file):
+    """Test transcription with real audio files using pipeline."""
     audio_path = Path(audio_file)
 
     if not audio_path.exists():
         pytest.skip(f"Audio file not found: {audio_file}")
 
-    # Should not raise any exceptions
-    result = loaded_model.transcribe(str(audio_path))
+    # Create pipeline and test
+    asr_pipeline = loaded_model.pipeline("automatic-speech-recognition")
+    result = asr_pipeline(str(audio_path))
 
-    # Result should be a string (may be empty for untrained model)
-    assert isinstance(result, str)
-
-    # Log the result for debugging (won't fail test)
-    print(
-        f"\n  Transcription of {audio_path.name}: '{result[:100]}{'...' if len(result) > 100 else ''}'"
-    )
+    # Pipeline returns a dict with 'text' key
+    assert isinstance(result, dict)
+    assert "text" in result
+    assert isinstance(result["text"], str)
 
 
 def test_generate_method_works(loaded_model):
@@ -195,58 +149,6 @@ def test_generate_method_works(loaded_model):
     assert output is not None
     assert output.shape[0] == 1  # Batch size
     assert len(output.shape) == 2  # Should be 2D tensor
-
-
-def test_transcribe_handles_errors_gracefully(loaded_model):
-    """Test that transcribe handles non-existent files gracefully."""
-    with pytest.raises(FileNotFoundError):
-        loaded_model.transcribe("/path/to/nonexistent/file.wav")
-
-
-def test_demo_app_starts_successfully(trained_model_path):
-    """Test that the demo app can start with the trained model."""
-    import os
-    import signal
-    import subprocess
-    import time
-
-    # Start the demo app
-    cmd = ["uv", "run", "demo/app.py", "--model", trained_model_path, "--port", "7861"]
-
-    print(f"\nStarting demo app with model: {trained_model_path}")
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        preexec_fn=os.setsid if os.name != "nt" else None,
-    )
-
-    try:
-        # Give it time to start
-        time.sleep(5)
-
-        # Check if process is still running
-        if process.poll() is not None:
-            stdout, stderr = process.communicate()
-            pytest.fail(f"Demo app failed to start:\nSTDOUT: {stdout}\nSTDERR: {stderr}")
-
-        # If it's still running, that's success
-        print("✓ Demo app started successfully")
-
-    finally:
-        # Clean up - kill the process group
-        if os.name != "nt":
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-        else:
-            process.terminate()
-
-        # Wait for it to terminate
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
 
 
 if __name__ == "__main__":

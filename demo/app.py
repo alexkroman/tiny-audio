@@ -84,8 +84,11 @@ class ASRDemo:
         self.model.eval()
         logger.info(f"Model loaded successfully with dtype: {self.model.dtype}")
 
+        # Create the pipeline for ASR
+        self.asr_pipeline = self.model.pipeline("automatic-speech-recognition")
+
     def transcribe(self, audio_path: str) -> str:
-        """Transcribe audio file to text.
+        """Transcribe audio file to text using the pipeline.
 
         Args:
             audio_path: Path to the audio file
@@ -93,14 +96,8 @@ class ASRDemo:
         Returns:
             Transcribed text
         """
-        try:
-            with torch.no_grad():
-                # The model's transcribe method handles everything
-                result = self.model.transcribe(audio_path)
-            return result if result else "Could not generate transcription"
-        except Exception as e:
-            logger.error(f"Error transcribing audio: {e}")
-            return f"Error: {str(e)}"
+        result = self.asr_pipeline(audio_path)
+        return result["text"]
 
     def process_audio(self, audio_input: Union[str, Tuple[int, np.ndarray], None]) -> str:
         """Process audio from microphone or file upload.

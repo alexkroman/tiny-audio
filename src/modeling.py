@@ -121,6 +121,7 @@ class ASRModel(PreTrainedModel):
     base_model_prefix = "asr"
     supports_gradient_checkpointing = True
     _no_split_modules = ["WhisperEncoder", "LLMDecoder", "AudioProjector"]
+    main_input_name = "input_features"  # Tell the pipeline to use input_features instead of input_ids
 
     def __init__(self, config: Union[ASRModelConfig, dict]) -> None:
         if isinstance(config, dict):
@@ -252,13 +253,25 @@ class ASRModel(PreTrainedModel):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        labels: torch.Tensor,
-        input_features: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        input_features: Optional[torch.Tensor] = None,
         audio_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        # Inference mode - when only input_features is provided (ASR pipeline)
+        if input_features is not None and input_ids is None:
+            # Generate token IDs
+            generated_ids = self.generate(input_features, attention_mask=audio_attention_mask, **kwargs)
+            # Return a simple object that the pipeline can handle
+            from transformers.modeling_outputs import CausalLMOutput
+            return CausalLMOutput(logits=generated_ids.unsqueeze(-1).float())
+        
+        # Training mode - require both input_ids and input_features
+        if not (input_ids is not None and input_features is not None):
+            raise ValueError("Both input_ids and input_features are required for training")
+
         audio_embeds = self._encode_audio(input_features, attention_mask=audio_attention_mask)
 
         embed_layer = self.decoder.model.get_input_embeddings()
@@ -355,40 +368,6 @@ class ASRModel(PreTrainedModel):
             **kwargs,
         )
         return generated
-
-    @torch.no_grad()
-    def transcribe(self, audio_path: str, **kwargs) -> str:
-        """Transcribe audio file using pipeline-style processing."""
-        from transformers.pipelines.audio_utils import ffmpeg_read
-
-        with Path(audio_path).open("rb") as f:
-            audio_bytes = f.read()
-        audio_array = ffmpeg_read(audio_bytes, sampling_rate=16000)
-
-        if self.feature_extractor is None:
-            raise ValueError("Feature extractor is not initialized")
-        inputs = self.feature_extractor(
-            audio_array,
-            sampling_rate=16000,
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
-
-        model_inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        generate_kwargs = {
-            "max_new_tokens": kwargs.pop("max_new_tokens", 200),
-            "do_sample": kwargs.pop("do_sample", False),
-            "pad_token_id": self.tokenizer.pad_token_id,
-            "eos_token_id": self.tokenizer.eos_token_id,
-            **kwargs,
-        }
-        generated_ids = self.generate(
-            input_features=model_inputs["input_features"],
-            attention_mask=model_inputs.get("attention_mask"),
-            **generate_kwargs,
-        )
-
-        return cast(str, self.tokenizer.decode(generated_ids[0], skip_special_tokens=True))
 
     def pipeline(self, task: str = "automatic-speech-recognition", **kwargs):
         from transformers import pipeline
