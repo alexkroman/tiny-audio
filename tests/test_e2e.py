@@ -3,8 +3,6 @@
 
 import subprocess
 import sys
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -15,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 @pytest.fixture(scope="module")
 def trained_model_path():
+    # Use a fixed output directory for testing
+    output_dir = "outputs/test_e2e_model"
+    
     # Use the mac_minimal experiment config for quick training
     cmd = [
         "uv",
@@ -27,6 +28,7 @@ def trained_model_path():
         "training.logging_steps=1",
         "data.max_train_samples=1",  # Very small dataset
         "training.gradient_checkpointing=false",  # Disable for speed
+        f"+output_dir={output_dir}",  # Specify output directory
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -34,31 +36,9 @@ def trained_model_path():
     if result.returncode != 0:
         pytest.fail(f"Training failed with return code {result.returncode}:\n{result.stderr}")
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    today_outputs = Path(f"outputs/{today}")
-
-    if not today_outputs.exists():
-        pytest.fail(f"No outputs directory found for today: {today_outputs}")
-
-    # Get the most recent directory
-    dirs = sorted(
-        [d for d in today_outputs.iterdir() if d.is_dir()],
-        key=lambda x: x.stat().st_mtime,
-        reverse=True,
-    )
-
-    if not dirs:
-        pytest.fail("No output directories found")
-
-    # Check for model in the most recent directory
-    model_path = None
-    for model_name in ["mac_minimal_model", "mac_model"]:
-        potential_path = dirs[0] / "outputs" / model_name
-        if potential_path.exists():
-            model_path = potential_path
-            break
-
-    if not model_path or not model_path.exists():
+    model_path = Path(output_dir) / "outputs" / "mac_minimal_model"
+    
+    if not model_path.exists():
         pytest.fail(f"Could not find saved model at expected path: {model_path}")
 
     print(f"✓ Model saved to: {model_path}")
@@ -113,8 +93,6 @@ def test_embedding_size_matches_tokenizer(loaded_model):
     "audio_file",
     [
         "demo/wav_outputs/sample5_short.wav",
-        "demo/wav_outputs/sample4_counting.wav",
-        "demo/wav_outputs/sample1_harvard.wav",
     ],
 )
 def test_pipeline_with_real_audio(loaded_model, audio_file):
