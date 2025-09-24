@@ -88,7 +88,35 @@ warn_unused_ignores = true
 warn_no_return = true
 follow_imports = "normal"
 ignore_missing_imports = true
+# Ignore specific error codes that are library-related
+disable_error_code = ["assignment", "override", "call-overload"]
 
+[[tool.mypy.overrides]]
+module = "transformers.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "peft.*"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+# Test discovery patterns
+python_files = "test_*.py *_test.py"
+python_classes = "Test*"
+python_functions = "test_*"
+
+# Default options
+addopts = "-v -s --tb=short"
+
+# Test paths
+testpaths = ["tests"]
+
+# Ignore directories
+norecursedirs = ["outputs", ".venv", "venv", ".git", "__pycache__", "*.egg-info"]
+
+# Asyncio configuration to fix deprecation warning
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100

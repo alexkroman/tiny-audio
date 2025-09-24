@@ -20,11 +20,10 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 
 
 class WhisperEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, encoder_model_name="openai/whisper-small"):
         super().__init__()
-        self.whisper = WhisperModel.from_pretrained("openai/whisper-small")
+        self.whisper = WhisperModel.from_pretrained(encoder_model_name)
 
-        # Use HuggingFace utility to freeze parameters
         self.whisper.requires_grad_(False)
         self.whisper.eval()
 
@@ -46,6 +45,7 @@ class ASRModelConfig(PretrainedConfig):
     def __init__(
         self,
         decoder_model_name="HuggingFaceTB/SmolLM2-360M-Instruct",
+        encoder_model_name="openai/whisper-small",
         lora_r=32,
         lora_alpha=64,
         lora_target_modules=None,
@@ -53,6 +53,7 @@ class ASRModelConfig(PretrainedConfig):
         **kwargs,
     ):
         self.decoder_model_name = decoder_model_name
+        self.encoder_model_name = encoder_model_name
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
         self.lora_target_modules = lora_target_modules or ["q_proj", "v_proj"]
@@ -69,7 +70,6 @@ class AudioProjector(nn.Module):
         self.act = nn.GELU()
         self.linear_2 = nn.Linear(text_dim, text_dim, bias=True)
 
-        # Use torch.nn.init methods consistently
         torch.nn.init.normal_(self.linear_1.weight, mean=0.0, std=0.01)
         torch.nn.init.zeros_(self.linear_1.bias)
         torch.nn.init.xavier_normal_(self.linear_2.weight)
@@ -80,7 +80,6 @@ class AudioProjector(nn.Module):
         hidden_states = self.linear_1(hidden_states)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
-
         result: torch.Tensor = hidden_states * 0.01
         return result
 
@@ -97,22 +96,9 @@ class LLMDecoder(nn.Module):
         self.model = AutoModelForCausalLM.from_pretrained(
             decoder_model_name,
             use_cache=False,
-            dtype="auto",
-        )
-        self.tokenizer = AutoTokenizer.from_pretrained(decoder_model_name)
-
-        # Use HuggingFace's device check utility
-        embeddings = self.model.get_input_embeddings()
-        is_meta_device = (
-            embeddings is not None
-            and hasattr(embeddings, "weight")
-            and embeddings.weight.device.type == "meta"
         )
 
-        if self.tokenizer.pad_token_id == self.tokenizer.eos_token_id:
-            self.tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
-            if not is_meta_device:
-                self.model.resize_token_embeddings(len(self.tokenizer))
+        self.tokenizer = None
 
         lora_config = LoraConfig(
             r=lora_r,
@@ -124,14 +110,14 @@ class LLMDecoder(nn.Module):
             bias="none",
             task_type=TaskType.CAUSAL_LM,
         )
-        self.model = get_peft_model(self.model, lora_config)  # type: ignore[assignment]
+        self.model = get_peft_model(self.model, lora_config)
 
     def forward(self, **kwargs):
         return self.model(**kwargs)
 
 
 class ASRModel(PreTrainedModel):
-    config_class = ASRModelConfig  # type: ignore[assignment]
+    config_class = ASRModelConfig
     base_model_prefix = "asr"
     supports_gradient_checkpointing = True
     _no_split_modules = ["WhisperEncoder", "LLMDecoder", "AudioProjector"]
@@ -142,47 +128,87 @@ class ASRModel(PreTrainedModel):
 
         super().__init__(config)
 
-        self.encoder = WhisperEncoder()
+        self.encoder = WhisperEncoder(config.encoder_model_name)
         self.decoder = LLMDecoder(config)
+
+        from transformers import WhisperFeatureExtractor
+
+        self.tokenizer = AutoTokenizer.from_pretrained(config.decoder_model_name)
+        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
+
+        self.decoder.tokenizer = self.tokenizer
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
         text_dim = getattr(self.decoder.model.config, "hidden_size", 768)
         audio_dim = self.encoder.d_model
         self.audio_projector = AudioProjector(audio_dim, text_dim)
-        self.add_audio_special_tokens()
 
-        # Initialize feature extractor as None - will be loaded in from_pretrained
-        self.feature_extractor = None
+        # Initialize but don't add tokens yet - will be done in from_pretrained or after init
+        self._tokens_initialized = False
+        self.add_audio_special_tokens()
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        """Load model and feature extractor.
+        """Load model, tokenizer, and feature extractor.
 
         This follows HuggingFace conventions and automatically handles:
         - Loading the model weights
+        - Loading the tokenizer that was saved with the model
         - Loading the feature extractor that was saved with the model
         """
         from transformers import WhisperFeatureExtractor
 
-        # Load the model using parent class method
+        # Override the model loading to not trigger embedding resizing
+        kwargs["ignore_mismatched_sizes"] = True
         model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
-
-        # Load feature extractor
+        model.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
         model.feature_extractor = WhisperFeatureExtractor.from_pretrained(
             pretrained_model_name_or_path
         )
 
+        model.decoder.tokenizer = model.tokenizer
+
+        # Just set the token IDs without resizing since they're already in the loaded model
+        model.audio_start_id = model.tokenizer.convert_tokens_to_ids("<|audio_start|>")
+        model.audio_end_id = model.tokenizer.convert_tokens_to_ids("<|audio_end|>")
+        model.audio_pad_id = model.tokenizer.convert_tokens_to_ids("<|audio_pad|>")
+        model.audio_chunk_id = model.tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
+        model._tokens_initialized = True
+
+        # Always resize embeddings to match tokenizer vocabulary size
+        model.decoder.model.resize_token_embeddings(len(model.tokenizer))
+
         return model
 
-    def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:  # type: ignore[override]
-        """Save the model, tokenizer, and feature extractor."""
-        super().save_pretrained(save_directory, **kwargs)
-        self.decoder.tokenizer.save_pretrained(save_directory)
+    def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
+        """Save the model, tokenizer, and feature extractor.
 
-        # Save feature extractor if it exists
+        This properly saves all components to the same directory so they can be
+        loaded together with from_pretrained().
+        """
+        import inspect
+        import shutil
+
+        super().save_pretrained(save_directory, **kwargs)
+        if self.tokenizer is not None:
+            self.tokenizer.save_pretrained(save_directory)
+
         if self.feature_extractor is not None:
             self.feature_extractor.save_pretrained(save_directory)
 
+        save_path = Path(save_directory)
+        save_path.mkdir(parents=True, exist_ok=True)
+        modeling_file = Path(inspect.getfile(self.__class__))
+        target_file = save_path / "modeling.py"
+
+        shutil.copy2(modeling_file, target_file)
+
     def add_audio_special_tokens(self):
         """Add audio-specific special tokens for better audio-text alignment."""
+        if self._tokens_initialized:
+            return  # Already initialized during from_pretrained
+
         audio_tokens = [
             "<|audio_start|>",
             "<|audio_end|>",
@@ -191,43 +217,30 @@ class ASRModel(PreTrainedModel):
             "<|audio_chunk|>",
         ]
 
-        num_added = self.decoder.tokenizer.add_special_tokens(
-            {"additional_special_tokens": audio_tokens}
-        )
+        num_added = self.tokenizer.add_special_tokens({"additional_special_tokens": audio_tokens})
 
+        # Only resize if tokens were added and not on meta device
         if num_added > 0:
-            # Check if model is on meta device
-            embeddings = self.decoder.model.get_input_embeddings()
-            is_meta_device = (
-                embeddings is not None
-                and hasattr(embeddings, "weight")
-                and embeddings.weight.device.type == "meta"
-            )
+            try:
+                # Check if model is on meta device
+                if hasattr(self.decoder.model, "embeddings"):
+                    embed_device = self.decoder.model.embeddings.weight.device
+                elif hasattr(self.decoder.model.model, "embed_tokens"):
+                    embed_device = self.decoder.model.model.embed_tokens.weight.device
+                else:
+                    embed_device = next(self.decoder.model.parameters()).device
 
-            if is_meta_device:
-                self.decoder.model.resize_token_embeddings(
-                    len(self.decoder.tokenizer), mean_resizing=False
-                )
-            else:
-                self.decoder.model.resize_token_embeddings(len(self.decoder.tokenizer))
+                if embed_device.type != "meta":
+                    self.decoder.model.resize_token_embeddings(len(self.tokenizer))
+            except Exception:
+                # If we can't resize, it's probably because model is on meta device
+                pass
 
-                # Initialize new embeddings with smart initialization
-                with torch.no_grad():
-                    embeddings = self.decoder.model.get_input_embeddings()
-                    if embeddings is not None and hasattr(embeddings, "weight"):
-                        existing_embeds = embeddings.weight[:-num_added]
-                        mean_embedding = existing_embeds.mean(dim=0)
-                        std_embedding = existing_embeds.std()
-
-                        # Use torch.nn.init style initialization
-                        new_embeds = embeddings.weight[-num_added:]
-                        torch.nn.init.normal_(new_embeds, mean=0, std=std_embedding * 0.02)
-                        new_embeds.data.add_(mean_embedding)
-
-        self.audio_start_id = self.decoder.tokenizer.convert_tokens_to_ids("<|audio_start|>")
-        self.audio_end_id = self.decoder.tokenizer.convert_tokens_to_ids("<|audio_end|>")
-        self.audio_pad_id = self.decoder.tokenizer.convert_tokens_to_ids("<|audio_pad|>")
-        self.audio_chunk_id = self.decoder.tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
+        self.audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
+        self.audio_end_id = self.tokenizer.convert_tokens_to_ids("<|audio_end|>")
+        self.audio_pad_id = self.tokenizer.convert_tokens_to_ids("<|audio_pad|>")
+        self.audio_chunk_id = self.tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
+        self._tokens_initialized = True
 
     def _encode_audio(
         self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
@@ -251,44 +264,40 @@ class ASRModel(PreTrainedModel):
         embed_layer = self.decoder.model.get_input_embeddings()
         text_embeds = embed_layer(input_ids)
 
+        audio_chunk_mask = input_ids == self.audio_chunk_id
+        batch_size = input_ids.shape[0]
         final_inputs_embeds = []
         final_labels = []
-        final_attention_masks = []
 
-        for i in range(input_ids.shape[0]):
-            chunk_idx = (input_ids[i] == self.audio_chunk_id).nonzero()
-            if chunk_idx.shape[0] == 0:
-                raise ValueError("'<|audio_chunk|>' token not found in input_ids.")
-            chunk_idx = chunk_idx[0].item()
+        for i in range(batch_size):
+            chunk_pos = audio_chunk_mask[i].nonzero(as_tuple=False)
+            if len(chunk_pos) == 0:
+                raise ValueError(f"'<|audio_chunk|>' token not found in batch item {i}")
 
-            combined_embeds = torch.cat(
+            chunk_idx = chunk_pos[0, 0].item() if chunk_pos.device.type != "meta" else 0
+            inputs_embeds = torch.cat(
+                [text_embeds[i, :chunk_idx], audio_embeds[i], text_embeds[i, chunk_idx + 1 :]]
+            )
+
+            labels_with_audio = torch.cat(
                 [
-                    text_embeds[i, :chunk_idx],
-                    audio_embeds[i],
-                    text_embeds[i, chunk_idx + 1 :],
-                ],
-                dim=0,
-            )
-            final_inputs_embeds.append(combined_embeds)
-
-            audio_len = audio_embeds[i].shape[0]
-            label_before = labels[i, :chunk_idx]
-            label_after = labels[i, chunk_idx + 1 :]
-            audio_labels = torch.full((audio_len,), -100, dtype=labels.dtype, device=labels.device)
-
-            combined_labels = torch.cat([label_before, audio_labels, label_after], dim=0)
-            final_labels.append(combined_labels)
-
-            final_attention_masks.append(
-                torch.ones(
-                    combined_embeds.shape[0], dtype=torch.long, device=combined_embeds.device
-                )
+                    labels[i, :chunk_idx],
+                    labels.new_full((audio_embeds.shape[1],), -100),
+                    labels[i, chunk_idx + 1 :],
+                ]
             )
 
-        # Use imported pad_sequence
+            final_inputs_embeds.append(inputs_embeds)
+            final_labels.append(labels_with_audio)
+
         inputs_embeds = pad_sequence(final_inputs_embeds, batch_first=True, padding_value=0.0)
         labels = pad_sequence(final_labels, batch_first=True, padding_value=-100)
-        attention_mask = pad_sequence(final_attention_masks, batch_first=True, padding_value=0)
+
+        attention_mask = torch.zeros(
+            inputs_embeds.shape[:2], dtype=torch.long, device=inputs_embeds.device
+        )
+        for i, length in enumerate(len(emb) for emb in final_inputs_embeds):
+            attention_mask[i, :length] = 1
 
         return self.decoder.model(
             inputs_embeds=inputs_embeds,
@@ -311,21 +320,16 @@ class ASRModel(PreTrainedModel):
         batch_size = audio_embeds.shape[0]
         embed_layer = self.decoder.model.get_input_embeddings()
 
-        messages = [
-            {
-                "role": "user",
-                "content": "Please transcribe the following audio recording.\n<|audio_chunk|>",
-            }
-        ]
-        prompt_ids = self.decoder.tokenizer.apply_chat_template(
+        prompt = "Please transcribe the following audio recording.\n<|audio_chunk|>"
+        messages = [{"role": "user", "content": prompt}]
+        prompt_ids = self.tokenizer.apply_chat_template(
             messages, return_tensors="pt", add_generation_prompt=True
-        )
-        prompt_ids = prompt_ids.to(input_features.device)
+        ).to(input_features.device)
 
         chunk_idx = (prompt_ids[0] == self.audio_chunk_id).nonzero()
         if chunk_idx.shape[0] == 0:
             raise ValueError("'<|audio_chunk|>' token not found in instruction.")
-        chunk_idx = chunk_idx[0].item()
+        chunk_idx = chunk_idx[0].item() if chunk_idx.device.type != "meta" else 0
 
         prompt_embeds = embed_layer(prompt_ids)
         initial_embeds = torch.cat(
@@ -357,12 +361,10 @@ class ASRModel(PreTrainedModel):
         """Transcribe audio file using pipeline-style processing."""
         from transformers.pipelines.audio_utils import ffmpeg_read
 
-        # Use transformers' audio utilities for consistent loading
         with Path(audio_path).open("rb") as f:
             audio_bytes = f.read()
         audio_array = ffmpeg_read(audio_bytes, sampling_rate=16000)
 
-        # Process through feature extractor (handles mono conversion internally)
         if self.feature_extractor is None:
             raise ValueError("Feature extractor is not initialized")
         inputs = self.feature_extractor(
@@ -372,43 +374,29 @@ class ASRModel(PreTrainedModel):
             return_attention_mask=True,
         )
 
-        # Move to device and generate
         model_inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-        # Set generation defaults with user overrides
         generate_kwargs = {
             "max_new_tokens": kwargs.pop("max_new_tokens", 200),
             "do_sample": kwargs.pop("do_sample", False),
-            "pad_token_id": self.decoder.tokenizer.pad_token_id,
-            "eos_token_id": self.decoder.tokenizer.eos_token_id,
-            **kwargs,  # Allow any additional generation parameters
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            **kwargs,
         }
-
-        # Generate transcription
         generated_ids = self.generate(
             input_features=model_inputs["input_features"],
             attention_mask=model_inputs.get("attention_mask"),
             **generate_kwargs,
         )
 
-        return cast(str, self.decoder.tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+        return cast(str, self.tokenizer.decode(generated_ids[0], skip_special_tokens=True))
 
     def pipeline(self, task: str = "automatic-speech-recognition", **kwargs):
-        """Create a HuggingFace pipeline for this model.
-
-        Args:
-            task: The task type (default: "automatic-speech-recognition")
-            **kwargs: Additional arguments for the pipeline
-
-        Returns:
-            A HuggingFace pipeline instance
-        """
         from transformers import pipeline
 
-        return pipeline(  # type: ignore[call-overload]
+        return pipeline(
             task,
             model=self,
-            tokenizer=self.decoder.tokenizer,
+            tokenizer=self.tokenizer,
             feature_extractor=self.feature_extractor,
             **kwargs,
         )

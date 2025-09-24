@@ -17,7 +17,6 @@ from transformers import (
     Trainer,
     TrainerCallback,
     TrainingArguments,
-    WhisperFeatureExtractor,
 )
 
 from modeling import (
@@ -112,7 +111,7 @@ class DataCollator:
     def __init__(
         self,
         tokenizer: Any,
-        feature_extractor: WhisperFeatureExtractor,
+        feature_extractor,  # Will be typed as Any since it's from model
         config: DictConfig,
         model: ASRModel,
     ):
@@ -125,7 +124,6 @@ class DataCollator:
     def __call__(
         self, features: List[Dict[str, Any]]
     ) -> Dict[str, Union[torch.Tensor, Optional[torch.Tensor], np.ndarray]]:
-
         valid_features = []
         for f in features:
             try:
@@ -321,7 +319,6 @@ class ModelingFileCopyCallback(TrainerCallback):
         if modeling_src.exists():
             modeling_dst = Path(args.output_dir) / "modeling.py"
             shutil.copy(modeling_src, modeling_dst)
-            print(f"✅ Copied modeling.py to {modeling_dst} for Hub upload")
 
 
 class PredictionLoggingCallback(TrainerCallback):
@@ -387,9 +384,8 @@ def main(cfg: DictConfig) -> None:
     print(OmegaConf.to_yaml(cfg))
 
     model = create_asr_model(cfg)
-    tokenizer = model.decoder.tokenizer
-    feature_extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-small")
-    model.feature_extractor = feature_extractor
+    tokenizer = model.tokenizer
+    feature_extractor = model.feature_extractor
     train_dataset, val_dataset = load_datasets(cfg)
 
     if cfg.resume_from_checkpoint:
@@ -450,14 +446,11 @@ def main(cfg: DictConfig) -> None:
         model_output_dir = Path(training_args.output_dir)  # type: ignore[arg-type]
         target_readme = model_output_dir / "README.md"
         shutil.copy2(model_card_path, target_readme)
-        print(f"✅ Copied MODEL_CARD.md to {target_readme}")
 
     if training_args.push_to_hub:
-        print("\n🚀 Pushing final model to Hub...")
         kwargs = {}
         if training_args.report_to and "tensorboard" in training_args.report_to:
             kwargs["include_tensorboard_logs"] = True
-            print("📊 Including TensorBoard logs in push to Hub...")
         trainer.push_to_hub(**kwargs)
 
 

@@ -45,18 +45,39 @@ uv run src/train.py resume_from_checkpoint=outputs/2025-09-22/12-51-14/checkpoin
 
 ### Code Quality
 
-```bash
-# Run linter
-uv run ruff check src/
+**IMPORTANT: Always run these after making code changes:**
 
-# Format code
-uv run ruff format src/
+```bash
+# Format code with ruff (replaces black)
+uv run ruff format src/ demo/ tests/
+
+# Run linter and auto-fix issues
+uv run ruff check src/ demo/ tests/ --fix
 
 # Type checking
 uv run mypy src/
 
-# Run all checks (lint + format check)
-uv run ruff check src/ && uv run ruff format --check src/
+# Run all checks together (recommended after every change)
+uv run ruff format src/ demo/ tests/ && uv run ruff check src/ demo/ tests/ && uv run mypy src/
+```
+
+### Testing
+
+```bash
+# Run all tests (end-to-end test that trains a model and tests transcription)
+uv run pytest
+
+# Run specific test file
+uv run pytest tests/test_e2e.py
+
+# Run tests with specific pattern
+uv run pytest -k transcribe
+
+# Run tests with coverage
+uv run pytest --cov=src
+
+# IMPORTANT: Always run tests after making changes to modeling.py or train.py
+uv run pytest tests/test_e2e.py -v
 ```
 
 ### Demo Application
@@ -148,6 +169,12 @@ wandb login
   efficiency
 - **Cross-Entropy Loss**: Applied only to decoder outputs, ignoring audio tokens
   in loss calculation
+
+### Important Code Guidelines
+
+- **NEVER use `torch_dtype` parameter** - It's deprecated. Don't use `dtype` either for `AutoModelForCausalLM.from_pretrained()` - let it auto-detect
+- **Always resize embeddings** when loading models to match tokenizer vocabulary size
+- **Run tests after changes** to modeling.py or train.py: `uv run pytest test_e2e.py -v`
 
 ## Configuration Structure
 

@@ -37,16 +37,47 @@ class ASRDemo:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
 
-        # Handle outputs directory
+        # Handle outputs directory - look relative to this script's location
         self.outputs_dir = Path(outputs_dir)
         if not self.outputs_dir.is_absolute():
-            self.outputs_dir = Path.cwd() / outputs_dir
+            # First, try relative to the script location
+            script_dir = Path(__file__).parent
+            potential_path = script_dir / outputs_dir
+            if potential_path.exists():
+                self.outputs_dir = potential_path
+            else:
+                # Fall back to current working directory
+                self.outputs_dir = Path.cwd() / outputs_dir
         logger.info(f"Using outputs directory: {self.outputs_dir.absolute()}")
 
-        # Load model using AutoModel with trust_remote_code
-        # The model's modeling.py will be automatically downloaded and executed
+        # Load model - handle both local and HuggingFace Hub models
         logger.info(f"Loading model from: {model_path}")
-        self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+
+        # Check if this is a local path with our custom model
+        import importlib.util
+        import sys
+
+        model_path_obj = Path(model_path)
+        if model_path_obj.exists() and model_path_obj.is_dir():
+            # Local model - load directly using the modeling.py file
+            modeling_file = model_path_obj / "modeling.py"
+            if modeling_file.exists():
+                # Load the modeling module dynamically
+                spec = importlib.util.spec_from_file_location("modeling", modeling_file)
+                modeling = importlib.util.module_from_spec(spec)
+                sys.modules["modeling"] = modeling
+                spec.loader.exec_module(modeling)
+
+                # Now load using the ASRModel class directly
+                from modeling import ASRModel
+
+                self.model = ASRModel.from_pretrained(model_path)
+            else:
+                # Fallback to AutoModel for standard models
+                self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+        else:
+            # HuggingFace Hub model
+            self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
 
         # Move to device and set to eval mode
         self.model = self.model.to(self.device)
@@ -139,17 +170,8 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
     Returns:
         Gradio Blocks interface
     """
-    try:
-        # Initialize the demo
-        asr_demo = ASRDemo(model_path, outputs_dir)
-    except Exception as e:
-        logger.error(f"Failed to load model: {e}")
-        # Create a fallback interface with error message
-        with gr.Blocks(title="ASR Demo - Error") as demo:
-            gr.Markdown("# ❌ Error Loading Model")
-            gr.Markdown(f"Failed to load model: {str(e)}")
-            gr.Markdown("Please check that the model exists and try again.")
-        return demo
+    # Initialize the demo
+    asr_demo = ASRDemo(model_path, outputs_dir)
 
     # Create the interface
     with gr.Blocks(title="ASR Demo - Whisper + SmolLM2") as demo:
