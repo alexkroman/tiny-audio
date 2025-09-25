@@ -53,6 +53,10 @@ print(transcription)
 
 - **Encoder**: Frozen Whisper-small (39M params) 
 - **Decoder**: SmolLM2-360M-Instruct with LoRA adapters
+- **Audio Projector**: Custom architecture with:
+  - 2x temporal downsampling (AvgPool1d)
+  - RMSNorm + Linear projection
+  - SwiGLU block with residual connection (8/3 expansion)
 - **LoRA Config**: rank=16, alpha=32, targets=[q_proj, v_proj, k_proj, o_proj]
 - **Trainable Parameters**: 4.94M (only 1.2% of total)
 - **Total**: ~400M parameters

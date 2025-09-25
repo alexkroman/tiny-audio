@@ -164,9 +164,11 @@ wandb login
 
    - `WhisperEncoder`: Frozen Whisper-small encoder for audio feature extraction
      (39M params)
-   - `AudioProjector` (`src/modeling.py:60`): Projects audio features to text
-     embedding space using RMSNorm and GELU activation with scaled
-     initialization
+   - `AudioProjector`: Projects audio features to text embedding space with:
+     • 2x downsampling via AvgPool1d to reduce sequence length
+     • RMSNorm for input normalization
+     • Linear projection to text dimension
+     • SwiGLU block with residual connection and 8/3 expansion factor
    - `LLMDecoder`: SmolLM2 decoder (360M or 1.7B params) with LoRA adapters for
      text generation
 
@@ -196,10 +198,11 @@ wandb login
   audio representations
 - **LoRA Fine-tuning**: Only ~2% of parameters are trained via LoRA adapters
   (rank 32-64)
-- **Audio Projection**: Custom projection layer with:
-  - RMSNorm for stability
-  - GELU activation for non-linearity
-  - Scaled initialization (0.01x) to prevent gradient explosion
+- **Audio Projection**: Modern projection architecture with:
+  - 2x temporal downsampling to reduce computational load
+  - RMSNorm for input stability
+  - SwiGLU (Swish-Gated Linear Unit) with 8/3 expansion factor
+  - Residual connection for gradient flow
 - **Streaming Datasets**: Uses HuggingFace streaming mode to handle TB-scale
   datasets
 - **Mixed Precision**: BF16 training via accelerate for 2x speedup and memory
@@ -213,7 +216,7 @@ wandb login
 - **Always resize embeddings** when loading models to match tokenizer vocabulary size (`model.resize_token_embeddings(len(tokenizer))`)
 - **Run tests after changes** to modeling.py or train.py: `uv run pytest tests/test_e2e.py -v`
 - **Frozen Whisper encoder** - The Whisper encoder MUST remain frozen (`requires_grad_(False)`) to preserve audio representations
-- **Audio projection initialization** - The projector uses scaled initialization (0.01x) to prevent gradient explosion
+- **Audio projection architecture** - The projector uses 2x downsampling, SwiGLU with residual connections for improved performance
 - **ASR Pipeline Support** - The model's `forward` method detects inference mode (when only `input_features` is provided) and redirects to the `generate` method for compatibility with HuggingFace's ASR pipeline
 - **Fixed test output directory** - E2E tests now use a fixed output path `outputs/test_e2e_model` specified via `+output_dir=` override
 - **Model Loading** - When loading pretrained models, use `low_cpu_mem_usage=False` to ensure proper initialization of audio special tokens
@@ -266,14 +269,14 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 
 1. **Audio Input**: Raw audio (16kHz) → Whisper feature extractor → Log-mel spectrogram
 2. **Encoder**: Spectrogram → Whisper encoder → Audio embeddings (1500 dim)
-3. **Projection**: Audio embeddings → RMSNorm → Linear → GELU → Linear → Text space (2048/4096 dim)
+3. **Projection**: Audio embeddings → RMSNorm → AvgPool1d (2x downsample) → Linear → Residual SwiGLU → Text space (2048/4096 dim)
 4. **Decoder**: Projected features + text prompt → SmolLM2 + LoRA → Generated transcription
 5. **Loss Calculation**: Cross-entropy on text tokens only (audio tokens masked with -100)
 
 ## Common Pitfalls to Avoid
 
 - **Model dtype issues**: Let transformers auto-detect dtype, don't specify it manually
-- **Gradient explosion**: Always use scaled initialization (0.01x) for the audio projector
+- **Gradient explosion**: The SwiGLU architecture with residual connections provides stable gradient flow
 - **Memory issues on Mac**: Use environment variables `PYTORCH_ENABLE_MPS_FALLBACK=1` and `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0`
 - **Dataset access**: Ensure `HF_TOKEN` is set for gated datasets (GigaSpeech, Common Voice)
 - **Checkpoint compatibility**: When resuming training, ensure optimizer states are compatible

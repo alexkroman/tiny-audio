@@ -145,8 +145,9 @@ The model consists of three main components:
 
 1. **Whisper Encoder**: A frozen `whisper-small` model that extracts audio
    features. (39M parameters, not trained)
-1. **Audio Projector**: A lightweight projection layer that maps audio features
-   to the text embedding space.
+1. **Audio Projector**: A modern projection architecture that maps audio features
+   to the text embedding space with 2x downsampling, normalization, and a
+   SwiGLU block with residual connections.
 1. **SmolLM2 Decoder**: An efficient language model from Hugging Face with LoRA
    adapters for parameter-efficient fine-tuning. (360M or 1.7B parameters, ~2%
    trained with LoRA)

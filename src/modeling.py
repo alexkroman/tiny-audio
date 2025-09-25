@@ -99,13 +99,26 @@ class ASRModel(PreTrainedModel):
 
         text_dim = self.decoder.config.hidden_size
         audio_dim = self.encoder.config.d_model
-        self.audio_projector = nn.Sequential(
-            RMSNorm(audio_dim, eps=self.decoder.config.rms_norm_eps or 1e-6),
-            nn.Linear(audio_dim, text_dim, bias=True),
-            nn.GELU(),
-            nn.Linear(text_dim, text_dim, bias=True),
-        )
-        self.audio_scale = nn.Parameter(torch.tensor(0.02))
+
+        # Downsampling layer to reduce sequence length by 2x
+        self.downsample = nn.AvgPool1d(kernel_size=2, stride=2)
+
+        # SwiGLU projector with residual connection
+        class SwiGLU(nn.Module):
+            def __init__(self, hidden_dim, expansion_factor=8 / 3):
+                super().__init__()
+                intermediate_dim = int(hidden_dim * expansion_factor)
+                self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+                self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+                self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
+
+            def forward(self, x):
+                return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+
+        # Audio projector with downsampling, normalization, and residual SwiGLU
+        self.audio_norm = RMSNorm(audio_dim, eps=self.decoder.config.rms_norm_eps or 1e-6)
+        self.audio_to_text = nn.Linear(audio_dim, text_dim, bias=False)
+        self.swiglu = SwiGLU(text_dim)
 
         # Initialize tokenizer for special tokens
         tokenizer = AutoTokenizer.from_pretrained(config.decoder_model_name)
@@ -153,8 +166,22 @@ class ASRModel(PreTrainedModel):
                 input_features, attention_mask=attention_mask
             ).last_hidden_state
 
-        projected_features = self.audio_projector(audio_features) * self.audio_scale
-        return projected_features.to(self.decoder.dtype)
+        # Apply normalization
+        audio_features = self.audio_norm(audio_features)
+
+        # Downsample: (batch, seq_len, dim) -> (batch, seq_len//2, dim)
+        audio_features = audio_features.transpose(1, 2)  # (batch, dim, seq_len)
+        audio_features = self.downsample(audio_features)
+        audio_features = audio_features.transpose(1, 2)  # (batch, seq_len//2, dim)
+
+        # Project to text dimension
+        projected = self.audio_to_text(audio_features)
+
+        # Apply SwiGLU with residual connection
+        projected = projected + self.swiglu(projected)
+
+        # Convert to decoder dtype
+        return projected.to(self.decoder.dtype)
 
     def forward(
         self,
@@ -184,7 +211,7 @@ class ASRModel(PreTrainedModel):
         audio_embeds = self._encode_audio(input_features, audio_attention_mask)
 
         batch_size, max_text_len, embed_dim = text_embeds.shape
-        _, audio_len, _ = audio_embeds.shape
+        _, audio_len, _ = audio_embeds.shape  # audio_len is now half due to downsampling
         new_len = max_text_len - 1 + audio_len
 
         inputs_embeds = torch.zeros(
