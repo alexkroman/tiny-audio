@@ -21,10 +21,18 @@ A lightweight ASR model combining Whisper-small encoder with SmolLM2 decoder, tr
 ## Quick Start
 
 ```python
-from transformers import AutoModel
+from transformers import AutoModelForSpeechSeq2Seq, pipeline
 
-model = AutoModel.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
-transcription = model.transcribe("audio.wav")
+# Load model
+model = AutoModelForSpeechSeq2Seq.from_pretrained(
+    "mazesmazes/tiny-audio",
+    trust_remote_code=True
+)
+
+# Create pipeline and transcribe
+asr = pipeline("automatic-speech-recognition", model=model)
+result = asr("audio.wav")
+print(result["text"])
 ```
 
 ## Architecture

@@ -37,8 +37,7 @@ def create_asr_model(config: DictConfig) -> ASRModel:
         },
     )
 
-    model = ASRModel(asr_config)
-    return model
+    return ASRModel(asr_config)
 
 
 def evaluate_samples(model, tokenizer, feature_extractor, eval_samples, device=None):

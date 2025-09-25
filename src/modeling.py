@@ -66,16 +66,8 @@ class ASRModel(PreTrainedModel):
         self.decoder = AutoModelForCausalLM.from_pretrained(
             config.decoder_model_name,
             use_cache=True,  # Enable cache for generation
+            low_cpu_mem_usage=False,
         )
-        lora_config = LoraConfig(
-            r=config.lora_r,
-            lora_alpha=config.lora_alpha,
-            target_modules=config.lora_target_modules,
-            lora_dropout=config.lora_dropout,
-            bias="none",
-            task_type=TaskType.CAUSAL_LM,
-        )
-        self.decoder = get_peft_model(self.decoder, lora_config)
 
         text_dim = self.decoder.config.hidden_size
         audio_dim = self.encoder.config.d_model
@@ -92,6 +84,17 @@ class ASRModel(PreTrainedModel):
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
         self.add_audio_special_tokens()
+
+        lora_config = LoraConfig(
+            r=config.lora_r,
+            lora_alpha=config.lora_alpha,
+            target_modules=config.lora_target_modules,
+            lora_dropout=config.lora_dropout,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+        )
+        
+        self.decoder = get_peft_model(self.decoder, lora_config)
 
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
         self.generation_config = self.decoder.generation_config
