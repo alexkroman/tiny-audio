@@ -1,16 +1,18 @@
-______________________________________________________________________
-
-license: mit datasets:
-
+---
+license: mit
+datasets:
 - mozilla-foundation/common_voice_17_0
 - speechcolab/gigaspeech
-- openslr/librispeech_asr language:
-- en metrics:
-- wer base_model:
+- openslr/librispeech_asr
+language:
+- en
+metrics:
+- wer
+base_model:
 - openai/whisper-small
-- HuggingFaceTB/SmolLM2-360M-Instruct pipeline_tag: automatic-speech-recognition
-
-______________________________________________________________________
+- HuggingFaceTB/SmolLM2-360M-Instruct
+pipeline_tag: automatic-speech-recognition
+---
 
 # Tiny Audio - Whisper-SmolLM2 ASR Model
 
