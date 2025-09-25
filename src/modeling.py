@@ -1,5 +1,6 @@
 """ASR Model for Whisper-LLM integration (Refactored for Pipeline Compatibility)"""
 
+from pathlib import Path
 from typing import Optional, Union
 
 import torch
@@ -82,7 +83,7 @@ class ASRModel(PreTrainedModel):
         self.tokenizer = AutoTokenizer.from_pretrained(config.decoder_model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        
+
         self.add_audio_special_tokens()
 
         lora_config = LoraConfig(
@@ -93,7 +94,7 @@ class ASRModel(PreTrainedModel):
             bias="none",
             task_type=TaskType.CAUSAL_LM,
         )
-        
+
         self.decoder = get_peft_model(self.decoder, lora_config)
 
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
@@ -105,7 +106,7 @@ class ASRModel(PreTrainedModel):
         self.tokenizer.add_special_tokens({"additional_special_tokens": audio_tokens})
 
         if hasattr(self.decoder, "resize_token_embeddings"):
-            self.decoder.resize_token_embeddings(len(self.tokenizer))
+            self.decoder.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
 
         self.audio_chunk_id = self.tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
 
@@ -234,6 +235,46 @@ class ASRModel(PreTrainedModel):
             inputs_embeds=initial_embeds,
             **generate_kwargs,
         )
+
+    def save_pretrained(
+        self,
+        save_directory: Union[str, Path],
+        is_main_process: bool = True,
+        state_dict: Optional[dict] = None,
+        save_function: Optional[callable] = torch.save,
+        push_to_hub: bool = False,
+        max_shard_size: Union[int, str] = "10GB",
+        safe_serialization: bool = True,
+        variant: Optional[str] = None,
+        token: Optional[Union[str, bool]] = None,
+        save_peft_format: bool = True,
+        **kwargs,
+    ):
+        """
+        Save the model and its components (including feature extractor).
+        """
+        # First, save the model using parent class method
+        super().save_pretrained(
+            save_directory,
+            is_main_process=is_main_process,
+            state_dict=state_dict,
+            save_function=save_function,
+            push_to_hub=push_to_hub,
+            max_shard_size=max_shard_size,
+            safe_serialization=safe_serialization,
+            variant=variant,
+            token=token,
+            save_peft_format=save_peft_format,
+            **kwargs,
+        )
+
+        # Save the feature extractor so pipeline can auto-detect it
+        if is_main_process and hasattr(self, "feature_extractor"):
+            self.feature_extractor.save_pretrained(save_directory)
+
+        # Save the tokenizer
+        if is_main_process and hasattr(self, "tokenizer"):
+            self.tokenizer.save_pretrained(save_directory)
 
 
 AutoConfig.register("asr_model", ASRModelConfig)

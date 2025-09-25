@@ -17,7 +17,18 @@ import gradio as gr
 import numpy as np
 import soundfile as sf
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, pipeline
+from transformers import AutoFeatureExtractor, AutoModelForSpeechSeq2Seq, AutoTokenizer, pipeline
+
+# Try to import spaces for GPU allocation on Hugging Face Spaces
+try:
+    import spaces
+except ImportError:
+    # If not running on Hugging Face Spaces, create a dummy decorator
+    class spaces:  # noqa: N801
+        @staticmethod
+        def GPU(func):  # noqa: N802
+            return func
+
 
 # Set up logging
 logging.basicConfig(
@@ -40,15 +51,29 @@ class ASRDemo:
             else:
                 self.outputs_dir = Path.cwd() / outputs_dir
 
+        # Load model and its components
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_path, trust_remote_code=True)
         self.model = self.model.to(self.device)
         self.model.eval()
+
+        # Load tokenizer from the decoder model specified in the config
+        tokenizer = AutoTokenizer.from_pretrained(self.model.config.decoder_model_name)
+
+        # Load feature extractor from the encoder model specified in the config
+        feature_extractor = AutoFeatureExtractor.from_pretrained(
+            self.model.config.encoder_model_name
+        )
+
         self.asr_pipeline = pipeline(
             "automatic-speech-recognition",
             model=self.model,
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
             device=self.device,
+            trust_remote_code=True,
         )
 
+    @spaces.GPU
     def transcribe(self, audio_path: str) -> str:
         result = self.asr_pipeline(audio_path)
         return result["text"]

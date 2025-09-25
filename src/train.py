@@ -27,6 +27,7 @@ from modeling import (
 def create_asr_model(config: DictConfig) -> ASRModel:
     asr_config = ASRModelConfig(
         decoder_model_name=config.model.decoder_model_name,
+        encoder_model_name="openai/whisper-small",  # Use the default encoder
         lora_r=config.model.lora_r,
         lora_alpha=config.model.lora_alpha,
         lora_target_modules=list(config.model.lora_target_modules),
