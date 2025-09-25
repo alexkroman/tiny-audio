@@ -198,7 +198,8 @@ class ASRModel(PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         **generate_kwargs,
     ) -> torch.LongTensor:
-        prompt_str = "<|user|>\nPlease transcribe the following audio recording.<|end|>\n<|assistant|>\n<|audio_chunk|>"
+        # SmolLM2 uses im_start/im_end format
+        prompt_str = "<|im_start|>user\nPlease transcribe the following audio recording.<|im_end|>\n<|im_start|>assistant\n<|audio_chunk|>"
 
         audio_embeds = self._encode_audio(input_features, attention_mask=attention_mask)
         embed_layer = self.decoder.get_input_embeddings()
@@ -231,6 +232,8 @@ class ASRModel(PreTrainedModel):
             generate_kwargs["eos_token_id"] = self.tokenizer.eos_token_id
         if "max_new_tokens" not in generate_kwargs and "max_length" not in generate_kwargs:
             generate_kwargs["max_new_tokens"] = 448  # Default max tokens to generate
+        if "min_new_tokens" not in generate_kwargs:
+            generate_kwargs["min_new_tokens"] = 1  # Ensure at least one token is generated
 
         # Create attention mask for the input embeddings
         attention_mask = torch.ones(
