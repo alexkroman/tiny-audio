@@ -52,7 +52,7 @@ hub_private_repo: false
 dataloader_num_workers: 16  # Optimized for 9 vCPUs (leave some for main process)
 dataloader_persistent_workers: true
 dataloader_prefetch_factor: 8
-gradient_checkpointing: true
+gradient_checkpointing: false
 fp16: false
 bf16: true
 dataloader_pin_memory: true

@@ -422,6 +422,7 @@ def main(cfg: DictConfig) -> None:
             config=cfg,
             model=model,
         ),
+        processing_class=tokenizer,  # Set processing_class to avoid warning
         callbacks=callbacks,
     )
 

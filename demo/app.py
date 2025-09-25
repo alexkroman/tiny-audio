@@ -8,6 +8,11 @@ Gradio app for ASR model with support for:
 - Processing audio files from outputs directory
 """
 
+import os
+
+# Set matplotlib config dir to avoid warning in Hugging Face Spaces
+os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
+
 import logging
 import tempfile
 from pathlib import Path
@@ -17,7 +22,7 @@ import gradio as gr
 import numpy as np
 import soundfile as sf
 import torch
-from transformers import AutoFeatureExtractor, AutoModelForSpeechSeq2Seq, AutoTokenizer, pipeline
+from transformers import AutoModelForSpeechSeq2Seq
 
 # Try to import spaces for GPU allocation on Hugging Face Spaces
 try:
@@ -37,47 +42,32 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Global variable to store the pipeline
-_asr_pipeline = None
+# Global variable to store model
+_model = None
 
 
-def get_pipeline(model_path: str = "mazesmazes/tiny-audio"):
-    """Initialize and cache the ASR pipeline."""
-    global _asr_pipeline
-    if _asr_pipeline is None:
+def get_model(model_path: str = "mazesmazes/tiny-audio"):
+    """Initialize and cache the model."""
+    global _model
+    if _model is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {device}")
 
-        # Load model and its components
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(model_path, trust_remote_code=True)
-        model = model.to(device)
-        model.eval()
+        # Load model
+        _model = AutoModelForSpeechSeq2Seq.from_pretrained(model_path, trust_remote_code=True)
+        _model = _model.to(device)
+        _model.eval()
 
-        # Load tokenizer from the decoder model specified in the config
-        tokenizer = AutoTokenizer.from_pretrained(model.config.decoder_model_name)
-
-        # Load feature extractor from the encoder model specified in the config
-        feature_extractor = AutoFeatureExtractor.from_pretrained(model.config.encoder_model_name)
-
-        _asr_pipeline = pipeline(
-            "automatic-speech-recognition",
-            model=model,
-            tokenizer=tokenizer,
-            feature_extractor=feature_extractor,
-            device=device,
-            trust_remote_code=True,
-            # Explicitly tell pipeline to use generate method for seq2seq models
-            generate_kwargs={"max_new_tokens": 448},
-        )
-    return _asr_pipeline
+    return _model
 
 
 @spaces.GPU
 def transcribe_audio(audio_path: str, model_path: str = "mazesmazes/tiny-audio") -> str:
-    """Transcribe audio using the ASR pipeline."""
-    pipeline = get_pipeline(model_path)
-    result = pipeline(audio_path)
-    return result["text"]
+    """Transcribe audio using the model's built-in transcribe method."""
+    model = get_model(model_path)
+
+    # Simply use the model's transcribe method
+    return model.transcribe(audio_path)
 
 
 class ASRDemo:
@@ -92,8 +82,8 @@ class ASRDemo:
             else:
                 self.outputs_dir = Path.cwd() / outputs_dir
 
-        # Initialize the pipeline on startup
-        get_pipeline(model_path)
+        # Initialize model on startup
+        get_model(model_path)
 
     def transcribe(self, audio_path: str) -> str:
         return transcribe_audio(audio_path, self.model_path)

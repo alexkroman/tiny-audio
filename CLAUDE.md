@@ -96,6 +96,17 @@ uv run scripts/deploy_to_hf_space.py --force
 uv run scripts/deploy_to_hf_space.py --space-url https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE --force
 ```
 
+### Model Publishing
+
+```bash
+# Push updated modeling.py and MODEL_CARD.md to HuggingFace Hub
+# Requires HF_TOKEN to be set
+uv run scripts/push_to_hub.py
+
+# Push to a custom repository
+uv run scripts/push_to_hub.py --repo-id YOUR_USERNAME/YOUR_MODEL --branch main
+```
+
 ### Remote Training (RunPod)
 
 ```bash
@@ -134,7 +145,8 @@ wandb login
 │   ├── deploy_runpod.py
 │   ├── start_remote_training.py
 │   ├── attach_remote_session.py
-│   └── deploy_to_hf_space.py
+│   ├── deploy_to_hf_space.py
+│   └── push_to_hub.py  # Push modeling.py updates to HuggingFace
 ├── src/                # Core source code
 │   ├── modeling.py     # ASR model implementation (~300 lines)
 │   └── train.py        # Training pipeline with Hydra integration

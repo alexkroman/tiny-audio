@@ -1,8 +1,9 @@
 """ASR Model"""
 
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 from peft import LoraConfig, TaskType, get_peft_model
@@ -16,7 +17,6 @@ from transformers import (
     WhisperFeatureExtractor,
     WhisperModel,
 )
-from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 
 
@@ -52,10 +52,35 @@ class ASRModel(PreTrainedModel):
     main_input_name = "input_features"
     _supports_generate = True  # Tell transformers this model supports generation
 
+    def can_generate(self) -> bool:
+        """Override to tell transformers this model can generate."""
+        return True
+
+    @property
+    def tokenizer(self) -> AutoTokenizer:
+        """Get the tokenizer, loading it if necessary."""
+        if not hasattr(self, '_tokenizer') or self._tokenizer is None:
+            from transformers import AutoTokenizer
+
+            self._tokenizer = AutoTokenizer.from_pretrained(self.config.decoder_model_name)
+        return self._tokenizer
+
+    @property
+    def feature_extractor(self) -> WhisperFeatureExtractor:
+        """Get the feature extractor, loading it if necessary."""
+        if not hasattr(self, '_feature_extractor') or self._feature_extractor is None:
+            from transformers import AutoFeatureExtractor
+
+            self._feature_extractor = AutoFeatureExtractor.from_pretrained(
+                self.config.encoder_model_name
+            )
+        return self._feature_extractor
+
     def __init__(self, config: Union[ASRModelConfig, dict]) -> None:
         if isinstance(config, dict):
             config = ASRModelConfig(**config)
         super().__init__(config)
+
 
         self.encoder = WhisperModel.from_pretrained(config.encoder_model_name)
         self.encoder.requires_grad_(False)  # Freeze the encoder
@@ -77,9 +102,11 @@ class ASRModel(PreTrainedModel):
         )
         self.audio_scale = nn.Parameter(torch.tensor(0.02))
 
-        self.tokenizer = AutoTokenizer.from_pretrained(config.decoder_model_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        # Initialize tokenizer for special tokens
+        tokenizer = AutoTokenizer.from_pretrained(config.decoder_model_name)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        self._tokenizer = tokenizer  # Store in cache
 
         self.add_audio_special_tokens()
 
@@ -94,8 +121,12 @@ class ASRModel(PreTrainedModel):
 
         self.decoder = get_peft_model(self.decoder, lora_config)
 
-        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
+        # Initialize feature extractor  
+        self._feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
         self.generation_config = self.decoder.generation_config
+
+        # Set processing_class to avoid warning when saving with Trainer
+        self.processing_class = "WhisperProcessor"
 
     def add_audio_special_tokens(self):
         """Adds special tokens required for audio processing to the tokenizer."""
@@ -132,18 +163,6 @@ class ASRModel(PreTrainedModel):
         """
         Forward pass for training and evaluation. For inference, use generate().
         """
-        if labels is None:
-            if input_features is None:
-                raise ValueError("`input_features` must be provided for generation.")
-            # For ASR pipeline compatibility, we need to return a proper output
-            # The pipeline will detect this is a seq2seq model and use generate() instead
-            # But we still need to return something with the expected structure
-            # Create dummy logits - the pipeline won't use these for seq2seq models
-            batch_size = input_features.shape[0]
-            # Return a minimal tensor that won't cause errors
-            vocab_size = self.decoder.config.vocab_size
-            dummy_logits = torch.zeros((batch_size, 1, vocab_size), device=input_features.device)
-            return CausalLMOutputWithPast(logits=dummy_logits)
 
         if not (input_ids is not None and input_features is not None):
             raise ValueError("Both `input_ids` and `input_features` are required for training.")
@@ -192,14 +211,72 @@ class ASRModel(PreTrainedModel):
         )
 
     @torch.no_grad()
+    def transcribe(
+        self,
+        audio: Union[np.ndarray, torch.Tensor, str],
+        sampling_rate: int = 16000,
+        **generate_kwargs,
+    ) -> str:
+        """
+        Transcribe audio to text. Convenience method that handles audio loading and processing.
+
+        Args:
+            audio: Can be:
+                - numpy array of audio samples
+                - torch tensor of audio samples
+                - string path to audio file
+            sampling_rate: Audio sampling rate (default: 16000)
+            **generate_kwargs: Additional arguments for generate() like max_new_tokens, temperature, etc.
+
+        Returns:
+            Transcribed text as a string
+        """
+        # Handle different input types
+        if isinstance(audio, str):
+            # Load audio file
+            import librosa
+
+            audio, _ = librosa.load(audio, sr=sampling_rate)
+        elif isinstance(audio, torch.Tensor):
+            audio = audio.cpu().numpy()
+
+        # Extract features using the property
+        inputs = self.feature_extractor(audio, sampling_rate=sampling_rate, return_tensors="pt")
+        input_features = inputs.input_features.to(self.device)
+
+        # Set default generation parameters
+        if "max_new_tokens" not in generate_kwargs:
+            generate_kwargs["max_new_tokens"] = 448
+        if "min_new_tokens" not in generate_kwargs:
+            generate_kwargs["min_new_tokens"] = 10
+        if "do_sample" not in generate_kwargs:
+            generate_kwargs["do_sample"] = False
+        if "num_beams" not in generate_kwargs:
+            generate_kwargs["num_beams"] = 1
+
+        # Generate
+        generated_ids = self.generate(input_features, **generate_kwargs)
+
+        # Decode using the property
+        return self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+    @torch.no_grad()
     def generate(
         self,
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         **generate_kwargs,
     ) -> torch.LongTensor:
-        # SmolLM2 uses im_start/im_end format
-        prompt_str = "<|im_start|>user\nPlease transcribe the following audio recording.<|im_end|>\n<|im_start|>assistant\n<|audio_chunk|>"
+        # Use the tokenizer's chat template for proper formatting
+        messages = [
+            {
+                "role": "user",
+                "content": "Please transcribe the following audio recording. <|audio_chunk|>",
+            }
+        ]
+        prompt_str = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
 
         audio_embeds = self._encode_audio(input_features, attention_mask=attention_mask)
         embed_layer = self.decoder.get_input_embeddings()
@@ -254,7 +331,7 @@ class ASRModel(PreTrainedModel):
         save_directory: Union[str, Path],
         is_main_process: bool = True,
         state_dict: Optional[dict] = None,
-        save_function: Optional[callable] = torch.save,
+        save_function: Optional[Callable] = torch.save,
         push_to_hub: bool = False,
         max_shard_size: Union[int, str] = "10GB",
         safe_serialization: bool = True,
