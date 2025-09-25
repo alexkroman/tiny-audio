@@ -12,6 +12,14 @@ base_model:
 - openai/whisper-small
 - HuggingFaceTB/SmolLM2-360M-Instruct
 pipeline_tag: automatic-speech-recognition
+tags:
+- whisper
+- asr
+- speech-recognition
+- lora
+model-index:
+- name: tiny-audio
+  results: []
 ---
 
 # Tiny Audio - Whisper-SmolLM2 ASR Model
@@ -38,14 +46,24 @@ print(result["text"])
 ## Architecture
 
 - **Encoder**: Frozen Whisper-small (39M params) 
-- **Decoder**: SmolLM2-360M with LoRA adapters (7.3M trainable params)
-- **Total**: ~400M parameters, only 2% trained
+- **Decoder**: SmolLM2-360M-Instruct with LoRA adapters
+- **LoRA Config**: rank=16, alpha=32, targets=[q_proj, v_proj, k_proj, o_proj]
+- **Trainable Parameters**: 4.94M (only 1.2% of total)
+- **Total**: ~400M parameters
 
 ## Training
 
-- **Data**: LibriSpeech, GigaSpeech, Common Voice (English)
-- **Method**: LoRA rank 32-64, BF16 mixed precision
-- **Performance**: ~15-20% WER on LibriSpeech test-clean
+- **Data**: LibriSpeech, GigaSpeech, Common Voice (streaming mode)
+- **Optimizer**: AdamW (fused), lr=2e-4, cosine schedule with restarts
+- **Batch Size**: 4 per device, gradient accumulation=4 (effective batch size: 16)
+- **Training**: 50,000 steps, BF16 mixed precision
+- **Hardware**: NVIDIA A40 GPU (1x), 128 vCPUs, 503 GB RAM
+
+## Performance
+
+- **Evaluation**: Performance measured across validation splits of all training datasets
+- **Metric**: Word Error Rate (WER)
+- **Note**: For specific performance metrics, please see the training logs in the repository
 
 ## Links
 
