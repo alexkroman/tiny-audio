@@ -43,7 +43,9 @@ class ASRDemo:
         self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
         self.model = self.model.to(self.device)
         self.model.eval()
-        self.asr_pipeline = pipeline("automatic-speech-recognition", model=self.model, device=self.device)
+        self.asr_pipeline = pipeline(
+            "automatic-speech-recognition", model=self.model, device=self.device
+        )
 
     def transcribe(self, audio_path: str) -> str:
         result = self.asr_pipeline(audio_path)

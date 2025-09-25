@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+
 @pytest.fixture(scope="module")
 def trained_model_path():
     output_dir = "outputs/test_e2e_model"
@@ -18,13 +19,13 @@ def trained_model_path():
         "run",
         "src/train.py",
         "+experiments=mac_minimal",
-        "training.max_steps=1",  
+        "training.max_steps=1",
         "training.save_steps=1",
-        "training.eval_steps=1",  
+        "training.eval_steps=1",
         "training.logging_steps=1",
-        "data.max_train_samples=1",  
-        "training.gradient_checkpointing=false",  
-        f"+output_dir={output_dir}",  
+        "data.max_train_samples=1",
+        "training.gradient_checkpointing=false",
+        f"+output_dir={output_dir}",
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)

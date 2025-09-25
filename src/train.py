@@ -305,13 +305,28 @@ def load_datasets(config: DictConfig) -> Tuple[Dataset, Dataset]:
 
 
 class ModelingFileCopyCallback(TrainerCallback):
-    """Copy modeling.py to the output directory so it gets pushed to Hub."""
+    """Copy modeling.py, create __init__.py, and copy model card as README to the output directory so they get pushed to Hub."""
 
     def on_save(self, args, state, control, **kwargs):
+        output_dir = Path(args.output_dir)
+
+        # Copy modeling.py
         modeling_src = Path(__file__).parent / "modeling.py"
         if modeling_src.exists():
-            modeling_dst = Path(args.output_dir) / "modeling.py"
+            modeling_dst = output_dir / "modeling.py"
             shutil.copy(modeling_src, modeling_dst)
+
+        # Create __init__.py in the output directory
+        init_dst = output_dir / "__init__.py"
+        init_dst.write_text(
+            "# Import the model and config classes to ensure proper registration\nfrom .modeling import ASRModel, ASRModelConfig\n"
+        )
+
+        # Copy model card as README.md
+        model_card_src = Path(__file__).parent.parent / "MODEL_CARD.md"
+        if model_card_src.exists():
+            readme_dst = output_dir / "README.md"
+            shutil.copy(model_card_src, readme_dst)
 
 
 class PredictionLoggingCallback(TrainerCallback):
@@ -433,21 +448,6 @@ def main(cfg: DictConfig) -> None:
 
     trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
     trainer.save_model()
-
-    original_cwd = hydra.utils.get_original_cwd()
-    model_card_path = Path(original_cwd) / "MODEL_CARD.md"
-    if model_card_path.exists():
-        model_output_dir = Path(training_args.output_dir)
-        target_readme = model_output_dir / "README.md"
-        shutil.copy2(model_card_path, target_readme)
-        print(f"✅ Copied MODEL_CARD.md to {target_readme}")
-
-    if training_args.push_to_hub:
-        kwargs = {}
-        if training_args.report_to and "tensorboard" in training_args.report_to:
-            kwargs["include_tensorboard_logs"] = True
-        trainer.push_to_hub(**kwargs)
-
 
 if __name__ == "__main__":
     main()
