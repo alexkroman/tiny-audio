@@ -10,7 +10,7 @@ gradient_accumulation_steps: 4
 eval_accumulation_steps: 1
 
 # Learning rate
-learning_rate: 5e-5
+learning_rate: 2e-4
 lr_scheduler_type: cosine_with_restarts
 warmup_ratio: 0.03  
 weight_decay: 0.01
