@@ -1,4 +1,4 @@
-# Tiny Audio - Learn ASR by Building One
+# Tiny Audio
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/release/python-390/)
@@ -55,21 +55,24 @@ and training your own.
 ### Option 1: Use Pre-trained Model
 
 ```python
-from transformers import AutoModelForSpeechSeq2Seq, pipeline
+from transformers import AutoModelForSpeechSeq2Seq
+import torch
 
 # Load model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
 model = AutoModelForSpeechSeq2Seq.from_pretrained(
-    "mazesmazes/tiny-audio", 
-    trust_remote_code=True,
-    low_cpu_mem_usage=False
+    "mazesmazes/tiny-audio",
+    dtype=dtype,
+    trust_remote_code=True
 )
+model = model.to(device)
+model.eval()
 
-# Create pipeline
-asr = pipeline("automatic-speech-recognition", model=model)
-
-# Transcribe
-result = asr("path/to/audio.wav")
-print(result["text"])
+# Transcribe audio
+transcription = model.transcribe("path/to/audio.wav")
+print(transcription)
 ```
 
 See the [model card](https://huggingface.co/mazesmazes/tiny-audio) for detailed
@@ -244,6 +247,8 @@ wandb login
 ├── src/                # Source code
 │   ├── modeling.py     # The core ASR model
 │   └── train.py        # The training script
+├── tests/              # Test suite
+│   └── test_e2e.py     # End-to-end training and transcription test
 ├── .gitignore
 ├── CLAUDE.md           # Notes for AI-assisted development
 ├── pyproject.toml

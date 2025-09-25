@@ -29,18 +29,24 @@ A lightweight ASR model combining Whisper-small encoder with SmolLM2 decoder, tr
 ## Quick Start
 
 ```python
-from transformers import AutoModelForSpeechSeq2Seq, pipeline
+from transformers import AutoModelForSpeechSeq2Seq
+import torch
 
 # Load model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
 model = AutoModelForSpeechSeq2Seq.from_pretrained(
     "mazesmazes/tiny-audio",
+    dtype=dtype,
     trust_remote_code=True
 )
+model = model.to(device)
+model.eval()
 
-# Create pipeline and transcribe
-asr = pipeline("automatic-speech-recognition", model=model)
-result = asr("audio.wav")
-print(result["text"])
+# Transcribe audio
+transcription = model.transcribe("audio.wav")
+print(transcription)
 ```
 
 ## Architecture

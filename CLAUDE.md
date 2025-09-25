@@ -78,7 +78,7 @@ uv run pytest --cov=src
 uv run pytest tests/test_e2e.py -v
 ```
 
-**Note**: The end-to-end test trains a minimal model with 5 steps and tests transcription functionality. It takes about 2-3 minutes to complete.
+**Note**: The end-to-end test trains a minimal model with 20 steps (from mac_minimal config) and tests transcription functionality. It takes about 2-3 minutes to complete.
 
 ### Demo Application
 
@@ -183,7 +183,7 @@ wandb login
 
    - Base config: `configs/hydra/config.yaml` - defines defaults and output
      structure
-   - Model configs: `small.yaml` (r=32), `large.yaml` (r=64) - LoRA rank
+   - Model configs: `small.yaml` (r=8, alpha=16), `large.yaml` (r=16, alpha=32) - LoRA
      parameters
    - Data configs: `tiny.yaml` (100 samples), `production_streaming.yaml` (full
      datasets)
