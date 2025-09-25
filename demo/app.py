@@ -17,7 +17,7 @@ import gradio as gr
 import numpy as np
 import soundfile as sf
 import torch
-from transformers import AutoModel
+from transformers import AutoModel, pipeline
 
 # Set up logging
 logging.basicConfig(
@@ -28,106 +28,43 @@ logger = logging.getLogger(__name__)
 
 class ASRDemo:
     def __init__(self, model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "wav_outputs"):
-        """Initialize the ASR demo with a model from HuggingFace Hub or local path.
-
-        Args:
-            model_path: HuggingFace model repository name or local directory path
-            outputs_dir: Directory containing audio files to process
-        """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
 
-        # Handle outputs directory - look relative to this script's location
         self.outputs_dir = Path(outputs_dir)
         if not self.outputs_dir.is_absolute():
-            # First, try relative to the script location
             script_dir = Path(__file__).parent
             potential_path = script_dir / outputs_dir
             if potential_path.exists():
                 self.outputs_dir = potential_path
             else:
-                # Fall back to current working directory
                 self.outputs_dir = Path.cwd() / outputs_dir
-        logger.info(f"Using outputs directory: {self.outputs_dir.absolute()}")
 
-        # Load model - handle both local and HuggingFace Hub models
-        logger.info(f"Loading model from: {model_path}")
-
-        # Check if this is a local path with our custom model
-        import importlib.util
-        import sys
-
-        model_path_obj = Path(model_path)
-        if model_path_obj.exists() and model_path_obj.is_dir():
-            # Local model - load directly using the modeling.py file
-            modeling_file = model_path_obj / "modeling.py"
-            if modeling_file.exists():
-                # Load the modeling module dynamically
-                spec = importlib.util.spec_from_file_location("modeling", modeling_file)
-                modeling = importlib.util.module_from_spec(spec)
-                sys.modules["modeling"] = modeling
-                spec.loader.exec_module(modeling)
-
-                # Now load using the ASRModel class directly
-                from modeling import ASRModel
-
-                self.model = ASRModel.from_pretrained(model_path)
-            else:
-                # Fallback to AutoModel for standard models
-                self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
-        else:
-            # HuggingFace Hub model
-            self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
-
-        # Move to device and set to eval mode
+        self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
         self.model = self.model.to(self.device)
         self.model.eval()
-        logger.info(f"Model loaded successfully with dtype: {self.model.dtype}")
-
-        # Create the pipeline for ASR
-        self.asr_pipeline = self.model.pipeline("automatic-speech-recognition")
+        self.asr_pipeline = pipeline("automatic-speech-recognition", model=self.model, device=self.device)
 
     def transcribe(self, audio_path: str) -> str:
-        """Transcribe audio file to text using the pipeline.
-
-        Args:
-            audio_path: Path to the audio file
-
-        Returns:
-            Transcribed text
-        """
         result = self.asr_pipeline(audio_path)
         return result["text"]
 
     def process_audio(self, audio_input: Union[str, Tuple[int, np.ndarray], None]) -> str:
-        """Process audio from microphone or file upload.
-
-        Args:
-            audio_input: Audio input from Gradio (file path or tuple of sample_rate, audio_data)
-
-        Returns:
-            Transcribed text
-        """
         if audio_input is None:
             return "Please provide audio input"
 
-        # Handle microphone input (tuple of sample_rate, audio_data)
         if isinstance(audio_input, tuple):
             sample_rate, audio_data = audio_input
 
-            # Create a temporary file to save the audio
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
                 temp_path = tmp_file.name
                 sf.write(temp_path, audio_data, sample_rate)
 
-            # Transcribe the temporary file
             result = self.transcribe(temp_path)
 
-            # Clean up temporary file
             Path(temp_path).unlink(missing_ok=True)
             return result
 
-        # Handle file upload (string path)
         return self.transcribe(audio_input)
 
     def get_output_files(self) -> List[str]:
@@ -141,7 +78,6 @@ class ASRDemo:
         for ext in audio_extensions:
             audio_files.extend(self.outputs_dir.glob(f"**/*{ext}"))
 
-        # Return relative paths as strings
         return [str(f.relative_to(self.outputs_dir)) for f in sorted(audio_files)]
 
     def process_from_outputs(self, selected_file: Optional[str]) -> str:
@@ -158,19 +94,7 @@ class ASRDemo:
 
 
 def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "wav_outputs"):
-    """Create and return the Gradio interface.
-
-    Args:
-        model_path: HuggingFace model repository name or local path
-        outputs_dir: Directory containing audio files to process
-
-    Returns:
-        Gradio Blocks interface
-    """
-    # Initialize the demo
     asr_demo = ASRDemo(model_path, outputs_dir)
-
-    # Create the interface
     with gr.Blocks(title="ASR Demo - Whisper + SmolLM2") as demo:
         gr.Markdown("# 🎤 ASR Demo: Whisper Encoder + SmolLM2 Decoder")
         gr.Markdown(
@@ -195,7 +119,6 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
             with gr.Tab("From Outputs Directory"):
                 with gr.Row():
                     with gr.Column():
-                        # Dropdown for selecting files from outputs
                         output_files = asr_demo.get_output_files()
                         file_dropdown = gr.Dropdown(
                             choices=output_files,
@@ -212,7 +135,6 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
                             placeholder="Transcription will appear here...",
                         )
 
-                # Refresh button updates the dropdown
                 def refresh_files():
                     files = asr_demo.get_output_files()
                     return gr.Dropdown(choices=files, value=files[0] if files else None)
@@ -223,7 +145,6 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
                     asr_demo.process_from_outputs, inputs=[file_dropdown], outputs=[output_text_2]
                 )
 
-        # Connect the main transcribe button
         submit_btn.click(asr_demo.process_audio, inputs=[audio_input], outputs=[output_text])
 
     return demo
@@ -250,6 +171,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Create and launch demo
     demo = create_demo(args.model, args.outputs_dir)
     demo.launch(server_port=args.port, share=args.share, server_name="0.0.0.0")

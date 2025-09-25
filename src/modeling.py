@@ -1,4 +1,4 @@
-"""ASR Model for Whisper-LLM integration (Refactored)"""
+"""ASR Model for Whisper-LLM integration (Refactored for Pipeline Compatibility)"""
 
 from typing import Optional, Union
 
@@ -19,11 +19,13 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 
 
 class ASRModelConfig(PretrainedConfig):
+    """Configuration class for the ASRModel."""
+
     model_type = "asr_model"
 
     def __init__(
         self,
-        decoder_model_name="HuggingFaceTB/SmolLM2-360M-Instruct",
+        decoder_model_name="HuggingFaceTB/SmolLM-1.6B-Instruct",
         encoder_model_name="openai/whisper-small",
         lora_r=32,
         lora_alpha=64,
@@ -41,6 +43,11 @@ class ASRModelConfig(PretrainedConfig):
 
 
 class ASRModel(PreTrainedModel):
+    """
+    An autoregressive speech recognition model that combines a Whisper encoder
+    with a large language model decoder.
+    """
+
     config_class = ASRModelConfig
     base_model_prefix = "asr"
     supports_gradient_checkpointing = True
@@ -53,11 +60,12 @@ class ASRModel(PreTrainedModel):
         super().__init__(config)
 
         self.encoder = WhisperModel.from_pretrained(config.encoder_model_name)
-        self.encoder.requires_grad_(False)
+        self.encoder.requires_grad_(False)  # Freeze the encoder
         self.encoder.eval()
 
         self.decoder = AutoModelForCausalLM.from_pretrained(
-            config.decoder_model_name, use_cache=False
+            config.decoder_model_name,
+            use_cache=True,  # Enable cache for generation
         )
         lora_config = LoraConfig(
             r=config.lora_r,
@@ -72,12 +80,12 @@ class ASRModel(PreTrainedModel):
         text_dim = self.decoder.config.hidden_size
         audio_dim = self.encoder.config.d_model
         self.audio_projector = nn.Sequential(
-            RMSNorm(audio_dim, eps=1e-6),
+            RMSNorm(audio_dim, eps=self.decoder.config.rms_norm_eps or 1e-6),
             nn.Linear(audio_dim, text_dim, bias=True),
             nn.GELU(),
             nn.Linear(text_dim, text_dim, bias=True),
         )
-        self.audio_scale = nn.Parameter(torch.tensor(0.01))
+        self.audio_scale = nn.Parameter(torch.tensor(0.02))
 
         self.tokenizer = AutoTokenizer.from_pretrained(config.decoder_model_name)
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
@@ -87,19 +95,16 @@ class ASRModel(PreTrainedModel):
         self._tokens_initialized = False
         self.add_audio_special_tokens()
 
+        self.generation_config = self.decoder.generation_config
+
     def add_audio_special_tokens(self):
+        """Adds special tokens required for audio processing to the tokenizer."""
         if self._tokens_initialized:
             return
-        audio_tokens = [
-            "<|audio_start|>",
-            "<|audio_end|>",
-            "<|audio_pad|>",
-            "<|audio_sep|>",
-            "<|audio_chunk|>",
-        ]
+        audio_tokens = ["<|audio_chunk|>"]
         self.tokenizer.add_special_tokens({"additional_special_tokens": audio_tokens})
 
-        if hasattr(self.decoder.model, "resize_token_embeddings"):
+        if hasattr(self.decoder, "resize_token_embeddings"):
             self.decoder.resize_token_embeddings(len(self.tokenizer))
 
         self.audio_chunk_id = self.tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
@@ -108,6 +113,7 @@ class ASRModel(PreTrainedModel):
     def _encode_audio(
         self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        """Encodes audio features and projects them into the text embedding space."""
         with torch.no_grad():
             input_features = input_features.to(self.encoder.dtype)
             audio_features = self.encoder.encoder(
@@ -126,15 +132,24 @@ class ASRModel(PreTrainedModel):
         audio_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        if input_features is not None and input_ids is None:
-            return self.generate(input_features, attention_mask=audio_attention_mask, **kwargs)
+        """
+        Forward pass for training and evaluation. For inference, use generate().
+        """
+        if labels is None:
+            if input_features is None:
+                raise ValueError("`input_features` must be provided for generation.")
+            return self.generate(
+                input_features=input_features, attention_mask=audio_attention_mask, **kwargs
+            )
 
         if not (input_ids is not None and input_features is not None):
-            raise ValueError("Both input_ids and input_features are required for training.")
+            raise ValueError("Both `input_ids` and `input_features` are required for training.")
 
         audio_chunk_mask = input_ids == self.audio_chunk_id
         if not torch.any(audio_chunk_mask):
-            raise ValueError("The '<|audio_chunk|>' token was not found in the input_ids.")
+            raise ValueError(
+                "The '<|audio_chunk|>' token was not found in `input_ids` for training."
+            )
 
         chunk_indices = torch.where(audio_chunk_mask)[1]
 
@@ -178,22 +193,27 @@ class ASRModel(PreTrainedModel):
         self,
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        max_new_tokens: int = 100,
-        prompt: str = "Please transcribe the following audio recording.\n<|audio_chunk|>",
-        **kwargs,
+        **generate_kwargs,
     ) -> torch.LongTensor:
+        """
+        Generates a transcription for the given audio features. This method is
+        designed to be compatible with the Hugging Face pipeline.
+        """
+        prompt_str = "<|user|>\nPlease transcribe the following audio recording.<|end|>\n<|assistant|>\n<|audio_chunk|>"
+
         audio_embeds = self._encode_audio(input_features, attention_mask=attention_mask)
         embed_layer = self.decoder.get_input_embeddings()
 
-        messages = [{"role": "user", "content": prompt}]
-        prompt_ids = self.tokenizer.apply_chat_template(
-            messages, return_tensors="pt", add_generation_prompt=True
-        ).to(input_features.device)
+        prompt_ids = self.tokenizer(
+            prompt_str, return_tensors="pt", add_special_tokens=False
+        ).input_ids.to(input_features.device)
 
-        chunk_idx = torch.where(prompt_ids[0] == self.audio_chunk_id)[0]
-        if len(chunk_idx) == 0:
-            raise ValueError("'<|audio_chunk|>' token not found in prompt.")
-        chunk_idx = chunk_idx[0].item()
+        chunk_idx_tensor = torch.where(prompt_ids[0] == self.audio_chunk_id)[0]
+        if len(chunk_idx_tensor) == 0:
+            raise ValueError(
+                "Internal error: '<|audio_chunk|>' token not found in the generation prompt."
+            )
+        chunk_idx = int(chunk_idx_tensor[0].item())
 
         prompt_embeds = embed_layer(prompt_ids[0])
 
@@ -206,10 +226,14 @@ class ASRModel(PreTrainedModel):
             dim=0,
         ).unsqueeze(0)
 
+        if "pad_token_id" not in generate_kwargs:
+            generate_kwargs["pad_token_id"] = self.tokenizer.pad_token_id
+        if "eos_token_id" not in generate_kwargs:
+            generate_kwargs["eos_token_id"] = self.tokenizer.eos_token_id
+
         return self.decoder.generate(
             inputs_embeds=initial_embeds,
-            max_new_tokens=max_new_tokens,
-            **kwargs,
+            **generate_kwargs,
         )
 
 

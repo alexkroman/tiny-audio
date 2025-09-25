@@ -7,28 +7,24 @@ from pathlib import Path
 
 import pytest
 
-# Add src to path for local imports
 sys.path.insert(0, str(Path(__file__).parent / "src"))
-
 
 @pytest.fixture(scope="module")
 def trained_model_path():
-    # Use a fixed output directory for testing
     output_dir = "outputs/test_e2e_model"
 
-    # Use the mac_minimal experiment config for quick training
     cmd = [
         "uv",
         "run",
         "src/train.py",
         "+experiments=mac_minimal",
-        "training.max_steps=1",  # Even fewer steps for testing
+        "training.max_steps=1",  
         "training.save_steps=1",
-        "training.eval_steps=1",  # Make eval_steps match save_steps
+        "training.eval_steps=1",  
         "training.logging_steps=1",
-        "data.max_train_samples=1",  # Very small dataset
-        "training.gradient_checkpointing=false",  # Disable for speed
-        f"+output_dir={output_dir}",  # Specify output directory
+        "data.max_train_samples=1",  
+        "training.gradient_checkpointing=false",  
+        f"+output_dir={output_dir}",  
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -74,7 +70,6 @@ def test_tokenizer_has_special_tokens(loaded_model):
     assert "<|audio_chunk|>" in vocab
     assert vocab["<|audio_chunk|>"] == loaded_model.audio_chunk_id
 
-    # Check other audio tokens
     assert hasattr(loaded_model, "audio_start_id")
     assert hasattr(loaded_model, "audio_end_id")
     assert hasattr(loaded_model, "audio_pad_id")
@@ -102,11 +97,9 @@ def test_pipeline_with_real_audio(loaded_model, audio_file):
     if not audio_path.exists():
         pytest.skip(f"Audio file not found: {audio_file}")
 
-    # Create pipeline and test
     asr_pipeline = loaded_model.pipeline("automatic-speech-recognition")
     result = asr_pipeline(str(audio_path))
 
-    # Pipeline returns a dict with 'text' key
     assert isinstance(result, dict)
     assert "text" in result
     assert isinstance(result["text"], str)
@@ -116,10 +109,8 @@ def test_generate_method_works(loaded_model):
     """Test that the generate method works with dummy input."""
     import torch
 
-    # Create dummy input features (batch_size=1, seq_len=3000, feature_dim=128)
     dummy_features = torch.randn(1, 3000, 128).to(loaded_model.device)
 
-    # Should not raise exceptions
     output = loaded_model.generate(
         input_features=dummy_features, max_new_tokens=10, do_sample=False
     )
@@ -130,5 +121,4 @@ def test_generate_method_works(loaded_model):
 
 
 if __name__ == "__main__":
-    # Run with verbose output and show print statements
     pytest.main([__file__, "-v", "-s"])

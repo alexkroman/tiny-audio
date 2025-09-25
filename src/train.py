@@ -83,25 +83,18 @@ def evaluate_samples(model, tokenizer, feature_extractor, eval_samples, device=N
 def clean_gigaspeech_text(text: str) -> Optional[str]:
     import re
 
-    # Check if text contains garbage tags that would make it invalid
     if re.search(r"<(SIL|MUSIC|NOISE|OTHER)>", text):
-        # Remove garbage tags and check if anything meaningful remains
         cleaned = re.sub(r"<(SIL|MUSIC|NOISE|OTHER)>", "", text).strip()
         if not cleaned or len(cleaned) < 3:
             return None
 
-    # Replace punctuation tags with actual punctuation
     punct_map = {"COMMA": ",", "PERIOD": ".", "QUESTIONMARK": "?", "EXCLAMATIONPOINT": "!"}
 
-    # Replace punctuation tags (with or without leading space)
     text = re.sub(
         r"\s*<(COMMA|PERIOD|QUESTIONMARK|EXCLAMATIONPOINT)>", lambda m: punct_map[m.group(1)], text
     )
 
-    # Remove any remaining garbage tags
     text = re.sub(r"<(SIL|MUSIC|NOISE|OTHER)>", " ", text)
-
-    # Normalize whitespace
     text = " ".join(text.split()).strip()
 
     return text if text else None
