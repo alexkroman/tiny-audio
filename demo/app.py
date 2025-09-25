@@ -17,7 +17,7 @@ import gradio as gr
 import numpy as np
 import soundfile as sf
 import torch
-from transformers import AutoModel, pipeline
+from transformers import AutoModelForSpeechSeq2Seq, pipeline
 
 # Set up logging
 logging.basicConfig(
@@ -40,11 +40,17 @@ class ASRDemo:
             else:
                 self.outputs_dir = Path.cwd() / outputs_dir
 
-        self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            low_cpu_mem_usage=False  # The key to solving both errors
+        )
         self.model = self.model.to(self.device)
         self.model.eval()
         self.asr_pipeline = pipeline(
-            "automatic-speech-recognition", model=self.model, device=self.device
+            "automatic-speech-recognition",
+            model=self.model,
+            device=self.device,
         )
 
     def transcribe(self, audio_path: str) -> str:

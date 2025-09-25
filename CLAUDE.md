@@ -204,6 +204,8 @@ wandb login
 - **Audio projection initialization** - The projector uses scaled initialization (0.01x) to prevent gradient explosion
 - **ASR Pipeline Support** - The model's `forward` method detects inference mode (when only `input_features` is provided) and redirects to the `generate` method for compatibility with HuggingFace's ASR pipeline
 - **Fixed test output directory** - E2E tests now use a fixed output path `outputs/test_e2e_model` specified via `+output_dir=` override
+- **Model Loading** - When loading pretrained models, use `low_cpu_mem_usage=False` to ensure proper initialization of audio special tokens
+- **Audio Special Tokens** - The model automatically adds `<|audio_chunk|>` token during initialization to handle audio-text alignment
 
 ## Configuration Structure
 

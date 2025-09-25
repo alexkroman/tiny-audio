@@ -54,9 +54,21 @@ and training your own.
 ### Option 1: Use Pre-trained Model
 
 ```python
-from transformers import AutoModel
-model = AutoModel.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
-transcription = model.transcribe("path/to/audio.wav")
+from transformers import AutoModelForSpeechSeq2Seq, pipeline
+
+# Load model
+model = AutoModelForSpeechSeq2Seq.from_pretrained(
+    "mazesmazes/tiny-audio", 
+    trust_remote_code=True,
+    low_cpu_mem_usage=False
+)
+
+# Create pipeline
+asr = pipeline("automatic-speech-recognition", model=model)
+
+# Transcribe
+result = asr("path/to/audio.wav")
+print(result["text"])
 ```
 
 See the [model card](https://huggingface.co/mazesmazes/tiny-audio) for detailed

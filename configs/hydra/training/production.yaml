@@ -31,11 +31,11 @@ report_to:
 
 # Evaluation
 eval_strategy: steps
-eval_steps: 50
+eval_steps: 5
 
 # Saving
 save_strategy: steps
-save_steps: 100
+save_steps: 10
 save_total_limit: 3
 load_best_model_at_end: true
 metric_for_best_model: eval_loss

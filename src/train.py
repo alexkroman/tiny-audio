@@ -3,7 +3,6 @@
 🎙️ ASR Training
 """
 
-import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -32,9 +31,14 @@ def create_asr_model(config: DictConfig) -> ASRModel:
         lora_alpha=config.model.lora_alpha,
         lora_target_modules=list(config.model.lora_target_modules),
         lora_dropout=config.model.lora_dropout,
+        auto_map={
+            "AutoConfig": "modeling.ASRModelConfig",
+            "AutoModelForSpeechSeq2Seq": "modeling.ASRModel",
+        },
     )
 
-    return ASRModel(asr_config)
+    model = ASRModel(asr_config)
+    return model
 
 
 def evaluate_samples(model, tokenizer, feature_extractor, eval_samples, device=None):
@@ -304,31 +308,6 @@ def load_datasets(config: DictConfig) -> Tuple[Dataset, Dataset]:
     return train_dataset, val_dataset
 
 
-class ModelingFileCopyCallback(TrainerCallback):
-    """Copy modeling.py, create __init__.py, and copy model card as README to the output directory so they get pushed to Hub."""
-
-    def on_save(self, args, state, control, **kwargs):
-        output_dir = Path(args.output_dir)
-
-        # Copy modeling.py
-        modeling_src = Path(__file__).parent / "modeling.py"
-        if modeling_src.exists():
-            modeling_dst = output_dir / "modeling.py"
-            shutil.copy(modeling_src, modeling_dst)
-
-        # Create __init__.py in the output directory
-        init_dst = output_dir / "__init__.py"
-        init_dst.write_text(
-            "# Import the model and config classes to ensure proper registration\nfrom .modeling import ASRModel, ASRModelConfig\n"
-        )
-
-        # Copy model card as README.md
-        model_card_src = Path(__file__).parent.parent / "MODEL_CARD.md"
-        if model_card_src.exists():
-            readme_dst = output_dir / "README.md"
-            shutil.copy(model_card_src, readme_dst)
-
-
 class PredictionLoggingCallback(TrainerCallback):
     def __init__(
         self, eval_dataset, tokenizer, feature_extractor, cfg, log_predictions_every_n_steps=500
@@ -420,7 +399,7 @@ def main(cfg: DictConfig) -> None:
 
     training_args = TrainingArguments(**training_args_dict)
 
-    callbacks: list[TrainerCallback] = [ModelingFileCopyCallback()]
+    callbacks: list[TrainerCallback] = []
     if val_dataset and training_args.report_to and "tensorboard" in training_args.report_to:
         callbacks.append(
             PredictionLoggingCallback(
@@ -448,6 +427,7 @@ def main(cfg: DictConfig) -> None:
 
     trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
     trainer.save_model()
+
 
 if __name__ == "__main__":
     main()

@@ -7,8 +7,8 @@ import torch.nn as nn
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoConfig,
-    AutoModel,
     AutoModelForCausalLM,
+    AutoModelForSpeechSeq2Seq,
     AutoTokenizer,
     PretrainedConfig,
     PreTrainedModel,
@@ -88,19 +88,16 @@ class ASRModel(PreTrainedModel):
         self.audio_scale = nn.Parameter(torch.tensor(0.02))
 
         self.tokenizer = AutoTokenizer.from_pretrained(config.decoder_model_name)
-        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        self._tokens_initialized = False
+        
         self.add_audio_special_tokens()
 
+        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
         self.generation_config = self.decoder.generation_config
 
     def add_audio_special_tokens(self):
         """Adds special tokens required for audio processing to the tokenizer."""
-        if self._tokens_initialized:
-            return
         audio_tokens = ["<|audio_chunk|>"]
         self.tokenizer.add_special_tokens({"additional_special_tokens": audio_tokens})
 
@@ -108,7 +105,6 @@ class ASRModel(PreTrainedModel):
             self.decoder.resize_token_embeddings(len(self.tokenizer))
 
         self.audio_chunk_id = self.tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
-        self._tokens_initialized = True
 
     def _encode_audio(
         self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
@@ -238,4 +234,4 @@ class ASRModel(PreTrainedModel):
 
 
 AutoConfig.register("asr_model", ASRModelConfig)
-AutoModel.register(ASRModelConfig, ASRModel)
+AutoModelForSpeechSeq2Seq.register(ASRModelConfig, ASRModel)
