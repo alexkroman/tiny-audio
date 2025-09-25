@@ -9,6 +9,7 @@ understanding with Hugging Face's SmolLM2 for text generation. This project is
 designed to be a hands-on guide to understanding modern ASR systems by building
 and training your own.
 
+**🚀 Live Demo**: [Try it on Hugging Face Spaces](https://huggingface.co/spaces/mazesmazes/tiny-audio)  
 **📦 Pre-trained Model**: Available on
 [Hugging Face Hub](https://huggingface.co/mazesmazes/tiny-audio)
 

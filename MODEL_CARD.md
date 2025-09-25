@@ -50,5 +50,6 @@ print(result["text"])
 ## Links
 
 - **Code**: [github.com/alexkroman/tiny-audio](https://github.com/alexkroman/tiny-audio)
-- **Demo**: `demo/app.py` in repository
+- **Demo**: [Try it on Hugging Face Spaces](https://huggingface.co/spaces/mazesmazes/tiny-audio)
+- **Local Demo**: `demo/app.py` in repository
 - **License**: MIT

@@ -3,8 +3,6 @@
 Gradio app for ASR model with support for:
 - Loading from HuggingFace Hub
 - Loading from local directory
-- Microphone recording
-- File upload
 - Processing audio files from outputs directory
 """
 
@@ -14,17 +12,13 @@ import os
 os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 
 import logging
-import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional
 
 import gradio as gr
-import numpy as np
-import soundfile as sf
 import torch
 from transformers import AutoModelForSpeechSeq2Seq
 
-# Try to import spaces for GPU allocation on Hugging Face Spaces
 try:
     import spaces
 except ImportError:
@@ -35,14 +29,11 @@ except ImportError:
             return func
 
 
-# Set up logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-
-# Global variable to store model
 _model = None
 
 
@@ -51,12 +42,17 @@ def get_model(model_path: str = "mazesmazes/tiny-audio"):
     global _model
     if _model is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Using device: {device}")
-
-        # Load model
-        _model = AutoModelForSpeechSeq2Seq.from_pretrained(model_path, trust_remote_code=True)
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        _model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_path,
+            dtype=dtype,
+            trust_remote_code=True,
+        )
         _model = _model.to(device)
         _model.eval()
+
+        if torch.__version__ >= "2.0.0":
+            _model = torch.compile(_model, mode="reduce-overhead")
 
     return _model
 
@@ -65,8 +61,6 @@ def get_model(model_path: str = "mazesmazes/tiny-audio"):
 def transcribe_audio(audio_path: str, model_path: str = "mazesmazes/tiny-audio") -> str:
     """Transcribe audio using the model's built-in transcribe method."""
     model = get_model(model_path)
-
-    # Simply use the model's transcribe method
     return model.transcribe(audio_path)
 
 
@@ -82,29 +76,10 @@ class ASRDemo:
             else:
                 self.outputs_dir = Path.cwd() / outputs_dir
 
-        # Initialize model on startup
         get_model(model_path)
 
     def transcribe(self, audio_path: str) -> str:
         return transcribe_audio(audio_path, self.model_path)
-
-    def process_audio(self, audio_input: Union[str, Tuple[int, np.ndarray], None]) -> str:
-        if audio_input is None:
-            return "Please provide audio input"
-
-        if isinstance(audio_input, tuple):
-            sample_rate, audio_data = audio_input
-
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-                temp_path = tmp_file.name
-                sf.write(temp_path, audio_data, sample_rate)
-
-            result = self.transcribe(temp_path)
-
-            Path(temp_path).unlink(missing_ok=True)
-            return result
-
-        return self.transcribe(audio_input)
 
     def get_output_files(self) -> List[str]:
         """Get list of audio files from outputs directory."""
@@ -134,57 +109,29 @@ class ASRDemo:
 
 def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "wav_outputs"):
     asr_demo = ASRDemo(model_path, outputs_dir)
-    with gr.Blocks(title="ASR Demo - Whisper + SmolLM2") as demo:
-        gr.Markdown("# 🎤 ASR Demo: Whisper Encoder + SmolLM2 Decoder")
-        gr.Markdown(
-            "Upload an audio file, record from microphone, or select from outputs directory"
-        )
+    with gr.Blocks(title="Tiny Audio") as demo:
+        gr.Markdown("# 🎤 Tiny Audio")
 
-        with gr.Tabs():
-            with gr.Tab("Microphone/Upload"), gr.Row():
-                with gr.Column():
-                    audio_input = gr.Audio(
-                        label="Audio Input", type="filepath", sources=["microphone", "upload"]
-                    )
-                    submit_btn = gr.Button("Transcribe", variant="primary")
+        with gr.Row():
+            with gr.Column():
+                output_files = asr_demo.get_output_files()
+                file_dropdown = gr.Dropdown(
+                    choices=output_files,
+                    label="Select audio file",
+                    value=output_files[0] if output_files else None,
+                )
+                process_btn = gr.Button("Transcribe Selected", variant="primary")
 
-                with gr.Column():
-                    output_text = gr.Textbox(
-                        label="Transcription",
-                        lines=5,
-                        placeholder="Transcription will appear here...",
-                    )
-
-            with gr.Tab("From Outputs Directory"):
-                with gr.Row():
-                    with gr.Column():
-                        output_files = asr_demo.get_output_files()
-                        file_dropdown = gr.Dropdown(
-                            choices=output_files,
-                            label=f"Select audio from {outputs_dir}/",
-                            value=output_files[0] if output_files else None,
-                        )
-                        refresh_btn = gr.Button("🔄 Refresh List")
-                        process_btn = gr.Button("Transcribe Selected", variant="primary")
-
-                    with gr.Column():
-                        output_text_2 = gr.Textbox(
-                            label="Transcription",
-                            lines=5,
-                            placeholder="Transcription will appear here...",
-                        )
-
-                def refresh_files():
-                    files = asr_demo.get_output_files()
-                    return gr.Dropdown(choices=files, value=files[0] if files else None)
-
-                refresh_btn.click(refresh_files, outputs=[file_dropdown])
-
-                process_btn.click(
-                    asr_demo.process_from_outputs, inputs=[file_dropdown], outputs=[output_text_2]
+            with gr.Column():
+                output_text = gr.Textbox(
+                    label="Transcription",
+                    lines=5,
+                    placeholder="Transcription will appear here...",
                 )
 
-        submit_btn.click(asr_demo.process_audio, inputs=[audio_input], outputs=[output_text])
+        process_btn.click(
+            asr_demo.process_from_outputs, inputs=[file_dropdown], outputs=[output_text]
+        )
 
     return demo
 

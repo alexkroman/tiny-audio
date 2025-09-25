@@ -51,6 +51,8 @@ class ASRModel(PreTrainedModel):
     _no_split_modules = ["WhisperEncoder", "LLMDecoder", "AudioProjector"]
     main_input_name = "input_features"
     _supports_generate = True  # Tell transformers this model supports generation
+    _tokenizer: Optional[AutoTokenizer]
+    _feature_extractor: Optional[WhisperFeatureExtractor]
 
     def can_generate(self) -> bool:
         """Override to tell transformers this model can generate."""
@@ -59,7 +61,7 @@ class ASRModel(PreTrainedModel):
     @property
     def tokenizer(self) -> AutoTokenizer:
         """Get the tokenizer, loading it if necessary."""
-        if not hasattr(self, '_tokenizer') or self._tokenizer is None:
+        if not hasattr(self, "_tokenizer") or self._tokenizer is None:
             from transformers import AutoTokenizer
 
             self._tokenizer = AutoTokenizer.from_pretrained(self.config.decoder_model_name)
@@ -68,7 +70,7 @@ class ASRModel(PreTrainedModel):
     @property
     def feature_extractor(self) -> WhisperFeatureExtractor:
         """Get the feature extractor, loading it if necessary."""
-        if not hasattr(self, '_feature_extractor') or self._feature_extractor is None:
+        if not hasattr(self, "_feature_extractor") or self._feature_extractor is None:
             from transformers import AutoFeatureExtractor
 
             self._feature_extractor = AutoFeatureExtractor.from_pretrained(
@@ -81,6 +83,9 @@ class ASRModel(PreTrainedModel):
             config = ASRModelConfig(**config)
         super().__init__(config)
 
+        # Initialize cached properties
+        self._tokenizer = None
+        self._feature_extractor = None
 
         self.encoder = WhisperModel.from_pretrained(config.encoder_model_name)
         self.encoder.requires_grad_(False)  # Freeze the encoder
@@ -121,7 +126,7 @@ class ASRModel(PreTrainedModel):
 
         self.decoder = get_peft_model(self.decoder, lora_config)
 
-        # Initialize feature extractor  
+        # Initialize feature extractor
         self._feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
         self.generation_config = self.decoder.generation_config
 
