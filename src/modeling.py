@@ -1,4 +1,4 @@
-"""ASR Model for Whisper-LLM integration (Refactored for Pipeline Compatibility)"""
+"""ASR Model"""
 
 from pathlib import Path
 from typing import Optional, Union
@@ -16,6 +16,7 @@ from transformers import (
     WhisperFeatureExtractor,
     WhisperModel,
 )
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 
 
@@ -44,16 +45,12 @@ class ASRModelConfig(PretrainedConfig):
 
 
 class ASRModel(PreTrainedModel):
-    """
-    An autoregressive speech recognition model that combines a Whisper encoder
-    with a large language model decoder.
-    """
-
     config_class = ASRModelConfig
     base_model_prefix = "asr"
     supports_gradient_checkpointing = True
     _no_split_modules = ["WhisperEncoder", "LLMDecoder", "AudioProjector"]
     main_input_name = "input_features"
+    _supports_generate = True  # Tell transformers this model supports generation
 
     def __init__(self, config: Union[ASRModelConfig, dict]) -> None:
         if isinstance(config, dict):
@@ -138,9 +135,15 @@ class ASRModel(PreTrainedModel):
         if labels is None:
             if input_features is None:
                 raise ValueError("`input_features` must be provided for generation.")
-            return self.generate(
-                input_features=input_features, attention_mask=audio_attention_mask, **kwargs
-            )
+            # For ASR pipeline compatibility, we need to return a proper output
+            # The pipeline will detect this is a seq2seq model and use generate() instead
+            # But we still need to return something with the expected structure
+            # Create dummy logits - the pipeline won't use these for seq2seq models
+            batch_size = input_features.shape[0]
+            # Return a minimal tensor that won't cause errors
+            vocab_size = self.decoder.config.vocab_size
+            dummy_logits = torch.zeros((batch_size, 1, vocab_size), device=input_features.device)
+            return CausalLMOutputWithPast(logits=dummy_logits)
 
         if not (input_ids is not None and input_features is not None):
             raise ValueError("Both `input_ids` and `input_features` are required for training.")
@@ -195,10 +198,6 @@ class ASRModel(PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         **generate_kwargs,
     ) -> torch.LongTensor:
-        """
-        Generates a transcription for the given audio features. This method is
-        designed to be compatible with the Hugging Face pipeline.
-        """
         prompt_str = "<|user|>\nPlease transcribe the following audio recording.<|end|>\n<|assistant|>\n<|audio_chunk|>"
 
         audio_embeds = self._encode_audio(input_features, attention_mask=attention_mask)
@@ -230,9 +229,20 @@ class ASRModel(PreTrainedModel):
             generate_kwargs["pad_token_id"] = self.tokenizer.pad_token_id
         if "eos_token_id" not in generate_kwargs:
             generate_kwargs["eos_token_id"] = self.tokenizer.eos_token_id
+        if "max_new_tokens" not in generate_kwargs and "max_length" not in generate_kwargs:
+            generate_kwargs["max_new_tokens"] = 448  # Default max tokens to generate
+
+        # Create attention mask for the input embeddings
+        attention_mask = torch.ones(
+            initial_embeds.shape[0],
+            initial_embeds.shape[1],
+            dtype=torch.long,
+            device=initial_embeds.device,
+        )
 
         return self.decoder.generate(
             inputs_embeds=initial_embeds,
+            attention_mask=attention_mask,
             **generate_kwargs,
         )
 

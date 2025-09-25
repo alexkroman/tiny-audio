@@ -37,11 +37,52 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Global variable to store the pipeline
+_asr_pipeline = None
+
+
+def get_pipeline(model_path: str = "mazesmazes/tiny-audio"):
+    """Initialize and cache the ASR pipeline."""
+    global _asr_pipeline
+    if _asr_pipeline is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {device}")
+
+        # Load model and its components
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(model_path, trust_remote_code=True)
+        model = model.to(device)
+        model.eval()
+
+        # Load tokenizer from the decoder model specified in the config
+        tokenizer = AutoTokenizer.from_pretrained(model.config.decoder_model_name)
+
+        # Load feature extractor from the encoder model specified in the config
+        feature_extractor = AutoFeatureExtractor.from_pretrained(model.config.encoder_model_name)
+
+        _asr_pipeline = pipeline(
+            "automatic-speech-recognition",
+            model=model,
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            device=device,
+            trust_remote_code=True,
+            # Explicitly tell pipeline to use generate method for seq2seq models
+            generate_kwargs={"max_new_tokens": 448},
+        )
+    return _asr_pipeline
+
+
+@spaces.GPU
+def transcribe_audio(audio_path: str, model_path: str = "mazesmazes/tiny-audio") -> str:
+    """Transcribe audio using the ASR pipeline."""
+    pipeline = get_pipeline(model_path)
+    result = pipeline(audio_path)
+    return result["text"]
+
+
 class ASRDemo:
     def __init__(self, model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "wav_outputs"):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Using device: {self.device}")
-
+        self.model_path = model_path
         self.outputs_dir = Path(outputs_dir)
         if not self.outputs_dir.is_absolute():
             script_dir = Path(__file__).parent
@@ -51,32 +92,11 @@ class ASRDemo:
             else:
                 self.outputs_dir = Path.cwd() / outputs_dir
 
-        # Load model and its components
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_path, trust_remote_code=True)
-        self.model = self.model.to(self.device)
-        self.model.eval()
+        # Initialize the pipeline on startup
+        get_pipeline(model_path)
 
-        # Load tokenizer from the decoder model specified in the config
-        tokenizer = AutoTokenizer.from_pretrained(self.model.config.decoder_model_name)
-
-        # Load feature extractor from the encoder model specified in the config
-        feature_extractor = AutoFeatureExtractor.from_pretrained(
-            self.model.config.encoder_model_name
-        )
-
-        self.asr_pipeline = pipeline(
-            "automatic-speech-recognition",
-            model=self.model,
-            tokenizer=tokenizer,
-            feature_extractor=feature_extractor,
-            device=self.device,
-            trust_remote_code=True,
-        )
-
-    @spaces.GPU
     def transcribe(self, audio_path: str) -> str:
-        result = self.asr_pipeline(audio_path)
-        return result["text"]
+        return transcribe_audio(audio_path, self.model_path)
 
     def process_audio(self, audio_input: Union[str, Tuple[int, np.ndarray], None]) -> str:
         if audio_input is None:
