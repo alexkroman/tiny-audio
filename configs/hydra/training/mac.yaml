@@ -22,7 +22,7 @@ adam_beta2: 0.98
 adam_epsilon: 1e-8
 
 # Logging
-logging_dir: ./logs
+logging_dir: ${hydra:runtime.output_dir}/logs
 logging_steps: 10
 logging_first_step: true
 logging_nan_inf_filter: false
@@ -46,7 +46,7 @@ push_to_hub: false
 # Performance - Mac optimized
 dataloader_num_workers: 0  # Important for Mac
 dataloader_prefetch_factor: null  # Disable prefetching for streaming
-gradient_checkpointing: true
+gradient_checkpointing: false
 fp16: false
 bf16: false
 dataloader_pin_memory: false  # Important for Mac

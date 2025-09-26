@@ -166,3 +166,5 @@ extend-ignore = [
     "B008",  # do not perform function calls in argument defaults
     "B905",  # zip() without an explicit strict= parameter
 ]
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch", "packaging", "ninja"]

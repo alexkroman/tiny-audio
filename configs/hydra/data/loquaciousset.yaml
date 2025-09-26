@@ -1,10 +1,13 @@
 # LoquaciousSet dataset configuration
 datasets:
-  - name: loquaciousset
+  - path: speechbrain/LoquaciousSet
+    name: clean  # Config name for LoquaciousSet
+    audio_column: wav    # LoquaciousSet uses 'wav' instead of 'audio'
+    text_column: text    # LoquaciousSet uses 'text' column
     train_splits:
       - train
     eval_splits:
-      - validation
+      - dev
 
 # Data filtering
 max_audio_seconds: 30.0  # LoquaciousSet can have longer utterances

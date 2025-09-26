@@ -18,5 +18,5 @@ hydra:
 resume_from_checkpoint: null
 
 # Evaluation and prediction logging
-log_predictions_every_n_steps: 500  # How often to log predictions to TensorBoard
+log_predictions_every_n_steps: 1000  # How often to log predictions to TensorBoard
 log_predictions_samples: 10  # Number of samples to evaluate for predictions

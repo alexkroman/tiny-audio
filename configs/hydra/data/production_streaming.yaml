@@ -5,6 +5,8 @@ datasets:
       - clean
       - clean
       - other
+    audio_column: audio  # LibriSpeech uses 'audio' column
+    text_column: text    # LibriSpeech uses 'text' column
     train_splits:
       - train.100
       - train.360
@@ -16,6 +18,9 @@ datasets:
 
   - name: gigaspeech
     subset: m  # ~1000 hours (medium subset)
+    audio_column: audio  # GigaSpeech uses 'audio' column
+    text_column: text    # GigaSpeech uses 'text' column
+    cleaner: gigaspeech  # Apply GigaSpeech-specific text cleaning
     train_splits:
       - train
     eval_splits:
@@ -23,16 +28,21 @@ datasets:
 
   - name: common_voice
     language: en
+    audio_column: audio    # Common Voice uses 'audio' column
+    text_column: sentence  # Common Voice uses 'sentence' column
     train_splits:
       - train  # Full train split for streaming
     eval_splits:
       - validation
 
-  - name: loquaciousset
+  - path: speechbrain/LoquaciousSet
+    name: clean  # Config name for LoquaciousSet
+    audio_column: wav    # LoquaciousSet uses 'wav' instead of 'audio'
+    text_column: text    # LoquaciousSet uses 'text' column
     train_splits:
       - train
     eval_splits:
-      - validation
+      - dev
 
 # Data filtering
 max_audio_seconds: 20.0

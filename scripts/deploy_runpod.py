@@ -46,7 +46,7 @@ echo "Updating package lists..."
 apt-get update
 
 echo "Installing system dependencies..."
-apt-get install -y ffmpeg tmux rsync curl
+apt-get install -y ffmpeg tmux rsync curl ninja-build build-essential
 
 echo "Installing uv package manager..."
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -146,21 +146,26 @@ def install_python_dependencies(host, port, project_root):
     # Get dependencies from pyproject.toml
     required_packages = get_project_dependencies(project_root)
 
-    packages_str = " ".join(f'"{pkg}"' for pkg in required_packages)
+    # Filter out flash-attn since it's pre-installed on RunPod
+    regular_packages = [pkg for pkg in required_packages if not pkg.startswith("flash-attn")]
 
-    print("Installing packages from pyproject.toml:")
-    for pkg in required_packages:
-        print(f"  - {pkg}")
+    # Install regular packages
+    if regular_packages:
+        packages_str = " ".join(f'"{pkg}"' for pkg in regular_packages)
 
-    # Use uv with --system to work with system Python and respect existing packages
-    # The --system flag tells uv to use the system Python instead of creating a venv
-    # This preserves the pre-installed CUDA-optimized PyTorch while installing our dependencies
-    cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
-        'export PATH="/root/.local/bin:/root/.cargo/bin:$PATH" && \
-         echo "Using uv to install packages while preserving system PyTorch..." && \
-         uv pip install --system {packages_str} 2>&1'"""
+        print("Installing packages from pyproject.toml:")
+        for pkg in regular_packages:
+            print(f"  - {pkg}")
 
-    run_command(cmd)
+        cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
+            'export PATH="/root/.local/bin:/root/.cargo/bin:$PATH" && \
+             echo "Using uv to install packages while preserving system PyTorch..." && \
+             uv pip install --system {packages_str} 2>&1'"""
+
+        run_command(cmd)
+    
+    print("\nNote: Skipping flash-attn installation as it's pre-installed on RunPod instances.")
+
     print("Python dependencies installed successfully!")
     return True
 

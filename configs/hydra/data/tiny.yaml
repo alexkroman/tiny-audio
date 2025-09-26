@@ -3,6 +3,8 @@ datasets:
   - name: librispeech_asr
     configs:
       - clean
+    audio_column: audio  # LibriSpeech uses 'audio' column
+    text_column: text    # LibriSpeech uses 'text' column
     train_splits:
       - train.100
     eval_splits:

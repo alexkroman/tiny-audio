@@ -22,7 +22,7 @@ adam_beta2: 0.999
 adam_epsilon: 1e-8
 
 # Logging
-logging_dir: ./logs
+logging_dir: ${hydra:runtime.output_dir}/logs
 logging_steps: 100
 logging_first_step: true
 logging_nan_inf_filter: false
@@ -31,7 +31,7 @@ report_to:
 
 # Evaluation
 eval_strategy: steps
-eval_steps: 500
+eval_steps: 1000
 
 # Saving
 save_strategy: steps
@@ -57,7 +57,7 @@ fp16: false
 bf16: true
 dataloader_pin_memory: true
 max_grad_norm: 1.0
-torch_compile: false
+torch_compile: false  # Disabled due to variable sequence lengths causing recompilation
 
 # Misc
 seed: 42
