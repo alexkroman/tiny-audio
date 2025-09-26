@@ -72,7 +72,7 @@ class ASRModelConfig(PretrainedConfig):
 
     def __init__(
         self,
-        decoder_model_name: str = "HuggingFaceTB/SmolLM-1.6B-Instruct",
+        decoder_model_name: str = "HuggingFaceTB/SmolLM3-3B",
         encoder_model_name: str = "facebook/w2v-bert-2.0",
         lora_r: int = 32,
         lora_alpha: int = 64,

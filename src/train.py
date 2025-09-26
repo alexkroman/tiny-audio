@@ -149,23 +149,32 @@ class DataCollator:
             audio_arrays, sampling_rate=self.sample_rate, return_tensors="pt", padding=True
         )
 
-        # 3. Tokenize text with prompt format: "<|audio_chunk|> {text}"
-        texts = [f"<|audio_chunk|> {f['text']}" for f in valid_features]
-        batch = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
+        # 3. Apply chat template for the whole batch at once
+        conversations = [
+            [
+                {"role": "user", "content": "<|audio_chunk|>"},
+                {"role": "assistant", "content": f["text"]},
+            ]
+            for f in valid_features
+        ]
 
-        # 4. Create labels by masking prompt tokens
+        tokenized = self.tokenizer.apply_chat_template(
+            conversations,
+            tokenize=True,
+            return_dict=True,
+            return_assistant_tokens_mask=True,
+            padding=True,
+            return_tensors="pt",
+        )
+
+        batch = {}
+        batch["input_ids"] = tokenized["input_ids"]
+        assistant_masks_padded = tokenized["assistant_masks"]
+
+        # 4. Create labels: mask non-assistant tokens and padding with -100
         labels = batch["input_ids"].clone()
-        chunk_token_mask = labels == self.audio_chunk_token_id
-        for i in range(labels.shape[0]):
-            # Find the position of the audio chunk token and mask everything before and including it
-            try:
-                mask_end_pos = chunk_token_mask[i].nonzero()[0][0].item() + 1
-                labels[i, :mask_end_pos] = -100
-            except IndexError:
-                # If the token is not found (due to truncation), mask the whole sequence
-                labels[i, :] = -100
-
-        labels[labels == self.tokenizer.pad_token_id] = -100  # Also mask padding tokens
+        labels[assistant_masks_padded == 0] = -100
+        labels[labels == self.tokenizer.pad_token_id] = -100
         batch["labels"] = labels
         batch["input_features"] = audio_features.input_features
         return batch
