@@ -362,11 +362,11 @@ class ASRModel(PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         **generate_kwargs,
     ) -> torch.LongTensor:
-        # Use the tokenizer's chat template for proper formatting
+        # Simplified ASR prompt - just the audio token
         messages = [
             {
                 "role": "user",
-                "content": "Please transcribe the following audio recording. <|audio_chunk|>",
+                "content": "<|audio_chunk|>",
             }
         ]
         prompt_str = self.tokenizer.apply_chat_template(

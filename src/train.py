@@ -178,11 +178,11 @@ class DataCollator:
         texts_with_labels = []
         prompt_lengths = []
 
-        # Pre-compute the prompt-only template once
+        # Simplified ASR prompt - just the audio token
         prompt_messages = [
             {
                 "role": "user",
-                "content": "Please transcribe the following audio recording.\n<|audio_chunk|>",
+                "content": "<|audio_chunk|>",
             }
         ]
         prompt_only = self.tokenizer.apply_chat_template(
@@ -194,7 +194,7 @@ class DataCollator:
             messages = [
                 {
                     "role": "user",
-                    "content": "Please transcribe the following audio recording.\n<|audio_chunk|>",
+                    "content": "<|audio_chunk|>",
                 },
                 {"role": "assistant", "content": f["text"]},
             ]
