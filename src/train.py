@@ -1,303 +1,267 @@
 #!/usr/bin/env python3
 """
 🎙️ Simplified ASR Training Script
+Refactored for clarity, modularity, and easier maintenance.
 """
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import hydra
 import torch
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.tensorboard import SummaryWriter
-from transformers import (
-    Trainer,
-    TrainerCallback,
-    TrainingArguments,
-)
+from transformers import Trainer, TrainerCallback, TrainingArguments
 
 from modeling import ASRModel, ASRModelConfig
 
-# --- Text Cleaning Utilities ---
+# --- Constants and Utilities ---
 
-PUNCT_MAP = {"COMMA": ",", "PERIOD": ".", "QUESTIONMARK": "?", "EXCLAMATIONPOINT": "!"}
+# Pre-compile regex for performance and clarity
 TAG_REGEX = re.compile(r"<(SIL|MUSIC|NOISE|OTHER)>")
 PUNCT_REGEX = re.compile(r"\s*<(COMMA|PERIOD|QUESTIONMARK|EXCLAMATIONPOINT)>")
+PUNCT_MAP = {"COMMA": ",", "PERIOD": ".", "QUESTIONMARK": "?", "EXCLAMATIONPOINT": "!"}
 
 
 def clean_gigaspeech_text(text: str) -> Optional[str]:
-    """Cleans transcription text from the GigaSpeech dataset."""
+    """
+    Cleans and normalizes transcription text from the GigaSpeech dataset.
+    Removes special tags and normalizes punctuation.
+    """
     if TAG_REGEX.search(text):
         cleaned = TAG_REGEX.sub("", text).strip()
+        # Return None for empty or very short transcriptions after cleaning
         if not cleaned or len(cleaned) < 3:
             return None
-
-    text = PUNCT_REGEX.sub(lambda m: PUNCT_MAP[m.group(1)], text)
+    text = PUNCT_REGEX.sub(lambda m: PUNCT_MAP.get(m.group(1), ""), text)
     text = TAG_REGEX.sub(" ", text)
+    # Remove extra whitespace
     return " ".join(text.split()).strip() or None
 
 
-# --- Data Loading ---
+# --- Data Handling ---
 
 
-def _load_and_prepare_dataset(
-    cfg: DictConfig, split: str, cache_dir: str, sample_rate: int
-) -> Dataset:
-    """Loads and prepares a single dataset split based on its configuration."""
-    # Handle different dataset structures
-    if cfg.get("path"):
-        # For datasets with explicit path (e.g., GigaSpeech)
+class DatasetLoader:
+    """Encapsulates all logic for loading and preparing datasets."""
+
+    def __init__(self, config: DictConfig):
+        self.config = config.data
+        self.sample_rate = self.config.sample_rate
+        self.cache_dir = self.config.dataset_cache_dir
+
+    def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
+        """Loads, cleans, and standardizes a single dataset split."""
         ds = load_dataset(
-            cfg.path,
-            name=cfg.get("name"),
+            dataset_cfg.get("path", dataset_cfg.name),
+            name=dataset_cfg.get("name"),
             split=split,
             streaming=True,
-            cache_dir=cache_dir,
-            trust_remote_code=True,
-        )
-    else:
-        # For datasets identified by name (e.g., librispeech_asr)
-        # Use the first config if multiple configs are provided
-        config_name = cfg.configs[0] if hasattr(cfg, "configs") and cfg.configs else None
-        ds = load_dataset(
-            cfg.name,
-            name=config_name,
-            split=split,
-            streaming=True,
-            cache_dir=cache_dir,
+            cache_dir=self.cache_dir,
             trust_remote_code=True,
         )
 
-    # Handle text column cleaning
-    text_column = cfg.get("text_column", "text")
+        # Apply text cleaning if specified
+        text_column = dataset_cfg.get("text_column", "text")
+        if dataset_cfg.get("cleaner") == "gigaspeech":
+            ds = ds.map(lambda x: {text_column: clean_gigaspeech_text(x[text_column])})
+            ds = ds.filter(lambda x: x[text_column] is not None)
 
-    if cfg.get("cleaner") == "gigaspeech":
-        ds = ds.filter(lambda x: clean_gigaspeech_text(x.get(text_column, "")) is not None)
-        ds = ds.map(lambda x: {text_column: clean_gigaspeech_text(x[text_column])})
+        # Standardize column names to 'audio' and 'text'
+        if text_column != "text" and text_column in ds.column_names:
+            ds = ds.rename_column(text_column, "text")
 
-    # Handle audio column (could be "audio" or "wav" or other)
-    audio_column = cfg.get("audio_column", "audio")
+        audio_column = dataset_cfg.get("audio_column", "audio")
+        if audio_column != "audio" and audio_column in ds.column_names:
+            ds = ds.rename_column(audio_column, "audio")
 
-    # Ensure we have a 'text' column
-    if "text" not in ds.column_names and text_column in ds.column_names:
-        ds = ds.rename_column(text_column, "text")
+        # Cast audio column to the correct sample rate
+        return ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-    # Ensure we have an 'audio' column (normalize different audio column names)
-    if "audio" not in ds.column_names and audio_column in ds.column_names:
-        ds = ds.rename_column(audio_column, "audio")
+    def load(self) -> tuple[Dataset, Dataset]:
+        """Loads and interleaves all configured training and validation datasets."""
+        train_datasets, val_datasets = [], []
+        for d_cfg in self.config.datasets:
+            # Handle multiple train/eval splits per dataset
+            train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
+            eval_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
 
-    return ds.cast_column("audio", Audio(sampling_rate=sample_rate))
+            # For datasets with multiple configs/splits, zip them together
+            if "configs" in d_cfg:
+                configs = d_cfg.configs
+                for config, train_split, eval_split in zip(configs, train_splits, eval_splits):
+                    # Create a modified config for this specific split
+                    split_cfg = OmegaConf.create(d_cfg)
+                    split_cfg.name = config
+                    train_datasets.append(self._prepare_split(split_cfg, train_split))
+                    val_datasets.append(self._prepare_split(split_cfg, eval_split))
+            else:
+                # Single config dataset - use all splits
+                for train_split in train_splits:
+                    train_datasets.append(self._prepare_split(d_cfg, train_split))
+                for eval_split in eval_splits:
+                    val_datasets.append(self._prepare_split(d_cfg, eval_split))
 
-
-def load_all_datasets(config: DictConfig) -> Tuple[Dataset, Dataset]:
-    """Loads and interleaves all specified training and validation datasets."""
-    train_datasets, val_datasets = [], []
-
-    for dataset_cfg in config.data.datasets:
-        # Handle both singular and plural forms, take first split if multiple
-        train_split = (
-            dataset_cfg.train_splits[0]
-            if hasattr(dataset_cfg, "train_splits")
-            else dataset_cfg.train_split
+        # Interleave datasets if more than one is provided
+        train_ds = (
+            interleave_datasets(train_datasets) if len(train_datasets) > 1 else train_datasets[0]
         )
-        eval_split = (
-            dataset_cfg.eval_splits[0]
-            if hasattr(dataset_cfg, "eval_splits")
-            else dataset_cfg.eval_split
-        )
+        val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
 
-        train_datasets.append(
-            _load_and_prepare_dataset(
-                dataset_cfg,
-                train_split,
-                config.data.dataset_cache_dir,
-                config.data.sample_rate,
-            )
-        )
-        val_datasets.append(
-            _load_and_prepare_dataset(
-                dataset_cfg,
-                eval_split,
-                config.data.dataset_cache_dir,
-                config.data.sample_rate,
-            )
-        )
+        # Apply sample limits if specified
+        if self.config.max_train_samples:
+            train_ds = train_ds.take(self.config.max_train_samples)
+        if self.config.max_eval_samples:
+            val_ds = val_ds.take(self.config.max_eval_samples)
 
-    train_dataset = (
-        interleave_datasets(train_datasets) if len(train_datasets) > 1 else train_datasets[0]
-    )
-    val_dataset = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
-
-    if config.data.max_train_samples:
-        train_dataset = train_dataset.take(config.data.max_train_samples)
-    if config.data.max_eval_samples:
-        val_dataset = val_dataset.take(config.data.max_eval_samples)
-
-    return train_dataset, val_dataset
-
-
-# --- Data Collator ---
+        return train_ds, val_ds
 
 
 class DataCollator:
+    """Prepares batches of audio and text data for model training."""
+
     def __init__(self, tokenizer: Any, feature_extractor: Any, config: DictConfig):
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.sample_rate = config.data.sample_rate
         self.max_audio_seconds = config.data.max_audio_seconds
         self.audio_chunk_token_id = tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
+
         if self.audio_chunk_token_id == tokenizer.unk_token_id:
-            raise ValueError("'<|audio_chunk|>' token not found in tokenizer vocabulary!")
+            raise ValueError("'<|audio_chunk|>' token is missing from the tokenizer's vocabulary!")
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        # 1. Filter out invalid samples (all data should be normalized by _load_and_prepare_dataset)
-        valid_features = []
-        for f in features:
-            # Both "text" and "audio" columns should be normalized by dataset loading
-            text = f.get("text", "").strip()
-            audio_data = f.get("audio")
-
-            # Skip if no audio data or text
-            if not audio_data or not text:
-                continue
-
-            # Skip if audio is too long
-            audio_array = audio_data.get("array") if isinstance(audio_data, dict) else audio_data
-            if audio_array is None or len(audio_array) == 0:
-                continue
-
-            duration = len(audio_array) / self.sample_rate
-            if duration <= self.max_audio_seconds:
-                valid_features.append(f)
-
+        # 1. Filter out invalid samples
+        valid_features = [
+            f
+            for f in features
+            if f.get("audio")
+            and f.get("text")
+            and (len(f["audio"]["array"]) / self.sample_rate) <= self.max_audio_seconds
+        ]
         if not valid_features:
-            return {}  # Trainer handles empty batches
+            return {}  # Trainer can handle empty batches
 
         # 2. Extract audio features
         audio_arrays = [f["audio"]["array"] for f in valid_features]
-        # SeamlessM4TFeatureExtractor processes audio arrays
         audio_features = self.feature_extractor(
-            audio_arrays,
-            sampling_rate=self.sample_rate,
-            return_tensors="pt",
-            padding=True,  # Use automatic padding
+            audio_arrays, sampling_rate=self.sample_rate, return_tensors="pt", padding=True
         )
 
-        # 3. Tokenize text with prompt format: <|audio_chunk|> {text}
+        # 3. Tokenize text with prompt format: "<|audio_chunk|> {text}"
         texts = [f"<|audio_chunk|> {f['text']}" for f in valid_features]
         batch = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
 
-        # 4. Create labels: mask tokens up to and including <|audio_chunk|>
+        # 4. Create labels by masking prompt tokens
         labels = batch["input_ids"].clone()
+        chunk_token_mask = labels == self.audio_chunk_token_id
         for i in range(labels.shape[0]):
-            # Find the first occurrence of the audio chunk token
-            chunk_token_indices = (labels[i] == self.audio_chunk_token_id).nonzero(as_tuple=True)[0]
-            if len(chunk_token_indices) > 0:
-                mask_end_pos = chunk_token_indices[0] + 1
+            # Find the position of the audio chunk token and mask everything before and including it
+            try:
+                mask_end_pos = chunk_token_mask[i].nonzero()[0][0].item() + 1
                 labels[i, :mask_end_pos] = -100
+            except IndexError:
+                # If the token is not found (due to truncation), mask the whole sequence
+                labels[i, :] = -100
 
-        labels[labels == self.tokenizer.pad_token_id] = -100  # Mask padding tokens
+        labels[labels == self.tokenizer.pad_token_id] = -100  # Also mask padding tokens
         batch["labels"] = labels
-
-        # 5. Add audio features to batch
         batch["input_features"] = audio_features.input_features
         return batch
 
 
-# --- Evaluation & Logging ---
-
-
-def evaluate_wer(model, tokenizer, feature_extractor, eval_samples: List[Dict]) -> float:
-    """Calculates Word Error Rate (WER) on a list of evaluation samples."""
-    import evaluate
-
-    device = model.device
-    predictions, references = [], []
-
-    with torch.no_grad():
-        for sample in eval_samples:
-            inputs = feature_extractor(
-                sample["audio"]["array"],
-                sampling_rate=16000,
-                return_tensors="pt",
-                padding=True,  # Use automatic padding for evaluation
-            )
-            generated_ids = model.generate(
-                input_features=inputs.input_features.to(device),
-                max_new_tokens=100,
-            )
-            predictions.append(tokenizer.decode(generated_ids[0], skip_special_tokens=True))
-            references.append(sample.get("text", ""))
-
-    wer_metric = evaluate.load("wer")
-    return wer_metric.compute(predictions=predictions, references=references)
+# --- Evaluation and Logging ---
 
 
 class PredictionLoggingCallback(TrainerCallback):
+    """Logs WER and sample predictions during training."""
+
     def __init__(
         self,
         eval_dataset: Dataset,
-        tokenizer,
-        feature_extractor,
-        num_samples=10,
-        log_every_n_steps=500,
+        tokenizer: Any,
+        feature_extractor: Any,
+        num_samples: int = 10,
+        log_every_n_steps: int = 500,
     ):
+        import evaluate  # Lazy import to avoid dependency if not used
+
         self.eval_samples = list(eval_dataset.take(num_samples))
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.log_every_n_steps = log_every_n_steps
-        self.num_samples = num_samples
+        self.wer_metric = evaluate.load("wer")
 
     def on_step_end(self, args: TrainingArguments, state, control, model=None, **kwargs):
         if state.global_step > 0 and state.global_step % self.log_every_n_steps == 0:
-            print(f"\n📊 Step {state.global_step}: Generating predictions for logging...")
-            wer = evaluate_wer(model, self.tokenizer, self.feature_extractor, self.eval_samples)
+            print(f"\n--- Step {state.global_step}: Running Prediction Log ---")
+            device = model.device
+            predictions, references = [], []
 
+            with torch.no_grad():
+                for sample in self.eval_samples:
+                    inputs = self.feature_extractor(
+                        sample["audio"]["array"],
+                        sampling_rate=self.sample_rate,
+                        return_tensors="pt",
+                    )
+                    generated_ids = model.generate(
+                        input_features=inputs.input_features.to(device), max_new_tokens=100
+                    )
+                    predictions.append(
+                        self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                    )
+                    references.append(sample.get("text", ""))
+
+            wer = self.wer_metric.compute(predictions=predictions, references=references)
+
+            # Log to TensorBoard
             with SummaryWriter(log_dir=args.logging_dir) as writer:
                 writer.add_scalar("eval/wer_on_samples", wer, state.global_step)
 
-            print(f"📈 WER on {self.num_samples} samples: {wer:.2%}\n")
-            model.train()
+            print(f"Prediction: '{predictions[0]}'")
+            print(f"Reference:  '{references[0]}'")
+            print(f"📈 WER on {len(self.eval_samples)} samples: {wer:.2%}\n")
+            model.train()  # Ensure model is back in training mode
 
 
-# --- Main Training Function ---
+# --- Main Training ---
 
 
 @hydra.main(version_base=None, config_path="../configs/hydra", config_name="config")
 def main(cfg: DictConfig) -> None:
-    """Main training function driven by Hydra configuration."""
-    print("--- Configuration ---\n" + OmegaConf.to_yaml(cfg))
+    """Main function to configure and run the ASR model training."""
+    print("--- 🚀 Initializing ASR Training ---")
+    print(OmegaConf.to_yaml(cfg))
 
-    # 1. Initialize Model, Tokenizer, and Feature Extractor
+    # 1. Initialize Model from Configuration
+    lora_config = {}
+    if cfg.model.use_lora:
+        lora_config = {
+            "lora_r": cfg.model.lora_r,
+            "lora_alpha": cfg.model.lora_alpha,
+            "lora_dropout": cfg.model.lora_dropout,
+            "lora_target_modules": list(cfg.model.lora_target_modules),
+        }
+
     asr_config = ASRModelConfig(
         decoder_model_name=cfg.model.decoder_model_name,
         encoder_model_name="facebook/w2v-bert-2.0",
-        lora_r=cfg.model.lora_r if cfg.model.use_lora else 0,
-        lora_alpha=cfg.model.lora_alpha if cfg.model.use_lora else 0,
-        lora_dropout=cfg.model.lora_dropout if cfg.model.use_lora else 0.0,
-        lora_target_modules=list(cfg.model.lora_target_modules) if cfg.model.use_lora else [],
+        **lora_config,
     )
     model = ASRModel(asr_config)
+    print("✅ Model, Tokenizer, and Feature Extractor loaded.")
 
-    # 2. Load Datasets
-    train_dataset, val_dataset = load_all_datasets(cfg)
+    # 2. Load and Prepare Datasets
+    data_loader = DatasetLoader(cfg)
+    train_dataset, val_dataset = data_loader.load()
+    print("✅ Datasets configured and ready.")
 
     # 3. Configure Training Arguments
-    training_args_dict = OmegaConf.to_container(cfg.training, resolve=True)
-    training_args = TrainingArguments(**training_args_dict)
+    training_args = TrainingArguments(**OmegaConf.to_container(cfg.training, resolve=True))
 
-    # 4. Set up Callbacks
-    callbacks = [
-        PredictionLoggingCallback(
-            eval_dataset=val_dataset,
-            tokenizer=model.tokenizer,
-            feature_extractor=model.feature_extractor,
-            log_every_n_steps=cfg.log_predictions_every_n_steps,
-        )
-    ]
-
-    # 5. Initialize Trainer
+    # 4. Initialize Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -308,12 +272,22 @@ def main(cfg: DictConfig) -> None:
             feature_extractor=model.feature_extractor,
             config=cfg,
         ),
-        callbacks=callbacks,
+        callbacks=[
+            PredictionLoggingCallback(
+                eval_dataset=val_dataset,
+                tokenizer=model.tokenizer,
+                feature_extractor=model.feature_extractor,
+                log_every_n_steps=cfg.log_predictions_every_n_steps,
+            )
+        ],
     )
 
-    # 6. Start Training
+    # 5. Start Training
+    print("--- 🏋️ Starting Training ---")
     trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
+    print("--- 🎉 Training Complete ---")
     trainer.save_model()
+    print(f"💾 Model saved to {training_args.output_dir}")
 
 
 if __name__ == "__main__":
