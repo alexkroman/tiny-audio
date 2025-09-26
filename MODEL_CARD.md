@@ -9,22 +9,24 @@ language:
 metrics:
 - wer
 base_model:
-- openai/whisper-small
+- facebook/w2v-bert-2.0
 - HuggingFaceTB/SmolLM2-360M-Instruct
+- Qwen/Qwen3-1.7B
 pipeline_tag: automatic-speech-recognition
 tags:
-- whisper
+- w2v-bert
 - asr
 - speech-recognition
 - lora
+- multilingual
 model-index:
 - name: tiny-audio
   results: []
 ---
 
-# Tiny Audio - Whisper-SmolLM2 ASR Model
+# Tiny Audio - W2V-BERT-LM ASR Model
 
-A lightweight ASR model combining Whisper-small encoder with SmolLM2 decoder, trained with LoRA for parameter-efficient fine-tuning (~300 lines of code).
+A lightweight ASR model combining W2V-BERT 2.0 encoder with modern language model decoders (SmolLM2 or Qwen3), trained with LoRA for parameter-efficient fine-tuning (~300 lines of code).
 
 ## Quick Start
 
@@ -51,15 +53,19 @@ print(transcription)
 
 ## Architecture
 
-- **Encoder**: Frozen Whisper-small (39M params) 
-- **Decoder**: SmolLM2-360M-Instruct with LoRA adapters
-- **Audio Projector**: Custom architecture with:
-  - 2x temporal downsampling (AvgPool1d)
-  - RMSNorm + Linear projection
-  - SwiGLU block with residual connection (8/3 expansion)
-- **LoRA Config**: rank=16, alpha=32, targets=[q_proj, v_proj, k_proj, o_proj]
-- **Trainable Parameters**: 4.94M (only 1.2% of total)
-- **Total**: ~400M parameters
+- **Encoder**: Frozen W2V-BERT 2.0 (600M params, trained on 4.5M hours across 143+ languages)
+- **Decoder**: SmolLM2-360M or Qwen3-1.7B with LoRA adapters
+- **Audio Projector**: Advanced architecture with:
+  - AttentionPoolingHead with learnable probes (128 tokens)
+  - Pre-norm transformer architecture with dual RMSNorm layers
+  - SwiGLU activation with proper residual connections
+  - Positional embeddings for temporal information
+- **LoRA Config**: 
+  - Small model: rank=8, alpha=16
+  - Large model: rank=16, alpha=32
+  - Target modules: [q_proj, k_proj, v_proj, out_proj]
+- **Trainable Parameters**: ~2% of total (varies by model size)
+- **Total**: ~960M (small) or ~2.3B (large) parameters
 
 ## Training
 

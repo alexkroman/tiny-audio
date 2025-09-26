@@ -14,8 +14,8 @@ from transformers import (
     AutoTokenizer,
     PretrainedConfig,
     PreTrainedModel,
-    WhisperFeatureExtractor,
-    WhisperModel,
+    SeamlessM4TFeatureExtractor,
+    Wav2Vec2BertModel,
 )
 from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 
@@ -43,20 +43,27 @@ class AttentionPoolingHead(nn.Module):
         super().__init__()
         self.probe = nn.Parameter(torch.randn(1, num_probe_tokens, hidden_dim))
         self.attention = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
-        self.layernorm = RMSNorm(hidden_dim, eps=1e-6)
+        self.layernorm1 = RMSNorm(hidden_dim, eps=1e-6)
+        self.layernorm2 = RMSNorm(hidden_dim, eps=1e-6)
         self.mlp = SwiGLU(hidden_dim)
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         batch_size = hidden_state.shape[0]
         probe = self.probe.repeat(batch_size, 1, 1)
 
-        # Probe attends to the audio features to "ask questions" and summarize them
-        pooled_output, _ = self.attention(query=probe, key=hidden_state, value=hidden_state)
+        # Pre-norm for attention
+        attn_input = self.layernorm1(probe)  # Norm the query
+        pooled_output, _ = self.attention(query=attn_input, key=hidden_state, value=hidden_state)
 
-        # Residual connection + MLP
-        residual = pooled_output
-        pooled_output = self.layernorm(pooled_output)
-        return residual + self.mlp(pooled_output)
+        # First residual connection
+        residual1 = probe + pooled_output
+
+        # Pre-norm for MLP
+        mlp_input = self.layernorm2(residual1)
+        mlp_output = self.mlp(mlp_input)
+
+        # Second residual connection
+        return residual1 + mlp_output
 
 
 # --- Configuration Class ---
@@ -68,7 +75,7 @@ class ASRModelConfig(PretrainedConfig):
     def __init__(
         self,
         decoder_model_name: str = "HuggingFaceTB/SmolLM-1.6B-Instruct",
-        encoder_model_name: str = "openai/whisper-small",
+        encoder_model_name: str = "facebook/w2v-bert-2.0",
         lora_r: int = 32,
         lora_alpha: int = 64,
         lora_target_modules: Optional[list[str]] = None,
@@ -103,8 +110,8 @@ class ASRModel(PreTrainedModel):
             config = ASRModelConfig(**config)
         super().__init__(config)
 
-        # --- 1. Encoder (Whisper) Setup ---
-        self.encoder = WhisperModel.from_pretrained(config.encoder_model_name)
+        # --- 1. Encoder (W2V-BERT) Setup ---
+        self.encoder = Wav2Vec2BertModel.from_pretrained(config.encoder_model_name)
         self.encoder.requires_grad_(False)  # Freeze the audio encoder
 
         # --- 2. Decoder (LLM) Setup ---
@@ -121,7 +128,9 @@ class ASRModel(PreTrainedModel):
         self._setup_lora()
 
         # --- 6. Feature Extractor & Final Config Sync ---
-        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
+        self.feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained(
+            config.encoder_model_name
+        )
         self._sync_configs()
 
     def _setup_decoder(self):
@@ -135,13 +144,13 @@ class ASRModel(PreTrainedModel):
         self.decoder = AutoModelForCausalLM.from_pretrained(
             self.config.decoder_model_name, **decoder_kwargs
         )
-        
+
         # Initialize generation config from decoder
         self.generation_config = self.decoder.generation_config
 
     def _setup_projector(self):
         """Initializes layers to project and compress audio features."""
-        audio_dim = self.encoder.config.d_model
+        audio_dim = self.encoder.config.hidden_size  # W2V-BERT uses hidden_size instead of d_model
         text_dim = self.decoder.config.hidden_size
         num_probe_tokens = 128
 
@@ -157,9 +166,7 @@ class ASRModel(PreTrainedModel):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        num_added = self.tokenizer.add_special_tokens(
-            {"additional_special_tokens": ["<|audio_chunk|>"]}
-        )
+        self.tokenizer.add_special_tokens({"additional_special_tokens": ["<|audio_chunk|>"]})
 
         self.decoder.resize_token_embeddings(len(self.tokenizer))
         self.audio_chunk_id = self.tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
@@ -194,9 +201,8 @@ class ASRModel(PreTrainedModel):
     def _encode_audio(self, input_features: torch.Tensor) -> torch.Tensor:
         """Encodes audio features and projects them into the text embedding space."""
         with torch.no_grad():
-            audio_features = self.encoder.encoder(
-                input_features.to(self.encoder.dtype)
-            ).last_hidden_state
+            # W2V-BERT expects input_values instead of input_features
+            audio_features = self.encoder(input_features.to(self.encoder.dtype)).last_hidden_state
 
         audio_features = self.audio_norm(audio_features)
         projected_features = self.audio_to_inter(audio_features)
@@ -226,44 +232,70 @@ class ASRModel(PreTrainedModel):
         text_embeds = self.decoder.get_input_embeddings()(input_ids)
         audio_embeds = self._encode_audio(input_features)
 
-        # Step 2: Identify where to splice the audio embeddings
+        # Step 2: Find the indices of the audio chunk token
         audio_chunk_mask = input_ids == self.audio_chunk_id
         if not torch.any(audio_chunk_mask):
             raise ValueError("Training requires '<|audio_chunk|>' token in `input_ids`.")
 
-        # Step 3: Combine text and audio embeddings in a vectorized way
-        batch_size, seq_len, embed_dim = text_embeds.shape
+        # batch_indices will be [0, 1, 2, ...], token_indices are the positions of the chunk token
+        batch_indices, token_indices = torch.where(audio_chunk_mask)
+
+        # For simplicity, this vectorized version assumes one chunk token per example.
+        if batch_indices.size(0) != input_ids.size(0):
+            raise ValueError(
+                "All examples in the batch must contain exactly one '<|audio_chunk|>' token."
+            )
+
+        # Step 3: Vectorized Splicing
+        # This is more memory-efficient than creating a new large tensor upfront.
+        # We create a list of tensors for each example and then stack them.
+        final_embeds = []
+        final_labels = []
         audio_len = audio_embeds.shape[1]
 
-        # Create new tensors to hold the combined sequence
-        new_len = seq_len - 1 + audio_len
-        inputs_embeds = torch.zeros(
-            batch_size, new_len, embed_dim, device=text_embeds.device, dtype=text_embeds.dtype
-        )
-        new_labels = torch.full(
-            (batch_size, new_len), -100, device=labels.device, dtype=labels.dtype
-        )
+        for i in range(input_ids.size(0)):
+            chunk_idx = token_indices[i]
 
-        for i in range(batch_size):
-            chunk_idx = int(torch.where(audio_chunk_mask[i])[0].item())
+            # Combine embeddings for this single example
+            combined_embed = torch.cat(
+                [
+                    text_embeds[i, :chunk_idx],
+                    audio_embeds[i],
+                    text_embeds[i, chunk_idx + 1 :],
+                ],
+                dim=0,
+            )
+            final_embeds.append(combined_embed)
 
-            # Before audio chunk
-            inputs_embeds[i, :chunk_idx] = text_embeds[i, :chunk_idx]
-            new_labels[i, :chunk_idx] = labels[i, :chunk_idx]
+            # Combine labels for this single example
+            # Labels for audio are implicitly -100
+            if labels is not None:
+                audio_labels = torch.full(
+                    (audio_len,), -100, device=labels.device, dtype=labels.dtype
+                )
+                combined_label = torch.cat(
+                    [
+                        labels[i, :chunk_idx],
+                        audio_labels,
+                        labels[i, chunk_idx + 1 :],
+                    ],
+                    dim=0,
+                )
+                final_labels.append(combined_label)
 
-            # The audio chunk itself
-            start, end = chunk_idx, chunk_idx + audio_len
-            inputs_embeds[i, start:end] = audio_embeds[i]
-            # Labels for audio part are ignored (-100)
+        # Pad the sequences to the max length in the batch
+        inputs_embeds = torch.nn.utils.rnn.pad_sequence(final_embeds, batch_first=True)
 
-            # After audio chunk
-            new_start = end
-            old_start = chunk_idx + 1
-            inputs_embeds[i, new_start:] = text_embeds[i, old_start:]
-            new_labels[i, new_start:] = labels[i, old_start:]
+        if labels is not None:
+            new_labels = torch.nn.utils.rnn.pad_sequence(
+                final_labels, batch_first=True, padding_value=-100
+            )
+        else:
+            new_labels = None
 
-        # Step 4: Create a new attention mask for the combined sequence
-        new_attention_mask = (new_labels != -100).long()
+        # Step 4: Create a new attention mask
+        # A 1 for every real token (including audio), a 0 for padding.
+        new_attention_mask = (inputs_embeds.sum(dim=-1) != 0).long()
 
         return self.decoder(
             inputs_embeds=inputs_embeds,
@@ -274,7 +306,17 @@ class ASRModel(PreTrainedModel):
 
     @torch.no_grad()
     def generate(self, input_features: torch.Tensor, **generate_kwargs) -> torch.LongTensor:
-        """Generates text transcription from audio features."""
+        """Generates text transcription from audio features.
+
+        Note: This method only supports single audio input (batch size 1).
+        For batch processing, use forward() method with appropriate batching logic.
+        """
+        # Ensure single input
+        if input_features.dim() == 2:
+            input_features = input_features.unsqueeze(0)
+        if input_features.size(0) != 1:
+            raise ValueError("generate() only supports single audio input (batch size 1)")
+
         # Create a standard prompt template for ASR
         prompt_str = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": "<|audio_chunk|>"}],
@@ -282,7 +324,12 @@ class ASRModel(PreTrainedModel):
             add_generation_prompt=True,
         )
         prompt_ids = self.tokenizer(prompt_str, return_tensors="pt").input_ids.to(self.device)
-        chunk_idx = int(torch.where(prompt_ids[0] == self.audio_chunk_id)[0].item())
+
+        # Find audio chunk position
+        audio_chunk_positions = torch.where(prompt_ids[0] == self.audio_chunk_id)[0]
+        if len(audio_chunk_positions) == 0:
+            raise ValueError("No audio chunk token found in prompt")
+        chunk_idx = int(audio_chunk_positions[0].item())
 
         # Get embeddings for the prompt and the audio
         prompt_embeds = self.decoder.get_input_embeddings()(prompt_ids)
@@ -291,9 +338,9 @@ class ASRModel(PreTrainedModel):
         # Splice audio embeddings into the prompt embeddings
         inputs_embeds = torch.cat(
             [
-                prompt_embeds[:, :chunk_idx],
+                prompt_embeds[0, :chunk_idx].unsqueeze(0),
                 audio_embeds,
-                prompt_embeds[:, chunk_idx + 1 :],
+                prompt_embeds[0, chunk_idx + 1 :].unsqueeze(0),
             ],
             dim=1,
         )
@@ -313,7 +360,11 @@ class ASRModel(PreTrainedModel):
         sampling_rate: int = 16000,
         **generate_kwargs,
     ) -> str:
-        """Convenience method to transcribe an audio file or array."""
+        """Convenience method to transcribe an audio file or array.
+
+        Note: This method only supports single audio input.
+        For batch processing, implement your own batching logic using forward().
+        """
         if isinstance(audio, str):
             import librosa
 
@@ -330,7 +381,6 @@ class ASRModel(PreTrainedModel):
         super().save_pretrained(save_directory, **kwargs)
         self.feature_extractor.save_pretrained(save_directory)
         self.tokenizer.save_pretrained(save_directory)
-
 
 
 # Register the custom model with AutoClasses for easy loading

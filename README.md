@@ -4,8 +4,8 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/release/python-390/)
 [![Hugging Face Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 
-A minimal (~300 line) speech recognition model that combines Whisper's audio
-understanding with Hugging Face's SmolLM2 for text generation. This project is
+A minimal (~300 line) speech recognition model that combines W2V-BERT 2.0's multilingual audio
+understanding with modern language models (SmolLM2 or Qwen3) for text generation. This project is
 designed to be a hands-on guide to understanding modern ASR systems by building
 and training your own.
 
@@ -17,8 +17,8 @@ and training your own.
 
 - **Minimalist Core**: The core model is just 300 lines of readable Python,
   making it easy to understand completely.
-- **Modern Architecture**: Combines a frozen Whisper encoder with a SmolLM2
-  decoder using LoRA adapters and a custom projection layer.
+- **Modern Architecture**: Combines a frozen W2V-BERT 2.0 encoder with SmolLM2
+  or Qwen3 decoders using LoRA adapters and an attention-based projection layer.
 - **Laptop-Friendly**: Train on your local machine (including M1/M2 Macs) or
   scale up to powerful GPUs.
 - **Real-World Datasets**: Supports training on standard ASR datasets like
@@ -143,17 +143,17 @@ Deploy your demo as a public Hugging Face Space for easy sharing:
 
 The model consists of three main components:
 
-1. **Whisper Encoder**: A frozen `whisper-small` model that extracts audio
-   features. (39M parameters, not trained)
-1. **Audio Projector**: A modern projection architecture that maps audio features
-   to the text embedding space with 2x downsampling, normalization, and a
-   SwiGLU block with residual connections.
-1. **SmolLM2 Decoder**: An efficient language model from Hugging Face with LoRA
-   adapters for parameter-efficient fine-tuning. (360M or 1.7B parameters, ~2%
-   trained with LoRA)
+1. **W2V-BERT 2.0 Encoder**: A frozen encoder trained on 4.5M hours of audio
+   across 143+ languages. (600M parameters, not trained)
+1. **Audio Projector**: An attention-based projection architecture featuring:
+   - AttentionPoolingHead with learnable probes for feature compression
+   - Pre-norm transformer architecture with dual layer normalization
+   - SwiGLU activation with proper residual connections
+1. **Language Model Decoder**: SmolLM2 (360M) or Qwen3 (1.7B) with LoRA
+   adapters for parameter-efficient fine-tuning (~2% of parameters trained)
 
 ```
-Audio Input → [Whisper Encoder] → [Audio Projector] → [SmolLM2 + LoRA] → Text Output
+Audio Input → [W2V-BERT Encoder] → [Audio Projector] → [LM Decoder + LoRA] → Text Output
 ```
 
 ## Configuration

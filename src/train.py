@@ -59,7 +59,7 @@ def _load_and_prepare_dataset(
     else:
         # For datasets identified by name (e.g., librispeech_asr)
         # Use the first config if multiple configs are provided
-        config_name = cfg.configs[0] if hasattr(cfg, 'configs') and cfg.configs else None
+        config_name = cfg.configs[0] if hasattr(cfg, "configs") and cfg.configs else None
         ds = load_dataset(
             cfg.name,
             name=config_name,
@@ -71,18 +71,18 @@ def _load_and_prepare_dataset(
 
     # Handle text column cleaning
     text_column = cfg.get("text_column", "text")
-    
+
     if cfg.get("cleaner") == "gigaspeech":
         ds = ds.filter(lambda x: clean_gigaspeech_text(x.get(text_column, "")) is not None)
         ds = ds.map(lambda x: {text_column: clean_gigaspeech_text(x[text_column])})
 
     # Handle audio column (could be "audio" or "wav" or other)
     audio_column = cfg.get("audio_column", "audio")
-    
+
     # Ensure we have a 'text' column
     if "text" not in ds.column_names and text_column in ds.column_names:
         ds = ds.rename_column(text_column, "text")
-        
+
     # Ensure we have an 'audio' column (normalize different audio column names)
     if "audio" not in ds.column_names and audio_column in ds.column_names:
         ds = ds.rename_column(audio_column, "audio")
@@ -96,9 +96,17 @@ def load_all_datasets(config: DictConfig) -> Tuple[Dataset, Dataset]:
 
     for dataset_cfg in config.data.datasets:
         # Handle both singular and plural forms, take first split if multiple
-        train_split = dataset_cfg.train_splits[0] if hasattr(dataset_cfg, 'train_splits') else dataset_cfg.train_split
-        eval_split = dataset_cfg.eval_splits[0] if hasattr(dataset_cfg, 'eval_splits') else dataset_cfg.eval_split
-        
+        train_split = (
+            dataset_cfg.train_splits[0]
+            if hasattr(dataset_cfg, "train_splits")
+            else dataset_cfg.train_split
+        )
+        eval_split = (
+            dataset_cfg.eval_splits[0]
+            if hasattr(dataset_cfg, "eval_splits")
+            else dataset_cfg.eval_split
+        )
+
         train_datasets.append(
             _load_and_prepare_dataset(
                 dataset_cfg,
@@ -149,16 +157,16 @@ class DataCollator:
             # Both "text" and "audio" columns should be normalized by dataset loading
             text = f.get("text", "").strip()
             audio_data = f.get("audio")
-            
+
             # Skip if no audio data or text
             if not audio_data or not text:
                 continue
-                
+
             # Skip if audio is too long
             audio_array = audio_data.get("array") if isinstance(audio_data, dict) else audio_data
             if audio_array is None or len(audio_array) == 0:
                 continue
-                
+
             duration = len(audio_array) / self.sample_rate
             if duration <= self.max_audio_seconds:
                 valid_features.append(f)
@@ -168,8 +176,12 @@ class DataCollator:
 
         # 2. Extract audio features
         audio_arrays = [f["audio"]["array"] for f in valid_features]
+        # SeamlessM4TFeatureExtractor processes audio arrays
         audio_features = self.feature_extractor(
-            audio_arrays, sampling_rate=self.sample_rate, return_tensors="pt", padding="max_length"
+            audio_arrays,
+            sampling_rate=self.sample_rate,
+            return_tensors="pt",
+            padding=True,  # Use automatic padding
         )
 
         # 3. Tokenize text with prompt format: <|audio_chunk|> {text}
@@ -206,7 +218,10 @@ def evaluate_wer(model, tokenizer, feature_extractor, eval_samples: List[Dict]) 
     with torch.no_grad():
         for sample in eval_samples:
             inputs = feature_extractor(
-                sample["audio"]["array"], sampling_rate=16000, return_tensors="pt", padding="max_length"
+                sample["audio"]["array"],
+                sampling_rate=16000,
+                return_tensors="pt",
+                padding=True,  # Use automatic padding for evaluation
             )
             generated_ids = model.generate(
                 input_features=inputs.input_features.to(device),
@@ -257,7 +272,7 @@ def main(cfg: DictConfig) -> None:
     # 1. Initialize Model, Tokenizer, and Feature Extractor
     asr_config = ASRModelConfig(
         decoder_model_name=cfg.model.decoder_model_name,
-        encoder_model_name="openai/whisper-small",
+        encoder_model_name="facebook/w2v-bert-2.0",
         lora_r=cfg.model.lora_r if cfg.model.use_lora else 0,
         lora_alpha=cfg.model.lora_alpha if cfg.model.use_lora else 0,
         lora_dropout=cfg.model.lora_dropout if cfg.model.use_lora else 0.0,

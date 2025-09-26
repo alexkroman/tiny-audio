@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an Automatic Speech Recognition (ASR) training pipeline that combines a Whisper encoder with a SmolLM2 decoder using LoRA for parameter-efficient fine-tuning. The project uses Hydra for configuration management and supports both local and remote training on RunPod.
+This is an Automatic Speech Recognition (ASR) training pipeline that combines a W2V-BERT 2.0 encoder with a SmolLM2 or Qwen decoder using LoRA for parameter-efficient fine-tuning. The project uses Hydra for configuration management and supports both local and remote training on RunPod.
 
 **📦 Pre-trained Model**: Available on [Hugging Face Hub](https://huggingface.co/mazesmazes/tiny-audio)
 
@@ -160,16 +160,16 @@ wandb login
 
 ### Core Components
 
-1. **ASRModel** (`src/modeling.py:151`): Main model combining:
+1. **ASRModel** (`src/modeling.py:95`): Main model combining:
 
-   - `WhisperEncoder`: Frozen Whisper-small encoder for audio feature extraction
-     (39M params)
+   - `W2V-BERT Encoder`: Frozen W2V-BERT 2.0 encoder for audio feature extraction
+     (600M params, trained on 4.5M hours of audio across 143+ languages)
    - `AudioProjector`: Projects audio features to text embedding space with:
-     • 2x downsampling via AvgPool1d to reduce sequence length
-     • RMSNorm for input normalization
-     • Linear projection to text dimension
-     • SwiGLU block with residual connection and 8/3 expansion factor
-   - `LLMDecoder`: SmolLM2 decoder (360M or 1.7B params) with LoRA adapters for
+     • AttentionPoolingHead with learnable probes for feature compression
+     • Pre-norm architecture with dual RMSNorm layers for stability
+     • SwiGLU activation with residual connections
+     • Positional embeddings for pooled features
+   - `LLMDecoder`: SmolLM2 (360M) or Qwen3 (1.7B) decoder with LoRA adapters for
      text generation
 
 1. **Training Pipeline** (`src/train.py:248`):
@@ -185,7 +185,7 @@ wandb login
 
    - Base config: `configs/hydra/config.yaml` - defines defaults and output
      structure
-   - Model configs: `small.yaml` (r=8, alpha=16), `large.yaml` (r=16, alpha=32) - LoRA
+   - Model configs: `small.yaml` (SmolLM2-360M, r=8, alpha=16), `large.yaml` (Qwen3-1.7B, r=16, alpha=32) - LoRA
      parameters
    - Data configs: `tiny.yaml` (100 samples), `production_streaming.yaml` (full
      datasets)
@@ -194,15 +194,16 @@ wandb login
 
 ### Key Design Decisions
 
-- **Frozen Encoder**: Whisper encoder remains frozen to preserve pre-trained
-  audio representations
+- **Frozen Encoder**: W2V-BERT encoder remains frozen to preserve pre-trained
+  audio representations from 4.5M hours of multilingual training
 - **LoRA Fine-tuning**: Only ~2% of parameters are trained via LoRA adapters
   (rank 32-64)
 - **Audio Projection**: Modern projection architecture with:
-  - 2x temporal downsampling to reduce computational load
-  - RMSNorm for input stability
-  - SwiGLU (Swish-Gated Linear Unit) with 8/3 expansion factor
-  - Residual connection for gradient flow
+  - AttentionPoolingHead using learnable probes to compress features
+  - Pre-norm transformer architecture for stable training
+  - Dual layer normalization (before attention and MLP)
+  - SwiGLU activation with proper residual connections
+  - Positional embeddings for temporal information
 - **Streaming Datasets**: Uses HuggingFace streaming mode to handle TB-scale
   datasets
 - **Mixed Precision**: BF16 training via accelerate for 2x speedup and memory
@@ -221,6 +222,8 @@ wandb login
 - **Fixed test output directory** - E2E tests now use a fixed output path `outputs/test_e2e_model` specified via `+output_dir=` override
 - **Model Loading** - When loading pretrained models, use `low_cpu_mem_usage=False` to ensure proper initialization of audio special tokens
 - **Audio Special Tokens** - The model automatically adds `<|audio_chunk|>` token during initialization to handle audio-text alignment
+- **Vectorized Forward Pass** - The forward method uses efficient tensor operations with `torch.cat` and `pad_sequence` for better GPU utilization and compatibility with distributed training
+- **W2V-BERT Integration** - Uses `SeamlessM4TFeatureExtractor` for audio preprocessing, which returns `input_features` for the encoder
 
 ## Configuration Structure
 
@@ -265,12 +268,12 @@ For faster downloads with HuggingFace:
 export HF_HUB_ENABLE_HF_TRANSFER=1
 ```
 
-## Data Flow
+### Data Flow
 
-1. **Audio Input**: Raw audio (16kHz) → Whisper feature extractor → Log-mel spectrogram
-2. **Encoder**: Spectrogram → Whisper encoder → Audio embeddings (1500 dim)
-3. **Projection**: Audio embeddings → RMSNorm → AvgPool1d (2x downsample) → Linear → Residual SwiGLU → Text space (2048/4096 dim)
-4. **Decoder**: Projected features + text prompt → SmolLM2 + LoRA → Generated transcription
+1. **Audio Input**: Raw audio (16kHz) → SeamlessM4TFeatureExtractor → Log-mel spectrogram features
+2. **Encoder**: Spectrogram → W2V-BERT encoder → Audio embeddings (1024 dim)
+3. **Projection**: Audio embeddings → RMSNorm → Linear projection → AttentionPoolingHead with learnable probes → Compressed features with positional embeddings → Text space (2048/4096 dim)
+4. **Decoder**: Projected features + text prompt → SmolLM2/Qwen3 + LoRA → Generated transcription
 5. **Loss Calculation**: Cross-entropy on text tokens only (audio tokens masked with -100)
 
 ## Common Pitfalls to Avoid
