@@ -182,6 +182,7 @@ class PredictionLoggingCallback(TrainerCallback):
         eval_dataset: Dataset,
         tokenizer: Any,
         feature_extractor: Any,
+        sample_rate: int,
         num_samples: int = 10,
         log_every_n_steps: int = 500,
     ):
@@ -190,6 +191,7 @@ class PredictionLoggingCallback(TrainerCallback):
         self.eval_samples = list(eval_dataset.take(num_samples))
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
+        self.sample_rate = sample_rate
         self.log_every_n_steps = log_every_n_steps
         self.wer_metric = evaluate.load("wer")
 
@@ -277,6 +279,7 @@ def main(cfg: DictConfig) -> None:
                 eval_dataset=val_dataset,
                 tokenizer=model.tokenizer,
                 feature_extractor=model.feature_extractor,
+                sample_rate=cfg.data.sample_rate,
                 log_every_n_steps=cfg.log_predictions_every_n_steps,
             )
         ],
