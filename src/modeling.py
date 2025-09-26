@@ -141,6 +141,10 @@ class ASRModel(PreTrainedModel):
         self.audio_to_inter = nn.Linear(audio_dim, text_dim, bias=False)
         self.audio_pooler = AttentionPoolingHead(hidden_dim=text_dim, num_heads=8)
 
+        # Explicit positional embeddings for audio features
+        audio_len = 128  # num_probe_tokens from AttentionPoolingHead
+        self.audio_pos_embed = nn.Embedding(audio_len, text_dim)
+
         # Initialize tokenizer for special tokens
         tokenizer = AutoTokenizer.from_pretrained(config.decoder_model_name)
         if tokenizer.pad_token is None:
@@ -195,6 +199,12 @@ class ASRModel(PreTrainedModel):
 
         # Pool the features using attention
         pooled_features = self.audio_pooler(projected)
+
+        # Add positional embeddings
+        positions = torch.arange(pooled_features.size(1), device=pooled_features.device).unsqueeze(
+            0
+        )
+        pooled_features = pooled_features + self.audio_pos_embed(positions)
 
         # Convert to decoder dtype
         return pooled_features.to(self.decoder.dtype)
