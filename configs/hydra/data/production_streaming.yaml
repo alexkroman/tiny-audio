@@ -28,6 +28,12 @@ datasets:
     eval_splits:
       - validation
 
+  - name: loquaciousset
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+
 # Data filtering
 max_audio_seconds: 20.0
 

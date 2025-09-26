@@ -91,9 +91,18 @@ class ASRModel(PreTrainedModel):
         self.encoder.requires_grad_(False)  # Freeze the encoder
         self.encoder.eval()
 
+        # Load decoder config and enable sliding window attention for efficiency
+        from transformers import AutoConfig
+
+        decoder_config = AutoConfig.from_pretrained(config.decoder_model_name)
+        # Set sliding window size for linear attention complexity
+        decoder_config.sliding_window = 4096
+        # Enable cache for generation
+        decoder_config.use_cache = True
+
         self.decoder = AutoModelForCausalLM.from_pretrained(
             config.decoder_model_name,
-            use_cache=True,  # Enable cache for generation
+            config=decoder_config,  # Pass the modified config with SWA
             low_cpu_mem_usage=False,
         )
 
@@ -389,6 +398,7 @@ class ASRModel(PreTrainedModel):
             dim=0,
         ).unsqueeze(0)
 
+        # Set default generation parameters
         if "pad_token_id" not in generate_kwargs:
             generate_kwargs["pad_token_id"] = self.tokenizer.pad_token_id
         if "eos_token_id" not in generate_kwargs:
@@ -397,6 +407,18 @@ class ASRModel(PreTrainedModel):
             generate_kwargs["max_new_tokens"] = 448  # Default max tokens to generate
         if "min_new_tokens" not in generate_kwargs:
             generate_kwargs["min_new_tokens"] = 1  # Ensure at least one token is generated
+
+        # Add Whisper-inspired generation parameters
+        if "num_beams" not in generate_kwargs:
+            generate_kwargs["num_beams"] = 1
+        if "suppress_tokens" not in generate_kwargs:
+            from transformers.models.whisper.configuration_whisper import NON_SPEECH_TOKENS
+
+            generate_kwargs["suppress_tokens"] = list(NON_SPEECH_TOKENS)
+        if "repetition_penalty" not in generate_kwargs:
+            generate_kwargs["repetition_penalty"] = 1.1
+        if "no_repeat_ngram_size" not in generate_kwargs:
+            generate_kwargs["no_repeat_ngram_size"] = 3
 
         # Create attention mask for the input embeddings
         attention_mask = torch.ones(

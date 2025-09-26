@@ -1,18 +1,18 @@
 # @package _global_
+# Production training with mixed datasets including LoquaciousSet
 
 defaults:
   - override /model: large
-  - override /data: loquaciousset  # Use LoquaciousSet dataset
+  - override /data: production_streaming  # Use all datasets including LoquaciousSet
   - override /training: production
 
 # Resume from checkpoint (root level override)
-#resume_from_checkpoint: /workspace/outputs/2025-09-23/21-58-09/outputs/production_model/checkpoint-27000
 resume_from_checkpoint: null
 
 # Production-specific overrides
 training:
   push_to_hub: true
-
+  
   # Streaming compatibility settings
   dataloader_num_workers: 32  # Leverage available vCPUs for faster data loading
   dataloader_persistent_workers: true

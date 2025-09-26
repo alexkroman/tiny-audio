@@ -43,6 +43,7 @@ def create_asr_model(config: DictConfig) -> ASRModel:
 
 def evaluate_samples(model, tokenizer, feature_extractor, eval_samples, device=None):
     import evaluate
+    from transformers.models.whisper.configuration_whisper import NON_SPEECH_TOKENS
 
     if device is None:
         device = model.device
@@ -70,6 +71,16 @@ def evaluate_samples(model, tokenizer, feature_extractor, eval_samples, device=N
                 attention_mask=attention_mask,
                 max_new_tokens=100,
                 do_sample=False,
+                # Whisper-inspired generation parameters
+                num_beams=1,  # Or make configurable
+                suppress_tokens=list(NON_SPEECH_TOKENS),  # Suppress non-speech tokens
+                begin_suppress_tokens=[220, tokenizer.eos_token_id],  # Whisper default
+                # Repetition controls
+                repetition_penalty=1.0,  # Consider 1.1-1.2 for less repetition
+                no_repeat_ngram_size=0,  # Or 3 to prevent repetition
+                # For long audio, consider:
+                # prompt_ids=prompt_ids,
+                # prompt_condition_type="first-segment",
             )
 
             prediction = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
@@ -160,13 +171,26 @@ class DataCollator:
             sampling_rate=self.sample_rate,
             return_tensors="pt",
             return_attention_mask=True,
-            padding="max_length",
-            max_length=480000,
+            padding="longest",  # Dynamic padding saves memory
         )
 
-        # Apply chat template
-        texts = []
+        # Optimize: Apply chat template and calculate prompt lengths efficiently
+        texts_with_labels = []
+        prompt_lengths = []
+
+        # Pre-compute the prompt-only template once
+        prompt_messages = [
+            {
+                "role": "user",
+                "content": "Please transcribe the following audio recording.\n<|audio_chunk|>",
+            }
+        ]
+        prompt_only = self.tokenizer.apply_chat_template(
+            prompt_messages, tokenize=False, add_generation_prompt=True
+        )
+
         for f in valid_features:
+            # Full message with response
             messages = [
                 {
                     "role": "user",
@@ -174,30 +198,39 @@ class DataCollator:
                 },
                 {"role": "assistant", "content": f["text"]},
             ]
-            texts.append(self.tokenizer.apply_chat_template(messages, tokenize=False))
+            full_text = self.tokenizer.apply_chat_template(messages, tokenize=False)
+            texts_with_labels.append(full_text)
 
-        # Use tokenizer's __call__ method directly (faster for fast tokenizers)
+            # Calculate prompt length by finding where assistant response starts
+            assistant_marker = '"\nassistant\n'
+            assistant_start_idx = full_text.find(assistant_marker)
+            if assistant_start_idx != -1:
+                prompt_lengths.append(
+                    len(
+                        self.tokenizer.encode(
+                            full_text[: assistant_start_idx + len(assistant_marker)],
+                            add_special_tokens=False,
+                        )
+                    )
+                )
+            else:
+                # Fallback: use pre-computed prompt-only length
+                prompt_lengths.append(
+                    len(self.tokenizer.encode(prompt_only, add_special_tokens=False))
+                )
+
+        # Single tokenization call for all texts
         batch = self.tokenizer(
-            texts,
+            texts_with_labels,
             padding="longest",
             truncation=True,
             return_tensors="pt",
         )
         labels = batch["input_ids"].clone()
 
-        # Mask the prompt part of the labels
-        prompt_messages = [
-            {
-                "role": "user",
-                "content": "Please transcribe the following audio recording.\n<|audio_chunk|>",
-            }
-        ]
-        prompt_text = self.tokenizer.apply_chat_template(
-            prompt_messages, tokenize=False, add_generation_prompt=True
-        )
-        prompt_length = len(self.tokenizer.encode(prompt_text, add_special_tokens=False))
-
-        labels[:, :prompt_length] = -100
+        # Apply prompt masking using pre-computed lengths
+        for i, prompt_length in enumerate(prompt_lengths):
+            labels[i, :prompt_length] = -100
 
         if self.tokenizer.pad_token_id is not None:
             labels[labels == self.tokenizer.pad_token_id] = -100
@@ -265,6 +298,17 @@ def _load_single_dataset(
             token=token,
         )
         ds = ds.rename_column("sentence", "text")
+    elif dataset_name == "loquaciousset":
+        ds = load_dataset(
+            "speechbrain/LoquaciousSet",
+            "medium",  # Use medium split
+            split=split,
+            streaming=True,
+            cache_dir=cache_dir,
+        )
+        # LoquaciousSet has 'transcription' instead of 'text'
+        if "transcription" in next(iter(ds)):
+            ds = ds.rename_column("transcription", "text")
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
