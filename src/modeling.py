@@ -100,10 +100,7 @@ class ASRModel(PreTrainedModel):
         text_dim = self.decoder.config.hidden_size
         audio_dim = self.encoder.config.d_model
 
-        # Downsampling layer to reduce sequence length by 2x
-        self.downsample = nn.AvgPool1d(kernel_size=2, stride=2)
-
-        # SwiGLU projector with residual connection
+        # SwiGLU module for use in AttentionPoolingHead
         class SwiGLU(nn.Module):
             def __init__(self, hidden_dim, expansion_factor=8 / 3):
                 super().__init__()
@@ -115,10 +112,34 @@ class ASRModel(PreTrainedModel):
             def forward(self, x):
                 return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
 
-        # Audio projector with downsampling, normalization, and residual SwiGLU
+        # AttentionPoolingHead for intelligent audio compression
+        class AttentionPoolingHead(nn.Module):
+            def __init__(self, hidden_dim, num_heads, num_probe_tokens=128):
+                super().__init__()
+                self.probe = nn.Parameter(torch.randn(1, num_probe_tokens, hidden_dim))
+                self.attention = torch.nn.MultiheadAttention(
+                    hidden_dim, num_heads, batch_first=True
+                )
+                self.layernorm = RMSNorm(hidden_dim, eps=1e-6)
+                # Use SwiGLU to process the pooled output
+                self.mlp = SwiGLU(hidden_dim)
+
+            def forward(self, hidden_state):
+                batch_size = hidden_state.shape[0]
+                probe = self.probe.repeat(batch_size, 1, 1)
+
+                # Probe attends to the audio features
+                pooled_output = self.attention(query=probe, key=hidden_state, value=hidden_state)[0]
+
+                residual = pooled_output
+                pooled_output = self.layernorm(pooled_output)
+                return residual + self.mlp(pooled_output)
+
+        # Audio projector with attention pooling
         self.audio_norm = RMSNorm(audio_dim, eps=self.decoder.config.rms_norm_eps or 1e-6)
-        self.audio_to_text = nn.Linear(audio_dim, text_dim, bias=False)
-        self.swiglu = SwiGLU(text_dim)
+        # Project to text dimension first
+        self.audio_to_inter = nn.Linear(audio_dim, text_dim, bias=False)
+        self.audio_pooler = AttentionPoolingHead(hidden_dim=text_dim, num_heads=8)
 
         # Initialize tokenizer for special tokens
         tokenizer = AutoTokenizer.from_pretrained(config.decoder_model_name)
@@ -169,19 +190,14 @@ class ASRModel(PreTrainedModel):
         # Apply normalization
         audio_features = self.audio_norm(audio_features)
 
-        # Downsample: (batch, seq_len, dim) -> (batch, seq_len//2, dim)
-        audio_features = audio_features.transpose(1, 2)  # (batch, dim, seq_len)
-        audio_features = self.downsample(audio_features)
-        audio_features = audio_features.transpose(1, 2)  # (batch, seq_len//2, dim)
+        # Project to text dimension BEFORE pooling
+        projected = self.audio_to_inter(audio_features)
 
-        # Project to text dimension
-        projected = self.audio_to_text(audio_features)
-
-        # Apply SwiGLU with residual connection
-        projected = projected + self.swiglu(projected)
+        # Pool the features using attention
+        pooled_features = self.audio_pooler(projected)
 
         # Convert to decoder dtype
-        return projected.to(self.decoder.dtype)
+        return pooled_features.to(self.decoder.dtype)
 
     def forward(
         self,
@@ -209,7 +225,7 @@ class ASRModel(PreTrainedModel):
         audio_embeds = self._encode_audio(input_features, audio_attention_mask)
 
         batch_size, max_text_len, embed_dim = text_embeds.shape
-        _, audio_len, _ = audio_embeds.shape  # audio_len is now half due to downsampling
+        _, audio_len, _ = audio_embeds.shape  # audio_len is now num_probe_tokens (128)
         new_len = max_text_len - 1 + audio_len
 
         inputs_embeds = torch.zeros(
