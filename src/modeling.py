@@ -205,8 +205,6 @@ class ASRModel(PreTrainedModel):
                 "The '<|audio_chunk|>' token was not found in `input_ids` for training."
             )
 
-        chunk_indices = torch.where(audio_chunk_mask)[1]
-
         text_embeds = self.decoder.get_input_embeddings()(input_ids)
         audio_embeds = self._encode_audio(input_features, audio_attention_mask)
 
@@ -221,13 +219,43 @@ class ASRModel(PreTrainedModel):
             (batch_size, new_len), -100, device=labels.device, dtype=labels.dtype
         )
 
-        for i in range(batch_size):
-            chunk_idx = chunk_indices[i]
-            inputs_embeds[i, :chunk_idx] = text_embeds[i, :chunk_idx]
-            new_labels[i, :chunk_idx] = labels[i, :chunk_idx]
-            inputs_embeds[i, chunk_idx : chunk_idx + audio_len] = audio_embeds[i]
-            inputs_embeds[i, chunk_idx + audio_len :] = text_embeds[i, chunk_idx + 1 :]
-            new_labels[i, chunk_idx + audio_len :] = labels[i, chunk_idx + 1 :]
+        # Vectorized approach for massive speedup
+        # 1. Find indices for text and audio parts
+        text_indices_mask = ~audio_chunk_mask & (input_ids != self.tokenizer.pad_token_id)
+
+        # 2. Create position mapping - each audio chunk shifts subsequent positions
+        position_offsets = torch.cumsum(audio_chunk_mask * (audio_len - 1), dim=-1)
+        old_positions = (
+            torch.arange(max_text_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
+        )
+        new_positions = (
+            old_positions
+            + position_offsets
+            - audio_chunk_mask.long().cumsum(dim=-1) * (audio_len - 1)
+        )
+
+        # 3. Scatter text embeds and labels to their new positions
+        # Create batch indices for 2D indexing
+        batch_indices = (
+            torch.arange(batch_size, device=input_ids.device).unsqueeze(1).expand(-1, max_text_len)
+        )
+
+        # Filter valid text positions (non-padding, non-audio-chunk)
+        valid_mask = text_indices_mask
+        batch_idx_flat = batch_indices[valid_mask]
+        old_pos_flat = old_positions[valid_mask]
+        new_pos_flat = new_positions[valid_mask]
+
+        # Place text embeddings and labels
+        inputs_embeds[batch_idx_flat, new_pos_flat] = text_embeds[batch_idx_flat, old_pos_flat]
+        new_labels[batch_idx_flat, new_pos_flat] = labels[batch_idx_flat, old_pos_flat]
+
+        # 4. Place audio embeddings
+        # Find where each audio chunk starts in the new sequence
+        audio_positions = torch.where(audio_chunk_mask)
+        for i, pos in zip(audio_positions[0], audio_positions[1]):
+            new_audio_start = new_positions[i, pos]
+            inputs_embeds[i, new_audio_start : new_audio_start + audio_len] = audio_embeds[i]
 
         original_lengths = attention_mask.sum(dim=1)
         new_lengths = original_lengths - 1 + audio_len
