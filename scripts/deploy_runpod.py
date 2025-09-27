@@ -46,19 +46,36 @@ echo "Updating package lists..."
 apt-get update
 
 echo "Installing system dependencies..."
-apt-get install -y ffmpeg tmux rsync curl ninja-build build-essential
+apt-get install -y ffmpeg tmux rsync curl ninja-build build-essential wget gnupg2
+
+echo "Installing CUDA 12.8..."
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+dpkg -i cuda-keyring_1.1-1_all.deb
+apt-get update
+apt-get install -y cuda-toolkit-12-8 libcudnn9-cuda-12
+
+echo "Installing Python..."
+apt-get install -y python3 python3-dev python3-pip python3-venv
 
 echo "Installing uv package manager..."
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
+echo "Setting up CUDA environment..."
+export PATH="/usr/local/cuda-12.8/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH"
+
 echo "System setup complete!"
 """
 
     # Execute setup script on remote
-    cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} 'cat > /tmp/setup.sh && chmod +x /tmp/setup.sh && bash /tmp/setup.sh' <<'EOF'
+    cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} << 'SETUP_EOF'
+cat > /tmp/setup.sh << 'EOF'
 {setup_script}
-EOF"""
+EOF
+chmod +x /tmp/setup.sh
+bash /tmp/setup.sh
+SETUP_EOF"""
 
     run_command(cmd)
     print("Remote dependencies installed successfully!")
@@ -136,35 +153,23 @@ def install_python_dependencies(host, port, project_root):
     """Install Python dependencies using uv on RunPod."""
     print("\nInstalling Python dependencies...")
 
-    # Display PyTorch version
-    print("Checking PyTorch installation...")
-    cmd_check = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
-        'python3 -c "import torch; print(\\"PyTorch \\" + torch.__version__ + \\" with CUDA \\" + str(torch.cuda.is_available()))" 2>&1'"""
-    result = run_command(cmd_check, capture_output=True)
-    print(f"Found: {result}")
+    # First sync base dependencies (including torch)
+    print("Installing base dependencies (including PyTorch)...")
+    cmd_base = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
+        'cd /workspace && export PATH="/root/.local/bin:/root/.cargo/bin:$PATH" && \
+         export PATH="/usr/local/cuda-12.8/bin:$PATH" && \
+         export LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH" && \
+         uv sync 2>&1'"""
+    run_command(cmd_base)
 
-    # Get dependencies from pyproject.toml
-    required_packages = get_project_dependencies(project_root)
-
-    # Filter out flash-attn since it's pre-installed on RunPod
-    regular_packages = [pkg for pkg in required_packages if not pkg.startswith("flash-attn")]
-
-    # Install regular packages
-    if regular_packages:
-        packages_str = " ".join(f'"{pkg}"' for pkg in regular_packages)
-
-        print("Installing packages from pyproject.toml:")
-        for pkg in regular_packages:
-            print(f"  - {pkg}")
-
-        cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
-            'export PATH="/root/.local/bin:/root/.cargo/bin:$PATH" && \
-             echo "Using uv to install packages while preserving system PyTorch..." && \
-             uv pip install --system {packages_str} 2>&1'"""
-
-        run_command(cmd)
-    
-    print("\nNote: Skipping flash-attn installation as it's pre-installed on RunPod instances.")
+    # Then install CUDA extras (flash-attn needs torch to build)
+    print("Installing CUDA extras (flash-attn, bitsandbytes)...")
+    cmd_cuda = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
+        'cd /workspace && export PATH="/root/.local/bin:/root/.cargo/bin:$PATH" && \
+         export PATH="/usr/local/cuda-12.8/bin:$PATH" && \
+         export LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH" && \
+         uv sync --extra cuda 2>&1'"""
+    run_command(cmd_cuda)
 
     print("Python dependencies installed successfully!")
     return True
@@ -204,18 +209,6 @@ def main():
     # Install Python dependencies
     if not args.skip_deps:
         install_python_dependencies(args.host, args.port, project_root)
-
-    print("\n" + "=" * 50)
-    print("Deployment complete!")
-    print("You can now SSH into your RunPod instance:")
-    print(f"  ssh -i ~/.ssh/id_ed25519 -p {args.port} root@{args.host}")
-    print("\nTo start training:")
-    print("  cd /workspace")
-    print("  python3 src/train.py +experiments=production")
-    print("\nOr use the training script:")
-    print(f"  python scripts/start_remote_training.py {args.host} {args.port}")
-    print("=" * 50)
-
 
 if __name__ == "__main__":
     main()

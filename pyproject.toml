@@ -27,9 +27,12 @@ classifiers = [
 ]
 
 dependencies = [
+    "torch",
+    "torchaudio",
+    "torchvision",
     "transformers",
     "accelerate",
-    "datasets",
+    "datasets[audio]",
     "peft",
     "evaluate",
     "jiwer",
@@ -43,6 +46,8 @@ dependencies = [
     "hf-transfer",
     "ninja",
     "gradio",
+    "torchcodec",
+    "hf_transfer"
 ]
 
 [project.optional-dependencies]
@@ -54,12 +59,9 @@ dev = [
     "pymarkdownlnt>=0.9.0",  # Markdown linter
 ]
 
-optimized = [
-    "hf-transfer>=0.1.0",
-]
-
 cuda = [
-    "bitsandbytes",  # For 8-bit optimizers on CUDA
+    "flash-attn>=2.7.0; platform_system != 'Darwin'",  # Flash Attention 2 for faster training (Linux/CUDA only)
+    "bitsandbytes; platform_system != 'Darwin'",  # For 8-bit optimizers on CUDA
 ]
 
 [project.urls]
@@ -128,6 +130,9 @@ norecursedirs = ["outputs", ".venv", "venv", ".git", "__pycache__", "*.egg-info"
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch", "ninja"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py38"
@@ -166,5 +171,3 @@ extend-ignore = [
     "B008",  # do not perform function calls in argument defaults
     "B905",  # zip() without an explicit strict= parameter
 ]
-[tool.uv.extra-build-dependencies]
-flash-attn = ["torch", "packaging", "ninja"]

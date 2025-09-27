@@ -64,25 +64,18 @@ def start_training(host, port, experiment, session_name, env_vars=None):
     training_script = f"""#!/bin/bash
 # Don't exit on error immediately, so we can see what happened
 cd /workspace
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
 export TORCH_HOME=/workspace/.cache/torch
+export TRITON_CACHE_DIR=/workspace/.cache/triton
+export TORCHINDUCTOR_CACHE_DIR=/workspace/.cache/inductor
 export HF_HUB_ENABLE_HF_TRANSFER=1
 export HF_TOKEN="{hf_token}"  # Pass through from host
-export DATASETS_PARALLEL=1  # Enable parallel dataset processing
 export HF_DATASETS_MULTIPROCESSING_MAX_WORKERS=8  # Optimized for 9 vCPUs
 export HF_DATASETS_DOWNLOAD_MANAGER_MAX_WORKERS=4  # Parallel downloads within each dataset
 export HF_DATASETS_DOWNLOAD_BATCH_SIZE=50  # Download multiple files in parallel
 export DATASETS_MAX_CONCURRENT_DOWNLOADS=4  # Max concurrent file downloads
-export TORCHINDUCTOR_COMPILE_THREADS=128
-export TOKENIZERS_PARALLELISM=false  # Disable parallel tokenization to avoid deadlocks
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"  # Better memory allocation and management
-export CUDA_LAUNCH_BLOCKING=0  # Enable async CUDA operations for better performance
-export NCCL_P2P_DISABLE=0  # Enable GPU peer-to-peer communication
-export NCCL_IB_DISABLE=0  # Enable InfiniBand if available
-export NCCL_NSOCKS_PERTHREAD=8  # More sockets for data transfer
-export NCCL_SOCKET_NTHREADS=4  # More threads per socket
 {env_string}
 echo "===== Training Starting ====="
 echo "Experiment: {experiment}"
@@ -105,13 +98,13 @@ echo "Launching training with experiment: {experiment}"
 
 # Start TensorBoard in background after we're in the right directory
 echo "Starting TensorBoard on port 6006..."
-(cd /workspace && nohup tensorboard --logdir=/workspace/outputs --port=6006 --bind_all > /tmp/tensorboard.log 2>&1 &)
+(cd /workspace && nohup uv run tensorboard --logdir=/workspace/outputs --port=6006 --bind_all > /tmp/tensorboard.log 2>&1 &)
 echo "TensorBoard started in background"
 echo "You can access TensorBoard by port-forwarding: ssh -L 6006:localhost:6006 -p {port} root@{host}"
 sleep 2  # Give TensorBoard a moment to start
 
 # Now run the training
-cd /workspace && accelerate launch --config_file configs/accelerate/a40.yaml src/train.py +experiments={experiment} 2>&1
+cd /workspace && uv run accelerate launch --config_file configs/accelerate/a40.yaml src/train.py +experiments={experiment} 2>&1
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then
@@ -155,13 +148,6 @@ EOF"""
 def attach_to_session(host, port, session_name):
     """Attach to the tmux session to see live output."""
     print(f"\nAttaching to session '{session_name}'...")
-    print("=" * 50)
-    print("TMUX CONTROLS:")
-    print("  - Detach (leave running): Ctrl+B then D")
-    print("  - Scroll up/down: Ctrl+B then [ (then q to exit scroll mode)")
-    print("  - Kill session: Ctrl+B then : then type 'kill-session'")
-    print("=" * 50)
-    print("")
 
     # SSH and attach to tmux session
     cmd = f"ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no -t root@{host} 'tmux attach-session -t {session_name}'"

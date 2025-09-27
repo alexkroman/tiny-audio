@@ -59,7 +59,6 @@ class DatasetLoader:
             split=split,
             streaming=True,
             cache_dir=self.cache_dir,
-            trust_remote_code=True,
         )
 
         # Apply text cleaning if specified
@@ -195,7 +194,7 @@ class PredictionLoggingCallback(TrainerCallback):
         num_samples: int = 10,
         log_every_n_steps: int = 500,
     ):
-        import evaluate  # Lazy import to avoid dependency if not used
+        import evaluate
 
         self.eval_samples = list(eval_dataset.take(num_samples))
         self.tokenizer = tokenizer
@@ -278,6 +277,7 @@ def main(cfg: DictConfig) -> None:
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
+        processing_class=model.tokenizer,
         data_collator=DataCollator(
             tokenizer=model.tokenizer,
             feature_extractor=model.feature_extractor,
