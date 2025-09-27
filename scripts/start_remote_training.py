@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-"""Start training on remote RunPod instance with tmux session management."""
+"""
+Start training on a remote RunPod instance, ensuring execution within the
+project's virtual environment using a managed tmux session.
+"""
 
 import argparse
 import subprocess
 import sys
+import textwrap
 from datetime import datetime, timezone
 
-
 def run_command(cmd, check=True, capture_output=False):
-    """Run a shell command."""
+    """Run a shell command, printing it first."""
     print(f"Running: {cmd}")
-    result = subprocess.run(cmd, shell=True, capture_output=capture_output, text=True, check=check)
+    result = subprocess.run(
+        cmd, shell=True, capture_output=capture_output, text=True, check=check
+    )
     if capture_output:
         return result.stdout.strip()
     return result.returncode
 
 
 def check_ssh_connection(host, port):
-    """Test SSH connection to the RunPod instance."""
+    """Test the SSH connection to the RunPod instance."""
     print(f"Testing SSH connection to {host}:{port}...")
     cmd = f"ssh -i ~/.ssh/id_ed25519 -p {port} -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@{host} 'echo Connected'"
     try:
@@ -25,186 +30,152 @@ def check_ssh_connection(host, port):
         print("SSH connection successful!")
         return True
     except subprocess.CalledProcessError:
-        print("Failed to connect via SSH. Please check:")
-        print("  - The host and port are correct")
-        print("  - The pod is running")
-        print("  - Your SSH key ~/.ssh/id_ed25519 is added to the pod")
+        print("Failed to connect via SSH. Please check pod status and SSH key.")
         return False
 
 
 def kill_existing_session(host, port, session_name):
-    """Kill existing tmux session if it exists."""
-    print(f"Checking for existing tmux session '{session_name}'...")
+    """Kill an existing tmux session on the remote host if it exists."""
+    print(f"Checking for and removing existing tmux session '{session_name}'...")
     cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
-        'tmux kill-session -t {session_name} 2>/dev/null || echo "No existing session"'"""
-    try:
-        result = run_command(cmd, capture_output=True)
-        if "No existing session" not in result:
-            print(f"Killed existing session '{session_name}'")
-    except subprocess.CalledProcessError:
-        pass  # Session doesn't exist, which is fine
+        "tmux kill-session -t {session_name}"
+    """
+    # We don't check for errors, as the command will fail if the session doesn't exist, which is fine.
+    subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    print(f"Ensured no session named '{session_name}' is running.")
 
 
-def start_training(host, port, experiment, session_name, env_vars=None):
-    """Start training in a tmux session on the remote instance."""
-
-    # Build environment variables string
-    env_string = ""
-    if env_vars:
-        env_string = " ".join([f"{k}={v}" for k, v in env_vars.items()]) + " "
-
+def start_training(host, port, experiment, session_name):
+    """
+    Creates and executes a training script inside a new tmux session on the remote host.
+    """
     print(f"\nStarting training session '{session_name}' with experiment '{experiment}'...")
 
-    # Get the token from environment
     import os
-
     hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        print("Warning: HF_TOKEN environment variable not set. This may cause issues.")
 
-    # Create a shell script to run on the remote
-    training_script = f"""#!/bin/bash
-# Don't exit on error immediately, so we can see what happened
-cd /workspace
-export PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export HF_HOME=/workspace/.cache/huggingface
-export HF_DATASETS_CACHE=/workspace/datasets
-export TORCH_HOME=/workspace/.cache/torch
-export TRITON_CACHE_DIR=/workspace/.cache/triton
-export TORCHINDUCTOR_CACHE_DIR=/workspace/.cache/inductor
-export HF_HUB_ENABLE_HF_TRANSFER=1
-export HF_TOKEN="{hf_token}"  # Pass through from host
-export HF_DATASETS_MULTIPROCESSING_MAX_WORKERS=8  # Optimized for 9 vCPUs
-export HF_DATASETS_DOWNLOAD_MANAGER_MAX_WORKERS=4  # Parallel downloads within each dataset
-export HF_DATASETS_DOWNLOAD_BATCH_SIZE=50  # Download multiple files in parallel
-export DATASETS_MAX_CONCURRENT_DOWNLOADS=4  # Max concurrent file downloads
-{env_string}
-echo "===== Training Starting ====="
-echo "Experiment: {experiment}"
-echo "Python: $(python3 --version)"
-echo "CUDA available: $(python3 -c 'import torch; print(torch.cuda.is_available())' 2>/dev/null)"
-echo "============================="
+    # This script will be created and executed on the remote machine.
+    # It activates the virtual environment to ensure all commands use the correct packages.
+    training_script_content = textwrap.dedent(f"""\
+        #!/bin/bash
+        # NOTE: "set -e" is intentionally removed.
+        # This ensures that if the training script crashes, the tmux session
+        # remains active so you can attach and debug the error message.
 
+        echo "--- Activating virtual environment ---"
+        source /workspace/.venv/bin/activate
 
-# Function to cleanup on exit
-cleanup() {{
-    echo "Cleaning up..."
-    exit
-}}
+        echo "--- Setting up environment variables ---"
+        export HF_DATASETS_AUDIO_DECODER="torchaudio"
+        export HF_HOME=/workspace/.cache/huggingface
+        export HF_DATASETS_CACHE=/workspace/datasets
+        export TORCH_HOME=/workspace/.cache/torch
+        export TRITON_CACHE_DIR=/workspace/.cache/triton
+        export HF_HUB_ENABLE_HF_TRANSFER=1
+        export HF_TOKEN="{hf_token}"
 
-# Set trap to cleanup on script exit
-trap cleanup EXIT INT TERM
+        echo "--- Verifying environment ---"
+        echo "Experiment: {experiment}"
+        echo "Python executable: $(which python)"
+        echo "Python version: $(python --version)"
+        echo "Accelerate executable: $(which accelerate)"
+        echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())' 2>/dev/null)"
+        echo "============================="
 
-# Run the training command and capture any errors
-echo "Launching training with experiment: {experiment}"
+        cd /workspace
 
-# Start TensorBoard in background after we're in the right directory
-echo "Starting TensorBoard on port 6006..."
-(cd /workspace && nohup uv run tensorboard --logdir=/workspace/outputs --port=6006 --bind_all > /tmp/tensorboard.log 2>&1 &)
-echo "TensorBoard started in background"
-echo "You can access TensorBoard by port-forwarding: ssh -L 6006:localhost:6006 -p {port} root@{host}"
-sleep 2  # Give TensorBoard a moment to start
+        echo "Starting trackio dashboard on port 6006..."
+        export GRADIO_SERVER_NAME=0.0.0.0
+        export GRADIO_SERVER_PORT=6006
+        export GRADIO_ANALYTICS_ENABLED=False
+        nohup uv run python -c "import logging; logging.getLogger('httpx').setLevel(logging.WARNING); logging.getLogger('gradio').setLevel(logging.WARNING); import trackio; trackio.show(project='tiny-audio')" > /tmp/trackio.log 2>&1 &
+        echo "trackio logs will be at /tmp/trackio.log"
+        echo "Forward port with: ssh -N -L 6006:localhost:6006 -p {port} root@{host}"
+        sleep 2 # Give trackio a moment to start.
 
-# Now run the training
-cd /workspace && uv run accelerate launch --config_file configs/accelerate/a40.yaml src/train.py +experiments={experiment} 2>&1
-EXIT_CODE=$?
+        echo "--- Launching Training ---"
+        accelerate launch --config_file configs/accelerate/a40.yaml src/train.py +experiments={experiment}
+        EXIT_CODE=$?
 
-if [ $EXIT_CODE -ne 0 ]; then
-    echo "===== Training Failed with exit code: $EXIT_CODE ====="
-    echo "Check the logs above for errors"
-else
-    echo "===== Training Completed Successfully ====="
-fi
+        if [ $EXIT_CODE -eq 0 ]; then
+            echo "===== Training Completed Successfully ====="
+        else
+            echo "===== Training Failed with exit code: $EXIT_CODE ====="
+        fi
 
-# Keep the session alive
-echo "Training session complete. TensorBoard is running on port 6006"
-echo "Press Ctrl+C to exit."
-sleep infinity
-"""
+        echo "Training script finished. Session will remain active for inspection."
+        sleep infinity
+    """)
 
-    # First, create the script on the remote
-    create_script_cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
-        'cat > /tmp/train_{session_name}.sh && chmod +x /tmp/train_{session_name}.sh' <<'EOF'
-{training_script}
+    # Use a heredoc to safely write the script to a temporary file on the remote
+    create_script_cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} bash << 'EOF'
+        cat > /tmp/train_{session_name}.sh << 'INNER_EOF'
+{training_script_content}
+INNER_EOF
+        chmod +x /tmp/train_{session_name}.sh
 EOF"""
 
     try:
         run_command(create_script_cmd)
+        print("Remote training script created successfully.")
     except subprocess.CalledProcessError as e:
-        print(f"Failed to create training script: {e}")
+        print(f"Error: Failed to create training script on remote host. {e}")
         return False
 
-    # Start tmux session and run the script
-    cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
-        'tmux new-session -d -s {session_name} /tmp/train_{session_name}.sh'"""
+    # Start a new detached tmux session running the script
+    start_session_cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
+        "tmux new-session -d -s {session_name} /tmp/train_{session_name}.sh"
+    """
 
     try:
-        run_command(cmd)
-        print(f"Training started in tmux session '{session_name}'")
+        run_command(start_session_cmd)
+        print(f"Successfully started tmux session '{session_name}'.")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Failed to start training: {e}")
+        print(f"Error: Failed to start tmux session. {e}")
         return False
 
 
 def attach_to_session(host, port, session_name):
-    """Attach to the tmux session to see live output."""
-    print(f"\nAttaching to session '{session_name}'...")
-
-    # SSH and attach to tmux session
+    """Attach to the running tmux session for live monitoring."""
+    print(f"\nAttaching to tmux session '{session_name}'...")
+    print("Use 'Ctrl+B' then 'D' to detach from the session without killing it.")
     cmd = f"ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no -t root@{host} 'tmux attach-session -t {session_name}'"
-
-    # Use subprocess.call for interactive session
-    subprocess.call(cmd, shell=True)
+    subprocess.run(cmd, shell=True)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Start training on remote RunPod instance")
-    parser.add_argument("host", help="RunPod instance IP address or hostname")
-    parser.add_argument("port", type=int, help="SSH port for the RunPod instance")
-    parser.add_argument(
-        "--experiment", default="production", help="Experiment config to use (default: production)"
-    )
-    parser.add_argument(
-        "--session-name",
-        default=None,
-        help="Name for the tmux session (default: train_YYYYMMDD_HHMMSS)",
-    )
-    parser.add_argument(
-        "--no-attach", action="store_true", help="Don't attach to session after starting"
-    )
-    parser.add_argument(
-        "--force", action="store_true", help="Kill existing session with same name if it exists"
-    )
+    parser = argparse.ArgumentParser(description="Start and manage training on a remote RunPod instance.")
+    parser.add_argument("host", help="RunPod instance IP address or hostname.")
+    parser.add_argument("port", type=int, help="SSH port for the RunPod instance.")
+    parser.add_argument("--experiment", default="production", help="Experiment config to run.")
+    parser.add_argument("--session-name", default=None, help="Custom name for the tmux session.")
+    parser.add_argument("--no-attach", action="store_true", help="Start the session but do not attach to it.")
+    parser.add_argument("--force", action="store_true", help="Kill any existing session with the same name before starting.")
 
     args = parser.parse_args()
 
-    # Generate session name if not provided
     if args.session_name is None:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        args.session_name = f"train_{timestamp}"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        args.session_name = f"train_{args.experiment}_{timestamp}"
 
-    # Test SSH connection
     if not check_ssh_connection(args.host, args.port):
         sys.exit(1)
 
-    # Kill existing session if force flag is set
     if args.force:
         kill_existing_session(args.host, args.port, args.session_name)
 
-    # Start training
     if not start_training(args.host, args.port, args.experiment, args.session_name):
+        print("Exiting due to failure in starting the training session.")
         sys.exit(1)
 
-    print(f"\nTraining started successfully in session '{args.session_name}'!")
-    print("To attach to the session manually, run:")
-    print(
-        f"  python scripts/attach_remote_session.py {args.host} {args.port} --session-name {args.session_name}"
-    )
+    print(f"\n✅ Training started in session '{args.session_name}'.")
+    print(f"To re-attach later: ssh -p {args.port} root@{args.host} -t 'tmux attach -t {args.session_name}'")
 
-    # Attach to session unless --no-attach is specified
     if not args.no_attach:
-        print("\nAttaching to session in 2 seconds...")
         import time
-
         time.sleep(2)
         attach_to_session(args.host, args.port, args.session_name)
 

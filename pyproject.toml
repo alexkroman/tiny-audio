@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "tiny-audio"
 dynamic = ["version"]
 description = "Learn ASR by Building One - A minimal speech recognition model combining Whisper with SmolLM2"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 readme = "README.md"
 authors = [
@@ -27,16 +27,14 @@ classifiers = [
 ]
 
 dependencies = [
-    "torch",
-    "torchaudio",
-    "torchvision",
     "transformers",
     "accelerate",
-    "datasets[audio]",
+    "datasets==3.6.0",
+    "torchaudio",
     "peft",
     "evaluate",
     "jiwer",
-    "tensorboard",
+    "trackio",
     "numpy",
     "soundfile",
     "librosa",
@@ -46,7 +44,6 @@ dependencies = [
     "hf-transfer",
     "ninja",
     "gradio",
-    "torchcodec",
     "hf_transfer"
 ]
 
@@ -57,11 +54,6 @@ dev = [
     "mypy>=1.5.0",
     "mdformat>=0.7.0",  # Markdown formatter
     "pymarkdownlnt>=0.9.0",  # Markdown linter
-]
-
-cuda = [
-    "flash-attn>=2.7.0; platform_system != 'Darwin'",  # Flash Attention 2 for faster training (Linux/CUDA only)
-    "bitsandbytes; platform_system != 'Darwin'",  # For 8-bit optimizers on CUDA
 ]
 
 [project.urls]
@@ -129,9 +121,6 @@ norecursedirs = ["outputs", ".venv", "venv", ".git", "__pycache__", "*.egg-info"
 # Asyncio configuration to fix deprecation warning
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
-
-[tool.uv.extra-build-dependencies]
-flash-attn = ["torch", "ninja"]
 
 [tool.ruff]
 line-length = 100

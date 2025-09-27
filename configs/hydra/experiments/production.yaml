@@ -14,5 +14,5 @@ training:
   push_to_hub: true
 
   # Streaming compatibility settings
-  dataloader_num_workers: 32  # Leverage available vCPUs for faster data loading
+  dataloader_num_workers: 8  # Leverage available vCPUs for faster data loading
   dataloader_persistent_workers: true

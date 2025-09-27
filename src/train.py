@@ -11,7 +11,7 @@ import hydra
 import torch
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.tensorboard import SummaryWriter
+import trackio
 from transformers import Trainer, TrainerCallback, TrainingArguments
 
 from modeling import ASRModel, ASRModelConfig
@@ -226,9 +226,8 @@ class PredictionLoggingCallback(TrainerCallback):
 
             wer = self.wer_metric.compute(predictions=predictions, references=references)
 
-            # Log to TensorBoard
-            with SummaryWriter(log_dir=args.logging_dir) as writer:
-                writer.add_scalar("eval/wer_on_samples", wer, state.global_step)
+            # Log to trackio
+            trackio.log({"eval/wer_on_samples": wer}, step=state.global_step)
 
             print(f"Prediction: '{predictions[0]}'")
             print(f"Reference:  '{references[0]}'")
@@ -244,6 +243,12 @@ def main(cfg: DictConfig) -> None:
     """Main function to configure and run the ASR model training."""
     print("--- 🚀 Initializing ASR Training ---")
     print(OmegaConf.to_yaml(cfg))
+
+    # Initialize trackio for experiment tracking
+    trackio.init(
+        project="tiny-audio",
+        config=OmegaConf.to_container(cfg, resolve=True)
+    )
 
     # 1. Initialize Model from Configuration
     lora_config = {}
@@ -270,6 +275,8 @@ def main(cfg: DictConfig) -> None:
 
     # 3. Configure Training Arguments
     training_args = TrainingArguments(**OmegaConf.to_container(cfg.training, resolve=True))
+    # Disable TensorBoard since we're using trackio
+    training_args.report_to = []
 
     # 4. Initialize Trainer
     trainer = Trainer(
@@ -300,6 +307,9 @@ def main(cfg: DictConfig) -> None:
     print("--- 🎉 Training Complete ---")
     trainer.save_model()
     print(f"💾 Model saved to {training_args.output_dir}")
+
+    # Finish trackio run
+    trackio.finish()
 
 
 if __name__ == "__main__":
