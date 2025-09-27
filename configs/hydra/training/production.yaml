@@ -26,6 +26,7 @@ logging_dir: ${hydra:runtime.output_dir}/logs
 logging_steps: 100
 logging_first_step: true
 logging_nan_inf_filter: false
+report_to: tensorboard
 
 # Evaluation
 eval_strategy: steps
@@ -47,20 +48,16 @@ hub_token: null  # Will use HF_TOKEN env var if not set
 hub_private_repo: false
 
 # Performance
-dataloader_num_workers: 8  
-dataloader_persistent_workers: true
-dataloader_prefetch_factor: 4
 gradient_checkpointing: false
 fp16: false
 bf16: true
 dataloader_pin_memory: true
 max_grad_norm: 1.0
-torch_compile: false
-torch_compile_mode: "reduce-overhead"
+torch_compile: true
 
 # Misc
 seed: 42
-save_safetensors: false
+save_safetensors: true
 disable_tqdm: false
 log_level: info
 ignore_data_skip: true  # Don't try to skip batches when resuming with streaming datasets

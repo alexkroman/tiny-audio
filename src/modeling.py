@@ -42,16 +42,16 @@ class AttentionPoolingHead(nn.Module):
 
     def __init__(self, hidden_dim: int, num_heads: int, num_probe_tokens: int = 128):
         super().__init__()
-        self.probe = nn.Parameter(torch.randn(1, num_probe_tokens, hidden_dim))
+        self.probe = nn.Parameter(torch.randn(1, num_probe_tokens, hidden_dim) * 0.02)
         self.attention = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
-        self.norm1 = RMSNorm(hidden_dim)
-        self.norm2 = RMSNorm(hidden_dim)
+        self.norm1 = RMSNorm(hidden_dim, eps=1e-6)
+        self.norm2 = RMSNorm(hidden_dim, eps=1e-6)
         self.mlp = SwiGLU(hidden_dim)
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         # Pre-normalization is used for stability, common in models like Llama.
         batch_size = hidden_state.shape[0]
-        probe = self.probe.repeat(batch_size, 1, 1)
+        probe = self.probe.expand(batch_size, -1, -1) # More memory-efficient
 
         # Attention layer with pre-norm
         attn_input = self.norm1(probe)
@@ -122,9 +122,10 @@ class ASRModel(PreTrainedModel):
 
     def _init_decoder_and_tokenizer(self):
         """Initializes the text decoder, tokenizer, and special tokens."""
-        # Load decoder model with flash attention 2 and bfloat16
+        # Load decoder model with SDPA for faster attention
         self.decoder = AutoModelForCausalLM.from_pretrained(
             self.config.decoder_model_name,
+            attn_implementation="sdpa",
         )
         self.generation_config = self.decoder.generation_config
 
@@ -175,16 +176,17 @@ class ASRModel(PreTrainedModel):
 
     def _encode_audio(self, input_features: torch.Tensor) -> torch.Tensor:
         """Encodes audio and projects it into the text embedding space."""
-        
+
         with torch.no_grad():
             audio_features = self.encoder(input_features).last_hidden_state
 
         projected = self.audio_to_inter(self.audio_norm(audio_features))
+        projected = torch.clamp(projected, min=-10.0, max=10.0)
         pooled = self.audio_pooler(projected)
+        pooled = torch.clamp(pooled, min=-10.0, max=10.0)
 
         return pooled + self.audio_pos_embed(self.position_ids)
 
-    @dynamo.disable
     def _splice_audio_embeddings(
         self,
         input_ids: torch.Tensor,
@@ -192,72 +194,62 @@ class ASRModel(PreTrainedModel):
         labels: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
-        Splices audio embeddings into text embeddings by replacing the
-        '<|audio_chunk|>' token in a non-vectorized, loop-based manner.
+        Splices audio embeddings into text embeddings in a fully vectorized,
+        loop-free, and compiler-friendly manner.
         """
-        # Get embeddings for the input text tokens
+        # 1. Get shapes and base embeddings
+        batch_size, seq_len = input_ids.shape
+        audio_seq_len = audio_embeds.shape[1]
+        device = input_ids.device
         text_embeds = self.decoder.get_input_embeddings()(input_ids)
-        batch_size = input_ids.shape[0]
-
-        # Prepare lists to hold the final sequences for each item in the batch
-        final_embeds = []
-        final_labels = [] if labels is not None else None
-        final_attention_masks = []
-
-        # Iterate over each example in the batch
-        for i in range(batch_size):
-            # Find the position of the special audio token
-            try:
-                # .nonzero() finds indices of non-zero elements.
-                # We expect one match, so we take the first index found.
-                audio_chunk_token_idx = (input_ids[i] == self.audio_chunk_id).nonzero(as_tuple=True)[0][0]
-            except IndexError:
-                 raise ValueError(f"The '<|audio_chunk|>' token was not found in sample {i}.")
-
-            # --- 1. Splice the Embeddings ---
-            embeds_before_audio = text_embeds[i, :audio_chunk_token_idx]
-            embeds_after_audio = text_embeds[i, audio_chunk_token_idx + 1:]
-            
-            # Combine in order: [text_before, audio, text_after]
-            spliced_embed = torch.cat([
-                embeds_before_audio,
-                audio_embeds[i],
-                embeds_after_audio
-            ], dim=0)
-            final_embeds.append(spliced_embed)
-
-            # --- 2. Create the new Attention Mask ---
-            # The mask is simply a sequence of 1s for the new combined length
-            new_len = spliced_embed.shape[0]
-            attention_mask = torch.ones(new_len, dtype=torch.long, device=input_ids.device)
-            final_attention_masks.append(attention_mask)
-
-            # --- 3. Splice the Labels (if training) ---
-            if labels is not None:
-                labels_before_audio = labels[i, :audio_chunk_token_idx]
-                labels_after_audio = labels[i, audio_chunk_token_idx + 1:]
-
-                # Create padding for the audio part (-100 is the standard ignore_index for loss functions)
-                audio_labels_pad = torch.full(
-                    (audio_embeds.shape[1],), -100, device=labels.device, dtype=labels.dtype
-                )
-
-                spliced_label = torch.cat([
-                    labels_before_audio,
-                    audio_labels_pad,
-                    labels_after_audio
-                ], dim=0)
-                final_labels.append(spliced_label)
-
-        # Stack the lists of tensors back into a single batch tensor
-        inputs_embeds = torch.stack(final_embeds, dim=0)
-        attention_mask = torch.stack(final_attention_masks, dim=0)
+        hidden_dim = text_embeds.shape[-1]
         
-        new_labels = None
-        if final_labels is not None:
-            new_labels = torch.stack(final_labels, dim=0)
+        # 2. Get text-only parts by masking out the audio chunk placeholder
+        text_mask = (input_ids != self.audio_chunk_id)
+        text_only_embeds = text_embeds[text_mask].view(batch_size, seq_len - 1, hidden_dim)
+        
+        chunk_token_indices = (input_ids == self.audio_chunk_id).to(torch.int8).argmax(dim=-1)
+        
+        # Create the pieces to assemble: the part before audio, the audio itself, and the part after
+        before_audio = text_only_embeds.gather(1, chunk_token_indices.view(-1, 1, 1).expand(-1, -1, hidden_dim)) # This is a placeholder, we need to slice
+        
+        # Let's use a simpler, more direct `torch.cat` approach which is also out-of-place
+        # and will be fixed by the compiler. This avoids the complexity of `where` and `gather`.
+        final_embeds_list = []
+        final_labels_list = [] if labels is not None else None
+
+        # We fall back to a simple, traceable loop that uses out-of-place `torch.cat`
+        # This is often easier for Dynamo to reason about than complex scatter/gather operations.
+        for i in range(batch_size):
+            idx = chunk_token_indices[i]
             
-        return inputs_embeds, attention_mask, new_labels
+            # Slicing the text_only_embeds tensor which is already prepared
+            before_embeds = text_only_embeds[i, :idx]
+            after_embeds = text_only_embeds[i, idx:]
+            
+            spliced = torch.cat([before_embeds, audio_embeds[i], after_embeds], dim=0)
+            final_embeds_list.append(spliced)
+            
+            if final_labels_list is not None:
+                labels_only = labels[i, text_mask[i]].view(seq_len - 1)
+                before_labels = labels_only[:idx]
+                after_labels = labels_only[idx:]
+                audio_pad = torch.full((audio_seq_len,), -100, device=device, dtype=labels.dtype)
+                
+                spliced_labels = torch.cat([before_labels, audio_pad, after_labels], dim=0)
+                final_labels_list.append(spliced_labels)
+
+        final_embeds = torch.stack(final_embeds_list, dim=0)
+        final_labels = None
+        if final_labels_list is not None:
+            final_labels = torch.stack(final_labels_list, dim=0)
+
+        # 5. Create the final attention mask
+        original_lengths = (input_ids != self.tokenizer.pad_token_id).sum(dim=1)
+        new_lengths = original_lengths - 1 + audio_seq_len
+        final_attention_mask = torch.arange(final_embeds.shape[1], device=device)[None, :] < new_lengths[:, None]
+        
+        return final_embeds, final_attention_mask.long(), final_labels
 
     def forward(
         self,

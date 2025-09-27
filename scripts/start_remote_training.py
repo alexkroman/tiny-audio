@@ -64,15 +64,12 @@ def start_training(host, port, experiment, session_name):
         # This ensures that if the training script crashes, the tmux session
         # remains active so you can attach and debug the error message.
 
-        echo "--- Activating virtual environment ---"
-        source /workspace/.venv/bin/activate
 
         echo "--- Setting up environment variables ---"
+        export TOKENIZERS_PARALLELISM=false
         export HF_DATASETS_AUDIO_DECODER="torchaudio"
         export HF_HOME=/workspace/.cache/huggingface
         export HF_DATASETS_CACHE=/workspace/datasets
-        export TORCH_HOME=/workspace/.cache/torch
-        export TRITON_CACHE_DIR=/workspace/.cache/triton
         export HF_HUB_ENABLE_HF_TRANSFER=1
         export HF_TOKEN="{hf_token}"
 
@@ -86,14 +83,11 @@ def start_training(host, port, experiment, session_name):
 
         cd /workspace
 
-        echo "Starting trackio dashboard on port 6006..."
-        export GRADIO_SERVER_NAME=0.0.0.0
-        export GRADIO_SERVER_PORT=6006
-        export GRADIO_ANALYTICS_ENABLED=False
-        nohup uv run python -c "import logging; logging.getLogger('httpx').setLevel(logging.WARNING); logging.getLogger('gradio').setLevel(logging.WARNING); import trackio; trackio.show(project='tiny-audio')" > /tmp/trackio.log 2>&1 &
-        echo "trackio logs will be at /tmp/trackio.log"
+        echo "Starting TensorBoard on port 6006..."
+        nohup tensorboard --logdir outputs --host 0.0.0.0 --port 6006 > /tmp/tensorboard.log 2>&1 &
+        echo "TensorBoard logs will be at /tmp/tensorboard.log"
         echo "Forward port with: ssh -N -L 6006:localhost:6006 -p {port} root@{host}"
-        sleep 2 # Give trackio a moment to start.
+        sleep 2
 
         echo "--- Launching Training ---"
         accelerate launch --config_file configs/accelerate/a40.yaml src/train.py +experiments={experiment}

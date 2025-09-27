@@ -44,15 +44,8 @@ def setup_remote_environment(host, port):
 set -e
 apt-get update -qq || true
 apt-get install -y -qq ffmpeg tmux rsync libsndfile1 ninja-build
-# Install uv, our package installer
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# Ensure uv is in the PATH for the session and future sessions
-cat >> /root/.bashrc << 'BASHRC_EOF'
 export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
-BASHRC_EOF
 export PATH="/root/.local/bin:$PATH"
-# REMOVED: The command to create a virtual environment is gone.
-# We will use the global Python environment provided by the RunPod image.
 """
     cmd = f"ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} << 'EOF'\n{setup_script}\nEOF"
     run_command(cmd)
@@ -89,18 +82,15 @@ def install_python_dependencies(host, port):
     """
     print("\nInstalling Python dependencies...")
     
-    # **THE FIX IS HERE**:
-    # 1. We REMOVED the step that installs torch, torchvision, etc.
-    # 2. We now ONLY install the dependencies defined in your project's setup file (e.g., pyproject.toml).
-    #    These packages will be installed into the main system Python environment, alongside
-    #    the pre-installed PyTorch.
     cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
         'cd /workspace && \
          export PATH="/root/.local/bin:$PATH" && \
          echo "--- Installing project-specific dependencies into the global environment ---" && \
-         uv pip install \
+         pip install \
             --no-cache-dir \
-            -e .'
+            tensorboard \
+            flash-attn --no-build-isolation && \
+         pip install -e .'
     """
     run_command(cmd)
     print("Python dependencies installed successfully!")

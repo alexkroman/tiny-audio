@@ -9,9 +9,9 @@ from typing import Any, Dict, List, Optional
 
 import hydra
 import torch
+import numpy as np
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
-import trackio
 from transformers import Trainer, TrainerCallback, TrainingArguments
 
 from modeling import ASRModel, ASRModelConfig
@@ -125,30 +125,42 @@ class DataCollator:
         self.feature_extractor = feature_extractor
         self.sample_rate = config.data.sample_rate
         self.max_audio_seconds = config.data.max_audio_seconds
+        self.max_audio_samples = int(self.max_audio_seconds * self.sample_rate)
         self.audio_chunk_token_id = tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
 
         if self.audio_chunk_token_id == tokenizer.unk_token_id:
             raise ValueError("'<|audio_chunk|>' token is missing from the tokenizer's vocabulary!")
 
+
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         # 1. Filter out invalid samples
-        valid_features = [
-            f
-            for f in features
-            if f.get("audio")
-            and f.get("text")
-            and (len(f["audio"]["array"]) / self.sample_rate) <= self.max_audio_seconds
-        ]
+        valid_features = [f for f in features if f.get("audio") and f.get("text")]
         if not valid_features:
-            return {}  # Trainer can handle empty batches
+            return {}
 
-        # 2. Extract audio features
-        audio_arrays = [f["audio"]["array"] for f in valid_features]
+        # 2. Manually truncate AND pad each audio array to the global max length
+        audio_arrays = []
+        for f in valid_features:
+            array = f["audio"]["array"]
+            # Truncate if longer
+            if len(array) > self.max_audio_samples:
+                array = array[:self.max_audio_samples]
+            # Pad with zeros if shorter
+            if len(array) < self.max_audio_samples:
+                padded_array = np.pad(
+                    array, (0, self.max_audio_samples - len(array)),
+                    mode='constant', constant_values=0
+                )
+                audio_arrays.append(padded_array)
+            else:
+                audio_arrays.append(array)
+
+        # 3. Process the uniformly-sized arrays with the feature extractor
         audio_features = self.feature_extractor(
-            audio_arrays, sampling_rate=self.sample_rate, return_tensors="pt", padding=True
+            audio_arrays, sampling_rate=self.sample_rate, return_tensors="pt"
         )
 
-        # 3. Apply chat template for the whole batch at once
+        # 4. Apply chat template for the whole batch at once
         conversations = [
             [
                 {"role": "user", "content": "<|audio_chunk|>"},
@@ -162,7 +174,9 @@ class DataCollator:
             tokenize=True,
             return_dict=True,
             return_assistant_tokens_mask=True,
-            padding=True,
+            padding="max_length",
+            max_length=512,
+            truncation=True,
             return_tensors="pt",
         )
 
@@ -170,7 +184,7 @@ class DataCollator:
         batch["input_ids"] = tokenized["input_ids"]
         assistant_masks_padded = tokenized["assistant_masks"]
 
-        # 4. Create labels: mask non-assistant tokens and padding with -100
+        # 5. Create labels: mask non-assistant tokens and padding with -100
         labels = batch["input_ids"].clone()
         labels[assistant_masks_padded == 0] = -100
         labels[labels == self.tokenizer.pad_token_id] = -100
@@ -181,53 +195,59 @@ class DataCollator:
 
 # --- Evaluation and Logging ---
 
-
 class PredictionLoggingCallback(TrainerCallback):
-    """Logs WER and sample predictions during training."""
 
-    def __init__(
-        self,
-        eval_dataset: Dataset,
-        tokenizer: Any,
-        feature_extractor: Any,
-        sample_rate: int,
-        num_samples: int = 10,
-        log_every_n_steps: int = 500,
-    ):
-        import evaluate
+ def __init__(
+    self,
+    eval_dataset: Dataset,
+    tokenizer: Any,
+    feature_extractor: Any,
+    sample_rate: int,
+    max_audio_seconds: float,
+    num_samples: int = 10,
+    log_every_n_steps: int = 500,
+):
+    import evaluate
 
-        self.eval_samples = list(eval_dataset.take(num_samples))
-        self.tokenizer = tokenizer
-        self.feature_extractor = feature_extractor
-        self.sample_rate = sample_rate
-        self.log_every_n_steps = log_every_n_steps
-        self.wer_metric = evaluate.load("wer")
+    self.eval_samples = list(eval_dataset.take(num_samples))
+    self.tokenizer = tokenizer
+    self.feature_extractor = feature_extractor
+    self.sample_rate = sample_rate
+    self.max_audio_samples = int(max_audio_seconds * sample_rate)
+    self.log_every_n_steps = log_every_n_steps
+    self.wer_metric = evaluate.load("wer")
 
     def on_step_end(self, args: TrainingArguments, state, control, model=None, **kwargs):
         if state.global_step > 0 and state.global_step % self.log_every_n_steps == 0:
-            print(f"\n--- Step {state.global_step}: Running Prediction Log ---")
-            device = model.device
-            predictions, references = [], []
-
+            # ...
             with torch.no_grad():
                 for sample in self.eval_samples:
+                    array = sample["audio"]["array"]
+                    # Manually truncate AND pad the single audio array
+                    if len(array) > self.max_audio_samples:
+                        array = array[:self.max_audio_samples]
+                    if len(array) < self.max_audio_samples:
+                        array = np.pad(
+                            array, (0, self.max_audio_samples - len(array)),
+                            mode='constant', constant_values=0
+                        )
+                
                     inputs = self.feature_extractor(
-                        sample["audio"]["array"],
+                        array,
                         sampling_rate=self.sample_rate,
                         return_tensors="pt",
                     )
+
                     generated_ids = model.generate(
                         input_features=inputs.input_features.to(device), max_new_tokens=100
                     )
+                    
                     predictions.append(
                         self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
                     )
                     references.append(sample.get("text", ""))
 
             wer = self.wer_metric.compute(predictions=predictions, references=references)
-
-            # Log to trackio
-            trackio.log({"eval/wer_on_samples": wer}, step=state.global_step)
 
             print(f"Prediction: '{predictions[0]}'")
             print(f"Reference:  '{references[0]}'")
@@ -243,12 +263,6 @@ def main(cfg: DictConfig) -> None:
     """Main function to configure and run the ASR model training."""
     print("--- 🚀 Initializing ASR Training ---")
     print(OmegaConf.to_yaml(cfg))
-
-    # Initialize trackio for experiment tracking
-    trackio.init(
-        project="tiny-audio",
-        config=OmegaConf.to_container(cfg, resolve=True)
-    )
 
     # 1. Initialize Model from Configuration
     lora_config = {}
@@ -275,8 +289,6 @@ def main(cfg: DictConfig) -> None:
 
     # 3. Configure Training Arguments
     training_args = TrainingArguments(**OmegaConf.to_container(cfg.training, resolve=True))
-    # Disable TensorBoard since we're using trackio
-    training_args.report_to = []
 
     # 4. Initialize Trainer
     trainer = Trainer(
@@ -296,6 +308,7 @@ def main(cfg: DictConfig) -> None:
                 tokenizer=model.tokenizer,
                 feature_extractor=model.feature_extractor,
                 sample_rate=cfg.data.sample_rate,
+                max_audio_seconds=cfg.data.max_audio_seconds,
                 log_every_n_steps=cfg.log_predictions_every_n_steps,
             )
         ],
@@ -307,9 +320,6 @@ def main(cfg: DictConfig) -> None:
     print("--- 🎉 Training Complete ---")
     trainer.save_model()
     print(f"💾 Model saved to {training_args.output_dir}")
-
-    # Finish trackio run
-    trackio.finish()
 
 
 if __name__ == "__main__":
