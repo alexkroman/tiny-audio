@@ -33,8 +33,12 @@ def test_model_training_step():
     input_ids = torch.randint(0, 1000, (batch_size, seq_len))
     attention_mask = torch.ones_like(input_ids)
     labels = input_ids.clone()
-    # W2V-BERT expects raw audio waveform
-    input_features = torch.randn(batch_size, 16000)  # 1 second of audio at 16kHz
+    # Preprocess raw audio through feature extractor
+    raw_audio = torch.randn(batch_size, 16000)  # 1 second of audio at 16kHz
+    audio_inputs = model.feature_extractor(
+        raw_audio.numpy(), sampling_rate=16000, return_tensors="pt"
+    )
+    input_features = audio_inputs.input_features
 
     # Forward pass
     outputs = model(
@@ -62,8 +66,12 @@ def test_model_generate():
     model = ASRModel(config)
     model.eval()
 
-    # Test with dummy audio
-    input_features = torch.randn(1, 16000)  # 1 second of audio at 16kHz
+    # Test with dummy audio - preprocess through feature extractor
+    raw_audio = torch.randn(1, 16000)  # 1 second of audio at 16kHz
+    audio_inputs = model.feature_extractor(
+        raw_audio.numpy(), sampling_rate=16000, return_tensors="pt"
+    )
+    input_features = audio_inputs.input_features
 
     with torch.no_grad():
         output_ids = model.generate(

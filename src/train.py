@@ -8,8 +8,8 @@ import re
 from typing import Any, Dict, List, Optional
 
 import hydra
-import torch
 import numpy as np
+import torch
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer, TrainerCallback, TrainingArguments
@@ -127,7 +127,6 @@ class DataCollator:
         self.max_audio_seconds = config.data.max_audio_seconds
         self.max_audio_samples = int(self.max_audio_seconds * self.sample_rate)
 
-
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         # 1. Filter out invalid samples
         valid_features = [f for f in features if f.get("audio") and f.get("text")]
@@ -174,67 +173,67 @@ class DataCollator:
 
 # --- Evaluation and Logging ---
 
+
 class PredictionLoggingCallback(TrainerCallback):
+    def __init__(
+        self,
+        eval_dataset: Dataset,
+        tokenizer: Any,
+        feature_extractor: Any,
+        sample_rate: int,
+        max_audio_seconds: float,
+        num_samples: int = 10,
+        log_every_n_steps: int = 500,
+    ):
+        import evaluate
 
- def __init__(
-    self,
-    eval_dataset: Dataset,
-    tokenizer: Any,
-    feature_extractor: Any,
-    sample_rate: int,
-    max_audio_seconds: float,
-    num_samples: int = 10,
-    log_every_n_steps: int = 500,
-):
-    import evaluate
+        self.eval_samples = list(eval_dataset.take(num_samples))
+        self.tokenizer = tokenizer
+        self.feature_extractor = feature_extractor
+        self.sample_rate = sample_rate
+        self.max_audio_samples = int(max_audio_seconds * sample_rate)
+        self.log_every_n_steps = log_every_n_steps
+        self.wer_metric = evaluate.load("wer")
 
-    self.eval_samples = list(eval_dataset.take(num_samples))
-    self.tokenizer = tokenizer
-    self.feature_extractor = feature_extractor
-    self.sample_rate = sample_rate
-    self.max_audio_samples = int(max_audio_seconds * sample_rate)
-    self.log_every_n_steps = log_every_n_steps
-    self.wer_metric = evaluate.load("wer")
+        def on_step_end(self, args: TrainingArguments, state, control, model=None, **kwargs):
+            if state.global_step > 0 and state.global_step % self.log_every_n_steps == 0:
+                model.eval()
+                device = next(model.parameters()).device
+                predictions, references = [], []
 
-    def on_step_end(self, args: TrainingArguments, state, control, model=None, **kwargs):
-        if state.global_step > 0 and state.global_step % self.log_every_n_steps == 0:
-            model.eval()
-            device = next(model.parameters()).device
-            predictions, references = [], []
+                with torch.no_grad():
+                    for sample in self.eval_samples:
+                        array = sample["audio"]["array"]
 
-            with torch.no_grad():
-                for sample in self.eval_samples:
-                    array = sample["audio"]["array"]
+                        # Always create fixed-size array (no branching for torch.compile)
+                        padded = np.zeros(self.max_audio_samples, dtype=np.float32)
+                        copy_len = min(len(array), self.max_audio_samples)
+                        padded[:copy_len] = array[:copy_len]
+                        array = padded
 
-                    # Always create fixed-size array (no branching for torch.compile)
-                    padded = np.zeros(self.max_audio_samples, dtype=np.float32)
-                    copy_len = min(len(array), self.max_audio_samples)
-                    padded[:copy_len] = array[:copy_len]
-                    array = padded
+                        inputs = self.feature_extractor(
+                            array,
+                            sampling_rate=self.sample_rate,
+                            return_tensors="pt",
+                        )
 
-                    inputs = self.feature_extractor(
-                        array,
-                        sampling_rate=self.sample_rate,
-                        return_tensors="pt",
-                    )
+                        generated_ids = model.generate(
+                            input_features=inputs.input_features.to(device),
+                            max_new_tokens=100,
+                            eos_token_id=self.tokenizer.eos_token_id,
+                        )
 
-                    generated_ids = model.generate(
-                        input_features=inputs.input_features.to(device),
-                        max_new_tokens=100,
-                        eos_token_id=self.tokenizer.eos_token_id,
-                    )
+                        predictions.append(
+                            self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                        )
+                        references.append(sample.get("text", ""))
 
-                    predictions.append(
-                        self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-                    )
-                    references.append(sample.get("text", ""))
+                wer = self.wer_metric.compute(predictions=predictions, references=references)
 
-            wer = self.wer_metric.compute(predictions=predictions, references=references)
-
-            print(f"Prediction: '{predictions[0]}'")
-            print(f"Reference:  '{references[0]}'")
-            print(f"📈 WER on {len(self.eval_samples)} samples: {wer:.2%}\n")
-            model.train()  # Ensure model is back in training mode
+                print(f"Prediction: '{predictions[0]}'")
+                print(f"Reference:  '{references[0]}'")
+                print(f"📈 WER on {len(self.eval_samples)} samples: {wer:.2%}\n")
+                model.train()  # Ensure model is back in training mode
 
 
 # --- Main Training ---
@@ -249,6 +248,7 @@ def main(cfg: DictConfig) -> None:
     # Initialize trackio if configured
     if cfg.training.get("report_to") == "trackio":
         import trackio
+
         project_name = cfg.training.get("trackio_project", "tiny-audio")
         print(f"📊 Initializing trackio project: {project_name}")
         trackio.init(project=project_name)
@@ -314,6 +314,7 @@ def main(cfg: DictConfig) -> None:
         # Finish trackio run if it was initialized
         if cfg.training.get("report_to") == "trackio":
             import trackio
+
             print("📊 Finishing trackio run...")
             trackio.finish()
 

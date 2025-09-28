@@ -17,7 +17,7 @@ from typing import List, Optional
 
 import gradio as gr
 import torch
-from transformers import AutoModelForSpeechSeq2Seq
+from transformers import AutoModel
 
 try:
     import spaces
@@ -41,18 +41,28 @@ def get_model(model_path: str = "mazesmazes/tiny-audio"):
     """Initialize and cache the model."""
     global _model
     if _model is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        _model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_path,
-            dtype=dtype,
-            trust_remote_code=True,
-        )
-        _model = _model.to(device)
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            dtype = torch.float16
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+            dtype = torch.float32  # MPS works better with float32
+        else:
+            device = torch.device("cpu")
+            dtype = torch.float32
+
+        # Load model from HuggingFace Hub with trust_remote_code
+        _model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+        _model = _model.to(device, dtype=dtype)
         _model.eval()
 
-        if torch.__version__ >= "2.0.0":
-            _model = torch.compile(_model, mode="reduce-overhead")
+        # Only compile if not on CPU (can cause issues)
+        if device.type != "cpu":
+            try:
+                _model = torch.compile(_model, mode="reduce-overhead")
+            except Exception:
+                # Compilation might fail in some environments
+                pass
 
     return _model
 
@@ -61,7 +71,7 @@ def get_model(model_path: str = "mazesmazes/tiny-audio"):
 def transcribe_audio(audio_path: str, model_path: str = "mazesmazes/tiny-audio") -> str:
     """Transcribe audio using the model's built-in transcribe method."""
     model = get_model(model_path)
-    return model.transcribe(audio_path)
+    return model.transcribe(audio_path, max_new_tokens=64)
 
 
 class ASRDemo:
@@ -94,6 +104,13 @@ class ASRDemo:
 
         return [str(f.relative_to(self.outputs_dir)) for f in sorted(audio_files)]
 
+    def get_audio_path(self, selected_file: Optional[str]) -> str:
+        """Get the full path for the selected audio file."""
+        if not selected_file:
+            return ""
+        file_path = self.outputs_dir / selected_file
+        return str(file_path) if file_path.exists() else ""
+
     def process_from_outputs(self, selected_file: Optional[str]) -> str:
         """Process a file from the outputs directory."""
         if not selected_file:
@@ -120,6 +137,12 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
                     label="Select audio file",
                     value=output_files[0] if output_files else None,
                 )
+                audio_player = gr.Audio(
+                    label="Audio Preview",
+                    type="filepath",
+                    interactive=False,
+                    value=asr_demo.get_audio_path(output_files[0]) if output_files else None,
+                )
                 process_btn = gr.Button("Transcribe Selected", variant="primary")
 
             with gr.Column():
@@ -128,6 +151,10 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio", outputs_dir: str = "w
                     lines=5,
                     placeholder="Transcription will appear here...",
                 )
+
+        file_dropdown.change(
+            asr_demo.get_audio_path, inputs=[file_dropdown], outputs=[audio_player]
+        )
 
         process_btn.click(
             asr_demo.process_from_outputs, inputs=[file_dropdown], outputs=[output_text]

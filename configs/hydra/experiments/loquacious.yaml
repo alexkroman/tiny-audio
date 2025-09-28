@@ -1,7 +1,0 @@
-# @package _global_
-# Production training with LoquaciousSet
-
-defaults:
-  - override /model: large
-  - override /data: loquaciousset
-  - override /training: production

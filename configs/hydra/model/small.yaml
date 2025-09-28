@@ -1,5 +1,5 @@
 # Small model configuration
-decoder_model_name: HuggingFaceTB/SmolLM2-135M-Instruct
+decoder_model_name: HuggingFaceTB/SmolLM2-135M
 
 # LoRA configuration
 use_lora: true

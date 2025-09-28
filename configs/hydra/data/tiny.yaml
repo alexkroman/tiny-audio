@@ -1,18 +1,16 @@
-# Tiny dataset configuration for Mac local development
+# LoquaciousSet dataset configuration
 datasets:
-  - name: librispeech_asr
-    configs:
-      - clean
-    audio_column: audio  # LibriSpeech uses 'audio' column
-    text_column: text    # LibriSpeech uses 'text' column
+  - path: speechbrain/LoquaciousSet
+    name: clean  # Config name for LoquaciousSet
+    audio_column: wav    # LoquaciousSet uses 'wav' instead of 'audio'
+    text_column: text    # LoquaciousSet uses 'text' column
     train_splits:
-      - train.100
+      - train
     eval_splits:
-      - validation
+      - dev
 
 # Data filtering
-max_audio_seconds: 30.0  # Increased to accommodate longer samples
-max_text_words: 100
+max_audio_seconds: 10
 
 # Audio processing
 sample_rate: 16000
@@ -20,5 +18,6 @@ sample_rate: 16000
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 num_proc: 1
-max_train_samples: 20
-max_eval_samples: 5
+max_train_samples: null
+max_eval_samples: 10
+use_streaming: true  # Enable streaming mode for faster startup

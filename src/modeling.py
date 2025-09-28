@@ -2,7 +2,6 @@
 
 from pathlib import Path
 from typing import Optional, Union
-import torch._dynamo as dynamo
 
 import numpy as np
 import torch
@@ -10,8 +9,8 @@ import torch.nn as nn
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
-    AutoModelForSpeechSeq2Seq,
     AutoTokenizer,
     PretrainedConfig,
     PreTrainedModel,
@@ -19,8 +18,6 @@ from transformers import (
     Wav2Vec2BertModel,
 )
 from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
-
-
 
 # --- Configuration Class ---
 
@@ -46,6 +43,8 @@ class ASRModelConfig(PretrainedConfig):
         self.lora_dropout = lora_dropout
         super().__init__(**kwargs)
 
+        self.auto_map = {"AutoConfig": "modeling.ASRModelConfig", "AutoModel": "modeling.ASRModel"}
+
 
 # --- Main ASR Model ---
 
@@ -62,9 +61,7 @@ class ASRModel(PreTrainedModel):
         super().__init__(config)
 
         # 1. Initialize Audio Encoder and Feature Extractor
-        self.encoder = Wav2Vec2BertModel.from_pretrained(
-            config.encoder_model_name, layerdrop=0.0
-        )
+        self.encoder = Wav2Vec2BertModel.from_pretrained(config.encoder_model_name, layerdrop=0.0)
         self.encoder.requires_grad_(False)  # Freeze encoder
         self.feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained(
             config.encoder_model_name
@@ -100,8 +97,16 @@ class ASRModel(PreTrainedModel):
             cfg.bos_token_id = getattr(self.tokenizer, "bos_token_id", self.tokenizer.eos_token_id)
 
         # Register token IDs as buffers for torch.compile
-        self.register_buffer("pad_token_id", torch.tensor(self.tokenizer.pad_token_id, dtype=torch.long), persistent=False)
-        self.register_buffer("eos_token_id", torch.tensor(self.tokenizer.eos_token_id, dtype=torch.long), persistent=False)
+        self.register_buffer(
+            "pad_token_id",
+            torch.tensor(self.tokenizer.pad_token_id, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "eos_token_id",
+            torch.tensor(self.tokenizer.eos_token_id, dtype=torch.long),
+            persistent=False,
+        )
 
     def _init_projector(self):
         """Initializes layers to project audio features to text space."""
@@ -139,7 +144,9 @@ class ASRModel(PreTrainedModel):
         projected = projected[:, :trimmed_len, :]
 
         # Reshape and average: (B, T, D) -> (B, T/4, 4, D) -> (B, T/4, D)
-        projected = projected.reshape(batch_size, trimmed_len // self.downsample_factor, self.downsample_factor, hidden_dim)
+        projected = projected.reshape(
+            batch_size, trimmed_len // self.downsample_factor, self.downsample_factor, hidden_dim
+        )
         projected = projected.mean(dim=2)  # Average over the downsample dimension
 
         return projected
@@ -168,7 +175,9 @@ class ASRModel(PreTrainedModel):
         total_lengths = audio_seq_len + text_lengths
         combined_seq_len = inputs_embeds.shape[1]
         # Use expand instead of [None, :] for better compilation
-        attention_mask = torch.arange(combined_seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1) < total_lengths.unsqueeze(1)
+        attention_mask = torch.arange(combined_seq_len, device=input_ids.device).unsqueeze(
+            0
+        ).expand(batch_size, -1) < total_lengths.unsqueeze(1)
 
         # Prepare labels: audio tokens are ignored (-100), text tokens keep their labels
         combined_labels = None
@@ -212,6 +221,10 @@ class ASRModel(PreTrainedModel):
         batch_size = input_features.shape[0]
         device = input_features.device
 
+        # Ensure input_features match encoder's dtype
+        encoder_dtype = next(self.encoder.parameters()).dtype
+        input_features = input_features.to(dtype=encoder_dtype)
+
         # Encode audio features
         audio_embeds = self._encode_audio(input_features)
         audio_seq_len = audio_embeds.shape[1]
@@ -222,6 +235,11 @@ class ASRModel(PreTrainedModel):
         generate_kwargs.setdefault("max_new_tokens", 448)
         generate_kwargs.setdefault("pad_token_id", self.pad_token_id.item())
         generate_kwargs.setdefault("eos_token_id", self.eos_token_id.item())
+        generate_kwargs.setdefault("use_cache", True)
+        generate_kwargs.setdefault("do_sample", False)
+        generate_kwargs.setdefault("num_beams", 1)
+        generate_kwargs.setdefault("repetition_penalty", 1.1)
+        generate_kwargs.setdefault("no_repeat_ngram_size", 3)
 
         return self.decoder.generate(
             inputs_embeds=audio_embeds, attention_mask=attention_mask, **generate_kwargs
@@ -233,9 +251,12 @@ class ASRModel(PreTrainedModel):
     ) -> str:
         """High-level convenience method to transcribe an audio file or array."""
         if isinstance(audio, str):
-            import librosa
+            import torchaudio
 
-            audio, _ = librosa.load(audio, sr=sampling_rate)
+            audio, sr = torchaudio.load(audio)
+            if sr != sampling_rate:
+                audio = torchaudio.functional.resample(audio, sr, sampling_rate)
+            audio = audio.squeeze(0).numpy()
 
         inputs = self.feature_extractor(audio, sampling_rate=sampling_rate, return_tensors="pt")
         device = next(self.decoder.parameters()).device
@@ -253,4 +274,4 @@ class ASRModel(PreTrainedModel):
 
 # Register the custom model with AutoClasses for easy loading
 AutoConfig.register("asr_model", ASRModelConfig)
-AutoModelForSpeechSeq2Seq.register(ASRModelConfig, ASRModel)
+AutoModel.register(ASRModelConfig, ASRModel)
