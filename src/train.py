@@ -126,10 +126,6 @@ class DataCollator:
         self.sample_rate = config.data.sample_rate
         self.max_audio_seconds = config.data.max_audio_seconds
         self.max_audio_samples = int(self.max_audio_seconds * self.sample_rate)
-        self.audio_chunk_token_id = tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
-
-        if self.audio_chunk_token_id == tokenizer.unk_token_id:
-            raise ValueError("'<|audio_chunk|>' token is missing from the tokenizer's vocabulary!")
 
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
@@ -138,62 +134,42 @@ class DataCollator:
         if not valid_features:
             return {}
 
-        # 2. Manually truncate AND pad each audio array to the global max length
+        # 2. Ensure all audio arrays are exactly max_audio_samples (compile-friendly)
         audio_arrays = []
         for f in valid_features:
             array = f["audio"]["array"]
-            
-            # Create a new array of the target size, filled with zeros
-            padded_array = np.zeros(self.max_audio_samples, dtype=np.float32)
-            
-            # Determine the portion of the original array to use (truncate if necessary)
+            # Always create fixed-size array (no branching for torch.compile)
+            padded = np.zeros(self.max_audio_samples, dtype=np.float32)
             copy_len = min(len(array), self.max_audio_samples)
-            
-            # Copy the data
-            padded_array[:copy_len] = array[:copy_len]
-            
-            audio_arrays.append(padded_array)
+            padded[:copy_len] = array[:copy_len]
+            audio_arrays.append(padded)
 
         # 3. Process the uniformly-sized arrays with the feature extractor
         audio_features = self.feature_extractor(
             audio_arrays, sampling_rate=self.sample_rate, return_tensors="pt"
         )
 
-        # 4. Format as a simple text sequence for the whole batch
-        # We add the EOS token to teach the model when a transcription is complete.
-        prompts = [f"<|audio_chunk|>{f['text']}{self.tokenizer.eos_token}" for f in valid_features]
+        # 4. Format text with EOS token (audio will be prepended as embeddings)
+        texts = [f"{f['text']}{self.tokenizer.eos_token}" for f in valid_features]
 
         # 5. Tokenize the batch
         tokenized = self.tokenizer(
-            prompts,
+            texts,
             padding="max_length",
             max_length=512,
             truncation=True,
             return_tensors="pt",
         )
 
-        batch = {}
-        batch["input_ids"] = tokenized["input_ids"]
-        batch["attention_mask"] = tokenized["attention_mask"]
-        batch["input_features"] = audio_features.input_features
-
-        # 6. Create labels: mask out the prompt part (<|audio_chunk|>)
-        labels = batch["input_ids"].clone()
-
-        # Tokenize the prompt-only part to find its length
-        prompt_only_tokenized = self.tokenizer(
-            ["<|audio_chunk|>"], add_special_tokens=False, return_tensors="pt"
-        )
-        prompt_len = prompt_only_tokenized.input_ids.shape[1]
-
-        # Mask the prompt tokens by setting their labels to -100
-        labels[:, :prompt_len] = -100
-
-        # Also mask padding tokens
+        # 6. Create labels (mask padding tokens, audio masking handled in model)
+        labels = tokenized["input_ids"].clone()
         labels[labels == self.tokenizer.pad_token_id] = -100
-        batch["labels"] = labels
 
-        return batch
+        return {
+            "input_ids": tokenized["input_ids"],
+            "input_features": audio_features.input_features,
+            "labels": labels,
+        }
 
 
 # --- Evaluation and Logging ---
@@ -229,12 +205,12 @@ class PredictionLoggingCallback(TrainerCallback):
             with torch.no_grad():
                 for sample in self.eval_samples:
                     array = sample["audio"]["array"]
-                    
-                    # Manually truncate AND pad the single audio array
-                    padded_array = np.zeros(self.max_audio_samples, dtype=np.float32)
+
+                    # Always create fixed-size array (no branching for torch.compile)
+                    padded = np.zeros(self.max_audio_samples, dtype=np.float32)
                     copy_len = min(len(array), self.max_audio_samples)
-                    padded_array[:copy_len] = array[:copy_len]
-                    array = padded_array
+                    padded[:copy_len] = array[:copy_len]
+                    array = padded
 
                     inputs = self.feature_extractor(
                         array,
@@ -269,6 +245,13 @@ def main(cfg: DictConfig) -> None:
     """Main function to configure and run the ASR model training."""
     print("--- 🚀 Initializing ASR Training ---")
     print(OmegaConf.to_yaml(cfg))
+
+    # Initialize trackio if configured
+    if cfg.training.get("report_to") == "trackio":
+        import trackio
+        project_name = cfg.training.get("trackio_project", "tiny-audio")
+        print(f"📊 Initializing trackio project: {project_name}")
+        trackio.init(project=project_name)
 
     # 1. Initialize Model from Configuration
     lora_config = {}
@@ -322,10 +305,17 @@ def main(cfg: DictConfig) -> None:
 
     # 5. Start Training
     print("--- 🏋️ Starting Training ---")
-    trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
-    print("--- 🎉 Training Complete ---")
-    trainer.save_model()
-    print(f"💾 Model saved to {training_args.output_dir}")
+    try:
+        trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
+        print("--- 🎉 Training Complete ---")
+        trainer.save_model()
+        print(f"💾 Model saved to {training_args.output_dir}")
+    finally:
+        # Finish trackio run if it was initialized
+        if cfg.training.get("report_to") == "trackio":
+            import trackio
+            print("📊 Finishing trackio run...")
+            trackio.finish()
 
 
 if __name__ == "__main__":

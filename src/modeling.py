@@ -20,49 +20,6 @@ from transformers import (
 )
 from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 
-# --- Helper Modules ---
-
-
-class SwiGLU(nn.Module):
-    """A SwiGLU activation layer, a variant of Gated Linear Units."""
-
-    def __init__(self, hidden_dim: int, expansion_factor: float = 8 / 3):
-        super().__init__()
-        intermediate_dim = int(hidden_dim * expansion_factor)
-        self.w1 = nn.Linear(hidden_dim, intermediate_dim, bias=False)  # Gate projection
-        self.w2 = nn.Linear(hidden_dim, intermediate_dim, bias=False)  # Up projection
-        self.w3 = nn.Linear(intermediate_dim, hidden_dim, bias=False)  # Down projection
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w3(torch.nn.functional.silu(self.w1(x)) * self.w2(x))
-
-
-class AttentionPoolingHead(nn.Module):
-    """Compresses audio features using attention with learnable query probes."""
-
-    def __init__(self, hidden_dim: int, num_heads: int, num_probe_tokens: int = 128):
-        super().__init__()
-        self.probe = nn.Parameter(torch.randn(1, num_probe_tokens, hidden_dim) * 0.02)
-        self.attention = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
-        self.norm1 = RMSNorm(hidden_dim, eps=1e-6)
-        self.norm2 = RMSNorm(hidden_dim, eps=1e-6)
-        self.mlp = SwiGLU(hidden_dim)
-
-    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        # Pre-normalization is used for stability, common in models like Llama.
-        batch_size = hidden_state.shape[0]
-        probe = self.probe.expand(batch_size, -1, -1) # More memory-efficient
-
-        # Attention layer with pre-norm
-        attn_input = self.norm1(probe)
-        attn_output, _ = self.attention(query=attn_input, key=hidden_state, value=hidden_state)
-        residual1 = probe + attn_output
-
-        # MLP layer with pre-norm
-        mlp_input = self.norm2(residual1)
-        mlp_output = self.mlp(mlp_input)
-
-        return residual1 + mlp_output
 
 
 # --- Configuration Class ---
@@ -75,8 +32,8 @@ class ASRModelConfig(PretrainedConfig):
         self,
         decoder_model_name: str = "HuggingFaceTB/SmolLM3-3B",
         encoder_model_name: str = "facebook/w2v-bert-2.0",
-        lora_r: int = 32,
-        lora_alpha: int = 64,
+        lora_r: int = 16,
+        lora_alpha: int = 32,
         lora_target_modules: Optional[list[str]] = None,
         lora_dropout: float = 0.05,
         **kwargs,
@@ -130,12 +87,10 @@ class ASRModel(PreTrainedModel):
         )
         self.generation_config = self.decoder.generation_config
 
-        # Load tokenizer and add special tokens
+        # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.decoder_model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.add_special_tokens({"additional_special_tokens": ["<|audio_chunk|>"]})
-        self.audio_chunk_id = self.tokenizer.convert_tokens_to_ids("<|audio_chunk|>")
 
         # Resize embeddings for new tokens and sync configs
         self.decoder.resize_token_embeddings(len(self.tokenizer))
@@ -144,23 +99,18 @@ class ASRModel(PreTrainedModel):
             cfg.eos_token_id = self.tokenizer.eos_token_id
             cfg.bos_token_id = getattr(self.tokenizer, "bos_token_id", self.tokenizer.eos_token_id)
 
+        # Register token IDs as buffers for torch.compile
+        self.register_buffer("pad_token_id", torch.tensor(self.tokenizer.pad_token_id, dtype=torch.long), persistent=False)
+        self.register_buffer("eos_token_id", torch.tensor(self.tokenizer.eos_token_id, dtype=torch.long), persistent=False)
+
     def _init_projector(self):
-        """Initializes layers to project and compress audio features."""
+        """Initializes layers to project audio features to text space."""
         audio_dim = self.encoder.config.hidden_size
         text_dim = self.decoder.config.hidden_size
-        num_probe_tokens = 128
-
         self.audio_norm = RMSNorm(audio_dim)
-        self.audio_to_inter = nn.Linear(audio_dim, text_dim, bias=False)
-        self.audio_pooler = AttentionPoolingHead(
-            text_dim, num_heads=8, num_probe_tokens=num_probe_tokens
-        )
-        self.audio_pos_embed = nn.Embedding(num_probe_tokens, text_dim)
-
-        self.register_buffer(
-            'position_ids',
-            torch.arange(num_probe_tokens, dtype=torch.long).unsqueeze(0)
-        )
+        self.audio_proj = nn.Linear(audio_dim, text_dim, bias=True)
+        # Downsample factor: reduces 50 Hz -> 12.5 Hz (4x reduction)
+        self.downsample_factor = 4
 
     def _init_lora(self):
         """Applies LoRA to the decoder for efficient fine-tuning."""
@@ -171,130 +121,110 @@ class ASRModel(PreTrainedModel):
             lora_dropout=self.config.lora_dropout,
             bias="none",
             task_type=TaskType.CAUSAL_LM,
-            modules_to_save=["lm_head", "embed_tokens"],  
         )
         self.decoder = get_peft_model(self.decoder, lora_config)
 
     def _encode_audio(self, input_features: torch.Tensor) -> torch.Tensor:
         """Encodes audio and projects it into the text embedding space."""
-
         with torch.no_grad():
             audio_features = self.encoder(input_features).last_hidden_state
 
-        projected = self.audio_to_inter(self.audio_norm(audio_features))
-        projected = torch.clamp(projected, min=-10.0, max=10.0)
-        pooled = self.audio_pooler(projected)
-        pooled = torch.clamp(pooled, min=-10.0, max=10.0)
+        # Project to text space
+        projected = self.audio_proj(self.audio_norm(audio_features))
 
-        return pooled + self.audio_pos_embed(self.position_ids)
+        # Downsample using reshape+mean (compile-friendly, no transpose issues)
+        batch_size, seq_len, hidden_dim = projected.shape
+        # Trim to multiple of downsample_factor
+        trimmed_len = (seq_len // self.downsample_factor) * self.downsample_factor
+        projected = projected[:, :trimmed_len, :]
 
-    def _splice_audio_embeddings(
+        # Reshape and average: (B, T, D) -> (B, T/4, 4, D) -> (B, T/4, D)
+        projected = projected.reshape(batch_size, trimmed_len // self.downsample_factor, self.downsample_factor, hidden_dim)
+        projected = projected.mean(dim=2)  # Average over the downsample dimension
+
+        return projected
+
+    def _prepare_inputs_embeds(
         self,
         input_ids: torch.Tensor,
         audio_embeds: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
-        Splices audio embeddings into text embeddings.
-        This version uses a loop, which is required for autograd correctness,
-        and disables the torch compiler to prevent compilation errors.
+        Prepares inputs by concatenating audio embeddings as a prefix to text embeddings.
+        This is fully vectorized and torch.compile friendly.
         """
-        batch_size, seq_len = input_ids.shape
-        audio_seq_len, audio_hidden_dim = audio_embeds.shape[1], audio_embeds.shape[2]
-        device = input_ids.device
+        batch_size = input_ids.shape[0]
+        audio_seq_len = audio_embeds.shape[1]
+
+        # Get text embeddings
         text_embeds = self.decoder.get_input_embeddings()(input_ids)
 
-        # Find where the audio chunk placeholder is
-        chunk_token_indices = (input_ids == self.audio_chunk_id).to(torch.int8).argmax(dim=-1)
+        # Concatenate audio as prefix: [audio_embeds, text_embeds]
+        inputs_embeds = torch.cat([audio_embeds, text_embeds], dim=1)
 
-        # Prepare text-only parts by masking out the placeholder
-        text_mask = input_ids != self.audio_chunk_id
+        # Create attention mask for the combined sequence
+        text_lengths = (input_ids != self.pad_token_id).sum(dim=1)
+        total_lengths = audio_seq_len + text_lengths
+        combined_seq_len = inputs_embeds.shape[1]
+        # Use expand instead of [None, :] for better compilation
+        attention_mask = torch.arange(combined_seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1) < total_lengths.unsqueeze(1)
 
-        # Pre-allocate tensors for the final spliced embeddings and labels
-        new_seq_len = seq_len - 1 + audio_seq_len
-        final_embeds = torch.zeros(batch_size, new_seq_len, audio_hidden_dim, device=device, dtype=text_embeds.dtype)
-        final_labels = None
+        # Prepare labels: audio tokens are ignored (-100), text tokens keep their labels
+        combined_labels = None
         if labels is not None:
-            final_labels = torch.full((batch_size, new_seq_len), -100, device=device, dtype=labels.dtype)
+            audio_labels = torch.full(
+                (batch_size, audio_seq_len), -100, device=labels.device, dtype=labels.dtype
+            )
+            combined_labels = torch.cat([audio_labels, labels], dim=1)
 
-        # This loop is autograd-safe and more memory-efficient than using torch.cat
-        for i in range(batch_size):
-            idx = chunk_token_indices[i]
-
-            # Select text embeddings for the current sample, excluding the placeholder
-            current_text_embeds = text_embeds[i, text_mask[i]].view(seq_len - 1, -1)
-
-            # Splice the embeddings
-            final_embeds[i, :idx] = current_text_embeds[:idx]
-            final_embeds[i, idx : idx + audio_seq_len] = audio_embeds[i]
-            final_embeds[i, idx + audio_seq_len :] = current_text_embeds[idx:]
-
-            if final_labels is not None and labels is not None:
-                labels_only = labels[i, text_mask[i]].view(seq_len - 1)
-                final_labels[i, :idx] = labels_only[:idx]
-                # The audio part remains -100 (ignored by loss function)
-                final_labels[i, idx + audio_seq_len :] = labels_only[idx:]
-
-
-        # Create the final attention mask
-        original_lengths = (input_ids != self.tokenizer.pad_token_id).sum(dim=1)
-        new_lengths = original_lengths - 1 + audio_seq_len
-        final_attention_mask = torch.arange(new_seq_len, device=device)[None, :] < new_lengths[:, None]
-
-        return final_embeds, final_attention_mask.long(), final_labels
+        return inputs_embeds, attention_mask.long(), combined_labels
 
     def forward(
         self,
         input_ids: torch.Tensor,
         input_features: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,  # Accept but ignore
         **kwargs,
     ):
         """Forward pass for training, combining audio and text inputs."""
-        kwargs.pop("attention_mask", None)
+        # Ignore input attention_mask, we compute our own
 
         audio_embeds = self._encode_audio(input_features)
-        inputs_embeds, new_attention_mask, new_labels = self._splice_audio_embeddings(
+        inputs_embeds, attention_mask, combined_labels = self._prepare_inputs_embeds(
             input_ids, audio_embeds, labels
         )
-        
+
         return self.decoder(
             inputs_embeds=inputs_embeds,
-            attention_mask=new_attention_mask,
-            labels=new_labels,
+            attention_mask=attention_mask,
+            labels=combined_labels,
             **kwargs,
         )
 
     @torch.no_grad()
     def generate(self, input_features: torch.Tensor, **generate_kwargs) -> torch.LongTensor:
-        """Generates text from audio features."""
+        """Generates text from audio features using audio embeddings as prefix."""
         if input_features.dim() == 2:
             input_features = input_features.unsqueeze(0)
 
-        # Create the simple prompt string directly
-        prompt_str = "<|audio_chunk|>"
+        batch_size = input_features.shape[0]
         device = input_features.device
 
-        # Tokenize the simple prompt.
-        # add_special_tokens=False ensures no extra BOS token is added,
-        # creating a perfect match with the training format.
-        prompt_ids = self.tokenizer(
-            prompt_str, return_tensors="pt", add_special_tokens=False
-        ).input_ids.to(device)
-
-        batch_size = input_features.shape[0]
-        if batch_size > 1:
-            prompt_ids = prompt_ids.repeat(batch_size, 1)
-
+        # Encode audio features
         audio_embeds = self._encode_audio(input_features)
-        inputs_embeds, attention_mask, _ = self._splice_audio_embeddings(prompt_ids, audio_embeds)
+        audio_seq_len = audio_embeds.shape[1]
+
+        # Create attention mask for audio tokens (all valid)
+        attention_mask = torch.ones(batch_size, audio_seq_len, device=device, dtype=torch.long)
 
         generate_kwargs.setdefault("max_new_tokens", 448)
-        generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
-        generate_kwargs.setdefault("eos_token_id", self.tokenizer.eos_token_id)
+        generate_kwargs.setdefault("pad_token_id", self.pad_token_id.item())
+        generate_kwargs.setdefault("eos_token_id", self.eos_token_id.item())
 
         return self.decoder.generate(
-            inputs_embeds=inputs_embeds, attention_mask=attention_mask, **generate_kwargs
+            inputs_embeds=audio_embeds, attention_mask=attention_mask, **generate_kwargs
         )
 
     @torch.no_grad()
@@ -316,7 +246,6 @@ class ASRModel(PreTrainedModel):
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
         """Saves the model, tokenizer, and feature extractor."""
-        kwargs.setdefault("safe_serialization", False)
         super().save_pretrained(save_directory, **kwargs)
         self.feature_extractor.save_pretrained(save_directory)
         self.tokenizer.save_pretrained(save_directory)

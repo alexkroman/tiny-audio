@@ -23,7 +23,7 @@ adam_epsilon: 1e-8
 
 # Logging
 logging_dir: ${hydra:runtime.output_dir}/logs
-logging_steps: 100
+logging_steps: 50
 logging_first_step: true
 logging_nan_inf_filter: false
 report_to: trackio
@@ -53,7 +53,7 @@ fp16: false
 bf16: true
 dataloader_pin_memory: true
 max_grad_norm: 1.0
-torch_compile: true
+torch_compile: false
 
 # Misc
 seed: 42

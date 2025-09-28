@@ -18,7 +18,7 @@ def test_model_training_step():
     # Create small model
     config = ASRModelConfig(
         decoder_model_name="HuggingFaceTB/SmolLM2-360M-Instruct",
-        encoder_model_name="openai/whisper-small",
+        encoder_model_name="facebook/w2v-bert-2.0",
         lora_r=4,  # Very small for testing
         lora_alpha=8,
     )
@@ -33,13 +33,8 @@ def test_model_training_step():
     input_ids = torch.randint(0, 1000, (batch_size, seq_len))
     attention_mask = torch.ones_like(input_ids)
     labels = input_ids.clone()
-    input_features = torch.randn(
-        batch_size, 80, 3000
-    )  # 80 mel bins, 3000 frames (Whisper requirement)
-
-    # Insert audio chunk token
-    audio_chunk_id = model.audio_chunk_id
-    input_ids[:, 5] = audio_chunk_id
+    # W2V-BERT expects raw audio waveform
+    input_features = torch.randn(batch_size, 16000)  # 1 second of audio at 16kHz
 
     # Forward pass
     outputs = model(
@@ -60,7 +55,7 @@ def test_model_generate():
 
     config = ASRModelConfig(
         decoder_model_name="HuggingFaceTB/SmolLM2-360M-Instruct",
-        encoder_model_name="openai/whisper-small",
+        encoder_model_name="facebook/w2v-bert-2.0",
         lora_r=4,
     )
 
@@ -68,7 +63,7 @@ def test_model_generate():
     model.eval()
 
     # Test with dummy audio
-    input_features = torch.randn(1, 80, 3000)  # 80 mel bins, 3000 frames (Whisper requirement)
+    input_features = torch.randn(1, 16000)  # 1 second of audio at 16kHz
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -95,7 +90,7 @@ def test_transcribe_method():
 
     config = ASRModelConfig(
         decoder_model_name="HuggingFaceTB/SmolLM2-360M-Instruct",
-        encoder_model_name="openai/whisper-small",
+        encoder_model_name="facebook/w2v-bert-2.0",
         lora_r=4,
     )
 
