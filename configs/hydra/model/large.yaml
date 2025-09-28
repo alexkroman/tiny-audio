@@ -1,5 +1,5 @@
 # Large model configuration
-decoder_model_name: HuggingFaceTB/SmolLM3-3B
+decoder_model_name: HuggingFaceTB/SmolLM3-3B-Base
 
 # LoRA configuration
 use_lora: true

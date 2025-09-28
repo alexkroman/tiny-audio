@@ -89,6 +89,7 @@ def install_python_dependencies(host, port):
          pip install \
             --no-cache-dir \
             tensorboard \
+            ninja \
             flash-attn --no-build-isolation && \
          pip install -e .'
     """

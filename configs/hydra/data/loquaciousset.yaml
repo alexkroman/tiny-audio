@@ -10,7 +10,7 @@ datasets:
       - dev
 
 # Data filtering
-max_audio_seconds: 30.0  # LoquaciousSet can have longer utterances
+max_audio_seconds: 20.0  # > 95% of samples
 
 # Audio processing
 sample_rate: 16000
@@ -19,5 +19,5 @@ sample_rate: 16000
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 num_proc: 8
 max_train_samples: null
-max_eval_samples: 500
+max_eval_samples: 1000
 use_streaming: true  # Enable streaming mode for faster startup
