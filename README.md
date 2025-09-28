@@ -4,29 +4,11 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/release/python-390/)
 [![Hugging Face Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 
-A minimal (~300 line) speech recognition model that combines W2V-BERT 2.0's multilingual audio
-understanding with modern language models (SmolLM2 or Qwen3) for text generation. This project is
-designed to be a hands-on guide to understanding modern ASR systems by building
-and training your own.
+A tiny speech recognition model
 
-**🚀 Live Demo**: [Try it on Hugging Face Spaces](https://huggingface.co/spaces/mazesmazes/tiny-audio)  
+**🚀 Demo**: [Try it on Hugging Face Spaces](https://huggingface.co/spaces/mazesmazes/tiny-audio)
 **📦 Pre-trained Model**: Available on
 [Hugging Face Hub](https://huggingface.co/mazesmazes/tiny-audio)
-
-## Features
-
-- **Minimalist Core**: The core model is just 300 lines of readable Python,
-  making it easy to understand completely.
-- **Modern Architecture**: Combines a frozen W2V-BERT 2.0 encoder with SmolLM2
-  or Qwen3 decoders using LoRA adapters and an attention-based projection layer.
-- **Laptop-Friendly**: Train on your local machine (including M1/M2 Macs) or
-  scale up to powerful GPUs.
-- **Real-World Datasets**: Supports training on standard ASR datasets like
-  LibriSpeech, GigaSpeech, and Common Voice.
-- **Live Monitoring**: Track your model's progress in real-time with TensorBoard
-  integration.
-- **Flexible Configuration**: Easily experiment with different model sizes,
-  datasets, and hyperparameters using Hydra.
 
 ## Installation
 
@@ -44,34 +26,31 @@ and training your own.
    uv sync
    ```
 
-   Alternatively, you can use pip:
-
-   ```bash
-   pip install -e .
-   ```
-
 ## Quick Start
 
 ### Option 1: Use Pre-trained Model
 
 ```python
-from transformers import AutoModelForSpeechSeq2Seq
+from transformers import AutoModel
 import torch
 
 # Load model
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    dtype = torch.float16
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
+    dtype = torch.float32  # MPS works better with float32
+else:
+    device = torch.device("cpu")
+    dtype = torch.float32
 
-model = AutoModelForSpeechSeq2Seq.from_pretrained(
-    "mazesmazes/tiny-audio",
-    dtype=dtype,
-    trust_remote_code=True
-)
-model = model.to(device)
+model = AutoModel.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
+model = model.to(device, dtype=dtype)
 model.eval()
 
 # Transcribe audio
-transcription = model.transcribe("path/to/audio.wav")
+transcription = model.transcribe("path/to/audio.wav", max_new_tokens=64)
 print(transcription)
 ```
 
@@ -121,6 +100,7 @@ Deploy your demo as a public Hugging Face Space for easy sharing:
    - Name your Space (e.g., "tiny-audio-demo")
 
 2. **Deploy using the automated script:**
+
    ```bash
    # Deploy to default space (mazesmazes/tiny-audio)
    uv run scripts/deploy_to_hf_space.py --force
@@ -145,16 +125,10 @@ The model consists of three main components:
 
 1. **W2V-BERT 2.0 Encoder**: A frozen encoder trained on 4.5M hours of audio
    across 143+ languages. (600M parameters, not trained)
-1. **Audio Projector**: An attention-based projection architecture featuring:
-   - AttentionPoolingHead with learnable probes for feature compression
-   - Pre-norm transformer architecture with dual layer normalization
-   - SwiGLU activation with proper residual connections
-1. **Language Model Decoder**: SmolLM2 (360M) or Qwen3 (1.7B) with LoRA
-   adapters for parameter-efficient fine-tuning (~2% of parameters trained)
+2. **Audio Projector**: An attention-based projector
+3. **Language Model Decoder**: SmolLM3
 
-```
 Audio Input → [W2V-BERT Encoder] → [Audio Projector] → [LM Decoder + LoRA] → Text Output
-```
 
 ## Configuration
 
@@ -214,47 +188,22 @@ This project uses `ruff` for linting and formatting, and `mypy` for type
 checking.
 
 - **Linting:**
+
   ```bash
   uv run ruff check src/
   ```
+
 - **Formatting:**
+
   ```bash
   uv run ruff format src/
   ```
+
 - **Type Checking:**
+
   ```bash
   uv run mypy src/
   ```
-
-## Monitoring
-
-Training progress, including loss and Word Error Rate (WER), is logged to
-Weights & Biases (W&B).
-
-```bash
-# Login to W&B (first time only)
-wandb login
-
-# View metrics in the W&B dashboard
-# Your runs will appear at https://wandb.ai/YOUR_USERNAME/tiny-audio
-```
-
-## Project Structure
-
-```
-├── configs/            # Hydra configuration files
-├── demo/               # Gradio demo application
-├── scripts/            # Scripts for cloud deployment and training
-├── src/                # Source code
-│   ├── modeling.py     # The core ASR model
-│   └── train.py        # The training script
-├── tests/              # Test suite
-│   └── test_e2e.py     # End-to-end training and transcription test
-├── .gitignore
-├── CLAUDE.md           # Notes for AI-assisted development
-├── pyproject.toml
-└── README.md
-```
 
 ## Contributing
 
