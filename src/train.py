@@ -160,20 +160,13 @@ class DataCollator:
             audio_arrays, sampling_rate=self.sample_rate, return_tensors="pt"
         )
 
-        # 4. Apply chat template for the whole batch at once
-        conversations = [
-            [
-                {"role": "user", "content": "<|audio_chunk|>"},
-                {"role": "assistant", "content": f["text"]},
-            ]
-            for f in valid_features
-        ]
+        # 4. Format as a simple text sequence for the whole batch
+        # We add the EOS token to teach the model when a transcription is complete.
+        prompts = [f"<|audio_chunk|>{f['text']}{self.tokenizer.eos_token}" for f in valid_features]
 
-        tokenized = self.tokenizer.apply_chat_template(
-            conversations,
-            tokenize=True,
-            return_dict=True,
-            return_assistant_tokens_mask=True,
+        # 5. Tokenize the batch
+        tokenized = self.tokenizer(
+            prompts,
             padding="max_length",
             max_length=512,
             truncation=True,
@@ -182,14 +175,25 @@ class DataCollator:
 
         batch = {}
         batch["input_ids"] = tokenized["input_ids"]
-        assistant_masks_padded = tokenized["assistant_masks"]
+        batch["attention_mask"] = tokenized["attention_mask"]
+        batch["input_features"] = audio_features.input_features
 
-        # 5. Create labels: mask non-assistant tokens and padding with -100
+        # 6. Create labels: mask out the prompt part (<|audio_chunk|>)
         labels = batch["input_ids"].clone()
-        labels[assistant_masks_padded == 0] = -100
+
+        # Tokenize the prompt-only part to find its length
+        prompt_only_tokenized = self.tokenizer(
+            ["<|audio_chunk|>"], add_special_tokens=False, return_tensors="pt"
+        )
+        prompt_len = prompt_only_tokenized.input_ids.shape[1]
+
+        # Mask the prompt tokens by setting their labels to -100
+        labels[:, :prompt_len] = -100
+
+        # Also mask padding tokens
         labels[labels == self.tokenizer.pad_token_id] = -100
         batch["labels"] = labels
-        batch["input_features"] = audio_features.input_features
+
         return batch
 
 
@@ -219,7 +223,14 @@ class PredictionLoggingCallback(TrainerCallback):
 
     def on_step_end(self, args: TrainingArguments, state, control, model=None, **kwargs):
         if state.global_step > 0 and state.global_step % self.log_every_n_steps == 0:
-            # ...
+            model.eval()
+            device = next(model.parameters()).device
+            predictions, references = [], []
+
+            # Prepare the inference prompt
+            inference_prompt = "<|audio_chunk|>"
+            prompt_ids = self.tokenizer(inference_prompt, return_tensors="pt").input_ids.to(device)
+
             with torch.no_grad():
                 for sample in self.eval_samples:
                     array = sample["audio"]["array"]
@@ -231,7 +242,7 @@ class PredictionLoggingCallback(TrainerCallback):
                             array, (0, self.max_audio_samples - len(array)),
                             mode='constant', constant_values=0
                         )
-                
+
                     inputs = self.feature_extractor(
                         array,
                         sampling_rate=self.sample_rate,
@@ -239,9 +250,12 @@ class PredictionLoggingCallback(TrainerCallback):
                     )
 
                     generated_ids = model.generate(
-                        input_features=inputs.input_features.to(device), max_new_tokens=100
+                        input_features=inputs.input_features.to(device),
+                        decoder_input_ids=prompt_ids,
+                        max_new_tokens=100,
+                        eos_token_id=self.tokenizer.eos_token_id,
                     )
-                    
+
                     predictions.append(
                         self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
                     )
