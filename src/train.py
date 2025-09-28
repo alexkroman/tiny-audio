@@ -142,18 +142,17 @@ class DataCollator:
         audio_arrays = []
         for f in valid_features:
             array = f["audio"]["array"]
-            # Truncate if longer
-            if len(array) > self.max_audio_samples:
-                array = array[:self.max_audio_samples]
-            # Pad with zeros if shorter
-            if len(array) < self.max_audio_samples:
-                padded_array = np.pad(
-                    array, (0, self.max_audio_samples - len(array)),
-                    mode='constant', constant_values=0
-                )
-                audio_arrays.append(padded_array)
-            else:
-                audio_arrays.append(array)
+            
+            # Create a new array of the target size, filled with zeros
+            padded_array = np.zeros(self.max_audio_samples, dtype=np.float32)
+            
+            # Determine the portion of the original array to use (truncate if necessary)
+            copy_len = min(len(array), self.max_audio_samples)
+            
+            # Copy the data
+            padded_array[:copy_len] = array[:copy_len]
+            
+            audio_arrays.append(padded_array)
 
         # 3. Process the uniformly-sized arrays with the feature extractor
         audio_features = self.feature_extractor(
@@ -227,21 +226,15 @@ class PredictionLoggingCallback(TrainerCallback):
             device = next(model.parameters()).device
             predictions, references = [], []
 
-            # Prepare the inference prompt
-            inference_prompt = "<|audio_chunk|>"
-            prompt_ids = self.tokenizer(inference_prompt, return_tensors="pt").input_ids.to(device)
-
             with torch.no_grad():
                 for sample in self.eval_samples:
                     array = sample["audio"]["array"]
+                    
                     # Manually truncate AND pad the single audio array
-                    if len(array) > self.max_audio_samples:
-                        array = array[:self.max_audio_samples]
-                    if len(array) < self.max_audio_samples:
-                        array = np.pad(
-                            array, (0, self.max_audio_samples - len(array)),
-                            mode='constant', constant_values=0
-                        )
+                    padded_array = np.zeros(self.max_audio_samples, dtype=np.float32)
+                    copy_len = min(len(array), self.max_audio_samples)
+                    padded_array[:copy_len] = array[:copy_len]
+                    array = padded_array
 
                     inputs = self.feature_extractor(
                         array,
@@ -251,7 +244,6 @@ class PredictionLoggingCallback(TrainerCallback):
 
                     generated_ids = model.generate(
                         input_features=inputs.input_features.to(device),
-                        decoder_input_ids=prompt_ids,
                         max_new_tokens=100,
                         eos_token_id=self.tokenizer.eos_token_id,
                     )

@@ -67,6 +67,7 @@ def start_training(host, port, experiment, session_name):
 
         echo "--- Setting up environment variables ---"
         export TOKENIZERS_PARALLELISM=false
+        export HYDRA_FULL_ERROR=1
         export CUDA_LAUNCH_BLOCKING=1
         export HF_DATASETS_AUDIO_DECODER="torchaudio"
         export HF_HOME=/workspace/.cache/huggingface
