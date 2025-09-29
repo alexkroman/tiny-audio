@@ -32,26 +32,9 @@ A tiny speech recognition model
 
 ```python
 from transformers import AutoModel
-import torch
-
-# Load model
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-    dtype = torch.float16
-elif torch.backends.mps.is_available():
-    device = torch.device("mps")
-    dtype = torch.float32  # MPS works better with float32
-else:
-    device = torch.device("cpu")
-    dtype = torch.float32
 
 model = AutoModel.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
-model = model.to(device, dtype=dtype)
-model.eval()
-
-# Transcribe audio
-transcription = model.transcribe("path/to/audio.wav", max_new_tokens=64)
-print(transcription)
+transcription = model.transcribe("audio.wav")
 ```
 
 See the [model card](https://huggingface.co/mazesmazes/tiny-audio) for detailed

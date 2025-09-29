@@ -41,28 +41,27 @@ def get_model(model_path: str = "mazesmazes/tiny-audio"):
     """Initialize and cache the model."""
     global _model
     if _model is None:
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            dtype = torch.float16
-        elif torch.backends.mps.is_available():
-            device = torch.device("mps")
-            dtype = torch.float32  # MPS works better with float32
-        else:
-            device = torch.device("cpu")
-            dtype = torch.float32
-
         # Load model from HuggingFace Hub with trust_remote_code
         _model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
-        _model = _model.to(device, dtype=dtype)
-        _model.eval()
 
-        # Only compile if not on CPU (can cause issues)
-        if device.type != "cpu":
+        # Optionally move to GPU/MPS if available for better performance
+        if torch.cuda.is_available():
+            _model = _model.cuda()
+            # Try to compile for faster inference on GPU
             try:
                 _model = torch.compile(_model, mode="reduce-overhead")
             except Exception:
                 # Compilation might fail in some environments
                 pass
+        elif torch.backends.mps.is_available():
+            _model = _model.to("mps")
+            # Try to compile for faster inference on MPS
+            try:
+                _model = torch.compile(_model, mode="reduce-overhead")
+            except Exception:
+                # Compilation might fail in some environments
+                pass
+        # Otherwise stays on CPU (default)
 
     return _model
 

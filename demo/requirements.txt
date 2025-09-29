@@ -1,4 +1,8 @@
-transformers>=4.56.0
-torch>=2.0.0
-torchaudio>=2.0.0
+# Use CPU-only PyTorch to stay within HF Spaces 50GB limit
+# The base image already has gradio, spaces, numpy, pandas, etc.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+torchaudio==2.5.1+cpu
+transformers>=4.44.0
 peft>=0.6.0
+soundfile  # Required for torchaudio to load audio files

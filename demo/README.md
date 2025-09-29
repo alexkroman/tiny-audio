@@ -15,8 +15,8 @@ models:
 tags:
   - audio
   - automatic-speech-recognition
-  - whisper
-  - smollm2
+  - wav2vec2
+  - smollm3
   - lora
 suggested_hardware: cpu-upgrade
 preload_from_hub:
