@@ -11,3 +11,7 @@ lora_target_modules:
   - k_proj
   - v_proj
   - o_proj
+
+# Compilation settings (disable for small model by default)
+compile_decoder: false  # Small model doesn't benefit as much from compilation
+compile_mode: default

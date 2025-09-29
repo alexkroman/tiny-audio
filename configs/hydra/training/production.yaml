@@ -4,7 +4,7 @@ overwrite_output_dir: false
 
 # Training configuration
 max_steps: 50000  # Use steps instead of epochs for streaming datasets
-per_device_train_batch_size: 4
+per_device_train_batch_size: 8
 per_device_eval_batch_size: 4
 gradient_accumulation_steps: 4
 eval_accumulation_steps: 1
@@ -53,7 +53,12 @@ fp16: false
 bf16: true
 dataloader_pin_memory: true
 max_grad_norm: 1.0
-torch_compile: false
+torch_compile: false  # Disable full model compilation (we compile decoder separately)
+
+# Streaming compatibility settings
+dataloader_num_workers: 9
+dataloader_persistent_workers: true
+dataloader_prefetch_factor: 2
 
 # Misc
 seed: 42

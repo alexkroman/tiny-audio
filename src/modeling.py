@@ -33,6 +33,8 @@ class ASRModelConfig(PretrainedConfig):
         lora_alpha: int = 32,
         lora_target_modules: Optional[list[str]] = None,
         lora_dropout: float = 0.05,
+        compile_decoder: bool = False,
+        compile_mode: str = "reduce-overhead",
         **kwargs,
     ):
         self.decoder_model_name = decoder_model_name
@@ -41,6 +43,8 @@ class ASRModelConfig(PretrainedConfig):
         self.lora_alpha = lora_alpha
         self.lora_target_modules = lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
         self.lora_dropout = lora_dropout
+        self.compile_decoder = compile_decoder
+        self.compile_mode = compile_mode
         super().__init__(**kwargs)
 
         self.auto_map = {"AutoConfig": "modeling.ASRModelConfig", "AutoModel": "modeling.ASRModel"}
@@ -128,6 +132,14 @@ class ASRModel(PreTrainedModel):
             task_type=TaskType.CAUSAL_LM,
         )
         self.decoder = get_peft_model(self.decoder, lora_config)
+
+        # Compile decoder for better performance (skip projector compilation)
+        if getattr(self.config, "compile_decoder", False):
+            import torch
+
+            compile_mode = getattr(self.config, "compile_mode", "reduce-overhead")
+            print(f"🔧 Compiling decoder with mode: {compile_mode}")
+            self.decoder = torch.compile(self.decoder, mode=compile_mode)
 
     def _encode_audio(self, input_features: torch.Tensor) -> torch.Tensor:
         """Encodes audio and projects it into the text embedding space."""

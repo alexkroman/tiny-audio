@@ -11,3 +11,7 @@ lora_target_modules:
   - k_proj
   - v_proj
   - o_proj
+
+# Compilation settings
+compile_decoder: true  # Compile only the decoder, not the projector
+compile_mode: reduce-overhead  # Options: default, reduce-overhead, max-autotune
