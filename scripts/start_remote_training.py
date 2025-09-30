@@ -72,10 +72,13 @@ def start_training(host, port, experiment, session_name):
         export HF_DATASETS_CACHE=/workspace/datasets
         export HF_HUB_ENABLE_HF_TRANSFER=1
         export HF_TOKEN="{hf_token}"
+        export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+        # Enable TF32 for A40 (2x matmul speedup with no accuracy loss)
+        export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
 
         echo "--- Starting TensorBoard ---"
         pkill -f tensorboard || true
-        tensorboard --logdir /workspace/outputs --host 0.0.0.0 --port 6006 --bind_all &
+        tensorboard --logdir /workspace/outputs --host 0.0.0.0 --port 6006 &
         echo "TensorBoard started on port 6006"
 
         echo "--- Verifying environment ---"

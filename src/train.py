@@ -133,15 +133,14 @@ class DataCollator:
         if not valid_features:
             return {}
 
-        # 2. Ensure all audio arrays are exactly max_audio_samples (compile-friendly)
+        # 2. Extract and truncate audio arrays (let feature extractor handle padding)
         audio_arrays = []
         for f in valid_features:
             array = f["audio"]["array"]
-            # Always create fixed-size array (no branching for torch.compile)
-            padded = np.zeros(self.max_audio_samples, dtype=np.float32)
-            copy_len = min(len(array), self.max_audio_samples)
-            padded[:copy_len] = array[:copy_len]
-            audio_arrays.append(padded)
+            # Truncate to max length but don't pad - feature extractor will pad to batch max
+            if len(array) > self.max_audio_samples:
+                array = array[:self.max_audio_samples]
+            audio_arrays.append(array)
 
         # 3. Process the uniformly-sized arrays with the feature extractor
         audio_features = self.feature_extractor(
@@ -151,11 +150,11 @@ class DataCollator:
         # 4. Format text with EOS token (audio will be prepended as embeddings)
         texts = [f"{f['text']}{self.tokenizer.eos_token}" for f in valid_features]
 
-        # 5. Tokenize the batch
+        # 5. Tokenize the batch (pad to longest in batch, not max_length)
         tokenized = self.tokenizer(
             texts,
-            padding="max_length",
-            max_length=512,
+            padding="longest",
+            max_length=256,
             truncation=True,
             return_tensors="pt",
         )
@@ -195,45 +194,60 @@ class PredictionLoggingCallback(TrainerCallback):
         self.log_every_n_steps = log_every_n_steps
         self.wer_metric = evaluate.load("wer")
 
-        def on_step_end(self, args: TrainingArguments, state, control, model=None, **kwargs):
-            if state.global_step > 0 and state.global_step % self.log_every_n_steps == 0:
-                model.eval()
-                device = next(model.parameters()).device
-                predictions, references = [], []
+    def on_step_end(self, args: TrainingArguments, state, control, model=None, **kwargs):
+        if state.global_step > 0 and state.global_step % self.log_every_n_steps == 0:
+            model.eval()
+            device = next(model.parameters()).device
+            predictions, references = [], []
 
-                with torch.no_grad():
-                    for sample in self.eval_samples:
-                        array = sample["audio"]["array"]
+            with torch.no_grad():
+                for sample in self.eval_samples:
+                    array = sample["audio"]["array"]
 
-                        # Always create fixed-size array (no branching for torch.compile)
-                        padded = np.zeros(self.max_audio_samples, dtype=np.float32)
-                        copy_len = min(len(array), self.max_audio_samples)
-                        padded[:copy_len] = array[:copy_len]
-                        array = padded
+                    # Always create fixed-size array (no branching for torch.compile)
+                    padded = np.zeros(self.max_audio_samples, dtype=np.float32)
+                    copy_len = min(len(array), self.max_audio_samples)
+                    padded[:copy_len] = array[:copy_len]
+                    array = padded
 
-                        inputs = self.feature_extractor(
-                            array,
-                            sampling_rate=self.sample_rate,
-                            return_tensors="pt",
-                        )
+                    inputs = self.feature_extractor(
+                        array,
+                        sampling_rate=self.sample_rate,
+                        return_tensors="pt",
+                    )
 
-                        generated_ids = model.generate(
-                            input_features=inputs.input_features.to(device),
-                            max_new_tokens=100,
-                            eos_token_id=self.tokenizer.eos_token_id,
-                        )
+                    generated_ids = model.generate(
+                        input_features=inputs.input_features.to(device),
+                        max_new_tokens=100,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                    )
 
-                        predictions.append(
-                            self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-                        )
-                        references.append(sample.get("text", ""))
+                    predictions.append(
+                        self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                    )
+                    references.append(sample.get("text", ""))
 
-                wer = self.wer_metric.compute(predictions=predictions, references=references)
+            wer = self.wer_metric.compute(predictions=predictions, references=references)
 
-                print(f"Prediction: '{predictions[0]}'")
-                print(f"Reference:  '{references[0]}'")
-                print(f"📈 WER on {len(self.eval_samples)} samples: {wer:.2%}\n")
-                model.train()  # Ensure model is back in training mode
+            print(f"Prediction: '{predictions[0]}'")
+            print(f"Reference:  '{references[0]}'")
+            print(f"📈 WER on {len(self.eval_samples)} samples: {wer:.2%}\n")
+
+            # Log to TensorBoard
+            if state.is_world_process_zero:
+                # Get TensorBoard writer from args
+                for callback in kwargs.get("callbacks", []):
+                    if hasattr(callback, "tb_writer") and callback.tb_writer is not None:
+                        writer = callback.tb_writer
+                        writer.add_scalar("eval/wer", wer, state.global_step)
+
+                        # Log first 3 prediction/reference pairs as text
+                        for i, (pred, ref) in enumerate(zip(predictions[:3], references[:3])):
+                            text = f"Prediction: {pred}\n\nReference: {ref}"
+                            writer.add_text(f"eval/sample_{i}", text, state.global_step)
+                        break
+
+            model.train()  # Ensure model is back in training mode
 
 
 # --- Main Training ---
@@ -243,6 +257,11 @@ class PredictionLoggingCallback(TrainerCallback):
 def main(cfg: DictConfig) -> None:
     """Main function to configure and run the ASR model training."""
     print("--- 🚀 Initializing ASR Training ---")
+
+    # Enable TF32 for A40/A100 GPUs (2x matmul speedup with no accuracy loss)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
     print(OmegaConf.to_yaml(cfg))
 
     # 1. Initialize Model from Configuration
@@ -257,7 +276,7 @@ def main(cfg: DictConfig) -> None:
 
     asr_config = ASRModelConfig(
         decoder_model_name=cfg.model.decoder_model_name,
-        encoder_model_name="facebook/w2v-bert-2.0",
+        encoder_model_name=cfg.model.get("encoder_model_name", "openai/whisper-small"),
         **lora_config,
     )
     model = ASRModel(asr_config)

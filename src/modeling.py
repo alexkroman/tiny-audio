@@ -56,7 +56,7 @@ class ASRModelConfig(PretrainedConfig):
 class ASRModel(PreTrainedModel):
     config_class = ASRModelConfig
     main_input_name = "input_features"
-    supports_gradient_checkpointing = False
+    supports_gradient_checkpointing = True
     _supports_generate = True
 
     def __init__(self, config: Union[ASRModelConfig, dict]):
@@ -67,6 +67,9 @@ class ASRModel(PreTrainedModel):
         # 1. Initialize Audio Encoder and Feature Extractor
         self.encoder = WhisperModel.from_pretrained(config.encoder_model_name)
         self.encoder.requires_grad_(False)  # Freeze encoder
+        # Disable gradient checkpointing on frozen encoder to avoid warnings
+        if hasattr(self.encoder, "gradient_checkpointing_disable"):
+            self.encoder.gradient_checkpointing_disable()
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
             config.encoder_model_name
         )
@@ -114,12 +117,17 @@ class ASRModel(PreTrainedModel):
 
     def _init_projector(self):
         """Initializes layers to project audio features to text space."""
-        audio_dim = self.encoder.config.hidden_size
+        audio_dim = self.encoder.config.d_model
         text_dim = self.decoder.config.hidden_size
         self.audio_norm = RMSNorm(audio_dim)
         self.audio_proj = nn.Linear(audio_dim, text_dim, bias=True)
-        # Downsample factor: reduces 50 Hz -> 12.5 Hz (4x reduction)
-        self.downsample_factor = 4
+
+        # Initialize projection with small weights to avoid large gradients
+        nn.init.normal_(self.audio_proj.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.audio_proj.bias)
+
+        # Downsample factor: reduces 50 Hz -> 25 Hz (2x reduction)
+        self.downsample_factor = 2
 
     def _init_lora(self):
         """Applies LoRA to the decoder for efficient fine-tuning."""
@@ -132,6 +140,10 @@ class ASRModel(PreTrainedModel):
             task_type=TaskType.CAUSAL_LM,
         )
         self.decoder = get_peft_model(self.decoder, lora_config)
+
+        # Enable gradient checkpointing on the decoder if supported
+        if hasattr(self.decoder, "enable_input_require_grads"):
+            self.decoder.enable_input_require_grads()
 
         # Compile decoder for better performance (skip projector compilation)
         if getattr(self.config, "compile_decoder", False):
@@ -156,7 +168,7 @@ class ASRModel(PreTrainedModel):
         trimmed_len = (seq_len // self.downsample_factor) * self.downsample_factor
         projected = projected[:, :trimmed_len, :]
 
-        # Reshape and average: (B, T, D) -> (B, T/4, 4, D) -> (B, T/4, D)
+        # Reshape and average: (B, T, D) -> (B, T/2, 2, D) -> (B, T/2, D)
         projected = projected.reshape(
             batch_size, trimmed_len // self.downsample_factor, self.downsample_factor, hidden_dim
         )
@@ -177,8 +189,8 @@ class ASRModel(PreTrainedModel):
         batch_size = input_ids.shape[0]
         audio_seq_len = audio_embeds.shape[1]
 
-        # Get text embeddings
-        text_embeds = self.decoder.get_input_embeddings()(input_ids)
+        # Get text embeddings directly from base model (faster, avoids PEFT wrapper)
+        text_embeds = self.decoder.base_model.model.get_input_embeddings()(input_ids)
 
         # Concatenate audio as prefix: [audio_embeds, text_embeds]
         inputs_embeds = torch.cat([audio_embeds, text_embeds], dim=1)
@@ -217,6 +229,10 @@ class ASRModel(PreTrainedModel):
         inputs_embeds, attention_mask, combined_labels = self._prepare_inputs_embeds(
             input_ids, audio_embeds, labels
         )
+
+        # Disable cache when using gradient checkpointing
+        if self.training and getattr(self.config, "use_cache", True):
+            kwargs["use_cache"] = False
 
         return self.decoder(
             inputs_embeds=inputs_embeds,

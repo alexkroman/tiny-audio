@@ -6,5 +6,5 @@ defaults:
   - override /training: production
 
 # Resume from checkpoint (root level override)
-resume_from_checkpoint: /workspace/outputs/2025-09-28/07-43-49/outputs/production_model/checkpoint-10000
-#resume_from_checkpoint: null
+# resume_from_checkpoint: /workspace/outputs/2025-09-28/07-43-49/outputs/production_model/checkpoint-10000
+
