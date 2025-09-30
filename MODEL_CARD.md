@@ -26,9 +26,9 @@ model-index:
 
 # Tiny Audio
 
-A tiny speech recognition model.
+Speech recognition combining Whisper encoder with SmolLM3 decoder.
 
-## Quick Start
+## Usage
 
 ```python
 from transformers import AutoModel
@@ -37,8 +37,22 @@ model = AutoModel.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=Tru
 transcription = model.transcribe("audio.wav")
 ```
 
+## Architecture
+
+- **Encoder**: Whisper-small (frozen)
+- **Projector**: Linear layer with RMSNorm and 2x downsampling
+- **Decoder**: SmolLM3 with LoRA (rank 16-32)
+
+## Training
+
+Datasets: LibriSpeech, GigaSpeech, Common Voice, LoquaciousSet
+
+- BF16 mixed precision
+- Streaming datasets
+- Frozen encoder, LoRA fine-tuning on decoder
+
 ## Links
 
-- **Code**: [github.com/alexkroman/tiny-audio](https://github.com/alexkroman/tiny-audio)
-- **Demo**: [Try it on Hugging Face Spaces](https://huggingface.co/spaces/mazesmazes/tiny-audio)
-- **License**: MIT
+- [Code](https://github.com/alexkroman/tiny-audio)
+- [Demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)
+- License: MIT
