@@ -1,8 +1,8 @@
-# Use CPU-only PyTorch to stay within HF Spaces 50GB limit
-# The base image already has gradio, spaces, numpy, pandas, etc.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.5.1+cpu
-torchaudio==2.5.1+cpu
+# Use GPU-enabled PyTorch for ZeroGPU support
+# The base image already has gradio, numpy, pandas, etc.
+torch>=2.5.1
+torchaudio>=2.5.1
 transformers>=4.44.0
 peft>=0.6.0
+spaces  # Required for ZeroGPU decorator
 soundfile  # Required for torchaudio to load audio files

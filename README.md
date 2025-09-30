@@ -35,11 +35,9 @@ uv run src/train.py +experiments=production
 
 ## Architecture
 
-- **Whisper-small encoder** (frozen)
-- **Linear projector** with RMSNorm and 2x downsampling
-- **SmolLM3 decoder** with LoRA (rank 16-32)
-
-Audio → Whisper → Linear+Downsample → SmolLM3+LoRA → Text
+- **Encoder**: Whisper-small (frozen)
+- **Projector**: RMSNorm → Linear projection → AvgPool (2x downsampling) → RMSNorm
+- **Decoder**: SmolLM3 with LoRA
 
 ## Configuration
 

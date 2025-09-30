@@ -23,9 +23,10 @@ preload_from_hub:
   - mazesmazes/tiny-audio
 ---
 
-# 🎤 Tiny Audio ASR Demo
+## Demo Overview
 
 This Space demonstrates an Automatic Speech Recognition (ASR) model that combines:
+
 - **Whisper-small encoder** for audio feature extraction
 - **SmolLM2 decoder** with LoRA adapters for efficient text generation
 

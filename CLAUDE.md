@@ -137,7 +137,7 @@ wandb login
 
 ## Project Structure
 
-```
+```text
 ├── configs/hydra/      # Hydra configuration files
 │   ├── config.yaml     # Base configuration with defaults
 │   ├── model/          # Model configs (small.yaml, large.yaml)

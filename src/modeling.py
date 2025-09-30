@@ -73,9 +73,7 @@ class ASRModel(PreTrainedModel):
         # Disable gradient checkpointing on frozen encoder to avoid warnings
         if hasattr(self.encoder, "gradient_checkpointing_disable"):
             self.encoder.gradient_checkpointing_disable()
-        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
-            config.encoder_model_name
-        )
+        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.encoder_model_name)
 
         # 2. Initialize Text Decoder and Tokenizer
         self._init_decoder_and_tokenizer()
@@ -174,9 +172,7 @@ class ASRModel(PreTrainedModel):
         projected = projected.transpose(1, 2)  # (B, T/2, D)
 
         # Apply final layer norm for stability
-        projected = self.audio_final_norm(projected)
-
-        return projected
+        return self.audio_final_norm(projected)
 
     def _prepare_inputs_embeds(
         self,
@@ -265,13 +261,14 @@ class ASRModel(PreTrainedModel):
         # Create attention mask for audio tokens (all valid)
         attention_mask = torch.ones(batch_size, audio_seq_len, device=device, dtype=torch.long)
 
-        generate_kwargs.setdefault("max_new_tokens", 448)
+        generate_kwargs.setdefault("max_new_tokens", 100)
         generate_kwargs.setdefault("pad_token_id", self.pad_token_id.item())
         generate_kwargs.setdefault("eos_token_id", self.eos_token_id.item())
         generate_kwargs.setdefault("use_cache", True)
         generate_kwargs.setdefault("do_sample", False)
         generate_kwargs.setdefault("num_beams", 1)
-        generate_kwargs.setdefault("repetition_penalty", 1)
+        generate_kwargs.setdefault("repetition_penalty", 1.1)
+        generate_kwargs.setdefault("length_penalty", 0.8)
 
         return self.decoder.generate(
             inputs_embeds=audio_embeds, attention_mask=attention_mask, **generate_kwargs

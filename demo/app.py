@@ -6,6 +6,7 @@ Gradio app for ASR model with support for:
 - Processing audio files from outputs directory
 """
 
+import contextlib
 import os
 
 # Set matplotlib config dir to avoid warning in Hugging Face Spaces
@@ -23,10 +24,12 @@ try:
     import spaces
 except ImportError:
     # If not running on Hugging Face Spaces, create a dummy decorator
-    class spaces:  # noqa: N801
+    class DummySpaces:  # noqa: N801
         @staticmethod
         def GPU(func):  # noqa: N802
             return func
+
+    spaces = DummySpaces
 
 
 logging.basicConfig(
@@ -48,19 +51,15 @@ def get_model(model_path: str = "mazesmazes/tiny-audio"):
         if torch.cuda.is_available():
             _model = _model.cuda()
             # Try to compile for faster inference on GPU
-            try:
-                _model = torch.compile(_model, mode="reduce-overhead")
-            except Exception:
+            with contextlib.suppress(Exception):
                 # Compilation might fail in some environments
-                pass
+                _model = torch.compile(_model, mode="reduce-overhead")
         elif torch.backends.mps.is_available():
             _model = _model.to("mps")
             # Try to compile for faster inference on MPS
-            try:
-                _model = torch.compile(_model, mode="reduce-overhead")
-            except Exception:
+            with contextlib.suppress(Exception):
                 # Compilation might fail in some environments
-                pass
+                _model = torch.compile(_model, mode="reduce-overhead")
         # Otherwise stays on CPU (default)
 
     return _model

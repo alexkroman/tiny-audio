@@ -139,7 +139,7 @@ class DataCollator:
             array = f["audio"]["array"]
             # Truncate to max length but don't pad - feature extractor will pad to batch max
             if len(array) > self.max_audio_samples:
-                array = array[:self.max_audio_samples]
+                array = array[: self.max_audio_samples]
             audio_arrays.append(array)
 
         # 3. Process the uniformly-sized arrays with the feature extractor

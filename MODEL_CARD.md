@@ -40,8 +40,8 @@ transcription = model.transcribe("audio.wav")
 ## Architecture
 
 - **Encoder**: Whisper-small (frozen)
-- **Projector**: Linear layer with RMSNorm and 2x downsampling
-- **Decoder**: SmolLM3 with LoRA (rank 16-32)
+- **Projector**: RMSNorm → Linear projection → AvgPool (2x downsampling) → RMSNorm
+- **Decoder**: SmolLM3 with LoRA
 
 ## Training
 
