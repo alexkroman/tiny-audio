@@ -11,9 +11,6 @@ lora_target_modules:
   - k_proj
   - v_proj
   - o_proj
-  - gate_proj          # Add MLP
-  - up_proj            # Add MLP
-  - down_proj  
 
 # Compilation settings
 compile_decoder: true  # Compile only the decoder, not the projector

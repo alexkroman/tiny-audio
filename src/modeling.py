@@ -130,8 +130,9 @@ class ASRModel(PreTrainedModel):
         nn.init.normal_(self.audio_proj.weight, mean=0.0, std=0.02)
         nn.init.zeros_(self.audio_proj.bias)
 
-        # Downsample factor: reduces 50 Hz -> 25 Hz (2x reduction)
-        self.downsample_factor = 2
+        # Additional pooling and normalization
+        self.audio_avgpool = nn.AvgPool1d(2, stride=2)
+        self.audio_final_norm = RMSNorm(text_dim)
 
     def _init_lora(self):
         """Applies LoRA to the decoder for efficient fine-tuning."""
@@ -166,17 +167,14 @@ class ASRModel(PreTrainedModel):
         # Project to text space (cast to bfloat16 to match decoder)
         projected = self.audio_proj(self.audio_norm(audio_features.to(torch.bfloat16)))
 
-        # Downsample using reshape+mean (compile-friendly, no transpose issues)
-        batch_size, seq_len, hidden_dim = projected.shape
-        # Trim to multiple of downsample_factor
-        trimmed_len = (seq_len // self.downsample_factor) * self.downsample_factor
-        projected = projected[:, :trimmed_len, :]
+        # Apply avgpool for additional downsampling: (B, T, D) -> (B, T/2, D)
+        # Transpose to (B, D, T) for pooling, then back to (B, T/2, D)
+        projected = projected.transpose(1, 2)  # (B, D, T)
+        projected = self.audio_avgpool(projected)  # (B, D, T/2)
+        projected = projected.transpose(1, 2)  # (B, T/2, D)
 
-        # Reshape and average: (B, T, D) -> (B, T/2, 2, D) -> (B, T/2, D)
-        projected = projected.reshape(
-            batch_size, trimmed_len // self.downsample_factor, self.downsample_factor, hidden_dim
-        )
-        projected = projected.mean(dim=2)  # Average over the downsample dimension
+        # Apply final layer norm for stability
+        projected = self.audio_final_norm(projected)
 
         return projected
 
