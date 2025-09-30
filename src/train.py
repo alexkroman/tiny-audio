@@ -245,14 +245,6 @@ def main(cfg: DictConfig) -> None:
     print("--- 🚀 Initializing ASR Training ---")
     print(OmegaConf.to_yaml(cfg))
 
-    # Initialize trackio if configured
-    if cfg.training.get("report_to") == "trackio":
-        import trackio
-
-        project_name = cfg.training.get("trackio_project", "tiny-audio")
-        print(f"📊 Initializing trackio project: {project_name}")
-        trackio.init(project=project_name)
-
     # 1. Initialize Model from Configuration
     lora_config = {}
     if cfg.model.use_lora:
@@ -305,18 +297,10 @@ def main(cfg: DictConfig) -> None:
 
     # 5. Start Training
     print("--- 🏋️ Starting Training ---")
-    try:
-        trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
-        print("--- 🎉 Training Complete ---")
-        trainer.save_model()
-        print(f"💾 Model saved to {training_args.output_dir}")
-    finally:
-        # Finish trackio run if it was initialized
-        if cfg.training.get("report_to") == "trackio":
-            import trackio
-
-            print("📊 Finishing trackio run...")
-            trackio.finish()
+    trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
+    print("--- 🎉 Training Complete ---")
+    trainer.save_model()
+    print(f"💾 Model saved to {training_args.output_dir}")
 
 
 if __name__ == "__main__":

@@ -72,8 +72,11 @@ def start_training(host, port, experiment, session_name):
         export HF_DATASETS_CACHE=/workspace/datasets
         export HF_HUB_ENABLE_HF_TRANSFER=1
         export HF_TOKEN="{hf_token}"
-        export TRACKIO_SPACE_ID="mazesmazes/trackio"
-        export TRACKIO_PROJECT="tiny-audio"
+
+        echo "--- Starting TensorBoard ---"
+        pkill -f tensorboard || true
+        tensorboard --logdir /workspace/outputs --host 0.0.0.0 --port 6006 --bind_all &
+        echo "TensorBoard started on port 6006"
 
         echo "--- Verifying environment ---"
         echo "Experiment: {experiment}"

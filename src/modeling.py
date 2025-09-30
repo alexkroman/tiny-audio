@@ -250,8 +250,7 @@ class ASRModel(PreTrainedModel):
         generate_kwargs.setdefault("use_cache", True)
         generate_kwargs.setdefault("do_sample", False)
         generate_kwargs.setdefault("num_beams", 1)
-        generate_kwargs.setdefault("repetition_penalty", 1.1)
-        generate_kwargs.setdefault("no_repeat_ngram_size", 3)
+        generate_kwargs.setdefault("repetition_penalty", 1)
 
         return self.decoder.generate(
             inputs_embeds=audio_embeds, attention_mask=attention_mask, **generate_kwargs

@@ -34,7 +34,7 @@ dependencies = [
     "peft",
     "evaluate",
     "jiwer",
-    "trackio",
+    "tensorboard",
     "numpy",
     "soundfile",
     "librosa",

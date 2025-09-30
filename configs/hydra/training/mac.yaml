@@ -26,7 +26,7 @@ logging_dir: ${hydra:runtime.output_dir}/logs
 logging_steps: 10
 logging_first_step: true
 logging_nan_inf_filter: false
-report_to: trackio
+report_to: tensorboard
 
 # Evaluation
 eval_strategy: steps

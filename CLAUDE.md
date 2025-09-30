@@ -4,9 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an Automatic Speech Recognition (ASR) training pipeline that combines a W2V-BERT 2.0 encoder with a SmolLM2 or Qwen decoder using LoRA for parameter-efficient fine-tuning. The project uses Hydra for configuration management and supports both local and remote training on RunPod.
+This is an Automatic Speech Recognition (ASR) training pipeline that combines a W2V-BERT 2.0 encoder with SmolLM3 or Qwen decoder using LoRA for parameter-efficient fine-tuning. The project uses Hydra for configuration management and supports both local and remote training on RunPod.
 
 **📦 Pre-trained Model**: Available on [Hugging Face Hub](https://huggingface.co/mazesmazes/tiny-audio)
+**🚀 Demo**: Try it at [Hugging Face Spaces](https://huggingface.co/spaces/mazesmazes/tiny-audio)
 
 ## Development Commands
 
@@ -90,11 +91,15 @@ uv run demo/app.py --model outputs/2025-09-22/12-51-14/outputs/mac_minimal_model
 uv run demo/app.py
 
 # Deploy demo to Hugging Face Spaces (public demo)
+# Note: Only deploys demo files (app.py, requirements.txt, README.md, wav_outputs/)
+# Models are loaded from HuggingFace Hub at runtime, not included in Space
 uv run scripts/deploy_to_hf_space.py --force
 
 # Deploy to a custom Hugging Face Space
 uv run scripts/deploy_to_hf_space.py --space-url https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE --force
 ```
+
+**Important**: The deployment script only copies demo-related files (~3MB). Model weights are downloaded from HuggingFace Hub when the Space runs, which may use 40-50GB of Docker storage for model caching. This is normal for HF Spaces.
 
 ### Model Publishing
 
@@ -169,7 +174,7 @@ wandb login
      • Pre-norm architecture with dual RMSNorm layers for stability
      • SwiGLU activation with residual connections
      • Positional embeddings for pooled features
-   - `LLMDecoder`: SmolLM2 (360M) or Qwen3 (1.7B) decoder with LoRA adapters for
+   - `LLMDecoder`: SmolLM3 (3B) or Qwen3 (1.7B) decoder with LoRA adapters for
      text generation
 
 1. **Training Pipeline** (`src/train.py:248`):
@@ -185,7 +190,7 @@ wandb login
 
    - Base config: `configs/hydra/config.yaml` - defines defaults and output
      structure
-   - Model configs: `small.yaml` (SmolLM2-360M, r=8, alpha=16), `large.yaml` (Qwen3-1.7B, r=16, alpha=32) - LoRA
+   - Model configs: `small.yaml` (SmolLM3-3B, r=8, alpha=16), `large.yaml` (Qwen3-1.7B, r=16, alpha=32) - LoRA
      parameters
    - Data configs: `tiny.yaml` (100 samples), `production_streaming.yaml` (full
      datasets)
@@ -216,7 +221,7 @@ wandb login
 - **NEVER use `torch_dtype` parameter** - It's deprecated. Don't use `dtype` either for `AutoModelForCausalLM.from_pretrained()` - let it auto-detect
 - **Always resize embeddings** when loading models to match tokenizer vocabulary size (`model.resize_token_embeddings(len(tokenizer))`)
 - **Run tests after changes** to modeling.py or train.py: `uv run pytest tests/test_e2e.py -v`
-- **Frozen Whisper encoder** - The Whisper encoder MUST remain frozen (`requires_grad_(False)`) to preserve audio representations
+- **Frozen W2V-BERT encoder** - The W2V-BERT encoder MUST remain frozen (`requires_grad_(False)`) to preserve audio representations
 - **Audio projection architecture** - The projector uses 2x downsampling, SwiGLU with residual connections for improved performance
 - **ASR Pipeline Support** - The model's `forward` method detects inference mode (when only `input_features` is provided) and redirects to the `generate` method for compatibility with HuggingFace's ASR pipeline
 - **Fixed test output directory** - E2E tests now use a fixed output path `outputs/test_e2e_model` specified via `+output_dir=` override
@@ -273,7 +278,7 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 1. **Audio Input**: Raw audio (16kHz) → SeamlessM4TFeatureExtractor → Log-mel spectrogram features
 2. **Encoder**: Spectrogram → W2V-BERT encoder → Audio embeddings (1024 dim)
 3. **Projection**: Audio embeddings → RMSNorm → Linear projection → AttentionPoolingHead with learnable probes → Compressed features with positional embeddings → Text space (2048/4096 dim)
-4. **Decoder**: Projected features + text prompt → SmolLM2/Qwen3 + LoRA → Generated transcription
+4. **Decoder**: Projected features + text prompt → SmolLM3/Qwen3 + LoRA → Generated transcription
 5. **Loss Calculation**: Cross-entropy on text tokens only (audio tokens masked with -100)
 
 ## Common Pitfalls to Avoid
@@ -283,3 +288,4 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 - **Memory issues on Mac**: Use environment variables `PYTORCH_ENABLE_MPS_FALLBACK=1` and `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0`
 - **Dataset access**: Ensure `HF_TOKEN` is set for gated datasets (GigaSpeech, Common Voice)
 - **Checkpoint compatibility**: When resuming training, ensure optimizer states are compatible
+- **HF Spaces storage**: Space repository should be <10MB (only demo files). The 40-50GB usage is Docker cache for downloaded models, which is managed by HuggingFace

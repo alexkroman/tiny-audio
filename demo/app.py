@@ -70,7 +70,7 @@ def get_model(model_path: str = "mazesmazes/tiny-audio"):
 def transcribe_audio(audio_path: str, model_path: str = "mazesmazes/tiny-audio") -> str:
     """Transcribe audio using the model's built-in transcribe method."""
     model = get_model(model_path)
-    return model.transcribe(audio_path, max_new_tokens=64)
+    return model.transcribe(audio_path)
 
 
 class ASRDemo:
