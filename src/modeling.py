@@ -14,8 +14,8 @@ from transformers import (
     AutoTokenizer,
     PretrainedConfig,
     PreTrainedModel,
-    SeamlessM4TFeatureExtractor,
-    Wav2Vec2BertModel,
+    WhisperFeatureExtractor,
+    WhisperModel,
 )
 from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 
@@ -28,7 +28,7 @@ class ASRModelConfig(PretrainedConfig):
     def __init__(
         self,
         decoder_model_name: str = "HuggingFaceTB/SmolLM3-3B",
-        encoder_model_name: str = "facebook/w2v-bert-2.0",
+        encoder_model_name: str = "openai/whisper-small",
         lora_r: int = 16,
         lora_alpha: int = 32,
         lora_target_modules: Optional[list[str]] = None,
@@ -65,9 +65,9 @@ class ASRModel(PreTrainedModel):
         super().__init__(config)
 
         # 1. Initialize Audio Encoder and Feature Extractor
-        self.encoder = Wav2Vec2BertModel.from_pretrained(config.encoder_model_name, layerdrop=0.0)
+        self.encoder = WhisperModel.from_pretrained(config.encoder_model_name)
         self.encoder.requires_grad_(False)  # Freeze encoder
-        self.feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained(
+        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
             config.encoder_model_name
         )
 
@@ -144,7 +144,8 @@ class ASRModel(PreTrainedModel):
     def _encode_audio(self, input_features: torch.Tensor) -> torch.Tensor:
         """Encodes audio and projects it into the text embedding space."""
         with torch.no_grad():
-            audio_features = self.encoder(input_features).last_hidden_state
+            # Whisper encoder outputs hidden states directly
+            audio_features = self.encoder.encoder(input_features).last_hidden_state
 
         # Project to text space
         projected = self.audio_proj(self.audio_norm(audio_features))
