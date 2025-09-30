@@ -65,7 +65,10 @@ class ASRModel(PreTrainedModel):
         super().__init__(config)
 
         # 1. Initialize Audio Encoder and Feature Extractor
-        self.encoder = WhisperModel.from_pretrained(config.encoder_model_name)
+        self.encoder = WhisperModel.from_pretrained(
+            config.encoder_model_name,
+            dtype=torch.bfloat16,
+        )
         self.encoder.requires_grad_(False)  # Freeze encoder
         # Disable gradient checkpointing on frozen encoder to avoid warnings
         if hasattr(self.encoder, "gradient_checkpointing_disable"):
@@ -88,6 +91,7 @@ class ASRModel(PreTrainedModel):
         self.decoder = AutoModelForCausalLM.from_pretrained(
             self.config.decoder_model_name,
             attn_implementation="sdpa",
+            dtype=torch.bfloat16,
         )
         self.generation_config = self.decoder.generation_config
 
@@ -159,8 +163,8 @@ class ASRModel(PreTrainedModel):
             # Whisper encoder outputs hidden states directly
             audio_features = self.encoder.encoder(input_features).last_hidden_state
 
-        # Project to text space
-        projected = self.audio_proj(self.audio_norm(audio_features))
+        # Project to text space (cast to bfloat16 to match decoder)
+        projected = self.audio_proj(self.audio_norm(audio_features.to(torch.bfloat16)))
 
         # Downsample using reshape+mean (compile-friendly, no transpose issues)
         batch_size, seq_len, hidden_dim = projected.shape
@@ -254,8 +258,10 @@ class ASRModel(PreTrainedModel):
         encoder_dtype = next(self.encoder.parameters()).dtype
         input_features = input_features.to(dtype=encoder_dtype)
 
-        # Encode audio features
+        # Encode audio features and ensure they match decoder dtype
         audio_embeds = self._encode_audio(input_features)
+        decoder_dtype = next(self.decoder.parameters()).dtype
+        audio_embeds = audio_embeds.to(dtype=decoder_dtype)
         audio_seq_len = audio_embeds.shape[1]
 
         # Create attention mask for audio tokens (all valid)
@@ -295,6 +301,17 @@ class ASRModel(PreTrainedModel):
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
         """Saves the model, tokenizer, and feature extractor."""
+        # Infer dtype from projector weights (trainable params)
+        param_dtype = next(self.audio_proj.parameters()).dtype
+
+        # Save with inferred dtype in config (use 'dtype' not 'torch_dtype')
+        if param_dtype == torch.bfloat16:
+            kwargs["dtype"] = torch.bfloat16
+        elif param_dtype == torch.float16:
+            kwargs["dtype"] = torch.float16
+        else:
+            kwargs["dtype"] = torch.float32
+
         super().save_pretrained(save_directory, **kwargs)
         self.feature_extractor.save_pretrained(save_directory)
         self.tokenizer.save_pretrained(save_directory)
