@@ -261,14 +261,13 @@ class ASRModel(PreTrainedModel):
         # Create attention mask for audio tokens (all valid)
         attention_mask = torch.ones(batch_size, audio_seq_len, device=device, dtype=torch.long)
 
-        generate_kwargs.setdefault("max_new_tokens", 100)
+        generate_kwargs.setdefault("max_new_tokens", 128)
         generate_kwargs.setdefault("pad_token_id", self.pad_token_id.item())
         generate_kwargs.setdefault("eos_token_id", self.eos_token_id.item())
         generate_kwargs.setdefault("use_cache", True)
         generate_kwargs.setdefault("do_sample", False)
         generate_kwargs.setdefault("num_beams", 1)
-        generate_kwargs.setdefault("repetition_penalty", 1.1)
-        generate_kwargs.setdefault("length_penalty", 0.8)
+        generate_kwargs.setdefault("repetition_penalty", 1.2)
 
         return self.decoder.generate(
             inputs_embeds=audio_embeds, attention_mask=attention_mask, **generate_kwargs

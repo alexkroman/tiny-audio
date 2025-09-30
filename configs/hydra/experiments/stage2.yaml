@@ -6,5 +6,13 @@ defaults:
   - override /training: production
 
 # Resume from checkpoint (root level override)
-resume_from_checkpoint: /workspace/outputs/2025-09-28/07-43-49/outputs/production_model/checkpoint-10000
+resume_from_checkpoint: /workspace/outputs/2025-09-30/11-43-35/outputs/production_model/checkpoint-4000
 #resume_from_checkpoint: null
+
+# Stage2 specific learning rate adjustments
+training:
+  learning_rate: 5e-5
+  warmup_steps: 500
+  lr_scheduler_type: cosine
+  max_steps: 6000
+

@@ -7,14 +7,12 @@ datasets:
 - speechbrain/LoquaciousSet
 language:
 - en
-metrics:
-- wer
 base_model:
-- facebook/w2v-bert-2.0
+- openai/whisper
 - HuggingFaceTB/SmolLM3-3B-Base
 pipeline_tag: automatic-speech-recognition
 tags:
-- w2v-bert
+- whisper
 - smollm3
 - asr
 - speech-recognition

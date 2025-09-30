@@ -1,0 +1,17 @@
+# @package _global_
+
+defaults:
+  - override /model: large
+  - override /data: noise_robust  # Use ASR Noise Robust dataset
+  - override /training: production
+
+# Resume from stage2 checkpoint (update path as needed)
+resume_from_checkpoint: /workspace/outputs/stage2/checkpoint-8000
+#resume_from_checkpoint: null
+
+# Stage3 specific learning rate adjustments
+training:
+  learning_rate: 2e-5
+  warmup_steps: 300
+  lr_scheduler_type: cosine
+  max_steps: 15000

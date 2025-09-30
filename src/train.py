@@ -218,8 +218,6 @@ class PredictionLoggingCallback(TrainerCallback):
 
                     generated_ids = model.generate(
                         input_features=inputs.input_features.to(device),
-                        max_new_tokens=100,
-                        eos_token_id=self.tokenizer.eos_token_id,
                     )
 
                     predictions.append(
