@@ -101,7 +101,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": "Transcribe speech to text."})
+            messages.append({"role": "user", "content": "Transcribe the speech in the audio <|audio_start|><|audio_end|>"})
             messages.append({"role": "assistant", "content": text})
 
             tokens = self.tokenizer.apply_chat_template(

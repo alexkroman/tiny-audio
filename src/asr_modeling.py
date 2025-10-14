@@ -131,6 +131,19 @@ class ASRModel(nn.Module):
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
+        # Add special audio boundary tokens
+        special_tokens = {"additional_special_tokens": ["<|audio_start|>", "<|audio_end|>"]}
+        num_added_tokens = self.tokenizer.add_special_tokens(special_tokens)
+        if num_added_tokens > 0:
+            # Resize model embeddings to account for new tokens
+            self.decoder.resize_token_embeddings(len(self.tokenizer))
+            print(f"Added {num_added_tokens} special tokens including audio boundaries")
+
+        # Store audio token IDs for easy access
+        self.audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
+        self.audio_end_id = self.tokenizer.convert_tokens_to_ids("<|audio_end|>")
+        print(f"Audio boundary IDs: start={self.audio_start_id}, end={self.audio_end_id}")
+
         # Always ensure chat template is loaded for SmolLM3
         if not self.tokenizer.chat_template and "SmolLM3" in self.config.text_model_id:
             from huggingface_hub import hf_hub_download
@@ -257,39 +270,74 @@ class ASRModel(nn.Module):
                 audio_attention_mask=audio_attention_mask,
             )
 
-            text_embeds = self.decoder.get_input_embeddings()(input_ids)
-
-            inputs_embeds = torch.cat([audio_embeds, text_embeds], dim=1)
-
-            batch_size = audio_embeds.shape[0]
+            batch_size = input_ids.shape[0]
             audio_seq_len = audio_embeds.shape[1]
 
-            if attention_mask is None:
-                attention_mask = torch.ones(
-                    batch_size, input_ids.shape[1], dtype=torch.long, device=input_ids.device
-                )
+            # Find positions of <|audio_start|> and <|audio_end|> tokens
+            audio_start_positions = (input_ids == self.audio_start_id).nonzero(as_tuple=True)
+            audio_end_positions = (input_ids == self.audio_end_id).nonzero(as_tuple=True)
 
-            audio_attention = torch.ones(
-                batch_size, audio_seq_len, dtype=torch.long, device=input_ids.device
-            )
-            full_attention_mask = torch.cat([audio_attention, attention_mask], dim=1)
+            if len(audio_start_positions[0]) == 0 or len(audio_end_positions[0]) == 0:
+                raise ValueError("Audio boundary tokens <|audio_start|> and <|audio_end|> must be present")
 
+            # Get text embeddings
+            text_embeds = self.decoder.get_input_embeddings()(input_ids)
+
+            # Build new embedding sequences with audio embeddings between the boundary tokens
+            new_embeds = []
+            new_labels = [] if labels is not None else None
+            new_attention = []
+
+            for i in range(batch_size):
+                # Find audio boundaries for this batch item
+                start_mask = audio_start_positions[0] == i
+                end_mask = audio_end_positions[0] == i
+
+                if not start_mask.any() or not end_mask.any():
+                    raise ValueError(f"Missing audio boundaries in batch item {i}")
+
+                start_pos = audio_start_positions[1][start_mask][0].item()
+                end_pos = audio_end_positions[1][end_mask][0].item()
+
+                # Build sequence: [..., <|audio_start|>, audio_embeds, <|audio_end|>, ...]
+                before_audio = text_embeds[i, :start_pos + 1]  # Include audio_start token
+                after_audio = text_embeds[i, end_pos:]  # Include audio_end token and everything after
+
+                batch_embeds = torch.cat([before_audio, audio_embeds[i], after_audio], dim=0)
+                new_embeds.append(batch_embeds)
+
+                # Handle labels if present
+                if labels is not None:
+                    before_labels = labels[i, :start_pos + 1]
+                    # Audio embeddings are always masked
+                    audio_labels = torch.full((audio_seq_len,), -100, dtype=labels.dtype, device=labels.device)
+                    after_labels = labels[i, end_pos:]
+                    batch_labels = torch.cat([before_labels, audio_labels, after_labels], dim=0)
+                    new_labels.append(batch_labels)
+
+                # Handle attention mask
+                if attention_mask is not None:
+                    before_attn = attention_mask[i, :start_pos + 1]
+                    audio_attn = torch.ones(audio_seq_len, dtype=attention_mask.dtype, device=attention_mask.device)
+                    after_attn = attention_mask[i, end_pos:]
+                    batch_attn = torch.cat([before_attn, audio_attn, after_attn], dim=0)
+                    new_attention.append(batch_attn)
+
+            # Stack all batches
+            inputs_embeds = torch.stack(new_embeds)
             if labels is not None:
-                audio_labels = torch.full(
-                    (batch_size, audio_seq_len), -100, dtype=torch.long, device=labels.device
-                )
-                labels = torch.cat([audio_labels, labels], dim=1)
+                labels = torch.stack(new_labels)
+            if attention_mask is not None:
+                full_attention_mask = torch.stack(new_attention)
+            else:
+                full_attention_mask = None
 
-                # Debug: Check label masking statistics
-                if kwargs.get("debug_labels", False):
-                    non_masked = (labels != -100).sum()
-                    total = labels.numel()
-                    audio_tokens = audio_seq_len * batch_size
-                    text_non_masked = (labels[:, audio_seq_len:] != -100).sum()
-                    text_total = labels[:, audio_seq_len:].numel()
-                    print(f"[Label Stats] Total: {total}, Non-masked: {non_masked} ({non_masked/total:.1%})")
-                    print(f"  Audio: {audio_tokens} (all masked)")
-                    print(f"  Text: {text_non_masked}/{text_total} ({text_non_masked/text_total:.1%} active)")
+            # Debug: Check label masking statistics
+            if kwargs.get("debug_labels", False) and labels is not None:
+                non_masked = (labels != -100).sum()
+                total = labels.numel()
+                print(f"[Label Stats] Total: {total}, Non-masked: {non_masked} ({non_masked/total:.1%})")
+                print(f"  Audio embeddings ({audio_seq_len} tokens) inserted between boundary tags")
         else:
             inputs_embeds = self.decoder.get_input_embeddings()(input_ids)
             full_attention_mask = attention_mask
@@ -311,6 +359,7 @@ class ASRModel(nn.Module):
         audio_embeds = self._encode_audio(input_values)
         batch_size = audio_embeds.shape[0]
         device = audio_embeds.device
+        audio_seq_len = audio_embeds.shape[1]
 
         # Debug: Check if audio embeddings are meaningful
         if generate_kwargs.pop("debug_audio", False):
@@ -324,11 +373,11 @@ class ASRModel(nn.Module):
             if audio_embeds.std().item() < 0.01:
                 print("⚠️ WARNING: Audio embeddings have very low variance!")
 
-        # Apply chat template to match training format
+        # Apply chat template with audio boundary tokens
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": "Transcribe speech to text."})
+        messages.append({"role": "user", "content": "Transcribe the speech in the audio <|audio_start|><|audio_end|>"})
 
         prompt_ids = self.tokenizer.apply_chat_template(
             messages,
@@ -340,8 +389,41 @@ class ASRModel(nn.Module):
         if len(prompt_ids.shape) == 1:
             prompt_ids = prompt_ids.unsqueeze(0)
 
+        # Expand to batch size if needed
+        if prompt_ids.shape[0] == 1 and batch_size > 1:
+            prompt_ids = prompt_ids.expand(batch_size, -1)
+
+        # Find positions of audio boundary tokens
+        audio_start_positions = (prompt_ids == self.audio_start_id).nonzero(as_tuple=True)
+        audio_end_positions = (prompt_ids == self.audio_end_id).nonzero(as_tuple=True)
+
+        if len(audio_start_positions[0]) == 0 or len(audio_end_positions[0]) == 0:
+            raise ValueError("Audio boundary tokens not found in prompt")
+
+        # Get text embeddings
         prompt_embeds = self.decoder.get_input_embeddings()(prompt_ids)
-        inputs_embeds = torch.cat([audio_embeds, prompt_embeds], dim=1)
+
+        # Insert audio embeddings between boundary tokens for each batch item
+        new_embeds = []
+        for i in range(batch_size):
+            # Find audio boundaries for this batch item
+            start_mask = audio_start_positions[0] == i
+            end_mask = audio_end_positions[0] == i
+
+            if not start_mask.any() or not end_mask.any():
+                raise ValueError(f"Missing audio boundaries in batch item {i}")
+
+            start_pos = audio_start_positions[1][start_mask][0].item()
+            end_pos = audio_end_positions[1][end_mask][0].item()
+
+            # Build sequence with audio embeddings between boundaries
+            before_audio = prompt_embeds[i, :start_pos + 1]  # Include start token
+            after_audio = prompt_embeds[i, end_pos:]  # Include end token
+
+            batch_embeds = torch.cat([before_audio, audio_embeds[i], after_audio], dim=0)
+            new_embeds.append(batch_embeds)
+
+        inputs_embeds = torch.stack(new_embeds)
 
         # Create attention mask for full input
         total_seq_len = inputs_embeds.shape[1]
