@@ -4,4 +4,4 @@ encoder_model_name: facebook/hubert-large-ls960-ft
 projector_hidden_dim: 2048
 audio_downsample_rate: 5
 
-system_prompt: "/no_think"
+system_prompt: "/no_think Output only the transcription without any explanation."
