@@ -74,7 +74,12 @@ class DatasetLoader:
 
 class DataCollator(DataCollatorForSeq2Seq):
     def __init__(
-        self, tokenizer: Any, feature_extractor: Any, sample_rate: int, max_audio_seconds: float, system_prompt: str = None
+        self,
+        tokenizer: Any,
+        feature_extractor: Any,
+        sample_rate: int,
+        max_audio_seconds: float,
+        system_prompt: str = None,
     ):
         super().__init__(tokenizer=tokenizer, padding=True)
         self.feature_extractor = feature_extractor
@@ -83,14 +88,12 @@ class DataCollator(DataCollatorForSeq2Seq):
         self.system_prompt = system_prompt
 
     def _extract_audio(self, audio_decoder) -> Any:
-        audio_samples = audio_decoder.get_all_samples()
-        audio_array = audio_samples.data[: self.max_audio_samples]
-        audio_array = audio_array.squeeze().numpy()
-
-        return audio_array
         # Note: Audio() does peak normalization → [-1, 1]
         # Wav2Vec2FeatureExtractor does z-normalization → mean=0, std=1
         # No additional normalization needed here!
+        audio_samples = audio_decoder.get_all_samples()
+        audio_array = audio_samples.data[: self.max_audio_samples]
+        return audio_array.squeeze().numpy()
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_arrays = [self._extract_audio(f["audio"]) for f in features]
@@ -106,7 +109,12 @@ class DataCollator(DataCollatorForSeq2Seq):
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": "Transcribe the speech in the audio <|audio_start|><|audio_end|>"})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Transcribe the speech in the audio <|audio_start|><|audio_end|>",
+                }
+            )
             messages.append({"role": "assistant", "content": text})
 
             tokens = self.tokenizer.apply_chat_template(
@@ -166,7 +174,9 @@ def main(cfg: DictConfig) -> None:
 
     import importlib.util
 
-    default_attn = "flash_attention_2" if importlib.util.find_spec("flash_attn") is not None else "sdpa"
+    default_attn = (
+        "flash_attention_2" if importlib.util.find_spec("flash_attn") is not None else "sdpa"
+    )
 
     asr_config = ASRConfig(
         text_model_id=cfg.model.decoder_model_name,

@@ -7,12 +7,14 @@
 A lightweight automatic speech recognition (ASR) model that combines a frozen Whisper encoder with a SmolLM3 decoder, connected via a learnable audio projector. Only the projector is trained, making it extremely efficient to fine-tune.
 
 **Key Features:**
+
 - **Efficient Training**: Only ~7M trainable parameters (projector) while leveraging frozen pretrained models
 - **Modular Design**: Easy to swap different audio encoders or language decoders
 - **Production Ready**: Includes remote training, evaluation tools, and HuggingFace integration
 - **Streaming Support**: Handles large datasets with streaming data loaders
 
 **Quick Links:**
+
 - [Live Demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)
 - [Model on HuggingFace](https://huggingface.co/mazesmazes/tiny-audio)
 - [GitHub Repository](https://github.com/alexkroman/tiny-audio)
@@ -58,7 +60,7 @@ The model accepts various audio formats (WAV, MP3, FLAC, etc.) and automatically
 
 ## Training
 
-### Quick Start
+### Training Setup
 
 ```bash
 git clone https://github.com/alexkroman/tiny-audio.git
@@ -76,20 +78,22 @@ uv run src/train.py +experiments=production
 ### Training Details
 
 **Datasets** (loaded via streaming):
+
 - LibriSpeech (960h)
 - GigaSpeech (10,000h)
 - Common Voice 17.0
 - LoquaciousSet
 
 **Training Configuration:**
+
 - Mixed precision: BF16
 - Optimizer: AdamW with cosine learning rate schedule
 - Gradient checkpointing: Enabled for memory efficiency
 - Batch size: Configurable via Hydra configs
-- Only the audio projector weights are trained by default
-- Optional: Enable LoRA adapters on decoder for additional fine-tuning
+- Only the audio projector weights are trained
 
 **Hardware Requirements:**
+
 - Minimum: 16GB GPU (e.g., RTX 4080)
 - Recommended: 24GB+ GPU (e.g., RTX 4090, A100)
 - Training time: ~24 hours on single A100 for full training
@@ -112,17 +116,17 @@ Tiny Audio uses a modular three-component architecture:
    - Maps audio features to language model embedding space
    - **This is the only trained component**
 
-3. **Language Model Decoder** (Frozen with LoRA)
+3. **Language Model Decoder** (Frozen)
    - Default: SmolLM3-3B-Base (`HuggingFaceTB/SmolLM3-3B-Base`)
    - Generates text transcriptions autoregressively
-   - LoRA adapters can be optionally trained for fine-tuning
+   - Pretrained weights remain frozen during training
    - Uses BF16 precision for efficient inference
 
 ### Data Flow
 
-```
+```text
 Audio Waveform → Encoder → Audio Features → Projector → LLM Embeddings → Decoder → Text
-                 (frozen)                  (trainable)                  (frozen/LoRA)
+                 (frozen)                  (trainable)                  (frozen)
 ```
 
 ### Why This Architecture?
@@ -138,7 +142,7 @@ Tiny Audio uses [Hydra](https://hydra.cc/) for configuration management, providi
 
 ### Config Structure
 
-```
+```text
 configs/
 ├── hydra/
 │   ├── config.yaml           # Main config
@@ -207,6 +211,7 @@ uv run scripts/start_remote_training.py \
 ### Monitoring
 
 The training script automatically:
+
 - Logs metrics to TensorBoard
 - Saves checkpoints to `outputs/` directory
 - Pushes final model to HuggingFace Hub (if `HF_TOKEN` is set)
@@ -255,7 +260,7 @@ uv run scripts/eval.py --provider assemblyai --api-key YOUR_API_KEY
 
 ### Example Output
 
-```
+```text
 Model: mazesmazes/tiny-audio
 Dataset: speechbrain/LoquaciousSet (config: large, split: test)
 Samples: 2000
@@ -294,7 +299,7 @@ uv run pytest --cov=src --cov-report=html
 
 ### Project Structure
 
-```
+```text
 tiny-audio/
 ├── src/                      # Source code
 │   ├── asr_modeling.py      # Model architecture
@@ -349,6 +354,7 @@ If you use Tiny Audio in your research, please cite:
 ## Acknowledgments
 
 This project builds upon:
+
 - [Whisper](https://github.com/openai/whisper) by OpenAI for audio encoding
 - [SmolLM3](https://huggingface.co/HuggingFaceTB/SmolLM3-3B-Base) by HuggingFace for language modeling
 - [SLAM-LLM](https://github.com/X-LANCE/SLAM-LLM) for architectural inspiration

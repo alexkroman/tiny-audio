@@ -39,7 +39,7 @@ model-index:
 
 # Tiny Audio
 
-**Efficient Speech Recognition with Frozen Pretrained Models**
+## Efficient Speech Recognition with Frozen Pretrained Models
 
 Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a frozen Whisper encoder with a SmolLM3 language model decoder, connected via a trainable audio projector. This architecture enables efficient training by only fine-tuning a small projection layer (~7M parameters) while leveraging the power of large pretrained models.
 
@@ -85,6 +85,7 @@ print(result["text"])
 ```
 
 The model automatically handles:
+
 - Audio resampling to 16kHz
 - Various audio formats (WAV, MP3, FLAC, etc.)
 - Batch processing for multiple files
@@ -113,7 +114,7 @@ The model automatically handles:
 
 ### Data Flow
 
-```
+```text
 Raw Audio (16kHz)
     ↓
 Whisper Encoder (frozen)
@@ -158,6 +159,7 @@ The model is trained on a diverse mix of English speech datasets:
 ### Training Strategy
 
 Only the audio projector weights are trained from scratch. The Whisper encoder and SmolLM3 decoder remain frozen throughout training, which:
+
 - Reduces memory requirements significantly
 - Enables faster training convergence
 - Preserves pretrained knowledge

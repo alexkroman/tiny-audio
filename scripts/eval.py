@@ -52,12 +52,11 @@ def prepare_wav_bytes(wav_data):
     if isinstance(wav_data, dict) and "bytes" in wav_data:
         # Already in bytes format
         return wav_data["bytes"]
-    elif isinstance(wav_data, dict):
+    if isinstance(wav_data, dict):
         # Dict with array and sampling_rate
         return audio_to_wav_bytes(wav_data["array"], wav_data["sampling_rate"])
-    else:
-        # Audio object format
-        return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
+    # Audio object format
+    return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
 
 
 def evaluate_huggingface(dataset, model_or_endpoint):
@@ -95,17 +94,18 @@ def evaluate_huggingface(dataset, model_or_endpoint):
                     prediction = result.get("text", result.get("transcription", ""))
                 elif isinstance(result, str):
                     prediction = result
-                elif hasattr(result, 'text'):
+                elif hasattr(result, "text"):
                     # Handle AutomaticSpeechRecognitionOutput objects
                     prediction = result.text
                 else:
                     prediction = str(result)
             except Exception as e:
                 import traceback
+
                 print(f"Error processing sample {i + 1}:")
                 print(f"  Exception type: {type(e).__name__}")
                 print(f"  Error message: {str(e)}")
-                print(f"  Full traceback:")
+                print("  Full traceback:")
                 traceback.print_exc()
                 prediction = ""
             finally:
@@ -121,6 +121,7 @@ def evaluate_huggingface(dataset, model_or_endpoint):
     finally:
         # Clean up temporary directory
         import shutil
+
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     return predictions, references
@@ -247,14 +248,18 @@ def main():
     wer_metric = evaluate.load("wer")
 
     # Load dataset in streaming mode
-    print(f"Loading speechbrain/LoquaciousSet dataset (config: {args.config}, split: {args.split})...")
-    dataset = load_dataset("speechbrain/LoquaciousSet", args.config, split=args.split, streaming=True)
+    print(
+        f"Loading speechbrain/LoquaciousSet dataset (config: {args.config}, split: {args.split})..."
+    )
+    dataset = load_dataset(
+        "speechbrain/LoquaciousSet", args.config, split=args.split, streaming=True
+    )
 
     if args.max_samples:
         dataset = dataset.take(args.max_samples)
 
     # Run inference
-    print(f"Running inference...")
+    print("Running inference...")
 
     if args.assemblyai:
         predictions, references = evaluate_assemblyai(dataset, args.api_key, args.assemblyai_model)
@@ -280,7 +285,9 @@ def main():
 
     with results_file.open("w") as f:
         f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: speechbrain/LoquaciousSet (config: {args.config}, split: {args.split})\n")
+        f.write(
+            f"Dataset: speechbrain/LoquaciousSet (config: {args.config}, split: {args.split})\n"
+        )
         f.write(f"Samples: {num_samples}\n")
         f.write(f"WER: {wer_percent:.2f}%\n\n")
         f.write("=" * 80 + "\n")

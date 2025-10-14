@@ -54,7 +54,7 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
     # Pre-load client
     get_client(model_path)
 
-    demo = gr.Interface(
+    return gr.Interface(
         fn=lambda audio: transcribe_audio(audio, model_path),
         inputs=gr.Audio(sources=["upload"], type="filepath", label="Audio"),
         outputs=gr.Textbox(label="Transcription"),
@@ -63,7 +63,6 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
         article="Powered by [Tiny Audio](https://huggingface.co/mazesmazes/tiny-audio) model.",
     )
 
-    return demo
 
 
 if __name__ == "__main__":

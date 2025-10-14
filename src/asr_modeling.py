@@ -14,7 +14,7 @@ from transformers import (
 try:
     from .asr_config import ASRConfig
 except ImportError:
-    from asr_config import ASRConfig
+    from asr_config import ASRConfig  # type: ignore[no-redef]
 
 
 class AudioProjector(nn.Module):
@@ -45,9 +45,9 @@ class ASRModel(nn.Module):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         from pathlib import Path as PathlibPath
-        from safetensors.torch import load_file
+
         from huggingface_hub import hf_hub_download
-        import os
+        from safetensors.torch import load_file
 
         config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
@@ -58,14 +58,13 @@ class ASRModel(nn.Module):
             model = cls(config, **kwargs)
 
             # Check if it's a local path or a Hugging Face model ID
-            if os.path.exists(pretrained_model_name_or_path):
+            if PathlibPath(pretrained_model_name_or_path).exists():
                 # Local path
                 projector_path = PathlibPath(pretrained_model_name_or_path) / "model.safetensors"
             else:
                 # Hugging Face model ID - download the file
                 projector_path = hf_hub_download(
-                    repo_id=pretrained_model_name_or_path,
-                    filename="model.safetensors"
+                    repo_id=pretrained_model_name_or_path, filename="model.safetensors"
                 )
 
             projector_state = load_file(projector_path)
@@ -83,7 +82,7 @@ class ASRModel(nn.Module):
             config = ASRConfig(**config)
 
         self.config = config
-        self.system_prompt = getattr(config, 'system_prompt', None)
+        self.system_prompt = getattr(config, "system_prompt", None)
 
         target_dtype = getattr(torch, config.model_dtype)
 
@@ -127,7 +126,11 @@ class ASRModel(nn.Module):
         self._no_split_modules = self.decoder._no_split_modules
 
     def _init_tokenizer(self):
-        model_path = self.__class__._pretrained_model_path if self._is_loading_from_pretrained else self.config.text_model_id
+        model_path = (
+            self.__class__._pretrained_model_path
+            if self._is_loading_from_pretrained
+            else self.config.text_model_id
+        )
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
@@ -146,12 +149,14 @@ class ASRModel(nn.Module):
 
         # Always ensure chat template is loaded for SmolLM3
         if not self.tokenizer.chat_template and "SmolLM3" in self.config.text_model_id:
-            from huggingface_hub import hf_hub_download
             from pathlib import Path
+
+            from huggingface_hub import hf_hub_download
+
             try:
                 template_path = hf_hub_download(
                     repo_id="HuggingFaceTB/SmolLM3-3B",  # Always use the canonical repo
-                    filename="chat_template.jinja"
+                    filename="chat_template.jinja",
                 )
                 self.tokenizer.chat_template = Path(template_path).read_text()
                 print(f"Loaded chat template from {template_path}")
@@ -230,7 +235,7 @@ class ASRModel(nn.Module):
         try:
             from .asr_processing import ASRProcessor
         except ImportError:
-            from asr_processing import ASRProcessor
+            from asr_processing import ASRProcessor  # type: ignore[no-redef]
 
         return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
 
@@ -278,14 +283,16 @@ class ASRModel(nn.Module):
             audio_end_positions = (input_ids == self.audio_end_id).nonzero(as_tuple=True)
 
             if len(audio_start_positions[0]) == 0 or len(audio_end_positions[0]) == 0:
-                raise ValueError("Audio boundary tokens <|audio_start|> and <|audio_end|> must be present")
+                raise ValueError(
+                    "Audio boundary tokens <|audio_start|> and <|audio_end|> must be present"
+                )
 
             # Get text embeddings
             text_embeds = self.decoder.get_input_embeddings()(input_ids)
 
             # Build new embedding sequences with audio embeddings between the boundary tokens
             new_embeds = []
-            new_labels = [] if labels is not None else None
+            new_labels: list[torch.Tensor] = [] if labels is not None else None
             new_attention = []
 
             for i in range(batch_size):
@@ -300,25 +307,31 @@ class ASRModel(nn.Module):
                 end_pos = audio_end_positions[1][end_mask][0].item()
 
                 # Build sequence: [..., <|audio_start|>, audio_embeds, <|audio_end|>, ...]
-                before_audio = text_embeds[i, :start_pos + 1]  # Include audio_start token
-                after_audio = text_embeds[i, end_pos:]  # Include audio_end token and everything after
+                before_audio = text_embeds[i, : start_pos + 1]  # Include audio_start token
+                after_audio = text_embeds[
+                    i, end_pos:
+                ]  # Include audio_end token and everything after
 
                 batch_embeds = torch.cat([before_audio, audio_embeds[i], after_audio], dim=0)
                 new_embeds.append(batch_embeds)
 
                 # Handle labels if present
                 if labels is not None:
-                    before_labels = labels[i, :start_pos + 1]
+                    before_labels = labels[i, : start_pos + 1]
                     # Audio embeddings are always masked
-                    audio_labels = torch.full((audio_seq_len,), -100, dtype=labels.dtype, device=labels.device)
+                    audio_labels = torch.full(
+                        (audio_seq_len,), -100, dtype=labels.dtype, device=labels.device
+                    )
                     after_labels = labels[i, end_pos:]
                     batch_labels = torch.cat([before_labels, audio_labels, after_labels], dim=0)
                     new_labels.append(batch_labels)
 
                 # Handle attention mask
                 if attention_mask is not None:
-                    before_attn = attention_mask[i, :start_pos + 1]
-                    audio_attn = torch.ones(audio_seq_len, dtype=attention_mask.dtype, device=attention_mask.device)
+                    before_attn = attention_mask[i, : start_pos + 1]
+                    audio_attn = torch.ones(
+                        audio_seq_len, dtype=attention_mask.dtype, device=attention_mask.device
+                    )
                     after_attn = attention_mask[i, end_pos:]
                     batch_attn = torch.cat([before_attn, audio_attn, after_attn], dim=0)
                     new_attention.append(batch_attn)
@@ -327,16 +340,15 @@ class ASRModel(nn.Module):
             inputs_embeds = torch.stack(new_embeds)
             if labels is not None:
                 labels = torch.stack(new_labels)
-            if attention_mask is not None:
-                full_attention_mask = torch.stack(new_attention)
-            else:
-                full_attention_mask = None
+            full_attention_mask = torch.stack(new_attention) if attention_mask is not None else None
 
             # Debug: Check label masking statistics
             if kwargs.get("debug_labels", False) and labels is not None:
                 non_masked = (labels != -100).sum()
                 total = labels.numel()
-                print(f"[Label Stats] Total: {total}, Non-masked: {non_masked} ({non_masked/total:.1%})")
+                print(
+                    f"[Label Stats] Total: {total}, Non-masked: {non_masked} ({non_masked / total:.1%})"
+                )
                 print(f"  Audio embeddings ({audio_seq_len} tokens) inserted between boundary tags")
         else:
             inputs_embeds = self.decoder.get_input_embeddings()(input_ids)
@@ -351,7 +363,10 @@ class ASRModel(nn.Module):
 
     @torch.no_grad()
     def generate(
-        self, input_values: Optional[torch.Tensor] = None, system_prompt: Optional[str] = None, **generate_kwargs
+        self,
+        input_values: Optional[torch.Tensor] = None,
+        system_prompt: Optional[str] = None,
+        **generate_kwargs,
     ) -> torch.Tensor:
         if input_values is None:
             raise ValueError("input_values must be provided for generation")
@@ -359,7 +374,7 @@ class ASRModel(nn.Module):
         audio_embeds = self._encode_audio(input_values)
         batch_size = audio_embeds.shape[0]
         device = audio_embeds.device
-        audio_seq_len = audio_embeds.shape[1]
+        audio_embeds.shape[1]
 
         # Debug: Check if audio embeddings are meaningful
         if generate_kwargs.pop("debug_audio", False):
@@ -377,13 +392,15 @@ class ASRModel(nn.Module):
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": "Transcribe the speech in the audio <|audio_start|><|audio_end|>"})
+        messages.append(
+            {
+                "role": "user",
+                "content": "Transcribe the speech in the audio <|audio_start|><|audio_end|>",
+            }
+        )
 
         prompt_ids = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt"
+            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
         ).to(device)
 
         if len(prompt_ids.shape) == 1:
@@ -417,7 +434,7 @@ class ASRModel(nn.Module):
             end_pos = audio_end_positions[1][end_mask][0].item()
 
             # Build sequence with audio embeddings between boundaries
-            before_audio = prompt_embeds[i, :start_pos + 1]  # Include start token
+            before_audio = prompt_embeds[i, : start_pos + 1]  # Include start token
             after_audio = prompt_embeds[i, end_pos:]  # Include end token
 
             batch_embeds = torch.cat([before_audio, audio_embeds[i], after_audio], dim=0)
@@ -448,7 +465,6 @@ class ASRModel(nn.Module):
         import shutil
         from pathlib import Path as PathlibPath
 
-        from safetensors.torch import save_file
 
         save_dir = PathlibPath(save_directory)
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -460,8 +476,8 @@ class ASRModel(nn.Module):
         self.config.text_config.eos_token_id = self.tokenizer.eos_token_id
         self.config.text_config.pad_token_id = self.tokenizer.pad_token_id
 
-        if hasattr(self.config, 'system_prompt'):
-            self.config.system_prompt = getattr(self.config, 'system_prompt', None)
+        if hasattr(self.config, "system_prompt"):
+            self.config.system_prompt = getattr(self.config, "system_prompt", None)
 
         self.config.save_pretrained(save_dir)
         self.tokenizer.save_pretrained(save_dir)

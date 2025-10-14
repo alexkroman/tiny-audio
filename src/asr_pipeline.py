@@ -6,7 +6,7 @@ import transformers
 try:
     from .asr_modeling import ASRModel
 except ImportError:
-    from asr_modeling import ASRModel
+    from asr_modeling import ASRModel  # type: ignore[no-redef]
 
 
 class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
@@ -22,8 +22,16 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
     def __call__(self, inputs, **kwargs):
         generate_kwargs = {}
-        for key in ['max_new_tokens', 'num_beams', 'temperature', 'do_sample',
-                    'length_penalty', 'repetition_penalty', 'top_p', 'top_k']:
+        for key in [
+            "max_new_tokens",
+            "num_beams",
+            "temperature",
+            "do_sample",
+            "length_penalty",
+            "repetition_penalty",
+            "top_p",
+            "top_k",
+        ]:
             if key in kwargs:
                 generate_kwargs[key] = kwargs.pop(key)
         if isinstance(inputs, list):
@@ -36,6 +44,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         model_inputs = self.preprocess(inputs, **kwargs)
 
         from collections.abc import Iterator
+
         if isinstance(model_inputs, Iterator):
             all_outputs = []
             for chunk in model_inputs:
@@ -48,15 +57,14 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 transcriptions.append(chunk_result.get("text", ""))
 
             return {"text": " ".join(transcriptions).strip()}
-        else:
-            model_outputs = self._forward(model_inputs, **generate_kwargs)
-            return self.postprocess(model_outputs)
+        model_outputs = self._forward(model_inputs, **generate_kwargs)
+        return self.postprocess(model_outputs)
 
     def preprocess(self, inputs, **preprocess_params):
         if isinstance(inputs, list):
             raise ValueError("Lists should not reach preprocess - bug in __call__")
 
-        if hasattr(inputs, '__array__') and not isinstance(inputs, (dict, bytes, str)):
+        if hasattr(inputs, "__array__") and not isinstance(inputs, (dict, bytes, str)):
             inputs = {"raw": inputs, "sampling_rate": 16000}
         elif torch.is_tensor(inputs):
             inputs = {"raw": inputs.cpu().numpy(), "sampling_rate": 16000}
@@ -65,7 +73,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
     def _forward(self, model_inputs, **generate_kwargs):
         is_last = True
-        stride = None
         input_values = None
 
         if isinstance(model_inputs, torch.Tensor):
@@ -77,7 +84,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                     if "is_last" in first_item:
                         is_last = first_item.pop("is_last")
                     if "stride" in first_item:
-                        stride = first_item.pop("stride")
+                        first_item.pop("stride")
                     input_values = first_item.get("input_values")
                 elif isinstance(first_item, torch.Tensor):
                     input_values = first_item
@@ -87,7 +94,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             if "is_last" in model_inputs:
                 is_last = model_inputs.pop("is_last")
             if "stride" in model_inputs:
-                stride = model_inputs.pop("stride")
+                model_inputs.pop("stride")
             input_values = model_inputs.get("input_values")
         else:
             input_values = model_inputs
@@ -104,9 +111,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         generate_kwargs.setdefault("eos_token_id", im_end_id)
 
         generated_ids = self.model.generate(
-            input_values,
-            system_prompt=self.model.config.system_prompt,
-            **generate_kwargs
+            input_values, system_prompt=self.model.config.system_prompt, **generate_kwargs
         )
 
         return {"tokens": generated_ids, "is_last": is_last}
@@ -115,14 +120,16 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         self, model_outputs: Dict[str, Any], return_timestamps=None, return_language=None
     ):
         if "is_last" in model_outputs:
-            is_last = model_outputs.pop("is_last")
+            model_outputs.pop("is_last")
 
         tokens = model_outputs.get("tokens")
         if tokens is None:
             tokens = model_outputs.get("generated_ids")
 
         if tokens is None:
-            raise ValueError(f"Expected 'tokens' or 'generated_ids' in model_outputs, got: {model_outputs.keys()}")
+            raise ValueError(
+                f"Expected 'tokens' or 'generated_ids' in model_outputs, got: {model_outputs.keys()}"
+            )
 
         if len(tokens.shape) > 1:
             tokens = tokens[0]
