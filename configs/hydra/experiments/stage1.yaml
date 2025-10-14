@@ -1,0 +1,55 @@
+# @package _global_
+# Single Stage Projector Training (SLAM-ASR Methodology)
+# This configuration implements the simple training approach from the paper:
+# "An Embarrassingly Simple Approach for LLM with Strong ASR Capacity"
+# - Frozen Speech Encoder (HuBERT)
+# - Frozen LLM Decoder (Smollm3-3B)
+# - Only the Projector is trained.
+
+defaults:
+  - override /model: large
+  - override /data: loquacious_clean
+  - override /training: production
+
+# Model configuration - the freezing logic is hard-coded in asr_modeling.py
+model:
+  decoder_model_name: HuggingFaceTB/SmolLM3-3B-Base  # Base model without chat templates
+  encoder_model_name: facebook/hubert-xlarge-ls960-ft
+
+  # Projector configuration
+  projector_hidden_dim: 2048
+  audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
+
+# Training Configuration (Aligned with Paper Section 3.3)
+training:
+  # Learning rate and scheduler
+  learning_rate: 1.0e-4
+  warmup_steps: 500
+  lr_scheduler_type: constant_with_warmup
+
+  # Optimization
+  weight_decay: 0.0
+  max_grad_norm: 1.0  # Increased from 1.0 - less aggressive clipping for projector training
+
+
+  # Evaluation and checkpointing
+  eval_steps: 500
+  save_steps: 500
+  logging_steps: 25
+
+  # Training duration
+  max_steps: 50000
+
+  # Reproducibility
+  seed: 42
+  ignore_data_skip: true
+
+# Early stopping configuration
+early_stopping:
+  patience: 20
+  threshold: 0.001
+
+# Data augmentation - DISABLED per paper requirements
+# The paper EXPLICITLY states "without any data augmentation"
+augmentation:
+  enabled: false

@@ -1,0 +1,19 @@
+defaults:
+  - model: small  # Default to small model
+  - data: tiny  # Default to tiny dataset
+  - training: mac  # Default to mac training settings
+  - _self_
+
+# Output directories - relative to where the command is run
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: true
+    
+resume_from_checkpoint: null
+
+

@@ -1,0 +1,77 @@
+# Production training configuration
+output_dir: ./outputs/production_model
+
+# Training configuration
+per_device_train_batch_size: 16
+per_device_eval_batch_size: 16
+gradient_accumulation_steps: 1
+eval_accumulation_steps: 1
+
+# Learning rate
+warmup_ratio: 0.03
+learning_rate: 1e-4
+weight_decay: 0.0
+
+# Optimizer - matching Qwen-Audio settings for multimodal training
+optim: adamw_torch_fused
+adam_beta1: 0.9
+adam_beta2: 0.999  
+adam_epsilon: 1e-8 
+
+# Logging
+logging_steps: 25
+logging_first_step: true
+logging_nan_inf_filter: false
+report_to: tensorboard
+
+# Evaluation
+eval_strategy: steps
+eval_steps: 500
+
+# Saving
+save_strategy: steps
+save_steps: 500
+save_total_limit: 10
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+
+# Hub
+push_to_hub: true
+hub_model_id: "mazesmazes/tiny-audio"  # Change this to your repo
+hub_strategy: checkpoint  # Push every checkpoint
+hub_token: null  # Will use HF_TOKEN env var if not set
+hub_private_repo: false
+
+# Performance
+fp16: false
+bf16: true
+tf32: true  # Enable TF32 for A40 (2x matmul speedup)
+dataloader_pin_memory: true
+max_grad_norm: 1.0  # Increased from 1.0 - less aggressive clipping for projector training
+torch_compile: true
+# torch_compile_mode: reduce-overhead
+
+# Regularization
+# NOTE: Label smoothing incompatible with multimodal models where labels are created internally
+# The Trainer's label smoother uses batch labels (256) but model creates combined labels (750+256)
+label_smoothing_factor: 0.0
+
+# Model dtype - use bfloat16 for production with flash attention
+model_dtype: bfloat16
+
+# Streaming compatibility settings
+dataloader_num_workers: 8  # Increased for better throughput (was 2)
+dataloader_persistent_workers: true
+dataloader_prefetch_factor: 4  # Reduced to limit memory with more workers
+
+# Misc
+seed: 42
+save_safetensors: true
+disable_tqdm: false
+log_level: info
+
+# Required by HF Trainer
+remove_unused_columns: false
+label_names:
+  - labels

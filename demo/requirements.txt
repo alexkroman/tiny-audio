@@ -1,0 +1,2 @@
+# The base image already has gradio, numpy, pandas, etc.
+huggingface_hub  # Required for InferenceClient

@@ -1,0 +1,17 @@
+# @package _global_
+
+defaults:
+  - override /model: small
+  - override /data: tiny
+  - override /training: mac
+
+training:
+  output_dir: ./outputs/mac_minimal_model
+  eval_steps: 10
+  save_steps: 10
+  max_steps: 20
+  gradient_accumulation_steps: 2  # Reduced for faster testing
+  # use_mps_device: true  # Deprecated - MPS will be used automatically if available
+  bf16: false  # MPS doesn't support bf16 yet
+  fp16: false  # Use float32 for stability on MPS
+  model_dtype: float32  # Keep float32 for MPS compatibility

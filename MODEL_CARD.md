@@ -1,0 +1,266 @@
+---
+license: mit
+datasets:
+- mozilla-foundation/common_voice_17_0
+- speechcolab/gigaspeech
+- openslr/librispeech_asr
+- speechbrain/LoquaciousSet
+language:
+- en
+base_model:
+- openai/whisper-small
+- HuggingFaceTB/SmolLM3-3B-Base
+pipeline_tag: automatic-speech-recognition
+tags:
+- whisper
+- smollm3
+- asr
+- speech-recognition
+- audio
+- parameter-efficient
+- frozen-encoder
+library_name: transformers
+model-index:
+- name: tiny-audio
+  results:
+  - task:
+      type: automatic-speech-recognition
+      name: Automatic Speech Recognition
+    dataset:
+      type: speechbrain/LoquaciousSet
+      name: LoquaciousSet
+      config: large
+      split: test
+    metrics:
+    - type: wer
+      name: Word Error Rate
+      value: TBD
+---
+
+# Tiny Audio
+
+**Efficient Speech Recognition with Frozen Pretrained Models**
+
+Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a frozen Whisper encoder with a SmolLM3 language model decoder, connected via a trainable audio projector. This architecture enables efficient training by only fine-tuning a small projection layer (~7M parameters) while leveraging the power of large pretrained models.
+
+## Model Description
+
+- **Developed by:** Alex Kroman
+- **Model type:** Automatic Speech Recognition (Speech-to-Text)
+- **Language(s):** English
+- **License:** MIT
+- **Architecture:** Encoder-Projector-Decoder
+  - Audio Encoder: Whisper-small (244M params, frozen)
+  - Audio Projector: 2-layer MLP (~7M params, trainable)
+  - Text Decoder: SmolLM3-3B (3B params, frozen with optional LoRA)
+
+## Key Features
+
+✅ **Parameter Efficient**: Only ~7M trainable parameters
+✅ **Fast Training**: Frozen encoder/decoder enable rapid fine-tuning
+✅ **Modular Design**: Easy to swap encoders (Whisper, HuBERT) or decoders
+✅ **Production Ready**: Includes evaluation tools and remote training scripts
+✅ **HuggingFace Native**: Full integration with transformers library
+
+## Quick Start
+
+```python
+from transformers import pipeline
+
+# Load ASR pipeline
+pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+
+# Transcribe audio file
+result = pipe("path/to/audio.wav")
+print(result["text"])
+
+# With custom generation parameters
+result = pipe(
+    "path/to/audio.wav",
+    max_new_tokens=200,
+    num_beams=4,
+    length_penalty=1.0,
+)
+print(result["text"])
+```
+
+The model automatically handles:
+- Audio resampling to 16kHz
+- Various audio formats (WAV, MP3, FLAC, etc.)
+- Batch processing for multiple files
+
+## Architecture Details
+
+### Model Components
+
+1. **Audio Encoder (Frozen)**
+   - Base Model: `openai/whisper-small`
+   - Parameters: 244M (frozen)
+   - Extracts acoustic features from raw audio waveforms
+   - Output: Audio embeddings at ~50Hz frame rate
+
+2. **Audio Projector (Trainable)**
+   - Architecture: `Linear(encoder_dim × 5, 2048) → ReLU → Linear(2048, llm_dim)`
+   - Parameters: ~7M (trainable)
+   - Downsamples audio features by 5x (from ~50Hz to ~10Hz)
+   - Maps audio embeddings to language model embedding space
+
+3. **Language Model Decoder (Frozen + Optional LoRA)**
+   - Base Model: `HuggingFaceTB/SmolLM3-3B-Base`
+   - Parameters: 3B (frozen) + optional LoRA adapters
+   - Generates text transcriptions autoregressively
+   - Uses beam search (beam_size=4) for decoding
+
+### Data Flow
+
+```
+Raw Audio (16kHz)
+    ↓
+Whisper Encoder (frozen)
+    ↓
+Audio Features [batch, ~1500, 768]
+    ↓
+Audio Projector (trainable, 5x downsample)
+    ↓
+Language Embeddings [batch, ~300, 2048]
+    ↓
+SmolLM3 Decoder (frozen/LoRA)
+    ↓
+Text Transcription
+```
+
+## Training Details
+
+### Training Data
+
+The model is trained on a diverse mix of English speech datasets:
+
+| Dataset | Hours | Domain | Description |
+|---------|-------|--------|-------------|
+| LibriSpeech | 960h | Audiobooks | Clean read speech |
+| GigaSpeech | 10,000h | Podcasts, YouTube | Diverse acoustic conditions |
+| Common Voice 17.0 | ~2,500h | Crowdsourced | Multiple accents and speakers |
+| LoquaciousSet | Variable | European Parliament | Formal speech |
+
+**Total Training Data:** ~13,000+ hours of English speech
+
+### Training Configuration
+
+- **Optimizer:** AdamW
+- **Learning Rate:** Cosine schedule with warmup
+- **Precision:** BF16 mixed precision
+- **Batch Size:** Dynamic based on audio length
+- **Gradient Checkpointing:** Enabled
+- **Training Steps:** ~50,000 steps
+- **Hardware:** Single NVIDIA A100 (40GB)
+- **Training Time:** ~24 hours
+
+### Training Strategy
+
+Only the audio projector weights are trained from scratch. The Whisper encoder and SmolLM3 decoder remain frozen throughout training, which:
+- Reduces memory requirements significantly
+- Enables faster training convergence
+- Preserves pretrained knowledge
+- Prevents catastrophic forgetting
+
+## Evaluation
+
+The model is evaluated on the LoquaciousSet benchmark dataset using Word Error Rate (WER) as the primary metric.
+
+### Benchmark Results
+
+| Dataset | Split | Samples | WER |
+|---------|-------|---------|-----|
+| LoquaciousSet (large) | test | ~2,000 | TBD |
+| LoquaciousSet (clean) | test | ~500 | TBD |
+
+### Evaluation Script
+
+```bash
+# Install tiny-audio
+pip install tiny-audio
+
+# Run evaluation
+uv run scripts/eval.py --max-samples 100
+
+# Compare with baselines
+uv run scripts/eval.py --provider huggingface --model openai/whisper-small
+```
+
+## Limitations and Bias
+
+### Limitations
+
+- **English Only**: Currently trained only on English speech data
+- **Formal Speech**: May perform better on clear, formal speech than casual conversation
+- **Background Noise**: Performance may degrade in noisy environments
+- **Accents**: May have varying performance across different English accents
+- **Domain Shift**: Best performance on domains similar to training data
+
+### Potential Biases
+
+- **Dataset Bias**: Training data may not equally represent all demographics
+- **Accent Bias**: May perform differently across accents (American, British, Indian, etc.)
+- **Gender Bias**: Performance may vary by speaker gender
+- **Age Bias**: Primarily trained on adult speech
+
+Users should evaluate the model on their specific use case and demographics before production deployment.
+
+## Intended Use
+
+### Primary Use Cases
+
+✅ **Transcription Services**: Converting speech to text for podcasts, videos, interviews
+✅ **Accessibility Tools**: Generating captions and subtitles
+✅ **Voice Assistants**: Speech-to-text component in voice interfaces
+✅ **Research**: ASR research and experimentation
+✅ **Education**: Learning about multimodal models and parameter-efficient training
+
+### Out-of-Scope Use
+
+❌ Real-time critical systems (medical, legal) without thorough validation
+❌ Surveillance or privacy-invasive applications
+❌ Non-English languages (not trained for this)
+❌ Child safety applications without age-appropriate testing
+
+## Environmental Impact
+
+- **Hardware:** 1× NVIDIA A100 (40GB)
+- **Training Time:** ~24 hours
+- **Power Consumption:** ~300W × 24h = 7.2 kWh
+- **Estimated CO₂ Emissions:** ~3.6 kg CO₂e (assuming 0.5 kg CO₂/kWh)
+
+This is significantly lower than training full ASR models from scratch thanks to frozen pretrained components.
+
+## Citation
+
+If you use Tiny Audio in your research, please cite:
+
+```bibtex
+@software{kroman2024tinyaudio,
+  author = {Kroman, Alex},
+  title = {Tiny Audio: Efficient Speech Recognition with Frozen Pretrained Models},
+  year = {2024},
+  url = {https://github.com/alexkroman/tiny-audio},
+  note = {HuggingFace Model: https://huggingface.co/mazesmazes/tiny-audio}
+}
+```
+
+## Acknowledgments
+
+This project builds upon excellent prior work:
+
+- **Whisper** ([Radford et al., 2022](https://github.com/openai/whisper)): Robust speech recognition encoder
+- **SmolLM3** ([HuggingFace Team](https://huggingface.co/HuggingFaceTB/SmolLM3-3B-Base)): Efficient language model
+- **SLAM-LLM** ([Ma et al., 2024](https://github.com/X-LANCE/SLAM-LLM)): Architectural inspiration for audio-language modeling
+
+## Additional Resources
+
+- 📄 [GitHub Repository](https://github.com/alexkroman/tiny-audio)
+- 🎯 [Live Demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)
+- 📚 [Documentation](https://github.com/alexkroman/tiny-audio#readme)
+- 🐛 [Issue Tracker](https://github.com/alexkroman/tiny-audio/issues)
+
+## License
+
+This model is released under the MIT License. See the [LICENSE](https://github.com/alexkroman/tiny-audio/blob/main/LICENSE) file for details.

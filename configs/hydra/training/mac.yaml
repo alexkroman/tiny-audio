@@ -1,0 +1,69 @@
+# Mac-optimized training configuration
+output_dir: ./outputs/mac_model
+
+# Training configuration
+max_steps: 20  # Quick testing default for Mac
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 2  # Reduced for quick testing
+eval_accumulation_steps: 1
+
+# Learning rate
+learning_rate: 5e-5
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+
+# Optimizer - matching Qwen-Audio settings for multimodal training
+optim: adamw_torch
+adam_beta1: 0.9
+adam_beta2: 0.98  # Lower β2 for faster adaptation (audio model best practice)
+adam_epsilon: 1e-6  # Match Qwen-Audio
+
+# Logging
+logging_steps: 10
+logging_first_step: true
+logging_nan_inf_filter: false
+report_to: tensorboard
+
+# Evaluation
+eval_strategy: steps
+eval_steps: 10
+
+# Saving
+save_strategy: steps
+save_steps: 10
+save_total_limit: 2
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+
+# Hub
+push_to_hub: false
+
+# Performance - Mac optimized
+dataloader_num_workers: 0  # Important for Mac
+dataloader_prefetch_factor: null  # Disable prefetching for streaming
+fp16: false
+bf16: false
+dataloader_pin_memory: false  # Important for Mac
+# use_mps_device: true # Deprecated - MPS will be used automatically if available
+max_grad_norm: 1.0
+
+# Regularization
+# NOTE: Label smoothing incompatible with multimodal models
+label_smoothing_factor: 0.0
+
+# Model dtype - use float32 for Mac to avoid dtype parameter issues
+model_dtype: float32
+
+# Misc
+seed: 42
+save_safetensors: true  # Required to avoid torch.load security issue
+disable_tqdm: false
+log_level: info
+
+# Required by HF Trainer
+remove_unused_columns: false
+label_names:
+  - labels

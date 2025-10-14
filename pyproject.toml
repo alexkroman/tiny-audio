@@ -1,0 +1,163 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tiny-audio"
+dynamic = ["version"]
+description = "Learn ASR by Building One - A minimal speech recognition model combining Whisper with SmolLM2"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+readme = "README.md"
+authors = [
+    {name = "Alex Kroman", email = "alex@alexkroman.com"}
+]
+keywords = ["speech-recognition", "asr", "whisper", "smollm2", "transformers", "deep-learning", "education"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "transformers",
+    "accelerate",
+    "datasets[audio]",
+    "torchcodec",
+    "torchaudio",
+    "peft",
+    "evaluate",
+    "jiwer",
+    "tensorboard",
+    "numpy",
+    "hydra-core",
+    "omegaconf",
+    "hf-transfer",
+    "ninja",
+    "gradio",
+    "hf_transfer",
+    "assemblyai",
+    "typer>=0.19.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+    "mdformat>=0.7.0",  # Markdown formatter
+    "pymarkdownlnt>=0.9.0",  # Markdown linter
+]
+
+[project.urls]
+Homepage = "https://github.com/alexkroman/tiny-audio"
+Documentation = "https://github.com/alexkroman/tiny-audio#readme"
+Repository = "https://github.com/alexkroman/tiny-audio"
+Issues = "https://github.com/alexkroman/tiny-audio/issues"
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.yaml", "*.yml"]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311"]
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 100
+multi_line_output = 3
+include_trailing_comma = true
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+follow_imports = "normal"
+ignore_missing_imports = true
+# Ignore specific error codes that are library-related
+disable_error_code = ["assignment", "override", "call-overload", "arg-type", "index", "union-attr"]
+
+[[tool.mypy.overrides]]
+module = "transformers.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "peft.*"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+# Test discovery patterns
+python_files = "test_*.py *_test.py"
+python_classes = "Test*"
+python_functions = "test_*"
+
+# Default options
+addopts = "-v -s --tb=short"
+
+# Test paths
+testpaths = ["tests"]
+
+# Ignore directories
+norecursedirs = ["outputs", ".venv", "venv", ".git", "__pycache__", "*.egg-info"]
+
+# Asyncio configuration to fix deprecation warning
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+extend-exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "*.egg-info",
+    ".mypy_cache",
+    ".pytest_cache",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "N",  # pep8-naming
+    "UP", # pyupgrade
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "DTZ", # flake8-datetimez
+    "T10", # flake8-debugger
+    "ISC", # flake8-implicit-str-concat
+    "RET", # flake8-return
+    "SIM", # flake8-simplify
+    "PTH", # flake8-use-pathlib
+]
+extend-ignore = [
+    "E203",  # whitespace before ':'
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+    "B905",  # zip() without an explicit strict= parameter
+]

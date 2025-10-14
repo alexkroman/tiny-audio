@@ -1,0 +1,5 @@
+# Core dependencies for tiny-audio model inference
+# This file is pushed to HuggingFace for model repository
+
+# Transformers - main library for model loading and inference
+transformers>=4.57.0
