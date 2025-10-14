@@ -13,6 +13,7 @@ class ASRConfig(transformers.PretrainedConfig):
         model_dtype: str = "bfloat16",
         projector_hidden_dim: int = 2048,
         audio_downsample_rate: int = 5,
+        projector_dropout: float = 0.1,
         system_prompt: str = None,
         **kwargs,
     ):
@@ -22,6 +23,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.model_dtype = model_dtype
         self.projector_hidden_dim = projector_hidden_dim
         self.audio_downsample_rate = audio_downsample_rate
+        self.projector_dropout = projector_dropout
         self.system_prompt = system_prompt
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)

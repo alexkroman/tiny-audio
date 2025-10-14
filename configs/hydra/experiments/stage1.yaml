@@ -13,7 +13,7 @@ defaults:
 
 # Model configuration - the freezing logic is hard-coded in asr_modeling.py
 model:
-  decoder_model_name: HuggingFaceTB/SmolLM3-3B-Base  # Base model without chat templates
+  decoder_model_name: HuggingFaceTB/SmolLM3-3B  # Base model without chat templates
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
   # Projector configuration
@@ -25,7 +25,7 @@ training:
   # Learning rate and scheduler
   learning_rate: 1.0e-4
   warmup_steps: 500
-  lr_scheduler_type: constant_with_warmup
+  lr_scheduler_type: cosine
 
   # Optimization
   weight_decay: 0.0
@@ -38,7 +38,7 @@ training:
   logging_steps: 25
 
   # Training duration
-  max_steps: 50000
+  max_steps: 20000
 
   # Reproducibility
   seed: 42

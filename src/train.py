@@ -125,24 +125,34 @@ class DataCollator(DataCollatorForSeq2Seq):
                 max_length=256,
             )
 
-            # Create labels with proper masking
-            # We need to mask everything except the assistant's response
-            labels = tokens.copy()
+            # Create labels - we need to find exactly where the assistant's actual content starts and ends
+            labels = [-100] * len(tokens)  # Start with everything masked
 
-            # Find where assistant response starts
-            # Apply template without assistant message to find the boundary
-            messages_without_assistant = messages[:-1]  # Remove assistant message
-            prefix_tokens = self.tokenizer.apply_chat_template(
-                messages_without_assistant,
-                tokenize=True,
-                add_generation_prompt=True,  # Add the assistant prompt
-                truncation=True,
-                max_length=256,
-            )
+            # Find the assistant's actual content by tokenizing just the text
+            # and finding where it appears in the full sequence
+            text_tokens = self.tokenizer.encode(text, add_special_tokens=False)
 
-            # Mask all tokens before the assistant's response
-            for i in range(len(prefix_tokens)):
-                labels[i] = -100
+            # Get the <|im_end|> token ID
+            im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+
+            # Find where these tokens appear in the full sequence
+            text_position = -1
+            for i in range(len(tokens) - len(text_tokens) + 1):
+                if tokens[i:i+len(text_tokens)] == text_tokens:
+                    # Found the transcription text! Train on these tokens
+                    for j in range(len(text_tokens)):
+                        labels[i + j] = tokens[i + j]
+                    text_position = i + len(text_tokens)
+                    break
+
+            # Also train on the <|im_end|> token that follows the text
+            # This is critical so the model learns when to stop!
+            if text_position > 0 and text_position < len(tokens):
+                if tokens[text_position] == im_end_id:
+                    labels[text_position] = tokens[text_position]
+                # Sometimes there might be whitespace before <|im_end|>
+                elif text_position + 1 < len(tokens) and tokens[text_position + 1] == im_end_id:
+                    labels[text_position + 1] = tokens[text_position + 1]
 
             text_features.append(
                 {

@@ -21,9 +21,12 @@ class AudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.k = config.encoder_projector_ds_rate
+        dropout_rate = getattr(config, "projector_dropout", 0.1)
         self.mlp = nn.Sequential(
             nn.Linear(config.encoder_dim * self.k, config.projector_hidden_dim),
+            nn.Dropout(dropout_rate),
             nn.ReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(config.projector_hidden_dim, config.llm_dim),
         )
 
@@ -117,6 +120,7 @@ class ASRModel(nn.Module):
             encoder_dim=audio_dim,
             llm_dim=text_dim,
             projector_hidden_dim=config.projector_hidden_dim,
+            projector_dropout=config.projector_dropout,
         )
         self.projector: AudioProjector = AudioProjector(projector_config)
 
@@ -464,7 +468,6 @@ class ASRModel(nn.Module):
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
         import shutil
         from pathlib import Path as PathlibPath
-
 
         save_dir = PathlibPath(save_directory)
         save_dir.mkdir(parents=True, exist_ok=True)

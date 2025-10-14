@@ -52,11 +52,6 @@ max_grad_norm: 1.0  # Increased from 1.0 - less aggressive clipping for projecto
 torch_compile: true
 # torch_compile_mode: reduce-overhead
 
-# Regularization
-# NOTE: Label smoothing incompatible with multimodal models where labels are created internally
-# The Trainer's label smoother uses batch labels (256) but model creates combined labels (750+256)
-label_smoothing_factor: 0.0
-
 # Model dtype - use bfloat16 for production with flash attention
 model_dtype: bfloat16
 
