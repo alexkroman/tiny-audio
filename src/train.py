@@ -85,7 +85,12 @@ class DataCollator(DataCollatorForSeq2Seq):
     def _extract_audio(self, audio_decoder) -> Any:
         audio_samples = audio_decoder.get_all_samples()
         audio_array = audio_samples.data[: self.max_audio_samples]
-        return audio_array.squeeze().numpy()
+        audio_array = audio_array.squeeze().numpy()
+
+        return audio_array
+        # Note: Audio() does peak normalization → [-1, 1]
+        # Wav2Vec2FeatureExtractor does z-normalization → mean=0, std=1
+        # No additional normalization needed here!
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_arrays = [self._extract_audio(f["audio"]) for f in features]
