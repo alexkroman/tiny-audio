@@ -246,7 +246,6 @@ class ASRModel(nn.Module):
         self,
         input_values: torch.Tensor,
         audio_attention_mask: Optional[torch.Tensor] = None,
-        apply_masking: bool = False,
     ) -> torch.Tensor:
         with torch.no_grad():
             audio_features = self.encoder(
@@ -254,47 +253,7 @@ class ASRModel(nn.Module):
                 attention_mask=audio_attention_mask,
             ).last_hidden_state
 
-        # Apply feature masking during training (if enabled)
-        if apply_masking and self.training:
-            audio_features = self._apply_feature_masking(audio_features, audio_attention_mask)
-
         return self.projector(audio_features)
-
-    def _apply_feature_masking(
-        self,
-        features: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Apply feature masking augmentation using Wav2Vec2's exact method.
-        Adapted from Wav2Vec2Model._mask_hidden_states but for frozen encoder.
-        """
-        from transformers.models.wav2vec2.modeling_wav2vec2 import _compute_mask_indices
-
-        batch_size, seq_len, hidden_dim = features.shape
-
-        # Use Wav2Vec2's exact parameters
-        # These match the default Wav2Vec2 training config
-        mask_time_indices = _compute_mask_indices(
-            shape=(batch_size, seq_len),
-            mask_prob=0.065,  # Slightly higher than default 0.05
-            mask_length=10,   # Same as Wav2Vec2 default
-            attention_mask=attention_mask,
-            min_masks=2,      # Same as Wav2Vec2 default
-        )
-
-        # Convert to torch tensor if numpy array
-        if not isinstance(mask_time_indices, torch.Tensor):
-            mask_time_indices = torch.from_numpy(mask_time_indices)
-
-        mask_time_indices = mask_time_indices.to(features.device)
-
-        # Apply mask - set masked positions to zero
-        # (Wav2Vec2 uses a learned embedding, but encoder is frozen so we use zero)
-        masked_features = features.clone()
-        masked_features[mask_time_indices] = 0.0
-
-        return masked_features
 
     def forward(
         self,
@@ -306,11 +265,9 @@ class ASRModel(nn.Module):
     ):
         if input_values is not None:
             audio_attention_mask = kwargs.pop("audio_attention_mask", None)
-            apply_masking = kwargs.pop("apply_feature_masking", True)  # Enable by default during training
             audio_embeds = self._encode_audio(
                 input_values=input_values,
                 audio_attention_mask=audio_attention_mask,
-                apply_masking=apply_masking,
             )
 
             batch_size = input_ids.shape[0]
