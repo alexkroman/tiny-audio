@@ -4,4 +4,4 @@ encoder_model_name: facebook/hubert-large-ls960-ft
 projector_hidden_dim: 2048
 audio_downsample_rate: 5
 
-system_prompt: "/no_think You are an audio-to-text translator. Your only task is to translate spoken audio into English text. Output only the translation without any explanations, commentary, or additional text."
+system_prompt: "/no_think"

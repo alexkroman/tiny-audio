@@ -101,7 +101,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": "Translate the audio to English."})
+            messages.append({"role": "user", "content": "Transcribe speech to text."})
             messages.append({"role": "assistant", "content": text})
 
             tokens = self.tokenizer.apply_chat_template(
@@ -112,10 +112,29 @@ class DataCollator(DataCollatorForSeq2Seq):
                 max_length=256,
             )
 
+            # Create labels with proper masking
+            # We need to mask everything except the assistant's response
+            labels = tokens.copy()
+
+            # Find where assistant response starts
+            # Apply template without assistant message to find the boundary
+            messages_without_assistant = messages[:-1]  # Remove assistant message
+            prefix_tokens = self.tokenizer.apply_chat_template(
+                messages_without_assistant,
+                tokenize=True,
+                add_generation_prompt=True,  # Add the assistant prompt
+                truncation=True,
+                max_length=256,
+            )
+
+            # Mask all tokens before the assistant's response
+            for i in range(len(prefix_tokens)):
+                labels[i] = -100
+
             text_features.append(
                 {
                     "input_ids": tokens,
-                    "labels": tokens,
+                    "labels": labels,
                 }
             )
 

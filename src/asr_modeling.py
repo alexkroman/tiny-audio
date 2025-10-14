@@ -279,6 +279,17 @@ class ASRModel(nn.Module):
                     (batch_size, audio_seq_len), -100, dtype=torch.long, device=labels.device
                 )
                 labels = torch.cat([audio_labels, labels], dim=1)
+
+                # Debug: Check label masking statistics
+                if kwargs.get("debug_labels", False):
+                    non_masked = (labels != -100).sum()
+                    total = labels.numel()
+                    audio_tokens = audio_seq_len * batch_size
+                    text_non_masked = (labels[:, audio_seq_len:] != -100).sum()
+                    text_total = labels[:, audio_seq_len:].numel()
+                    print(f"[Label Stats] Total: {total}, Non-masked: {non_masked} ({non_masked/total:.1%})")
+                    print(f"  Audio: {audio_tokens} (all masked)")
+                    print(f"  Text: {text_non_masked}/{text_total} ({text_non_masked/text_total:.1%} active)")
         else:
             inputs_embeds = self.decoder.get_input_embeddings()(input_ids)
             full_attention_mask = attention_mask
@@ -301,11 +312,23 @@ class ASRModel(nn.Module):
         batch_size = audio_embeds.shape[0]
         device = audio_embeds.device
 
+        # Debug: Check if audio embeddings are meaningful
+        if generate_kwargs.pop("debug_audio", False):
+            print(f"[Audio Debug] Shape: {audio_embeds.shape}")
+            print(f"[Audio Debug] Mean: {audio_embeds.mean().item():.6f}")
+            print(f"[Audio Debug] Std: {audio_embeds.std().item():.6f}")
+            print(f"[Audio Debug] Min: {audio_embeds.min().item():.6f}")
+            print(f"[Audio Debug] Max: {audio_embeds.max().item():.6f}")
+
+            # Check if embeddings are collapsed
+            if audio_embeds.std().item() < 0.01:
+                print("⚠️ WARNING: Audio embeddings have very low variance!")
+
         # Apply chat template to match training format
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": "Translate the audio to English."})
+        messages.append({"role": "user", "content": "Transcribe speech to text."})
 
         prompt_ids = self.tokenizer.apply_chat_template(
             messages,
