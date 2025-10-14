@@ -66,12 +66,9 @@ def main():
                 "max_new_tokens": 200,
                 "num_beams": 1,
                 "do_sample": False,
-                "temperature": 0.1,
                 "repetition_penalty": 1.2,
-                "length_penalty": 1.0,
                 "eos_token_id": model.tokenizer.convert_tokens_to_ids("<|im_end|>"),
                 "pad_token_id": model.tokenizer.pad_token_id,
-                "early_stopping": True,
                 "system_prompt": model.config.system_prompt,
             }
 
