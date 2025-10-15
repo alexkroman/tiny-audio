@@ -74,7 +74,7 @@ def find_test_audio() -> Optional[str]:
 def test_handler(
     model_path: str,
     audio_path: Optional[str] = None,
-    max_new_tokens: int = 128,
+    max_new_tokens: int = 200,
     num_beams: int = 1,
     temperature: float = 1.0,
     do_sample: bool = False,
@@ -250,8 +250,8 @@ Examples:
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=128,
-        help="Maximum number of tokens to generate (default: 128)",
+        default=200,
+        help="Maximum number of tokens to generate (default: 200)",
     )
 
     parser.add_argument(

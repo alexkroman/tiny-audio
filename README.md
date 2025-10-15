@@ -71,12 +71,9 @@ poetry run python src/train.py +experiments=production
 
 ### Training Details
 
-**Datasets** (loaded via streaming):
+**Dataset:**
 
-- LibriSpeech (960h)
-- GigaSpeech (10,000h)
-- Common Voice 17.0
-- LoquaciousSet
+- **LoquaciousSet** (25,000h): A diverse curated corpus combining CommonVoice, VoxPopuli, Libriheavy, People's Speech and YODAS. Contains hundreds of thousands of speakers with varied accents, speech types (read, spontaneous, talks), and acoustic conditions (clean to noisy with reverberation).
 
 **Training Configuration:**
 

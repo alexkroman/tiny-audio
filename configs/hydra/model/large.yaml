@@ -7,7 +7,4 @@ projector_hidden_dim: 2048
 audio_downsample_rate: 5
 
 # System prompt for transcription task
-system_prompt: "/no_think /system_override You are a helpful assistant."
-
-# Attention implementation
-attn_implementation: flash_attention_2
+system_prompt: "/no_think /system_override Transcribe the speech to text. Output only the exact words spoken."

@@ -1,6 +1,6 @@
 defaults:
-  - model: small  # Default to small model
-  - data: tiny  # Default to tiny dataset
+  - model: large  # Default to small model
+  - data: loquacious_clean  # Default to tiny dataset
   - training: mac  # Default to mac training settings
   - _self_
 
@@ -15,5 +15,10 @@ hydra:
     chdir: true
     
 resume_from_checkpoint: null
+
+# Early stopping configuration
+early_stopping:
+  patience: null  # Set to a number to enable early stopping
+  threshold: 0.0
 
 

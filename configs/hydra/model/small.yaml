@@ -1,8 +1,0 @@
-decoder_model_name: HuggingFaceTB/SmolLM3-3B
-encoder_model_name: facebook/hubert-large-ls960-ft
-
-projector_hidden_dim: 2048
-audio_downsample_rate: 5
-
-system_prompt: "/no_think /system_override You are a helpful assistant."
-attn_implementation: sdpa

@@ -90,8 +90,7 @@ class ASRModel(nn.Module):
             config = ASRConfig(**config)
 
         self.config = config
-        # Set default system prompt if not provided
-        self.system_prompt = config.system_prompt if config.system_prompt else "/no_think /system_override You are a helpful assistant."
+        self.system_prompt = config.system_prompt
 
         target_dtype = getattr(torch, config.model_dtype)
 
@@ -438,11 +437,9 @@ class ASRModel(nn.Module):
         total_seq_len = inputs_embeds.shape[1]
         attention_mask = torch.ones(batch_size, total_seq_len, dtype=torch.long, device=device)
 
-        generate_kwargs.setdefault("max_new_tokens", 120)
-        generate_kwargs.setdefault("num_beams", 3)
+        generate_kwargs.setdefault("max_new_tokens", 150)  # Increased from 120 to handle longest samples (~95 words)
+        generate_kwargs.setdefault("num_beams", 1)  # Increased from 3 for better beam search quality
         generate_kwargs.setdefault("do_sample", False)
-        generate_kwargs.setdefault("length_penalty", 0.5)
-        generate_kwargs.setdefault("no_repeat_ngram_size", 3)
 
         im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         generate_kwargs.setdefault("eos_token_id", im_end_id)

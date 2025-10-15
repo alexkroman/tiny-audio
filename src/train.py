@@ -185,7 +185,7 @@ def main(cfg: DictConfig) -> None:
     asr_config = ASRConfig(
         text_model_id=cfg.model.decoder_model_name,
         audio_model_id=cfg.model.encoder_model_name,
-        attn_implementation=cfg.model.attn_implementation,
+        attn_implementation=cfg.training.attn_implementation,
         model_dtype=cfg.training.model_dtype,
         projector_hidden_dim=cfg.model.projector_hidden_dim,
         audio_downsample_rate=cfg.model.audio_downsample_rate,
@@ -218,6 +218,7 @@ def main(cfg: DictConfig) -> None:
     training_args = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_args, dict), "training_args must be a dict"
     training_args.pop("model_dtype", None)
+    training_args.pop("attn_implementation", None)
 
     trainer = Trainer(
         model=model,

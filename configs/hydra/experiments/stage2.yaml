@@ -18,12 +18,12 @@ training:
 
   resume_from_checkpoint: /workspace/outputs/2025-10-14/22-36-14/outputs/production_model/checkpoint-20000
 
-  learning_rate: 3.0e-4  # Increased from 1e-4 for better convergence
-  warmup_steps: 100     # Increased from 500 for smoother ramp-up
+  learning_rate: 1.0e-5  # Increased from 1e-4 for better convergence
+  warmup_steps: 1000     # Increased from 500 for smoother ramp-up
   lr_scheduler_type: cosine
 
   weight_decay: 0.01     # Small weight decay to prevent overfitting
-  max_grad_norm: 2.0     # Increased to allow larger updates
+  max_grad_norm: 1.0     # Increased to allow larger updates
 
   # Evaluation and checkpointing
   eval_steps: 500
