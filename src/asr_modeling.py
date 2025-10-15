@@ -10,6 +10,7 @@ from transformers import (
     AutoTokenizer,
     Wav2Vec2FeatureExtractor,
 )
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.generation.utils import (
     GenerateBeamDecoderOnlyOutput,
     GenerateBeamEncoderDecoderOutput,
@@ -31,9 +32,10 @@ class AudioProjector(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(config.encoder_dim * self.k, config.projector_hidden_dim),
             nn.Dropout(dropout_rate),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout_rate),
             nn.Linear(config.projector_hidden_dim, config.llm_dim),
+            LlamaRMSNorm(config.llm_dim),
         )
 
     def forward(self, x):
