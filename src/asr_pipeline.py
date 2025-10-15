@@ -64,7 +64,36 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if isinstance(inputs, list):
             raise ValueError("Lists should not reach preprocess - bug in __call__")
 
-        if hasattr(inputs, "__array__") and not isinstance(inputs, (dict, bytes, str)):
+        # Handle different formats from datasets
+        if isinstance(inputs, dict):
+            if "bytes" in inputs:
+                # Decode bytes to audio array using torchcodec
+                import tempfile
+                from torchcodec.decoders import AudioDecoder
+
+                wav_bytes = inputs["bytes"]
+                # Write to temp file for torchcodec to read
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    f.write(wav_bytes)
+                    temp_path = f.name
+                try:
+                    decoder = AudioDecoder(temp_path)
+                    # Get all audio samples
+                    audio_result = decoder.get_all_samples()
+                    audio_tensor = audio_result.data
+                    sample_rate = audio_result.sample_rate
+                    inputs = {"raw": audio_tensor.squeeze().numpy(), "sampling_rate": sample_rate}
+                finally:
+                    import os
+                    os.unlink(temp_path)
+            elif "array" in inputs:
+                # Convert "array" key to "raw" key
+                inputs = {"raw": inputs["array"], "sampling_rate": inputs["sampling_rate"]}
+            # If it already has "raw" and "sampling_rate", it's good to go
+        elif hasattr(inputs, "array") and hasattr(inputs, "sampling_rate"):
+            # Audio object with attributes (not dict)
+            inputs = {"raw": inputs.array, "sampling_rate": inputs.sampling_rate}
+        elif hasattr(inputs, "__array__") and not isinstance(inputs, (dict, bytes, str)):
             inputs = {"raw": inputs, "sampling_rate": 16000}
         elif torch.is_tensor(inputs):
             inputs = {"raw": inputs.cpu().numpy(), "sampling_rate": 16000}

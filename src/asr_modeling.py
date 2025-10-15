@@ -46,6 +46,11 @@ class ASRModel(nn.Module):
     _pretrained_model_path: Optional[str] = None
 
     @classmethod
+    def register_for_auto_class(cls, auto_class="AutoModel"):
+        """Register this model with transformers auto classes."""
+        pass
+
+    @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         from pathlib import Path as PathlibPath
 
@@ -58,7 +63,7 @@ class ASRModel(nn.Module):
         cls._pretrained_model_path = pretrained_model_name_or_path
 
         try:
-            model = cls(config, **kwargs)
+            model = cls(config)
 
             # Check if it's a local path or a Hugging Face model ID
             if PathlibPath(pretrained_model_name_or_path).exists():
@@ -85,7 +90,8 @@ class ASRModel(nn.Module):
             config = ASRConfig(**config)
 
         self.config = config
-        self.system_prompt = config.system_prompt
+        # Set default system prompt if not provided
+        self.system_prompt = config.system_prompt if config.system_prompt else "/no_think /system_override You are a helpful assistant."
 
         target_dtype = getattr(torch, config.model_dtype)
 
@@ -370,6 +376,10 @@ class ASRModel(nn.Module):
         batch_size = audio_embeds.shape[0]
         device = audio_embeds.device
 
+        # Use model's default system prompt if none provided
+        if system_prompt is None:
+            system_prompt = self.system_prompt
+
         # Apply chat template with audio boundary tokens
         messages = []
         if system_prompt:
@@ -428,10 +438,11 @@ class ASRModel(nn.Module):
         total_seq_len = inputs_embeds.shape[1]
         attention_mask = torch.ones(batch_size, total_seq_len, dtype=torch.long, device=device)
 
-        generate_kwargs.setdefault("max_new_tokens", 200)
-        generate_kwargs.setdefault("num_beams", 4)
+        generate_kwargs.setdefault("max_new_tokens", 120)
+        generate_kwargs.setdefault("num_beams", 3)
         generate_kwargs.setdefault("do_sample", False)
-        generate_kwargs.setdefault("length_penalty", 1.0)
+        generate_kwargs.setdefault("length_penalty", 0.5)
+        generate_kwargs.setdefault("no_repeat_ngram_size", 3)
 
         im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         generate_kwargs.setdefault("eos_token_id", im_end_id)

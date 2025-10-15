@@ -17,6 +17,9 @@ import tempfile
 import time
 from pathlib import Path
 
+# Disable tokenizers parallelism to avoid fork warnings
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import evaluate
 import torch
 import torchaudio
@@ -60,45 +63,104 @@ def prepare_wav_bytes(wav_data):
 
 
 def evaluate_huggingface(dataset, model_or_endpoint):
-    """Evaluate using HuggingFace InferenceClient (works for both Hub models and endpoints)."""
+    """Evaluate using local transformers pipeline or HuggingFace Inference Endpoint."""
 
-    # Create client - use base_url for endpoints instead of model parameter
-    if model_or_endpoint.startswith("http"):
-        print(f"Using HuggingFace Inference Endpoint: {model_or_endpoint}")
-        client = InferenceClient(base_url=model_or_endpoint)
-    else:
-        print(f"Using HuggingFace Hub model: {model_or_endpoint}")
-        client = InferenceClient(model=model_or_endpoint)
+    from jiwer import Compose, RemoveMultipleSpaces, RemovePunctuation, Strip, ToLowerCase, wer
 
     predictions = []
     references = []
+    per_sample_wers = []
 
-    # Create a temporary directory for WAV files
-    temp_dir = tempfile.mkdtemp()
+    # Create text normalizer
+    normalizer = Compose([ToLowerCase(), RemovePunctuation(), RemoveMultipleSpaces(), Strip()])
 
-    try:
+    # Check if it's an inference endpoint (URL) or a model to load locally
+    if model_or_endpoint.startswith("http"):
+        print(f"Using HuggingFace Inference Endpoint: {model_or_endpoint}")
+        client = InferenceClient(base_url=model_or_endpoint)
+
+        # Create a temporary directory for WAV files
+        temp_dir = tempfile.mkdtemp()
+
+        try:
+            for i, sample in enumerate(dataset):
+                # Get WAV bytes for API
+                wav_bytes = prepare_wav_bytes(sample["wav"])
+
+                # Write to temporary file with .wav extension
+                temp_path = Path(temp_dir) / f"temp_{i}.wav"
+                temp_path.write_bytes(wav_bytes)
+
+                try:
+                    result = client.automatic_speech_recognition(str(temp_path))
+
+                    # Parse result - InferenceClient returns different formats
+                    if isinstance(result, dict):
+                        prediction = result.get("text", result.get("transcription", ""))
+                    elif isinstance(result, str):
+                        prediction = result
+                    elif hasattr(result, "text"):
+                        prediction = result.text
+                    else:
+                        prediction = str(result)
+                except Exception as e:
+                    import traceback
+
+                    print(f"Error processing sample {i + 1}:")
+                    print(f"  Exception type: {type(e).__name__}")
+                    print(f"  Error message: {str(e)}")
+                    print("  Full traceback:")
+                    traceback.print_exc()
+                    prediction = ""
+                finally:
+                    # Clean up temporary file
+                    if temp_path.exists():
+                        temp_path.unlink()
+
+                predictions.append(prediction)
+                references.append(sample["text"])
+
+                # Compute WER for this sample
+                norm_pred = normalizer(prediction)
+                norm_ref = normalizer(sample["text"])
+                sample_wer = wer(norm_ref, norm_pred) * 100
+                per_sample_wers.append(sample_wer)
+
+                print(f"Sample {i + 1}: WER = {sample_wer:.2f}%")
+                print(f"  Ref:  {sample['text']}")
+                print(f"  Pred: {prediction}")
+        finally:
+            # Clean up temporary directory
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    else:
+        # Load model locally using custom ASRPipeline
+        print(f"Loading model locally: {model_or_endpoint}")
+        from transformers import pipeline
+
+        # Use pipeline with trust_remote_code to load our custom ASRPipeline
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_or_endpoint,
+            trust_remote_code=True,
+            device=device
+        )
+        print(f"Model loaded on device: {pipe.device}")
+
         for i, sample in enumerate(dataset):
-            # Get WAV bytes for API
-            wav_bytes = prepare_wav_bytes(sample["wav"])
-
-            # Write to temporary file with .wav extension
-            # InferenceClient needs a file path to detect content type properly
-            temp_path = Path(temp_dir) / f"temp_{i}.wav"
-            temp_path.write_bytes(wav_bytes)
-
             try:
-                result = client.automatic_speech_recognition(str(temp_path))
+                # Pass audio directly to our custom pipeline
+                result = pipe(sample["wav"])
 
-                # Parse result - InferenceClient returns different formats
+                # Extract text from result
                 if isinstance(result, dict):
-                    prediction = result.get("text", result.get("transcription", ""))
+                    prediction = result.get("text", "")
                 elif isinstance(result, str):
                     prediction = result
-                elif hasattr(result, "text"):
-                    # Handle AutomaticSpeechRecognitionOutput objects
-                    prediction = result.text
                 else:
                     prediction = str(result)
+
             except Exception as e:
                 import traceback
 
@@ -108,28 +170,27 @@ def evaluate_huggingface(dataset, model_or_endpoint):
                 print("  Full traceback:")
                 traceback.print_exc()
                 prediction = ""
-            finally:
-                # Clean up temporary file
-                if temp_path.exists():
-                    temp_path.unlink()
 
             predictions.append(prediction)
             references.append(sample["text"])
 
-            if (i + 1) % 10 == 0:
-                print(f"Processed {i + 1} samples")
-    finally:
-        # Clean up temporary directory
-        import shutil
+            # Compute WER for this sample
+            norm_pred = normalizer(prediction)
+            norm_ref = normalizer(sample["text"])
+            sample_wer = wer(norm_ref, norm_pred) * 100
+            per_sample_wers.append(sample_wer)
 
-        shutil.rmtree(temp_dir, ignore_errors=True)
+            print(f"Sample {i + 1}: WER = {sample_wer:.2f}%")
+            print(f"  Ref:  {sample['text']}")
+            print(f"  Pred: {prediction}")
 
-    return predictions, references
+    return predictions, references, per_sample_wers
 
 
 def evaluate_assemblyai(dataset, api_key, model="best"):
     """Evaluate using AssemblyAI API."""
     import assemblyai as aai
+    from jiwer import Compose, RemoveMultipleSpaces, RemovePunctuation, Strip, ToLowerCase, wer
 
     aai.settings.api_key = api_key
 
@@ -151,6 +212,10 @@ def evaluate_assemblyai(dataset, api_key, model="best"):
 
     predictions = []
     references = []
+    per_sample_wers = []
+
+    # Create text normalizer
+    normalizer = Compose([ToLowerCase(), RemovePunctuation(), RemoveMultipleSpaces(), Strip()])
 
     for i, sample in enumerate(dataset):
         # Get WAV bytes for API
@@ -166,13 +231,20 @@ def evaluate_assemblyai(dataset, api_key, model="best"):
         predictions.append(prediction)
         references.append(sample["text"])
 
-        if (i + 1) % 10 == 0:
-            print(f"Processed {i + 1} samples")
+        # Compute WER for this sample
+        norm_pred = normalizer(prediction)
+        norm_ref = normalizer(sample["text"])
+        sample_wer = wer(norm_ref, norm_pred) * 100
+        per_sample_wers.append(sample_wer)
+
+        print(f"Sample {i + 1}: WER = {sample_wer:.2f}%")
+        print(f"  Ref:  {sample['text']}")
+        print(f"  Pred: {prediction}")
 
         # Rate limiting
         time.sleep(0.5)
 
-    return predictions, references
+    return predictions, references, per_sample_wers
 
 
 def main():
@@ -262,10 +334,10 @@ def main():
     print("Running inference...")
 
     if args.assemblyai:
-        predictions, references = evaluate_assemblyai(dataset, args.api_key, args.assemblyai_model)
+        predictions, references, per_sample_wers = evaluate_assemblyai(dataset, args.api_key, args.assemblyai_model)
         model_name = f"AssemblyAI ({args.assemblyai_model})"
     else:
-        predictions, references = evaluate_huggingface(dataset, args.model)
+        predictions, references, per_sample_wers = evaluate_huggingface(dataset, args.model)
         model_name = args.model
 
     # Normalize text before computing WER
@@ -294,8 +366,8 @@ def main():
         f.write("Predictions vs Ground Truth\n")
         f.write("=" * 80 + "\n\n")
 
-        for i, (pred, ref) in enumerate(zip(predictions, references)):
-            f.write(f"Sample {i + 1}\n")
+        for i, (pred, ref, sample_wer) in enumerate(zip(predictions, references, per_sample_wers)):
+            f.write(f"Sample {i + 1} - WER: {sample_wer:.2f}%\n")
             f.write(f"Ground Truth: {ref}\n")
             f.write(f"Prediction:   {pred}\n")
             f.write("-" * 80 + "\n\n")
