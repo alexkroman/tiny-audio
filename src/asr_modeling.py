@@ -21,7 +21,7 @@ class AudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.k = config.encoder_projector_ds_rate
-        dropout_rate = getattr(config, "projector_dropout", 0.1)
+        dropout_rate = config.projector_dropout
         self.mlp = nn.Sequential(
             nn.Linear(config.encoder_dim * self.k, config.projector_hidden_dim),
             nn.Dropout(dropout_rate),
@@ -85,7 +85,7 @@ class ASRModel(nn.Module):
             config = ASRConfig(**config)
 
         self.config = config
-        self.system_prompt = getattr(config, "system_prompt", None)
+        self.system_prompt = config.system_prompt
 
         target_dtype = getattr(torch, config.model_dtype)
 
@@ -160,11 +160,6 @@ class ASRModel(nn.Module):
                 self.tokenizer.eos_token_id = 128001
                 self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
                 self.tokenizer.pad_token_id = 128004
-            else:
-                if self.tokenizer.bos_token_id is None:
-                    self.tokenizer.bos_token_id = self.tokenizer.eos_token_id
-                if self.tokenizer.pad_token_id is None:
-                    self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         for cfg in [self.config.text_config, self.decoder.config, self.generation_config]:
             if isinstance(cfg, dict):
                 cfg["pad_token_id"] = self.tokenizer.pad_token_id
@@ -463,7 +458,7 @@ class ASRModel(nn.Module):
         self.config.text_config.pad_token_id = self.tokenizer.pad_token_id
 
         if hasattr(self.config, "system_prompt"):
-            self.config.system_prompt = getattr(self.config, "system_prompt", None)
+            self.config.system_prompt = self.config.system_prompt
 
         self.config.save_pretrained(save_dir)
         self.tokenizer.save_pretrained(save_dir)

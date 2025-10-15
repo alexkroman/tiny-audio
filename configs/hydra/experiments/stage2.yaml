@@ -41,7 +41,7 @@ training:
   logging_steps: 25
 
   # Training duration
-  max_steps: 20000
+  max_steps: 40000
 
   # Reproducibility
   seed: 43

@@ -182,20 +182,14 @@ def main(cfg: DictConfig) -> None:
 
     print(OmegaConf.to_yaml(cfg))
 
-    import importlib.util
-
-    default_attn = (
-        "flash_attention_2" if importlib.util.find_spec("flash_attn") is not None else "sdpa"
-    )
-
     asr_config = ASRConfig(
         text_model_id=cfg.model.decoder_model_name,
         audio_model_id=cfg.model.encoder_model_name,
-        attn_implementation=cfg.model.get("attn_implementation", default_attn),
+        attn_implementation=cfg.model.attn_implementation,
         model_dtype=cfg.training.model_dtype,
         projector_hidden_dim=cfg.model.projector_hidden_dim,
         audio_downsample_rate=cfg.model.audio_downsample_rate,
-        system_prompt=cfg.model.get("system_prompt", None),
+        system_prompt=cfg.model.system_prompt,
     )
     model = ASRModel(asr_config)
 
@@ -206,7 +200,7 @@ def main(cfg: DictConfig) -> None:
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         max_audio_seconds=cfg.data.max_audio_seconds,
-        system_prompt=cfg.model.get("system_prompt", None),
+        system_prompt=cfg.model.system_prompt,
     )
 
     callbacks = []
@@ -235,7 +229,7 @@ def main(cfg: DictConfig) -> None:
         callbacks=callbacks,
     )
 
-    trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
+    trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
     trainer.save_model()
 
 
