@@ -18,15 +18,12 @@ training:
 
   resume_from_checkpoint: /workspace/outputs/2025-10-14/22-36-14/outputs/production_model/checkpoint-20000
 
-  # Learning rate and scheduler
-  learning_rate: 1.0e-4
-  warmup_steps: 500
+  learning_rate: 3.0e-4  # Increased from 1e-4 for better convergence
+  warmup_steps: 100     # Increased from 500 for smoother ramp-up
   lr_scheduler_type: cosine
 
-  # Optimization
-  weight_decay: 0.0
-  max_grad_norm: 1.0  # Increased from 1.0 - less aggressive clipping for projector training
-
+  weight_decay: 0.01     # Small weight decay to prevent overfitting
+  max_grad_norm: 2.0     # Increased to allow larger updates
 
   # Evaluation and checkpointing
   eval_steps: 500
@@ -40,9 +37,8 @@ training:
   seed: 43
   ignore_data_skip: true
 
-# Early stopping configuration
 early_stopping:
-  patience: 20
-  threshold: 0.001
+  patience: 10           # Reduced patience - stop faster if not improving
+  threshold: 0.0005      # Tighter threshold
 
 # Resume from stage1 checkpoint

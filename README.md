@@ -24,12 +24,6 @@ A lightweight automatic speech recognition (ASR) model that combines a frozen Hu
 ### Installation
 
 ```bash
-pip install tiny-audio
-```
-
-Or from source:
-
-```bash
 git clone https://github.com/alexkroman/tiny-audio.git
 cd tiny-audio
 poetry install

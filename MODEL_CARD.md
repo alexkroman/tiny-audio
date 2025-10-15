@@ -134,16 +134,13 @@ Text Transcription
 
 ### Training Data
 
-The model is trained on a diverse mix of English speech datasets:
+The model is trained on the LoquaciousSet dataset:
 
-| Dataset | Hours | Domain | Description |
-|---------|-------|--------|-------------|
-| LibriSpeech | 960h | Audiobooks | Clean read speech |
-| GigaSpeech | 10,000h | Podcasts, YouTube | Diverse acoustic conditions |
-| Common Voice 17.0 | ~2,500h | Crowdsourced | Multiple accents and speakers |
-| LoquaciousSet | Variable | European Parliament | Formal speech |
+| Dataset | Hours | Description |
+|---------|-------|-------------|
+| LoquaciousSet | 25,000h | A diverse curated corpus combining CommonVoice, VoxPopuli, Libriheavy, People's Speech and YODAS. Contains hundreds of thousands of speakers with varied accents, speech types (read, spontaneous, talks), and acoustic conditions (clean to noisy with reverberation). |
 
-**Total Training Data:** ~13,000+ hours of English speech
+This diverse training data enables the model to handle a wide range of English speech recognition scenarios.
 
 ### Training Configuration
 
@@ -179,9 +176,6 @@ The model is evaluated on the LoquaciousSet benchmark dataset using Word Error R
 ### Evaluation Script
 
 ```bash
-# Install tiny-audio
-pip install tiny-audio
-
 # Run evaluation
 poetry run eval mazesmazes/tiny-audio --max-samples 100
 
