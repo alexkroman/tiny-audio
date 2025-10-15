@@ -22,6 +22,9 @@ model:
 
 # Training Configuration (Aligned with Paper Section 3.3)
 training:
+
+  resume_from_checkpoint: /workspace/outputs/2025-10-14/22-36-14/outputs/production_model/checkpoint-20000
+
   # Learning rate and scheduler
   learning_rate: 1.0e-4
   warmup_steps: 500
@@ -41,7 +44,7 @@ training:
   max_steps: 20000
 
   # Reproducibility
-  seed: 42
+  seed: 43
   ignore_data_skip: true
 
 # Early stopping configuration
@@ -50,4 +53,3 @@ early_stopping:
   threshold: 0.001
 
 # Resume from stage1 checkpoint
-resume_from_checkpoint: /workspace/outputs/2025-10-14/22-36-14/outputs/production_model/checkpoint-20000

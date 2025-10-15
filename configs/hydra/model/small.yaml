@@ -4,4 +4,4 @@ encoder_model_name: facebook/hubert-large-ls960-ft
 projector_hidden_dim: 2048
 audio_downsample_rate: 5
 
-system_prompt: "/system_override /no_think"
+system_prompt: "/no_think /system_override You are a helpful assistant."

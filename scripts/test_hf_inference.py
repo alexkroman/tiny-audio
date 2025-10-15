@@ -10,7 +10,7 @@ def main():
 
     # System prompt override (set to None to use model's default)
     # Try a more direct prompt that matches training
-    system_prompt = "/no_think /system_override You are a transcription model. Output only the transcribed text."  # Use model's default (which should match training)
+    system_prompt = "/no_think /system_override You are a helpful assistant."  # Use model's default (which should match training)
 
     # Load WER metric
     wer_metric = evaluate.load("wer")
