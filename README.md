@@ -32,7 +32,7 @@ Or from source:
 ```bash
 git clone https://github.com/alexkroman/tiny-audio.git
 cd tiny-audio
-uv sync  # or: pip install -e .
+poetry install
 ```
 
 ### Usage
@@ -65,14 +65,14 @@ The model accepts various audio formats (WAV, MP3, FLAC, etc.) and automatically
 ```bash
 git clone https://github.com/alexkroman/tiny-audio.git
 cd tiny-audio
-uv sync  # Install dependencies using uv (or use: pip install -e .)
+poetry install
 
 # Quick test run (20 steps, small dataset)
-uv run src/train.py
+poetry run python src/train.py
 
 # Full production training
 export HF_TOKEN='your-token'  # Get from https://huggingface.co/settings/tokens
-uv run src/train.py +experiments=production
+poetry run python src/train.py +experiments=production
 ```
 
 ### Training Details
@@ -157,19 +157,19 @@ configs/
 
 ```bash
 # Use larger model
-uv run src/train.py model=large
+poetry run python src/train.py model=large
 
 # Adjust training parameters
-uv run src/train.py training.max_steps=10000 training.learning_rate=5e-5
+poetry run python src/train.py training.max_steps=10000 training.learning_rate=5e-5
 
 # Change audio encoder
-uv run src/train.py model.audio_model_id=facebook/hubert-large-ls960-ft
+poetry run python src/train.py model.audio_model_id=facebook/hubert-large-ls960-ft
 
 # Use experiment preset
-uv run src/train.py +experiments=production
+poetry run python src/train.py +experiments=production
 
 # Combine multiple overrides
-uv run src/train.py model=large training.batch_size=32 training.max_steps=50000
+poetry run python src/train.py model=large training.batch_size=32 training.max_steps=50000
 ```
 
 ### Key Configuration Parameters
@@ -190,10 +190,10 @@ Tiny Audio includes tools for easy deployment and training on cloud GPU provider
 
 ```bash
 # Deploy code to remote GPU instance
-uv run scripts/deploy_runpod.py --host <pod-id>.runpod.io --port 22
+poetry run deploy-runpod --host <pod-id>.runpod.io --port 22
 
 # Start training on remote instance
-uv run scripts/start_remote_training.py \
+poetry run remote-train \
   --host <pod-id>.runpod.io \
   --port 22 \
   --config production
@@ -224,13 +224,13 @@ Tiny Audio includes a comprehensive evaluation framework using Word Error Rate (
 
 ```bash
 # Evaluate tiny-audio model on 100 samples
-uv run scripts/eval.py --max-samples 100
+poetry run eval mazesmazes/tiny-audio --max-samples 100
 
 # Evaluate on full test set
-uv run scripts/eval.py
+poetry run eval mazesmazes/tiny-audio
 
 # Compare with other models
-uv run scripts/eval.py --provider assemblyai --api-key YOUR_API_KEY
+poetry run eval --provider assemblyai --api-key YOUR_API_KEY
 ```
 
 ### Supported Providers
@@ -272,27 +272,30 @@ Sample predictions with ground truth comparison...
 ### Code Quality
 
 ```bash
-# Format code with Ruff
-uv run ruff format src/
+# Format code
+poetry run format
 
-# Lint and auto-fix issues
-uv run ruff check src/ --fix
+# Lint code
+poetry run lint
 
-# Type checking with mypy
-uv run mypy src/
+# Type checking
+poetry run type-check
 
-# Run all checks
-uv run ruff format src/ && uv run ruff check src/ --fix && uv run mypy src/
+# Run all checks (lint + type-check + test)
+poetry run check
 ```
 
 ### Testing
 
 ```bash
 # Run test suite
-uv run pytest
+poetry run test
+
+# Or run pytest directly
+poetry run pytest
 
 # Run with coverage
-uv run pytest --cov=src --cov-report=html
+poetry run pytest --cov=src --cov-report=html
 ```
 
 ### Project Structure
@@ -328,9 +331,9 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 
 1. Fork the repository
 2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/tiny-audio.git`
-3. Install development dependencies: `uv sync` or `pip install -e ".[dev]"`
+3. Install development dependencies: `poetry install`
 4. Create a feature branch: `git checkout -b feature/amazing-feature`
-5. Make your changes and ensure tests pass
+5. Make your changes and ensure tests pass: `poetry run check`
 6. Commit your changes: `git commit -m 'Add amazing feature'`
 7. Push to the branch: `git push origin feature/amazing-feature`
 8. Open a Pull Request

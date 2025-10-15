@@ -183,10 +183,10 @@ The model is evaluated on the LoquaciousSet benchmark dataset using Word Error R
 pip install tiny-audio
 
 # Run evaluation
-uv run scripts/eval.py --max-samples 100
+poetry run eval mazesmazes/tiny-audio --max-samples 100
 
 # Compare with baselines
-uv run scripts/eval.py --provider assemblyai --api-key YOUR_API_KEY
+poetry run eval --provider assemblyai --api-key YOUR_API_KEY
 ```
 
 ## Limitations and Bias
