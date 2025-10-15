@@ -1,5 +1,5 @@
 # Large model configuration for SLAM-ASR
-decoder_model_name: HuggingFaceTB/SmolLM3-3B
+decoder_model_name: Qwen/Qwen3-8B
 encoder_model_name: facebook/hubert-xlarge-ls960-ft  # HuBERT encoder
 
 # Projector configuration per SLAM-ASR paper

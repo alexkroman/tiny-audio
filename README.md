@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![Hugging Face Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 
-A lightweight automatic speech recognition (ASR) model that combines a frozen HuBERT encoder with a SmolLM3 decoder, connected via a learnable audio projector. Only the projector is trained, making it extremely efficient to fine-tune.
+A lightweight automatic speech recognition (ASR) model that combines a frozen HuBERT encoder with a Qwen3-8B decoder, connected via a learnable audio projector. Only the projector is trained, making it extremely efficient to fine-tune.
 
 **Key Features:**
 
@@ -110,7 +110,7 @@ Tiny Audio uses a modular three-component architecture:
 
 1. **Language Model Decoder** (Frozen)
 
-   - Default: SmolLM3-3B-Base (`HuggingFaceTB/SmolLM3-3B-Base`)
+   - Default: Qwen3-8B (`Qwen/Qwen3-8B`)
    - Generates text transcriptions autoregressively
    - Pretrained weights remain frozen during training
    - Uses BF16 precision for efficient inference
@@ -125,7 +125,7 @@ Audio Waveform → Encoder → Audio Features → Projector → LLM Embeddings �
 ### Why This Architecture?
 
 - **Parameter Efficient**: Only train the small projector (~7M params) instead of the full model (>400M params)
-- **Leverages Pretrained Models**: Combines the best of audio understanding (HuBERT) and language generation (SmolLM3)
+- **Leverages Pretrained Models**: Combines the best of audio understanding (HuBERT) and language generation (Qwen3-8B)
 - **Flexible**: Easy to swap different encoder or decoder models
 - **Fast Training**: Frozen components mean faster training and lower memory requirements
 
@@ -140,8 +140,8 @@ configs/
 ├── hydra/
 │   ├── config.yaml           # Main config
 │   ├── model/                # Model variants
-│   │   ├── small.yaml        # HuBERT-large + SmolLM3-3B
-│   │   └── large.yaml        # HuBERT-xlarge + SmolLM3-3B
+│   │   ├── small.yaml        # HuBERT-large + Qwen3-8B
+│   │   └── large.yaml        # HuBERT-xlarge + Qwen3-8B
 │   ├── training/             # Training hyperparameters
 │   └── experiments/          # Full experiment configs
 │       └── production.yaml   # Production training setup
@@ -169,7 +169,7 @@ poetry run python src/train.py model=large training.batch_size=32 training.max_s
 ### Key Configuration Parameters
 
 - `model.audio_model_id`: Audio encoder model (default: `facebook/hubert-large-ls960-ft`)
-- `model.text_model_id`: Language model decoder (default: `HuggingFaceTB/SmolLM3-3B-Base`)
+- `model.text_model_id`: Language model decoder (default: `Qwen/Qwen3-8B`)
 - `model.audio_downsample_rate`: Audio feature downsampling factor (default: 5)
 - `model.projector_hidden_dim`: Hidden dimension in projector MLP (default: 2048)
 - `training.max_steps`: Total training steps
@@ -389,7 +389,7 @@ If you use Tiny Audio in your research, please cite:
 This project builds upon:
 
 - [HuBERT](https://huggingface.co/docs/transformers/model_doc/hubert) by Facebook AI for audio encoding
-- [SmolLM3](https://huggingface.co/HuggingFaceTB/SmolLM3-3B-Base) by HuggingFace for language modeling
+- [Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) by Alibaba Cloud for language modeling
 
 ## License
 

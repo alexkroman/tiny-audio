@@ -5,11 +5,11 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry]
 name = "tiny-audio"
 version = "0.1.0"
-description = "Learn ASR by Building One - A minimal speech recognition model combining HuBERT with SmolLM3"
+description = "Learn ASR by Building One - A minimal speech recognition model combining HuBERT with Qwen3-8B"
 authors = ["Alex Kroman <alex@alexkroman.com>"]
 license = "MIT"
 readme = "README.md"
-keywords = ["speech-recognition", "asr", "hubert", "smollm3", "transformers", "deep-learning", "education"]
+keywords = ["speech-recognition", "asr", "hubert", "qwen3", "transformers", "deep-learning", "education"]
 homepage = "https://github.com/alexkroman/tiny-audio"
 repository = "https://github.com/alexkroman/tiny-audio"
 documentation = "https://github.com/alexkroman/tiny-audio#readme"

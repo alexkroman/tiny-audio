@@ -118,7 +118,7 @@ class ASRModel(nn.Module):
         self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(config.audio_model_id)
 
         self.generation_config = self.decoder.generation_config
-        self.generation_config.num_beams = 4
+        self.generation_config.num_beams = config.num_beams
 
         self._init_tokenizer()
 
@@ -162,13 +162,6 @@ class ASRModel(nn.Module):
 
         self.tokenizer.padding_side = "right"
 
-        if not self._is_loading_from_pretrained and "SmolLM3" in self.config.text_model_id:
-            self.tokenizer.bos_token = "<|begin_of_text|>"
-            self.tokenizer.bos_token_id = 128000
-            self.tokenizer.eos_token = "<|end_of_text|>"
-            self.tokenizer.eos_token_id = 128001
-            self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
-            self.tokenizer.pad_token_id = 128004
         for cfg in [self.config.text_config, self.decoder.config, self.generation_config]:
             if isinstance(cfg, dict):
                 cfg["pad_token_id"] = self.tokenizer.pad_token_id
@@ -451,9 +444,7 @@ class ASRModel(nn.Module):
         generate_kwargs.setdefault(
             "max_new_tokens", 150
         )  # Increased from 120 to handle longest samples (~95 words)
-        generate_kwargs.setdefault(
-            "num_beams", 1
-        )  # Increased from 3 for better beam search quality
+        generate_kwargs.setdefault("num_beams", self.config.num_beams)
         generate_kwargs.setdefault("do_sample", False)
 
         im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")

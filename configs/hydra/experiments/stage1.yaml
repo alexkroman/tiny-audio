@@ -3,12 +3,12 @@
 
 defaults:
   - override /model: large
-  - override /data: loquacious_clean
+  - override /data: loquacious_large
   - override /training: production
 
 # Model configuration - the freezing logic is hard-coded in asr_modeling.py
 model:
-  decoder_model_name: HuggingFaceTB/SmolLM3-3B  # Base model without chat templates
+  decoder_model_name: Qwen/Qwen3-8B
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
   # Projector configuration
@@ -32,7 +32,7 @@ training:
   logging_steps: 25
 
   # Training duration
-  max_steps: 20000
+  max_steps: 40000
 
   # Reproducibility
   seed: 42
@@ -40,6 +40,6 @@ training:
 
 # Early stopping configuration
 early_stopping:
-  patience: 20
+  patience: 5
   threshold: 0.001
 

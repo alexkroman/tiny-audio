@@ -11,11 +11,11 @@ datasets:
 - en
   base_model:
 - facebook/hubert-large-ls960-ft
-- HuggingFaceTB/SmolLM3-3B-Base
+- Qwen/Qwen3-8B
   pipeline_tag: automatic-speech-recognition
   tags:
 - hubert
-- smollm3
+- qwen3
 - asr
 - speech-recognition
 - audio
@@ -44,7 +44,7 @@ ______________________________________________________________________
 
 ## Efficient Speech Recognition with Frozen Pretrained Models
 
-Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a frozen HuBERT encoder with a SmolLM3 language model decoder, connected via a trainable audio projector. This architecture enables efficient training by only fine-tuning a small projection layer (~7M parameters) while leveraging the power of large pretrained models.
+Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a frozen HuBERT encoder with a Qwen3-8B language model decoder, connected via a trainable audio projector. This architecture enables efficient training by only fine-tuning a small projection layer (~7M parameters) while leveraging the power of large pretrained models.
 
 ## Model Description
 
@@ -55,7 +55,7 @@ Tiny Audio is a lightweight automatic speech recognition (ASR) model that combin
 - **Architecture:** Encoder-Projector-Decoder
   - Audio Encoder: HuBERT-large (317M params, frozen)
   - Audio Projector: 2-layer MLP (~7M params, trainable)
-  - Text Decoder: SmolLM3-3B (3B params, frozen)
+  - Text Decoder: Qwen3-8B (8B params, frozen)
 
 ## Key Features
 
@@ -113,8 +113,8 @@ The model automatically handles:
 
 1. **Language Model Decoder (Frozen)**
 
-   - Base Model: `HuggingFaceTB/SmolLM3-3B-Base`
-   - Parameters: 3B (frozen)
+   - Base Model: `Qwen/Qwen3-8B`
+   - Parameters: 8B (frozen)
    - Generates text transcriptions autoregressively
    - Uses beam search (beam_size=4) for decoding
 
@@ -131,7 +131,7 @@ Audio Projector (trainable, 5x downsample)
     ↓
 Language Embeddings [batch, ~300, 2048]
     ↓
-SmolLM3 Decoder (frozen)
+Qwen3-8B Decoder (frozen)
     ↓
 Text Transcription
 ```
@@ -161,7 +161,7 @@ This diverse training data enables the model to handle a wide range of English s
 
 ### Training Strategy
 
-Only the audio projector weights are trained from scratch. The HuBERT encoder and SmolLM3 decoder remain frozen throughout training, which:
+Only the audio projector weights are trained from scratch. The HuBERT encoder and Qwen3-8B decoder remain frozen throughout training, which:
 
 - Reduces memory requirements significantly
 - Enables faster training convergence
@@ -253,7 +253,7 @@ If you use Tiny Audio in your research, please cite:
 This project builds upon excellent prior work:
 
 - **HuBERT** ([Hsu et al., 2021](https://huggingface.co/docs/transformers/model_doc/hubert)): Self-supervised speech representation learning
-- **SmolLM3** ([HuggingFace Team](https://huggingface.co/HuggingFaceTB/SmolLM3-3B-Base)): Efficient language model
+- **Qwen3-8B** ([Alibaba Cloud](https://huggingface.co/Qwen/Qwen3-8B)): Efficient language model
 
 ## Additional Resources
 

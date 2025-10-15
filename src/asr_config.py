@@ -8,12 +8,13 @@ class ASRConfig(transformers.PretrainedConfig):
     def __init__(
         self,
         audio_model_id: str = "facebook/hubert-large-ls960-ft",
-        text_model_id: str = "HuggingFaceTB/SmolLM3-3B",
+        text_model_id: str = "Qwen/Qwen3-8B",
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
         projector_hidden_dim: int = 2048,
         audio_downsample_rate: int = 5,
-        projector_dropout: float = 0.1,
+        projector_dropout: float = 0.2,
+        num_beams: int = 5,
         system_prompt: str = None,
         **kwargs,
     ):
@@ -24,6 +25,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_hidden_dim = projector_hidden_dim
         self.audio_downsample_rate = audio_downsample_rate
         self.projector_dropout = projector_dropout
+        self.num_beams = num_beams
         self.system_prompt = system_prompt
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
