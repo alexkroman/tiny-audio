@@ -8,11 +8,11 @@ datasets:
 language:
 - en
 base_model:
-- openai/whisper-small
+- facebook/hubert-large-ls960-ft
 - HuggingFaceTB/SmolLM3-3B-Base
 pipeline_tag: automatic-speech-recognition
 tags:
-- whisper
+- hubert
 - smollm3
 - asr
 - speech-recognition
@@ -41,7 +41,7 @@ model-index:
 
 ## Efficient Speech Recognition with Frozen Pretrained Models
 
-Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a frozen Whisper encoder with a SmolLM3 language model decoder, connected via a trainable audio projector. This architecture enables efficient training by only fine-tuning a small projection layer (~7M parameters) while leveraging the power of large pretrained models.
+Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a frozen HuBERT encoder with a SmolLM3 language model decoder, connected via a trainable audio projector. This architecture enables efficient training by only fine-tuning a small projection layer (~7M parameters) while leveraging the power of large pretrained models.
 
 ## Model Description
 
@@ -50,15 +50,15 @@ Tiny Audio is a lightweight automatic speech recognition (ASR) model that combin
 - **Language(s):** English
 - **License:** MIT
 - **Architecture:** Encoder-Projector-Decoder
-  - Audio Encoder: Whisper-small (244M params, frozen)
+  - Audio Encoder: HuBERT-large (317M params, frozen)
   - Audio Projector: 2-layer MLP (~7M params, trainable)
-  - Text Decoder: SmolLM3-3B (3B params, frozen with optional LoRA)
+  - Text Decoder: SmolLM3-3B (3B params, frozen)
 
 ## Key Features
 
 ✅ **Parameter Efficient**: Only ~7M trainable parameters
 ✅ **Fast Training**: Frozen encoder/decoder enable rapid fine-tuning
-✅ **Modular Design**: Easy to swap encoders (Whisper, HuBERT) or decoders
+✅ **Modular Design**: Easy to swap different encoder or decoder models
 ✅ **Production Ready**: Includes evaluation tools and remote training scripts
 ✅ **HuggingFace Native**: Full integration with transformers library
 
@@ -95,8 +95,8 @@ The model automatically handles:
 ### Model Components
 
 1. **Audio Encoder (Frozen)**
-   - Base Model: `openai/whisper-small`
-   - Parameters: 244M (frozen)
+   - Base Model: `facebook/hubert-large-ls960-ft`
+   - Parameters: 317M (frozen)
    - Extracts acoustic features from raw audio waveforms
    - Output: Audio embeddings at ~50Hz frame rate
 
@@ -106,9 +106,9 @@ The model automatically handles:
    - Downsamples audio features by 5x (from ~50Hz to ~10Hz)
    - Maps audio embeddings to language model embedding space
 
-3. **Language Model Decoder (Frozen + Optional LoRA)**
+3. **Language Model Decoder (Frozen)**
    - Base Model: `HuggingFaceTB/SmolLM3-3B-Base`
-   - Parameters: 3B (frozen) + optional LoRA adapters
+   - Parameters: 3B (frozen)
    - Generates text transcriptions autoregressively
    - Uses beam search (beam_size=4) for decoding
 
@@ -117,15 +117,15 @@ The model automatically handles:
 ```text
 Raw Audio (16kHz)
     ↓
-Whisper Encoder (frozen)
+HuBERT Encoder (frozen)
     ↓
-Audio Features [batch, ~1500, 768]
+Audio Features [batch, ~1500, 1024]
     ↓
 Audio Projector (trainable, 5x downsample)
     ↓
 Language Embeddings [batch, ~300, 2048]
     ↓
-SmolLM3 Decoder (frozen/LoRA)
+SmolLM3 Decoder (frozen)
     ↓
 Text Transcription
 ```
@@ -158,7 +158,7 @@ The model is trained on a diverse mix of English speech datasets:
 
 ### Training Strategy
 
-Only the audio projector weights are trained from scratch. The Whisper encoder and SmolLM3 decoder remain frozen throughout training, which:
+Only the audio projector weights are trained from scratch. The HuBERT encoder and SmolLM3 decoder remain frozen throughout training, which:
 
 - Reduces memory requirements significantly
 - Enables faster training convergence
@@ -186,7 +186,7 @@ pip install tiny-audio
 uv run scripts/eval.py --max-samples 100
 
 # Compare with baselines
-uv run scripts/eval.py --provider huggingface --model openai/whisper-small
+uv run scripts/eval.py --provider assemblyai --api-key YOUR_API_KEY
 ```
 
 ## Limitations and Bias
@@ -252,9 +252,8 @@ If you use Tiny Audio in your research, please cite:
 
 This project builds upon excellent prior work:
 
-- **Whisper** ([Radford et al., 2022](https://github.com/openai/whisper)): Robust speech recognition encoder
+- **HuBERT** ([Hsu et al., 2021](https://huggingface.co/docs/transformers/model_doc/hubert)): Self-supervised speech representation learning
 - **SmolLM3** ([HuggingFace Team](https://huggingface.co/HuggingFaceTB/SmolLM3-3B-Base)): Efficient language model
-- **SLAM-LLM** ([Ma et al., 2024](https://github.com/X-LANCE/SLAM-LLM)): Architectural inspiration for audio-language modeling
 
 ## Additional Resources
 

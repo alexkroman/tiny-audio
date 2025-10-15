@@ -1,10 +1,4 @@
 # @package _global_
-# Single Stage Projector Training (SLAM-ASR Methodology)
-# This configuration implements the simple training approach from the paper:
-# "An Embarrassingly Simple Approach for LLM with Strong ASR Capacity"
-# - Frozen Speech Encoder (HuBERT)
-# - Frozen LLM Decoder (Smollm3-3B)
-# - Only the Projector is trained.
 
 defaults:
   - override /model: large
@@ -20,7 +14,6 @@ model:
   projector_hidden_dim: 2048
   audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
 
-# Training Configuration (Aligned with Paper Section 3.3)
 training:
 
   resume_from_checkpoint: /workspace/outputs/2025-10-14/22-36-14/outputs/production_model/checkpoint-20000

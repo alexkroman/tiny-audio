@@ -75,7 +75,7 @@ def start_training(host, port, experiment, session_name):
         export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
         # Enable TF32 for A40 (2x matmul speedup with no accuracy loss)
         export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
-        # Enable cudnn benchmarking for faster convolutions (Whisper encoder)
+        # Enable cudnn benchmarking for faster convolutions
         export TORCH_CUDNN_BENCHMARK=1
         export TORCHINDUCTOR_CACHE_DIR=/workspace/.inductor_cache  # Cache compiled kernels
         export TORCHINDUCTOR_FX_GRAPH_CACHE=1  # Cache graph transformations

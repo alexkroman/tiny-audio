@@ -218,7 +218,7 @@ Examples:
   python scripts/run_handler_local.py --model outputs/2025-09-24/10-39-34/outputs/mac_model
 
   # Use a HuggingFace Hub model
-  python scripts/run_handler_local.py --model openai/whisper-small
+  python scripts/run_handler_local.py --model mazesmazes/tiny-audio
 
   # Specify custom audio file
   python scripts/run_handler_local.py --audio path/to/audio.wav
@@ -285,7 +285,7 @@ Examples:
         else:
             print("❌ No saved models found in outputs/")
             print("   Please specify a model with --model flag")
-            print("   Example: --model openai/whisper-small")
+            print("   Example: --model mazesmazes/tiny-audio")
             sys.exit(1)
 
     # Run the test

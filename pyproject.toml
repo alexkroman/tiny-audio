@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tiny-audio"
 dynamic = ["version"]
-description = "Learn ASR by Building One - A minimal speech recognition model combining Whisper with SmolLM2"
+description = "Learn ASR by Building One - A minimal speech recognition model combining HuBERT with SmolLM3"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 readme = "README.md"
 authors = [
     {name = "Alex Kroman", email = "alex@alexkroman.com"}
 ]
-keywords = ["speech-recognition", "asr", "whisper", "smollm2", "transformers", "deep-learning", "education"]
+keywords = ["speech-recognition", "asr", "hubert", "smollm3", "transformers", "deep-learning", "education"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

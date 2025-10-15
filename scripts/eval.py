@@ -3,7 +3,7 @@
 Evaluate ASR models on the LoquaciousSet dataset using HuggingFace Inference API.
 
 Supports:
-- HuggingFace Hub models (e.g., mazesmazes/tiny-audio, openai/whisper-small)
+- HuggingFace Hub models (e.g., mazesmazes/tiny-audio)
 - HuggingFace Inference Endpoints (via endpoint URL)
 - AssemblyAI API for comparison
 

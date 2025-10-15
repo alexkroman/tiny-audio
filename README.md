@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![Hugging Face Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 
-A lightweight automatic speech recognition (ASR) model that combines a frozen Whisper encoder with a SmolLM3 decoder, connected via a learnable audio projector. Only the projector is trained, making it extremely efficient to fine-tune.
+A lightweight automatic speech recognition (ASR) model that combines a frozen HuBERT encoder with a SmolLM3 decoder, connected via a learnable audio projector. Only the projector is trained, making it extremely efficient to fine-tune.
 
 **Key Features:**
 
@@ -105,8 +105,7 @@ Tiny Audio uses a modular three-component architecture:
 ### Components
 
 1. **Audio Encoder** (Frozen)
-   - Default: Whisper-small (`openai/whisper-small`)
-   - Alternative: HuBERT-large (`facebook/hubert-large-ls960-ft`)
+   - HuBERT-large (`facebook/hubert-large-ls960-ft`)
    - Extracts acoustic features from raw audio waveforms
    - Pretrained weights remain frozen during training
 
@@ -132,8 +131,8 @@ Audio Waveform → Encoder → Audio Features → Projector → LLM Embeddings �
 ### Why This Architecture?
 
 - **Parameter Efficient**: Only train the small projector (~7M params) instead of the full model (>400M params)
-- **Leverages Pretrained Models**: Combines the best of audio understanding (Whisper) and language generation (SmolLM3)
-- **Flexible**: Easy to swap encoders (Whisper, HuBERT) or decoders (SmolLM, Llama, etc.)
+- **Leverages Pretrained Models**: Combines the best of audio understanding (HuBERT) and language generation (SmolLM3)
+- **Flexible**: Easy to swap different encoder or decoder models
 - **Fast Training**: Frozen components mean faster training and lower memory requirements
 
 ## Configuration
@@ -147,8 +146,8 @@ configs/
 ├── hydra/
 │   ├── config.yaml           # Main config
 │   ├── model/                # Model variants
-│   │   ├── default.yaml      # Whisper-small + SmolLM3-3B
-│   │   └── large.yaml        # Larger model configs
+│   │   ├── small.yaml        # HuBERT-large + SmolLM3-3B
+│   │   └── large.yaml        # HuBERT-xlarge + SmolLM3-3B
 │   ├── training/             # Training hyperparameters
 │   └── experiments/          # Full experiment configs
 │       └── production.yaml   # Production training setup
@@ -175,7 +174,7 @@ uv run src/train.py model=large training.batch_size=32 training.max_steps=50000
 
 ### Key Configuration Parameters
 
-- `model.audio_model_id`: Audio encoder model (default: `openai/whisper-small`)
+- `model.audio_model_id`: Audio encoder model (default: `facebook/hubert-large-ls960-ft`)
 - `model.text_model_id`: Language model decoder (default: `HuggingFaceTB/SmolLM3-3B-Base`)
 - `model.audio_downsample_rate`: Audio feature downsampling factor (default: 5)
 - `model.projector_hidden_dim`: Hidden dimension in projector MLP (default: 2048)
@@ -231,7 +230,6 @@ uv run scripts/eval.py --max-samples 100
 uv run scripts/eval.py
 
 # Compare with other models
-uv run scripts/eval.py --provider huggingface --model openai/whisper-small
 uv run scripts/eval.py --provider assemblyai --api-key YOUR_API_KEY
 ```
 
@@ -355,9 +353,8 @@ If you use Tiny Audio in your research, please cite:
 
 This project builds upon:
 
-- [Whisper](https://github.com/openai/whisper) by OpenAI for audio encoding
+- [HuBERT](https://huggingface.co/docs/transformers/model_doc/hubert) by Facebook AI for audio encoding
 - [SmolLM3](https://huggingface.co/HuggingFaceTB/SmolLM3-3B-Base) by HuggingFace for language modeling
-- [SLAM-LLM](https://github.com/X-LANCE/SLAM-LLM) for architectural inspiration
 
 ## License
 
