@@ -65,7 +65,16 @@ def prepare_wav_bytes(wav_data):
 def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
     """Evaluate using local transformers pipeline or HuggingFace Inference Endpoint."""
 
-    from jiwer import Compose, ExpandCommonEnglishContractions, RemoveKaldiNonWords, RemoveMultipleSpaces, RemovePunctuation, Strip, ToLowerCase, wer
+    from jiwer import (
+        Compose,
+        ExpandCommonEnglishContractions,
+        RemoveKaldiNonWords,
+        RemoveMultipleSpaces,
+        RemovePunctuation,
+        Strip,
+        ToLowerCase,
+        wer,
+    )
 
     predictions = []
     references = []
@@ -73,7 +82,16 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
     per_sample_times = []
 
     # Create text normalizer
-    normalizer = Compose([ToLowerCase(), ExpandCommonEnglishContractions(), RemoveKaldiNonWords(), RemovePunctuation(), RemoveMultipleSpaces(), Strip()])
+    normalizer = Compose(
+        [
+            ToLowerCase(),
+            ExpandCommonEnglishContractions(),
+            RemoveKaldiNonWords(),
+            RemovePunctuation(),
+            RemoveMultipleSpaces(),
+            Strip(),
+        ]
+    )
 
     # Check if it's an inference endpoint (URL) or a model to load locally
     if model_or_endpoint.startswith("http"):
@@ -137,6 +155,7 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
         finally:
             # Clean up temporary directory
             import shutil
+
             shutil.rmtree(temp_dir, ignore_errors=True)
     else:
         # Load model locally using custom ASRPipeline
@@ -149,22 +168,22 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
             "automatic-speech-recognition",
             model=model_or_endpoint,
             trust_remote_code=True,
-            device=device
+            device=device,
         )
         print(f"Model loaded on device: {pipe.device}")
 
         # Print original system prompt from model
-        if hasattr(pipe.model, 'system_prompt'):
+        if hasattr(pipe.model, "system_prompt"):
             print(f"Original system prompt from model: {pipe.model.system_prompt}")
         else:
             print("Original system prompt: Not available")
 
         # Override with custom system prompt if provided
-        if system_prompt is not None and hasattr(pipe.model, 'system_prompt'):
+        if system_prompt is not None and hasattr(pipe.model, "system_prompt"):
             pipe.model.system_prompt = system_prompt
             print(f"Using custom system prompt: {system_prompt}")
         else:
-            print(f"Using model's default system prompt")
+            print("Using model's default system prompt")
 
         for i, sample in enumerate(dataset):
             try:
@@ -212,7 +231,16 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
 def evaluate_assemblyai(dataset, api_key, model="best"):
     """Evaluate using AssemblyAI API."""
     import assemblyai as aai
-    from jiwer import Compose, ExpandCommonEnglishContractions, RemoveKaldiNonWords, RemoveMultipleSpaces, RemovePunctuation, Strip, ToLowerCase, wer
+    from jiwer import (
+        Compose,
+        ExpandCommonEnglishContractions,
+        RemoveKaldiNonWords,
+        RemoveMultipleSpaces,
+        RemovePunctuation,
+        Strip,
+        ToLowerCase,
+        wer,
+    )
 
     aai.settings.api_key = api_key
 
@@ -238,7 +266,16 @@ def evaluate_assemblyai(dataset, api_key, model="best"):
     per_sample_times = []
 
     # Create text normalizer
-    normalizer = Compose([ToLowerCase(), ExpandCommonEnglishContractions(), RemoveKaldiNonWords(), RemovePunctuation(), RemoveMultipleSpaces(), Strip()])
+    normalizer = Compose(
+        [
+            ToLowerCase(),
+            ExpandCommonEnglishContractions(),
+            RemoveKaldiNonWords(),
+            RemovePunctuation(),
+            RemoveMultipleSpaces(),
+            Strip(),
+        ]
+    )
 
     for i, sample in enumerate(dataset):
         # Get WAV bytes for API
@@ -367,16 +404,37 @@ def main():
     print("Running inference...")
 
     if args.assemblyai:
-        predictions, references, per_sample_wers, per_sample_times = evaluate_assemblyai(dataset, args.api_key, args.assemblyai_model)
+        predictions, references, per_sample_wers, per_sample_times = evaluate_assemblyai(
+            dataset, args.api_key, args.assemblyai_model
+        )
         model_name = f"AssemblyAI ({args.assemblyai_model})"
     else:
-        predictions, references, per_sample_wers, per_sample_times = evaluate_huggingface(dataset, args.model, args.system_prompt)
+        predictions, references, per_sample_wers, per_sample_times = evaluate_huggingface(
+            dataset, args.model, args.system_prompt
+        )
         model_name = args.model
 
     # Normalize text before computing WER
-    from jiwer import Compose, ExpandCommonEnglishContractions, RemoveKaldiNonWords, RemoveMultipleSpaces, RemovePunctuation, Strip, ToLowerCase
+    from jiwer import (
+        Compose,
+        ExpandCommonEnglishContractions,
+        RemoveKaldiNonWords,
+        RemoveMultipleSpaces,
+        RemovePunctuation,
+        Strip,
+        ToLowerCase,
+    )
 
-    normalizer = Compose([ToLowerCase(), ExpandCommonEnglishContractions(), RemoveKaldiNonWords(), RemovePunctuation(), RemoveMultipleSpaces(), Strip()])
+    normalizer = Compose(
+        [
+            ToLowerCase(),
+            ExpandCommonEnglishContractions(),
+            RemoveKaldiNonWords(),
+            RemovePunctuation(),
+            RemoveMultipleSpaces(),
+            Strip(),
+        ]
+    )
     normalized_predictions = [normalizer(p) for p in predictions]
     normalized_references = [normalizer(r) for r in references]
 
@@ -403,7 +461,9 @@ def main():
         f.write("Predictions vs Ground Truth\n")
         f.write("=" * 80 + "\n\n")
 
-        for i, (pred, ref, sample_wer, sample_time) in enumerate(zip(predictions, references, per_sample_wers, per_sample_times)):
+        for i, (pred, ref, sample_wer, sample_time) in enumerate(
+            zip(predictions, references, per_sample_wers, per_sample_times)
+        ):
             f.write(f"Sample {i + 1} - WER: {sample_wer:.2f}%, Time: {sample_time:.2f}s\n")
             f.write(f"Ground Truth: {ref}\n")
             f.write(f"Prediction:   {pred}\n")

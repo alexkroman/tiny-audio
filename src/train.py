@@ -138,7 +138,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             # Find where these tokens appear in the full sequence
             text_position = -1
             for i in range(len(tokens) - len(text_tokens) + 1):
-                if tokens[i:i+len(text_tokens)] == text_tokens:
+                if tokens[i : i + len(text_tokens)] == text_tokens:
                     # Found the transcription text! Train on these tokens
                     for j in range(len(text_tokens)):
                         labels[i + j] = tokens[i + j]

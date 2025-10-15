@@ -58,7 +58,8 @@ def start_training(host, port, experiment, session_name):
 
     # This script will be created and executed on the remote machine.
     # It activates the virtual environment to ensure all commands use the correct packages.
-    training_script_content = textwrap.dedent(f"""\
+    training_script_content = textwrap.dedent(
+        f"""\
         #!/bin/bash
         # NOTE: "set -e" is intentionally removed.
         # This ensures that if the training script crashes, the tmux session
@@ -111,7 +112,8 @@ def start_training(host, port, experiment, session_name):
 
         echo "Training script finished. Session will remain active for inspection."
         sleep infinity
-    """)
+    """
+    )
 
     # Use a heredoc to safely write the script to a temporary file on the remote
     create_script_cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} bash << 'EOF'

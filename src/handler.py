@@ -128,4 +128,3 @@ class EndpointHandler:
             length_penalty=length_penalty,
             repetition_penalty=repetition_penalty,
         )
-

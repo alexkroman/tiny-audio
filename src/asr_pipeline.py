@@ -69,6 +69,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             if "bytes" in inputs:
                 # Decode bytes to audio array using torchcodec
                 import tempfile
+
                 from torchcodec.decoders import AudioDecoder
 
                 wav_bytes = inputs["bytes"]
@@ -84,8 +85,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                     sample_rate = audio_result.sample_rate
                     inputs = {"raw": audio_tensor.squeeze().numpy(), "sampling_rate": sample_rate}
                 finally:
-                    import os
-                    os.unlink(temp_path)
+                    from pathlib import Path
+
+                    Path(temp_path).unlink()
             elif "array" in inputs:
                 # Convert "array" key to "raw" key
                 inputs = {"raw": inputs["array"], "sampling_rate": inputs["sampling_rate"]}

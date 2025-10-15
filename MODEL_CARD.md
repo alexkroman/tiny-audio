@@ -1,17 +1,19 @@
----
+______________________________________________________________________
+
 license: mit
 datasets:
+
 - mozilla-foundation/common_voice_17_0
 - speechcolab/gigaspeech
 - openslr/librispeech_asr
 - speechbrain/LoquaciousSet
-language:
+  language:
 - en
-base_model:
+  base_model:
 - facebook/hubert-large-ls960-ft
 - HuggingFaceTB/SmolLM3-3B-Base
-pipeline_tag: automatic-speech-recognition
-tags:
+  pipeline_tag: automatic-speech-recognition
+  tags:
 - hubert
 - smollm3
 - asr
@@ -19,23 +21,24 @@ tags:
 - audio
 - parameter-efficient
 - frozen-encoder
-library_name: transformers
-model-index:
+  library_name: transformers
+  model-index:
 - name: tiny-audio
   results:
   - task:
-      type: automatic-speech-recognition
-      name: Automatic Speech Recognition
+    type: automatic-speech-recognition
+    name: Automatic Speech Recognition
     dataset:
-      type: speechbrain/LoquaciousSet
-      name: LoquaciousSet
-      config: large
-      split: test
+    type: speechbrain/LoquaciousSet
+    name: LoquaciousSet
+    config: large
+    split: test
     metrics:
     - type: wer
       name: Word Error Rate
       value: TBD
----
+
+______________________________________________________________________
 
 # Tiny Audio
 
@@ -95,18 +98,21 @@ The model automatically handles:
 ### Model Components
 
 1. **Audio Encoder (Frozen)**
+
    - Base Model: `facebook/hubert-large-ls960-ft`
    - Parameters: 317M (frozen)
    - Extracts acoustic features from raw audio waveforms
    - Output: Audio embeddings at ~50Hz frame rate
 
-2. **Audio Projector (Trainable)**
+1. **Audio Projector (Trainable)**
+
    - Architecture: `Linear(encoder_dim × 5, 2048) → ReLU → Linear(2048, llm_dim)`
    - Parameters: ~7M (trainable)
    - Downsamples audio features by 5x (from ~50Hz to ~10Hz)
    - Maps audio embeddings to language model embedding space
 
-3. **Language Model Decoder (Frozen)**
+1. **Language Model Decoder (Frozen)**
+
    - Base Model: `HuggingFaceTB/SmolLM3-3B-Base`
    - Parameters: 3B (frozen)
    - Generates text transcriptions autoregressively

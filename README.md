@@ -96,17 +96,20 @@ Tiny Audio uses a modular three-component architecture:
 ### Components
 
 1. **Audio Encoder** (Frozen)
+
    - HuBERT-large (`facebook/hubert-large-ls960-ft`)
    - Extracts acoustic features from raw audio waveforms
    - Pretrained weights remain frozen during training
 
-2. **Audio Projector** (Trainable ~7M params)
+1. **Audio Projector** (Trainable ~7M params)
+
    - Downsamples audio features by 5x (configurable)
    - Architecture: `Linear(encoder_dim × k, 2048) → ReLU → Linear(2048, llm_dim)`
    - Maps audio features to language model embedding space
    - **This is the only trained component**
 
-3. **Language Model Decoder** (Frozen)
+1. **Language Model Decoder** (Frozen)
+
    - Default: SmolLM3-3B-Base (`HuggingFaceTB/SmolLM3-3B-Base`)
    - Generates text transcriptions autoregressively
    - Pretrained weights remain frozen during training
@@ -227,8 +230,8 @@ poetry run eval --provider assemblyai --api-key YOUR_API_KEY
 ### Supported Providers
 
 1. **tiny-audio** (default): Your trained model
-2. **huggingface**: Any HuggingFace ASR model
-3. **assemblyai**: AssemblyAI commercial API
+1. **huggingface**: Any HuggingFace ASR model
+1. **assemblyai**: AssemblyAI commercial API
 
 ### Command-Line Options
 
@@ -265,12 +268,14 @@ Sample predictions with ground truth comparison...
 Poetry provides convenient commands for common tasks:
 
 **Training:**
+
 ```bash
 poetry run python src/train.py              # Run training
 poetry run python src/train.py model=large  # With config overrides
 ```
 
 **Model Scripts:**
+
 ```bash
 poetry run eval <model-id> --max-samples 100  # Evaluate model
 poetry run push-to-hub                         # Push to HuggingFace Hub
@@ -278,6 +283,7 @@ poetry run run-handler                         # Run handler locally
 ```
 
 **Deployment:**
+
 ```bash
 poetry run deploy-hf         # Deploy to HuggingFace Space
 poetry run deploy-runpod     # Deploy to RunPod
@@ -286,6 +292,7 @@ poetry run attach-remote     # Attach to remote session
 ```
 
 **Development Tools:**
+
 ```bash
 poetry run format      # Format code with black and ruff
 poetry run lint        # Run ruff linter
@@ -355,13 +362,13 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 ### Development Setup
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/tiny-audio.git`
-3. Install development dependencies: `poetry install`
-4. Create a feature branch: `git checkout -b feature/amazing-feature`
-5. Make your changes and ensure tests pass: `poetry run check`
-6. Commit your changes: `git commit -m 'Add amazing feature'`
-7. Push to the branch: `git push origin feature/amazing-feature`
-8. Open a Pull Request
+1. Clone your fork: `git clone https://github.com/YOUR_USERNAME/tiny-audio.git`
+1. Install development dependencies: `poetry install`
+1. Create a feature branch: `git checkout -b feature/amazing-feature`
+1. Make your changes and ensure tests pass: `poetry run check`
+1. Commit your changes: `git commit -m 'Add amazing feature'`
+1. Push to the branch: `git push origin feature/amazing-feature`
+1. Open a Pull Request
 
 ## Citation
 

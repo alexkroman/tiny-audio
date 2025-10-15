@@ -154,17 +154,15 @@ class ASRModel(nn.Module):
         self.audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
         self.audio_end_id = self.tokenizer.convert_tokens_to_ids("<|audio_end|>")
 
-
         self.tokenizer.padding_side = "right"
 
-        if not self._is_loading_from_pretrained:
-            if "SmolLM3" in self.config.text_model_id:
-                self.tokenizer.bos_token = "<|begin_of_text|>"
-                self.tokenizer.bos_token_id = 128000
-                self.tokenizer.eos_token = "<|end_of_text|>"
-                self.tokenizer.eos_token_id = 128001
-                self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
-                self.tokenizer.pad_token_id = 128004
+        if not self._is_loading_from_pretrained and "SmolLM3" in self.config.text_model_id:
+            self.tokenizer.bos_token = "<|begin_of_text|>"
+            self.tokenizer.bos_token_id = 128000
+            self.tokenizer.eos_token = "<|end_of_text|>"
+            self.tokenizer.eos_token_id = 128001
+            self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
+            self.tokenizer.pad_token_id = 128004
         for cfg in [self.config.text_config, self.decoder.config, self.generation_config]:
             if isinstance(cfg, dict):
                 cfg["pad_token_id"] = self.tokenizer.pad_token_id
@@ -212,7 +210,7 @@ class ASRModel(nn.Module):
             # Note: we don't add unexpected keys from projector since we filtered them
 
         # Check for any state dict keys that weren't projector keys
-        for k in state_dict.keys():
+        for k in state_dict:
             if not k.startswith("projector."):
                 unexpected_keys.append(k)
 
@@ -227,6 +225,7 @@ class ASRModel(nn.Module):
 
         # Return a proper _IncompatibleKeys object
         from torch.nn.modules.module import _IncompatibleKeys
+
         return _IncompatibleKeys(missing_keys, unexpected_keys)
 
     @property
@@ -437,19 +436,21 @@ class ASRModel(nn.Module):
         total_seq_len = inputs_embeds.shape[1]
         attention_mask = torch.ones(batch_size, total_seq_len, dtype=torch.long, device=device)
 
-        generate_kwargs.setdefault("max_new_tokens", 150)  # Increased from 120 to handle longest samples (~95 words)
-        generate_kwargs.setdefault("num_beams", 1)  # Increased from 3 for better beam search quality
+        generate_kwargs.setdefault(
+            "max_new_tokens", 150
+        )  # Increased from 120 to handle longest samples (~95 words)
+        generate_kwargs.setdefault(
+            "num_beams", 1
+        )  # Increased from 3 for better beam search quality
         generate_kwargs.setdefault("do_sample", False)
 
         im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         generate_kwargs.setdefault("eos_token_id", im_end_id)
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
 
-        outputs = self.decoder.generate(
+        return self.decoder.generate(
             inputs_embeds=inputs_embeds, attention_mask=attention_mask, **generate_kwargs
         )
-
-        return outputs
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
         import shutil

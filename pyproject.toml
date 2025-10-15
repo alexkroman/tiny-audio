@@ -57,7 +57,6 @@ black = ">=23.0.0"
 ruff = ">=0.1.0"
 mypy = ">=1.5.0"
 mdformat = ">=0.7.0"
-pymarkdownlnt = ">=0.9.0"
 
 [tool.poetry.scripts]
 # Model scripts (use: poetry run python src/train.py for training due to Hydra config paths)
@@ -74,6 +73,7 @@ attach-remote = "scripts.attach_remote_session:main"
 # Development tools
 lint = "scripts.dev_tools:lint"
 format = "scripts.dev_tools:format_code"
+format-md = "scripts.dev_tools:format_markdown"
 type-check = "scripts.dev_tools:type_check"
 test = "scripts.dev_tools:test"
 check = "scripts.dev_tools:check_all"
@@ -170,3 +170,7 @@ extend-ignore = [
     "B008",  # do not perform function calls in argument defaults
     "B905",  # zip() without an explicit strict= parameter
 ]
+
+[tool.mdformat]
+wrap = 100
+number = false
