@@ -10,6 +10,12 @@ from transformers import (
     AutoTokenizer,
     Wav2Vec2FeatureExtractor,
 )
+from transformers.generation.utils import (
+    GenerateBeamDecoderOnlyOutput,
+    GenerateBeamEncoderDecoderOutput,
+    GenerateDecoderOnlyOutput,
+    GenerateEncoderDecoderOutput,
+)
 
 try:
     from .asr_config import ASRConfig
@@ -366,7 +372,13 @@ class ASRModel(nn.Module):
         input_values: Optional[torch.Tensor] = None,
         system_prompt: Optional[str] = None,
         **generate_kwargs,
-    ) -> torch.Tensor:
+    ) -> Union[
+        torch.Tensor,
+        GenerateDecoderOnlyOutput,
+        GenerateEncoderDecoderOutput,
+        GenerateBeamDecoderOnlyOutput,
+        GenerateBeamEncoderDecoderOutput,
+    ]:
         if input_values is None:
             raise ValueError("input_values must be provided for generation")
 
