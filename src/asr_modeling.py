@@ -144,31 +144,11 @@ class ASRModel(nn.Module):
         if num_added_tokens > 0:
             # Resize model embeddings to account for new tokens
             self.decoder.resize_token_embeddings(len(self.tokenizer))
-            print(f"Added {num_added_tokens} special tokens including audio boundaries")
 
         # Store audio token IDs for easy access
         self.audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
         self.audio_end_id = self.tokenizer.convert_tokens_to_ids("<|audio_end|>")
-        print(f"Audio boundary IDs: start={self.audio_start_id}, end={self.audio_end_id}")
 
-        # Always ensure chat template is loaded for SmolLM3
-        if not self.tokenizer.chat_template and "SmolLM3" in self.config.text_model_id:
-            from pathlib import Path
-
-            from huggingface_hub import hf_hub_download
-
-            try:
-                template_path = hf_hub_download(
-                    repo_id="HuggingFaceTB/SmolLM3-3B",  # Always use the canonical repo
-                    filename="chat_template.jinja",
-                )
-                self.tokenizer.chat_template = Path(template_path).read_text()
-                print(f"Loaded chat template from {template_path}")
-            except Exception as e:
-                print(f"Warning: Could not load chat template: {e}")
-                # Fallback to a simple ChatML template
-                self.tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|im_start|>system\\n' + message['content'] + '<|im_end|>\\n' }}{% elif message['role'] == 'user' %}{{ '<|im_start|>user\\n' + message['content'] + '<|im_end|>\\n' }}{% elif message['role'] == 'assistant' %}{{ '<|im_start|>assistant\\n' + message['content'] + '<|im_end|>\\n' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
-                print("Using fallback ChatML template")
 
         self.tokenizer.padding_side = "right"
 
@@ -370,15 +350,6 @@ class ASRModel(nn.Module):
             if labels is not None:
                 labels = torch.stack(new_labels)
             full_attention_mask = torch.stack(new_attention) if attention_mask is not None else None
-
-            # Debug: Check label masking statistics
-            if kwargs.get("debug_labels", False) and labels is not None:
-                non_masked = (labels != -100).sum()
-                total = labels.numel()
-                print(
-                    f"[Label Stats] Total: {total}, Non-masked: {non_masked} ({non_masked / total:.1%})"
-                )
-                print(f"  Audio embeddings ({audio_seq_len} tokens) inserted between boundary tags")
         else:
             inputs_embeds = self.decoder.get_input_embeddings()(input_ids)
             full_attention_mask = attention_mask
@@ -403,19 +374,6 @@ class ASRModel(nn.Module):
         audio_embeds = self._encode_audio(input_values)
         batch_size = audio_embeds.shape[0]
         device = audio_embeds.device
-        audio_embeds.shape[1]
-
-        # Debug: Check if audio embeddings are meaningful
-        if generate_kwargs.pop("debug_audio", False):
-            print(f"[Audio Debug] Shape: {audio_embeds.shape}")
-            print(f"[Audio Debug] Mean: {audio_embeds.mean().item():.6f}")
-            print(f"[Audio Debug] Std: {audio_embeds.std().item():.6f}")
-            print(f"[Audio Debug] Min: {audio_embeds.min().item():.6f}")
-            print(f"[Audio Debug] Max: {audio_embeds.max().item():.6f}")
-
-            # Check if embeddings are collapsed
-            if audio_embeds.std().item() < 0.01:
-                print("⚠️ WARNING: Audio embeddings have very low variance!")
 
         # Apply chat template with audio boundary tokens
         messages = []
@@ -484,25 +442,10 @@ class ASRModel(nn.Module):
         generate_kwargs.setdefault("eos_token_id", im_end_id)
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
 
-        # Pop our custom debug flag before passing to decoder
-        debug_tokens = generate_kwargs.pop("debug_tokens", False)
-
         outputs = self.decoder.generate(
             inputs_embeds=inputs_embeds, attention_mask=attention_mask, **generate_kwargs
         )
 
-        # Debug: Let's see what the first few tokens are
-        if debug_tokens and outputs.shape[1] > 0:
-            print(f"[Token Debug] First 5 generated token IDs: {outputs[0, :5].tolist()}")
-            first_tokens = self.tokenizer.decode(outputs[0, :5], skip_special_tokens=False)
-            print(f"[Token Debug] First 5 tokens decoded: {first_tokens!r}")
-            print(f"[Token Debug] BOS token ID: {self.tokenizer.bos_token_id}")
-            if outputs[0, 0].item() == self.tokenizer.bos_token_id:
-                print("[Token Debug] First token is BOS, will be removed")
-
-        # When using inputs_embeds, generate() returns only the newly generated tokens
-        # The first token might be an extra space or formatting token
-        # For now, let's not slice anything and see what we get
         return outputs
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
