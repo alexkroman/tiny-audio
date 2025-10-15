@@ -9,8 +9,8 @@ from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
 from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments
 
-from .asr_config import ASRConfig
-from .asr_modeling import ASRModel
+from src.asr_config import ASRConfig
+from src.asr_modeling import ASRModel
 
 
 class DatasetLoader:

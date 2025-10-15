@@ -269,6 +269,40 @@ Sample predictions with ground truth comparison...
 
 ## Development
 
+### Available Poetry Commands
+
+Poetry provides convenient commands for common tasks:
+
+**Training:**
+```bash
+poetry run python src/train.py              # Run training
+poetry run python src/train.py model=large  # With config overrides
+```
+
+**Model Scripts:**
+```bash
+poetry run eval <model-id> --max-samples 100  # Evaluate model
+poetry run push-to-hub                         # Push to HuggingFace Hub
+poetry run run-handler                         # Run handler locally
+```
+
+**Deployment:**
+```bash
+poetry run deploy-hf         # Deploy to HuggingFace Space
+poetry run deploy-runpod     # Deploy to RunPod
+poetry run remote-train      # Start remote training
+poetry run attach-remote     # Attach to remote session
+```
+
+**Development Tools:**
+```bash
+poetry run format      # Format code with black and ruff
+poetry run lint        # Run ruff linter
+poetry run type-check  # Run mypy type checker
+poetry run test        # Run pytest tests
+poetry run check       # Run all checks (lint + type-check + test)
+```
+
 ### Code Quality
 
 ```bash

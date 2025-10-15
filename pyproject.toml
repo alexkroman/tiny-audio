@@ -60,8 +60,7 @@ mdformat = ">=0.7.0"
 pymarkdownlnt = ">=0.9.0"
 
 [tool.poetry.scripts]
-# Training and model scripts
-train = "src.train:main"
+# Model scripts (use: poetry run python src/train.py for training due to Hydra config paths)
 eval = "scripts.eval:main"
 push-to-hub = "scripts.push_to_hub:main"
 run-handler = "scripts.run_handler_local:main"
