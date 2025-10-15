@@ -8,7 +8,7 @@
 
 defaults:
   - override /model: large
-  - override /data: loquacious_clean
+  - override /data: loquacious_large
   - override /training: production
 
 # Model configuration - the freezing logic is hard-coded in asr_modeling.py
@@ -49,3 +49,5 @@ early_stopping:
   patience: 20
   threshold: 0.001
 
+# Resume from stage1 checkpoint
+resume_from_checkpoint: /workspace/outputs/2025-10-14/22-36-14/outputs/production_model/checkpoint-20000

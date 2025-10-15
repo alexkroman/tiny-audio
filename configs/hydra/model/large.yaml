@@ -7,7 +7,7 @@ projector_hidden_dim: 2048
 audio_downsample_rate: 5
 
 # System prompt for transcription task
-system_prompt: "/system_override"
+system_prompt: "/system_override /no_think"
 
 # Attention implementation - auto-detected by training script
 # Will use flash_attention_2 on compatible GPUs (compute capability >= 8.0)

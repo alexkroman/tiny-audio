@@ -220,9 +220,34 @@ class ASRModel(nn.Module):
             for k, v in state_dict.items()
             if k.startswith("projector.")
         }
+
+        # Track keys that were not used
+        missing_keys = []
+        unexpected_keys = []
+
+        # Load projector state
         if projector_state:
-            self.projector.load_state_dict(projector_state, strict=strict)
-        return self
+            result = self.projector.load_state_dict(projector_state, strict=False)
+            missing_keys.extend([f"projector.{k}" for k in result.missing_keys])
+            # Note: we don't add unexpected keys from projector since we filtered them
+
+        # Check for any state dict keys that weren't projector keys
+        for k in state_dict.keys():
+            if not k.startswith("projector."):
+                unexpected_keys.append(k)
+
+        # If strict mode and we have issues, raise an error
+        if strict and (missing_keys or unexpected_keys):
+            error_msg = ""
+            if missing_keys:
+                error_msg += f"Missing keys: {missing_keys}\n"
+            if unexpected_keys:
+                error_msg += f"Unexpected keys: {unexpected_keys}"
+            raise RuntimeError(error_msg)
+
+        # Return a proper _IncompatibleKeys object
+        from torch.nn.modules.module import _IncompatibleKeys
+        return _IncompatibleKeys(missing_keys, unexpected_keys)
 
     @property
     def device(self) -> torch.device:
@@ -459,11 +484,26 @@ class ASRModel(nn.Module):
         generate_kwargs.setdefault("eos_token_id", im_end_id)
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
 
+        # Pop our custom debug flag before passing to decoder
+        debug_tokens = generate_kwargs.pop("debug_tokens", False)
+
         outputs = self.decoder.generate(
             inputs_embeds=inputs_embeds, attention_mask=attention_mask, **generate_kwargs
         )
 
-        return outputs[:, 1:]
+        # Debug: Let's see what the first few tokens are
+        if debug_tokens and outputs.shape[1] > 0:
+            print(f"[Token Debug] First 5 generated token IDs: {outputs[0, :5].tolist()}")
+            first_tokens = self.tokenizer.decode(outputs[0, :5], skip_special_tokens=False)
+            print(f"[Token Debug] First 5 tokens decoded: {first_tokens!r}")
+            print(f"[Token Debug] BOS token ID: {self.tokenizer.bos_token_id}")
+            if outputs[0, 0].item() == self.tokenizer.bos_token_id:
+                print("[Token Debug] First token is BOS, will be removed")
+
+        # When using inputs_embeds, generate() returns only the newly generated tokens
+        # The first token might be an extra space or formatting token
+        # For now, let's not slice anything and see what we get
+        return outputs
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
         import shutil
