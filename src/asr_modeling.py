@@ -28,7 +28,7 @@ class AudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.k = config.encoder_projector_ds_rate
-
+        
         self.projection = nn.Linear(config.encoder_dim * self.k, config.llm_dim)
         self.norm = LlamaRMSNorm(config.llm_dim, eps=1e-6)
         
@@ -41,7 +41,10 @@ class AudioProjector(nn.Module):
         if seq_len % self.k:
             x = x[:, : -(seq_len % self.k)]
         x = x.contiguous().view(batch_size, -1, dim * self.k)
-        return self.mlp(x)
+        
+        x = self.projection(x)
+        x = self.norm(x)
+        return x
 
 
 class ASRModel(nn.Module):
@@ -130,8 +133,6 @@ class ASRModel(nn.Module):
             encoder_projector_ds_rate=config.audio_downsample_rate,
             encoder_dim=audio_dim,
             llm_dim=text_dim,
-            projector_hidden_dim=config.projector_hidden_dim,
-            projector_dropout=config.projector_dropout,
         )
         self.projector: AudioProjector = AudioProjector(projector_config)
 

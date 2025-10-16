@@ -187,7 +187,6 @@ def main(cfg: DictConfig) -> None:
         audio_model_id=cfg.model.encoder_model_name,
         attn_implementation=cfg.training.attn_implementation,
         model_dtype=cfg.training.model_dtype,
-        projector_hidden_dim=cfg.model.projector_hidden_dim,
         audio_downsample_rate=cfg.model.audio_downsample_rate,
         system_prompt=cfg.model.system_prompt,
     )

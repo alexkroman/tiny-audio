@@ -11,9 +11,7 @@ class ASRConfig(transformers.PretrainedConfig):
         text_model_id: str = "Qwen/Qwen3-8B",
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
-        projector_hidden_dim: int = 2048,
         audio_downsample_rate: int = 5,
-        projector_dropout: float = 0.2,
         num_beams: int = 5,
         system_prompt: str = None,
         **kwargs,
@@ -22,9 +20,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.text_model_id = text_model_id
         self.attn_implementation = attn_implementation
         self.model_dtype = model_dtype
-        self.projector_hidden_dim = projector_hidden_dim
         self.audio_downsample_rate = audio_downsample_rate
-        self.projector_dropout = projector_dropout
         self.num_beams = num_beams
         self.system_prompt = system_prompt
         if "audio_config" not in kwargs:

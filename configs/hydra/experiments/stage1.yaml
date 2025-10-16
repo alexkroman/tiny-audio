@@ -17,7 +17,7 @@ model:
 training:
   # Learning rate and scheduler
   learning_rate: 1.0e-4
-  warmup_steps: 1000
+  warmup_steps: 750
   lr_scheduler_type: cosine
 
   # Optimization

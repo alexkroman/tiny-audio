@@ -104,7 +104,7 @@ Tiny Audio uses a modular three-component architecture:
 1. **Audio Projector** (Trainable ~7M params)
 
    - Downsamples audio features by 5x (configurable)
-   - Architecture: `Linear(encoder_dim × k, 2048) → ReLU → Linear(2048, llm_dim)`
+   - Architecture: `Linear(encoder_dim × k, llm_dim) → RMSNorm`
    - Maps audio features to language model embedding space
    - **This is the only trained component**
 
@@ -171,7 +171,6 @@ poetry run python src/train.py model=large training.batch_size=32 training.max_s
 - `model.audio_model_id`: Audio encoder model (default: `facebook/hubert-large-ls960-ft`)
 - `model.text_model_id`: Language model decoder (default: `Qwen/Qwen3-8B`)
 - `model.audio_downsample_rate`: Audio feature downsampling factor (default: 5)
-- `model.projector_hidden_dim`: Hidden dimension in projector MLP (default: 2048)
 - `training.max_steps`: Total training steps
 - `training.learning_rate`: Peak learning rate for cosine schedule
 - `training.batch_size`: Per-device batch size

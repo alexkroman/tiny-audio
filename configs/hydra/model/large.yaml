@@ -3,7 +3,6 @@ decoder_model_name: Qwen/Qwen3-8B
 encoder_model_name: facebook/hubert-xlarge-ls960-ft  # HuBERT encoder
 
 # Projector configuration per SLAM-ASR paper
-projector_hidden_dim: 4096
 audio_downsample_rate: 5
 
 # System prompt for transcription task
