@@ -29,9 +29,7 @@ class AudioProjector(nn.Module):
         super().__init__()
         self.k = config.encoder_projector_ds_rate
         self.mlp = nn.Sequential(
-            nn.Linear(config.encoder_dim * self.k, config.projector_hidden_dim),
-            nn.GELU(),
-            nn.Linear(config.projector_hidden_dim, config.llm_dim),
+            nn.Linear(config.encoder_dim * self.k, config.llm_dim),  # 6400 → 4096
             LlamaRMSNorm(config.llm_dim),
         )
 

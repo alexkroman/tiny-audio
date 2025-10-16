@@ -2,14 +2,10 @@
 output_dir: ./outputs/production_model
 
 # Training configuration
-per_device_train_batch_size: 6
-per_device_eval_batch_size: 3
-gradient_accumulation_steps: 6
-eval_accumulation_steps: 3
-
-# Learning rate
-learning_rate: 1e-4
-weight_decay: 0.0
+per_device_train_batch_size: 18
+per_device_eval_batch_size: 18
+gradient_accumulation_steps: 1
+eval_accumulation_steps: 1
 
 optim: adamw_torch_fused
 adam_beta1: 0.9
@@ -55,7 +51,7 @@ model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
 # Streaming compatibility settings
-dataloader_num_workers: 8  # Increased for better throughput (was 2)
+dataloader_num_workers: 8 # Increased for better throughput (was 2)
 dataloader_persistent_workers: true
 dataloader_prefetch_factor: 4  # Reduced to limit memory with more workers
 

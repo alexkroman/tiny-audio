@@ -12,13 +12,12 @@ model:
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
   # Projector configuration
-  projector_hidden_dim: 2048
   audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
 
 training:
   # Learning rate and scheduler
   learning_rate: 1.0e-4
-  warmup_steps: 2000
+  warmup_steps: 1000
   lr_scheduler_type: cosine
 
   # Optimization
@@ -32,7 +31,7 @@ training:
   logging_steps: 25
 
   # Training duration
-  max_steps: 40000
+  max_steps: 25000
 
   # Reproducibility
   seed: 42
@@ -40,6 +39,6 @@ training:
 
 # Early stopping configuration
 early_stopping:
-  patience: 5
-  threshold: 0.001
+  patience: 10
+  threshold: 0.0001
 
