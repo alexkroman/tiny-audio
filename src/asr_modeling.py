@@ -28,10 +28,13 @@ class AudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.k = config.encoder_projector_ds_rate
-        self.mlp = nn.Sequential(
-            nn.Linear(config.encoder_dim * self.k, config.llm_dim),  # 6400 → 4096
-            LlamaRMSNorm(config.llm_dim),
-        )
+
+        self.projection = nn.Linear(config.encoder_dim * self.k, config.llm_dim)
+        self.norm = LlamaRMSNorm(config.llm_dim, eps=1e-6)
+        
+        with torch.no_grad():
+            nn.init.normal_(self.projection.weight, std=0.02)
+            nn.init.zeros_(self.projection.bias)
 
     def forward(self, x):
         batch_size, seq_len, dim = x.size()
