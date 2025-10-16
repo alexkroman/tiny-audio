@@ -2,10 +2,10 @@
 output_dir: ./outputs/production_model
 
 # Training configuration
-per_device_train_batch_size: 14
-per_device_eval_batch_size: 14
-gradient_accumulation_steps: 3
-eval_accumulation_steps: 3
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 2
+eval_accumulation_steps: 2
 
 optim: adamw_torch_fused
 adam_beta1: 0.9
@@ -16,7 +16,7 @@ adam_epsilon: 1e-8
 logging_steps: 25
 logging_first_step: true
 logging_nan_inf_filter: false
-report_to: tensorboard
+report_to: wandb
 
 # Evaluation
 eval_strategy: steps
@@ -41,7 +41,6 @@ hub_private_repo: false
 fp16: false
 bf16: true
 tf32: true  # Enable TF32 for A40 (2x matmul speedup)
-dataloader_pin_memory: true
 max_grad_norm: 1.0  # Increased from 1.0 - less aggressive clipping for projector training
 torch_compile: true
 # torch_compile_mode: reduce-overhead
@@ -51,9 +50,10 @@ model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
 # Streaming compatibility settings
-dataloader_num_workers: 8 # Increased for better throughput (was 2)
-dataloader_persistent_workers: true
-dataloader_prefetch_factor: 4  # Reduced to limit memory with more workers
+dataloader_num_workers: 2 # Disable multiprocessing for streaming audio datasets to prevent OOM
+dataloader_persistent_workers: true  # Not needed with num_workers=0
+dataloader_prefetch_factor: 2  # Not needed with num_workers=0
+dataloader_pin_memory: true
 
 # Misc
 seed: 42
@@ -62,6 +62,6 @@ disable_tqdm: false
 log_level: info
 
 # Required by HF Trainer
-remove_unused_columns: false
+remove_unused_columns: true
 label_names:
   - labels

@@ -97,9 +97,10 @@ def sync_project(host, port, project_root):
 
 def install_python_dependencies(host, port):
     """
-    # CHANGED: Installs ONLY the project-specific dependencies into the global environment.
+    Install ONLY production dependencies into the global environment.
+    Dev dependencies (pytest, black, ruff, mypy, mdformat) are excluded.
     """
-    print("\nInstalling Python dependencies...")
+    print("\nInstalling Python dependencies (excluding dev dependencies)...")
 
     cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
         'cd /workspace && \
@@ -109,7 +110,7 @@ def install_python_dependencies(host, port):
          python -c "import flash_attn" 2>/dev/null || pip install --break-system-packages flash-attn --no-build-isolation && \
          echo "--- Installing torchcodec with CUDA support ---" && \
          pip install --break-system-packages torchcodec --index-url=https://download.pytorch.org/whl/cu128 && \
-         echo "--- Installing project dependencies ---" && \
+         echo "--- Installing project dependencies (production only, no dev deps) ---" && \
          pip install --break-system-packages -e .'
     """
     run_command(cmd)

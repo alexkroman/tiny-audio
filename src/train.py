@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 import hydra
 import torch
+import wandb
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
 from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments
@@ -123,6 +124,7 @@ class DataCollator(DataCollatorForSeq2Seq):
                 add_generation_prompt=False,
                 truncation=True,
                 max_length=256,
+                enable_thinking=False,
             )
 
             # Create labels - we need to find exactly where the assistant's actual content starts and ends
@@ -182,6 +184,20 @@ def main(cfg: DictConfig) -> None:
 
     print(OmegaConf.to_yaml(cfg))
 
+    # Initialize wandb
+    if cfg.training.get("report_to") == "wandb":
+        wandb.init(
+            project="tiny-audio",
+            config=OmegaConf.to_container(cfg, resolve=True),
+            name=cfg.training.get("run_name"),
+        )
+
+    # Get encoder and decoder dimensions
+    from transformers import AutoConfig as HFAutoConfig
+
+    encoder_config = HFAutoConfig.from_pretrained(cfg.model.encoder_model_name)
+    decoder_config = HFAutoConfig.from_pretrained(cfg.model.decoder_model_name, trust_remote_code=True)
+
     asr_config = ASRConfig(
         text_model_id=cfg.model.decoder_model_name,
         audio_model_id=cfg.model.encoder_model_name,
@@ -189,6 +205,8 @@ def main(cfg: DictConfig) -> None:
         model_dtype=cfg.training.model_dtype,
         audio_downsample_rate=cfg.model.audio_downsample_rate,
         system_prompt=cfg.model.system_prompt,
+        encoder_dim=encoder_config.hidden_size,
+        llm_dim=decoder_config.hidden_size,
     )
     model = ASRModel(asr_config)
 

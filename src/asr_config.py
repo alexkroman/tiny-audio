@@ -13,7 +13,9 @@ class ASRConfig(transformers.PretrainedConfig):
         model_dtype: str = "bfloat16",
         audio_downsample_rate: int = 5,
         num_beams: int = 5,
-        system_prompt: str = None,
+        system_prompt: str = "/no_think You are a helpful assistant.",
+        encoder_dim: int = None,
+        llm_dim: int = None,
         **kwargs,
     ):
         self.audio_model_id = audio_model_id
@@ -23,6 +25,8 @@ class ASRConfig(transformers.PretrainedConfig):
         self.audio_downsample_rate = audio_downsample_rate
         self.num_beams = num_beams
         self.system_prompt = system_prompt
+        self.encoder_dim = encoder_dim
+        self.llm_dim = llm_dim
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
         else:

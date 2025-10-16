@@ -1,9 +1,9 @@
 # Large model configuration for SLAM-ASR
-decoder_model_name: Qwen/Qwen3-8B
+decoder_model_name: HuggingFaceTB/SmolLM3-3B
 encoder_model_name: facebook/hubert-xlarge-ls960-ft  # HuBERT encoder
 
 # Projector configuration per SLAM-ASR paper
 audio_downsample_rate: 5
 
 # System prompt for transcription task
-system_prompt: "You are a helpful assistant."
+system_prompt: "/no_think /system_override You are a helpful assistant."

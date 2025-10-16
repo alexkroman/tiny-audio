@@ -84,10 +84,6 @@ def start_training(host, port, experiment, session_name):
         export TORCH_DYNAMO_ALLOW_UNSPEC_INT_ON_NN_MODULE=1
         # Disable CUDA graphs (incompatible with CPU-GPU sync in flash attention)
         export TORCH_CUDA_GRAPHS_ENABLED=0
-        echo "--- Starting TensorBoard ---"
-        pkill -f tensorboard || true
-        tensorboard --logdir /workspace/outputs --host 0.0.0.0 --port 6006 &
-        echo "TensorBoard started on port 6006"
 
         echo "--- Verifying environment ---"
         echo "Experiment: {experiment}"

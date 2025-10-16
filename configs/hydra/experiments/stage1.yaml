@@ -3,12 +3,11 @@
 
 defaults:
   - override /model: large
-  - override /data: loquacious_large
+  - override /data: loquacious_clean
   - override /training: production
 
-# Model configuration - the freezing logic is hard-coded in asr_modeling.py
 model:
-  decoder_model_name: Qwen/Qwen3-8B
+  decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
   # Projector configuration

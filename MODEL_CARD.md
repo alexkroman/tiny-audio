@@ -1,44 +1,41 @@
-______________________________________________________________________
-
+---
 license: mit
 datasets:
-
-- mozilla-foundation/common_voice_17_0
-- speechcolab/gigaspeech
-- openslr/librispeech_asr
-- speechbrain/LoquaciousSet
-  language:
-- en
-  base_model:
-- facebook/hubert-large-ls960-ft
-- Qwen/Qwen3-8B
-  pipeline_tag: automatic-speech-recognition
-  tags:
-- hubert
-- qwen3
-- asr
-- speech-recognition
-- audio
-- parameter-efficient
-- frozen-encoder
-  library_name: transformers
-  model-index:
-- name: tiny-audio
-  results:
-  - task:
-    type: automatic-speech-recognition
-    name: Automatic Speech Recognition
-    dataset:
-    type: speechbrain/LoquaciousSet
-    name: LoquaciousSet
-    config: large
-    split: test
-    metrics:
-    - type: wer
-      name: Word Error Rate
-      value: TBD
-
-______________________________________________________________________
+  - mozilla-foundation/common_voice_17_0
+  - speechcolab/gigaspeech
+  - openslr/librispeech_asr
+  - speechbrain/LoquaciousSet
+language:
+  - en
+base_model:
+  - facebook/hubert-large-ls960-ft
+  - Qwen/Qwen3-8B
+pipeline_tag: automatic-speech-recognition
+tags:
+  - hubert
+  - qwen3
+  - asr
+  - speech-recognition
+  - audio
+  - parameter-efficient
+  - frozen-encoder
+library_name: transformers
+model-index:
+  - name: tiny-audio
+    results:
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          type: speechbrain/LoquaciousSet
+          name: LoquaciousSet
+          config: large
+          split: test
+        metrics:
+          - type: wer
+            name: Word Error Rate
+            value: TBD
+---
 
 # Tiny Audio
 
@@ -54,7 +51,7 @@ Tiny Audio is a lightweight automatic speech recognition (ASR) model that combin
 - **License:** MIT
 - **Architecture:** Encoder-Projector-Decoder
   - Audio Encoder: HuBERT-large (317M params, frozen)
-  - Audio Projector: 2-layer MLP (~7M params, trainable)
+  - Audio Projector: Linear + RMSNorm (~7M params, trainable)
   - Text Decoder: Qwen3-8B (8B params, frozen)
 
 ## Key Features
@@ -106,7 +103,7 @@ The model automatically handles:
 
 1. **Audio Projector (Trainable)**
 
-   - Architecture: `Linear(encoder_dim × 5, 2048) → ReLU → Linear(2048, llm_dim)`
+   - Architecture: `Linear(encoder_dim × 5, llm_dim) → RMSNorm`
    - Parameters: ~7M (trainable)
    - Downsamples audio features by 5x (from ~50Hz to ~10Hz)
    - Maps audio embeddings to language model embedding space

@@ -28,8 +28,9 @@ class AudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.k = config.encoder_projector_ds_rate
-        
+
         self.projection = nn.Linear(config.encoder_dim * self.k, config.llm_dim)
+        self.gelu = nn.GELU()
         self.norm = LlamaRMSNorm(config.llm_dim, eps=1e-6)
         
         with torch.no_grad():
@@ -41,8 +42,9 @@ class AudioProjector(nn.Module):
         if seq_len % self.k:
             x = x[:, : -(seq_len % self.k)]
         x = x.contiguous().view(batch_size, -1, dim * self.k)
-        
+
         x = self.projection(x)
+        x = self.gelu(x)
         x = self.norm(x)
         return x
 
@@ -127,12 +129,18 @@ class ASRModel(nn.Module):
 
         from types import SimpleNamespace
 
-        audio_dim = self.encoder.config.hidden_size
-        text_dim = self.decoder.config.hidden_size
+        # Use dimensions from config (required)
+        if config.encoder_dim is None or config.llm_dim is None:
+            raise ValueError(
+                "encoder_dim and llm_dim must be specified in config. "
+                "These dimensions should match the checkpoint weights. "
+                "If loading an old model, please update the config file on HuggingFace Hub."
+            )
+
         projector_config = SimpleNamespace(
             encoder_projector_ds_rate=config.audio_downsample_rate,
-            encoder_dim=audio_dim,
-            llm_dim=text_dim,
+            encoder_dim=config.encoder_dim,
+            llm_dim=config.llm_dim,
         )
         self.projector: AudioProjector = AudioProjector(projector_config)
 
@@ -155,7 +163,8 @@ class ASRModel(nn.Module):
         num_added_tokens = self.tokenizer.add_special_tokens(special_tokens)
         if num_added_tokens > 0:
             # Resize model embeddings to account for new tokens
-            self.decoder.resize_token_embeddings(len(self.tokenizer))
+            # Use mean_resizing=False since these are structural tokens, not semantic ones
+            self.decoder.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
 
         # Store audio token IDs for easy access
         self.audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
@@ -238,6 +247,21 @@ class ASRModel(nn.Module):
 
     def can_generate(self) -> bool:
         return True
+
+    def num_parameters(self, only_trainable: bool = False) -> int:
+        """
+        Get the number of (trainable or total) parameters in the model.
+
+        Args:
+            only_trainable: Whether to only count trainable parameters
+
+        Returns:
+            The number of parameters
+        """
+        if only_trainable:
+            return sum(p.numel() for p in self.parameters() if p.requires_grad)
+        else:
+            return sum(p.numel() for p in self.parameters())
 
     def get_processor(self):
         try:
@@ -396,7 +420,7 @@ class ASRModel(nn.Module):
         )
 
         prompt_ids = self.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
+            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt", enable_thinking=False
         ).to(device)
 
         if len(prompt_ids.shape) == 1:
@@ -463,12 +487,21 @@ class ASRModel(nn.Module):
         save_dir = PathlibPath(save_directory)
         save_dir.mkdir(parents=True, exist_ok=True)
 
+        # Update config to match actually loaded models
         self.config.text_config.vocab_size = self.decoder.config.vocab_size
+        self.config.text_config.hidden_size = self.decoder.config.hidden_size
         self.config.vocab_size = self.decoder.config.vocab_size
+        self.config.hidden_size = self.decoder.config.hidden_size
         self.config.pad_token_id = self.decoder.config.pad_token_id
         self.config.text_config.bos_token_id = self.tokenizer.bos_token_id
         self.config.text_config.eos_token_id = self.tokenizer.eos_token_id
         self.config.text_config.pad_token_id = self.tokenizer.pad_token_id
+
+        # Ensure projector dimensions are saved (set during __init__)
+        if not hasattr(self.config, "encoder_dim") or self.config.encoder_dim is None:
+            self.config.encoder_dim = self.encoder.config.hidden_size
+        if not hasattr(self.config, "llm_dim") or self.config.llm_dim is None:
+            self.config.llm_dim = self.decoder.config.hidden_size
 
         if hasattr(self.config, "system_prompt"):
             self.config.system_prompt = self.config.system_prompt

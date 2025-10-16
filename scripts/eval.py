@@ -21,33 +21,55 @@ from pathlib import Path
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import evaluate
+import numpy as np
 import torch
-import torchaudio
 from datasets import load_dataset
 from huggingface_hub import InferenceClient
+from torchcodec.decoders import AudioDecoder
 
 
 def audio_to_wav_bytes(audio_array, sample_rate):
-    """Convert audio array to WAV bytes in memory."""
-    if not isinstance(audio_array, torch.Tensor):
-        audio_tensor = torch.from_numpy(audio_array)
-    else:
-        audio_tensor = audio_array
+    """Convert audio array to WAV bytes using torchcodec."""
+    # Convert to numpy if needed
+    if isinstance(audio_array, torch.Tensor):
+        audio_array = audio_array.numpy()
 
-    # Ensure 2D shape (channels, samples)
-    if audio_tensor.ndim == 1:
-        audio_tensor = audio_tensor.unsqueeze(0)
+    # Ensure 1D shape
+    if audio_array.ndim > 1:
+        audio_array = audio_array.squeeze()
 
-    # Write to BytesIO buffer
+    # Write to temp file and use torchcodec to encode as WAV
+    # torchcodec is primarily a decoder, so we'll use a simple WAV writer
+    import struct
+    import wave
+
     buffer = io.BytesIO()
-    torchaudio.save(buffer, audio_tensor, sample_rate, format="wav")
+    with wave.open(buffer, 'wb') as wav_file:
+        wav_file.setnchannels(1)  # mono
+        wav_file.setsampwidth(2)  # 16-bit
+        wav_file.setframerate(sample_rate)
+        # Convert float32 to int16
+        audio_int16 = (audio_array * 32767).astype(np.int16)
+        wav_file.writeframes(audio_int16.tobytes())
+
     return buffer.getvalue()
 
 
 def wav_bytes_to_audio(wav_bytes):
-    """Convert WAV bytes to audio array."""
-    audio_tensor, sample_rate = torchaudio.load(io.BytesIO(wav_bytes), format="wav")
-    return audio_tensor.squeeze().numpy(), sample_rate
+    """Convert WAV bytes to audio array using torchcodec."""
+    # Write bytes to temp file for torchcodec
+    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+        f.write(wav_bytes)
+        temp_path = f.name
+
+    try:
+        decoder = AudioDecoder(temp_path)
+        audio_samples = decoder.get_all_samples()
+        audio_array = audio_samples.data.squeeze().numpy()
+        sample_rate = decoder.metadata.sample_rate
+        return audio_array, sample_rate
+    finally:
+        os.unlink(temp_path)
 
 
 def prepare_wav_bytes(wav_data):
@@ -363,7 +385,7 @@ def main():
     parser.add_argument(
         "--system-prompt",
         type=str,
-        default="/no_think /system_override Transcribe the speech to text. Output only the exact words spoken.",
+        default="/no_think You are a helpful assistant.",
         help="System prompt to use for generation (default: task-focused transcription prompt)",
     )
     args = parser.parse_args()

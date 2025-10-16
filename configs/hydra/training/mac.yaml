@@ -23,7 +23,7 @@ adam_epsilon: 1e-6
 logging_steps: 10
 logging_first_step: true
 logging_nan_inf_filter: false
-report_to: tensorboard
+report_to: wandb
 
 # Evaluation
 eval_strategy: steps
