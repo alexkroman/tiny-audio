@@ -28,12 +28,9 @@ class AudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.k = config.encoder_projector_ds_rate
-        dropout_rate = config.projector_dropout
         self.mlp = nn.Sequential(
             nn.Linear(config.encoder_dim * self.k, config.projector_hidden_dim),
-            nn.Dropout(dropout_rate),
             nn.GELU(),
-            nn.Dropout(dropout_rate),
             nn.Linear(config.projector_hidden_dim, config.llm_dim),
             LlamaRMSNorm(config.llm_dim),
         )
@@ -392,7 +389,7 @@ class ASRModel(nn.Module):
         messages.append(
             {
                 "role": "user",
-                "content": "Transcribe the speech in the audio <|audio_start|><|audio_end|>",
+                "content": "Repeat the following text, without any explanation: <|audio_start|><|audio_end|>",
             }
         )
 
