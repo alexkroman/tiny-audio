@@ -33,7 +33,7 @@ include = ["*.json", "*.yaml", "*.yml"]
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
 torch = "~2.8.0"
-torchcodec = ">=0.1.0"
+torchcodec = ">=0.8.0"
 transformers = "*"
 accelerate = "*"
 datasets = {extras = ["audio"], version = ">=3.0.0"}

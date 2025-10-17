@@ -97,21 +97,34 @@ def sync_project(host, port, project_root):
 
 def install_python_dependencies(host, port):
     """
-    Install ONLY production dependencies into the global environment.
-    Dev dependencies (pytest, black, ruff, mypy, mdformat) are excluded.
+    Install production dependencies using Poetry to respect poetry.lock versions.
+    System packages (PyTorch, CUDA libs) are preserved. Dev dependencies excluded.
     """
-    print("\nInstalling Python dependencies (excluding dev dependencies)...")
+    print("\nInstalling Python dependencies from poetry.lock (excluding dev dependencies)...")
 
     cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
         'cd /workspace && \
          export PATH="/root/.local/bin:$PATH" && \
          export PIP_ROOT_USER_ACTION=ignore && \
+         export POETRY_VIRTUALENVS_CREATE=false && \
+         export POETRY_INSTALLER_PARALLEL=true && \
+         export PIP_BREAK_SYSTEM_PACKAGES=1 && \
+         echo "--- Configuring pip to allow system package installation ---" && \
+         mkdir -p /root/.config/pip && \
+         echo -e "[global]\\nbreak-system-packages = true" > /root/.config/pip/pip.conf && \
+         echo "--- Installing Poetry (if not present) ---" && \
+         command -v poetry >/dev/null 2>&1 || pip install poetry && \
+         echo "--- Configuring Poetry ---" && \
+         poetry config virtualenvs.create false && \
+         poetry config installer.max-workers 10 && \
          echo "--- Installing flash-attn (if not present) ---" && \
-         python -c "import flash_attn" 2>/dev/null || pip install --break-system-packages flash-attn --no-build-isolation && \
+         python -c "import flash_attn" 2>/dev/null || pip install flash-attn --no-build-isolation && \
          echo "--- Installing torchcodec with CUDA support ---" && \
-         pip install --break-system-packages torchcodec --index-url=https://download.pytorch.org/whl/cu128 && \
-         echo "--- Installing project dependencies (production only, no dev deps) ---" && \
-         pip install --break-system-packages -e .'
+         pip install torchcodec --index-url=https://download.pytorch.org/whl/cu128 && \
+         echo "--- Installing project dependencies from poetry.lock (production only) ---" && \
+         poetry install --only main --no-root && \
+         echo "--- Installing project in editable mode ---" && \
+         pip install -e . --no-deps'
     """
     run_command(cmd)
     print("Python dependencies installed successfully!")
