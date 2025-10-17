@@ -109,6 +109,8 @@ class ASRModel(nn.Module):
             config.audio_model_id,
             attn_implementation=config.attn_implementation,
             dtype=target_dtype,
+            device_map="auto",
+            low_cpu_mem_usage=True,
         )
         self.encoder.requires_grad_(False)
 
@@ -117,6 +119,8 @@ class ASRModel(nn.Module):
             attn_implementation=config.attn_implementation,
             dtype=target_dtype,
             trust_remote_code=True,
+            device_map="auto",
+            low_cpu_mem_usage=True,
         )
         self.decoder.requires_grad_(False)
 
@@ -247,6 +251,16 @@ class ASRModel(nn.Module):
 
     def can_generate(self) -> bool:
         return True
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        """Enable gradient checkpointing for the decoder model to save memory."""
+        if hasattr(self.decoder, 'gradient_checkpointing_enable'):
+            self.decoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing for the decoder model."""
+        if hasattr(self.decoder, 'gradient_checkpointing_disable'):
+            self.decoder.gradient_checkpointing_disable()
 
     def num_parameters(self, only_trainable: bool = False) -> int:
         """

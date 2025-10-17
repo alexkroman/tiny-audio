@@ -4035,12 +4035,65 @@ pyyaml = ["pyyaml"]
 
 [[package]]
 name = "torchcodec"
+version = "0.7.0"
+description = "A video decoder for PyTorch"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+markers = "sys_platform == \"darwin\""
+files = [
+    {file = "torchcodec-0.7.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:6ae0b7acbc0c1a755ae817a8843715131f24be7807ddc46092d8b49a0fc970eb"},
+    {file = "torchcodec-0.7.0-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:a0071096724e8ded6a171457ce4680f646499b4a4d285cdb46e130983f965ce4"},
+    {file = "torchcodec-0.7.0-cp310-cp310-win_amd64.whl", hash = "sha256:737da9212594bf2f205582512a7a4f56d39591b357bf5a30e72e858cfcedc2ac"},
+    {file = "torchcodec-0.7.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:967a14b31e04721901ddbf965f9e9f733f328c5e98a51e22f414e25ac32e20ba"},
+    {file = "torchcodec-0.7.0-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:afb1c48b52bd4ee8f485f5a427bb4e82380590255a26b8e9e3fe099e0779287f"},
+    {file = "torchcodec-0.7.0-cp311-cp311-win_amd64.whl", hash = "sha256:a68765cd29159da3cf36eb5716481c617ad9d168fe06418bcde2a9360cc7eb5e"},
+    {file = "torchcodec-0.7.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:d9d082bbb599f4f7715bfc3b1afa5bc16d8fb9d852e68084c63f1973cc78a1cb"},
+    {file = "torchcodec-0.7.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:3cd23c3296c9b071d56bb2c534a6a98275d65c1a6a7213cdb72a26ec9f9d2fd8"},
+    {file = "torchcodec-0.7.0-cp312-cp312-win_amd64.whl", hash = "sha256:ac942831bff02e6041d8718b71c6f63e4e37c05dd95e72863725c9dbef0d4a7b"},
+    {file = "torchcodec-0.7.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:32a0115035a7f0a77fa451f67c101e0273a3a37d33b69e1bcd777f00aceb7340"},
+    {file = "torchcodec-0.7.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:9c70f910f9f48e6625aacaed534f766e13d447b895dc7299e96d4db9a93f1514"},
+    {file = "torchcodec-0.7.0-cp313-cp313-win_amd64.whl", hash = "sha256:31b402c9ae3c6e9f33c41fddf7058f9492c443ad55d02f022395f8fa196b58f6"},
+    {file = "torchcodec-0.7.0-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:37e5bdc6f0a0e71f8ea742acb874445adbd2457d92363989ada1e454f13b5b2c"},
+    {file = "torchcodec-0.7.0-cp39-cp39-manylinux_2_28_x86_64.whl", hash = "sha256:d2b10c1ad9bfdc21c75b1794566a0d68131f087dd609c27ee707efb035a45198"},
+    {file = "torchcodec-0.7.0-cp39-cp39-win_amd64.whl", hash = "sha256:58be79fec0d6b2a4fa73440b9a84a0be4ba813ed71aa529a2ec72bbb6a57a7f8"},
+]
+
+[package.extras]
+dev = ["numpy", "pillow", "pytest"]
+
+[[package]]
+name = "torchcodec"
+version = "0.7.0+cu128"
+description = "A video decoder for PyTorch"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+markers = "sys_platform == \"linux\""
+files = [
+    {file = "torchcodec-0.7.0+cu128-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:55c89830a3bf2a99302bed1a93ae13a65fa0a35a0d110b586a8df38624aabcf6"},
+    {file = "torchcodec-0.7.0+cu128-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:7fd53ebd7d62a5ffbf2aea5b320b8c4df406d32e99a1ab9f59bc1da749f35b8c"},
+    {file = "torchcodec-0.7.0+cu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:023d68f85e0f88159dffde418189dcd65b938616ae9a9432260c65103fa2110e"},
+    {file = "torchcodec-0.7.0+cu128-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:c1b7d1fd21b7d9ce4718767f36efceaf49480bc5dabcf84837deead87d3548fb"},
+    {file = "torchcodec-0.7.0+cu128-cp39-cp39-manylinux_2_28_x86_64.whl", hash = "sha256:3f654f2a2a52cbe339e24ca277dea038d959a80a6305f1788806086597f70269"},
+]
+
+[package.extras]
+dev = ["numpy", "pillow", "pytest"]
+
+[package.source]
+type = "legacy"
+url = "https://download.pytorch.org/whl/cu128"
+reference = "pytorch-cu128"
+
+[[package]]
+name = "torchcodec"
 version = "0.8.0"
 description = "A video decoder for PyTorch"
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
-markers = "sys_platform != \"linux\""
+markers = "sys_platform != \"darwin\" and sys_platform != \"linux\""
 files = [
     {file = "torchcodec-0.8.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:952dbb809dc5c9520e1674cd4815b7e6838006737bd159b90c012f36e91ca3df"},
     {file = "torchcodec-0.8.0-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:5899f1b54bb6a4a50178a354575e27d94e8f6074da6e1ebb1fed2008ad9e781c"},
@@ -4058,29 +4111,6 @@ files = [
 
 [package.extras]
 dev = ["numpy", "pillow", "pytest"]
-
-[[package]]
-name = "torchcodec"
-version = "0.8.0+cu128"
-description = "A video decoder for PyTorch"
-optional = false
-python-versions = ">=3.8"
-groups = ["main"]
-markers = "sys_platform == \"linux\""
-files = [
-    {file = "torchcodec-0.8.0+cu128-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:1b4372ad877e750a68da4fe18d6cd1ad9cb551687b363dd08d8f1743e6db4542"},
-    {file = "torchcodec-0.8.0+cu128-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:7ecc38c1d3b195507fcc893082cbca2947bf1664f3df8dbe44cd7f463e1e4c9d"},
-    {file = "torchcodec-0.8.0+cu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:c0195d81784f48c0d9d265c0d72324a65e1cd1e70c8213b95b4ff483493621ab"},
-    {file = "torchcodec-0.8.0+cu128-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:0f278cc6610d420ad8c79ac7c4be930f33b37970c14686f5baa9f657aa0c9497"},
-]
-
-[package.extras]
-dev = ["numpy", "pillow", "pytest"]
-
-[package.source]
-type = "legacy"
-url = "https://download.pytorch.org/whl/cu128"
-reference = "pytorch-cu128"
 
 [[package]]
 name = "tqdm"
@@ -4744,4 +4774,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "a69b5f107604788add0aefc397a0a03f197e8713edf91d404f50a0d97de18c68"
+content-hash = "486bcf009e6bbdabed4b782ea8c769d6cf0e607a063b8d1c59eee6c23c3de7a8"

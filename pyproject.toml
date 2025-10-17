@@ -42,8 +42,8 @@ torch = [
     {version = "~2.8.0", source = "pytorch-cu128", markers = "sys_platform == 'linux'"}
 ]
 torchcodec = [
-    {version = ">=0.8.0", markers = "sys_platform == 'darwin'"},
-    {version = ">=0.8.0", source = "pytorch-cu128", markers = "sys_platform == 'linux'"}
+    {version = "~0.7.0", markers = "sys_platform == 'darwin'"},
+    {version = "~0.7.0", source = "pytorch-cu128", markers = "sys_platform == 'linux'"}
 ]
 transformers = "*"
 accelerate = "*"
