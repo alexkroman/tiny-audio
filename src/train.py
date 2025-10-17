@@ -63,7 +63,7 @@ class DatasetLoader:
         )
         val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
 
-        train_ds = train_ds.shuffle(seed=42, buffer_size=10000)
+        # train_ds = train_ds.shuffle(seed=42, buffer_size=1000)
 
         if self.config.max_train_samples:
             train_ds = train_ds.take(self.config.max_train_samples)
@@ -107,19 +107,33 @@ class DataCollator(DataCollatorForSeq2Seq):
         for f in features:
             text = f["text"].strip() if isinstance(f["text"], str) else f["text"]
 
-            messages = []
+            # Build messages for prefix (everything before assistant response)
+            prefix_messages = []
             if self.system_prompt:
-                messages.append({"role": "system", "content": self.system_prompt})
-            messages.append(
+                prefix_messages.append({"role": "system", "content": self.system_prompt})
+            prefix_messages.append(
                 {
                     "role": "user",
                     "content": "Repeat the following text, without any explanation: <|audio_start|><|audio_end|>",
                 }
             )
-            messages.append({"role": "assistant", "content": text})
 
+            # Tokenize prefix with add_generation_prompt=True to get position where assistant content starts
+            prefix_tokens = self.tokenizer.apply_chat_template(
+                prefix_messages,
+                tokenize=True,
+                add_generation_prompt=True,  # Adds assistant start marker
+                truncation=False,
+                enable_thinking=False,
+            )
+
+            # Build full messages including assistant response
+            full_messages = prefix_messages.copy()
+            full_messages.append({"role": "assistant", "content": text})
+
+            # Tokenize full conversation
             tokens = self.tokenizer.apply_chat_template(
-                messages,
+                full_messages,
                 tokenize=True,
                 add_generation_prompt=False,
                 truncation=True,
@@ -127,34 +141,11 @@ class DataCollator(DataCollatorForSeq2Seq):
                 enable_thinking=False,
             )
 
-            # Create labels - we need to find exactly where the assistant's actual content starts and ends
-            labels = [-100] * len(tokens)  # Start with everything masked
-
-            # Find the assistant's actual content by tokenizing just the text
-            # and finding where it appears in the full sequence
-            text_tokens = self.tokenizer.encode(text, add_special_tokens=False)
-
-            # Get the <|im_end|> token ID
-            im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
-
-            # Find where these tokens appear in the full sequence
-            text_position = -1
-            for i in range(len(tokens) - len(text_tokens) + 1):
-                if tokens[i : i + len(text_tokens)] == text_tokens:
-                    # Found the transcription text! Train on these tokens
-                    for j in range(len(text_tokens)):
-                        labels[i + j] = tokens[i + j]
-                    text_position = i + len(text_tokens)
-                    break
-
-            # Also train on the <|im_end|> token that follows the text
-            # This is critical so the model learns when to stop!
-            if text_position > 0 and text_position < len(tokens):
-                if tokens[text_position] == im_end_id:
-                    labels[text_position] = tokens[text_position]
-                # Sometimes there might be whitespace before <|im_end|>
-                elif text_position + 1 < len(tokens) and tokens[text_position + 1] == im_end_id:
-                    labels[text_position + 1] = tokens[text_position + 1]
+            # FAST label masking: Mask everything before assistant response starts
+            # Only train on the assistant's actual response (from len(prefix_tokens) onwards)
+            labels = [-100] * len(tokens)
+            for i in range(len(prefix_tokens), len(tokens)):
+                labels[i] = tokens[i]
 
             text_features.append(
                 {

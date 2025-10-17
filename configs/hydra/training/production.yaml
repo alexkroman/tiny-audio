@@ -2,10 +2,10 @@
 output_dir: ./outputs/production_model
 
 # Training configuration
-per_device_train_batch_size: 12
-per_device_eval_batch_size: 3
-gradient_accumulation_steps: 12
-eval_accumulation_steps: 3
+per_device_train_batch_size: 10
+per_device_eval_batch_size: 10
+gradient_accumulation_steps: 4
+eval_accumulation_steps: 4
 
 optim: adamw_torch_fused
 adam_beta1: 0.9
@@ -50,7 +50,7 @@ model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
 # Streaming compatibility settings
-dataloader_num_workers: 4  # Disable multiprocessing for streaming audio datasets to prevent OOM
+dataloader_num_workers: 24  # Disable multiprocessing for streaming audio datasets to prevent OOM
 dataloader_persistent_workers: true  # Not needed with num_workers=0
 dataloader_prefetch_factor: 2  # Not needed with num_workers=0
 dataloader_pin_memory: true
