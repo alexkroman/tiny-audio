@@ -127,34 +127,36 @@ class DataCollator(DataCollatorForSeq2Seq):
                 enable_thinking=False,
             )
 
-            # Create labels - we need to find exactly where the assistant's actual content starts and ends
+            # Create labels - we need to find exactly where the assistant's response starts and ends
             labels = [-100] * len(tokens)  # Start with everything masked
 
-            # Find the assistant's actual content by tokenizing just the text
-            # and finding where it appears in the full sequence
-            text_tokens = self.tokenizer.encode(text, add_special_tokens=False)
-
-            # Get the <|im_end|> token ID
+            # Get special token IDs
+            im_start_id = self.tokenizer.convert_tokens_to_ids("<|im_start|>")
             im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+            assistant_id = self.tokenizer.convert_tokens_to_ids("assistant")
 
-            # Find where these tokens appear in the full sequence
-            text_position = -1
-            for i in range(len(tokens) - len(text_tokens) + 1):
-                if tokens[i : i + len(text_tokens)] == text_tokens:
-                    # Found the transcription text! Train on these tokens
-                    for j in range(len(text_tokens)):
-                        labels[i + j] = tokens[i + j]
-                    text_position = i + len(text_tokens)
+            # Find the assistant message start: <|im_start|>assistant
+            assistant_start = -1
+            for i in range(len(tokens) - 1):
+                if tokens[i] == im_start_id and tokens[i + 1] == assistant_id:
+                    # The assistant content starts after: <|im_start|>assistant\n
+                    # Skip ahead past the newline (position i+2)
+                    assistant_start = i + 3  # i+2 is the newline, i+3 is first content token
                     break
 
-            # Also train on the <|im_end|> token that follows the text
-            # This is critical so the model learns when to stop!
-            if text_position > 0 and text_position < len(tokens):
-                if tokens[text_position] == im_end_id:
-                    labels[text_position] = tokens[text_position]
-                # Sometimes there might be whitespace before <|im_end|>
-                elif text_position + 1 < len(tokens) and tokens[text_position + 1] == im_end_id:
-                    labels[text_position + 1] = tokens[text_position + 1]
+            # Find the closing <|im_end|> for the assistant message
+            assistant_end = -1
+            if assistant_start > 0:
+                for i in range(assistant_start, len(tokens)):
+                    if tokens[i] == im_end_id:
+                        assistant_end = i
+                        break
+
+            # Unmask all tokens in the assistant's response (including thinking tokens and end marker)
+            # This ensures the model learns the full response pattern, including <think></think> if present
+            if assistant_start > 0 and assistant_end > 0:
+                for i in range(assistant_start, assistant_end + 1):  # +1 to include <|im_end|>
+                    labels[i] = tokens[i]
 
             text_features.append(
                 {
