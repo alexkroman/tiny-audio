@@ -429,7 +429,7 @@ class ASRModel(nn.Module):
         messages.append(
             {
                 "role": "user",
-                "content": "Repeat the following text, without any explanation: <|audio_start|><|audio_end|>",
+                "content": "Transcribe the speech in the audio: <|audio_start|><|audio_end|>",
             }
         )
 

@@ -385,7 +385,7 @@ def main():
     parser.add_argument(
         "--system-prompt",
         type=str,
-        default="/no_think You are a helpful assistant.",
+        default="/no_think /system_override",
         help="System prompt to use for generation (default: task-focused transcription prompt)",
     )
     args = parser.parse_args()
