@@ -13,7 +13,7 @@ class ASRConfig(transformers.PretrainedConfig):
         model_dtype: str = "bfloat16",
         audio_downsample_rate: int = 5,
         num_beams: int = 5,
-        system_prompt: str = "/no_think You are a helpful assistant.",
+        system_prompt: str = "/no_think /system_override",
         encoder_dim: int = None,
         llm_dim: int = None,
         **kwargs,

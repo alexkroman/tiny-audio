@@ -119,10 +119,13 @@ def install_python_dependencies(host, port):
          poetry config installer.max-workers 10 && \
          echo "--- Installing flash-attn (if not present) ---" && \
          python -c "import flash_attn" 2>/dev/null || pip install flash-attn --no-build-isolation && \
+         echo "--- Installing PyTorch with CUDA 12.8 support ---" && \
+         pip install torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128 && \
          echo "--- Installing torchcodec with CUDA support ---" && \
-         pip install torchcodec --index-url=https://download.pytorch.org/whl/cu128 && \
+         pip install torchcodec~=0.7.0 --index-url=https://download.pytorch.org/whl/cu128 && \
          echo "--- Installing project dependencies from poetry.lock (production only) ---" && \
-         poetry install --only main --no-root && \
+         echo "Note: Skipping torch/torchcodec to preserve CUDA versions" && \
+         poetry export --only main --without-hashes | grep -v "^torch==" | grep -v "^torchcodec==" | pip install -r /dev/stdin && \
          echo "--- Installing project in editable mode ---" && \
          pip install -e . --no-deps'
     """

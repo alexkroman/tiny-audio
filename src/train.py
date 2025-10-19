@@ -127,35 +127,45 @@ class DataCollator(DataCollatorForSeq2Seq):
                 enable_thinking=False,
             )
 
-            # Create labels - we need to find exactly where the assistant's response starts and ends
+            # Create labels - only train on the actual transcription text, not thinking tags
             labels = [-100] * len(tokens)  # Start with everything masked
 
             # Get special token IDs
-            im_start_id = self.tokenizer.convert_tokens_to_ids("<|im_start|>")
             im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
-            assistant_id = self.tokenizer.convert_tokens_to_ids("assistant")
+            think_start_id = self.tokenizer.convert_tokens_to_ids("<think>")
+            think_end_id = self.tokenizer.convert_tokens_to_ids("</think>")
 
-            # Find the assistant message start: <|im_start|>assistant
-            assistant_start = -1
-            for i in range(len(tokens) - 1):
-                if tokens[i] == im_start_id and tokens[i + 1] == assistant_id:
-                    # The assistant content starts after: <|im_start|>assistant\n
-                    # Skip ahead past the newline (position i+2)
-                    assistant_start = i + 3  # i+2 is the newline, i+3 is first content token
+            # Find where </think> ends (if present) - the actual transcription starts after it
+            content_start = -1
+            for i in range(len(tokens)):
+                if tokens[i] == think_end_id:
+                    # Skip the </think> token and any newlines after it
+                    content_start = i + 1
+                    # Skip newlines
+                    while content_start < len(tokens) and self.tokenizer.decode([tokens[content_start]]).strip() == "":
+                        content_start += 1
                     break
 
-            # Find the closing <|im_end|> for the assistant message
-            assistant_end = -1
-            if assistant_start > 0:
-                for i in range(assistant_start, len(tokens)):
-                    if tokens[i] == im_end_id:
-                        assistant_end = i
+            # If no thinking tags found, look for assistant content directly
+            if content_start == -1:
+                im_start_id = self.tokenizer.convert_tokens_to_ids("<|im_start|>")
+                assistant_id = self.tokenizer.convert_tokens_to_ids("assistant")
+                for i in range(len(tokens) - 1):
+                    if tokens[i] == im_start_id and tokens[i + 1] == assistant_id:
+                        content_start = i + 3  # Skip <|im_start|>, assistant, \n
                         break
 
-            # Unmask all tokens in the assistant's response (including thinking tokens and end marker)
-            # This ensures the model learns the full response pattern, including <think></think> if present
-            if assistant_start > 0 and assistant_end > 0:
-                for i in range(assistant_start, assistant_end + 1):  # +1 to include <|im_end|>
+            # Find the closing <|im_end|> for the assistant message
+            content_end = -1
+            if content_start > 0:
+                for i in range(content_start, len(tokens)):
+                    if tokens[i] == im_end_id:
+                        content_end = i
+                        break
+
+            # Unmask only the actual transcription text (not thinking tags)
+            if content_start > 0 and content_end > 0:
+                for i in range(content_start, content_end + 1):  # +1 to include <|im_end|>
                     labels[i] = tokens[i]
 
             text_features.append(
