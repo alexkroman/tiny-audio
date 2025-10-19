@@ -33,18 +33,13 @@ include = ["*.json", "*.yaml", "*.yml"]
 [[tool.poetry.source]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
-priority = "explicit"
+priority = "supplemental"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
-torch = [
-    {version = "~2.8.0", markers = "sys_platform == 'darwin'"},
-    {version = "~2.8.0", source = "pytorch-cu128", markers = "sys_platform == 'linux'"}
-]
-torchcodec = [
-    {version = "~0.7.0", markers = "sys_platform == 'darwin'"},
-    {version = "~0.7.0", source = "pytorch-cu128", markers = "sys_platform == 'linux'"}
-]
+# torch and torchcodec - Poetry will pull from pytorch-cu128 source on Linux when available
+torch = "~2.8.0"
+torchcodec = "~0.7.0"
 transformers = "*"
 accelerate = "*"
 datasets = {extras = ["audio"], version = ">=3.0.0"}
@@ -63,7 +58,7 @@ typer = ">=0.19.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
-black = ">=23.0.0"
+black = ">=2.3.0"
 ruff = ">=0.1.0"
 mypy = ">=1.5.0"
 mdformat = ">=0.7.0"
@@ -184,3 +179,4 @@ extend-ignore = [
 [tool.mdformat]
 wrap = 100
 number = false
+
