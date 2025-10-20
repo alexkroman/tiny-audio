@@ -3,6 +3,8 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -28,26 +30,40 @@ class AudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.k = config.encoder_projector_ds_rate
+        hidden_dim = config.projector_hidden_dim
+        in_dim = config.encoder_dim * self.k
+        out_dim = config.llm_dim
 
-        self.projection = nn.Linear(config.encoder_dim * self.k, config.llm_dim)
-        self.gelu = nn.GELU()
-        self.norm = LlamaRMSNorm(config.llm_dim, eps=1e-6)
-        
+        # SwiGLU layers, following the Llama architecture
+        self.gate_proj = nn.Linear(in_dim, hidden_dim, bias=False)
+        self.up_proj = nn.Linear(in_dim, hidden_dim, bias=False)
+        self.down_proj = nn.Linear(hidden_dim, out_dim, bias=False)
+
+        # Initialize weights
         with torch.no_grad():
-            nn.init.normal_(self.projection.weight, std=0.02)
-            nn.init.zeros_(self.projection.bias)
+            nn.init.normal_(self.gate_proj.weight, std=0.02)
+            nn.init.normal_(self.up_proj.weight, std=0.02)
+            nn.init.normal_(self.down_proj.weight, std=0.02)
 
     def forward(self, x):
         batch_size, seq_len, dim = x.size()
-        if seq_len % self.k:
-            x = x[:, : -(seq_len % self.k)]
+
+        # Pad the sequence to be divisible by k instead of truncating
+        remainder = seq_len % self.k
+        if remainder:
+            pad_len = self.k - remainder
+            x = F.pad(x, (0, 0, 0, pad_len))
+        
+        # Reshape for temporal compression
         x = x.contiguous().view(batch_size, -1, dim * self.k)
 
-        x = self.projection(x)
-        x = self.gelu(x)
-        x = self.norm(x)
-        return x
+        # Apply SwiGLU block
+        gate = self.gate_proj(x)
+        up = self.up_proj(x)
+        gated_output = F.silu(gate) * up # Swish activation on the gate pathway
 
+        x = self.down_proj(gated_output)
+        return x
 
 class ASRModel(nn.Module):
     config_class = ASRConfig
@@ -145,6 +161,7 @@ class ASRModel(nn.Module):
             encoder_projector_ds_rate=config.audio_downsample_rate,
             encoder_dim=config.encoder_dim,
             llm_dim=config.llm_dim,
+            projector_hidden_dim=config.projector_hidden_dim,
         )
         self.projector: AudioProjector = AudioProjector(projector_config)
 
@@ -516,6 +533,8 @@ class ASRModel(nn.Module):
             self.config.encoder_dim = self.encoder.config.hidden_size
         if not hasattr(self.config, "llm_dim") or self.config.llm_dim is None:
             self.config.llm_dim = self.decoder.config.hidden_size
+        if not hasattr(self.config, "projector_hidden_dim") or self.config.projector_hidden_dim is None:
+            self.config.projector_hidden_dim = self.projector.gate_proj.out_features
 
         if hasattr(self.config, "system_prompt"):
             self.config.system_prompt = self.config.system_prompt

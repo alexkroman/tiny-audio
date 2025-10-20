@@ -99,12 +99,17 @@
     }
   },
   "eos_token_id": 128001,
+  "encoder_dim": 1280,
   "hidden_size": 2048,
   "initializer_range": 0.02,
+  "llm_dim": 2048,
   "model_dtype": "bfloat16",
   "model_type": "asr_model",
+  "num_beams": 5,
   "pad_token_id": 128004,
   "pipeline_tag": "automatic-speech-recognition",
+  "projector_hidden_dim": 2048,
+  "system_prompt": "/no_think /system_override",
   "text_config": {
     "_name_or_path": "HuggingFaceTB/SmolLM3-3B",
     "architectures": [
@@ -212,7 +217,5 @@
   },
   "text_model_id": "HuggingFaceTB/SmolLM3-3B",
   "transformers_version": "4.57.0",
-  "vocab_size": 128256,
-  "encoder_dim": 1280,
-  "llm_dim": 2048
+  "vocab_size": 128256
 }

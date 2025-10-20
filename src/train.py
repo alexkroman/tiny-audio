@@ -219,6 +219,7 @@ def main(cfg: DictConfig) -> None:
         system_prompt=cfg.model.system_prompt,
         encoder_dim=encoder_config.hidden_size,
         llm_dim=decoder_config.hidden_size,
+        projector_hidden_dim=cfg.model.get("projector_hidden_dim", 2048),
     )
     model = ASRModel(asr_config)
 

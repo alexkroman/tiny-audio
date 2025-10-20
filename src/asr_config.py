@@ -16,6 +16,7 @@ class ASRConfig(transformers.PretrainedConfig):
         system_prompt: str = "/no_think /system_override",
         encoder_dim: int = None,
         llm_dim: int = None,
+        projector_hidden_dim: int = 8192,
         **kwargs,
     ):
         self.audio_model_id = audio_model_id
@@ -27,6 +28,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.system_prompt = system_prompt
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
+        self.projector_hidden_dim = projector_hidden_dim
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
         else:
