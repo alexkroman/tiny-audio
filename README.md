@@ -1,373 +1,196 @@
+<div align="center">
+  <img src="https://raw.githubusercontent.com/alexkroman/tiny-audio/main/public/logo.png" alt="Tiny Audio Logo" width="200"/>
+</div>
+
 # Tiny Audio
+
+**Train your own speech recognition model in 6 hours for ~$6**
+
+This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in less than 6 hours. Tiny Audio combines a frozen HuBERT-XLarge encoder (1.3B params) with a frozen SmolLM3-3B decoder (3B params), connected by a small trainable audio projector (~13M params). The result is a speech-to-text system you can train in a few hours, deploy to HuggingFace, and use just like Whisper or any other ASR model.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![Hugging Face Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 
-A lightweight automatic speech recognition (ASR) model that combines a frozen HuBERT encoder with a Qwen3-8B decoder, connected via a learnable audio projector. Only the projector is trained, making it extremely efficient to fine-tune.
+## Talk to it
 
-**Key Features:**
+You can try the model right now at [huggingface.co/spaces/mazesmazes/tiny-audio](https://huggingface.co/spaces/mazesmazes/tiny-audio). Upload an audio file and watch it transcribe. It's not perfect - you'll notice it makes mistakes, especially with background noise or heavy accents - but what makes it unique is that **it's fully yours**: fully configurable, tweakable, hackable, and trained by you from start to end.
 
-- **Efficient Training**: Only ~7M trainable parameters (projector) while leveraging frozen pretrained models
-- **Modular Design**: Easy to swap different audio encoders or language decoders
-- **Production Ready**: Includes remote training, evaluation tools, and HuggingFace integration
-- **Streaming Support**: Handles large datasets with streaming data loaders
-
-**Quick Links:**
-
-- [Live Demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)
-- [Model on HuggingFace](https://huggingface.co/mazesmazes/tiny-audio)
-- [GitHub Repository](https://github.com/alexkroman/tiny-audio)
-
-## Quick Start
-
-### Installation
-
-```bash
-git clone https://github.com/alexkroman/tiny-audio.git
-cd tiny-audio
-poetry install
-```
-
-### Usage
+Or use it via the transformers library:
 
 ```python
 from transformers import pipeline
 
-# Load the ASR pipeline
-pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+pipe = pipeline("automatic-speech-recognition",
+                model="mazesmazes/tiny-audio",
+                trust_remote_code=True)
 
-# Transcribe audio
 result = pipe("path/to/audio.wav")
-print(result["text"])
-
-# Or with custom generation parameters
-result = pipe(
-    "path/to/audio.wav",
-    max_new_tokens=200,
-    num_beams=4,
-)
 print(result["text"])
 ```
 
-The model accepts various audio formats (WAV, MP3, FLAC, etc.) and automatically handles resampling to 16kHz.
+The model handles various audio formats (WAV, MP3, FLAC, etc.) and automatically resamples to 16kHz.
 
-## Training
+## Quick start
 
-### Training Setup
+The fastest way to feel the magic is to train your own model. Boot up an A40 GPU box from your favorite provider (I like RunPod), clone this repo, and kick off training:
 
 ```bash
 git clone https://github.com/alexkroman/tiny-audio.git
 cd tiny-audio
 poetry install
 
-# Quick test run (20 steps, small dataset)
+# Quick test run (20 steps, ~5 minutes)
 poetry run python src/train.py
 
-# Full production training
+# Full production training (~24 hours on A100)
 export HF_TOKEN='your-token'  # Get from https://huggingface.co/settings/tokens
 poetry run python src/train.py +experiments=production
 ```
 
-### Training Details
-
-**Dataset:**
-
-- **LoquaciousSet** (25,000h): A diverse curated corpus combining CommonVoice, VoxPopuli, Libriheavy, People's Speech and YODAS. Contains hundreds of thousands of speakers with varied accents, speech types (read, spontaneous, talks), and acoustic conditions (clean to noisy with reverberation).
-
-**Training Configuration:**
-
-- Mixed precision: BF16
-- Optimizer: AdamW with cosine learning rate schedule
-- Gradient checkpointing: Enabled for memory efficiency
-- Batch size: Configurable via Hydra configs
-- Only the audio projector weights are trained
-
-**Hardware Requirements:**
-
-- Minimum: 16GB GPU (e.g., RTX 4080)
-- Recommended: 24GB+ GPU (e.g., RTX 4090, A100)
-- Training time: ~24 hours on single A100 for full training
-
-## Architecture
-
-Tiny Audio uses a modular three-component architecture:
-
-### Components
-
-1. **Audio Encoder** (Frozen)
-
-   - HuBERT-large (`facebook/hubert-large-ls960-ft`)
-   - Extracts acoustic features from raw audio waveforms
-   - Pretrained weights remain frozen during training
-
-1. **Audio Projector** (Trainable ~7M params)
-
-   - Downsamples audio features by 5x (configurable)
-   - Architecture: `Linear(encoder_dim × k, llm_dim) → RMSNorm`
-   - Maps audio features to language model embedding space
-   - **This is the only trained component**
-
-1. **Language Model Decoder** (Frozen)
-
-   - Default: Qwen3-8B (`Qwen/Qwen3-8B`)
-   - Generates text transcriptions autoregressively
-   - Pretrained weights remain frozen during training
-   - Uses BF16 precision for efficient inference
-
-### Data Flow
-
-```text
-Audio Waveform → Encoder → Audio Features → Projector → LLM Embeddings → Decoder → Text
-                 (frozen)                  (trainable)                  (frozen)
-```
-
-### Why This Architecture?
-
-- **Parameter Efficient**: Only train the small projector (~7M params) instead of the full model (>400M params)
-- **Leverages Pretrained Models**: Combines the best of audio understanding (HuBERT) and language generation (Qwen3-8B)
-- **Flexible**: Easy to swap different encoder or decoder models
-- **Fast Training**: Frozen components mean faster training and lower memory requirements
-
-## Configuration
-
-Tiny Audio uses [Hydra](https://hydra.cc/) for configuration management, providing flexible config composition and command-line overrides.
-
-### Config Structure
-
-```text
-configs/
-├── hydra/
-│   ├── config.yaml           # Main config
-│   ├── model/                # Model variants
-│   │   ├── small.yaml        # HuBERT-large + Qwen3-8B
-│   │   └── large.yaml        # HuBERT-xlarge + Qwen3-8B
-│   ├── training/             # Training hyperparameters
-│   └── experiments/          # Full experiment configs
-│       └── production.yaml   # Production training setup
-```
-
-### Override Examples
+If you want to run it on a remote GPU like RunPod, there are deployment scripts to make your life easier:
 
 ```bash
-# Use larger model
-poetry run python src/train.py model=large
-
-# Adjust training parameters
-poetry run python src/train.py training.max_steps=10000 training.learning_rate=5e-5
-
-# Change audio encoder
-poetry run python src/train.py model.audio_model_id=facebook/hubert-large-ls960-ft
-
-# Use experiment preset
-poetry run python src/train.py +experiments=production
-
-# Combine multiple overrides
-poetry run python src/train.py model=large training.batch_size=32 training.max_steps=50000
-```
-
-### Key Configuration Parameters
-
-- `model.audio_model_id`: Audio encoder model (default: `facebook/hubert-large-ls960-ft`)
-- `model.text_model_id`: Language model decoder (default: `Qwen/Qwen3-8B`)
-- `model.audio_downsample_rate`: Audio feature downsampling factor (default: 5)
-- `training.max_steps`: Total training steps
-- `training.learning_rate`: Peak learning rate for cosine schedule
-- `training.batch_size`: Per-device batch size
-
-## Remote Training
-
-Tiny Audio includes tools for easy deployment and training on cloud GPU providers like RunPod.
-
-### Setup Remote Instance
-
-```bash
-# Deploy code to remote GPU instance
+# Deploy code to remote GPU
 poetry run deploy-runpod --host <pod-id>.runpod.io --port 22
 
-# Start training on remote instance
+# Start training remotely
 poetry run remote-train \
   --host <pod-id>.runpod.io \
   --port 22 \
   --config production
 ```
 
-### Features
+Now wait ~6 hours. Once it's done, your model will be pushed to HuggingFace Hub automatically (if you set `HF_TOKEN`), and you can use it just like in the example above!
 
-- Automatic code synchronization via rsync
-- Remote training script execution
-- Real-time log monitoring
-- Checkpoint saving to HuggingFace Hub
-- Supports RunPod, Lambda Labs, Vast.ai, and other SSH-accessible GPU providers
+## How it works
 
-### Monitoring
+Tiny Audio uses a simple three-component architecture:
 
-The training script automatically:
+```text
+Audio Waveform → HuBERT-XLarge → Audio Projector → SmolLM3-3B → Text
+                 (1.3B, frozen)  (~13M, trainable)  (3B, frozen)
+```
 
-- Logs metrics to TensorBoard
-- Saves checkpoints to `outputs/` directory
-- Pushes final model to HuggingFace Hub (if `HF_TOKEN` is set)
-- Reports training progress and WER metrics
+1. **Audio Encoder (Frozen)**: HuBERT-XLarge extracts acoustic features from your audio
+2. **Audio Projector (Trainable)**: A SwiGLU MLP that downsamples 5x and maps audio features to language model space - **this is the only part you train**
+3. **Language Decoder (Frozen)**: SmolLM3-3B generates the text transcription autoregressively with Flash Attention 2
+
+The projector uses a **SwiGLU** architecture (like Llama):
+- `gate_proj`: Linear(6400 → 2048, no bias)
+- `up_proj`: Linear(6400 → 2048, no bias)
+- `down_proj`: Linear(2048 → 2048, no bias)
+- Activation: `silu(gate) * up` → `down`
+
+Why freeze the encoder and decoder? Because:
+- **You only train ~13M parameters** instead of 4+ billion
+- **Training is fast** (~6 hours on A40)
+- **It's cheap** (~$6 for a full run)
+- **You leverage pretrained knowledge** from both audio and language domains
+- **Memory efficient** - runs on a single A40 40GB
+
+## Training details
+
+**Dataset**: LoquaciousSet (25,000 hours) - a diverse corpus combining CommonVoice, VoxPopuli, Libriheavy, People's Speech, and YODAS. Hundreds of thousands of speakers with varied accents, speech types, and acoustic conditions.
+
+**Hardware**: Single NVIDIA A40 40GB works great.
+
+**Time & Cost**: ~6 hours on A40 = ~$6 depending on your provider
+
+**Configuration**: The repo uses Hydra for configs, so you can easily tweak things:
+
+```bash
+# Try different encoders
+poetry run python src/train.py model.audio_model_id=facebook/hubert-large-ls960-ft
+
+# Adjust learning rate
+poetry run python src/train.py training.learning_rate=5e-5
+
+# Change batch size (if you're running out of memory)
+poetry run python src/train.py training.batch_size=16
+```
+
+The training script automatically logs to Weights & Biases (wandb), saves checkpoints to `outputs/`, and pushes the final model to HuggingFace.
 
 ## Evaluation
 
-Tiny Audio includes a comprehensive evaluation framework using Word Error Rate (WER) on the LoquaciousSet benchmark dataset.
-
-### Quick Evaluation
+Evaluate your model (or any other ASR model) on the LoquaciousSet benchmark:
 
 ```bash
-# Evaluate tiny-audio model on 100 samples
+# Evaluate on 100 samples (quick check)
 poetry run eval mazesmazes/tiny-audio --max-samples 100
 
-# Evaluate on full test set
+# Full evaluation
 poetry run eval mazesmazes/tiny-audio
-
-# Compare with other models
-poetry run eval --provider assemblyai --api-key YOUR_API_KEY
 ```
 
-### Supported Providers
+Results are measured in Word Error Rate (WER) - lower is better. Detailed predictions are saved to `outputs/eval_*/results.txt` so you can see exactly where your model succeeds or fails.
 
-1. **tiny-audio** (default): Your trained model
-1. **huggingface**: Any HuggingFace ASR model
-1. **assemblyai**: AssemblyAI commercial API
+## What makes this repo different?
 
-### Command-Line Options
+Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable, hackable codebase** designed to train an ASR model start to end and produce a working model you can actually use and learn from.
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--provider` | Model provider (`tiny-audio`, `huggingface`, `assemblyai`) | `tiny-audio` |
-| `--model` | HuggingFace model ID | Required for `huggingface` |
-| `--api-key` | AssemblyAI API key | Required for `assemblyai` |
-| `--max-samples` | Limit evaluation samples | All samples |
-| `--config` | LoquaciousSet config (`large`, `clean`) | `large` |
-| `--split` | Dataset split | `test` |
+- **~1000 lines of core code** across 7 Python files in `src/`
+- **Dependency-lite**: Just PyTorch, transformers, datasets, and a few other essentials via Poetry
+- **No magic**: Read the code and understand exactly what's happening
+- **Fully yours**: Train it, modify it, deploy it however you want
 
-### Evaluation Metrics
+The entire codebase is small enough to read in an afternoon and understand deeply.
 
-- **Word Error Rate (WER)**: Primary metric for ASR performance
-- Automatic text normalization (lowercasing, punctuation removal)
-- Detailed per-sample predictions saved to `outputs/eval_{provider}/results.txt`
-
-### Example Output
-
-```text
-Model: mazesmazes/tiny-audio
-Dataset: speechbrain/LoquaciousSet (config: large, split: test)
-Samples: 2000
-WER: 12.3%
-
-Sample predictions with ground truth comparison...
-```
-
-## Development
-
-### Available Poetry Commands
-
-Poetry provides convenient commands for common tasks:
-
-**Training:**
-
-```bash
-poetry run python src/train.py              # Run training
-poetry run python src/train.py model=large  # With config overrides
-```
-
-**Model Scripts:**
-
-```bash
-poetry run eval <model-id> --max-samples 100  # Evaluate model
-poetry run push-to-hub                         # Push to HuggingFace Hub
-poetry run run-handler                         # Run handler locally
-```
-
-**Deployment:**
-
-```bash
-poetry run deploy-hf         # Deploy to HuggingFace Space
-poetry run deploy-runpod     # Deploy to RunPod
-poetry run remote-train      # Start remote training
-poetry run attach-remote     # Attach to remote session
-```
-
-**Development Tools:**
-
-```bash
-poetry run format      # Format code with black and ruff
-poetry run lint        # Run ruff linter
-poetry run type-check  # Run mypy type checker
-poetry run test        # Run pytest tests
-poetry run check       # Run all checks (lint + type-check + test)
-```
-
-### Code Quality
-
-```bash
-# Format code
-poetry run format
-
-# Lint code
-poetry run lint
-
-# Type checking
-poetry run type-check
-
-# Run all checks (lint + type-check + test)
-poetry run check
-```
-
-### Testing
-
-```bash
-# Run test suite
-poetry run test
-
-# Or run pytest directly
-poetry run pytest
-
-# Run with coverage
-poetry run pytest --cov=src --cov-report=html
-```
-
-### Project Structure
+## Project structure
 
 ```text
 tiny-audio/
-├── src/                      # Source code
+├── src/                      # Core code (~1,200 lines)
 │   ├── asr_modeling.py      # Model architecture
 │   ├── asr_config.py        # Model configuration
-│   ├── asr_pipeline.py      # HuggingFace pipeline
+│   ├── asr_pipeline.py      # HuggingFace pipeline integration
 │   ├── asr_processing.py    # Audio/text processing
 │   ├── train.py             # Training script
 │   └── handler.py           # Inference handler
 ├── configs/                 # Hydra configurations
 │   └── hydra/
 │       ├── config.yaml      # Main config
-│       ├── model/           # Model configs
-│       ├── training/        # Training configs
-│       └── experiments/     # Experiment presets
+│       ├── model/           # Model variants
+│       ├── training/        # Training hyperparameters
+│       └── experiments/     # Full experiment presets
 ├── scripts/                 # Utility scripts
-│   ├── eval.py             # Evaluation script
+│   ├── eval.py             # Evaluation
 │   ├── deploy_runpod.py    # Remote deployment
-│   └── start_remote_training.py
-├── demo/                    # Gradio demo app
+│   └── ...
+├── demo/                    # Gradio web interface
 └── tests/                   # Test suite
+```
+
+## Development
+
+```bash
+# Format code
+poetry run format
+
+# Run linter
+poetry run lint
+
+# Type checking
+poetry run type-check
+
+# Run tests
+poetry run test
+
+# Run all checks
+poetry run check
 ```
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+Tiny Audio is nowhere finished. The goal is to make ASR training accessible on budgets < $100 while keeping the codebase small, readable, and hackable. Contributions that align with this philosophy are welcome - please open an issue to discuss major changes.
 
-### Development Setup
+## Acknowledgments
 
-1. Fork the repository
-1. Clone your fork: `git clone https://github.com/YOUR_USERNAME/tiny-audio.git`
-1. Install development dependencies: `poetry install`
-1. Create a feature branch: `git checkout -b feature/amazing-feature`
-1. Make your changes and ensure tests pass: `poetry run check`
-1. Commit your changes: `git commit -m 'Add amazing feature'`
-1. Push to the branch: `git push origin feature/amazing-feature`
-1. Open a Pull Request
+This project builds upon:
+- [HuBERT](https://huggingface.co/docs/transformers/model_doc/hubert) by Facebook AI for audio encoding
+- [SmolLM3-3B](https://huggingface.co/HuggingFaceTB/SmolLM3-3B) by HuggingFace for language modeling
+- [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) by SpeechBrain for training data
 
 ## Citation
 
@@ -376,20 +199,13 @@ If you use Tiny Audio in your research, please cite:
 ```bibtex
 @software{kroman2024tinyaudio,
   author = {Kroman, Alex},
-  title = {Tiny Audio: Efficient Speech Recognition with Frozen Pretrained Models},
+  title = {Tiny Audio: Train your own speech recognition model in 6 hours},
   year = {2024},
-  url = {https://github.com/alexkroman/tiny-audio},
-  note = {GitHub repository}
+  publisher = {GitHub},
+  url = {https://github.com/alexkroman/tiny-audio}
 }
 ```
 
-## Acknowledgments
-
-This project builds upon:
-
-- [HuBERT](https://huggingface.co/docs/transformers/model_doc/hubert) by Facebook AI for audio encoding
-- [Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) by Alibaba Cloud for language modeling
-
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT

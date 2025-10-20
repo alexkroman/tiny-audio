@@ -8,17 +8,18 @@ datasets:
 language:
   - en
 base_model:
-  - facebook/hubert-large-ls960-ft
-  - Qwen/Qwen3-8B
+  - facebook/hubert-xlarge-ls960-ft
+  - HuggingFaceTB/SmolLM3-3B
 pipeline_tag: automatic-speech-recognition
 tags:
   - hubert
-  - qwen3
+  - smollm3
   - asr
   - speech-recognition
   - audio
   - parameter-efficient
   - frozen-encoder
+  - flash-attention-2
 library_name: transformers
 model-index:
   - name: tiny-audio
@@ -41,7 +42,7 @@ model-index:
 
 ## Efficient Speech Recognition with Frozen Pretrained Models
 
-Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a frozen HuBERT encoder with a Qwen3-8B language model decoder, connected via a trainable audio projector. This architecture enables efficient training by only fine-tuning a small projection layer (~7M parameters) while leveraging the power of large pretrained models.
+Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a frozen HuBERT-XLarge encoder with a SmolLM3-3B language model decoder, connected via a trainable audio projector. This architecture enables efficient training by only fine-tuning a small projection layer (~7M parameters) while leveraging the power of large pretrained models.
 
 ## Model Description
 
@@ -50,17 +51,18 @@ Tiny Audio is a lightweight automatic speech recognition (ASR) model that combin
 - **Language(s):** English
 - **License:** MIT
 - **Architecture:** Encoder-Projector-Decoder
-  - Audio Encoder: HuBERT-large (317M params, frozen)
-  - Audio Projector: Linear + RMSNorm (~7M params, trainable)
-  - Text Decoder: Qwen3-8B (8B params, frozen)
+  - Audio Encoder: HuBERT-XLarge (1.3B params, frozen)
+  - Audio Projector: SwiGLU MLP (~13M params, trainable)
+  - Text Decoder: SmolLM3-3B (3B params, frozen)
 
 ## Key Features
 
-✅ **Parameter Efficient**: Only ~7M trainable parameters
-✅ **Fast Training**: Frozen encoder/decoder enable rapid fine-tuning
+✅ **Parameter Efficient**: Only ~13M trainable parameters
+✅ **Fast Training**: Frozen encoder/decoder enable rapid fine-tuning (~6 hours on A40)
 ✅ **Modular Design**: Easy to swap different encoder or decoder models
 ✅ **Production Ready**: Includes evaluation tools and remote training scripts
 ✅ **HuggingFace Native**: Full integration with transformers library
+✅ **Optimized Performance**: Flash Attention 2 for faster inference
 
 ## Quick Start
 
@@ -78,8 +80,6 @@ print(result["text"])
 result = pipe(
     "path/to/audio.wav",
     max_new_tokens=200,
-    num_beams=4,
-    length_penalty=1.0,
 )
 print(result["text"])
 ```
@@ -96,39 +96,45 @@ The model automatically handles:
 
 1. **Audio Encoder (Frozen)**
 
-   - Base Model: `facebook/hubert-large-ls960-ft`
-   - Parameters: 317M (frozen)
+   - Base Model: `facebook/hubert-xlarge-ls960-ft`
+   - Parameters: 1.3B (frozen)
    - Extracts acoustic features from raw audio waveforms
    - Output: Audio embeddings at ~50Hz frame rate
 
 1. **Audio Projector (Trainable)**
 
-   - Architecture: `Linear(encoder_dim × 5, llm_dim) → RMSNorm`
-   - Parameters: ~7M (trainable)
+   - Architecture: SwiGLU MLP (following Llama design)
+     - `gate_proj`: Linear(6400 → 2048, no bias)
+     - `up_proj`: Linear(6400 → 2048, no bias)
+     - `down_proj`: Linear(2048 → 2048, no bias)
+     - Activation: `silu(gate) * up` → `down`
+   - Parameters: ~13M (trainable)
    - Downsamples audio features by 5x (from ~50Hz to ~10Hz)
    - Maps audio embeddings to language model embedding space
 
 1. **Language Model Decoder (Frozen)**
 
-   - Base Model: `Qwen/Qwen3-8B`
-   - Parameters: 8B (frozen)
-   - Generates text transcriptions autoregressively
-   - Uses beam search (beam_size=4) for decoding
+   - Base Model: `HuggingFaceTB/SmolLM3-3B`
+   - Parameters: 3B (frozen)
+   - Generates text transcriptions autoregressively with greedy decoding
+   - Uses Flash Attention 2 for efficient processing
 
 ### Data Flow
 
 ```text
 Raw Audio (16kHz)
     ↓
-HuBERT Encoder (frozen)
+HuBERT-XLarge Encoder (frozen)
     ↓
-Audio Features [batch, ~1500, 1024]
+Audio Features [batch, ~1500, 1280]
     ↓
-Audio Projector (trainable, 5x downsample)
+Audio Projector (SwiGLU MLP, trainable, 5x downsample)
+    gate_proj(6400→2048) & up_proj(6400→2048)
+    silu(gate) * up → down_proj(2048→2048)
     ↓
 Language Embeddings [batch, ~300, 2048]
     ↓
-Qwen3-8B Decoder (frozen)
+SmolLM3-3B Decoder (frozen, Flash Attention 2)
     ↓
 Text Transcription
 ```
@@ -158,12 +164,13 @@ This diverse training data enables the model to handle a wide range of English s
 
 ### Training Strategy
 
-Only the audio projector weights are trained from scratch. The HuBERT encoder and Qwen3-8B decoder remain frozen throughout training, which:
+Only the audio projector weights (~13M params) are trained from scratch. The HuBERT-XLarge encoder and SmolLM3-3B decoder remain frozen throughout training, which:
 
 - Reduces memory requirements significantly
-- Enables faster training convergence
-- Preserves pretrained knowledge
+- Enables faster training convergence (~6 hours vs days/weeks)
+- Preserves pretrained knowledge from both audio and language domains
 - Prevents catastrophic forgetting
+- Makes training affordable (~$6 on A40)
 
 ## Evaluation
 
@@ -250,7 +257,7 @@ If you use Tiny Audio in your research, please cite:
 This project builds upon excellent prior work:
 
 - **HuBERT** ([Hsu et al., 2021](https://huggingface.co/docs/transformers/model_doc/hubert)): Self-supervised speech representation learning
-- **Qwen3-8B** ([Alibaba Cloud](https://huggingface.co/Qwen/Qwen3-8B)): Efficient language model
+- **SmolLM3-3B** ([HuggingFace](https://huggingface.co/HuggingFaceTB/SmolLM3-3B)): Efficient small language model
 
 ## Additional Resources
 
