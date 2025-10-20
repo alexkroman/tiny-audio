@@ -1,4 +1,4 @@
-"""SLAM-ASR: Frozen HuBERT + Trainable Projector + Frozen SmolLM3-3B-Base
+"""SLAM-ASR: Frozen HuBERT + Trainable Projector + Frozen Qwen3-8B
 
 Simple direct audio-to-text mapping without chat templates.
 """

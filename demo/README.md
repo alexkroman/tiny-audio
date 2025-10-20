@@ -9,14 +9,14 @@ python_version: "3.11"
 app_file: app.py
 pinned: false
 license: mit
-short_description: Efficient ASR with Whisper encoder and SmolLM2 decoder
+short_description: Efficient ASR with HuBERT encoder and Qwen3-8B decoder
 models:
   - mazesmazes/tiny-audio
 tags:
   - audio
   - automatic-speech-recognition
   - wav2vec2
-  - smollm3
+  - qwen3
   - lora
 suggested_hardware: cpu-upgrade
 preload_from_hub:
@@ -27,8 +27,8 @@ preload_from_hub:
 
 This Space demonstrates an Automatic Speech Recognition (ASR) model that combines:
 
-- **Whisper-small encoder** for audio feature extraction
-- **SmolLM2 decoder** with LoRA adapters for efficient text generation
+- **HuBERT-large encoder** for audio feature extraction
+- **Qwen3-8B decoder** for efficient text generation
 
 ## Features
 
@@ -41,9 +41,9 @@ This Space demonstrates an Automatic Speech Recognition (ASR) model that combine
 
 The model uses a novel architecture that bridges audio and text modalities:
 
-1. **Audio Encoder**: Frozen Whisper-small encoder (39M params)
-2. **Projection Layer**: Custom audio-to-text space mapping with RMSNorm
-3. **Text Decoder**: SmolLM2-135M with LoRA rank-32 adapters
+1. **Audio Encoder**: Frozen HuBERT-large encoder (317M params)
+2. **Projection Layer**: Custom audio-to-text space mapping
+3. **Text Decoder**: Qwen3-8B (frozen)
 
 ## Usage
 
@@ -70,7 +70,7 @@ If you use this model in your research, please cite:
 ```bibtex
 @software{tiny_audio_2024,
   author = {Kroman, Alex},
-  title = {Tiny Audio: Efficient ASR with Whisper and SmolLM2},
+  title = {Tiny Audio: Efficient ASR with HuBERT and Qwen3-8B},
   year = {2024},
   url = {https://github.com/alexkroman/tiny-audio}
 }

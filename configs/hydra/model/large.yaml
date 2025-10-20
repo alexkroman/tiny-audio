@@ -1,11 +1,10 @@
 # Large model configuration for SLAM-ASR
-decoder_model_name: HuggingFaceTB/SmolLM3-3B-Base  # Base model without chat templates
+decoder_model_name: HuggingFaceTB/SmolLM3-3B
 encoder_model_name: facebook/hubert-xlarge-ls960-ft  # HuBERT encoder
 
 # Projector configuration per SLAM-ASR paper
-projector_hidden_dim: 2048
+projector_hidden_dim: 8192
 audio_downsample_rate: 5
 
-# Attention implementation - auto-detected by training script
-# Will use flash_attention_2 on compatible GPUs (compute capability >= 8.0)
-# Falls back to sdpa (PyTorch scaled dot-product attention) otherwise
+# System prompt for transcription task
+system_prompt: "/no_think /system_override"

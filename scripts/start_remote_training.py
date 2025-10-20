@@ -58,7 +58,8 @@ def start_training(host, port, experiment, session_name):
 
     # This script will be created and executed on the remote machine.
     # It activates the virtual environment to ensure all commands use the correct packages.
-    training_script_content = textwrap.dedent(f"""\
+    training_script_content = textwrap.dedent(
+        f"""\
         #!/bin/bash
         # NOTE: "set -e" is intentionally removed.
         # This ensures that if the training script crashes, the tmux session
@@ -75,7 +76,7 @@ def start_training(host, port, experiment, session_name):
         export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
         # Enable TF32 for A40 (2x matmul speedup with no accuracy loss)
         export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
-        # Enable cudnn benchmarking for faster convolutions (Whisper encoder)
+        # Enable cudnn benchmarking for faster convolutions
         export TORCH_CUDNN_BENCHMARK=1
         export TORCHINDUCTOR_CACHE_DIR=/workspace/.inductor_cache  # Cache compiled kernels
         export TORCHINDUCTOR_FX_GRAPH_CACHE=1  # Cache graph transformations
@@ -83,10 +84,6 @@ def start_training(host, port, experiment, session_name):
         export TORCH_DYNAMO_ALLOW_UNSPEC_INT_ON_NN_MODULE=1
         # Disable CUDA graphs (incompatible with CPU-GPU sync in flash attention)
         export TORCH_CUDA_GRAPHS_ENABLED=0
-        echo "--- Starting TensorBoard ---"
-        pkill -f tensorboard || true
-        tensorboard --logdir /workspace/outputs --host 0.0.0.0 --port 6006 &
-        echo "TensorBoard started on port 6006"
 
         echo "--- Verifying environment ---"
         echo "Experiment: {experiment}"
@@ -111,7 +108,8 @@ def start_training(host, port, experiment, session_name):
 
         echo "Training script finished. Session will remain active for inspection."
         sleep infinity
-    """)
+    """
+    )
 
     # Use a heredoc to safely write the script to a temporary file on the remote
     create_script_cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} bash << 'EOF'

@@ -9,22 +9,21 @@ gradient_accumulation_steps: 2  # Reduced for quick testing
 eval_accumulation_steps: 1
 
 # Learning rate
-learning_rate: 5e-5
+learning_rate: 1e-4
 lr_scheduler_type: cosine
 warmup_ratio: 0.05
 weight_decay: 0.01
 
-# Optimizer - matching Qwen-Audio settings for multimodal training
 optim: adamw_torch
 adam_beta1: 0.9
-adam_beta2: 0.98  # Lower β2 for faster adaptation (audio model best practice)
-adam_epsilon: 1e-6  # Match Qwen-Audio
+adam_beta2: 0.98 
+adam_epsilon: 1e-6  
 
 # Logging
 logging_steps: 10
 logging_first_step: true
 logging_nan_inf_filter: false
-report_to: tensorboard
+report_to: wandb
 
 # Evaluation
 eval_strategy: steps
@@ -50,18 +49,12 @@ dataloader_pin_memory: false  # Important for Mac
 # use_mps_device: true # Deprecated - MPS will be used automatically if available
 max_grad_norm: 1.0
 
-# Regularization
-# NOTE: Label smoothing incompatible with multimodal models
-label_smoothing_factor: 0.0
-
-# Model dtype - use float32 for Mac to avoid dtype parameter issues
 model_dtype: float32
+attn_implementation: sdpa
 
 # Misc
 seed: 42
-save_safetensors: true  # Required to avoid torch.load security issue
-disable_tqdm: false
-log_level: info
+
 
 # Required by HF Trainer
 remove_unused_columns: false

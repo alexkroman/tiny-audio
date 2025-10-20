@@ -97,20 +97,37 @@ def sync_project(host, port, project_root):
 
 def install_python_dependencies(host, port):
     """
-    # CHANGED: Installs ONLY the project-specific dependencies into the global environment.
+    Install production dependencies using Poetry to respect poetry.lock versions.
+    System packages (PyTorch, CUDA libs) are preserved. Dev dependencies excluded.
     """
-    print("\nInstalling Python dependencies...")
+    print("\nInstalling Python dependencies from poetry.lock (excluding dev dependencies)...")
 
     cmd = f"""ssh -i ~/.ssh/id_ed25519 -p {port} -o StrictHostKeyChecking=no root@{host} \
         'cd /workspace && \
          export PATH="/root/.local/bin:$PATH" && \
          export PIP_ROOT_USER_ACTION=ignore && \
+         export POETRY_VIRTUALENVS_CREATE=false && \
+         export POETRY_INSTALLER_PARALLEL=true && \
+         export PIP_BREAK_SYSTEM_PACKAGES=1 && \
+         echo "--- Configuring pip to allow system package installation ---" && \
+         mkdir -p /root/.config/pip && \
+         echo -e "[global]\\nbreak-system-packages = true" > /root/.config/pip/pip.conf && \
+         echo "--- Installing Poetry (if not present) ---" && \
+         command -v poetry >/dev/null 2>&1 || pip install poetry && \
+         echo "--- Configuring Poetry ---" && \
+         poetry config virtualenvs.create false && \
+         poetry config installer.max-workers 10 && \
          echo "--- Installing flash-attn (if not present) ---" && \
-         python -c "import flash_attn" 2>/dev/null || pip install --break-system-packages flash-attn --no-build-isolation && \
+         python -c "import flash_attn" 2>/dev/null || pip install flash-attn --no-build-isolation && \
+         echo "--- Installing PyTorch with CUDA 12.8 support ---" && \
+         pip install torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128 && \
          echo "--- Installing torchcodec with CUDA support ---" && \
-         pip install --break-system-packages torchcodec --index-url=https://download.pytorch.org/whl/cu128 && \
-         echo "--- Installing project dependencies ---" && \
-         pip install --break-system-packages -e .'
+         pip install torchcodec~=0.7.0 --index-url=https://download.pytorch.org/whl/cu128 && \
+         echo "--- Installing project dependencies from poetry.lock (production only) ---" && \
+         echo "Note: Skipping torch/torchcodec to preserve CUDA versions" && \
+         poetry export --only main --without-hashes | grep -v "^torch==" | grep -v "^torchcodec==" | pip install -r /dev/stdin && \
+         echo "--- Installing project in editable mode ---" && \
+         pip install -e . --no-deps'
     """
     run_command(cmd)
     print("Python dependencies installed successfully!")

@@ -10,7 +10,7 @@ datasets:
       - dev
 
 # Data filtering
-max_audio_seconds: 30.0  
+max_audio_seconds: 25.0 
 
 # Audio processing
 sample_rate: 16000

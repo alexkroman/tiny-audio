@@ -2,17 +2,11 @@
 output_dir: ./outputs/production_model
 
 # Training configuration
-per_device_train_batch_size: 16
-per_device_eval_batch_size: 16
-gradient_accumulation_steps: 1
-eval_accumulation_steps: 1
+per_device_train_batch_size: 12
+per_device_eval_batch_size: 12
+gradient_accumulation_steps: 3
+eval_accumulation_steps: 3
 
-# Learning rate
-warmup_ratio: 0.03
-learning_rate: 1e-4
-weight_decay: 0.0
-
-# Optimizer - matching Qwen-Audio settings for multimodal training
 optim: adamw_torch_fused
 adam_beta1: 0.9
 adam_beta2: 0.999  
@@ -22,7 +16,7 @@ adam_epsilon: 1e-8
 logging_steps: 25
 logging_first_step: true
 logging_nan_inf_filter: false
-report_to: tensorboard
+report_to: wandb
 
 # Evaluation
 eval_strategy: steps
@@ -47,23 +41,19 @@ hub_private_repo: false
 fp16: false
 bf16: true
 tf32: true  # Enable TF32 for A40 (2x matmul speedup)
-dataloader_pin_memory: true
 max_grad_norm: 1.0  # Increased from 1.0 - less aggressive clipping for projector training
 torch_compile: true
 # torch_compile_mode: reduce-overhead
 
-# Regularization
-# NOTE: Label smoothing incompatible with multimodal models where labels are created internally
-# The Trainer's label smoother uses batch labels (256) but model creates combined labels (750+256)
-label_smoothing_factor: 0.0
-
 # Model dtype - use bfloat16 for production with flash attention
 model_dtype: bfloat16
+attn_implementation: flash_attention_2
 
 # Streaming compatibility settings
-dataloader_num_workers: 8  # Increased for better throughput (was 2)
-dataloader_persistent_workers: true
-dataloader_prefetch_factor: 4  # Reduced to limit memory with more workers
+dataloader_num_workers: 4
+dataloader_persistent_workers: true  
+dataloader_prefetch_factor: 2  
+dataloader_pin_memory: true
 
 # Misc
 seed: 42

@@ -119,7 +119,7 @@ class EndpointHandler:
 
         # The pipeline's __call__ method handles both single and batch inputs
         # as well as automatic chunking for long audio files
-        result = self.pipe(
+        return self.pipe(
             inputs,
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
@@ -128,5 +128,3 @@ class EndpointHandler:
             length_penalty=length_penalty,
             repetition_penalty=repetition_penalty,
         )
-
-        return result

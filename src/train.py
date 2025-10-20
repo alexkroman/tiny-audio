@@ -5,12 +5,13 @@ from typing import Any, Dict, List
 
 import hydra
 import torch
+import wandb
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
 from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments
 
-from .asr_config import ASRConfig
-from .asr_modeling import ASRModel
+from src.asr_config import ASRConfig
+from src.asr_modeling import ASRModel
 
 
 class DatasetLoader:
@@ -62,7 +63,7 @@ class DatasetLoader:
         )
         val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
 
-        train_ds = train_ds.shuffle(seed=42, buffer_size=10000)
+        # train_ds = train_ds.shuffle(seed=42, buffer_size=1000)
 
         if self.config.max_train_samples:
             train_ds = train_ds.take(self.config.max_train_samples)
@@ -74,7 +75,12 @@ class DatasetLoader:
 
 class DataCollator(DataCollatorForSeq2Seq):
     def __init__(
-        self, tokenizer: Any, feature_extractor: Any, sample_rate: int, max_audio_seconds: float, system_prompt: str = None
+        self,
+        tokenizer: Any,
+        feature_extractor: Any,
+        sample_rate: int,
+        max_audio_seconds: float,
+        system_prompt: str = None,
     ):
         super().__init__(tokenizer=tokenizer, padding=True)
         self.feature_extractor = feature_extractor
@@ -83,6 +89,9 @@ class DataCollator(DataCollatorForSeq2Seq):
         self.system_prompt = system_prompt
 
     def _extract_audio(self, audio_decoder) -> Any:
+        # Note: Audio() does peak normalization → [-1, 1]
+        # Wav2Vec2FeatureExtractor does z-normalization → mean=0, std=1
+        # No additional normalization needed here!
         audio_samples = audio_decoder.get_all_samples()
         audio_array = audio_samples.data[: self.max_audio_samples]
         return audio_array.squeeze().numpy()
@@ -101,7 +110,12 @@ class DataCollator(DataCollatorForSeq2Seq):
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": "Translate the audio to English."})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Transcribe: <|audio_start|><|audio_end|>",
+                }
+            )
             messages.append({"role": "assistant", "content": text})
 
             tokens = self.tokenizer.apply_chat_template(
@@ -110,12 +124,54 @@ class DataCollator(DataCollatorForSeq2Seq):
                 add_generation_prompt=False,
                 truncation=True,
                 max_length=256,
+                enable_thinking=False,
             )
+
+            # Create labels - only train on the actual transcription text, not thinking tags
+            labels = [-100] * len(tokens)  # Start with everything masked
+
+            # Get special token IDs
+            im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+            think_start_id = self.tokenizer.convert_tokens_to_ids("<think>")
+            think_end_id = self.tokenizer.convert_tokens_to_ids("</think>")
+
+            # Find where </think> ends (if present) - the actual transcription starts after it
+            content_start = -1
+            for i in range(len(tokens)):
+                if tokens[i] == think_end_id:
+                    # Skip the </think> token and any newlines after it
+                    content_start = i + 1
+                    # Skip newlines
+                    while content_start < len(tokens) and self.tokenizer.decode([tokens[content_start]]).strip() == "":
+                        content_start += 1
+                    break
+
+            # If no thinking tags found, look for assistant content directly
+            if content_start == -1:
+                im_start_id = self.tokenizer.convert_tokens_to_ids("<|im_start|>")
+                assistant_id = self.tokenizer.convert_tokens_to_ids("assistant")
+                for i in range(len(tokens) - 1):
+                    if tokens[i] == im_start_id and tokens[i + 1] == assistant_id:
+                        content_start = i + 3  # Skip <|im_start|>, assistant, \n
+                        break
+
+            # Find the closing <|im_end|> for the assistant message
+            content_end = -1
+            if content_start > 0:
+                for i in range(content_start, len(tokens)):
+                    if tokens[i] == im_end_id:
+                        content_end = i
+                        break
+
+            # Unmask only the actual transcription text (not thinking tags)
+            if content_start > 0 and content_end > 0:
+                for i in range(content_start, content_end + 1):  # +1 to include <|im_end|>
+                    labels[i] = tokens[i]
 
             text_features.append(
                 {
                     "input_ids": tokens,
-                    "labels": tokens,
+                    "labels": labels,
                 }
             )
 
@@ -140,18 +196,30 @@ def main(cfg: DictConfig) -> None:
 
     print(OmegaConf.to_yaml(cfg))
 
-    import importlib.util
+    # Initialize wandb
+    if cfg.training.get("report_to") == "wandb":
+        wandb.init(
+            project="tiny-audio",
+            config=OmegaConf.to_container(cfg, resolve=True),
+            name=cfg.training.get("run_name"),
+        )
 
-    default_attn = "flash_attention_2" if importlib.util.find_spec("flash_attn") is not None else "sdpa"
+    # Get encoder and decoder dimensions
+    from transformers import AutoConfig as HFAutoConfig
+
+    encoder_config = HFAutoConfig.from_pretrained(cfg.model.encoder_model_name)
+    decoder_config = HFAutoConfig.from_pretrained(cfg.model.decoder_model_name, trust_remote_code=True)
 
     asr_config = ASRConfig(
         text_model_id=cfg.model.decoder_model_name,
         audio_model_id=cfg.model.encoder_model_name,
-        attn_implementation=cfg.model.get("attn_implementation", default_attn),
+        attn_implementation=cfg.training.attn_implementation,
         model_dtype=cfg.training.model_dtype,
-        projector_hidden_dim=cfg.model.projector_hidden_dim,
         audio_downsample_rate=cfg.model.audio_downsample_rate,
-        system_prompt=cfg.model.get("system_prompt", None),
+        system_prompt=cfg.model.system_prompt,
+        encoder_dim=encoder_config.hidden_size,
+        llm_dim=decoder_config.hidden_size,
+        projector_hidden_dim=cfg.model.get("projector_hidden_dim", 2048),
     )
     model = ASRModel(asr_config)
 
@@ -162,7 +230,7 @@ def main(cfg: DictConfig) -> None:
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         max_audio_seconds=cfg.data.max_audio_seconds,
-        system_prompt=cfg.model.get("system_prompt", None),
+        system_prompt=cfg.model.system_prompt,
     )
 
     callbacks = []
@@ -180,6 +248,7 @@ def main(cfg: DictConfig) -> None:
     training_args = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_args, dict), "training_args must be a dict"
     training_args.pop("model_dtype", None)
+    training_args.pop("attn_implementation", None)
 
     trainer = Trainer(
         model=model,
@@ -191,7 +260,7 @@ def main(cfg: DictConfig) -> None:
         callbacks=callbacks,
     )
 
-    trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
+    trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
     trainer.save_model()
 
 

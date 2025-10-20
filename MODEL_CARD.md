@@ -1,47 +1,48 @@
 ---
 license: mit
 datasets:
-- mozilla-foundation/common_voice_17_0
-- speechcolab/gigaspeech
-- openslr/librispeech_asr
-- speechbrain/LoquaciousSet
+  - mozilla-foundation/common_voice_17_0
+  - speechcolab/gigaspeech
+  - openslr/librispeech_asr
+  - speechbrain/LoquaciousSet
 language:
-- en
+  - en
 base_model:
-- openai/whisper-small
-- HuggingFaceTB/SmolLM3-3B-Base
+  - facebook/hubert-xlarge-ls960-ft
+  - HuggingFaceTB/SmolLM3-3B
 pipeline_tag: automatic-speech-recognition
 tags:
-- whisper
-- smollm3
-- asr
-- speech-recognition
-- audio
-- parameter-efficient
-- frozen-encoder
+  - hubert
+  - smollm3
+  - asr
+  - speech-recognition
+  - audio
+  - parameter-efficient
+  - frozen-encoder
+  - flash-attention-2
 library_name: transformers
 model-index:
-- name: tiny-audio
-  results:
-  - task:
-      type: automatic-speech-recognition
-      name: Automatic Speech Recognition
-    dataset:
-      type: speechbrain/LoquaciousSet
-      name: LoquaciousSet
-      config: large
-      split: test
-    metrics:
-    - type: wer
-      name: Word Error Rate
-      value: TBD
+  - name: tiny-audio
+    results:
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          type: speechbrain/LoquaciousSet
+          name: LoquaciousSet
+          config: large
+          split: test
+        metrics:
+          - type: wer
+            name: Word Error Rate
+            value: TBD
 ---
 
 # Tiny Audio
 
-**Efficient Speech Recognition with Frozen Pretrained Models**
+## Efficient Speech Recognition with Frozen Pretrained Models
 
-Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a frozen Whisper encoder with a SmolLM3 language model decoder, connected via a trainable audio projector. This architecture enables efficient training by only fine-tuning a small projection layer (~7M parameters) while leveraging the power of large pretrained models.
+Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a frozen HuBERT-XLarge encoder with a SmolLM3-3B language model decoder, connected via a trainable audio projector. This architecture enables efficient training by only fine-tuning a small projection layer (~7M parameters) while leveraging the power of large pretrained models.
 
 ## Model Description
 
@@ -50,17 +51,18 @@ Tiny Audio is a lightweight automatic speech recognition (ASR) model that combin
 - **Language(s):** English
 - **License:** MIT
 - **Architecture:** Encoder-Projector-Decoder
-  - Audio Encoder: Whisper-small (244M params, frozen)
-  - Audio Projector: 2-layer MLP (~7M params, trainable)
-  - Text Decoder: SmolLM3-3B (3B params, frozen with optional LoRA)
+  - Audio Encoder: HuBERT-XLarge (1.3B params, frozen)
+  - Audio Projector: SwiGLU MLP (~13M params, trainable)
+  - Text Decoder: SmolLM3-3B (3B params, frozen)
 
 ## Key Features
 
-✅ **Parameter Efficient**: Only ~7M trainable parameters
-✅ **Fast Training**: Frozen encoder/decoder enable rapid fine-tuning
-✅ **Modular Design**: Easy to swap encoders (Whisper, HuBERT) or decoders
+✅ **Parameter Efficient**: Only ~13M trainable parameters
+✅ **Fast Training**: Frozen encoder/decoder enable rapid fine-tuning (~6 hours on A40)
+✅ **Modular Design**: Easy to swap different encoder or decoder models
 ✅ **Production Ready**: Includes evaluation tools and remote training scripts
 ✅ **HuggingFace Native**: Full integration with transformers library
+✅ **Optimized Performance**: Flash Attention 2 for faster inference
 
 ## Quick Start
 
@@ -78,13 +80,12 @@ print(result["text"])
 result = pipe(
     "path/to/audio.wav",
     max_new_tokens=200,
-    num_beams=4,
-    length_penalty=1.0,
 )
 print(result["text"])
 ```
 
 The model automatically handles:
+
 - Audio resampling to 16kHz
 - Various audio formats (WAV, MP3, FLAC, etc.)
 - Batch processing for multiple files
@@ -94,37 +95,46 @@ The model automatically handles:
 ### Model Components
 
 1. **Audio Encoder (Frozen)**
-   - Base Model: `openai/whisper-small`
-   - Parameters: 244M (frozen)
+
+   - Base Model: `facebook/hubert-xlarge-ls960-ft`
+   - Parameters: 1.3B (frozen)
    - Extracts acoustic features from raw audio waveforms
    - Output: Audio embeddings at ~50Hz frame rate
 
-2. **Audio Projector (Trainable)**
-   - Architecture: `Linear(encoder_dim × 5, 2048) → ReLU → Linear(2048, llm_dim)`
-   - Parameters: ~7M (trainable)
+1. **Audio Projector (Trainable)**
+
+   - Architecture: SwiGLU MLP (following Llama design)
+     - `gate_proj`: Linear(6400 → 2048, no bias)
+     - `up_proj`: Linear(6400 → 2048, no bias)
+     - `down_proj`: Linear(2048 → 2048, no bias)
+     - Activation: `silu(gate) * up` → `down`
+   - Parameters: ~13M (trainable)
    - Downsamples audio features by 5x (from ~50Hz to ~10Hz)
    - Maps audio embeddings to language model embedding space
 
-3. **Language Model Decoder (Frozen + Optional LoRA)**
-   - Base Model: `HuggingFaceTB/SmolLM3-3B-Base`
-   - Parameters: 3B (frozen) + optional LoRA adapters
-   - Generates text transcriptions autoregressively
-   - Uses beam search (beam_size=4) for decoding
+1. **Language Model Decoder (Frozen)**
+
+   - Base Model: `HuggingFaceTB/SmolLM3-3B`
+   - Parameters: 3B (frozen)
+   - Generates text transcriptions autoregressively with greedy decoding
+   - Uses Flash Attention 2 for efficient processing
 
 ### Data Flow
 
-```
+```text
 Raw Audio (16kHz)
     ↓
-Whisper Encoder (frozen)
+HuBERT-XLarge Encoder (frozen)
     ↓
-Audio Features [batch, ~1500, 768]
+Audio Features [batch, ~1500, 1280]
     ↓
-Audio Projector (trainable, 5x downsample)
+Audio Projector (SwiGLU MLP, trainable, 5x downsample)
+    gate_proj(6400→2048) & up_proj(6400→2048)
+    silu(gate) * up → down_proj(2048→2048)
     ↓
 Language Embeddings [batch, ~300, 2048]
     ↓
-SmolLM3 Decoder (frozen/LoRA)
+SmolLM3-3B Decoder (frozen, Flash Attention 2)
     ↓
 Text Transcription
 ```
@@ -133,16 +143,13 @@ Text Transcription
 
 ### Training Data
 
-The model is trained on a diverse mix of English speech datasets:
+The model is trained on the LoquaciousSet dataset:
 
-| Dataset | Hours | Domain | Description |
-|---------|-------|--------|-------------|
-| LibriSpeech | 960h | Audiobooks | Clean read speech |
-| GigaSpeech | 10,000h | Podcasts, YouTube | Diverse acoustic conditions |
-| Common Voice 17.0 | ~2,500h | Crowdsourced | Multiple accents and speakers |
-| LoquaciousSet | Variable | European Parliament | Formal speech |
+| Dataset | Hours | Description |
+|---------|-------|-------------|
+| LoquaciousSet | 25,000h | A diverse curated corpus combining CommonVoice, VoxPopuli, Libriheavy, People's Speech and YODAS. Contains hundreds of thousands of speakers with varied accents, speech types (read, spontaneous, talks), and acoustic conditions (clean to noisy with reverberation). |
 
-**Total Training Data:** ~13,000+ hours of English speech
+This diverse training data enables the model to handle a wide range of English speech recognition scenarios.
 
 ### Training Configuration
 
@@ -157,11 +164,13 @@ The model is trained on a diverse mix of English speech datasets:
 
 ### Training Strategy
 
-Only the audio projector weights are trained from scratch. The Whisper encoder and SmolLM3 decoder remain frozen throughout training, which:
+Only the audio projector weights (~13M params) are trained from scratch. The HuBERT-XLarge encoder and SmolLM3-3B decoder remain frozen throughout training, which:
+
 - Reduces memory requirements significantly
-- Enables faster training convergence
-- Preserves pretrained knowledge
+- Enables faster training convergence (~6 hours vs days/weeks)
+- Preserves pretrained knowledge from both audio and language domains
 - Prevents catastrophic forgetting
+- Makes training affordable (~$6 on A40)
 
 ## Evaluation
 
@@ -177,14 +186,11 @@ The model is evaluated on the LoquaciousSet benchmark dataset using Word Error R
 ### Evaluation Script
 
 ```bash
-# Install tiny-audio
-pip install tiny-audio
-
 # Run evaluation
-uv run scripts/eval.py --max-samples 100
+poetry run eval mazesmazes/tiny-audio --max-samples 100
 
 # Compare with baselines
-uv run scripts/eval.py --provider huggingface --model openai/whisper-small
+poetry run eval --provider assemblyai --api-key YOUR_API_KEY
 ```
 
 ## Limitations and Bias
@@ -250,9 +256,8 @@ If you use Tiny Audio in your research, please cite:
 
 This project builds upon excellent prior work:
 
-- **Whisper** ([Radford et al., 2022](https://github.com/openai/whisper)): Robust speech recognition encoder
-- **SmolLM3** ([HuggingFace Team](https://huggingface.co/HuggingFaceTB/SmolLM3-3B-Base)): Efficient language model
-- **SLAM-LLM** ([Ma et al., 2024](https://github.com/X-LANCE/SLAM-LLM)): Architectural inspiration for audio-language modeling
+- **HuBERT** ([Hsu et al., 2021](https://huggingface.co/docs/transformers/model_doc/hubert)): Self-supervised speech representation learning
+- **SmolLM3-3B** ([HuggingFace](https://huggingface.co/HuggingFaceTB/SmolLM3-3B)): Efficient small language model
 
 ## Additional Resources
 

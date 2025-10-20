@@ -1,73 +1,87 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
 
-[project]
+[tool.poetry]
 name = "tiny-audio"
-dynamic = ["version"]
-description = "Learn ASR by Building One - A minimal speech recognition model combining Whisper with SmolLM2"
-requires-python = ">=3.10"
-license = {text = "MIT"}
+version = "0.1.0"
+description = "Learn ASR by Building One - A minimal speech recognition model combining HuBERT with Qwen3-8B"
+authors = ["Alex Kroman <alex@alexkroman.com>"]
+license = "MIT"
 readme = "README.md"
-authors = [
-    {name = "Alex Kroman", email = "alex@alexkroman.com"}
-]
-keywords = ["speech-recognition", "asr", "whisper", "smollm2", "transformers", "deep-learning", "education"]
+keywords = ["speech-recognition", "asr", "hubert", "qwen3", "transformers", "deep-learning", "education"]
+homepage = "https://github.com/alexkroman/tiny-audio"
+repository = "https://github.com/alexkroman/tiny-audio"
+documentation = "https://github.com/alexkroman/tiny-audio#readme"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Education",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+packages = [{include = "src"}]
+include = ["*.json", "*.yaml", "*.yml"]
 
-dependencies = [
-    "transformers",
-    "accelerate",
-    "datasets[audio]",
-    "torchcodec",
-    "torchaudio",
-    "peft",
-    "evaluate",
-    "jiwer",
-    "tensorboard",
-    "numpy",
-    "hydra-core",
-    "omegaconf",
-    "hf-transfer",
-    "ninja",
-    "gradio",
-    "hf_transfer",
-    "assemblyai",
-    "typer>=0.19.2",
-]
+[tool.poetry.urls]
+"Bug Tracker" = "https://github.com/alexkroman/tiny-audio/issues"
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
-    "mypy>=1.5.0",
-    "mdformat>=0.7.0",  # Markdown formatter
-    "pymarkdownlnt>=0.9.0",  # Markdown linter
-]
+[[tool.poetry.source]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+priority = "supplemental"
 
-[project.urls]
-Homepage = "https://github.com/alexkroman/tiny-audio"
-Documentation = "https://github.com/alexkroman/tiny-audio#readme"
-Repository = "https://github.com/alexkroman/tiny-audio"
-Issues = "https://github.com/alexkroman/tiny-audio/issues"
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+# torch and torchcodec - Poetry will pull from pytorch-cu128 source on Linux when available
+torch = "~2.8.0"
+torchcodec = "~0.7.0"
+transformers = "*"
+accelerate = "*"
+datasets = {extras = ["audio"], version = ">=3.0.0"}
+peft = "*"
+evaluate = "*"
+jiwer = "*"
+wandb = "*"
+numpy = "*"
+hydra-core = "*"
+omegaconf = "*"
+hf-transfer = "*"
+ninja = "*"
+gradio = "*"
+assemblyai = "*"
+typer = ">=0.19.2"
 
-[tool.setuptools]
-packages = ["src"]
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0.0"
+black = ">=2.3.0"
+ruff = ">=0.1.0"
+mypy = ">=1.5.0"
+mdformat = ">=0.7.0"
 
-[tool.setuptools.package-data]
-"*" = ["*.json", "*.yaml", "*.yml"]
+[tool.poetry.scripts]
+# Model scripts (use: poetry run python src/train.py for training due to Hydra config paths)
+eval = "scripts.eval:main"
+push-to-hub = "scripts.push_to_hub:main"
+run-handler = "scripts.run_handler_local:main"
+
+# Deployment scripts
+deploy-hf = "scripts.deploy_to_hf_space:main"
+deploy-runpod = "scripts.deploy_runpod:main"
+remote-train = "scripts.start_remote_training:main"
+attach-remote = "scripts.attach_remote_session:main"
+
+# Development tools
+lint = "scripts.dev_tools:lint"
+format = "scripts.dev_tools:format_code"
+format-md = "scripts.dev_tools:format_markdown"
+type-check = "scripts.dev_tools:type_check"
+test = "scripts.dev_tools:test"
+check = "scripts.dev_tools:check_all"
 
 [tool.black]
 line-length = 100
@@ -161,3 +175,8 @@ extend-ignore = [
     "B008",  # do not perform function calls in argument defaults
     "B905",  # zip() without an explicit strict= parameter
 ]
+
+[tool.mdformat]
+wrap = 100
+number = false
+
