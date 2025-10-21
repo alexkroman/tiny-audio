@@ -114,6 +114,8 @@ def install_python_dependencies(host, port):
          echo -e "[global]\\nbreak-system-packages = true" > /root/.config/pip/pip.conf && \
          echo "--- Installing Poetry (if not present) ---" && \
          command -v poetry >/dev/null 2>&1 || pip install poetry && \
+         echo "--- Installing Poetry export plugin ---" && \
+         pip install poetry-plugin-export && \
          echo "--- Configuring Poetry ---" && \
          poetry config virtualenvs.create false && \
          poetry config installer.max-workers 10 && \

@@ -1,0 +1,48 @@
+# @package _global_
+
+# Stage 2 configuration - continues from stage1 with different seed
+defaults:
+  - override /model: large
+  - override /data: loquacious_large
+  - override /training: production
+
+model:
+  decoder_model_name: HuggingFaceTB/SmolLM3-3B
+  encoder_model_name: facebook/hubert-xlarge-ls960-ft
+
+  # Projector configuration
+  audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
+
+training:
+  # Learning rate and scheduler - cosine decay for fine-tuning from checkpoint
+  learning_rate: 5.0e-7  # Reduced from 5.0e-6 to reduce oscillation
+  warmup_steps: 50  # Gradual warmup to target LR
+  lr_scheduler_type: cosine  # Cosine decay for smooth convergence
+
+  # Optimization
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # Evaluation and checkpointing
+  eval_steps: 500
+  save_steps: 500
+  logging_steps: 25
+
+  # Training duration - extended for stage 2
+  max_steps: 40000
+
+  # Reproducibility - different seed for stage 2
+  seed: 45  # Changed from 42 for different initialization
+  ignore_data_skip: true
+
+  # Resume from best checkpoint if available
+  # Uncomment and set path to resume from stage1 checkpoint
+  # resume_from_checkpoint: ./outputs/production_model/checkpoint-10000
+  # Or resume from HuggingFace Hub:
+  
+  resume_from_checkpoint: /workspace/outputs/2025-10-21/17-36-16/outputs/production_model/checkpoint-20500
+
+# Early stopping configuration - less aggressive for continued improvement
+early_stopping:
+  patience: 20  # Increased from 10 to allow more exploration
+  threshold: 0.00005  # Reduced from 0.0001 for finer-grained improvements

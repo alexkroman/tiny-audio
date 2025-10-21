@@ -63,7 +63,7 @@ class DatasetLoader:
         )
         val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
 
-        # train_ds = train_ds.shuffle(seed=42, buffer_size=1000)
+        train_ds = train_ds.shuffle(seed=42)
 
         if self.config.max_train_samples:
             train_ds = train_ds.take(self.config.max_train_samples)
