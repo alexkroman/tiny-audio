@@ -55,8 +55,7 @@ training:
 
   # Memory optimization
   torch_compile: true  # Saves ~2GB
-  gradient_checkpointing: true  # Trade compute for memory
-
+  gradient_checkpointing: true  # Enable gradient checkpointing for stage3
 
   # Training duration - can be shorter with LoRA
   max_steps: 10000  # Reduced from 50k - LoRA converges faster

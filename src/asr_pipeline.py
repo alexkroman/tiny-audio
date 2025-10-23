@@ -25,11 +25,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         for key in [
             "max_new_tokens",
             "num_beams",
-            "temperature",
             "do_sample",
             "length_penalty",
             "repetition_penalty",
-            "top_p",
             "top_k",
         ]:
             if key in kwargs:

@@ -38,7 +38,6 @@ class AudioProjector(nn.Module):
         self.up_proj = nn.Linear(in_dim, hidden_dim, bias=False)
         self.down_proj = nn.Linear(hidden_dim, out_dim, bias=False)
 
-        # Initialize weights
         with torch.no_grad():
             nn.init.normal_(self.gate_proj.weight, std=0.02)
             nn.init.normal_(self.up_proj.weight, std=0.02)
@@ -53,10 +52,8 @@ class AudioProjector(nn.Module):
             pad_len = self.k - remainder
             x = F.pad(x, (0, 0, 0, pad_len))
 
-        # Reshape for temporal compression
         x = x.contiguous().view(batch_size, -1, dim * self.k)
 
-        # Apply SwiGLU block
         gate = self.gate_proj(x)
         up = self.up_proj(x)
         gated_output = F.silu(gate) * up  # Swish activation on the gate pathway
@@ -69,6 +66,7 @@ class ASRModel(PreTrainedModel):
     base_model_prefix = "model"
     main_input_name = "input_values"
     _supports_flash_attn_2 = True
+    supports_gradient_checkpointing = True
     _keys_to_ignore_on_save = ["encoder", "decoder.base_model"]
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
@@ -86,7 +84,6 @@ class ASRModel(PreTrainedModel):
         cls._pretrained_model_path = pretrained_model_name_or_path
 
         try:
-            # Load PEFT config if present
             peft_config = None
             try:
                 peft_config_file = cached_file(
@@ -102,50 +99,28 @@ class ASRModel(PreTrainedModel):
             except Exception:
                 pass
 
-            # Initialize model with PEFT config if found
             model = cls(config, peft_config=peft_config)
 
-            # Load projector weights (try new format first, fallback to old)
             projector_path = cached_file(
                 pretrained_model_name_or_path,
                 "projector.safetensors",
-                _raise_exceptions_for_missing_entries=False,
             )
-            if not projector_path:
-                projector_path = cached_file(
-                    pretrained_model_name_or_path,
-                    "model.safetensors",
-                    _raise_exceptions_for_missing_entries=False,
-                )
-                if projector_path:
-                    print("Note: Loading from old format (model.safetensors)")
-
             projector_state = load_file(projector_path)
-            # Extract projector weights
             projector_state = {
                 k.replace("projector.", ""): v
                 for k, v in projector_state.items()
                 if k.startswith("projector.")
             }
 
-            # Load projector weights strictly
             if projector_state:
                 model.projector.load_state_dict(projector_state, strict=True)
 
-            # Load LoRA adapters using PEFT's standard method
             if peft_config:
-                # Check if adapter files exist using cached_file
                 adapter_file = cached_file(
                     pretrained_model_name_or_path,
                     "adapter_model.safetensors",
                     _raise_exceptions_for_missing_entries=False,
                 )
-                if not adapter_file:
-                    adapter_file = cached_file(
-                        pretrained_model_name_or_path,
-                        "adapter_model.bin",
-                        _raise_exceptions_for_missing_entries=False,
-                    )
 
                 if adapter_file:
                     from peft import PeftModel
@@ -167,7 +142,6 @@ class ASRModel(PreTrainedModel):
     def __init__(self, config: ASRConfig, **kwargs):
         super().__init__(config)
 
-        # Extract peft_config from kwargs
         peft_config = kwargs.pop("peft_config", None)
 
         self.system_prompt = config.system_prompt
@@ -202,13 +176,11 @@ class ASRModel(PreTrainedModel):
         # Initialize tokenizer and resize embeddings BEFORE applying LoRA
         self._init_tokenizer()
 
-        # Apply LoRA AFTER tokenizer initialization and embedding resize
         if peft_config and peft_config.get("peft_method") == "lora":
             self._apply_lora(peft_config)
 
         from types import SimpleNamespace
 
-        # Use dimensions from config (required)
         if config.encoder_dim is None or config.llm_dim is None:
             raise ValueError(
                 "encoder_dim and llm_dim must be specified in config. "
@@ -238,15 +210,11 @@ class ASRModel(PreTrainedModel):
                 "PEFT library is required for LoRA fine-tuning. Install with: pip install peft"
             ) from None
 
-        # Handle target_modules configuration
         target_modules = peft_config.get("target_modules", ["q_proj", "v_proj"])
 
-        # If "all-linear" is specified, let PEFT automatically find all linear layers
         if target_modules == "all-linear":
-            # For recent PEFT versions, this targets all Linear layers
             target_modules = "all-linear"
 
-        # Create LoRA configuration
         # Note: We exclude embedding and lm_head layers to avoid issues with vocab resizing
         lora_config = LoraConfig(
             r=peft_config.get("r", 8),
@@ -258,10 +226,7 @@ class ASRModel(PreTrainedModel):
             modules_to_save=None,  # Don't save any modules, just apply LoRA
         )
 
-        # Apply LoRA to decoder
         self.decoder = get_peft_model(self.decoder, lora_config)
-
-        # Enable LoRA adapters for training
         self.decoder.print_trainable_parameters()
 
     def _init_weights(self, module):
@@ -291,6 +256,11 @@ class ASRModel(PreTrainedModel):
             return [f"decoder.{k}" for k in self.decoder._tied_weights_keys]
         return []
 
+    def _set_gradient_checkpointing(self, module, value=False):
+        """Enable/disable gradient checkpointing for the decoder."""
+        if isinstance(module, type(self.decoder)):
+            module.gradient_checkpointing_enable() if value else module.gradient_checkpointing_disable()
+
     def _init_tokenizer(self):
         model_path = (
             self.__class__._pretrained_model_path
@@ -300,7 +270,6 @@ class ASRModel(PreTrainedModel):
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-        # Add special audio boundary tokens if they don't exist
         existing_special = self.tokenizer.additional_special_tokens or []
         tokens_to_add = []
         if "<|audio_start|>" not in existing_special:
@@ -312,21 +281,18 @@ class ASRModel(PreTrainedModel):
             special_tokens = {"additional_special_tokens": existing_special + tokens_to_add}
             num_added_tokens = self.tokenizer.add_special_tokens(special_tokens)
             if num_added_tokens > 0:
-                # Resize model embeddings to account for new tokens
                 # Use mean_resizing=False since these are structural tokens, not semantic ones
                 self.decoder.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
                 print(
                     f"Added {num_added_tokens} special tokens, vocab size now: {len(self.tokenizer)}"
                 )
 
-        # Always ensure embeddings match tokenizer size (important for loaded models)
         current_embed_size = self.decoder.get_input_embeddings().weight.shape[0]
         expected_size = len(self.tokenizer)
         if current_embed_size != expected_size:
             print(f"Resizing embeddings from {current_embed_size} to {expected_size}")
             self.decoder.resize_token_embeddings(expected_size, mean_resizing=False)
 
-        # Store audio token IDs for easy access
         self.audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
         self.audio_end_id = self.tokenizer.convert_tokens_to_ids("<|audio_end|>")
 
@@ -351,21 +317,15 @@ class ASRModel(PreTrainedModel):
         return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
 
     def state_dict(self, *args, **kwargs):
-        """Only save trainable parameters (projector + LoRA) for efficient checkpointing.
+        """Only save trainable projector parameters for efficient checkpointing.
 
         This prevents saving frozen encoder/decoder weights in training checkpoints,
         reducing checkpoint size from ~10GB to <100MB.
+
+        Note: LoRA adapters are saved separately by PEFT's integration with Trainer.
         """
         state = {}
-
-        # Always include projector (trainable)
         state.update({f"projector.{k}": v for k, v in self.projector.state_dict().items()})
-
-        # Include LoRA parameters if using PEFT
-        if hasattr(self.decoder, "peft_config"):
-            lora_state = self.decoder.state_dict()
-            state.update({f"decoder.{k}": v for k, v in lora_state.items() if "lora_" in k})
-
         return state
 
     def get_input_embeddings(self):
@@ -428,7 +388,6 @@ class ASRModel(PreTrainedModel):
                     f"Vocab size: {vocab_size}"
                 )
 
-            # Find positions of <|audio_start|> and <|audio_end|> tokens
             audio_start_positions = (input_ids == self.audio_start_id).nonzero(as_tuple=True)
             audio_end_positions = (input_ids == self.audio_end_id).nonzero(as_tuple=True)
 
@@ -437,16 +396,13 @@ class ASRModel(PreTrainedModel):
                     "Audio boundary tokens <|audio_start|> and <|audio_end|> must be present"
                 )
 
-            # Get text embeddings
             text_embeds = self.decoder.get_input_embeddings()(input_ids)
 
-            # Build new embedding sequences with audio embeddings between the boundary tokens
             new_embeds = []
             new_labels: list[torch.Tensor] = [] if labels is not None else None
             new_attention = []
 
             for i in range(batch_size):
-                # Find audio boundaries for this batch item
                 start_mask = audio_start_positions[0] == i
                 end_mask = audio_end_positions[0] == i
 
@@ -456,19 +412,14 @@ class ASRModel(PreTrainedModel):
                 start_pos = audio_start_positions[1][start_mask][0].item()
                 end_pos = audio_end_positions[1][end_mask][0].item()
 
-                # Build sequence: [..., <|audio_start|>, audio_embeds, <|audio_end|>, ...]
-                before_audio = text_embeds[i, : start_pos + 1]  # Include audio_start token
-                after_audio = text_embeds[
-                    i, end_pos:
-                ]  # Include audio_end token and everything after
+                before_audio = text_embeds[i, : start_pos + 1]
+                after_audio = text_embeds[i, end_pos:]
 
                 batch_embeds = torch.cat([before_audio, audio_embeds[i], after_audio], dim=0)
                 new_embeds.append(batch_embeds)
 
-                # Handle labels if present
                 if labels is not None:
                     before_labels = labels[i, : start_pos + 1]
-                    # Audio embeddings are always masked
                     audio_labels = torch.full(
                         (audio_seq_len,), -100, dtype=labels.dtype, device=labels.device
                     )
@@ -476,7 +427,6 @@ class ASRModel(PreTrainedModel):
                     batch_labels = torch.cat([before_labels, audio_labels, after_labels], dim=0)
                     new_labels.append(batch_labels)
 
-                # Handle attention mask
                 if attention_mask is not None:
                     before_attn = attention_mask[i, : start_pos + 1]
                     audio_attn = torch.ones(
@@ -486,7 +436,6 @@ class ASRModel(PreTrainedModel):
                     batch_attn = torch.cat([before_attn, audio_attn, after_attn], dim=0)
                     new_attention.append(batch_attn)
 
-            # Stack all batches
             inputs_embeds = torch.stack(new_embeds)
             if labels is not None:
                 labels = torch.stack(new_labels)
@@ -522,11 +471,9 @@ class ASRModel(PreTrainedModel):
         batch_size = audio_embeds.shape[0]
         device = audio_embeds.device
 
-        # Use model's default system prompt if none provided
         if system_prompt is None:
             system_prompt = self.system_prompt
 
-        # Apply chat template with audio boundary tokens
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -548,24 +495,19 @@ class ASRModel(PreTrainedModel):
         if len(prompt_ids.shape) == 1:
             prompt_ids = prompt_ids.unsqueeze(0)
 
-        # Expand to batch size if needed
         if prompt_ids.shape[0] == 1 and batch_size > 1:
             prompt_ids = prompt_ids.expand(batch_size, -1)
 
-        # Find positions of audio boundary tokens
         audio_start_positions = (prompt_ids == self.audio_start_id).nonzero(as_tuple=True)
         audio_end_positions = (prompt_ids == self.audio_end_id).nonzero(as_tuple=True)
 
         if len(audio_start_positions[0]) == 0 or len(audio_end_positions[0]) == 0:
             raise ValueError("Audio boundary tokens not found in prompt")
 
-        # Get text embeddings
         prompt_embeds = self.decoder.get_input_embeddings()(prompt_ids)
 
-        # Insert audio embeddings between boundary tokens for each batch item
         new_embeds = []
         for i in range(batch_size):
-            # Find audio boundaries for this batch item
             start_mask = audio_start_positions[0] == i
             end_mask = audio_end_positions[0] == i
 
@@ -575,22 +517,18 @@ class ASRModel(PreTrainedModel):
             start_pos = audio_start_positions[1][start_mask][0].item()
             end_pos = audio_end_positions[1][end_mask][0].item()
 
-            # Build sequence with audio embeddings between boundaries
-            before_audio = prompt_embeds[i, : start_pos + 1]  # Include start token
-            after_audio = prompt_embeds[i, end_pos:]  # Include end token
+            before_audio = prompt_embeds[i, : start_pos + 1]
+            after_audio = prompt_embeds[i, end_pos:]
 
             batch_embeds = torch.cat([before_audio, audio_embeds[i], after_audio], dim=0)
             new_embeds.append(batch_embeds)
 
         inputs_embeds = torch.stack(new_embeds)
 
-        # Create attention mask for full input
         total_seq_len = inputs_embeds.shape[1]
         attention_mask = torch.ones(batch_size, total_seq_len, dtype=torch.long, device=device)
 
-        generate_kwargs.setdefault(
-            "max_new_tokens", 150
-        )  # Increased from 120 to handle longest samples (~95 words)
+        generate_kwargs.setdefault("max_new_tokens", 150)
         generate_kwargs.setdefault("num_beams", self.config.num_beams)
         generate_kwargs.setdefault("do_sample", False)
 
@@ -611,32 +549,17 @@ class ASRModel(PreTrainedModel):
         save_dir = PathlibPath(save_directory)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # Sync vocab size (may have changed if tokens were added)
         actual_vocab_size = self.decoder.config.vocab_size
         self.config.vocab_size = actual_vocab_size
         self.config.text_config.vocab_size = actual_vocab_size
 
-        # Ensure projector dimensions are set (may not be present in old configs)
-        if not hasattr(self.config, "encoder_dim") or self.config.encoder_dim is None:
-            self.config.encoder_dim = self.encoder.config.hidden_size
-        if not hasattr(self.config, "llm_dim") or self.config.llm_dim is None:
-            self.config.llm_dim = self.decoder.config.hidden_size
-        if (
-            not hasattr(self.config, "projector_hidden_dim")
-            or self.config.projector_hidden_dim is None
-        ):
-            self.config.projector_hidden_dim = self.projector.gate_proj.out_features
-
-        # Save config and generation config (but not model weights - we handle those separately)
         self.config.save_pretrained(save_dir)
         if hasattr(self, "generation_config") and self.generation_config is not None:
             self.generation_config.save_pretrained(save_dir)
 
-        # Save projector weights
         projector_state = {"projector." + k: v for k, v in self.projector.state_dict().items()}
         save_file(projector_state, save_dir / "projector.safetensors")
 
-        # Save LoRA adapters
         if self.peft_config and self.peft_config.get("peft_method") == "lora":
             if hasattr(self.decoder, "save_pretrained"):
                 self.decoder.save_pretrained(save_dir)
@@ -647,12 +570,10 @@ class ASRModel(PreTrainedModel):
             with peft_config_path.open("w") as f:
                 json.dump(self.peft_config, f, indent=2)
 
-        # Save tokenizer and feature extractor
         self.tokenizer.save_pretrained(save_dir)
         self.feature_extractor.save_pretrained(save_dir)
         self.get_processor().save_pretrained(save_dir)
 
-        # Copy source files
         src_dir = PathlibPath(__file__).parent
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
