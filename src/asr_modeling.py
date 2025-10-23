@@ -18,6 +18,7 @@ from transformers.generation.utils import (
     GenerateDecoderOnlyOutput,
     GenerateEncoderDecoderOutput,
 )
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 try:
     from .asr_config import ASRConfig
@@ -33,10 +34,16 @@ class AudioProjector(nn.Module):
         in_dim = config.encoder_dim * self.k
         out_dim = config.llm_dim
 
+        # Pre-norm: normalize stacked encoder features (fixes broken normalization from concatenation)
+        self.ln_pre = LlamaRMSNorm(in_dim)
+
         # SwiGLU layers, following the Llama architecture
         self.gate_proj = nn.Linear(in_dim, hidden_dim, bias=False)
         self.up_proj = nn.Linear(in_dim, hidden_dim, bias=False)
         self.down_proj = nn.Linear(hidden_dim, out_dim, bias=False)
+
+        # Post-norm: normalize output to match LLM's expected embedding distribution
+        self.ln_post = LlamaRMSNorm(out_dim)
 
         with torch.no_grad():
             nn.init.normal_(self.gate_proj.weight, std=0.02)
@@ -52,13 +59,22 @@ class AudioProjector(nn.Module):
             pad_len = self.k - remainder
             x = F.pad(x, (0, 0, 0, pad_len))
 
+        # Stack frames (concatenation breaks encoder's normalization)
         x = x.contiguous().view(batch_size, -1, dim * self.k)
 
+        # Re-normalize after stacking
+        x = self.ln_pre(x)
+
+        # SwiGLU projection
         gate = self.gate_proj(x)
         up = self.up_proj(x)
-        gated_output = F.silu(gate) * up  # Swish activation on the gate pathway
+        gated_output = F.silu(gate) * up
 
-        return self.down_proj(gated_output)
+        # Project to LLM dimension
+        output = self.down_proj(gated_output)
+
+        # Normalize before LLM to ensure stable input distribution
+        return self.ln_post(output)
 
 
 class ASRModel(PreTrainedModel):
@@ -125,14 +141,14 @@ class ASRModel(PreTrainedModel):
 
             model = cls(config, peft_config=peft_config, encoder_lora_config=encoder_lora_config)
 
-            projector_path = cached_file(
+            model_path = cached_file(
                 pretrained_model_name_or_path,
-                "projector.safetensors",
+                "model.safetensors",
             )
-            projector_state = load_file(projector_path)
+            model_state = load_file(model_path)
             projector_state = {
                 k.replace("projector.", ""): v
-                for k, v in projector_state.items()
+                for k, v in model_state.items()
                 if k.startswith("projector.")
             }
 
@@ -192,8 +208,6 @@ class ASRModel(PreTrainedModel):
         self.encoder_lora_config = encoder_lora_config
 
         self.encoder = self._create_encoder(config, encoder_lora_config)
-        # Always wrap encoder forward to prevent torch.compile issues
-        self._wrap_encoder_forward()
 
         self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(config.audio_model_id)
 
@@ -270,33 +284,6 @@ class ASRModel(PreTrainedModel):
         model.print_trainable_parameters()
         return model
 
-    def _wrap_encoder_forward(self):
-        """Wrap encoder forward to filter out invalid kwargs like input_ids.
-
-        This is needed because torch.compile and other wrappers may try to pass
-        all parent model kwargs to child modules. HuBERT only accepts specific args.
-        """
-        original_forward = self.encoder.forward
-
-        def safe_encoder_forward(
-            input_values=None,
-            attention_mask=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
-            **kwargs  # Catch and discard any other kwargs
-        ):
-            # Only pass valid HuBERT arguments
-            return original_forward(
-                input_values=input_values,
-                attention_mask=attention_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-
-        self.encoder.forward = safe_encoder_forward
-
     @classmethod
     def _create_encoder(cls, config: ASRConfig, encoder_lora_config: Optional[dict] = None):
         """Create and configure the audio encoder.
@@ -308,6 +295,8 @@ class ASRModel(PreTrainedModel):
         Returns:
             Configured encoder model (potentially with LoRA)
         """
+        import types
+
         target_dtype = getattr(torch, config.model_dtype)
 
         encoder = AutoModel.from_pretrained(
@@ -319,7 +308,29 @@ class ASRModel(PreTrainedModel):
         )
         encoder.requires_grad_(False)
 
-        # Apply LoRA to encoder if configured
+        # Wrap encoder forward BEFORE applying LoRA to filter invalid kwargs
+        original_forward = encoder.forward
+
+        def safe_encoder_forward(
+            self_encoder,
+            input_values=None,
+            attention_mask=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+            **kwargs  # Catch and discard invalid kwargs like input_ids
+        ):
+            return original_forward(
+                input_values=input_values,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
+        encoder.forward = types.MethodType(safe_encoder_forward, encoder)
+
+        # Apply LoRA to encoder if configured (after wrapping base forward)
         if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
             from peft import TaskType
             encoder = cls._apply_lora(encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder")
@@ -409,20 +420,16 @@ class ASRModel(PreTrainedModel):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
         existing_special = self.tokenizer.additional_special_tokens or []
-        tokens_to_add = []
-        if "<|audio_start|>" not in existing_special:
-            tokens_to_add.append("<|audio_start|>")
-        if "<|audio_end|>" not in existing_special:
-            tokens_to_add.append("<|audio_end|>")
 
-        if tokens_to_add:
-            special_tokens = {"additional_special_tokens": existing_special + tokens_to_add}
+        # Add single audio token if not present
+        if "<audio>" not in existing_special:
+            special_tokens = {"additional_special_tokens": existing_special + ["<audio>"]}
             num_added_tokens = self.tokenizer.add_special_tokens(special_tokens)
             if num_added_tokens > 0:
-                # Use mean_resizing=False since these are structural tokens, not semantic ones
+                # Use mean_resizing=False since this is a structural token, not semantic
                 self.decoder.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
                 print(
-                    f"Added {num_added_tokens} special tokens, vocab size now: {len(self.tokenizer)}"
+                    f"Added {num_added_tokens} audio token, vocab size now: {len(self.tokenizer)}"
                 )
 
         current_embed_size = self.decoder.get_input_embeddings().weight.shape[0]
@@ -431,8 +438,7 @@ class ASRModel(PreTrainedModel):
             print(f"Resizing embeddings from {current_embed_size} to {expected_size}")
             self.decoder.resize_token_embeddings(expected_size, mean_resizing=False)
 
-        self.audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
-        self.audio_end_id = self.tokenizer.convert_tokens_to_ids("<|audio_end|>")
+        self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<audio>")
 
         self.tokenizer.padding_side = "right"
 
@@ -539,26 +545,21 @@ class ASRModel(PreTrainedModel):
             batch_size = input_ids.shape[0]
             audio_seq_len = audio_embeds.shape[1]
 
-            # Validate audio token IDs before using them
-            if self.audio_start_id is None or self.audio_end_id is None:
-                raise ValueError(
-                    f"Audio tokens not properly initialized. Start: {self.audio_start_id}, End: {self.audio_end_id}"
-                )
+            # Validate audio token ID before using it
+            if self.audio_token_id is None:
+                raise ValueError(f"Audio token not properly initialized: {self.audio_token_id}")
 
             vocab_size = self.decoder.get_input_embeddings().weight.shape[0]
-            if self.audio_start_id >= vocab_size or self.audio_end_id >= vocab_size:
+            if self.audio_token_id >= vocab_size:
                 raise ValueError(
-                    f"Audio token IDs out of range. Start: {self.audio_start_id}, End: {self.audio_end_id}, "
-                    f"Vocab size: {vocab_size}"
+                    f"Audio token ID out of range. ID: {self.audio_token_id}, Vocab size: {vocab_size}"
                 )
 
-            audio_start_positions = (input_ids == self.audio_start_id).nonzero(as_tuple=True)
-            audio_end_positions = (input_ids == self.audio_end_id).nonzero(as_tuple=True)
+            # Find positions of <audio> token
+            audio_token_positions = (input_ids == self.audio_token_id).nonzero(as_tuple=True)
 
-            if len(audio_start_positions[0]) == 0 or len(audio_end_positions[0]) == 0:
-                raise ValueError(
-                    "Audio boundary tokens <|audio_start|> and <|audio_end|> must be present"
-                )
+            if len(audio_token_positions[0]) == 0:
+                raise ValueError("Audio token <audio> must be present in input")
 
             text_embeds = self.decoder.get_input_embeddings()(input_ids)
 
@@ -567,36 +568,38 @@ class ASRModel(PreTrainedModel):
             new_attention = []
 
             for i in range(batch_size):
-                start_mask = audio_start_positions[0] == i
-                end_mask = audio_end_positions[0] == i
+                # Find audio token position for this batch item
+                token_mask = audio_token_positions[0] == i
 
-                if not start_mask.any() or not end_mask.any():
-                    raise ValueError(f"Missing audio boundaries in batch item {i}")
+                if not token_mask.any():
+                    raise ValueError(f"Missing audio token in batch item {i}")
 
-                start_pos = audio_start_positions[1][start_mask][0].item()
-                end_pos = audio_end_positions[1][end_mask][0].item()
+                audio_pos = audio_token_positions[1][token_mask][0].item()
 
-                before_audio = text_embeds[i, : start_pos + 1]
-                after_audio = text_embeds[i, end_pos:]
+                # Split embeddings: before audio token, audio embeddings, after audio token
+                before_audio = text_embeds[i, :audio_pos]
+                after_audio = text_embeds[i, audio_pos + 1 :]
 
+                # Replace audio token with audio embeddings
                 batch_embeds = torch.cat([before_audio, audio_embeds[i], after_audio], dim=0)
                 new_embeds.append(batch_embeds)
 
                 if labels is not None:
-                    before_labels = labels[i, : start_pos + 1]
+                    before_labels = labels[i, :audio_pos]
+                    # Audio embeddings don't contribute to loss
                     audio_labels = torch.full(
                         (audio_seq_len,), -100, dtype=labels.dtype, device=labels.device
                     )
-                    after_labels = labels[i, end_pos:]
+                    after_labels = labels[i, audio_pos + 1 :]
                     batch_labels = torch.cat([before_labels, audio_labels, after_labels], dim=0)
                     new_labels.append(batch_labels)
 
                 if attention_mask is not None:
-                    before_attn = attention_mask[i, : start_pos + 1]
+                    before_attn = attention_mask[i, :audio_pos]
                     audio_attn = torch.ones(
                         audio_seq_len, dtype=attention_mask.dtype, device=attention_mask.device
                     )
-                    after_attn = attention_mask[i, end_pos:]
+                    after_attn = attention_mask[i, audio_pos + 1 :]
                     batch_attn = torch.cat([before_attn, audio_attn, after_attn], dim=0)
                     new_attention.append(batch_attn)
 
@@ -644,7 +647,7 @@ class ASRModel(PreTrainedModel):
         messages.append(
             {
                 "role": "user",
-                "content": "Transcribe: <|audio_start|><|audio_end|>",
+                "content": "Repeat the following text, without any explanation: <audio>",
             }
         )
 
@@ -662,27 +665,26 @@ class ASRModel(PreTrainedModel):
         if prompt_ids.shape[0] == 1 and batch_size > 1:
             prompt_ids = prompt_ids.expand(batch_size, -1)
 
-        audio_start_positions = (prompt_ids == self.audio_start_id).nonzero(as_tuple=True)
-        audio_end_positions = (prompt_ids == self.audio_end_id).nonzero(as_tuple=True)
+        # Find positions of <audio> token
+        audio_token_positions = (prompt_ids == self.audio_token_id).nonzero(as_tuple=True)
 
-        if len(audio_start_positions[0]) == 0 or len(audio_end_positions[0]) == 0:
-            raise ValueError("Audio boundary tokens not found in prompt")
+        if len(audio_token_positions[0]) == 0:
+            raise ValueError("Audio token <audio> not found in prompt")
 
         prompt_embeds = self.decoder.get_input_embeddings()(prompt_ids)
 
         new_embeds = []
         for i in range(batch_size):
-            start_mask = audio_start_positions[0] == i
-            end_mask = audio_end_positions[0] == i
+            token_mask = audio_token_positions[0] == i
 
-            if not start_mask.any() or not end_mask.any():
-                raise ValueError(f"Missing audio boundaries in batch item {i}")
+            if not token_mask.any():
+                raise ValueError(f"Missing audio token in batch item {i}")
 
-            start_pos = audio_start_positions[1][start_mask][0].item()
-            end_pos = audio_end_positions[1][end_mask][0].item()
+            audio_pos = audio_token_positions[1][token_mask][0].item()
 
-            before_audio = prompt_embeds[i, : start_pos + 1]
-            after_audio = prompt_embeds[i, end_pos:]
+            # Replace audio token with audio embeddings
+            before_audio = prompt_embeds[i, :audio_pos]
+            after_audio = prompt_embeds[i, audio_pos + 1 :]
 
             batch_embeds = torch.cat([before_audio, audio_embeds[i], after_audio], dim=0)
             new_embeds.append(batch_embeds)

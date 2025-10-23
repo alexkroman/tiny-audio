@@ -1,0 +1,49 @@
+# @package _global_
+
+
+defaults:
+  - override /model: large
+  - override /data: loquacious_clean
+  - override /training: production
+
+model:
+  decoder_model_name: HuggingFaceTB/SmolLM3-3B
+  encoder_model_name: facebook/hubert-xlarge-ls960-ft
+
+  # Projector configuration
+  audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
+  projector_hidden_dim: 8192  # Increased for better capacity
+
+training:
+  per_device_train_batch_size: 12
+  per_device_eval_batch_size: 12
+  gradient_accumulation_steps: 3
+  eval_accumulation_steps: 3
+
+  # Learning rate and scheduler
+  learning_rate: 1.0e-3
+  warmup_steps: 500
+  lr_scheduler_type: cosine
+
+  # Optimization
+  weight_decay: 0.01
+  max_grad_norm: 1.0  # Increased from 1.0 - less aggressive clipping for projector training
+
+
+  # Evaluation and checkpointing
+  eval_steps: 500
+  save_steps: 500
+  logging_steps: 25
+
+  # Training duration
+  max_steps: 10000
+
+  # Reproducibility
+  seed: 42
+  ignore_data_skip: true
+
+# Early stopping configuration
+early_stopping:
+  patience: 10
+  threshold: 0.0001
+

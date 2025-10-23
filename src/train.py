@@ -113,7 +113,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             messages.append(
                 {
                     "role": "user",
-                    "content": "Transcribe: <|audio_start|><|audio_end|>",
+                    "content": "Repeat the following text, without any explanation: <audio>",
                 }
             )
             messages.append({"role": "assistant", "content": text})
