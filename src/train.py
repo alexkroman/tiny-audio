@@ -4,7 +4,9 @@ import logging
 from typing import Any, Dict, List
 
 import hydra
+import nltk
 import torch
+import truecase
 import wandb
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
@@ -12,6 +14,12 @@ from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer,
 
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
+
+# Download required NLTK data for truecase
+try:
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+    nltk.download('punkt_tab', quiet=True)
 
 
 class DatasetLoader:
@@ -37,7 +45,10 @@ class DatasetLoader:
         if audio_column != "audio" and audio_column in ds.column_names:
             ds = ds.rename_column(audio_column, "audio")
 
-        return ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
+        # Cast audio column to correct format
+        ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
+
+        return ds
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -106,6 +117,10 @@ class DataCollator(DataCollatorForSeq2Seq):
         text_features = []
         for f in features:
             text = f["text"].strip() if isinstance(f["text"], str) else f["text"]
+
+            # Apply truecasing in main process (not in DataLoader workers)
+            text = text.replace('<COMMA>', ',').replace('<PERIOD>', '.')
+            text = truecase.get_true_case(text)
 
             messages = []
             if self.system_prompt:

@@ -55,6 +55,8 @@ ninja = "*"
 gradio = "*"
 assemblyai = "*"
 typer = ">=0.19.2"
+truecase = "*"
+nltk = "*"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
