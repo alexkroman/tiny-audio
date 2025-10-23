@@ -77,10 +77,9 @@ class ASRModel(PreTrainedModel):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         import json
-        from pathlib import Path as PathlibPath
 
-        from huggingface_hub import hf_hub_download
         from safetensors.torch import load_file
+        from transformers.utils import cached_file
 
         config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
@@ -88,39 +87,38 @@ class ASRModel(PreTrainedModel):
         cls._pretrained_model_path = pretrained_model_name_or_path
 
         try:
-            # Check if PEFT config exists (for LoRA models)
+            # Load PEFT config if present
             peft_config = None
-            local_path = PathlibPath(pretrained_model_name_or_path)
+            try:
+                peft_config_file = cached_file(
+                    pretrained_model_name_or_path,
+                    "peft_config.json",
+                    _raise_exceptions_for_missing_entries=False,
+                )
+                if peft_config_file:
+                    from pathlib import Path as PathlibPath
 
-            if local_path.exists():
-                peft_config_path = local_path / "peft_config.json"
-                if peft_config_path.exists():
-                    with peft_config_path.open() as f:
+                    with PathlibPath(peft_config_file).open() as f:
                         peft_config = json.load(f)
+            except Exception:
+                pass
 
             # Initialize model with PEFT config if found
             model = cls(config, peft_config=peft_config)
 
-            # Load projector weights from dedicated file
-            if local_path.exists():
-                # Local path
-                projector_path = local_path / "projector.safetensors"
-                # Fallback for old format
-                if not projector_path.exists():
-                    projector_path = local_path / "model.safetensors"
-                    if projector_path.exists():
-                        print("Note: Loading from old format (model.safetensors)")
-            else:
-                # Download from HuggingFace Hub
-                try:
-                    projector_path = hf_hub_download(
-                        repo_id=pretrained_model_name_or_path, filename="projector.safetensors"
-                    )
-                except Exception:
-                    # Fallback for old format
-                    projector_path = hf_hub_download(
-                        repo_id=pretrained_model_name_or_path, filename="model.safetensors"
-                    )
+            # Load projector weights (try new format first, fallback to old)
+            projector_path = cached_file(
+                pretrained_model_name_or_path,
+                "projector.safetensors",
+                _raise_exceptions_for_missing_entries=False,
+            )
+            if not projector_path:
+                projector_path = cached_file(
+                    pretrained_model_name_or_path,
+                    "model.safetensors",
+                    _raise_exceptions_for_missing_entries=False,
+                )
+                if projector_path:
                     print("Note: Loading from old format (model.safetensors)")
 
             projector_state = load_file(projector_path)
@@ -137,35 +135,26 @@ class ASRModel(PreTrainedModel):
 
             # Load LoRA adapters using PEFT's standard method
             if peft_config:
-                # Try to load adapter files
-                adapter_exists = False
+                # Check if adapter files exist using cached_file
+                adapter_file = cached_file(
+                    pretrained_model_name_or_path,
+                    "adapter_model.safetensors",
+                    _raise_exceptions_for_missing_entries=False,
+                )
+                if not adapter_file:
+                    adapter_file = cached_file(
+                        pretrained_model_name_or_path,
+                        "adapter_model.bin",
+                        _raise_exceptions_for_missing_entries=False,
+                    )
 
-                if local_path.exists():
-                    # Check local path
-                    adapter_model_path = local_path / "adapter_model.safetensors"
-                    if not adapter_model_path.exists():
-                        adapter_model_path = local_path / "adapter_model.bin"
-                    adapter_exists = adapter_model_path.exists()
-                else:
-                    # Check Hub for adapter files
-                    try:
-                        from huggingface_hub import list_repo_files
-
-                        files = list_repo_files(pretrained_model_name_or_path)
-                        adapter_exists = any(
-                            f in files for f in ["adapter_model.safetensors", "adapter_model.bin"]
-                        )
-                    except Exception:
-                        pass
-
-                if adapter_exists:
+                if adapter_file:
                     from peft import PeftModel
 
                     print(f"Loading LoRA adapters from {pretrained_model_name_or_path}")
-                    # Load LoRA adapters using PEFT's standard method
                     model.decoder = PeftModel.from_pretrained(
                         model.decoder,
-                        pretrained_model_name_or_path if not local_path.exists() else local_path,
+                        pretrained_model_name_or_path,
                         is_trainable=True,  # Keep adapters trainable for continued training
                     )
                 else:
@@ -276,6 +265,33 @@ class ASRModel(PreTrainedModel):
         # Enable LoRA adapters for training
         self.decoder.print_trainable_parameters()
 
+    def _init_weights(self, module):
+        """Initialize weights for trainable modules.
+
+        Note: This is a no-op since:
+        - AudioProjector self-initializes in its __init__
+        - Encoder/decoder are loaded from pretrained weights
+        """
+        pass
+
+    def can_generate(self) -> bool:
+        """Return True to indicate this model supports generation.
+
+        Required for Transformers 4.50+ where PreTrainedModel no longer
+        inherits from GenerationMixin.
+        """
+        return True
+
+    @property
+    def _tied_weights_keys(self):
+        """Return list of weight keys that should be tied.
+
+        In this model, input and output embeddings of the decoder may be tied.
+        """
+        if hasattr(self.decoder, "_tied_weights_keys"):
+            return [f"decoder.{k}" for k in self.decoder._tied_weights_keys]
+        return []
+
     def _init_tokenizer(self):
         model_path = (
             self.__class__._pretrained_model_path
@@ -334,6 +350,40 @@ class ASRModel(PreTrainedModel):
             from asr_processing import ASRProcessor  # type: ignore[no-redef]
 
         return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
+
+    def state_dict(self, *args, **kwargs):
+        """Only save trainable parameters (projector + LoRA) for efficient checkpointing.
+
+        This prevents saving frozen encoder/decoder weights in training checkpoints,
+        reducing checkpoint size from ~10GB to <100MB.
+        """
+        state = {}
+
+        # Always include projector (trainable)
+        state.update({f"projector.{k}": v for k, v in self.projector.state_dict().items()})
+
+        # Include LoRA parameters if using PEFT
+        if hasattr(self.decoder, "peft_config"):
+            lora_state = self.decoder.state_dict()
+            state.update({f"decoder.{k}": v for k, v in lora_state.items() if "lora_" in k})
+
+        return state
+
+    def get_input_embeddings(self):
+        """Delegate to decoder for proper HF Trainer integration."""
+        return self.decoder.get_input_embeddings()
+
+    def set_input_embeddings(self, value):
+        """Delegate to decoder for proper HF Trainer integration."""
+        self.decoder.set_input_embeddings(value)
+
+    def get_output_embeddings(self):
+        """Delegate to decoder for proper HF Trainer integration."""
+        return self.decoder.get_output_embeddings()
+
+    def set_output_embeddings(self, value):
+        """Delegate to decoder for proper HF Trainer integration."""
+        self.decoder.set_output_embeddings(value)
 
     def _encode_audio(
         self,
@@ -562,16 +612,12 @@ class ASRModel(PreTrainedModel):
         save_dir = PathlibPath(save_directory)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # Update config dimensions before saving
-        self.config.text_config.vocab_size = self.decoder.config.vocab_size
-        self.config.text_config.hidden_size = self.decoder.config.hidden_size
-        self.config.vocab_size = self.decoder.config.vocab_size
-        self.config.hidden_size = self.decoder.config.hidden_size
-        self.config.pad_token_id = self.decoder.config.pad_token_id
-        self.config.text_config.bos_token_id = self.tokenizer.bos_token_id
-        self.config.text_config.eos_token_id = self.tokenizer.eos_token_id
-        self.config.text_config.pad_token_id = self.tokenizer.pad_token_id
+        # Sync vocab size (may have changed if tokens were added)
+        actual_vocab_size = self.decoder.config.vocab_size
+        self.config.vocab_size = actual_vocab_size
+        self.config.text_config.vocab_size = actual_vocab_size
 
+        # Ensure projector dimensions are set (may not be present in old configs)
         if not hasattr(self.config, "encoder_dim") or self.config.encoder_dim is None:
             self.config.encoder_dim = self.encoder.config.hidden_size
         if not hasattr(self.config, "llm_dim") or self.config.llm_dim is None:
@@ -582,8 +628,10 @@ class ASRModel(PreTrainedModel):
         ):
             self.config.projector_hidden_dim = self.projector.gate_proj.out_features
 
-        # Call parent's save_pretrained to handle config saving
-        super().save_pretrained(save_directory, **kwargs)
+        # Save config and generation config (but not model weights - we handle those separately)
+        self.config.save_pretrained(save_dir)
+        if hasattr(self, "generation_config") and self.generation_config is not None:
+            self.generation_config.save_pretrained(save_dir)
 
         # Save projector weights
         projector_state = {"projector." + k: v for k, v in self.projector.state_dict().items()}
