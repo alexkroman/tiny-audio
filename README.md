@@ -126,6 +126,16 @@ poetry run eval mazesmazes/tiny-audio
 
 Results are measured in Word Error Rate (WER) - lower is better. Detailed predictions are saved to `outputs/eval_*/results.txt` so you can see exactly where your model succeeds or fails.
 
+## Leaderboard
+
+Contributors who have trained and evaluated Tiny Audio models:
+
+| Rank | Contributor | WER | Git Hash | Date |
+|------|------------|-----|----------|------|
+| 🥇 | [@alexkroman](https://github.com/alexkroman) | **10.14** | [`5a5f3a0`](https://github.com/alexkroman/tiny-audio/commit/5a5f3a055d2e5722d9473f3a1c2fb883eab7ad9c) | 2025-10-23 |
+
+Want to see your name here? Train a model, evaluate it on LoquaciousSet, and submit a PR with your results!
+
 ## What makes this repo different?
 
 Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable, hackable codebase** designed to train an ASR model start to end and produce a working model you can actually use and learn from.
