@@ -62,7 +62,7 @@ training:
   max_steps: 10000  # Reduced from 50k - LoRA converges faster
 
   # Reproducibility
-  seed: 123  # Different seed for stage 3
+  seed: 1234  # Different seed for stage 3
   ignore_data_skip: true
 
 # Data configuration - potentially adjust for LoRA training

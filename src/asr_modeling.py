@@ -68,7 +68,6 @@ class ASRModel(PreTrainedModel):
     config_class = ASRConfig
     base_model_prefix = "model"
     main_input_name = "input_values"
-    supports_gradient_checkpointing = True
     _supports_flash_attn_2 = True
     _keys_to_ignore_on_save = ["encoder", "decoder.base_model"]
     _is_loading_from_pretrained: bool = False
