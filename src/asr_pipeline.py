@@ -29,6 +29,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             "length_penalty",
             "repetition_penalty",
             "top_k",
+            "temperature",
+            "top_p",
         ]:
             if key in kwargs:
                 generate_kwargs[key] = kwargs.pop(key)

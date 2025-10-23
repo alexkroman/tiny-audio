@@ -7,6 +7,8 @@ defaults:
   - override /training: production
 
 model:
+
+  pretrained_model_path: "mazesmazes/tiny-audio"  # Load projector from here
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
@@ -22,15 +24,9 @@ training:
 
   # Hub configuration
   push_to_hub: true
-  hub_model_id: "your-username/tiny-audio-stage2"  # Change to your HF username
+  hub_model_id: "mazesmazes/tiny-audio"  # Change to your HF username
   hub_strategy: "checkpoint"  # Push every checkpoint
   hub_private_repo: false  # Keep it private
-
-  # Resume from Hub (uncomment when resuming)
-  # resume_from_checkpoint: "your-username/tiny-audio-stage2"
-
-  # Or resume from specific checkpoint
-  # resume_from_checkpoint: "your-username/tiny-audio-stage2/checkpoint-1000"
 
   # Learning rate and scheduler - constant LR to break through plateau
   learning_rate: 5e-4  # Increased from 5e-6 to enable meaningful updates
@@ -44,7 +40,7 @@ training:
   adam_epsilon: 1.0e-6  # Reduced from 1e-8 for slightly larger updates to low-variance parameters
 
   # Evaluation and checkpointing - more frequent monitoring
-  eval_steps: 250  # Increased frequency to monitor plateau breaking
+  eval_steps: 500  # Increased frequency to monitor plateau breaking
   save_steps: 500
   logging_steps: 25
 
@@ -52,5 +48,5 @@ training:
   max_steps: 10000
 
   # Reproducibility - different seed for stage 2
-  seed: 48  # Changed from 42 for different initialization
+  seed: 49  # Changed from 42 for different initialization
   ignore_data_skip: true

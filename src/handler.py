@@ -112,10 +112,11 @@ class EndpointHandler:
         params = data.get("parameters", {})
         max_new_tokens = params.get("max_new_tokens", 200)  # Longer transcripts
         num_beams = params.get("num_beams", 4)  # Beam search as per paper
-        temperature = params.get("temperature", 1.0)
         do_sample = params.get("do_sample", False)
         length_penalty = params.get("length_penalty", 1.0)
         repetition_penalty = params.get("repetition_penalty", 1.0)
+        temperature = params.get("temperature", 1.0)
+        top_p = params.get("top_p", 1.0)
 
         # The pipeline's __call__ method handles both single and batch inputs
         # as well as automatic chunking for long audio files
@@ -123,8 +124,9 @@ class EndpointHandler:
             inputs,
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
-            temperature=temperature,
             do_sample=do_sample,
             length_penalty=length_penalty,
             repetition_penalty=repetition_penalty,
+            temperature=temperature,
+            top_p=top_p,
         )

@@ -379,7 +379,7 @@ def main():
     parser.add_argument(
         "--max-samples",
         type=int,
-        default=None,
+        default=500,
         help="Maximum number of samples to evaluate (default: all)",
     )
     parser.add_argument(

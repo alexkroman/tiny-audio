@@ -21,7 +21,7 @@ model:
 # PEFT Configuration for LoRA
 peft:
   peft_method: lora  # Enable LoRA fine-tuning
-  r: 32  # LoRA rank
+  r: 64  # LoRA rank
   lora_alpha: 16  # LoRA scaling factor (alpha/r = 4x scaling)
   target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
   bias: none  # No bias training
@@ -42,7 +42,7 @@ training:
   gradient_accumulation_steps: 3  # Increased to maintain effective batch size
   eval_accumulation_steps: 3
   # Learning rate - Higher for LoRA than frozen training
-  learning_rate: 1.0e-5  # Much higher LR for LoRA (typical range 1e-4 to 5e-4)
+  learning_rate: 2.0e-5  # Much higher LR for LoRA (typical range 1e-4 to 5e-4)
   warmup_steps: 200  # Slightly longer warmup for LoRA adaptation
   lr_scheduler_type: cosine  # Cosine decay works well with LoRA
 

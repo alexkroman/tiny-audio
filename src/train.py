@@ -8,10 +8,26 @@ import torch
 import wandb
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
-from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments
+from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments, TrainerCallback
 
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
+
+
+class PeftCheckpointCallback(TrainerCallback):
+    """Save PEFT adapters during training checkpoints."""
+
+    def on_save(self, args, state, control, model=None, **kwargs):
+        if model is not None and hasattr(model, "decoder") and hasattr(model.decoder, "peft_config"):
+            checkpoint_folder = f"{args.output_dir}/checkpoint-{state.global_step}"
+            model.decoder.save_pretrained(checkpoint_folder)
+
+            if hasattr(model, "peft_config") and model.peft_config:
+                import json
+                from pathlib import Path
+                peft_config_path = Path(checkpoint_folder) / "peft_config.json"
+                with peft_config_path.open("w") as f:
+                    json.dump(model.peft_config, f, indent=2)
 
 
 class DatasetLoader:
@@ -257,6 +273,9 @@ def main(cfg: DictConfig) -> None:
     )
 
     callbacks = []
+
+    if peft_config and peft_config.get("peft_method") == "lora":
+        callbacks.append(PeftCheckpointCallback())
 
     if cfg.early_stopping.patience:
         callbacks.append(
