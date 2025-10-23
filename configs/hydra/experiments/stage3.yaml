@@ -10,7 +10,6 @@ model:
   # Load the pretrained model from Hub (this loads the projector weights)
   # The base decoder and encoder will still be loaded from their sources
   pretrained_model_path: "mazesmazes/tiny-audio"  # Load projector from here
-
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
@@ -21,7 +20,7 @@ model:
 # PEFT Configuration for LoRA
 peft:
   peft_method: lora  # Enable LoRA fine-tuning
-  r: 64  # LoRA rank
+  r: 32  # LoRA rank
   lora_alpha: 16  # LoRA scaling factor (alpha/r = 4x scaling)
   target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
   bias: none  # No bias training

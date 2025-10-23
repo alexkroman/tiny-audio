@@ -78,7 +78,14 @@ class ASRModel(PreTrainedModel):
         from safetensors.torch import load_file
         from transformers.utils import cached_file
 
-        config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        # Check if config is already provided in kwargs
+        config = kwargs.pop("config", None)
+        if config is None:
+            config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        else:
+            # If config is provided, still need to load subfolder/revision info
+            # but use the provided config's values
+            pass
 
         cls._is_loading_from_pretrained = True
         cls._pretrained_model_path = pretrained_model_name_or_path
@@ -255,11 +262,6 @@ class ASRModel(PreTrainedModel):
         if hasattr(self.decoder, "_tied_weights_keys"):
             return [f"decoder.{k}" for k in self.decoder._tied_weights_keys]
         return []
-
-    def _set_gradient_checkpointing(self, module, value=False):
-        """Enable/disable gradient checkpointing for the decoder."""
-        if isinstance(module, type(self.decoder)):
-            module.gradient_checkpointing_enable() if value else module.gradient_checkpointing_disable()
 
     def _init_tokenizer(self):
         model_path = (

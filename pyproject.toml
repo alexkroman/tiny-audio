@@ -67,6 +67,7 @@ mdformat = ">=0.7.0"
 # Model scripts (use: poetry run python src/train.py for training due to Hydra config paths)
 eval = "scripts.eval:main"
 push-to-hub = "scripts.push_to_hub:main"
+promote-checkpoint = "scripts.promote_checkpoint:main"
 run-handler = "scripts.run_handler_local:main"
 
 # Deployment scripts

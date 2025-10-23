@@ -136,6 +136,18 @@ Contributors who have trained and evaluated Tiny Audio models:
 
 Want to see your name here? Train a model, evaluate it on LoquaciousSet, and submit a PR with your results!
 
+**To reproduce or generate your own WER score:**
+```bash
+# Evaluate on 500 samples (default)
+poetry run eval mazesmazes/tiny-audio
+
+# Or evaluate your own model
+poetry run eval your-username/your-model-name
+
+# Quick test on 100 samples
+poetry run eval mazesmazes/tiny-audio --max-samples 100
+```
+
 ## What makes this repo different?
 
 Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable, hackable codebase** designed to train an ASR model start to end and produce a working model you can actually use and learn from.

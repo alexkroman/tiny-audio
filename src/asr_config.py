@@ -77,3 +77,17 @@ class ASRConfig(transformers.PretrainedConfig):
         }
         self.architectures = ["ASRModel"]
         self.pipeline_tag = "automatic-speech-recognition"
+
+    def to_dict(self):
+        """Override to ensure all critical fields are serialized."""
+        output = super().to_dict()
+
+        # Explicitly ensure these fields are saved
+        output["encoder_dim"] = self.encoder_dim
+        output["llm_dim"] = self.llm_dim
+        output["projector_hidden_dim"] = self.projector_hidden_dim
+        output["audio_downsample_rate"] = self.audio_downsample_rate
+        output["system_prompt"] = self.system_prompt
+        output["num_beams"] = self.num_beams
+
+        return output
