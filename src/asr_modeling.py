@@ -79,6 +79,7 @@ class ASRModel(nn.Module):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        import json
         from pathlib import Path as PathlibPath
 
         from huggingface_hub import hf_hub_download
@@ -90,27 +91,91 @@ class ASRModel(nn.Module):
         cls._pretrained_model_path = pretrained_model_name_or_path
 
         try:
-            model = cls(config)
+            # Check if PEFT config exists (for LoRA models)
+            peft_config = None
+            local_path = PathlibPath(pretrained_model_name_or_path)
 
-            # Check if it's a local path or a Hugging Face model ID
-            if PathlibPath(pretrained_model_name_or_path).exists():
+            if local_path.exists():
+                peft_config_path = local_path / "peft_config.json"
+                if peft_config_path.exists():
+                    with open(peft_config_path, "r") as f:
+                        peft_config = json.load(f)
+
+            # Initialize model with PEFT config if found
+            model = cls(config, peft_config=peft_config)
+
+            # Load projector weights from dedicated file
+            if local_path.exists():
                 # Local path
-                projector_path = PathlibPath(pretrained_model_name_or_path) / "model.safetensors"
+                projector_path = local_path / "projector.safetensors"
+                # Fallback for old format
+                if not projector_path.exists():
+                    projector_path = local_path / "model.safetensors"
+                    if projector_path.exists():
+                        print(f"Note: Loading from old format (model.safetensors)")
             else:
-                # Hugging Face model ID - download the file
-                projector_path = hf_hub_download(
-                    repo_id=pretrained_model_name_or_path, filename="model.safetensors"
-                )
+                # Download from HuggingFace Hub
+                try:
+                    projector_path = hf_hub_download(
+                        repo_id=pretrained_model_name_or_path, filename="projector.safetensors"
+                    )
+                except:
+                    # Fallback for old format
+                    projector_path = hf_hub_download(
+                        repo_id=pretrained_model_name_or_path, filename="model.safetensors"
+                    )
+                    print(f"Note: Loading from old format (model.safetensors)")
 
             projector_state = load_file(projector_path)
-            projector_state = {k.replace("projector.", ""): v for k, v in projector_state.items()}
-            model.projector.load_state_dict(projector_state)
+            # Extract projector weights
+            projector_state = {
+                k.replace("projector.", ""): v
+                for k, v in projector_state.items()
+                if k.startswith("projector.")
+            }
+
+            # Load projector weights strictly
+            if projector_state:
+                model.projector.load_state_dict(projector_state, strict=True)
+
+            # Load LoRA adapters using PEFT's standard method
+            if peft_config:
+                # Try to load adapter files
+                adapter_exists = False
+
+                if local_path.exists():
+                    # Check local path
+                    adapter_model_path = local_path / "adapter_model.safetensors"
+                    if not adapter_model_path.exists():
+                        adapter_model_path = local_path / "adapter_model.bin"
+                    adapter_exists = adapter_model_path.exists()
+                else:
+                    # Check Hub for adapter files
+                    try:
+                        from huggingface_hub import list_repo_files
+                        files = list_repo_files(pretrained_model_name_or_path)
+                        adapter_exists = any(f in files for f in ["adapter_model.safetensors", "adapter_model.bin"])
+                    except:
+                        pass
+
+                if adapter_exists:
+                    from peft import PeftModel
+                    print(f"Loading LoRA adapters from {pretrained_model_name_or_path}")
+                    # Load LoRA adapters using PEFT's standard method
+                    model.decoder = PeftModel.from_pretrained(
+                        model.decoder,
+                        pretrained_model_name_or_path if not local_path.exists() else local_path,
+                        is_trainable=True,  # Keep adapters trainable for continued training
+                    )
+                else:
+                    print(f"No LoRA adapters found, initializing fresh LoRA weights")
+
             return model
         finally:
             cls._is_loading_from_pretrained = False
             del cls._pretrained_model_path
 
-    def __init__(self, config: Union[ASRConfig, dict], **kwargs):
+    def __init__(self, config: Union[ASRConfig, dict], peft_config: Optional[dict] = None, **kwargs):
         super().__init__()
 
         if isinstance(config, dict):
@@ -118,6 +183,7 @@ class ASRModel(nn.Module):
 
         self.config = config
         self.system_prompt = config.system_prompt
+        self.peft_config = peft_config
 
         target_dtype = getattr(torch, config.model_dtype)
 
@@ -145,7 +211,12 @@ class ASRModel(nn.Module):
         self.generation_config = self.decoder.generation_config
         self.generation_config.num_beams = config.num_beams
 
+        # Initialize tokenizer and resize embeddings BEFORE applying LoRA
         self._init_tokenizer()
+
+        # Apply LoRA AFTER tokenizer initialization and embedding resize
+        if peft_config and peft_config.get("peft_method") == "lora":
+            self._apply_lora(peft_config)
 
         from types import SimpleNamespace
 
@@ -170,6 +241,42 @@ class ASRModel(nn.Module):
 
         self._no_split_modules = self.decoder._no_split_modules
 
+    def _apply_lora(self, peft_config: dict):
+        """Apply LoRA adapters to the decoder model."""
+        try:
+            from peft import LoraConfig, TaskType, get_peft_model
+        except ImportError:
+            raise ImportError(
+                "PEFT library is required for LoRA fine-tuning. "
+                "Install with: pip install peft"
+            )
+
+        # Handle target_modules configuration
+        target_modules = peft_config.get("target_modules", ["q_proj", "v_proj"])
+
+        # If "all-linear" is specified, let PEFT automatically find all linear layers
+        if target_modules == "all-linear":
+            # For recent PEFT versions, this targets all Linear layers
+            target_modules = "all-linear"
+
+        # Create LoRA configuration
+        # Note: We exclude embedding and lm_head layers to avoid issues with vocab resizing
+        lora_config = LoraConfig(
+            r=peft_config.get("r", 8),
+            lora_alpha=peft_config.get("lora_alpha", 32),
+            target_modules=target_modules,
+            lora_dropout=peft_config.get("lora_dropout", 0.05),
+            bias=peft_config.get("bias", "none"),
+            task_type=TaskType.CAUSAL_LM,
+            modules_to_save=None,  # Don't save any modules, just apply LoRA
+        )
+
+        # Apply LoRA to decoder
+        self.decoder = get_peft_model(self.decoder, lora_config)
+
+        # Enable LoRA adapters for training
+        self.decoder.print_trainable_parameters()
+
     def _init_tokenizer(self):
         model_path = (
             self.__class__._pretrained_model_path
@@ -179,13 +286,29 @@ class ASRModel(nn.Module):
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-        # Add special audio boundary tokens
-        special_tokens = {"additional_special_tokens": ["<|audio_start|>", "<|audio_end|>"]}
-        num_added_tokens = self.tokenizer.add_special_tokens(special_tokens)
-        if num_added_tokens > 0:
-            # Resize model embeddings to account for new tokens
-            # Use mean_resizing=False since these are structural tokens, not semantic ones
-            self.decoder.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
+        # Add special audio boundary tokens if they don't exist
+        existing_special = self.tokenizer.additional_special_tokens or []
+        tokens_to_add = []
+        if "<|audio_start|>" not in existing_special:
+            tokens_to_add.append("<|audio_start|>")
+        if "<|audio_end|>" not in existing_special:
+            tokens_to_add.append("<|audio_end|>")
+
+        if tokens_to_add:
+            special_tokens = {"additional_special_tokens": existing_special + tokens_to_add}
+            num_added_tokens = self.tokenizer.add_special_tokens(special_tokens)
+            if num_added_tokens > 0:
+                # Resize model embeddings to account for new tokens
+                # Use mean_resizing=False since these are structural tokens, not semantic ones
+                self.decoder.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
+                print(f"Added {num_added_tokens} special tokens, vocab size now: {len(self.tokenizer)}")
+
+        # Always ensure embeddings match tokenizer size (important for loaded models)
+        current_embed_size = self.decoder.get_input_embeddings().weight.shape[0]
+        expected_size = len(self.tokenizer)
+        if current_embed_size != expected_size:
+            print(f"Resizing embeddings from {current_embed_size} to {expected_size}")
+            self.decoder.resize_token_embeddings(expected_size, mean_resizing=False)
 
         # Store audio token IDs for easy access
         self.audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
@@ -220,42 +343,66 @@ class ASRModel(nn.Module):
             self.decoder.tie_weights()
 
     def state_dict(self, *args, **kwargs):
-        return {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
+        """Get state dict with projector and optionally LoRA parameters.
+
+        This is used by HuggingFace Trainer for checkpoint saving.
+        """
+        state = {}
+
+        # Always include projector parameters
+        state.update({f"projector.{k}": v for k, v in self.projector.state_dict().items()})
+
+        # Include LoRA parameters if using PEFT
+        if hasattr(self.decoder, 'peft_config'):
+            # Get only LoRA weights from the PEFT model
+            lora_state = self.decoder.state_dict()
+            for k, v in lora_state.items():
+                if "lora_" in k:
+                    state[f"decoder.{k}"] = v
+
+        return state
 
     def load_state_dict(self, state_dict, strict=True):
+        """Load state dict with projector and optionally LoRA parameters.
+
+        This is used by HuggingFace Trainer for checkpoint loading.
+        """
+        # Extract projector weights
         projector_state = {
             k.replace("projector.", ""): v
             for k, v in state_dict.items()
             if k.startswith("projector.")
         }
 
-        # Track keys that were not used
+        # Extract LoRA weights
+        lora_state = {
+            k.replace("decoder.", ""): v
+            for k, v in state_dict.items()
+            if k.startswith("decoder.") and "lora_" in k
+        }
+
         missing_keys = []
         unexpected_keys = []
 
         # Load projector state
         if projector_state:
-            result = self.projector.load_state_dict(projector_state, strict=False)
-            missing_keys.extend([f"projector.{k}" for k in result.missing_keys])
-            # Note: we don't add unexpected keys from projector since we filtered them
+            result = self.projector.load_state_dict(projector_state, strict=strict)
+            if hasattr(result, 'missing_keys'):
+                missing_keys.extend([f"projector.{k}" for k in result.missing_keys])
 
-        # Check for any state dict keys that weren't projector keys
+        # Load LoRA state if model has PEFT
+        if lora_state and hasattr(self.decoder, 'peft_config'):
+            result = self.decoder.load_state_dict(lora_state, strict=False)
+            if hasattr(result, 'missing_keys'):
+                missing_keys.extend([f"decoder.{k}" for k in result.missing_keys])
+
+        # Find unexpected keys
         for k in state_dict:
-            if not k.startswith("projector."):
+            if not k.startswith("projector.") and not (k.startswith("decoder.") and "lora_" in k):
                 unexpected_keys.append(k)
 
-        # If strict mode and we have issues, raise an error
-        if strict and (missing_keys or unexpected_keys):
-            error_msg = ""
-            if missing_keys:
-                error_msg += f"Missing keys: {missing_keys}\n"
-            if unexpected_keys:
-                error_msg += f"Unexpected keys: {unexpected_keys}"
-            raise RuntimeError(error_msg)
-
-        # Return a proper _IncompatibleKeys object
+        # Return proper result
         from torch.nn.modules.module import _IncompatibleKeys
-
         return _IncompatibleKeys(missing_keys, unexpected_keys)
 
     @property
@@ -340,6 +487,17 @@ class ASRModel(nn.Module):
 
             batch_size = input_ids.shape[0]
             audio_seq_len = audio_embeds.shape[1]
+
+            # Validate audio token IDs before using them
+            if self.audio_start_id is None or self.audio_end_id is None:
+                raise ValueError(f"Audio tokens not properly initialized. Start: {self.audio_start_id}, End: {self.audio_end_id}")
+
+            vocab_size = self.decoder.get_input_embeddings().weight.shape[0]
+            if self.audio_start_id >= vocab_size or self.audio_end_id >= vocab_size:
+                raise ValueError(
+                    f"Audio token IDs out of range. Start: {self.audio_start_id}, End: {self.audio_end_id}, "
+                    f"Vocab size: {vocab_size}"
+                )
 
             # Find positions of <|audio_start|> and <|audio_end|> tokens
             audio_start_positions = (input_ids == self.audio_start_id).nonzero(as_tuple=True)
@@ -538,6 +696,22 @@ class ASRModel(nn.Module):
 
         if hasattr(self.config, "system_prompt"):
             self.config.system_prompt = self.config.system_prompt
+
+        # Save projector weights separately
+        from safetensors.torch import save_file
+        projector_state = {"projector." + k: v for k, v in self.projector.state_dict().items()}
+        save_file(projector_state, save_dir / "projector.safetensors")
+
+        # Save LoRA adapters if using PEFT
+        if self.peft_config and self.peft_config.get("peft_method") == "lora":
+            if hasattr(self.decoder, 'save_pretrained'):
+                # Save LoRA adapters using PEFT's standard method
+                self.decoder.save_pretrained(save_dir)
+
+            # Save PEFT config for reloading
+            import json
+            with open(save_dir / "peft_config.json", "w") as f:
+                json.dump(self.peft_config, f, indent=2)
 
         self.config.save_pretrained(save_dir)
         self.tokenizer.save_pretrained(save_dir)

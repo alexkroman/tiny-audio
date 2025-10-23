@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - override /model: small
+  - override /model: large
   - override /data: tiny
   - override /training: mac
 

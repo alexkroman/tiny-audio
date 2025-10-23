@@ -14,25 +14,44 @@ model:
   audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
 
 training:
-  # Learning rate and scheduler - cosine decay for fine-tuning from checkpoint
-  learning_rate: 5.0e-8  # Reduced from 5.0e-6 to reduce oscillation
-  warmup_steps: 50  # Gradual warmup to target LR
-  lr_scheduler_type: cosine  # Cosine decay for smooth convergence
+  per_device_train_batch_size: 12
+  per_device_eval_batch_size: 12
+  gradient_accumulation_steps: 3
+  eval_accumulation_steps: 3
 
-  # Optimization
+  # Hub configuration
+  push_to_hub: true
+  hub_model_id: "your-username/tiny-audio-stage2"  # Change to your HF username
+  hub_strategy: "checkpoint"  # Push every checkpoint
+  hub_private_repo: false  # Keep it private
+
+  # Resume from Hub (uncomment when resuming)
+  # resume_from_checkpoint: "your-username/tiny-audio-stage2"
+
+  # Or resume from specific checkpoint
+  # resume_from_checkpoint: "your-username/tiny-audio-stage2/checkpoint-1000"
+
+  # Learning rate and scheduler - constant LR to break through plateau
+  learning_rate: 5e-4  # Increased from 5e-6 to enable meaningful updates
+  warmup_steps: 100  # Gradual warmup to target LR
+  lr_scheduler_type: cosine  # No decay - maintain learning capacity
+
+  # Optimization - more responsive Adam for plateau
   weight_decay: 0.01
-  max_grad_norm: 1.0
+  max_grad_norm: 1.5  # Increased from 1.0 for less aggressive clipping
+  adam_beta2: 0.95  # Reduced from 0.999 for faster adaptation to current gradients
+  adam_epsilon: 1.0e-6  # Reduced from 1e-8 for slightly larger updates to low-variance parameters
 
-  # Evaluation and checkpointing
-  eval_steps: 500
+  # Evaluation and checkpointing - more frequent monitoring
+  eval_steps: 250  # Increased frequency to monitor plateau breaking
   save_steps: 500
   logging_steps: 25
 
   # Training duration - extended for stage 2
-  max_steps: 40000
+  max_steps: 30000
 
   # Reproducibility - different seed for stage 2
-  seed: 46  # Changed from 42 for different initialization
+  seed: 48  # Changed from 42 for different initialization
   ignore_data_skip: true
 
   # Resume from best checkpoint if available
@@ -40,9 +59,4 @@ training:
   # resume_from_checkpoint: ./outputs/production_model/checkpoint-10000
   # Or resume from HuggingFace Hub:
   
-  resume_from_checkpoint: /workspace/outputs/2025-10-21/22-12-38/outputs/production_model/checkpoint-23000
-
-# Early stopping configuration - less aggressive for continued improvement
-early_stopping:
-  patience: 20  # Increased from 10 to allow more exploration
-  threshold: 0.00005  # Reduced from 0.0001 for finer-grained improvements
+  resume_from_checkpoint: /workspace/outputs/2025-10-22/15-35-42/outputs/production_model/checkpoint-34000

@@ -221,7 +221,19 @@ def main(cfg: DictConfig) -> None:
         llm_dim=decoder_config.hidden_size,
         projector_hidden_dim=cfg.model.get("projector_hidden_dim", 2048),
     )
-    model = ASRModel(asr_config)
+
+    # Extract PEFT config if present
+    peft_config = None
+    if "peft" in cfg and cfg.peft.get("peft_method"):
+        peft_config = OmegaConf.to_container(cfg.peft, resolve=True)
+
+    # Load from pretrained if specified, otherwise create new model
+    if cfg.model.get("pretrained_model_path"):
+        print(f"Loading pretrained model from: {cfg.model.pretrained_model_path}")
+        model = ASRModel.from_pretrained(cfg.model.pretrained_model_path, peft_config=peft_config)
+        print(f"✓ Loaded pretrained model with projector weights")
+    else:
+        model = ASRModel(asr_config, peft_config=peft_config)
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 

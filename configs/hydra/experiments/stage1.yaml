@@ -3,7 +3,7 @@
 
 defaults:
   - override /model: large
-  - override /data: loquacious_large
+  - override /data: loquacious_clean
   - override /training: production
 
 model:
@@ -14,8 +14,13 @@ model:
   audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
 
 training:
+  per_device_train_batch_size: 12
+  per_device_eval_batch_size: 12
+  gradient_accumulation_steps: 3
+  eval_accumulation_steps: 3
+
   # Learning rate and scheduler
-  learning_rate: 1.0e-4
+  learning_rate: 1.0e-3
   warmup_steps: 500
   lr_scheduler_type: cosine
 
@@ -30,7 +35,7 @@ training:
   logging_steps: 25
 
   # Training duration
-  max_steps: 25000
+  max_steps: 10000
 
   # Reproducibility
   seed: 42

@@ -1,12 +1,6 @@
 # Production training configuration
 output_dir: ./outputs/production_model
 
-# Training configuration
-per_device_train_batch_size: 12
-per_device_eval_batch_size: 12
-gradient_accumulation_steps: 3
-eval_accumulation_steps: 3
-
 optim: adamw_torch_fused
 adam_beta1: 0.9
 adam_beta2: 0.999  

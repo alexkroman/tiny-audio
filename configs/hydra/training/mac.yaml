@@ -50,7 +50,7 @@ dataloader_pin_memory: false  # Important for Mac
 max_grad_norm: 1.0
 
 model_dtype: float32
-attn_implementation: sdpa
+attn_implementation: eager  # Mac compatibility - eager works best
 
 # Misc
 seed: 42
