@@ -8,26 +8,10 @@ import torch
 import wandb
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
-from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments, TrainerCallback
+from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments
 
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
-
-
-class PeftCheckpointCallback(TrainerCallback):
-    """Save PEFT adapters during training checkpoints."""
-
-    def on_save(self, args, state, control, model=None, **kwargs):
-        if model is not None and hasattr(model, "decoder") and hasattr(model.decoder, "peft_config"):
-            checkpoint_folder = f"{args.output_dir}/checkpoint-{state.global_step}"
-            model.decoder.save_pretrained(checkpoint_folder)
-
-            if hasattr(model, "peft_config") and model.peft_config:
-                import json
-                from pathlib import Path
-                peft_config_path = Path(checkpoint_folder) / "peft_config.json"
-                with peft_config_path.open("w") as f:
-                    json.dump(model.peft_config, f, indent=2)
 
 
 class DatasetLoader:
@@ -238,10 +222,14 @@ def main(cfg: DictConfig) -> None:
         projector_hidden_dim=cfg.model.get("projector_hidden_dim", 2048),
     )
 
-    # Extract PEFT config if present
+    # Extract PEFT configs if present
     peft_config = None
     if "peft" in cfg and cfg.peft.get("peft_method"):
         peft_config = OmegaConf.to_container(cfg.peft, resolve=True)
+
+    encoder_lora_config = None
+    if "encoder_lora" in cfg and cfg.encoder_lora.get("r", 0) > 0:
+        encoder_lora_config = OmegaConf.to_container(cfg.encoder_lora, resolve=True)
 
     # Load from pretrained if specified, otherwise create new model
     if cfg.model.get("pretrained_model_path"):
@@ -251,16 +239,26 @@ def main(cfg: DictConfig) -> None:
         model = ASRModel.from_pretrained(
             cfg.model.pretrained_model_path,
             config=asr_config,
-            peft_config=None  # Don't apply LoRA during loading
+            peft_config=None,  # Don't apply LoRA during loading
+            encoder_lora_config=None  # Don't apply encoder LoRA during loading
         )
         print(f"✓ Loaded pretrained model with projector weights")
 
         # Now apply LoRA if configured
+        if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
+            from peft import TaskType
+            print("Applying encoder LoRA adapters to the loaded model...")
+            model.encoder = model._apply_lora(model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder")
+            model._wrap_encoder_forward()
+            model.encoder_lora_config = encoder_lora_config
+
         if peft_config and peft_config.get("peft_method") == "lora":
-            print("Applying LoRA adapters to the loaded model...")
-            model._apply_lora(peft_config)
+            from peft import TaskType
+            print("Applying decoder LoRA adapters to the loaded model...")
+            model.decoder = model._apply_lora(model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder")
+            model.peft_config = peft_config
     else:
-        model = ASRModel(asr_config, peft_config=peft_config)
+        model = ASRModel(asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config)
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
@@ -274,8 +272,7 @@ def main(cfg: DictConfig) -> None:
 
     callbacks = []
 
-    if peft_config and peft_config.get("peft_method") == "lora":
-        callbacks.append(PeftCheckpointCallback())
+    # PEFT's trainer integration automatically handles LoRA checkpoint saving
 
     if cfg.early_stopping.patience:
         callbacks.append(

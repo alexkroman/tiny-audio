@@ -91,6 +91,7 @@ class ASRModel(PreTrainedModel):
         cls._pretrained_model_path = pretrained_model_name_or_path
 
         try:
+            # Load decoder LoRA config if it exists
             peft_config = None
             try:
                 peft_config_file = cached_file(
@@ -106,7 +107,23 @@ class ASRModel(PreTrainedModel):
             except Exception:
                 pass
 
-            model = cls(config, peft_config=peft_config)
+            # Load encoder LoRA config if it exists
+            encoder_lora_config = None
+            try:
+                encoder_lora_config_file = cached_file(
+                    pretrained_model_name_or_path,
+                    "encoder_lora_config.json",
+                    _raise_exceptions_for_missing_entries=False,
+                )
+                if encoder_lora_config_file:
+                    from pathlib import Path as PathlibPath
+
+                    with PathlibPath(encoder_lora_config_file).open() as f:
+                        encoder_lora_config = json.load(f)
+            except Exception:
+                pass
+
+            model = cls(config, peft_config=peft_config, encoder_lora_config=encoder_lora_config)
 
             projector_path = cached_file(
                 pretrained_model_name_or_path,
@@ -122,6 +139,7 @@ class ASRModel(PreTrainedModel):
             if projector_state:
                 model.projector.load_state_dict(projector_state, strict=True)
 
+            # Load decoder LoRA adapters if config exists
             if peft_config:
                 adapter_file = cached_file(
                     pretrained_model_name_or_path,
@@ -132,14 +150,31 @@ class ASRModel(PreTrainedModel):
                 if adapter_file:
                     from peft import PeftModel
 
-                    print(f"Loading LoRA adapters from {pretrained_model_name_or_path}")
+                    print(f"Loading decoder LoRA adapters from {pretrained_model_name_or_path}")
                     model.decoder = PeftModel.from_pretrained(
                         model.decoder,
                         pretrained_model_name_or_path,
                         is_trainable=True,  # Keep adapters trainable for continued training
                     )
                 else:
-                    print("No LoRA adapters found, initializing fresh LoRA weights")
+                    print("No decoder LoRA adapters found, initializing fresh LoRA weights")
+
+            # Load encoder LoRA adapters if config exists
+            if encoder_lora_config:
+                try:
+                    from peft import PeftModel
+
+                    print(f"Loading encoder LoRA adapters from {pretrained_model_name_or_path}")
+                    model.encoder = PeftModel.from_pretrained(
+                        model.encoder,
+                        pretrained_model_name_or_path,
+                        subfolder="encoder_adapter",
+                        is_trainable=True,
+                    )
+                    # Re-wrap since we replaced the encoder
+                    model._wrap_encoder_forward()
+                except Exception as e:
+                    print(f"No encoder LoRA adapters found ({e}), will initialize fresh if configured")
 
             return model
         finally:
@@ -150,41 +185,25 @@ class ASRModel(PreTrainedModel):
         super().__init__(config)
 
         peft_config = kwargs.pop("peft_config", None)
+        encoder_lora_config = kwargs.pop("encoder_lora_config", None)
 
         self.system_prompt = config.system_prompt
         self.peft_config = peft_config
+        self.encoder_lora_config = encoder_lora_config
 
-        target_dtype = getattr(torch, config.model_dtype)
-
-        self.encoder = AutoModel.from_pretrained(
-            config.audio_model_id,
-            attn_implementation=config.attn_implementation,
-            dtype=target_dtype,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-        )
-        self.encoder.requires_grad_(False)
-
-        self.decoder = AutoModelForCausalLM.from_pretrained(
-            config.text_model_id,
-            attn_implementation=config.attn_implementation,
-            dtype=target_dtype,
-            trust_remote_code=True,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-        )
-        self.decoder.requires_grad_(False)
+        self.encoder = self._create_encoder(config, encoder_lora_config)
+        # Always wrap encoder forward to prevent torch.compile issues
+        self._wrap_encoder_forward()
 
         self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(config.audio_model_id)
 
+        # Create decoder first (needed for tokenizer init)
+        self.decoder = self._create_decoder(config, peft_config)
         self.generation_config = self.decoder.generation_config
         self.generation_config.num_beams = config.num_beams
 
-        # Initialize tokenizer and resize embeddings BEFORE applying LoRA
+        # Initialize tokenizer and resize embeddings after decoder is created
         self._init_tokenizer()
-
-        if peft_config and peft_config.get("peft_method") == "lora":
-            self._apply_lora(peft_config)
 
         from types import SimpleNamespace
 
@@ -208,33 +227,134 @@ class ASRModel(PreTrainedModel):
 
         self._no_split_modules = self.decoder._no_split_modules
 
-    def _apply_lora(self, peft_config: dict):
-        """Apply LoRA adapters to the decoder model."""
+    @staticmethod
+    def _apply_lora(model, lora_config: dict, task_type, model_name: str = "model"):
+        """Apply LoRA adapters to a model (encoder or decoder).
+
+        Args:
+            model: The model to apply LoRA to
+            lora_config: Dict with LoRA configuration (r, lora_alpha, target_modules, etc.)
+            task_type: peft.TaskType (FEATURE_EXTRACTION for encoder, CAUSAL_LM for decoder)
+            model_name: Name for logging purposes
+        """
+        if lora_config.get("r", 0) == 0:
+            # Freeze the model if r=0
+            for param in model.parameters():
+                param.requires_grad = False
+            return model
+
         try:
-            from peft import LoraConfig, TaskType, get_peft_model
+            from peft import LoraConfig, get_peft_model
         except ImportError:
             raise ImportError(
                 "PEFT library is required for LoRA fine-tuning. Install with: pip install peft"
             ) from None
 
-        target_modules = peft_config.get("target_modules", ["q_proj", "v_proj"])
-
+        target_modules = lora_config.get("target_modules", ["q_proj", "k_proj"])
         if target_modules == "all-linear":
             target_modules = "all-linear"
 
-        # Note: We exclude embedding and lm_head layers to avoid issues with vocab resizing
-        lora_config = LoraConfig(
-            r=peft_config.get("r", 8),
-            lora_alpha=peft_config.get("lora_alpha", 32),
+        peft_config = LoraConfig(
+            r=lora_config.get("r", 8),
+            lora_alpha=lora_config.get("lora_alpha", 8),
             target_modules=target_modules,
-            lora_dropout=peft_config.get("lora_dropout", 0.05),
-            bias=peft_config.get("bias", "none"),
-            task_type=TaskType.CAUSAL_LM,
-            modules_to_save=None,  # Don't save any modules, just apply LoRA
+            lora_dropout=lora_config.get("lora_dropout", 0.0),
+            bias=lora_config.get("bias", "none"),
+            task_type=task_type,
+            modules_to_save=lora_config.get("modules_to_save"),
+            init_lora_weights=True,
         )
 
-        self.decoder = get_peft_model(self.decoder, lora_config)
-        self.decoder.print_trainable_parameters()
+        print(f"Applying LoRA to {model_name} with r={peft_config.r}, alpha={peft_config.lora_alpha}")
+        model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
+        return model
+
+    def _wrap_encoder_forward(self):
+        """Wrap encoder forward to filter out invalid kwargs like input_ids.
+
+        This is needed because torch.compile and other wrappers may try to pass
+        all parent model kwargs to child modules. HuBERT only accepts specific args.
+        """
+        original_forward = self.encoder.forward
+
+        def safe_encoder_forward(
+            input_values=None,
+            attention_mask=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+            **kwargs  # Catch and discard any other kwargs
+        ):
+            # Only pass valid HuBERT arguments
+            return original_forward(
+                input_values=input_values,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
+        self.encoder.forward = safe_encoder_forward
+
+    @classmethod
+    def _create_encoder(cls, config: ASRConfig, encoder_lora_config: Optional[dict] = None):
+        """Create and configure the audio encoder.
+
+        Args:
+            config: Model configuration
+            encoder_lora_config: Optional LoRA configuration for encoder
+
+        Returns:
+            Configured encoder model (potentially with LoRA)
+        """
+        target_dtype = getattr(torch, config.model_dtype)
+
+        encoder = AutoModel.from_pretrained(
+            config.audio_model_id,
+            attn_implementation=config.attn_implementation,
+            dtype=target_dtype,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+        encoder.requires_grad_(False)
+
+        # Apply LoRA to encoder if configured
+        if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
+            from peft import TaskType
+            encoder = cls._apply_lora(encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder")
+
+        return encoder
+
+    @classmethod
+    def _create_decoder(cls, config: ASRConfig, peft_config: Optional[dict] = None):
+        """Create and configure the language model decoder.
+
+        Args:
+            config: Model configuration
+            peft_config: Optional LoRA configuration for decoder
+
+        Returns:
+            Configured decoder model (potentially with LoRA)
+        """
+        target_dtype = getattr(torch, config.model_dtype)
+
+        decoder = AutoModelForCausalLM.from_pretrained(
+            config.text_model_id,
+            attn_implementation=config.attn_implementation,
+            dtype=target_dtype,
+            trust_remote_code=True,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+        decoder.requires_grad_(False)
+
+        # Apply LoRA to decoder if configured
+        if peft_config and peft_config.get("peft_method") == "lora":
+            from peft import TaskType
+            decoder = cls._apply_lora(decoder, peft_config, TaskType.CAUSAL_LM, "decoder")
+
+        return decoder
 
     def _init_weights(self, module):
         """Initialize weights for trainable modules.
@@ -252,6 +372,22 @@ class ASRModel(PreTrainedModel):
         inherits from GenerationMixin.
         """
         return True
+
+    def _set_gradient_checkpointing(self, module, value=False):
+        """Control gradient checkpointing for the model.
+
+        Only apply gradient checkpointing to the decoder, not the encoder.
+        The encoder either has no gradients (frozen) or has LoRA adapters
+        which handle gradients differently.
+        """
+        if hasattr(module, "gradient_checkpointing_enable"):
+            if value:
+                # Only enable gradient checkpointing on the decoder
+                if module is self.decoder or (hasattr(self, 'decoder') and module is self.decoder.base_model):
+                    module.gradient_checkpointing_enable()
+            else:
+                if hasattr(module, "gradient_checkpointing_disable"):
+                    module.gradient_checkpointing_disable()
 
     @property
     def _tied_weights_keys(self):
@@ -319,16 +455,27 @@ class ASRModel(PreTrainedModel):
         return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
 
     def state_dict(self, *args, **kwargs):
-        """Only save trainable projector parameters for efficient checkpointing.
+        """Only save trainable parameters for efficient checkpointing.
 
-        This prevents saving frozen encoder/decoder weights in training checkpoints,
-        reducing checkpoint size from ~10GB to <100MB.
-
-        Note: LoRA adapters are saved separately by PEFT's integration with Trainer.
+        This prevents saving frozen encoder/decoder weights in training checkpoints.
+        LoRA adapters are saved separately by PEFT's integration with Trainer.
         """
-        state = {}
-        state.update({f"projector.{k}": v for k, v in self.projector.state_dict().items()})
-        return state
+        full_state = super().state_dict(*args, **kwargs)
+        return self.diff_state_dict(full_state)
+
+    def diff_state_dict(self, state_dict=None):
+        """Filter state dict to only include trainable parameters.
+
+        This ensures minimal checkpoint size by only saving what's being trained.
+        """
+        if state_dict is None:
+            state_dict = super().state_dict()
+
+        # Get all trainable parameter names
+        trainable_params = {k for k, v in self.named_parameters() if v.requires_grad}
+
+        # Only keep trainable parameters
+        return {k: v for k, v in state_dict.items() if k in trainable_params}
 
     def get_input_embeddings(self):
         """Delegate to decoder for proper HF Trainer integration."""
@@ -351,11 +498,20 @@ class ASRModel(PreTrainedModel):
         input_values: torch.Tensor,
         audio_attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        with torch.no_grad():
+        # Only pass explicit valid arguments to encoder
+        # Never use **kwargs to prevent torch.compile from injecting decoder args like input_ids
+        # Don't use no_grad if encoder has LoRA (needs gradients for training)
+        if self.encoder_lora_config and self.encoder_lora_config.get("r", 0) > 0:
             audio_features = self.encoder(
                 input_values=input_values.to(self.encoder.dtype),
                 attention_mask=audio_attention_mask,
             ).last_hidden_state
+        else:
+            with torch.no_grad():
+                audio_features = self.encoder(
+                    input_values=input_values.to(self.encoder.dtype),
+                    attention_mask=audio_attention_mask,
+                ).last_hidden_state
 
         return self.projector(audio_features)
 
@@ -368,7 +524,13 @@ class ASRModel(PreTrainedModel):
         **kwargs,
     ):
         if input_values is not None:
+            # Extract audio-specific kwargs, don't pass input_ids to encoder
             audio_attention_mask = kwargs.pop("audio_attention_mask", None)
+
+            # Remove any decoder-specific kwargs that shouldn't go to the encoder
+            kwargs.pop("past_key_values", None)
+            kwargs.pop("use_cache", None)
+
             audio_embeds = self._encode_audio(
                 input_values=input_values,
                 audio_attention_mask=audio_attention_mask,
@@ -542,7 +704,28 @@ class ASRModel(PreTrainedModel):
             inputs_embeds=inputs_embeds, attention_mask=attention_mask, **generate_kwargs
         )
 
+    def merge_and_unload(self):
+        """Merge LoRA weights into base model and remove PEFT wrappers.
+
+        This creates cleaner model saves and enables faster inference without PEFT.
+        """
+        try:
+            from peft import PeftModel
+        except ImportError:
+            return
+
+        # Merge decoder LoRA
+        if isinstance(self.decoder, PeftModel):
+            self.decoder = self.decoder.merge_and_unload()
+            self.peft_config = None
+
+        # Merge encoder LoRA
+        if isinstance(self.encoder, PeftModel):
+            self.encoder = self.encoder.merge_and_unload()
+            self.encoder_lora_config = None
+
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
+        import json
         import shutil
         from pathlib import Path as PathlibPath
 
@@ -559,18 +742,26 @@ class ASRModel(PreTrainedModel):
         if hasattr(self, "generation_config") and self.generation_config is not None:
             self.generation_config.save_pretrained(save_dir)
 
-        projector_state = {"projector." + k: v for k, v in self.projector.state_dict().items()}
-        save_file(projector_state, save_dir / "projector.safetensors")
+        # Use diff_state_dict to only save trainable parameters
+        state_dict = self.diff_state_dict()
+        if state_dict:
+            save_file(state_dict, save_dir / "model.safetensors")
 
+        # Save decoder LoRA if configured
         if self.peft_config and self.peft_config.get("peft_method") == "lora":
             if hasattr(self.decoder, "save_pretrained"):
                 self.decoder.save_pretrained(save_dir)
-
-            import json
-
-            peft_config_path = save_dir / "peft_config.json"
-            with peft_config_path.open("w") as f:
+            with (save_dir / "peft_config.json").open("w") as f:
                 json.dump(self.peft_config, f, indent=2)
+
+        # Save encoder LoRA if configured
+        if self.encoder_lora_config and self.encoder_lora_config.get("r", 0) > 0:
+            if hasattr(self.encoder, "save_pretrained"):
+                encoder_adapter_dir = save_dir / "encoder_adapter"
+                encoder_adapter_dir.mkdir(exist_ok=True)
+                self.encoder.save_pretrained(encoder_adapter_dir)
+            with (save_dir / "encoder_lora_config.json").open("w") as f:
+                json.dump(self.encoder_lora_config, f, indent=2)
 
         self.tokenizer.save_pretrained(save_dir)
         self.feature_extractor.save_pretrained(save_dir)

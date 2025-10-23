@@ -1,0 +1,15 @@
+# Encoder LoRA Configuration
+# This applies LoRA fine-tuning to the audio encoder (HuBERT/Wav2Vec2)
+
+r: 8  # LoRA rank (higher = more params)
+lora_alpha: 8  # Scaling factor (alpha/r = 1.0 gives equal weighting)
+
+# Target modules for HuBERT attention layers
+# HuBERT uses: q_proj, k_proj (query and key projections)
+# Only Q and K, not V
+target_modules:
+  - q_proj
+  - k_proj
+
+lora_dropout: 0.0  # No dropout
+bias: none  # Don't train bias terms
