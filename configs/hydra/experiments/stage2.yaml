@@ -12,6 +12,7 @@ model:
 
   # Projector configuration
   audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
+  projector_hidden_dim: 8192  # Increased for better capacity
 
 training:
   per_device_train_batch_size: 12
@@ -48,15 +49,8 @@ training:
   logging_steps: 25
 
   # Training duration - extended for stage 2
-  max_steps: 30000
+  max_steps: 10000
 
   # Reproducibility - different seed for stage 2
   seed: 48  # Changed from 42 for different initialization
   ignore_data_skip: true
-
-  # Resume from best checkpoint if available
-  # Uncomment and set path to resume from stage1 checkpoint
-  # resume_from_checkpoint: ./outputs/production_model/checkpoint-10000
-  # Or resume from HuggingFace Hub:
-  
-  resume_from_checkpoint: /workspace/outputs/2025-10-22/15-35-42/outputs/production_model/checkpoint-34000

@@ -12,6 +12,7 @@ model:
 
   # Projector configuration
   audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
+  projector_hidden_dim: 8192  # Increased for better capacity
 
 training:
   per_device_train_batch_size: 12

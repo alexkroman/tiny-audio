@@ -16,6 +16,7 @@ model:
 
   # Projector configuration
   audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
+  projector_hidden_dim: 8192  # Must match the pretrained model's projector size
 
 # PEFT Configuration for LoRA
 peft:
@@ -36,14 +37,8 @@ training:
   hub_strategy: "checkpoint"  # Push every checkpoint
   hub_private_repo: false  # Keep it private
 
-  # Can't resume from model repo - comment out or remove
-  # resume_from_checkpoint: "mazesmazes/tiny-audio"
-
-  # Instead, load the pretrained model in the model config
-  # This is handled by model initialization, not trainer resume
-
-  per_device_train_batch_size: 10  # Reduced from 4
-  per_device_eval_batch_size: 10 # Reduced from 4
+  per_device_train_batch_size: 12  # Reduced from 4
+  per_device_eval_batch_size: 12 # Reduced from 4
   gradient_accumulation_steps: 3  # Increased to maintain effective batch size
   eval_accumulation_steps: 3
   # Learning rate - Higher for LoRA than frozen training
@@ -64,7 +59,7 @@ training:
 
 
   # Training duration - can be shorter with LoRA
-  max_steps: 50000  # Reduced from 50k - LoRA converges faster
+  max_steps: 10000  # Reduced from 50k - LoRA converges faster
 
   # Reproducibility
   seed: 123  # Different seed for stage 3

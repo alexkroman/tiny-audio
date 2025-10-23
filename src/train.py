@@ -230,8 +230,19 @@ def main(cfg: DictConfig) -> None:
     # Load from pretrained if specified, otherwise create new model
     if cfg.model.get("pretrained_model_path"):
         print(f"Loading pretrained model from: {cfg.model.pretrained_model_path}")
-        model = ASRModel.from_pretrained(cfg.model.pretrained_model_path, peft_config=peft_config)
+        # Pass our config to override the Hub config dimensions
+        # Don't apply LoRA yet when loading from pretrained - apply it after loading
+        model = ASRModel.from_pretrained(
+            cfg.model.pretrained_model_path,
+            config=asr_config,
+            peft_config=None  # Don't apply LoRA during loading
+        )
         print(f"✓ Loaded pretrained model with projector weights")
+
+        # Now apply LoRA if configured
+        if peft_config and peft_config.get("peft_method") == "lora":
+            print("Applying LoRA adapters to the loaded model...")
+            model._apply_lora(peft_config)
     else:
         model = ASRModel(asr_config, peft_config=peft_config)
 
