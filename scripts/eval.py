@@ -377,7 +377,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="large",
+        default="medium",
         help="LoquaciousSet config name (default: large)",
     )
     parser.add_argument(
@@ -389,7 +389,7 @@ def main():
     parser.add_argument(
         "--max-samples",
         type=int,
-        default=500,
+        default=None,
         help="Maximum number of samples to evaluate (default: all)",
     )
     parser.add_argument(
