@@ -84,7 +84,7 @@ def prepare_wav_bytes(wav_data):
     return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
 
 
-def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
+def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None, user_prompt=None):
     """Evaluate using local transformers pipeline or HuggingFace Inference Endpoint."""
 
     from jiwer import (
@@ -207,11 +207,21 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
         else:
             print("Using model's default system prompt")
 
+        # Print user_prompt info
+        if user_prompt is not None:
+            print(f"Using custom user prompt: {user_prompt}")
+        else:
+            print("Using default user prompt: 'Repeat the following text, without any explanation: <audio>'")
+
         for i, sample in enumerate(dataset):
             try:
                 # Pass audio directly to our custom pipeline
                 start_time = time.time()
-                result = pipe(sample["wav"])
+                # Pass user_prompt to pipeline if provided
+                if user_prompt is not None:
+                    result = pipe(sample["wav"], user_prompt=user_prompt)
+                else:
+                    result = pipe(sample["wav"])
                 inference_time = time.time() - start_time
                 per_sample_times.append(inference_time)
 
@@ -388,6 +398,12 @@ def main():
         default="/no_think /system_override",
         help="System prompt to use for generation (default: task-focused transcription prompt)",
     )
+    parser.add_argument(
+        "--user-prompt",
+        type=str,
+        default=None,
+        help="User prompt to override the default 'Repeat the following text, without any explanation: <audio>'. Must include <audio> token.",
+    )
     args = parser.parse_args()
 
     # Validate AssemblyAI requirements
@@ -432,7 +448,7 @@ def main():
         model_name = f"AssemblyAI ({args.assemblyai_model})"
     else:
         predictions, references, per_sample_wers, per_sample_times = evaluate_huggingface(
-            dataset, args.model, args.system_prompt
+            dataset, args.model, args.system_prompt, args.user_prompt
         )
         model_name = args.model
 

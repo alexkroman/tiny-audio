@@ -621,6 +621,7 @@ class ASRModel(PreTrainedModel):
         self,
         input_values: Optional[torch.Tensor] = None,
         system_prompt: Optional[str] = None,
+        user_prompt: Optional[str] = None,
         **generate_kwargs,
     ) -> Union[
         torch.Tensor,
@@ -639,13 +640,16 @@ class ASRModel(PreTrainedModel):
         if system_prompt is None:
             system_prompt = self.system_prompt
 
+        if user_prompt is None:
+            user_prompt = "Repeat the following text, without any explanation: <audio>"
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append(
             {
                 "role": "user",
-                "content": "Repeat the following text, without any explanation: <audio>",
+                "content": user_prompt,
             }
         )
 
