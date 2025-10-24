@@ -61,7 +61,7 @@ training:
 
 # Data configuration
 data:
-  max_audio_seconds: 14.0
+  max_audio_seconds: 16.0
 
 # Early stopping configuration
 early_stopping:

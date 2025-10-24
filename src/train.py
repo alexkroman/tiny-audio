@@ -264,7 +264,6 @@ def main(cfg: DictConfig) -> None:
             from peft import TaskType
             print("Applying encoder LoRA adapters to the loaded model...")
             model.encoder = model._apply_lora(model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder")
-            model._wrap_encoder_forward()
             model.encoder_lora_config = encoder_lora_config
 
         if peft_config and peft_config.get("peft_method") == "lora":
