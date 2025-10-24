@@ -10,7 +10,7 @@ defaults:
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
-  # pretrained_model_path: "mazesmazes/tiny-audio"
+  pretrained_model_path: "mazesmazes/tiny-audio"
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
@@ -33,15 +33,16 @@ training:
   hub_strategy: "checkpoint"
   hub_private_repo: false
 
-  per_device_train_batch_size: 4
-  per_device_eval_batch_size: 4
-  gradient_accumulation_steps: 4
-  eval_accumulation_steps: 4
+  per_device_train_batch_size: 5
+  per_device_eval_batch_size: 5
+  gradient_accumulation_steps: 5
+  eval_accumulation_steps: 5
 
   # Learning rate - Higher for LoRA
   learning_rate: 1.0e-4
-  warmup_steps: 1000
-  lr_scheduler_type: cosine
+  warmup_steps: 100
+  lr_scheduler_type: "cosine_with_min_lr"
+  lr_scheduler_kwargs: {"min_lr_rate": 0.1}
 
   # Optimization
   weight_decay: 0.0
@@ -52,12 +53,17 @@ training:
   gradient_checkpointing: false
 
   # Training duration
-  max_steps: 40000
+  max_steps: 100000
 
   # Reproducibility
-  seed: 43
+  seed: 45
   ignore_data_skip: true
 
 # Data configuration
 data:
-  max_audio_seconds: 25.0
+  max_audio_seconds: 14.0
+
+# Early stopping configuration
+early_stopping:
+  patience: null
+  threshold: 0.0

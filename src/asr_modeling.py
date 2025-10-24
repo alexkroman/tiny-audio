@@ -187,8 +187,6 @@ class ASRModel(PreTrainedModel):
                         subfolder="encoder_adapter",
                         is_trainable=True,
                     )
-                    # Re-wrap since we replaced the encoder
-                    model._wrap_encoder_forward()
                 except Exception as e:
                     print(f"No encoder LoRA adapters found ({e}), will initialize fresh if configured")
 
