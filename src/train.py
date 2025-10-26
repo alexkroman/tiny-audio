@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import logging
+import re
 from typing import Any, Dict, List
 
 import hydra
@@ -10,7 +11,7 @@ import truecase
 import wandb
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
-from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments
+from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments, WhisperTokenizer
 
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
@@ -99,6 +100,21 @@ class DataCollator(DataCollatorForSeq2Seq):
         self.max_audio_samples = int(max_audio_seconds * sample_rate)
         self.system_prompt = system_prompt
 
+        # Initialize WhisperTokenizer for text normalization (matches eval script)
+        self.whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+
+    def _preprocess_text(self, text: str) -> str:
+        """Preprocess text before Whisper normalization (matches eval script)."""
+        # Remove <inaudible> tags
+        text = re.sub(r'<inaudible>', '', text, flags=re.IGNORECASE)
+        # Remove disfluencies (uh, um)
+        text = re.sub(r'\b(uh|um)\b', '', text, flags=re.IGNORECASE)
+        return text
+
+    def _normalize_text(self, text: str) -> str:
+        """Apply Whisper normalization (matches eval script)."""
+        return self.whisper_tokenizer.normalize(self._preprocess_text(text))
+
     def _extract_audio(self, audio_decoder) -> Any:
         # Note: Audio() does peak normalization → [-1, 1]
         # Wav2Vec2FeatureExtractor does z-normalization → mean=0, std=1
@@ -118,6 +134,9 @@ class DataCollator(DataCollatorForSeq2Seq):
         for f in features:
             text = f["text"].strip() if isinstance(f["text"], str) else f["text"]
 
+            # Apply Whisper normalization (matches eval script preprocessing)
+            text = self._normalize_text(text)
+
             # Apply truecasing in main process (not in DataLoader workers)
             text = text.replace('<COMMA>', ',').replace('<PERIOD>', '.')
             text = truecase.get_true_case(text)
@@ -128,7 +147,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             messages.append(
                 {
                     "role": "user",
-                    "content": "Repeat the following text, without any explanation: <audio>",
+                    "content": "Transcribe: <audio>",
                 }
             )
             messages.append({"role": "assistant", "content": text})

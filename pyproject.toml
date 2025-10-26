@@ -78,6 +78,10 @@ deploy-runpod = "scripts.deploy_runpod:main"
 remote-train = "scripts.start_remote_training:main"
 attach-remote = "scripts.attach_remote_session:main"
 
+# Analysis tools
+filter-wer = "scripts.filter_high_wer:main"
+optimize-prompt = "scripts.optimize_prompt:main"
+
 # Development tools
 lint = "scripts.dev_tools:lint"
 format = "scripts.dev_tools:format_code"

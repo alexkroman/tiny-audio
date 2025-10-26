@@ -106,6 +106,15 @@ class ASRModel(PreTrainedModel):
         cls._is_loading_from_pretrained = True
         cls._pretrained_model_path = pretrained_model_name_or_path
 
+        # Extract subfolder/revision from kwargs for cached_file calls
+        subfolder = kwargs.get("subfolder", None)
+        revision = kwargs.get("revision", None)
+        cache_kwargs = {}
+        if subfolder:
+            cache_kwargs["subfolder"] = subfolder
+        if revision:
+            cache_kwargs["revision"] = revision
+
         try:
             # Load decoder LoRA config if it exists
             peft_config = None
@@ -114,6 +123,7 @@ class ASRModel(PreTrainedModel):
                     pretrained_model_name_or_path,
                     "peft_config.json",
                     _raise_exceptions_for_missing_entries=False,
+                    **cache_kwargs,
                 )
                 if peft_config_file:
                     from pathlib import Path as PathlibPath
@@ -130,6 +140,7 @@ class ASRModel(PreTrainedModel):
                     pretrained_model_name_or_path,
                     "encoder_lora_config.json",
                     _raise_exceptions_for_missing_entries=False,
+                    **cache_kwargs,
                 )
                 if encoder_lora_config_file:
                     from pathlib import Path as PathlibPath
@@ -144,6 +155,7 @@ class ASRModel(PreTrainedModel):
             model_path = cached_file(
                 pretrained_model_name_or_path,
                 "model.safetensors",
+                **cache_kwargs,
             )
             model_state = load_file(model_path)
             projector_state = {
@@ -161,6 +173,7 @@ class ASRModel(PreTrainedModel):
                     pretrained_model_name_or_path,
                     "adapter_model.safetensors",
                     _raise_exceptions_for_missing_entries=False,
+                    **cache_kwargs,
                 )
 
                 if adapter_file:
@@ -175,20 +188,24 @@ class ASRModel(PreTrainedModel):
                 else:
                     print("No decoder LoRA adapters found, initializing fresh LoRA weights")
 
-            # Load encoder LoRA adapters if config exists
+            # Load encoder LoRA weights from model.safetensors if config exists
             if encoder_lora_config:
-                try:
-                    from peft import PeftModel
+                print(f"Found encoder_lora_config.json with r={encoder_lora_config.get('r', 0)}")
+                # Extract encoder LoRA weights from model_state
+                encoder_lora_state = {
+                    k.replace("encoder.", ""): v
+                    for k, v in model_state.items()
+                    if k.startswith("encoder.")
+                }
 
-                    print(f"Loading encoder LoRA adapters from {pretrained_model_name_or_path}")
-                    model.encoder = PeftModel.from_pretrained(
-                        model.encoder,
-                        pretrained_model_name_or_path,
-                        subfolder="encoder_adapter",
-                        is_trainable=True,
-                    )
-                except Exception as e:
-                    print(f"No encoder LoRA adapters found ({e}), will initialize fresh if configured")
+                if encoder_lora_state:
+                    print(f"✓ Loading encoder LoRA weights from model.safetensors ({len(encoder_lora_state)} parameters)")
+                    # Load the weights into the encoder (which is already a PeftModel from __init__)
+                    model.encoder.load_state_dict(encoder_lora_state, strict=False)
+                else:
+                    print(f"⚠ No encoder LoRA weights found in model.safetensors, using freshly initialized weights")
+            else:
+                print("No encoder_lora_config.json found, encoder LoRA not used")
 
             return model
         finally:
@@ -433,7 +450,9 @@ class ASRModel(PreTrainedModel):
         current_embed_size = self.decoder.get_input_embeddings().weight.shape[0]
         expected_size = len(self.tokenizer)
         if current_embed_size != expected_size:
-            print(f"Resizing embeddings from {current_embed_size} to {expected_size}")
+            # Only print message if not loading from pretrained (where resize is expected)
+            if not self._is_loading_from_pretrained:
+                print(f"Resizing embeddings from {current_embed_size} to {expected_size}")
             self.decoder.resize_token_embeddings(expected_size, mean_resizing=False)
 
         self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<audio>")
@@ -641,7 +660,7 @@ class ASRModel(PreTrainedModel):
             system_prompt = self.system_prompt
 
         if user_prompt is None:
-            user_prompt = "Repeat the following text, without any explanation: <audio>"
+            user_prompt = "Transcribe: <audio>"
 
         messages = []
         if system_prompt:
@@ -758,12 +777,13 @@ class ASRModel(PreTrainedModel):
             with (save_dir / "peft_config.json").open("w") as f:
                 json.dump(self.peft_config, f, indent=2)
 
-        # Save encoder LoRA if configured
-        if self.encoder_lora_config and self.encoder_lora_config.get("r", 0) > 0:
-            if hasattr(self.encoder, "save_pretrained"):
-                encoder_adapter_dir = save_dir / "encoder_adapter"
-                encoder_adapter_dir.mkdir(exist_ok=True)
-                self.encoder.save_pretrained(encoder_adapter_dir)
+        # Save encoder LoRA config (weights are already in model.safetensors via diff_state_dict)
+        if (
+            hasattr(self, "encoder_lora_config")
+            and self.encoder_lora_config is not None
+            and isinstance(self.encoder_lora_config, dict)
+            and self.encoder_lora_config.get("r", 0) > 0
+        ):
             with (save_dir / "encoder_lora_config.json").open("w") as f:
                 json.dump(self.encoder_lora_config, f, indent=2)
 

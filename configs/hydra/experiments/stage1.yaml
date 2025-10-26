@@ -53,10 +53,10 @@ training:
   gradient_checkpointing: false
 
   # Training duration
-  max_steps: 100000
+  max_steps: 50000
 
   # Reproducibility
-  seed: 45
+  seed: 46
   ignore_data_skip: true
 
 # Data configuration

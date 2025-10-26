@@ -195,6 +195,19 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None, user_pr
                 print(f"Sample {i + 1}: WER = {sample_wer:.2f}%, Time = {per_sample_times[i]:.2f}s")
                 print(f"  Ref:  {sample[text_field]}")
                 print(f"  Pred: {prediction}")
+
+                # Print cumulative WER every 100 samples
+                if (i + 1) % 100 == 0:
+                    # Compute corpus-level WER (same as final metric)
+                    normalized_preds = [normalize_text(p) for p in predictions]
+                    normalized_refs = [normalize_text(r) for r in references]
+                    corpus_wer = wer(normalized_refs, normalized_preds) * 100
+                    avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
+                    print(f"\n{'='*80}")
+                    print(f"CHECKPOINT @ {i + 1} samples:")
+                    print(f"  Corpus WER: {corpus_wer:.2f}%")
+                    print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
+                    print(f"{'='*80}\n")
         finally:
             # Clean up temporary directory
             import shutil
@@ -232,7 +245,7 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None, user_pr
         if user_prompt is not None:
             print(f"Using custom user prompt: {user_prompt}")
         else:
-            print("Using default user prompt: 'Repeat the following text, without any explanation: <audio>'")
+            print("Using default user prompt: 'Transcribe: <audio>'")
 
         for i, sample in enumerate(dataset):
             try:
@@ -277,6 +290,19 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None, user_pr
             print(f"Sample {i + 1}: WER = {sample_wer:.2f}%, Time = {per_sample_times[i]:.2f}s")
             print(f"  Ref:  {sample[text_field]}")
             print(f"  Pred: {prediction}")
+
+            # Print cumulative WER every 100 samples
+            if (i + 1) % 100 == 0:
+                # Compute corpus-level WER (same as final metric)
+                normalized_preds = [normalize_text(p) for p in predictions]
+                normalized_refs = [normalize_text(r) for r in references]
+                corpus_wer = wer(normalized_refs, normalized_preds) * 100
+                avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
+                print(f"\n{'='*80}")
+                print(f"CHECKPOINT @ {i + 1} samples:")
+                print(f"  Corpus WER: {corpus_wer:.2f}%")
+                print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
+                print(f"{'='*80}\n")
 
     return predictions, references, per_sample_wers, per_sample_times
 
@@ -361,6 +387,19 @@ def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_
         print(f"  Ref:  {sample[text_field]}")
         print(f"  Pred: {prediction}")
 
+        # Print cumulative WER every 100 samples
+        if (i + 1) % 100 == 0:
+            # Compute corpus-level WER (same as final metric)
+            normalized_preds = [normalize_text(p) for p in predictions]
+            normalized_refs = [normalize_text(r) for r in references]
+            corpus_wer = wer(normalized_refs, normalized_preds) * 100
+            avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
+            print(f"\n{'='*80}")
+            print(f"CHECKPOINT @ {i + 1} samples:")
+            print(f"  Corpus WER: {corpus_wer:.2f}%")
+            print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
+            print(f"{'='*80}\n")
+
         # Rate limiting
         time.sleep(0.5)
 
@@ -393,7 +432,7 @@ def main():
         type=str,
         default="slam_1",
         choices=["best", "universal", "slam_1", "nano"],
-        help="AssemblyAI model to use (default: best)",
+        help="AssemblyAI model to use (default: slam_1)",
     )
     parser.add_argument(
         "--api-key",
@@ -436,6 +475,12 @@ def main():
         type=str,
         default=None,
         help="User prompt to override the default 'Repeat the following text, without any explanation: <audio>'. Must include <audio> token.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for dataset shuffling (default: 42)",
     )
     args = parser.parse_args()
 
@@ -490,6 +535,10 @@ def main():
         )
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
+
+    # Shuffle dataset for reproducibility
+    print(f"Shuffling dataset with seed {args.seed}...")
+    dataset = dataset.shuffle(seed=args.seed, buffer_size=10000)
 
     if args.max_samples:
         dataset = dataset.take(args.max_samples)

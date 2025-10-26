@@ -1,7 +1,7 @@
 # LoquaciousSet dataset configuration
 datasets:
   - path: speechbrain/LoquaciousSet
-    name: medium  # Config name for LoquaciousSet
+    name: large  # Config name for LoquaciousSet
     audio_column: wav    # LoquaciousSet uses 'wav' instead of 'audio'
     text_column: text    # LoquaciousSet uses 'text' column
     train_splits:
