@@ -199,7 +199,8 @@ class ASRModel(PreTrainedModel):
                 }
 
                 if encoder_lora_state:
-                    print(f"✓ Loading encoder LoRA weights from model.safetensors ({len(encoder_lora_state)} parameters)")
+                    total_params = sum(v.numel() for v in encoder_lora_state.values())
+                    print(f"✓ Loading encoder LoRA weights from model.safetensors ({len(encoder_lora_state)} tensors, {total_params:,} parameters)")
                     # Load the weights into the encoder (which is already a PeftModel from __init__)
                     model.encoder.load_state_dict(encoder_lora_state, strict=False)
                 else:
