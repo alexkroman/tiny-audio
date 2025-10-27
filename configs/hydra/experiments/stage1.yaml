@@ -56,7 +56,7 @@ training:
   max_steps: 50000
 
   # Reproducibility
-  seed: 46
+  seed: 47
   ignore_data_skip: true
 
 # Data configuration
