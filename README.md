@@ -4,9 +4,9 @@
 
 # Tiny Audio
 
-**Train your own speech recognition model in 6 hours for ~$6**
+**Train your own speech recognition model in 24 hours for $12**
 
-This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in less than 6 hours. Tiny Audio combines a frozen HuBERT-XLarge encoder (1.3B params) with a frozen SmolLM3-3B decoder (3B params), connected by a small trainable audio projector (~13M params). The result is a speech-to-text system you can train in a few hours, deploy to HuggingFace, and use just like Whisper or any other ASR model.
+This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in 24 hours. Tiny Audio combines a frozen HuBERT-XLarge encoder (1.3B params) with a frozen SmolLM3-3B decoder (3B params), connected by a small trainable audio projector (~13M params). The result is a speech-to-text system you can train in a few hours, deploy to HuggingFace, and use just like Whisper or any other ASR model.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
@@ -43,7 +43,7 @@ poetry install
 # Quick test run (20 steps, ~5 minutes)
 poetry run python src/train.py
 
-# Full production training (~24 hours on A100)
+# Full production training (~24 hours on A40)
 export HF_TOKEN='your-token'  # Get from https://huggingface.co/settings/tokens
 poetry run python src/train.py +experiments=production
 ```
@@ -61,7 +61,7 @@ poetry run remote-train \
   --config production
 ```
 
-Now wait ~6 hours. Once it's done, your model will be pushed to HuggingFace Hub automatically (if you set `HF_TOKEN`), and you can use it just like in the example above!
+Now wait ~24 hours. Once it's done, your model will be pushed to HuggingFace Hub automatically (if you set `HF_TOKEN`), and you can use it just like in the example above!
 
 ## How it works
 
@@ -84,8 +84,8 @@ The projector uses a **SwiGLU** architecture (like Llama):
 
 Why freeze the encoder and decoder? Because:
 - **You only train ~13M parameters** instead of 4+ billion
-- **Training is fast** (~6 hours on A40)
-- **It's cheap** (~$6 for a full run)
+- **Training is fast** (~24 hours on A40)
+- **It's cheap** (~$12 for a full run)
 - **You leverage pretrained knowledge** from both audio and language domains
 - **Memory efficient** - runs on a single A40 40GB
 
@@ -95,7 +95,7 @@ Why freeze the encoder and decoder? Because:
 
 **Hardware**: Single NVIDIA A40 40GB works great.
 
-**Time & Cost**: ~6 hours on A40 = ~$6 depending on your provider
+**Time & Cost**: ~24 hours on A40 = ~$12 depending on your provider
 
 **Configuration**: The repo uses Hydra for configs, so you can easily tweak things:
 
@@ -125,6 +125,28 @@ poetry run eval mazesmazes/tiny-audio
 ```
 
 Results are measured in Word Error Rate (WER) - lower is better. Detailed predictions are saved to `outputs/eval_*/results.txt` so you can see exactly where your model succeeds or fails.
+
+## Leaderboard
+
+Contributors who have trained and evaluated Tiny Audio models:
+
+| Rank | Contributor | WER | Git Hash | Date |
+|------|------------|-----|----------|------|
+| 🥇 | [@alexkroman](https://github.com/alexkroman) | **10.14** | [`5a5f3a0`](https://github.com/alexkroman/tiny-audio/commit/5a5f3a055d2e5722d9473f3a1c2fb883eab7ad9c) | 2025-10-23 |
+
+Want to see your name here? Train a model, evaluate it on LoquaciousSet, and submit a PR with your results!
+
+**To reproduce or generate your own WER score:**
+```bash
+# Evaluate on 500 samples (default)
+poetry run eval mazesmazes/tiny-audio
+
+# Or evaluate your own model
+poetry run eval your-username/your-model-name
+
+# Quick test on 100 samples
+poetry run eval mazesmazes/tiny-audio --max-samples 100
+```
 
 ## What makes this repo different?
 
@@ -199,7 +221,7 @@ If you use Tiny Audio in your research, please cite:
 ```bibtex
 @software{kroman2024tinyaudio,
   author = {Kroman, Alex},
-  title = {Tiny Audio: Train your own speech recognition model in 6 hours},
+  title = {Tiny Audio: Train your own speech recognition model in 24 hours},
   year = {2024},
   publisher = {GitHub},
   url = {https://github.com/alexkroman/tiny-audio}

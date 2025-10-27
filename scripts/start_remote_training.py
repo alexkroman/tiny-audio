@@ -67,6 +67,7 @@ def start_training(host, port, experiment, session_name):
 
 
         echo "--- Setting up environment variables ---"
+        export PATH="/root/.local/bin:$PATH"
         export TOKENIZERS_PARALLELISM=false
         export HF_DATASETS_AUDIO_DECODER="torchcodec"
         export HF_HOME=/workspace/.cache/huggingface
@@ -87,9 +88,9 @@ def start_training(host, port, experiment, session_name):
 
         echo "--- Verifying environment ---"
         echo "Experiment: {experiment}"
+        echo "Current PATH: $PATH"
         echo "Python executable: $(which python)"
         echo "Python version: $(python --version)"
-        echo "Accelerate executable: $(which accelerate)"
         echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())' 2>/dev/null)"
         echo "Audio decoder: $HF_DATASETS_AUDIO_DECODER"
         echo "============================="
@@ -97,7 +98,8 @@ def start_training(host, port, experiment, session_name):
         cd /workspace
 
         echo "--- Launching Training ---"
-        accelerate launch --config_file configs/accelerate/a40.yaml -m src.train +experiments={experiment}
+        # Use python -m to ensure we find the module even if binary isn't in PATH
+        python -m accelerate.commands.launch --config_file configs/accelerate/a40.yaml -m src.train +experiments={experiment}
         EXIT_CODE=$?
 
         if [ $EXIT_CODE -eq 0 ]; then

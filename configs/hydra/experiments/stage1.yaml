@@ -1,43 +1,69 @@
 # @package _global_
 
-
+# Stage 4 configuration - Projector + Encoder LoRA + Decoder LoRA
+# This stage adds encoder LoRA on top of stage 3 for maximum adaptation
 defaults:
   - override /model: large
   - override /data: loquacious_large
   - override /training: production
+  - override /encoder_lora: default
 
 model:
+  # Load the pretrained model from Hub (this loads the projector weights)
+  pretrained_model_path: "mazesmazes/tiny-audio"
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
   # Projector configuration
-  audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
+  audio_downsample_rate: 5
+  projector_hidden_dim: 8192
+
+# Encoder LoRA Configuration
+encoder_lora:
+  r: 8  # LoRA rank for encoder
+  lora_alpha: 8  # Scaling factor (alpha/r = 1.0)
+  target_modules: ["q_proj", "k_proj"]  # HuBERT attention projections
+  lora_dropout: 0.0
+  bias: none
 
 training:
-  # Learning rate and scheduler
+  # Hub configuration
+  push_to_hub: true
+  hub_model_id: "mazesmazes/tiny-audio"
+  hub_strategy: "checkpoint"
+  hub_private_repo: false
+
+  per_device_train_batch_size: 5
+  per_device_eval_batch_size: 5
+  gradient_accumulation_steps: 5
+  eval_accumulation_steps: 5
+
+  # Learning rate - Higher for LoRA
   learning_rate: 1.0e-4
-  warmup_steps: 500
-  lr_scheduler_type: cosine
+  warmup_steps: 100
+  lr_scheduler_type: "cosine_with_min_lr"
+  lr_scheduler_kwargs: {"min_lr_rate": 0.1}
 
   # Optimization
-  weight_decay: 0.01
-  max_grad_norm: 1.0  # Increased from 1.0 - less aggressive clipping for projector training
+  weight_decay: 0.0
+  max_grad_norm: 1.0
 
-
-  # Evaluation and checkpointing
-  eval_steps: 500
-  save_steps: 500
-  logging_steps: 25
+  # Memory optimization
+  torch_compile: false  # Disabled - causes issues with encoder LoRA
+  gradient_checkpointing: false
 
   # Training duration
-  max_steps: 25000
+  max_steps: 50000
 
   # Reproducibility
-  seed: 42
+  seed: 47
   ignore_data_skip: true
+
+# Data configuration
+data:
+  max_audio_seconds: 16.0
 
 # Early stopping configuration
 early_stopping:
-  patience: 10
-  threshold: 0.0001
-
+  patience: null
+  threshold: 0.0

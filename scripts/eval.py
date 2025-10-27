@@ -74,46 +74,67 @@ def wav_bytes_to_audio(wav_bytes):
 
 def prepare_wav_bytes(wav_data):
     """Convert various WAV data formats to bytes for API calls."""
-    if isinstance(wav_data, dict) and "bytes" in wav_data:
-        # Already in bytes format
-        return wav_data["bytes"]
+    # Handle AudioDecoder objects (datasets library lazy loading)
+    if hasattr(wav_data, '__class__') and 'AudioDecoder' in str(type(wav_data)):
+        # AudioDecoder has get_all_samples method
+        if hasattr(wav_data, 'get_all_samples'):
+            samples = wav_data.get_all_samples()
+            # samples should have .data and metadata with sample_rate
+            audio_array = samples.data.squeeze().numpy()
+            sample_rate = wav_data.metadata.sample_rate
+            return audio_to_wav_bytes(audio_array, sample_rate)
+
     if isinstance(wav_data, dict):
-        # Dict with array and sampling_rate
-        return audio_to_wav_bytes(wav_data["array"], wav_data["sampling_rate"])
-    # Audio object format
-    return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
+        if "bytes" in wav_data:
+            # Already in bytes format
+            return wav_data["bytes"]
+        elif "array" in wav_data and "sampling_rate" in wav_data:
+            # Dict with array and sampling_rate (earnings22 format)
+            return audio_to_wav_bytes(wav_data["array"], wav_data["sampling_rate"])
+
+    # Audio object format (LoquaciousSet)
+    if hasattr(wav_data, 'array') and hasattr(wav_data, 'sampling_rate'):
+        return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
+
+    raise ValueError(f"Unsupported audio format: {type(wav_data)}, available attributes: {dir(wav_data) if hasattr(wav_data, '__dir__') else 'N/A'}")
 
 
-def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
-    """Evaluate using local transformers pipeline or HuggingFace Inference Endpoint."""
+def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None, user_prompt=None, audio_field="wav", text_field="text"):
+    """Evaluate using local transformers pipeline or HuggingFace Inference Endpoint.
 
-    from jiwer import (
-        Compose,
-        ExpandCommonEnglishContractions,
-        RemoveKaldiNonWords,
-        RemoveMultipleSpaces,
-        RemovePunctuation,
-        Strip,
-        ToLowerCase,
-        wer,
-    )
+    Args:
+        dataset: Dataset to evaluate on
+        model_or_endpoint: Model path or endpoint URL
+        system_prompt: Optional system prompt override
+        user_prompt: Optional user prompt override
+        audio_field: Name of the audio field in the dataset (default: "wav")
+        text_field: Name of the text field in the dataset (default: "text")
+    """
+
+    import re
+    from jiwer import wer
+    from transformers import WhisperTokenizer
+
+    # Custom preprocessing to remove <inaudible> tags and disfluencies before Whisper normalization
+    def preprocess_text(text: str) -> str:
+        # Remove <inaudible> tags
+        text = re.sub(r'<inaudible>', '', text, flags=re.IGNORECASE)
+        # Remove disfluencies (uh, um) - these are in Whisper's ignore patterns already
+        # but we keep this for compatibility with non-Whisper datasets
+        text = re.sub(r'\b(uh|um)\b', '', text, flags=re.IGNORECASE)
+        return text
 
     predictions = []
     references = []
     per_sample_wers = []
     per_sample_times = []
 
-    # Create text normalizer
-    normalizer = Compose(
-        [
-            ToLowerCase(),
-            ExpandCommonEnglishContractions(),
-            RemoveKaldiNonWords(),
-            RemovePunctuation(),
-            RemoveMultipleSpaces(),
-            Strip(),
-        ]
-    )
+    # Use Whisper's English text normalizer (includes number normalization, contractions, etc.)
+    # Load once at the start to avoid repeated downloads
+    whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+
+    def normalize_text(text: str) -> str:
+        return whisper_tokenizer.normalize(preprocess_text(text))
 
     # Check if it's an inference endpoint (URL) or a model to load locally
     if model_or_endpoint.startswith("http"):
@@ -126,7 +147,7 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
         try:
             for i, sample in enumerate(dataset):
                 # Get WAV bytes for API
-                wav_bytes = prepare_wav_bytes(sample["wav"])
+                wav_bytes = prepare_wav_bytes(sample[audio_field])
 
                 # Write to temporary file with .wav extension
                 temp_path = Path(temp_dir) / f"temp_{i}.wav"
@@ -163,17 +184,30 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
                         temp_path.unlink()
 
                 predictions.append(prediction)
-                references.append(sample["text"])
+                references.append(sample[text_field])
 
-                # Compute WER for this sample
-                norm_pred = normalizer(prediction)
-                norm_ref = normalizer(sample["text"])
+                # Compute WER for this sample using Whisper normalization
+                norm_pred = normalize_text(prediction)
+                norm_ref = normalize_text(sample[text_field])
                 sample_wer = wer(norm_ref, norm_pred) * 100
                 per_sample_wers.append(sample_wer)
 
                 print(f"Sample {i + 1}: WER = {sample_wer:.2f}%, Time = {per_sample_times[i]:.2f}s")
-                print(f"  Ref:  {sample['text']}")
+                print(f"  Ref:  {sample[text_field]}")
                 print(f"  Pred: {prediction}")
+
+                # Print cumulative WER every 100 samples
+                if (i + 1) % 100 == 0:
+                    # Compute corpus-level WER (same as final metric)
+                    normalized_preds = [normalize_text(p) for p in predictions]
+                    normalized_refs = [normalize_text(r) for r in references]
+                    corpus_wer = wer(normalized_refs, normalized_preds) * 100
+                    avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
+                    print(f"\n{'='*80}")
+                    print(f"CHECKPOINT @ {i + 1} samples:")
+                    print(f"  Corpus WER: {corpus_wer:.2f}%")
+                    print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
+                    print(f"{'='*80}\n")
         finally:
             # Clean up temporary directory
             import shutil
@@ -207,11 +241,21 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
         else:
             print("Using model's default system prompt")
 
+        # Print user_prompt info
+        if user_prompt is not None:
+            print(f"Using custom user prompt: {user_prompt}")
+        else:
+            print("Using default user prompt: 'Transcribe: <audio>'")
+
         for i, sample in enumerate(dataset):
             try:
                 # Pass audio directly to our custom pipeline
                 start_time = time.time()
-                result = pipe(sample["wav"])
+                # Pass user_prompt to pipeline if provided
+                if user_prompt is not None:
+                    result = pipe(sample[audio_field], user_prompt=user_prompt)
+                else:
+                    result = pipe(sample[audio_field])
                 inference_time = time.time() - start_time
                 per_sample_times.append(inference_time)
 
@@ -235,34 +279,56 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None):
                 per_sample_times.append(0.0)
 
             predictions.append(prediction)
-            references.append(sample["text"])
+            references.append(sample[text_field])
 
-            # Compute WER for this sample
-            norm_pred = normalizer(prediction)
-            norm_ref = normalizer(sample["text"])
+            # Compute WER for this sample using Whisper normalization
+            norm_pred = normalize_text(prediction)
+            norm_ref = normalize_text(sample[text_field])
             sample_wer = wer(norm_ref, norm_pred) * 100
             per_sample_wers.append(sample_wer)
 
             print(f"Sample {i + 1}: WER = {sample_wer:.2f}%, Time = {per_sample_times[i]:.2f}s")
-            print(f"  Ref:  {sample['text']}")
+            print(f"  Ref:  {sample[text_field]}")
             print(f"  Pred: {prediction}")
+
+            # Print cumulative WER every 100 samples
+            if (i + 1) % 100 == 0:
+                # Compute corpus-level WER (same as final metric)
+                normalized_preds = [normalize_text(p) for p in predictions]
+                normalized_refs = [normalize_text(r) for r in references]
+                corpus_wer = wer(normalized_refs, normalized_preds) * 100
+                avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
+                print(f"\n{'='*80}")
+                print(f"CHECKPOINT @ {i + 1} samples:")
+                print(f"  Corpus WER: {corpus_wer:.2f}%")
+                print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
+                print(f"{'='*80}\n")
 
     return predictions, references, per_sample_wers, per_sample_times
 
 
-def evaluate_assemblyai(dataset, api_key, model="best"):
-    """Evaluate using AssemblyAI API."""
+def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_field="text"):
+    """Evaluate using AssemblyAI API.
+
+    Args:
+        dataset: Dataset to evaluate on
+        api_key: AssemblyAI API key
+        model: AssemblyAI model to use
+        audio_field: Name of the audio field in the dataset (default: "wav")
+        text_field: Name of the text field in the dataset (default: "text")
+    """
+    import re
     import assemblyai as aai
-    from jiwer import (
-        Compose,
-        ExpandCommonEnglishContractions,
-        RemoveKaldiNonWords,
-        RemoveMultipleSpaces,
-        RemovePunctuation,
-        Strip,
-        ToLowerCase,
-        wer,
-    )
+    from jiwer import wer
+    from transformers import WhisperTokenizer
+
+    # Custom preprocessing to remove <inaudible> tags and disfluencies before Whisper normalization
+    def preprocess_text(text: str) -> str:
+        # Remove <inaudible> tags
+        text = re.sub(r'<inaudible>', '', text, flags=re.IGNORECASE)
+        # Remove disfluencies (uh, um)
+        text = re.sub(r'\b(uh|um)\b', '', text, flags=re.IGNORECASE)
+        return text
 
     aai.settings.api_key = api_key
 
@@ -287,21 +353,15 @@ def evaluate_assemblyai(dataset, api_key, model="best"):
     per_sample_wers = []
     per_sample_times = []
 
-    # Create text normalizer
-    normalizer = Compose(
-        [
-            ToLowerCase(),
-            ExpandCommonEnglishContractions(),
-            RemoveKaldiNonWords(),
-            RemovePunctuation(),
-            RemoveMultipleSpaces(),
-            Strip(),
-        ]
-    )
+    # Use Whisper's English text normalizer
+    whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+
+    def normalize_text(text: str) -> str:
+        return whisper_tokenizer.normalize(preprocess_text(text))
 
     for i, sample in enumerate(dataset):
         # Get WAV bytes for API
-        wav_bytes = prepare_wav_bytes(sample["wav"])
+        wav_bytes = prepare_wav_bytes(sample[audio_field])
 
         try:
             start_time = time.time()
@@ -315,17 +375,30 @@ def evaluate_assemblyai(dataset, api_key, model="best"):
             per_sample_times.append(0.0)
 
         predictions.append(prediction)
-        references.append(sample["text"])
+        references.append(sample[text_field])
 
-        # Compute WER for this sample
-        norm_pred = normalizer(prediction)
-        norm_ref = normalizer(sample["text"])
+        # Compute WER for this sample using Whisper normalization
+        norm_pred = normalize_text(prediction)
+        norm_ref = normalize_text(sample[text_field])
         sample_wer = wer(norm_ref, norm_pred) * 100
         per_sample_wers.append(sample_wer)
 
         print(f"Sample {i + 1}: WER = {sample_wer:.2f}%, Time = {per_sample_times[i]:.2f}s")
-        print(f"  Ref:  {sample['text']}")
+        print(f"  Ref:  {sample[text_field]}")
         print(f"  Pred: {prediction}")
+
+        # Print cumulative WER every 100 samples
+        if (i + 1) % 100 == 0:
+            # Compute corpus-level WER (same as final metric)
+            normalized_preds = [normalize_text(p) for p in predictions]
+            normalized_refs = [normalize_text(r) for r in references]
+            corpus_wer = wer(normalized_refs, normalized_preds) * 100
+            avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
+            print(f"\n{'='*80}")
+            print(f"CHECKPOINT @ {i + 1} samples:")
+            print(f"  Corpus WER: {corpus_wer:.2f}%")
+            print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
+            print(f"{'='*80}\n")
 
         # Rate limiting
         time.sleep(0.5)
@@ -334,11 +407,20 @@ def evaluate_assemblyai(dataset, api_key, model="best"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate ASR models on LoquaciousSet dataset")
+    parser = argparse.ArgumentParser(description="Evaluate ASR models on audio datasets")
     parser.add_argument(
         "model",
         type=str,
-        help="Model ID (e.g., mazesmazes/tiny-audio) or endpoint URL",
+        nargs="?",
+        default=None,
+        help="Model ID (e.g., mazesmazes/tiny-audio) or endpoint URL (not required when using --assemblyai)",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="loquacious",
+        choices=["loquacious", "earnings22"],
+        help="Dataset to evaluate on (default: loquacious)",
     )
     parser.add_argument(
         "--assemblyai",
@@ -348,9 +430,9 @@ def main():
     parser.add_argument(
         "--assemblyai-model",
         type=str,
-        default="best",
+        default="slam_1",
         choices=["best", "universal", "slam_1", "nano"],
-        help="AssemblyAI model to use (default: best)",
+        help="AssemblyAI model to use (default: slam_1)",
     )
     parser.add_argument(
         "--api-key",
@@ -367,8 +449,8 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="large",
-        help="LoquaciousSet config name (default: large)",
+        default="medium",
+        help="Dataset config name (default: medium for loquacious, chunked for earnings22)",
     )
     parser.add_argument(
         "--output-dir",
@@ -388,22 +470,38 @@ def main():
         default="/no_think /system_override",
         help="System prompt to use for generation (default: task-focused transcription prompt)",
     )
+    parser.add_argument(
+        "--user-prompt",
+        type=str,
+        default=None,
+        help="User prompt to override the default 'Repeat the following text, without any explanation: <audio>'. Must include <audio> token.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for dataset shuffling (default: 42)",
+    )
     args = parser.parse_args()
 
-    # Validate AssemblyAI requirements
-    if args.assemblyai and not args.api_key:
-        raise ValueError("AssemblyAI API key required. Set --api-key or ASSEMBLYAI_API_KEY env var")
+    # Validate arguments
+    if args.assemblyai:
+        if not args.api_key:
+            raise ValueError("AssemblyAI API key required. Set --api-key or ASSEMBLYAI_API_KEY env var")
+    else:
+        if not args.model:
+            raise ValueError("Model argument is required when not using --assemblyai")
 
     # Set default output dir
     if args.output_dir is None:
         if args.assemblyai:
-            args.output_dir = Path(f"outputs/eval_assemblyai_{args.assemblyai_model}")
+            args.output_dir = Path(f"outputs/eval_{args.dataset}_assemblyai_{args.assemblyai_model}")
         else:
             # Sanitize model name for directory
             model_name = args.model.replace("/", "_").replace(":", "_")
             if args.model.startswith("http"):
                 model_name = "endpoint_" + model_name.split("/")[-1]
-            args.output_dir = Path(f"outputs/eval_{model_name}")
+            args.output_dir = Path(f"outputs/eval_{args.dataset}_{model_name}")
 
     # Create output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -411,13 +509,36 @@ def main():
     # Load WER metric
     wer_metric = evaluate.load("wer")
 
-    # Load dataset in streaming mode
-    print(
-        f"Loading speechbrain/LoquaciousSet dataset (config: {args.config}, split: {args.split})..."
-    )
-    dataset = load_dataset(
-        "speechbrain/LoquaciousSet", args.config, split=args.split, streaming=True
-    )
+    # Load dataset based on selection
+    if args.dataset == "loquacious":
+        dataset_name = "speechbrain/LoquaciousSet"
+        dataset_config = args.config if args.config != "medium" else "medium"
+        audio_field = "wav"
+        text_field = "text"
+        print(
+            f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})..."
+        )
+        dataset = load_dataset(
+            dataset_name, dataset_config, split=args.split, streaming=True
+        )
+    elif args.dataset == "earnings22":
+        dataset_name = "distil-whisper/earnings22"
+        # Use chunked config by default for earnings22, or user-specified config
+        dataset_config = args.config if args.config != "medium" else "chunked"
+        audio_field = "audio"
+        text_field = "transcription"
+        print(
+            f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})..."
+        )
+        dataset = load_dataset(
+            dataset_name, dataset_config, split=args.split, streaming=True
+        )
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset}")
+
+    # Shuffle dataset for reproducibility
+    print(f"Shuffling dataset with seed {args.seed}...")
+    dataset = dataset.shuffle(seed=args.seed, buffer_size=10000)
 
     if args.max_samples:
         dataset = dataset.take(args.max_samples)
@@ -427,38 +548,28 @@ def main():
 
     if args.assemblyai:
         predictions, references, per_sample_wers, per_sample_times = evaluate_assemblyai(
-            dataset, args.api_key, args.assemblyai_model
+            dataset, args.api_key, args.assemblyai_model, audio_field, text_field
         )
         model_name = f"AssemblyAI ({args.assemblyai_model})"
     else:
         predictions, references, per_sample_wers, per_sample_times = evaluate_huggingface(
-            dataset, args.model, args.system_prompt
+            dataset, args.model, args.system_prompt, args.user_prompt, audio_field, text_field
         )
         model_name = args.model
 
-    # Normalize text before computing WER
-    from jiwer import (
-        Compose,
-        ExpandCommonEnglishContractions,
-        RemoveKaldiNonWords,
-        RemoveMultipleSpaces,
-        RemovePunctuation,
-        Strip,
-        ToLowerCase,
-    )
+    # Normalize text before computing WER using Whisper's normalizer
+    import re
+    from transformers import WhisperTokenizer
 
-    normalizer = Compose(
-        [
-            ToLowerCase(),
-            ExpandCommonEnglishContractions(),
-            RemoveKaldiNonWords(),
-            RemovePunctuation(),
-            RemoveMultipleSpaces(),
-            Strip(),
-        ]
-    )
-    normalized_predictions = [normalizer(p) for p in predictions]
-    normalized_references = [normalizer(r) for r in references]
+    # Custom preprocessing to remove <inaudible> tags and disfluencies
+    def preprocess_text(text: str) -> str:
+        text = re.sub(r'<inaudible>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\b(uh|um)\b', '', text, flags=re.IGNORECASE)
+        return text
+
+    whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+    normalized_predictions = [whisper_tokenizer.normalize(preprocess_text(p)) for p in predictions]
+    normalized_references = [whisper_tokenizer.normalize(preprocess_text(r)) for r in references]
 
     # Compute WER
     wer = wer_metric.compute(predictions=normalized_predictions, references=normalized_references)

@@ -55,6 +55,8 @@ ninja = "*"
 gradio = "*"
 assemblyai = "*"
 typer = ">=0.19.2"
+truecase = "*"
+nltk = "*"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
@@ -67,6 +69,7 @@ mdformat = ">=0.7.0"
 # Model scripts (use: poetry run python src/train.py for training due to Hydra config paths)
 eval = "scripts.eval:main"
 push-to-hub = "scripts.push_to_hub:main"
+promote-checkpoint = "scripts.promote_checkpoint:main"
 run-handler = "scripts.run_handler_local:main"
 
 # Deployment scripts
@@ -74,6 +77,10 @@ deploy-hf = "scripts.deploy_to_hf_space:main"
 deploy-runpod = "scripts.deploy_runpod:main"
 remote-train = "scripts.start_remote_training:main"
 attach-remote = "scripts.attach_remote_session:main"
+
+# Analysis tools
+filter-wer = "scripts.filter_high_wer:main"
+optimize-prompt = "scripts.optimize_prompt:main"
 
 # Development tools
 lint = "scripts.dev_tools:lint"

@@ -1,0 +1,69 @@
+# @package _global_
+
+# Stage 3 configuration - Projector + LoRA fine-tuning on decoder
+defaults:
+  - override /model: large
+  - override /data: loquacious_large
+  - override /training: production
+
+model:
+  # Load the pretrained model from Hub (this loads the projector weights)
+  # The base decoder and encoder will still be loaded from their sources
+  pretrained_model_path: "mazesmazes/tiny-audio"  # Load projector from here
+  decoder_model_name: HuggingFaceTB/SmolLM3-3B
+  encoder_model_name: facebook/hubert-xlarge-ls960-ft
+
+  # Projector configuration
+  audio_downsample_rate: 5  # Concatenate every 5 frames for downsampling
+  projector_hidden_dim: 8192  # Must match the pretrained model's projector size
+
+# PEFT Configuration for LoRA
+peft:
+  peft_method: lora  # Enable LoRA fine-tuning
+  r: 32  # LoRA rank
+  lora_alpha: 16  # LoRA scaling factor (alpha/r = 4x scaling)
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+  bias: none  # No bias training
+  task_type: CAUSAL_LM  # Causal language modeling
+  lora_dropout: 0.05  # Small dropout for regularization
+  inference_mode: false  # Training mode
+
+training:
+
+  # Hub configuration
+  push_to_hub: true
+  hub_model_id: "mazesmazes/tiny-audio"  # Change to your HF username
+  hub_strategy: "checkpoint"  # Push every checkpoint
+  hub_private_repo: false  # Keep it private
+
+  per_device_train_batch_size: 12  # Reduced from 4
+  per_device_eval_batch_size: 12 # Reduced from 4
+  gradient_accumulation_steps: 3  # Increased to maintain effective batch size
+  eval_accumulation_steps: 3
+  # Learning rate - Higher for LoRA than frozen training
+  learning_rate: 2.0e-5  # Much higher LR for LoRA (typical range 1e-4 to 5e-4)
+  warmup_steps: 200  # Slightly longer warmup for LoRA adaptation
+  lr_scheduler_type: cosine  # Cosine decay works well with LoRA
+
+  # Optimization - adjusted for LoRA + projector training
+  weight_decay: 0.01
+  max_grad_norm: 1.0  # Back to 1.0 for stability with higher LR
+  adam_beta1: 0.9
+  adam_beta2: 0.999  # Standard beta2 for stability with higher LR
+  adam_epsilon: 1.0e-8  # Standard epsilon
+
+  # Memory optimization
+  torch_compile: true  # Saves ~2GB
+  gradient_checkpointing: true  # Enable gradient checkpointing for stage3
+
+  # Training duration - can be shorter with LoRA
+  max_steps: 10000  # Reduced from 50k - LoRA converges faster
+
+  # Reproducibility
+  seed: 1234  # Different seed for stage 3
+  ignore_data_skip: true
+
+# Data configuration - potentially adjust for LoRA training
+data:
+  # Consider using slightly longer sequences for LoRA to learn better context
+  max_audio_seconds: 25.0  # Increased from 25.0

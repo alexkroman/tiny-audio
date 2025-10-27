@@ -25,12 +25,13 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         for key in [
             "max_new_tokens",
             "num_beams",
-            "temperature",
             "do_sample",
             "length_penalty",
             "repetition_penalty",
-            "top_p",
             "top_k",
+            "temperature",
+            "top_p",
+            "user_prompt",
         ]:
             if key in kwargs:
                 generate_kwargs[key] = kwargs.pop(key)

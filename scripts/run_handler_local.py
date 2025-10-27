@@ -124,14 +124,18 @@ def test_handler(
 
     # Basic single file test
     if not batch_test:
+        params = {
+            "max_new_tokens": max_new_tokens,
+            "num_beams": num_beams,
+            "do_sample": do_sample,
+        }
+        # Only add temperature when sampling is enabled
+        if do_sample:
+            params["temperature"] = temperature
+
         data = {
             "inputs": audio_path,
-            "parameters": {
-                "max_new_tokens": max_new_tokens,
-                "num_beams": num_beams,
-                "temperature": temperature,
-                "do_sample": do_sample,
-            },
+            "parameters": params,
         }
 
         print(f"   Parameters: max_new_tokens={max_new_tokens}, num_beams={num_beams}")
@@ -166,15 +170,19 @@ def test_handler(
 
         # Create a batch of the same audio file
         batch_size = 3
+        params = {
+            "max_new_tokens": max_new_tokens,
+            "num_beams": num_beams,
+            "batch_size": batch_size,
+            "do_sample": do_sample,
+        }
+        # Only add temperature when sampling is enabled
+        if do_sample:
+            params["temperature"] = temperature
+
         data = {
             "inputs": [audio_path] * batch_size,
-            "parameters": {
-                "max_new_tokens": max_new_tokens,
-                "num_beams": num_beams,
-                "batch_size": batch_size,
-                "temperature": temperature,
-                "do_sample": do_sample,
-            },
+            "parameters": params,
         }
 
         print(f"   Batch size: {batch_size}")
@@ -283,10 +291,9 @@ Examples:
         if model_path:
             print(f"   Found model: {model_path}")
         else:
-            print("❌ No saved models found in outputs/")
-            print("   Please specify a model with --model flag")
-            print("   Example: --model mazesmazes/tiny-audio")
-            sys.exit(1)
+            print("⚠️  No saved models found in outputs/")
+            print("   Defaulting to HuggingFace Hub model: mazesmazes/tiny-audio")
+            model_path = "mazesmazes/tiny-audio"
 
     # Run the test
     test_handler(

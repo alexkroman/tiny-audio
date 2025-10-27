@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 
 import logging
+import re
 from typing import Any, Dict, List
 
 import hydra
+import nltk
 import torch
+import truecase
 import wandb
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
-from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments
+from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments, WhisperTokenizer
 
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
+
+# Download required NLTK data for truecase
+try:
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+    nltk.download('punkt_tab', quiet=True)
 
 
 class DatasetLoader:
@@ -37,7 +46,10 @@ class DatasetLoader:
         if audio_column != "audio" and audio_column in ds.column_names:
             ds = ds.rename_column(audio_column, "audio")
 
-        return ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
+        # Cast audio column to correct format
+        ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
+
+        return ds
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -63,7 +75,7 @@ class DatasetLoader:
         )
         val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
 
-        # train_ds = train_ds.shuffle(seed=42, buffer_size=1000)
+        train_ds = train_ds.shuffle(seed=42)
 
         if self.config.max_train_samples:
             train_ds = train_ds.take(self.config.max_train_samples)
@@ -88,6 +100,21 @@ class DataCollator(DataCollatorForSeq2Seq):
         self.max_audio_samples = int(max_audio_seconds * sample_rate)
         self.system_prompt = system_prompt
 
+        # Initialize WhisperTokenizer for text normalization (matches eval script)
+        self.whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+
+    def _preprocess_text(self, text: str) -> str:
+        """Preprocess text before Whisper normalization (matches eval script)."""
+        # Remove <inaudible> tags
+        text = re.sub(r'<inaudible>', '', text, flags=re.IGNORECASE)
+        # Remove disfluencies (uh, um)
+        text = re.sub(r'\b(uh|um)\b', '', text, flags=re.IGNORECASE)
+        return text
+
+    def _normalize_text(self, text: str) -> str:
+        """Apply Whisper normalization (matches eval script)."""
+        return self.whisper_tokenizer.normalize(self._preprocess_text(text))
+
     def _extract_audio(self, audio_decoder) -> Any:
         # Note: Audio() does peak normalization → [-1, 1]
         # Wav2Vec2FeatureExtractor does z-normalization → mean=0, std=1
@@ -107,13 +134,20 @@ class DataCollator(DataCollatorForSeq2Seq):
         for f in features:
             text = f["text"].strip() if isinstance(f["text"], str) else f["text"]
 
+            # Apply Whisper normalization (matches eval script preprocessing)
+            text = self._normalize_text(text)
+
+            # Apply truecasing in main process (not in DataLoader workers)
+            text = text.replace('<COMMA>', ',').replace('<PERIOD>', '.')
+            text = truecase.get_true_case(text)
+
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
             messages.append(
                 {
                     "role": "user",
-                    "content": "Transcribe: <|audio_start|><|audio_end|>",
+                    "content": "Transcribe: <audio>",
                 }
             )
             messages.append({"role": "assistant", "content": text})
@@ -221,7 +255,43 @@ def main(cfg: DictConfig) -> None:
         llm_dim=decoder_config.hidden_size,
         projector_hidden_dim=cfg.model.get("projector_hidden_dim", 2048),
     )
-    model = ASRModel(asr_config)
+
+    # Extract PEFT configs if present
+    peft_config = None
+    if "peft" in cfg and cfg.peft.get("peft_method"):
+        peft_config = OmegaConf.to_container(cfg.peft, resolve=True)
+
+    encoder_lora_config = None
+    if "encoder_lora" in cfg and cfg.encoder_lora.get("r", 0) > 0:
+        encoder_lora_config = OmegaConf.to_container(cfg.encoder_lora, resolve=True)
+
+    # Load from pretrained if specified, otherwise create new model
+    if cfg.model.get("pretrained_model_path"):
+        print(f"Loading pretrained model from: {cfg.model.pretrained_model_path}")
+        # Pass our config to override the Hub config dimensions
+        # Don't apply LoRA yet when loading from pretrained - apply it after loading
+        model = ASRModel.from_pretrained(
+            cfg.model.pretrained_model_path,
+            config=asr_config,
+            peft_config=None,  # Don't apply LoRA during loading
+            encoder_lora_config=None  # Don't apply encoder LoRA during loading
+        )
+        print(f"✓ Loaded pretrained model with projector weights")
+
+        # Now apply LoRA if configured
+        if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
+            from peft import TaskType
+            print("Applying encoder LoRA adapters to the loaded model...")
+            model.encoder = model._apply_lora(model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder")
+            model.encoder_lora_config = encoder_lora_config
+
+        if peft_config and peft_config.get("peft_method") == "lora":
+            from peft import TaskType
+            print("Applying decoder LoRA adapters to the loaded model...")
+            model.decoder = model._apply_lora(model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder")
+            model.peft_config = peft_config
+    else:
+        model = ASRModel(asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config)
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
@@ -234,6 +304,8 @@ def main(cfg: DictConfig) -> None:
     )
 
     callbacks = []
+
+    # PEFT's trainer integration automatically handles LoRA checkpoint saving
 
     if cfg.early_stopping.patience:
         callbacks.append(
