@@ -1,7 +1,8 @@
 # @package _global_
 
-# Stage 4 configuration - Projector + Encoder LoRA + Decoder LoRA
-# This stage adds encoder LoRA on top of stage 3 for maximum adaptation
+# Stage 1 configuration - Full PEFT Training
+# Projector (trainable) + Encoder LoRA + Decoder LoRA
+# This is the most comprehensive training approach with ~18M trainable parameters
 defaults:
   - override /model: large
   - override /data: loquacious_large
@@ -11,6 +12,7 @@ defaults:
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
   pretrained_model_path: "mazesmazes/tiny-audio"
+  
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
@@ -26,6 +28,17 @@ encoder_lora:
   lora_dropout: 0.0
   bias: none
 
+# Decoder LoRA Configuration
+peft:
+  peft_method: lora  # Enable LoRA fine-tuning on decoder
+  r: 64  # LoRA rank for decoder (matching encoder)
+  lora_alpha: 32  # Scaling factor (alpha/r = 1.0)
+  target_modules: ["q_proj", "v_proj"]  
+  bias: none  # No bias training
+  task_type: CAUSAL_LM  # Causal language modeling
+  lora_dropout: 0.0  
+  inference_mode: false  # Training mode
+
 training:
   # Hub configuration
   push_to_hub: true
@@ -39,7 +52,10 @@ training:
   eval_accumulation_steps: 5
 
   # Learning rate - Higher for LoRA
+
   learning_rate: 1.0e-4
+  # learning_rate: .00007 try this learning rate if you reach a plateau
+  
   warmup_steps: 100
   lr_scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs: {"min_lr_rate": 0.1}
@@ -53,7 +69,7 @@ training:
   gradient_checkpointing: false
 
   # Training duration
-  max_steps: 50000
+  max_steps: 25000
 
   # Reproducibility
   seed: 47

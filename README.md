@@ -43,9 +43,9 @@ poetry install
 # Quick test run (20 steps, ~5 minutes)
 poetry run python src/train.py
 
-# Full production training (~24 hours on A40)
+# Full production training with encoder LoRA (~24 hours on A40)
 export HF_TOKEN='your-token'  # Get from https://huggingface.co/settings/tokens
-poetry run python src/train.py +experiments=production
+poetry run python src/train.py +experiments=stage1
 ```
 
 If you want to run it on a remote GPU like RunPod, there are deployment scripts to make your life easier:
@@ -58,36 +58,53 @@ poetry run deploy-runpod --host <pod-id>.runpod.io --port 22
 poetry run remote-train \
   --host <pod-id>.runpod.io \
   --port 22 \
-  --config production
+  --config stage1
 ```
 
 Now wait ~24 hours. Once it's done, your model will be pushed to HuggingFace Hub automatically (if you set `HF_TOKEN`), and you can use it just like in the example above!
 
 ## How it works
 
-Tiny Audio uses a simple three-component architecture:
+Tiny Audio uses a parameter-efficient three-component architecture:
 
 ```text
 Audio Waveform → HuBERT-XLarge → Audio Projector → SmolLM3-3B → Text
-                 (1.3B, frozen)  (~13M, trainable)  (3B, frozen)
+                 (1.3B + LoRA)   (~13M, trainable)  (3B + LoRA)
 ```
 
-1. **Audio Encoder (Frozen)**: HuBERT-XLarge extracts acoustic features from your audio
-2. **Audio Projector (Trainable)**: A SwiGLU MLP that downsamples 5x and maps audio features to language model space - **this is the only part you train**
-3. **Language Decoder (Frozen)**: SmolLM3-3B generates the text transcription autoregressively with Flash Attention 2
+1. **Audio Encoder (LoRA Fine-tuned)**: HuBERT-XLarge (1.3B) with LoRA adapters on attention layers (q_proj, k_proj)
+2. **Audio Projector (Trainable)**: A SwiGLU MLP that downsamples 5x and maps audio features to language model space
+3. **Language Decoder (LoRA Fine-tuned)**: SmolLM3-3B with LoRA adapters on attention layers (q_proj, v_proj) generates text transcription with Flash Attention 2
 
 The projector uses a **SwiGLU** architecture (like Llama):
-- `gate_proj`: Linear(6400 → 2048, no bias)
-- `up_proj`: Linear(6400 → 2048, no bias)
-- `down_proj`: Linear(2048 → 2048, no bias)
+- Pre-norm: RMSNorm on stacked encoder features
+- `gate_proj`: Linear(6400 → 8192, no bias)
+- `up_proj`: Linear(6400 → 8192, no bias)
+- `down_proj`: Linear(8192 → 2048, no bias)
 - Activation: `silu(gate) * up` → `down`
+- Post-norm: RMSNorm on output embeddings
 
-Why freeze the encoder and decoder? Because:
-- **You only train ~13M parameters** instead of 4+ billion
+**LoRA Configuration** (optional, configurable):
+
+*Encoder LoRA:*
+- Rank: 8 (default)
+- Alpha: 8 (scaling factor)
+- Target modules: q_proj, k_proj in HuBERT attention layers
+- Adds ~1-2M trainable parameters
+
+*Decoder LoRA:*
+- Rank: 64 (default)
+- Alpha: 32 (scaling factor = 0.5)
+- Target modules: q_proj, v_proj in SmolLM3 attention layers
+- Adds ~15-20M trainable parameters
+
+Why use parameter-efficient training? Because:
+- **You train ~30M parameters** instead of 4+ billion (projector + encoder LoRA + decoder LoRA)
 - **Training is fast** (~24 hours on A40)
 - **It's cheap** (~$12 for a full run)
 - **You leverage pretrained knowledge** from both audio and language domains
 - **Memory efficient** - runs on a single A40 40GB
+- **LoRA enables targeted adaptation** of both encoder and decoder without full fine-tuning
 
 ## Training details
 
@@ -101,16 +118,46 @@ Why freeze the encoder and decoder? Because:
 
 ```bash
 # Try different encoders
-poetry run python src/train.py model.audio_model_id=facebook/hubert-large-ls960-ft
+poetry run python src/train.py model.encoder_model_name=facebook/hubert-large-ls960-ft
+
+# Adjust encoder LoRA rank (0 = frozen encoder, higher = more adaptation)
+poetry run python src/train.py encoder_lora.r=8
+
+# Adjust decoder LoRA rank (0 = frozen decoder, higher = more adaptation)
+poetry run python src/train.py peft.r=64
 
 # Adjust learning rate
-poetry run python src/train.py training.learning_rate=5e-5
+poetry run python src/train.py training.learning_rate=1e-4
 
 # Change batch size (if you're running out of memory)
-poetry run python src/train.py training.batch_size=16
+poetry run python src/train.py training.per_device_train_batch_size=5
+
+# Disable encoder LoRA (train only projector + decoder LoRA)
+poetry run python src/train.py encoder_lora.r=0
+
+# Disable decoder LoRA (train only projector + encoder LoRA)
+poetry run python src/train.py peft.peft_method=null
+
+# Train only projector (no LoRA on encoder or decoder)
+poetry run python src/train.py encoder_lora.r=0 peft.peft_method=null
 ```
 
 The training script automatically logs to Weights & Biases (wandb), saves checkpoints to `outputs/`, and pushes the final model to HuggingFace.
+
+**Training Stages**: The repo includes pre-configured experiment files:
+
+```bash
+# Stage 1: Full PEFT training (projector + encoder LoRA + decoder LoRA)
+poetry run python src/train.py +experiments=stage1
+
+# Mac minimal: Quick local testing
+poetry run python src/train.py +experiments=mac_minimal
+
+# Decoder LoRA only: Use archived config (projector + decoder LoRA, frozen encoder)
+poetry run python src/train.py +experiments=archive/lora_decoder
+```
+
+Each experiment combines model, data, and training configs. Check `configs/hydra/experiments/` for all available presets.
 
 ## Evaluation
 
@@ -132,14 +179,14 @@ Contributors who have trained and evaluated Tiny Audio models:
 
 | Rank | Contributor | WER | Git Hash | Date |
 |------|------------|-----|----------|------|
-| 🥇 | [@alexkroman](https://github.com/alexkroman) | **10.14** | [`5a5f3a0`](https://github.com/alexkroman/tiny-audio/commit/5a5f3a055d2e5722d9473f3a1c2fb883eab7ad9c) | 2025-10-23 |
+| 🥇 | [@alexkroman](https://github.com/alexkroman) | **12.14** | [`5a5f3a0`](https://github.com/alexkroman/tiny-audio/commit/5a5f3a055d2e5722d9473f3a1c2fb883eab7ad9c) | 2025-10-23 |
 
 Want to see your name here? Train a model, evaluate it on LoquaciousSet, and submit a PR with your results!
 
 **To reproduce or generate your own WER score:**
 ```bash
-# Evaluate on 500 samples (default)
-poetry run eval mazesmazes/tiny-audio
+# Evaluate on 500 samples
+poetry run eval mazesmazes/tiny-audio --max-samples 500
 
 # Or evaluate your own model
 poetry run eval your-username/your-model-name
@@ -153,9 +200,11 @@ poetry run eval mazesmazes/tiny-audio --max-samples 100
 Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable, hackable codebase** designed to train an ASR model start to end and produce a working model you can actually use and learn from.
 
 - **~1000 lines of core code** across 7 Python files in `src/`
-- **Dependency-lite**: Just PyTorch, transformers, datasets, and a few other essentials via Poetry
+- **Parameter-efficient training**: Train only ~18M parameters (projector + encoder LoRA + decoder LoRA) instead of 4B+
+- **Dependency-lite**: Just PyTorch, transformers, datasets, PEFT, and a few other essentials via Poetry
 - **No magic**: Read the code and understand exactly what's happening
 - **Fully yours**: Train it, modify it, deploy it however you want
+- **Flexible training**: Easily toggle encoder/decoder LoRA on/off, adjust rank, change target modules
 
 The entire codebase is small enough to read in an afternoon and understand deeply.
 
