@@ -10,7 +10,8 @@ defaults:
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
-  pretrained_model_path: "mazesmazes/tiny-audio"
+  # pretrained_model_path: "mazesmazes/tiny-audio"
+  
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
@@ -53,7 +54,7 @@ training:
   gradient_checkpointing: false
 
   # Training duration
-  max_steps: 50000
+  max_steps: 25000
 
   # Reproducibility
   seed: 47
