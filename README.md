@@ -6,7 +6,7 @@
 
 **Train your own speech recognition model in 24 hours for $12**
 
-This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in 24 hours. Tiny Audio combines a frozen HuBERT-XLarge encoder (1.3B params) with a frozen SmolLM3-3B decoder (3B params), connected by a small trainable audio projector (~13M params). The result is a speech-to-text system you can train in a few hours, deploy to HuggingFace, and use just like Whisper or any other ASR model.
+This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in 24 hours. Tiny Audio combines a HuBERT-XLarge encoder (1.3B params) with a SmolLM3-3B decoder (3B params), connected by a small trainable audio projector (~13M params). Both the encoder and decoder use **LoRA (Low-Rank Adaptation)** for parameter-efficient fine-tuning. The result is a speech-to-text system you can train in a few hours, deploy to HuggingFace, and use just like Whisper or any other ASR model.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
@@ -65,16 +65,16 @@ Now wait ~24 hours. Once it's done, your model will be pushed to HuggingFace Hub
 
 ## How it works
 
-Tiny Audio uses a parameter-efficient three-component architecture:
+Tiny Audio uses a parameter-efficient three-component architecture with **LoRA adapters on both the encoder and decoder**:
 
 ```text
 Audio Waveform → HuBERT-XLarge → Audio Projector → SmolLM3-3B → Text
                  (1.3B + LoRA)   (~13M, trainable)  (3B + LoRA)
 ```
 
-1. **Audio Encoder (LoRA Fine-tuned)**: HuBERT-XLarge (1.3B) with LoRA adapters on attention layers (q_proj, k_proj)
-2. **Audio Projector (Trainable)**: A SwiGLU MLP that downsamples 5x and maps audio features to language model space
-3. **Language Decoder (LoRA Fine-tuned)**: SmolLM3-3B with LoRA adapters on attention layers (q_proj, v_proj) generates text transcription with Flash Attention 2
+1. **Audio Encoder (LoRA Fine-tuned)**: HuBERT-XLarge (1.3B parameters) with LoRA adapters on attention layers (q_proj, k_proj) - adds ~1-2M trainable parameters
+2. **Audio Projector (Fully Trainable)**: A SwiGLU MLP (~13M parameters) that downsamples 5x and maps audio features to language model space
+3. **Language Decoder (LoRA Fine-tuned)**: SmolLM3-3B (3B parameters) with LoRA adapters on attention layers (q_proj, v_proj) - adds ~15-20M trainable parameters. Generates text transcription with Flash Attention 2
 
 The projector uses a **SwiGLU** architecture (like Llama):
 - Pre-norm: RMSNorm on stacked encoder features
@@ -98,13 +98,14 @@ The projector uses a **SwiGLU** architecture (like Llama):
 - Target modules: q_proj, v_proj in SmolLM3 attention layers
 - Adds ~15-20M trainable parameters
 
-Why use parameter-efficient training? Because:
+Why use parameter-efficient training with LoRA on both encoder and decoder? Because:
 - **You train ~30M parameters** instead of 4+ billion (projector + encoder LoRA + decoder LoRA)
-- **Training is fast** (~24 hours on A40)
+- **Training is fast** (~24 hours on A40) thanks to reduced gradient computations
 - **It's cheap** (~$12 for a full run)
 - **You leverage pretrained knowledge** from both audio and language domains
-- **Memory efficient** - runs on a single A40 40GB
+- **Memory efficient** - runs on a single A40 40GB with LoRA adapters
 - **LoRA enables targeted adaptation** of both encoder and decoder without full fine-tuning
+- **Flexible configuration** - easily adjust LoRA rank, target modules, and alpha for both models
 
 ## Training details
 

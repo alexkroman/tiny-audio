@@ -43,7 +43,7 @@ model-index:
 
 ## Efficient Speech Recognition with Parameter-Efficient Fine-Tuning
 
-Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a LoRA-adapted HuBERT-XLarge encoder with a LoRA-adapted SmolLM3-3B language model decoder, connected via a trainable audio projector. This architecture enables efficient training by fine-tuning only ~18M parameters (projector + encoder LoRA + decoder LoRA adapters) while leveraging the power of large pretrained models.
+Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a **LoRA-adapted HuBERT-XLarge encoder** with a **LoRA-adapted SmolLM3-3B language model decoder**, connected via a trainable audio projector. By applying LoRA (Low-Rank Adaptation) to both the encoder and decoder, this architecture enables efficient training by fine-tuning only ~30M parameters (projector + encoder LoRA + decoder LoRA adapters) while leveraging the power of large pretrained models.
 
 ## Model Description
 
@@ -58,13 +58,14 @@ Tiny Audio is a lightweight automatic speech recognition (ASR) model that combin
 
 ## Key Features
 
-✅ **Parameter Efficient**: Only ~30M trainable parameters (projector + encoder LoRA + decoder LoRA)
-✅ **Fast Training**: LoRA fine-tuning enables rapid training (~24 hours on A40)
+✅ **Parameter Efficient**: Only ~30M trainable parameters (projector + encoder LoRA + decoder LoRA) - less than 1% of total model size
+✅ **Dual LoRA Adaptation**: LoRA fine-tuning applied to both encoder and decoder for targeted optimization
+✅ **Fast Training**: LoRA on both models enables rapid training (~24 hours on A40)
 ✅ **Modular Design**: Easy to swap different encoder or decoder models
 ✅ **Production Ready**: Includes evaluation tools and remote training scripts
 ✅ **HuggingFace Native**: Full integration with transformers library and PEFT
 ✅ **Optimized Performance**: Flash Attention 2 for faster inference
-✅ **Flexible Training**: Configure encoder/decoder LoRA rank, target modules, and more
+✅ **Flexible Training**: Independently configure encoder/decoder LoRA rank, target modules, alpha, and more
 
 ## Quick Start
 
@@ -178,22 +179,24 @@ This diverse training data enables the model to handle a wide range of English s
 
 ### Training Strategy
 
-The model uses **parameter-efficient fine-tuning (PEFT)** with three trainable components:
+The model uses **parameter-efficient fine-tuning (PEFT) with LoRA on both encoder and decoder** with three trainable components:
 
 1. **Audio Projector** (~13M params): Trained from scratch to map audio to language embeddings
-2. **Encoder LoRA Adapters** (~1-2M params): Fine-tune HuBERT attention layers (q_proj, k_proj)
-3. **Decoder LoRA Adapters** (~15-20M params): Fine-tune SmolLM3 attention layers (q_proj, v_proj)
+2. **Encoder LoRA Adapters** (~1-2M params): Fine-tune HuBERT attention layers (q_proj, k_proj) with rank 8
+3. **Decoder LoRA Adapters** (~15-20M params): Fine-tune SmolLM3 attention layers (q_proj, v_proj) with rank 64
 
-The base weights of both encoder and decoder remain **frozen**, with only LoRA adapters being trained.
+The base weights of both encoder and decoder remain **frozen**, with only LoRA adapters and the projector being trained. This dual LoRA approach allows both models to adapt to the speech-to-text task without catastrophic forgetting.
 
-This approach:
-- Reduces memory requirements significantly
-- Enables faster training convergence (~24 hours vs days/weeks)
+This dual LoRA approach:
+- Reduces memory requirements significantly compared to full fine-tuning
+- Enables faster training convergence (~24 hours vs days/weeks for full fine-tuning)
 - Preserves pretrained knowledge from both audio and language domains
-- Prevents catastrophic forgetting
-- Makes training affordable (~$12 on A40)
-- Allows targeted adaptation of both encoder and decoder without full fine-tuning
+- Prevents catastrophic forgetting by keeping base weights frozen
+- Makes training affordable (~$12 on A40) through parameter efficiency
+- Allows targeted adaptation of both encoder and decoder attention mechanisms
+- Provides independent control over encoder and decoder adaptation strength
 - Total trainable parameters: ~30M (0.7% of the full 4.3B model)
+- Both encoder and decoder maintain their pretrained capabilities while adapting to ASR
 
 ## Evaluation
 

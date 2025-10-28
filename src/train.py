@@ -268,26 +268,28 @@ def main(cfg: DictConfig) -> None:
     # Load from pretrained if specified, otherwise create new model
     if cfg.model.get("pretrained_model_path"):
         print(f"Loading pretrained model from: {cfg.model.pretrained_model_path}")
-        # Pass our config to override the Hub config dimensions
-        # Don't apply LoRA yet when loading from pretrained - apply it after loading
+        # from_pretrained will automatically load LoRA weights if they exist in the checkpoint
+        # It reads encoder_lora_config.json and decoder_lora_config.json from the Hub
         model = ASRModel.from_pretrained(
             cfg.model.pretrained_model_path,
             config=asr_config,
-            peft_config=None,  # Don't apply LoRA during loading
-            encoder_lora_config=None  # Don't apply encoder LoRA during loading
         )
-        print(f"✓ Loaded pretrained model with projector weights")
+        print(f"✓ Loaded pretrained model (projector + LoRA weights if present)")
 
-        # Now apply LoRA if configured
-        if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
+        # If no LoRA weights were in checkpoint but we want to add them, apply fresh LoRA
+        # Check if encoder already has LoRA
+        has_encoder_lora = any("lora" in name.lower() for name, _ in model.encoder.named_parameters())
+        if encoder_lora_config and encoder_lora_config.get("r", 0) > 0 and not has_encoder_lora:
             from peft import TaskType
-            print("Applying encoder LoRA adapters to the loaded model...")
+            print("⚠️  No encoder LoRA in checkpoint - applying fresh encoder LoRA adapters...")
             model.encoder = model._apply_lora(model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder")
             model.encoder_lora_config = encoder_lora_config
 
-        if peft_config and peft_config.get("peft_method") == "lora":
+        # Check if decoder already has LoRA
+        has_decoder_lora = any("lora" in name.lower() for name, _ in model.decoder.named_parameters())
+        if peft_config and peft_config.get("peft_method") == "lora" and not has_decoder_lora:
             from peft import TaskType
-            print("Applying decoder LoRA adapters to the loaded model...")
+            print("⚠️  No decoder LoRA in checkpoint - applying fresh decoder LoRA adapters...")
             model.decoder = model._apply_lora(model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder")
             model.peft_config = peft_config
     else:

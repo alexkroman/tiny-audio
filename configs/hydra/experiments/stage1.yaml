@@ -48,13 +48,12 @@ training:
 
   per_device_train_batch_size: 5
   per_device_eval_batch_size: 5
-  gradient_accumulation_steps: 5
-  eval_accumulation_steps: 5
+  gradient_accumulation_steps: 7
+  eval_accumulation_steps: 7
 
   # Learning rate - Higher for LoRA
 
   learning_rate: 1.0e-4
-  # learning_rate: .00007 try this learning rate if you reach a plateau
   
   warmup_steps: 100
   lr_scheduler_type: "cosine_with_min_lr"
@@ -72,7 +71,7 @@ training:
   max_steps: 25000
 
   # Reproducibility
-  seed: 47
+  seed: 48
   ignore_data_skip: true
 
 # Data configuration

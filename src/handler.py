@@ -123,7 +123,7 @@ class EndpointHandler:
         # Length penalty encourages appropriate transcript length
         # >1.0 = prefer longer outputs, <1.0 = prefer shorter
         # Slight positive bias helps avoid truncated transcripts
-        length_penalty = params.get("length_penalty", 1.0)
+        length_penalty = params.get("length_penalty", 1.1)
 
         # Repetition penalty to prevent loops (1.1-1.2 is good for ASR)
         repetition_penalty = params.get("repetition_penalty", 1.15)
@@ -138,11 +138,7 @@ class EndpointHandler:
 
         # Diversity penalty encourages different beams (helps with rare words)
         # 0.0 = no diversity, 0.5-1.0 = good diversity
-        num_beam_groups = params.get("num_beam_groups", 1)
-        diversity_penalty = params.get("diversity_penalty", 0.0)
-
-        temperature = params.get("temperature", 1.0)
-        top_p = params.get("top_p", 1.0)
+        diversity_penalty = params.get("diversity_penalty", 0.5)
 
         # The pipeline's __call__ method handles both single and batch inputs
         # as well as automatic chunking for long audio files
@@ -157,6 +153,4 @@ class EndpointHandler:
             early_stopping=early_stopping,
             num_beam_groups=num_beam_groups,
             diversity_penalty=diversity_penalty,
-            temperature=temperature,
-            top_p=top_p,
         )
