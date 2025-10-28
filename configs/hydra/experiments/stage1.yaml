@@ -53,7 +53,8 @@ training:
 
   # Learning rate - Higher for LoRA
 
-  learning_rate: 1.0e-4
+  # learning_rate: 1.0e-4
+  learning_rate: 5.0e-5
   
   warmup_steps: 100
   lr_scheduler_type: "cosine_with_min_lr"

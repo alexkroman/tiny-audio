@@ -151,6 +151,5 @@ class EndpointHandler:
             repetition_penalty=repetition_penalty,
             no_repeat_ngram_size=no_repeat_ngram_size,
             early_stopping=early_stopping,
-            num_beam_groups=num_beam_groups,
             diversity_penalty=diversity_penalty,
         )

@@ -107,8 +107,8 @@ class ASRModel(PreTrainedModel):
         cls._pretrained_model_path = pretrained_model_name_or_path
 
         # Extract subfolder/revision from kwargs for cached_file calls
-        subfolder = kwargs.get("subfolder", None)
-        revision = kwargs.get("revision", None)
+        subfolder = kwargs.get("subfolder")
+        revision = kwargs.get("revision")
         cache_kwargs = {}
         if subfolder:
             cache_kwargs["subfolder"] = subfolder
@@ -127,6 +127,7 @@ class ASRModel(PreTrainedModel):
                     )
                     if config_file:
                         from pathlib import Path as PathlibPath
+
                         with PathlibPath(config_file).open() as f:
                             return json.load(f)
                 except Exception:
@@ -138,7 +139,9 @@ class ASRModel(PreTrainedModel):
             decoder_lora_config = load_lora_config("decoder_lora_config.json")
 
             # Create model with LoRA configs
-            model = cls(config, peft_config=decoder_lora_config, encoder_lora_config=encoder_lora_config)
+            model = cls(
+                config, peft_config=decoder_lora_config, encoder_lora_config=encoder_lora_config
+            )
 
             # Load all weights from model.safetensors
             model_path = cached_file(
@@ -168,9 +171,13 @@ class ASRModel(PreTrainedModel):
                 if encoder_lora_state:
                     total_params = sum(v.numel() for v in encoder_lora_state.values())
                     model.encoder.load_state_dict(encoder_lora_state, strict=False)
-                    print(f"✓ Loaded encoder LoRA from model.safetensors (r={encoder_lora_config.get('r', 0)}, {total_params:,} parameters)")
+                    print(
+                        f"✓ Loaded encoder LoRA from model.safetensors (r={encoder_lora_config.get('r', 0)}, {total_params:,} parameters)"
+                    )
                 else:
-                    print(f"⚠ No encoder LoRA weights in model.safetensors, using fresh initialization")
+                    print(
+                        "⚠ No encoder LoRA weights in model.safetensors, using fresh initialization"
+                    )
 
             # Load decoder LoRA weights from model.safetensors
             if decoder_lora_config:
@@ -182,9 +189,13 @@ class ASRModel(PreTrainedModel):
                 if decoder_lora_state:
                     total_params = sum(v.numel() for v in decoder_lora_state.values())
                     model.decoder.load_state_dict(decoder_lora_state, strict=False)
-                    print(f"✓ Loaded decoder LoRA from model.safetensors (r={decoder_lora_config.get('r', 0)}, {total_params:,} parameters)")
+                    print(
+                        f"✓ Loaded decoder LoRA from model.safetensors (r={decoder_lora_config.get('r', 0)}, {total_params:,} parameters)"
+                    )
                 else:
-                    print(f"⚠ No decoder LoRA weights in model.safetensors, using fresh initialization")
+                    print(
+                        "⚠ No decoder LoRA weights in model.safetensors, using fresh initialization"
+                    )
 
             return model
         finally:
@@ -310,7 +321,7 @@ class ASRModel(PreTrainedModel):
             output_attentions=None,
             output_hidden_states=None,
             return_dict=None,
-            **kwargs  # Catch and discard invalid kwargs like input_ids
+            **kwargs,  # Catch and discard invalid kwargs like input_ids
         ):
             return original_forward(
                 input_values=input_values,
@@ -325,7 +336,10 @@ class ASRModel(PreTrainedModel):
         # Apply LoRA to encoder if configured (after wrapping base forward)
         if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
             from peft import TaskType
-            encoder = cls._apply_lora(encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder")
+
+            encoder = cls._apply_lora(
+                encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
+            )
 
         return encoder
 
@@ -355,6 +369,7 @@ class ASRModel(PreTrainedModel):
         # Apply LoRA to decoder if configured
         if peft_config and peft_config.get("peft_method") == "lora":
             from peft import TaskType
+
             decoder = cls._apply_lora(decoder, peft_config, TaskType.CAUSAL_LM, "decoder")
 
         return decoder
@@ -386,7 +401,9 @@ class ASRModel(PreTrainedModel):
         if hasattr(module, "gradient_checkpointing_enable"):
             if value:
                 # Only enable gradient checkpointing on the decoder
-                if module is self.decoder or (hasattr(self, 'decoder') and module is self.decoder.base_model):
+                if module is self.decoder or (
+                    hasattr(self, "decoder") and module is self.decoder.base_model
+                ):
                     module.gradient_checkpointing_enable()
             else:
                 if hasattr(module, "gradient_checkpointing_disable"):

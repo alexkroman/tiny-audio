@@ -1,43 +1,46 @@
----
+______________________________________________________________________
+
 license: mit
 datasets:
-  - mozilla-foundation/common_voice_17_0
-  - speechcolab/gigaspeech
-  - openslr/librispeech_asr
-  - speechbrain/LoquaciousSet
-language:
-  - en
-base_model:
-  - facebook/hubert-xlarge-ls960-ft
-  - HuggingFaceTB/SmolLM3-3B
-pipeline_tag: automatic-speech-recognition
-tags:
-  - hubert
-  - smollm3
-  - asr
-  - speech-recognition
-  - audio
-  - parameter-efficient
-  - lora
-  - peft
-  - flash-attention-2
-library_name: transformers
-model-index:
-  - name: tiny-audio
-    results:
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          type: speechbrain/LoquaciousSet
-          name: LoquaciousSet
-          config: large
-          split: test
-        metrics:
-          - type: wer
-            name: Word Error Rate
-            value: TBD
----
+
+- mozilla-foundation/common_voice_17_0
+- speechcolab/gigaspeech
+- openslr/librispeech_asr
+- speechbrain/LoquaciousSet
+  language:
+- en
+  base_model:
+- facebook/hubert-xlarge-ls960-ft
+- HuggingFaceTB/SmolLM3-3B
+  pipeline_tag: automatic-speech-recognition
+  tags:
+- hubert
+- smollm3
+- asr
+- speech-recognition
+- audio
+- parameter-efficient
+- lora
+- peft
+- flash-attention-2
+  library_name: transformers
+  model-index:
+- name: tiny-audio
+  results:
+  - task:
+    type: automatic-speech-recognition
+    name: Automatic Speech Recognition
+    dataset:
+    type: speechbrain/LoquaciousSet
+    name: LoquaciousSet
+    config: large
+    split: test
+    metrics:
+    - type: wer
+      name: Word Error Rate
+      value: TBD
+
+______________________________________________________________________
 
 # Tiny Audio
 
@@ -109,7 +112,7 @@ The model automatically handles:
    - Extracts acoustic features from raw audio waveforms
    - Output: Audio embeddings at ~50Hz frame rate
 
-2. **Audio Projector (Trainable)**
+1. **Audio Projector (Trainable)**
 
    - Architecture: SwiGLU MLP (following Llama design)
      - Pre-norm: RMSNorm on stacked encoder features
@@ -122,7 +125,7 @@ The model automatically handles:
    - Downsamples audio features by 5x (from ~50Hz to ~10Hz)
    - Maps audio embeddings to language model embedding space
 
-3. **Language Model Decoder (LoRA Fine-tuned)**
+1. **Language Model Decoder (LoRA Fine-tuned)**
 
    - Base Model: `HuggingFaceTB/SmolLM3-3B`
    - Parameters: 3B base + ~15-20M LoRA adapters
@@ -182,12 +185,13 @@ This diverse training data enables the model to handle a wide range of English s
 The model uses **parameter-efficient fine-tuning (PEFT) with LoRA on both encoder and decoder** with three trainable components:
 
 1. **Audio Projector** (~13M params): Trained from scratch to map audio to language embeddings
-2. **Encoder LoRA Adapters** (~1-2M params): Fine-tune HuBERT attention layers (q_proj, k_proj) with rank 8
-3. **Decoder LoRA Adapters** (~15-20M params): Fine-tune SmolLM3 attention layers (q_proj, v_proj) with rank 64
+1. **Encoder LoRA Adapters** (~1-2M params): Fine-tune HuBERT attention layers (q_proj, k_proj) with rank 8
+1. **Decoder LoRA Adapters** (~15-20M params): Fine-tune SmolLM3 attention layers (q_proj, v_proj) with rank 64
 
 The base weights of both encoder and decoder remain **frozen**, with only LoRA adapters and the projector being trained. This dual LoRA approach allows both models to adapt to the speech-to-text task without catastrophic forgetting.
 
 This dual LoRA approach:
+
 - Reduces memory requirements significantly compared to full fine-tuning
 - Enables faster training convergence (~24 hours vs days/weeks for full fine-tuning)
 - Preserves pretrained knowledge from both audio and language domains

@@ -11,16 +11,22 @@ import truecase
 import wandb
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
-from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments, WhisperTokenizer
+from transformers import (
+    DataCollatorForSeq2Seq,
+    EarlyStoppingCallback,
+    Trainer,
+    TrainingArguments,
+    WhisperTokenizer,
+)
 
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
 
 # Download required NLTK data for truecase
 try:
-    nltk.data.find('tokenizers/punkt_tab')
+    nltk.data.find("tokenizers/punkt_tab")
 except LookupError:
-    nltk.download('punkt_tab', quiet=True)
+    nltk.download("punkt_tab", quiet=True)
 
 
 class DatasetLoader:
@@ -106,9 +112,9 @@ class DataCollator(DataCollatorForSeq2Seq):
     def _preprocess_text(self, text: str) -> str:
         """Preprocess text before Whisper normalization (matches eval script)."""
         # Remove <inaudible> tags
-        text = re.sub(r'<inaudible>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
         # Remove disfluencies (uh, um)
-        text = re.sub(r'\b(uh|um)\b', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
         return text
 
     def _normalize_text(self, text: str) -> str:
@@ -138,7 +144,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             text = self._normalize_text(text)
 
             # Apply truecasing in main process (not in DataLoader workers)
-            text = text.replace('<COMMA>', ',').replace('<PERIOD>', '.')
+            text = text.replace("<COMMA>", ",").replace("<PERIOD>", ".")
             text = truecase.get_true_case(text)
 
             messages = []
@@ -176,7 +182,10 @@ class DataCollator(DataCollatorForSeq2Seq):
                     # Skip the </think> token and any newlines after it
                     content_start = i + 1
                     # Skip newlines
-                    while content_start < len(tokens) and self.tokenizer.decode([tokens[content_start]]).strip() == "":
+                    while (
+                        content_start < len(tokens)
+                        and self.tokenizer.decode([tokens[content_start]]).strip() == ""
+                    ):
                         content_start += 1
                     break
 
@@ -242,7 +251,9 @@ def main(cfg: DictConfig) -> None:
     from transformers import AutoConfig as HFAutoConfig
 
     encoder_config = HFAutoConfig.from_pretrained(cfg.model.encoder_model_name)
-    decoder_config = HFAutoConfig.from_pretrained(cfg.model.decoder_model_name, trust_remote_code=True)
+    decoder_config = HFAutoConfig.from_pretrained(
+        cfg.model.decoder_model_name, trust_remote_code=True
+    )
 
     asr_config = ASRConfig(
         text_model_id=cfg.model.decoder_model_name,
@@ -274,26 +285,38 @@ def main(cfg: DictConfig) -> None:
             cfg.model.pretrained_model_path,
             config=asr_config,
         )
-        print(f"✓ Loaded pretrained model (projector + LoRA weights if present)")
+        print("✓ Loaded pretrained model (projector + LoRA weights if present)")
 
         # If no LoRA weights were in checkpoint but we want to add them, apply fresh LoRA
         # Check if encoder already has LoRA
-        has_encoder_lora = any("lora" in name.lower() for name, _ in model.encoder.named_parameters())
+        has_encoder_lora = any(
+            "lora" in name.lower() for name, _ in model.encoder.named_parameters()
+        )
         if encoder_lora_config and encoder_lora_config.get("r", 0) > 0 and not has_encoder_lora:
             from peft import TaskType
+
             print("⚠️  No encoder LoRA in checkpoint - applying fresh encoder LoRA adapters...")
-            model.encoder = model._apply_lora(model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder")
+            model.encoder = model._apply_lora(
+                model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
+            )
             model.encoder_lora_config = encoder_lora_config
 
         # Check if decoder already has LoRA
-        has_decoder_lora = any("lora" in name.lower() for name, _ in model.decoder.named_parameters())
+        has_decoder_lora = any(
+            "lora" in name.lower() for name, _ in model.decoder.named_parameters()
+        )
         if peft_config and peft_config.get("peft_method") == "lora" and not has_decoder_lora:
             from peft import TaskType
+
             print("⚠️  No decoder LoRA in checkpoint - applying fresh decoder LoRA adapters...")
-            model.decoder = model._apply_lora(model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder")
+            model.decoder = model._apply_lora(
+                model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder"
+            )
             model.peft_config = peft_config
     else:
-        model = ASRModel(asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config)
+        model = ASRModel(
+            asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config
+        )
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
