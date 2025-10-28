@@ -158,8 +158,9 @@ class ASRModel(PreTrainedModel):
                 if k.startswith("projector.")
             }
             if projector_state:
+                total_params = sum(v.numel() for v in projector_state.values())
                 model.projector.load_state_dict(projector_state, strict=True)
-                print(f"✓ Loaded projector weights ({len(projector_state)} tensors)")
+                print(f"✓ Loaded projector weights ({total_params:,} parameters)")
 
             # Load encoder LoRA weights from model.safetensors
             if encoder_lora_config:

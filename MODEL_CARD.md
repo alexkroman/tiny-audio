@@ -1,46 +1,43 @@
-______________________________________________________________________
-
+---
 license: mit
 datasets:
-
-- mozilla-foundation/common_voice_17_0
-- speechcolab/gigaspeech
-- openslr/librispeech_asr
-- speechbrain/LoquaciousSet
-  language:
-- en
-  base_model:
-- facebook/hubert-xlarge-ls960-ft
-- HuggingFaceTB/SmolLM3-3B
-  pipeline_tag: automatic-speech-recognition
-  tags:
-- hubert
-- smollm3
-- asr
-- speech-recognition
-- audio
-- parameter-efficient
-- lora
-- peft
-- flash-attention-2
-  library_name: transformers
-  model-index:
-- name: tiny-audio
-  results:
-  - task:
-    type: automatic-speech-recognition
-    name: Automatic Speech Recognition
-    dataset:
-    type: speechbrain/LoquaciousSet
-    name: LoquaciousSet
-    config: large
-    split: test
-    metrics:
-    - type: wer
-      name: Word Error Rate
-      value: TBD
-
-______________________________________________________________________
+  - mozilla-foundation/common_voice_17_0
+  - speechcolab/gigaspeech
+  - openslr/librispeech_asr
+  - speechbrain/LoquaciousSet
+language:
+  - en
+base_model:
+  - facebook/hubert-xlarge-ls960-ft
+  - HuggingFaceTB/SmolLM3-3B
+pipeline_tag: automatic-speech-recognition
+tags:
+  - hubert
+  - smollm3
+  - asr
+  - speech-recognition
+  - audio
+  - parameter-efficient
+  - lora
+  - peft
+  - flash-attention-2
+library_name: transformers
+model-index:
+  - name: tiny-audio
+    results:
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          type: speechbrain/LoquaciousSet
+          name: LoquaciousSet
+          config: large
+          split: test
+        metrics:
+          - type: wer
+            name: Word Error Rate
+            value: TBD
+---
 
 # Tiny Audio
 
