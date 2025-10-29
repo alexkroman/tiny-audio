@@ -224,7 +224,6 @@ def evaluate_huggingface(
             shutil.rmtree(temp_dir, ignore_errors=True)
     else:
         # Load model locally using custom ASRPipeline
-        print(f"Loading model locally: {model_or_endpoint}")
         from transformers import pipeline
 
         # Use pipeline with trust_remote_code to load our custom ASRPipeline
@@ -235,26 +234,6 @@ def evaluate_huggingface(
             trust_remote_code=True,
             device=device,
         )
-        print(f"Model loaded on device: {pipe.device}")
-
-        # Print original system prompt from model
-        if hasattr(pipe.model, "system_prompt"):
-            print(f"Original system prompt from model: {pipe.model.system_prompt}")
-        else:
-            print("Original system prompt: Not available")
-
-        # Override with custom system prompt if provided
-        if system_prompt is not None and hasattr(pipe.model, "system_prompt"):
-            pipe.model.system_prompt = system_prompt
-            print(f"Using custom system prompt: {system_prompt}")
-        else:
-            print("Using model's default system prompt")
-
-        # Print user_prompt info
-        if user_prompt is not None:
-            print(f"Using custom user prompt: {user_prompt}")
-        else:
-            print("Using default user prompt: 'Transcribe: <audio>'")
 
         for i, sample in enumerate(dataset):
             try:
