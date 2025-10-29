@@ -8,7 +8,7 @@ class ASRConfig(transformers.PretrainedConfig):
     def __init__(
         self,
         audio_model_id: str = "facebook/hubert-large-ls960-ft",
-        text_model_id: str = "Qwen/Qwen3-8B",
+        text_model_id: str = "HuggingFaceTB/SmolLM3-3B",
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
         audio_downsample_rate: int = 5,

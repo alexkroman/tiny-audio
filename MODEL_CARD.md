@@ -43,7 +43,7 @@ model-index:
 
 ## Efficient Speech Recognition with Parameter-Efficient Fine-Tuning
 
-Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a **LoRA-adapted HuBERT-XLarge encoder** with a **LoRA-adapted SmolLM3-3B language model decoder**, connected via a trainable audio projector. By applying LoRA (Low-Rank Adaptation) to both the encoder and decoder, this architecture enables efficient training by fine-tuning only ~30M parameters (projector + encoder LoRA + decoder LoRA adapters) while leveraging the power of large pretrained models.
+Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a **LoRA-adapted HuBERT-XLarge encoder** with a **LoRA-adapted SmolLM3-3B language model decoder**, connected via a trainable audio projector. By applying LoRA (Low-Rank Adaptation) to both the encoder and decoder, this architecture enables efficient training by fine-tuning only ~139M parameters (projector: ~122M + encoder LoRA: ~2M + decoder LoRA: ~15M adapters) while leveraging the power of large pretrained models.
 
 ## Model Description
 
@@ -52,13 +52,13 @@ Tiny Audio is a lightweight automatic speech recognition (ASR) model that combin
 - **Language(s):** English
 - **License:** MIT
 - **Architecture:** Encoder-Projector-Decoder
-  - Audio Encoder: HuBERT-XLarge (1.3B params + LoRA adapters)
-  - Audio Projector: SwiGLU MLP (~13M params, trainable)
-  - Text Decoder: SmolLM3-3B (3B params + LoRA adapters)
+  - Audio Encoder: HuBERT-XLarge (1.3B params + LoRA adapters, r=8, ~2M trainable)
+  - Audio Projector: SwiGLU MLP (~122M params, fully trainable)
+  - Text Decoder: SmolLM3-3B (3B params + LoRA adapters, r=64, ~15M trainable)
 
 ## Key Features
 
-✅ **Parameter Efficient**: Only ~30M trainable parameters (projector + encoder LoRA + decoder LoRA) - less than 1% of total model size
+✅ **Parameter Efficient**: Only ~139M trainable parameters (projector + encoder LoRA + decoder LoRA) - 3.2% of total model size (4.3B)
 ✅ **Dual LoRA Adaptation**: LoRA fine-tuning applied to both encoder and decoder for targeted optimization
 ✅ **Fast Training**: LoRA on both models enables rapid training (~24 hours on A40)
 ✅ **Modular Design**: Easy to swap different encoder or decoder models
@@ -181,7 +181,7 @@ This diverse training data enables the model to handle a wide range of English s
 
 The model uses **parameter-efficient fine-tuning (PEFT) with LoRA on both encoder and decoder** with three trainable components:
 
-1. **Audio Projector** (~13M params): Trained from scratch to map audio to language embeddings
+1. **Audio Projector** (~122M params): Trained from scratch to map audio to language embeddings
 1. **Encoder LoRA Adapters** (~1-2M params): Fine-tune HuBERT attention layers (q_proj, k_proj) with rank 8
 1. **Decoder LoRA Adapters** (~15-20M params): Fine-tune SmolLM3 attention layers (q_proj, v_proj) with rank 64
 

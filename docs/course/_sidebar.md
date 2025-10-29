@@ -1,0 +1,7 @@
+- [Course Overview](course/0-course-overview.md)
+- [1. Introduction and Setup](course/1-introduction-and-setup.md)
+- [2. Audio Processing and Encoders](course/2-audio-processing-and-encoders.md)
+- [3. Language Models and Projectors](course/3-language-models-and-projectors.md)
+- [4. Training](course/4-training.md)
+- [5. Evaluation and Debugging](course/5-evaluation-and-debugging.md)
+- [6. Publishing and Deployment](course/6-publishing-and-deployment.md)

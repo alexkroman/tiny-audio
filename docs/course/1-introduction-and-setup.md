@@ -1,0 +1,629 @@
+# Class 1: Introduction and Setup
+
+**Duration**: 1 hour (20 min lecture + 40 min hands-on)
+**Goal**: Understand ASR systems and run your first model inference
+
+## Learning Objectives
+
+By the end of this class, you will:
+
+- Understand what automatic speech recognition (ASR) is and why it matters
+- Know the three main components of the Tiny Audio architecture
+- Have a working development environment
+- Successfully run inference on an audio file
+
+---
+
+# PART A: LECTURE (20 minutes)
+
+> **Instructor**: Present these concepts. Students should just listen and absorb.
+
+## 1. What is Automatic Speech Recognition? (5 min)
+
+### The Problem
+
+Humans communicate primarily through speech, but computers understand text. ASR bridges this gap by converting audio waveforms into written text.
+
+**Real-world applications:**
+
+- Voice assistants (Siri, Alexa, Google Assistant)
+- Transcription services (meetings, podcasts, interviews)
+- Accessibility tools (live captioning for deaf/hard-of-hearing)
+- Voice search and commands
+- Medical dictation systems
+
+### The Challenge
+
+Speech recognition is hard because:
+
+1. **Audio variability**: Different accents, speaking speeds, background noise
+2. **Ambiguity**: "I scream" vs "ice cream" sound identical
+3. **Context dependency**: Understanding requires linguistic knowledge
+4. **Real-time constraints**: Users expect instant responses
+
+### How Modern ASR Works
+
+Modern ASR systems have evolved through several generations:
+
+**1st Generation (1950s-1980s)**: Rule-based pattern matching
+
+- Limited vocabulary (~100 words)
+- Speaker-dependent
+
+**2nd Generation (1980s-2010s)**: Hidden Markov Models (HMMs)
+
+- Better accuracy
+- Still struggled with noise and accents
+
+**3rd Generation (2010s-2020s)**: Deep Learning
+
+- Recurrent Neural Networks (RNNs)
+- Attention mechanisms
+- Dramatic accuracy improvements
+
+**4th Generation (2020s-Present)**: Multimodal Transformers
+
+- Self-supervised pre-training
+- Transfer learning from language models
+- **This is what Tiny Audio uses!**
+
+---
+
+## 2. The Tiny Audio Architecture (10 min)
+
+### High-Level Overview
+
+Tiny Audio uses a three-component architecture:
+
+```
+Audio File → Audio Encoder → Audio Projector → Language Model → Text
+            (HuBERT)         (SwiGLU MLP)      (SmolLM3)
+```
+
+Let's understand each component:
+
+### Component 1: Audio Encoder (HuBERT-XLarge)
+
+**Purpose**: Convert raw audio waveforms into meaningful feature representations
+
+**What it does:**
+
+- Takes audio waveform (numbers representing sound pressure over time)
+- Outputs a sequence of embedding vectors (one per ~20ms of audio)
+- Each vector captures phonetic and acoustic information
+
+**Key insight**: HuBERT is **pre-trained** on thousands of hours of unlabeled speech, so it already "understands" human speech patterns before we even start training!
+
+**Analogy**: Think of it like a musician who can hear a song and recognize the notes, rhythm, and instruments without reading sheet music.
+
+**Size**: 1.3 billion parameters (frozen during our training)
+
+### Component 2: Audio Projector (~122M parameters)
+
+**Purpose**: Bridge the gap between audio features and language model expectations
+
+**What it does:**
+
+- Takes HuBERT's audio embeddings
+- Downsamples by 5x (reduces sequence length for efficiency)
+- Transforms to match the language model's input format
+
+**Architecture**: SwiGLU MLP (we'll dive deeper in Class 3)
+
+- Pre-normalization layer
+- Gated projection (allows selective information flow)
+- Post-normalization layer
+
+**Key insight**: This is the **largest trainable component** - all ~122M parameters learn during training.
+
+**Analogy**: Like a translator who converts spoken French into written English, adapting both language and medium.
+
+### Component 3: Language Model Decoder (SmolLM3-3B)
+
+**Purpose**: Generate text transcription from audio features
+
+**What it does:**
+
+- Receives audio embeddings (via projector)
+- Uses linguistic knowledge to predict text
+- Handles grammar, spelling, punctuation
+
+**Key insight**: SmolLM3 is also **pre-trained** on massive text corpora, so it already knows English grammar, vocabulary, and context before seeing any audio!
+
+**Size**: 3 billion parameters (we use LoRA to adapt efficiently)
+
+**Analogy**: Like a skilled writer who can dictate text, knowing proper grammar and spelling naturally.
+
+### Why This Architecture?
+
+**Efficiency**: We train ~139M parameters instead of 4.3+ billion (3.2% of total model)
+
+- Projector: ~122M (fully trained)
+- Encoder LoRA: ~2M (adapter weights, r=8)
+- Decoder LoRA: ~15M (adapter weights, r=64)
+
+**Speed**: Training completes in ~24 hours on a single GPU
+
+**Cost**: ~$12 for a full training run
+
+**Quality**: Leverages pre-trained knowledge from both audio and language domains
+
+---
+
+## 3. Course Goals (5 min)
+
+By the end of this 6-class course, each student will:
+
+1. **Train** their own customized ASR model
+2. **Evaluate** it on standard benchmarks
+3. **Push** it to their own HuggingFace account
+4. **Add** their results to the community leaderboard
+
+This isn't just learning - you'll have a real, working, deployed model with your name on it!
+
+---
+
+# PART B: HANDS-ON WORKSHOP (40 minutes)
+
+> **Students**: Follow these instructions step-by-step on your own computer.
+>
+> **Instructor**: Circulate and help students who get stuck.
+
+---
+
+## Workshop Exercise 1: Environment Setup (15 min)
+
+### Goal
+
+Get a working development environment with all dependencies installed.
+
+### Your Task
+
+Set up the Tiny Audio development environment.
+
+### Instructions
+
+**Step 1: Check Prerequisites**
+
+Open your terminal and verify:
+
+```bash
+python --version  # Should be 3.10 or newer
+git --version     # Should show git version
+```
+
+**Step 2: Clone the Repository**
+
+```bash
+git clone https://github.com/alexkroman/tiny-audio.git
+cd tiny-audio
+```
+
+**Step 3: Install Poetry (if needed)**
+
+Poetry manages dependencies and virtual environments:
+
+```bash
+# macOS/Linux
+curl -sSL https://install.python-poetry.org | python3 -
+
+# Windows (PowerShell)
+(Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing).Content | py -
+```
+
+Add Poetry to your PATH if prompted, then verify:
+
+```bash
+poetry --version
+```
+
+**Step 4: Install Dependencies**
+
+```bash
+poetry install
+```
+
+This will:
+
+- Create a virtual environment
+- Install PyTorch, Transformers, and other dependencies
+- Take ~5-10 minutes depending on your internet speed
+
+**Troubleshooting:**
+
+- If you get SSL errors, try: `poetry config certificates.default.cert false`
+- If PyTorch installation fails, visit [pytorch.org](https://pytorch.org) for platform-specific instructions
+
+**Step 5: Verify Installation**
+
+```bash
+poetry run python -c "import torch; import transformers; print('✓ Installation successful!')"
+```
+
+You should see: `✓ Installation successful!`
+
+### Success Checkpoint
+
+You should see: `✓ Installation successful!`
+
+If you hit any issues, raise your hand for help!
+
+---
+
+## Workshop Exercise 2: Run Your First Inference (15 min)
+
+### Goal
+
+Transcribe an audio file using the pre-trained Tiny Audio model.
+
+### Your Task
+
+Run inference on an audio file and see the transcription output.
+
+### Instructions
+
+**Step 1: Get an Audio File**
+
+You need an audio file to transcribe. Choose one option:
+
+**Option A: Use your own**
+
+- Any WAV, MP3, or FLAC file works
+- Speech works best (podcasts, meetings, voice memos)
+
+**Option B: Record your own**
+
+- Use your phone or computer
+- Record yourself saying: "Hello, this is a test of the Tiny Audio speech recognition system."
+- Save as `test.wav`
+
+**Option C: Download a sample**
+
+```bash
+# Download a LibriSpeech test sample
+wget https://www.openslr.org/resources/12/test-clean.tar.gz
+tar -xzf test-clean.tar.gz
+# Now you have many .flac files in test-clean/
+```
+
+**Step 2: Create inference script**
+
+Create a file called `test_inference.py` in the `tiny-audio/` directory:
+
+Create a file called `test_inference.py`:
+
+```python
+from transformers import pipeline
+
+# Load the pre-trained Tiny Audio model
+print("Loading model...")
+pipe = pipeline(
+    "automatic-speech-recognition",
+    model="mazesmazes/tiny-audio",
+    trust_remote_code=True
+)
+
+print("✓ Model loaded!")
+
+# Transcribe an audio file
+# Replace with your own audio file path
+audio_path = "path/to/your/audio.wav"
+
+print(f"Transcribing {audio_path}...")
+result = pipe(audio_path)
+
+print("\nTranscription:")
+print(result["text"])
+```
+
+**Step 3: Update the audio path**
+
+Edit `test_inference.py` and change this line:
+
+```python
+audio_path = "path/to/your/audio.wav"
+```
+
+To point to your actual audio file, for example:
+
+```python
+audio_path = "test.wav"
+# or
+audio_path = "test-clean/1089/134686/1089-134686-0000.flac"
+```
+
+**Step 4: Run inference**
+
+```bash
+poetry run python test_inference.py
+```
+
+**What's happening:**
+
+1. Model downloads from HuggingFace Hub (~4GB, first time only)
+2. Audio file is loaded and resampled to 16kHz
+3. Audio passes through: Encoder → Projector → Decoder
+4. Text transcription is returned
+
+**Expected output:**
+
+```
+Loading model...
+✓ Model loaded!
+Transcribing audio.wav...
+
+Transcription:
+Hello, this is a test of the Tiny Audio speech recognition system.
+```
+
+**What's happening:**
+
+1. Model downloads from HuggingFace Hub (~4GB, first time only - be patient!)
+2. Audio is loaded and resampled to 16kHz
+3. Audio passes through: Encoder → Projector → Decoder
+4. Text transcription is returned
+
+**Expected output:**
+
+```
+Loading model...
+✓ Model loaded!
+Transcribing test.wav...
+
+Transcription:
+Hello, this is a test of the Tiny Audio speech recognition system.
+```
+
+### Success Checkpoint
+
+- [ ] I successfully ran the script
+- [ ] I saw a transcription output
+- [ ] The transcription is mostly accurate (doesn't have to be perfect!)
+
+**Note**: You might notice some mistakes - that's normal! Our model achieves ~12% Word Error Rate, meaning it gets about 88% of words correct.
+
+---
+
+## Workshop Exercise 3: Explore Model Behavior (10 min)
+
+### Goal
+
+Understand how the model performs on different types of audio.
+
+### Your Task
+
+Test the model on at least 3 different audio files and observe the results.
+
+### Instructions
+
+**Step 1: Test different audio types**
+
+Try transcribing:
+
+1. Clear speech (someone speaking clearly)
+2. Noisy audio (background sounds)
+3. Different accent or speaking style
+
+For each one, run:
+
+```bash
+poetry run python test_inference.py
+```
+
+(Remember to update `audio_path` each time!)
+
+**Step 2: Record your observations**
+
+Create a file called `observations.txt` and note:
+
+- Which audio worked best?
+- What kinds of mistakes did you see?
+- Did it handle noise well?
+- Did accents affect accuracy?
+
+### Discussion Questions
+
+We'll discuss as a class:
+
+- What patterns did you notice?
+- When does the model struggle?
+- Why might certain audio be harder to transcribe?
+
+---
+
+## Bonus: Explore the Model (Optional)
+
+If you finish early, try these exploration exercises:
+
+### Model Files
+
+When you load the model, HuggingFace downloads these files:
+
+```
+~/.cache/huggingface/hub/models--mazesmazes--tiny-audio/
+├── config.json              # Model configuration
+├── model.safetensors        # Trained weights (projector + LoRA)
+├── preprocessor_config.json # Audio preprocessing settings
+├── tokenizer_config.json    # Text tokenization settings
+├── asr_modeling.py         # Model architecture code
+├── asr_config.py           # Configuration class
+├── asr_pipeline.py         # Pipeline integration
+└── asr_processing.py       # Audio/text processing
+```
+
+### Inspecting the Config
+
+```python
+from transformers import AutoConfig
+
+config = AutoConfig.from_pretrained(
+    "mazesmazes/tiny-audio",
+    trust_remote_code=True
+)
+
+print(f"Audio encoder: {config.audio_model_id}")
+print(f"Language model: {config.text_model_id}")
+print(f"Encoder dimension: {config.encoder_dim}")
+print(f"LLM dimension: {config.llm_dim}")
+print(f"Downsampling rate: {config.audio_downsample_rate}x")
+```
+
+**Output:**
+
+```
+Audio encoder: facebook/hubert-xlarge-ls960-ft
+Language model: HuggingFaceTB/SmolLM3-3B
+Encoder dimension: 1280
+LLM dimension: 2048
+Downsampling rate: 5x
+```
+
+---
+
+## Bonus Exercise 1: Count Model Parameters
+
+```python
+from transformers import AutoModel
+
+model = AutoModel.from_pretrained(
+    "mazesmazes/tiny-audio",
+    trust_remote_code=True
+)
+
+# Count parameters
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+print(f"Total parameters: {total_params:,}")
+print(f"Trainable parameters: {trainable_params:,}")
+print(f"Percentage trainable: {100 * trainable_params / total_params:.2f}%")
+
+# Explore structure
+print("\nModel structure:")
+print(model)
+```
+
+**Question**: Which components have trainable parameters?
+
+## Bonus Exercise 2: Time Inference Speed
+
+```python
+import time
+from transformers import pipeline
+
+pipe = pipeline(
+    "automatic-speech-recognition",
+    model="mazesmazes/tiny-audio",
+    trust_remote_code=True
+)
+
+audio_path = "your-audio.wav"
+
+start = time.time()
+result = pipe(audio_path)
+end = time.time()
+
+print(f"Transcription took {end - start:.2f} seconds")
+print(f"Result: {result['text']}")
+```
+
+**Question**: How does inference time relate to audio length?
+
+---
+
+# CLASS SUMMARY
+
+## What We Covered Today
+
+**Lecture (20 min):**
+
+- What ASR is and why it matters
+- The three-component Tiny Audio architecture
+- Course goals: train, evaluate, publish
+
+**Workshop (40 min):**
+
+- Set up development environment
+- Ran first inference
+- Explored model behavior on different audio
+
+## Homework (Optional)
+
+Before Class 2, try to:
+
+1. Test the model on 5+ different audio files
+2. Start thinking: "How would I represent sound as numbers?"
+3. Browse `src/asr_modeling.py` - don't worry if it's confusing yet!
+
+## Key Takeaways
+
+✅ ASR converts audio waveforms to text using ML models
+✅ Tiny Audio uses: Encoder (HuBERT) → Projector → Decoder (SmolLM3)
+✅ We train only ~139M params (3.2%) instead of the full 4.3B model
+✅ You can run inference on any audio file and get transcriptions
+
+## Check Your Understanding
+
+Before moving to Class 2, make sure you can answer:
+
+1. **What are the three main components of Tiny Audio?**
+   - Audio Encoder (HuBERT)
+   - Audio Projector (SwiGLU MLP)
+   - Language Model Decoder (SmolLM3)
+
+2. **Why is parameter-efficient training important?**
+   - Trains only ~139M parameters instead of 4.3B+
+   - Faster, cheaper, accessible on consumer hardware
+   - Enables $12 / 24-hour training runs
+
+3. **What does the audio projector do?**
+   - Bridges audio and text modalities
+   - Downsamples by 5x for efficiency
+   - Transforms encoder outputs to decoder inputs
+
+4. **Can you successfully run inference on an audio file?**
+   - Yes! You should have transcribed multiple audio files
+
+---
+
+## Further Reading (Optional)
+
+### Foundational Papers
+
+- **HuBERT**: [Self-Supervised Speech Representation Learning](https://arxiv.org/abs/2106.07447)
+- **LoRA**: [Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685)
+- **Attention**: [Attention Is All You Need](https://arxiv.org/abs/1706.03762) (foundational)
+
+### Documentation
+
+- [HuggingFace Transformers](https://huggingface.co/docs/transformers/index)
+- [PyTorch Tutorials](https://pytorch.org/tutorials/)
+- [Wav2Vec2 Guide](https://huggingface.co/docs/transformers/model_doc/wav2vec2)
+
+### Videos
+
+- [But what is a neural network?](https://www.youtube.com/watch?v=aircAruvnKk) by 3Blue1Brown
+- [Illustrated Transformer](http://jalammar.github.io/illustrated-transformer/) by Jay Alammar
+
+---
+
+## Next Class
+
+In [Class 2: Audio Processing and Encoders](./2-audio-processing-and-encoders.md), we'll dive deep into:
+
+- How audio becomes numbers
+- Feature extraction and spectrograms
+- Understanding the HuBERT encoder
+- Exploring audio embeddings hands-on
+
+**Prep for next class:**
+
+- Ensure you can run inference successfully
+- Browse `src/asr_modeling.py` (don't worry if it's confusing yet!)
+- Think about: "How would you represent sound as numbers?"
+
+---
+
+[Previous: Course Overview](./0-course-overview.md) | [Next: Class 2: Audio Processing and Encoders](./2-audio-processing-and-encoders.md)
+
+**Questions or stuck?** Open an issue on GitHub or check the discussions!

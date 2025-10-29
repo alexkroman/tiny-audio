@@ -31,6 +31,27 @@ print(result["text"])
 
 The model handles various audio formats (WAV, MP3, FLAC, etc.) and automatically resamples to 16kHz.
 
+## 🎓 Learn by Building: Free ASR Course
+
+Want to deeply understand how speech recognition works? We've created a **6-hour hands-on course** that teaches you ASR by building your own model from scratch.
+
+**[📚 Start the Course](docs/QUICKSTART.md)** | **[📖 Course Overview](docs/course/0-course-overview.md)**
+
+**What you'll learn:**
+- How audio becomes numbers and how encoders process them
+- Language model architectures and multimodal bridging
+- Parameter-efficient training with LoRA
+- Model evaluation, debugging, and deployment
+
+**What you'll build:**
+- Your own trained ASR model
+- Published to HuggingFace Hub with your name on it
+- Results added to the community leaderboard
+
+**Time**: 6 hours (6 one-hour classes) | **Cost**: ~$12 for GPU training
+
+Each class has a 20-minute lecture and 40 minutes of hands-on coding. All exercise scripts are pre-created for you!
+
 ## Quick start
 
 The fastest way to feel the magic is to train your own model. Boot up an A40 GPU box from your favorite provider (I like RunPod), clone this repo, and kick off training:
@@ -69,12 +90,12 @@ Tiny Audio uses a parameter-efficient three-component architecture with **LoRA a
 
 ```text
 Audio Waveform → HuBERT-XLarge → Audio Projector → SmolLM3-3B → Text
-                 (1.3B + LoRA)   (~13M, trainable)  (3B + LoRA)
+                 (1.3B + LoRA)   (~122M, trainable)  (3B + LoRA)
 ```
 
-1. **Audio Encoder (LoRA Fine-tuned)**: HuBERT-XLarge (1.3B parameters) with LoRA adapters on attention layers (q_proj, k_proj) - adds ~1-2M trainable parameters
-1. **Audio Projector (Fully Trainable)**: A SwiGLU MLP (~13M parameters) that downsamples 5x and maps audio features to language model space
-1. **Language Decoder (LoRA Fine-tuned)**: SmolLM3-3B (3B parameters) with LoRA adapters on attention layers (q_proj, v_proj) - adds ~15-20M trainable parameters. Generates text transcription with Flash Attention 2
+1. **Audio Encoder (LoRA Fine-tuned)**: HuBERT-XLarge (1.3B parameters) with LoRA adapters on attention layers (q_proj, k_proj) - adds ~2M trainable parameters (r=8)
+1. **Audio Projector (Fully Trainable)**: A SwiGLU MLP (~122M parameters) that downsamples 5x and maps audio features to language model space
+1. **Language Decoder (LoRA Fine-tuned)**: SmolLM3-3B (3B parameters) with LoRA adapters on attention layers (q_proj, v_proj) - adds ~15M trainable parameters (r=64). Generates text transcription with Flash Attention 2
 
 The projector uses a **SwiGLU** architecture (like Llama):
 
@@ -92,18 +113,18 @@ The projector uses a **SwiGLU** architecture (like Llama):
 - Rank: 8 (default)
 - Alpha: 8 (scaling factor)
 - Target modules: q_proj, k_proj in HuBERT attention layers
-- Adds ~1-2M trainable parameters
+- Adds ~2M trainable parameters
 
 *Decoder LoRA:*
 
 - Rank: 64 (default)
 - Alpha: 32 (scaling factor = 0.5)
 - Target modules: q_proj, v_proj in SmolLM3 attention layers
-- Adds ~15-20M trainable parameters
+- Adds ~15M trainable parameters
 
 Why use parameter-efficient training with LoRA on both encoder and decoder? Because:
 
-- **You train ~30M parameters** instead of 4+ billion (projector + encoder LoRA + decoder LoRA)
+- **You train ~139M parameters** instead of 4.3+ billion (projector: ~122M + encoder LoRA: ~2M + decoder LoRA: ~15M)
 - **Training is fast** (~24 hours on A40) thanks to reduced gradient computations
 - **It's cheap** (~$12 for a full run)
 - **You leverage pretrained knowledge** from both audio and language domains
@@ -206,7 +227,7 @@ poetry run eval mazesmazes/tiny-audio --max-samples 100
 Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable, hackable codebase** designed to train an ASR model start to end and produce a working model you can actually use and learn from.
 
 - **~1000 lines of core code** across 7 Python files in `src/`
-- **Parameter-efficient training**: Train only ~18M parameters (projector + encoder LoRA + decoder LoRA) instead of 4B+
+- **Parameter-efficient training**: Train only ~139M parameters (projector + encoder LoRA + decoder LoRA) instead of 4.3B+
 - **Dependency-lite**: Just PyTorch, transformers, datasets, PEFT, and a few other essentials via Poetry
 - **No magic**: Read the code and understand exactly what's happening
 - **Fully yours**: Train it, modify it, deploy it however you want

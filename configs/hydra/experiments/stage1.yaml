@@ -48,15 +48,14 @@ training:
 
   per_device_train_batch_size: 5
   per_device_eval_batch_size: 5
-  gradient_accumulation_steps: 7
-  eval_accumulation_steps: 7
+  gradient_accumulation_steps: 1
+  eval_accumulation_steps: 1
 
   # Learning rate - Higher for LoRA
 
   learning_rate: 1.0e-4
-  # learning_rate: 5.0e-5
 
-  warmup_steps: 100
+  warmup_steps: 500
   lr_scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs: {"min_lr_rate": 0.1}
 
@@ -69,15 +68,15 @@ training:
   gradient_checkpointing: false
 
   # Training duration
-  max_steps: 25000
+  max_steps: 100000
 
   # Reproducibility
-  seed: 48
+  seed: 51
   ignore_data_skip: true
 
 # Data configuration
 data:
-  max_audio_seconds: 16.0
+  max_audio_seconds: 15.0
 
 # Early stopping configuration
 early_stopping:
