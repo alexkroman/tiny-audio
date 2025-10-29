@@ -5,15 +5,15 @@
 # This is the most comprehensive training approach with ~18M trainable parameters
 defaults:
   - override /model: large
-  - override /data: loquacious_large
+  - override /data: loquacious_clean
   - override /training: production
   - override /encoder_lora: default
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
-  pretrained_model_path: "mazesmazes/tiny-audio"
+  # pretrained_model_path: "mazesmazes/tiny-audio"
   
-  decoder_model_name: HuggingFaceTB/SmolLM3-3B
+  decoder_model_name: Qwen/Qwen3-8B
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
   # Projector configuration
@@ -25,18 +25,18 @@ encoder_lora:
   r: 8  # LoRA rank for encoder
   lora_alpha: 8  # Scaling factor (alpha/r = 1.0)
   target_modules: ["q_proj", "k_proj"]  # HuBERT attention projections
-  lora_dropout: 0.0
+  lora_dropout: 0.05
   bias: none
 
 # Decoder LoRA Configuration
 peft:
   peft_method: lora  # Enable LoRA fine-tuning on decoder
-  r: 64  # LoRA rank for decoder (matching encoder)
+  r: 8  # LoRA rank for decoder (matching encoder)
   lora_alpha: 32  # Scaling factor (alpha/r = 1.0)
   target_modules: ["q_proj", "v_proj"]  
   bias: none  # No bias training
   task_type: CAUSAL_LM  # Causal language modeling
-  lora_dropout: 0.0  
+  lora_dropout: 0.05  
   inference_mode: false  # Training mode
 
 training:
@@ -46,21 +46,21 @@ training:
   hub_strategy: "checkpoint"
   hub_private_repo: false
 
-  per_device_train_batch_size: 5
-  per_device_eval_batch_size: 5
-  gradient_accumulation_steps: 1
-  eval_accumulation_steps: 1
+  per_device_train_batch_size: 3
+  per_device_eval_batch_size: 3
+  gradient_accumulation_steps: 3
+  eval_accumulation_steps: 3
 
   # Learning rate - Higher for LoRA
 
   learning_rate: 1.0e-4
 
-  warmup_steps: 500
+  warmup_steps: 1000
   lr_scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs: {"min_lr_rate": 0.1}
 
   # Optimization
-  weight_decay: 0.0
+  weight_decay: 0.01
   max_grad_norm: 1.0
 
   # Memory optimization
@@ -71,12 +71,12 @@ training:
   max_steps: 100000
 
   # Reproducibility
-  seed: 51
+  seed: 42
   ignore_data_skip: true
 
 # Data configuration
 data:
-  max_audio_seconds: 15.0
+  max_audio_seconds: 16.0
 
 # Early stopping configuration
 early_stopping:

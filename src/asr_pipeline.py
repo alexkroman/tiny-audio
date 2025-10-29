@@ -101,9 +101,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             # Audio object with attributes (not dict)
             inputs = {"raw": inputs.array, "sampling_rate": inputs.sampling_rate}
         elif hasattr(inputs, "__array__") and not isinstance(inputs, (dict, bytes, str)):
-            inputs = {"raw": inputs, "sampling_rate": 16000}
+            inputs = {"raw": inputs, "sampling_rate": self.model.config.audio_sample_rate}
         elif torch.is_tensor(inputs):
-            inputs = {"raw": inputs.cpu().numpy(), "sampling_rate": 16000}
+            inputs = {"raw": inputs.cpu().numpy(), "sampling_rate": self.model.config.audio_sample_rate}
 
         return super().preprocess(inputs, **preprocess_params)
 

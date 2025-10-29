@@ -8,15 +8,25 @@ class ASRConfig(transformers.PretrainedConfig):
     def __init__(
         self,
         audio_model_id: str = "facebook/hubert-large-ls960-ft",
-        text_model_id: str = "HuggingFaceTB/SmolLM3-3B",
+        text_model_id: str = "Qwen/Qwen3-8B",
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
         audio_downsample_rate: int = 5,
         num_beams: int = 1,
         system_prompt: str = "/no_think /system_override",
+        user_prompt: str = "Transcribe in English: <audio>",
         encoder_dim: int = None,
         llm_dim: int = None,
         projector_hidden_dim: int = 8192,
+        # Audio processing constants
+        audio_sample_rate: int = 16000,
+        # Projector initialization constants
+        projector_init_std: float = 0.02,
+        # LoRA default parameters
+        lora_default_dropout: float = 0.0,
+        # Inference parameters
+        inference_diversity_penalty: float = 0.5,
+        inference_warmup_tokens: int = 10,
         **kwargs,
     ):
         self.audio_model_id = audio_model_id
@@ -26,9 +36,15 @@ class ASRConfig(transformers.PretrainedConfig):
         self.audio_downsample_rate = audio_downsample_rate
         self.num_beams = num_beams
         self.system_prompt = system_prompt
+        self.user_prompt = user_prompt
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
         self.projector_hidden_dim = projector_hidden_dim
+        self.audio_sample_rate = audio_sample_rate
+        self.projector_init_std = projector_init_std
+        self.lora_default_dropout = lora_default_dropout
+        self.inference_diversity_penalty = inference_diversity_penalty
+        self.inference_warmup_tokens = inference_warmup_tokens
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
         else:
@@ -88,6 +104,12 @@ class ASRConfig(transformers.PretrainedConfig):
         output["projector_hidden_dim"] = self.projector_hidden_dim
         output["audio_downsample_rate"] = self.audio_downsample_rate
         output["system_prompt"] = self.system_prompt
+        output["user_prompt"] = self.user_prompt
         output["num_beams"] = self.num_beams
+        output["audio_sample_rate"] = self.audio_sample_rate
+        output["projector_init_std"] = self.projector_init_std
+        output["lora_default_dropout"] = self.lora_default_dropout
+        output["inference_diversity_penalty"] = self.inference_diversity_penalty
+        output["inference_warmup_tokens"] = self.inference_warmup_tokens
 
         return output

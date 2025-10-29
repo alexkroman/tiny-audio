@@ -83,12 +83,14 @@ class EndpointHandler:
         """Warmup to trigger model compilation and allocate GPU memory."""
         print("Warming up model...")
         try:
-            # Create dummy audio
-            dummy_audio = torch.randn(16000, dtype=torch.float32)
+            # Create dummy audio (1 second at config sample rate)
+            sample_rate = self.pipe.model.config.audio_sample_rate
+            dummy_audio = torch.randn(sample_rate, dtype=torch.float32)
 
             # The pipeline now handles GPU optimization internally
             with torch.inference_mode():
-                _ = self.pipe({"raw": dummy_audio, "sampling_rate": 16000}, max_new_tokens=10)
+                warmup_tokens = self.pipe.model.config.inference_warmup_tokens
+                _ = self.pipe({"raw": dummy_audio, "sampling_rate": sample_rate}, max_new_tokens=warmup_tokens)
 
             # Force CUDA synchronization to ensure kernels are compiled
             if torch.cuda.is_available():
@@ -138,7 +140,8 @@ class EndpointHandler:
 
         # Diversity penalty encourages different beams (helps with rare words)
         # 0.0 = no diversity, 0.5-1.0 = good diversity
-        diversity_penalty = params.get("diversity_penalty", 0.5)
+        default_diversity = self.pipe.model.config.inference_diversity_penalty
+        diversity_penalty = params.get("diversity_penalty", default_diversity)
 
         # The pipeline's __call__ method handles both single and batch inputs
         # as well as automatic chunking for long audio files
