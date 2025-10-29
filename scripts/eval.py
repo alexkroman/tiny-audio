@@ -224,14 +224,27 @@ def evaluate_huggingface(
             shutil.rmtree(temp_dir, ignore_errors=True)
     else:
         # Load model locally using custom ASRPipeline
-        from transformers import pipeline
+        from src.asr_modeling import ASRModel
+        from src.asr_pipeline import ASRPipeline
 
-        # Use pipeline with trust_remote_code to load our custom ASRPipeline
+        # Load model first to handle device placement properly
         device = "mps" if torch.backends.mps.is_available() else "cpu"
-        pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model_or_endpoint,
-            trust_remote_code=True,
+
+        # Load model with low_cpu_mem_usage to avoid meta tensor issues
+        model = ASRModel.from_pretrained(
+            model_or_endpoint,
+            dtype=torch.float16 if device == "cuda" else torch.float32,
+            low_cpu_mem_usage=True,
+        )
+
+        # Move model to device after loading (handles meta tensors properly)
+        model = model.to(device)
+
+        # Create pipeline using local ASRPipeline class directly
+        pipe = ASRPipeline(
+            model=model,
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
             device=device,
         )
 
