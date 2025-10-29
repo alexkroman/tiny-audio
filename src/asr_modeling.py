@@ -121,6 +121,7 @@ class ASRModel(PreTrainedModel):
         try:
             # Helper function to load LoRA config
             def load_lora_config(config_filename):
+                # Try loading from main directory first
                 try:
                     config_file = cached_file(
                         pretrained_model_name_or_path,
@@ -135,6 +136,26 @@ class ASRModel(PreTrainedModel):
                             return json.load(f)
                 except Exception:
                     pass
+
+                # Fallback: try loading from last-checkpoint subfolder
+                try:
+                    fallback_kwargs = cache_kwargs.copy()
+                    fallback_kwargs["subfolder"] = "last-checkpoint"
+                    config_file = cached_file(
+                        pretrained_model_name_or_path,
+                        config_filename,
+                        _raise_exceptions_for_missing_entries=False,
+                        **fallback_kwargs,
+                    )
+                    if config_file:
+                        from pathlib import Path as PathlibPath
+
+                        print(f"Loading {config_filename} from last-checkpoint subfolder")
+                        with PathlibPath(config_file).open() as f:
+                            return json.load(f)
+                except Exception:
+                    pass
+
                 return None
 
             # Load LoRA configs
@@ -150,7 +171,8 @@ class ASRModel(PreTrainedModel):
             # Each component is saved in its own safetensors file for clarity
 
             def load_component(filename):
-                """Load a component file."""
+                """Load a component file, with fallback to last-checkpoint subfolder."""
+                # Try loading from main directory first
                 try:
                     component_path = cached_file(
                         pretrained_model_name_or_path,
@@ -162,6 +184,23 @@ class ASRModel(PreTrainedModel):
                         return load_file(component_path)
                 except Exception:
                     pass
+
+                # Fallback: try loading from last-checkpoint subfolder
+                try:
+                    fallback_kwargs = cache_kwargs.copy()
+                    fallback_kwargs["subfolder"] = "last-checkpoint"
+                    component_path = cached_file(
+                        pretrained_model_name_or_path,
+                        filename,
+                        _raise_exceptions_for_missing_entries=False,
+                        **fallback_kwargs,
+                    )
+                    if component_path:
+                        print(f"Loading {filename} from last-checkpoint subfolder")
+                        return load_file(component_path)
+                except Exception:
+                    pass
+
                 return None
 
             encoder_state = load_component("encoder.safetensors")
