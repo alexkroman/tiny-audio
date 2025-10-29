@@ -109,20 +109,22 @@ The model automatically handles:
    - Extracts acoustic features from raw audio waveforms
    - Output: Audio embeddings at ~50Hz frame rate
 
-1. **Audio Projector (Trainable)**
+2. **Audio Projector (Fully Trainable)**
 
    - Architecture: SwiGLU MLP (following Llama design)
-     - Pre-norm: RMSNorm on stacked encoder features
+     - Input: Stacked encoder features (5 frames concatenated)
+     - Pre-norm: RMSNorm on stacked features
      - `gate_proj`: Linear(6400 → 8192, no bias)
      - `up_proj`: Linear(6400 → 8192, no bias)
+     - SwiGLU activation: `silu(gate) * up`
      - `down_proj`: Linear(8192 → 2048, no bias)
-     - Activation: `silu(gate) * up` → `down`
      - Post-norm: RMSNorm on output embeddings
-   - Parameters: ~13M (trainable)
-   - Downsamples audio features by 5x (from ~50Hz to ~10Hz)
-   - Maps audio embeddings to language model embedding space
+   - Parameters: ~122M (fully trainable)
+   - Downsamples audio features by 5x (from ~149 frames to ~30 frames)
+   - Maps 1280-dim audio embeddings to 2048-dim language model space
+   - Each output frame represents ~100ms of audio
 
-1. **Language Model Decoder (LoRA Fine-tuned)**
+3. **Language Model Decoder (LoRA Fine-tuned)**
 
    - Base Model: `HuggingFaceTB/SmolLM3-3B`
    - Parameters: 3B base + ~15-20M LoRA adapters
@@ -196,7 +198,10 @@ This dual LoRA approach:
 - Makes training affordable (~$12 on A40) through parameter efficiency
 - Allows targeted adaptation of both encoder and decoder attention mechanisms
 - Provides independent control over encoder and decoder adaptation strength
-- Total trainable parameters: ~30M (0.7% of the full 4.3B model)
+- Total trainable parameters: ~139M (3.2% of the full 4.3B model)
+  - Projector: ~122M (fully trained)
+  - Encoder LoRA: ~2M adapters
+  - Decoder LoRA: ~15M adapters
 - Both encoder and decoder maintain their pretrained capabilities while adapting to ASR
 
 ## Evaluation
@@ -288,12 +293,27 @@ This project builds upon excellent prior work:
 - **LoRA** ([Hu et al., 2021](https://arxiv.org/abs/2106.09685)): Low-Rank Adaptation of Large Language Models
 - **PEFT** ([HuggingFace](https://github.com/huggingface/peft)): Parameter-Efficient Fine-Tuning library
 
+## 🎓 Learn by Building
+
+Want to understand exactly how this model works? We've created a **free 6-hour hands-on course** that teaches you to build your own ASR model from scratch:
+
+**[📚 Start the Course](https://github.com/alexkroman/tiny-audio/blob/main/docs/QUICKSTART.md)**
+
+Learn about:
+- How audio becomes embeddings (HuBERT encoder)
+- SwiGLU projector architecture and frame downsampling
+- Parameter-efficient training with LoRA
+- Model evaluation and deployment
+
+Build your own model, publish it to HuggingFace, and add your results to the leaderboard!
+
 ## Additional Resources
 
 - 📄 [GitHub Repository](https://github.com/alexkroman/tiny-audio)
 - 🎯 [Live Demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)
 - 📚 [Documentation](https://github.com/alexkroman/tiny-audio#readme)
 - 🐛 [Issue Tracker](https://github.com/alexkroman/tiny-audio/issues)
+- 🎓 [Free ASR Course](https://github.com/alexkroman/tiny-audio/blob/main/docs/QUICKSTART.md)
 
 ## License
 

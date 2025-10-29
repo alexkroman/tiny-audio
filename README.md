@@ -6,7 +6,7 @@
 
 ## Train your own speech recognition model in 24 hours for $12
 
-This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in 24 hours. Tiny Audio combines a HuBERT-XLarge encoder (1.3B params) with a SmolLM3-3B decoder (3B params), connected by a small trainable audio projector (~13M params). Both the encoder and decoder use **LoRA (Low-Rank Adaptation)** for parameter-efficient fine-tuning. The result is a speech-to-text system you can train in a few hours, deploy to HuggingFace, and use just like Whisper or any other ASR model.
+This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in 24 hours. Tiny Audio combines a HuBERT-XLarge encoder (1.3B params) with a SmolLM3-3B decoder (3B params), connected by a trainable audio projector (~122M params). Both the encoder and decoder use **LoRA (Low-Rank Adaptation)** for parameter-efficient fine-tuning. The result is a speech-to-text system you can train in under 24 hours for ~$12, deploy to HuggingFace, and use just like Whisper or any other ASR model.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
@@ -89,26 +89,56 @@ Now wait ~24 hours. Once it's done, your model will be pushed to HuggingFace Hub
 Tiny Audio uses a parameter-efficient three-component architecture with **LoRA adapters on both the encoder and decoder**:
 
 ```text
-Audio Waveform → HuBERT-XLarge → Audio Projector → SmolLM3-3B → Text
-                 (1.3B + LoRA)   (~122M, trainable)  (3B + LoRA)
+Audio Waveform (16kHz)
+    ↓
+HuBERT-XLarge Encoder (1.3B params, frozen)
+    + LoRA Adapters (r=8, ~2M params)
+    ↓
+Audio Embeddings [~149 frames × 1280 dim]
+    ↓
+Audio Projector (SwiGLU MLP, ~122M params)
+    - Frame stacking (5x downsample)
+    - Pre-norm (RMSNorm)
+    - gate_proj & up_proj (6400 → 8192)
+    - SwiGLU activation
+    - down_proj (8192 → 2048)
+    - Post-norm (RMSNorm)
+    ↓
+Language Embeddings [~30 frames × 2048 dim]
+    ↓
+SmolLM3-3B Decoder (3B params, frozen)
+    + LoRA Adapters (r=64, ~15M params)
+    + Flash Attention 2
+    ↓
+Text Transcription
 ```
 
-1. **Audio Encoder (LoRA Fine-tuned)**: HuBERT-XLarge (1.3B parameters) with LoRA adapters on attention layers (q_proj, k_proj) - adds ~2M trainable parameters (r=8)
-1. **Audio Projector (Fully Trainable)**: A SwiGLU MLP (~122M parameters) that downsamples 5x and maps audio features to language model space
-1. **Language Decoder (LoRA Fine-tuned)**: SmolLM3-3B (3B parameters) with LoRA adapters on attention layers (q_proj, v_proj) - adds ~15M trainable parameters (r=64). Generates text transcription with Flash Attention 2
+**Three trainable components:**
 
-The projector uses a **SwiGLU** architecture (like Llama):
+1. **Audio Encoder (LoRA Fine-tuned)**: HuBERT-XLarge (1.3B parameters frozen) with LoRA adapters on attention layers (q_proj, k_proj) - adds ~2M trainable parameters (r=8, alpha=8)
+2. **Audio Projector (Fully Trainable)**: A SwiGLU MLP (~122M parameters) that:
+   - Stacks 5 consecutive frames (5x time reduction: ~149 → ~30 frames)
+   - Maps 6400-dim stacked features → 8192-dim hidden → 2048-dim output
+   - Uses pre/post RMSNorm for stable training
+3. **Language Decoder (LoRA Fine-tuned)**: SmolLM3-3B (3B parameters frozen) with LoRA adapters on attention layers (q_proj, v_proj) - adds ~15M trainable parameters (r=64, alpha=32). Generates text transcription with Flash Attention 2
 
-- Pre-norm: RMSNorm on stacked encoder features
-- `gate_proj`: Linear(6400 → 8192, no bias)
-- `up_proj`: Linear(6400 → 8192, no bias)
-- `down_proj`: Linear(8192 → 2048, no bias)
-- Activation: `silu(gate) * up` → `down`
-- Post-norm: RMSNorm on output embeddings
+**Total trainable: ~139M params (3.2% of 4.3B total)**
 
-**LoRA Configuration** (optional, configurable):
+### Key Concepts Explained
 
-*Encoder LoRA:*
+**What is LoRA?** Low-Rank Adaptation adds small trainable "adapter" matrices to frozen model weights. Instead of updating a 2048×2048 weight matrix (4.2M params), LoRA uses two small matrices: 2048×8 and 8×2048 (32K params). This is 0.76% the size but captures most of the adaptation needed!
+
+**What is SwiGLU?** Swish Gated Linear Unit - a modern activation function that gates information flow. Used in Llama and other state-of-the-art models. Formula: `SwiGLU(x) = Swish(Wx) ⊗ (Vx)` where `Swish(x) = x × sigmoid(x)`.
+
+**What is RMSNorm?** Root Mean Square Normalization - a simpler, faster alternative to LayerNorm that just normalizes by the RMS value: `x / sqrt(mean(x²))`. Used in modern transformers like Llama.
+
+**Why 16kHz audio?** This sample rate captures human speech frequency range (85-255 Hz fundamental + harmonics up to ~8kHz) while being computationally efficient. Industry standard for ASR.
+
+**Why 5x downsampling?** Reduces computational cost in the decoder while maintaining ~100ms temporal resolution per frame - detailed enough for accurate transcription.
+
+### LoRA Configuration
+
+**Encoder LoRA:**
 
 - Rank: 8 (default)
 - Alpha: 8 (scaling factor)

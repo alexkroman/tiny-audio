@@ -169,6 +169,17 @@ This isn't just learning - you'll have a real, working, deployed model with your
 >
 > **Instructor**: Circulate and help students who get stuck.
 
+## Workshop Overview
+
+In the next 40 minutes, you will:
+
+- **Exercise 1**: Set up your environment (install dependencies, download samples)
+- **Exercise 2**: Run inference with the pretrained model
+- **Exercise 3**: Inspect the model configuration
+- **Exercise 4**: Count trainable parameters
+
+By the end, you'll have a working setup and understand the complete model architecture!
+
 ---
 
 ## Workshop Exercise 1: Environment Setup (15 min)

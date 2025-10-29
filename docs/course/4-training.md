@@ -239,6 +239,17 @@ configs/hydra/
 >
 > **Instructor**: Circulate and help students.
 
+## Workshop Overview
+
+In the next 40 minutes, you will:
+
+- **Exercise 1**: Explore training configs (Hydra structure)
+- **Exercise 2**: Set up cloud GPU (RunPod or similar)
+- **Exercise 3**: Start your first training run
+- **Exercise 4**: Monitor training progress (wandb)
+
+By the end, you'll have a model training in the cloud!
+
 ---
 
 ## Workshop Exercise 1: Explore Training Configs (10 min)

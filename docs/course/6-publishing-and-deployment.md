@@ -193,6 +193,17 @@ After pushing:
 >
 > **Instructor**: Circulate and help students.
 
+## Workshop Overview
+
+In the next 40 minutes, you will:
+
+- **Exercise 1**: Prepare model card and metadata
+- **Exercise 2**: Push your model to HuggingFace Hub
+- **Exercise 3**: Test your deployed model
+- **Exercise 4**: Submit your results to the leaderboard
+
+By the end, you'll have a publicly accessible ASR model with your name on it!
+
 ---
 
 ## Workshop Exercise 1: Prepare for Publishing (10 min)

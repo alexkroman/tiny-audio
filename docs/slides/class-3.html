@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Class 3: Language Models and Projectors | Tiny Audio Course</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reset.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/theme/black.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/highlight/monokai.css">
+    <style>
+        .reveal h1, .reveal h2, .reveal h3 { text-transform: none; }
+        .reveal section img { border: none; background: none; box-shadow: none; }
+        .reveal pre code { max-height: 500px; }
+        .two-column { display: grid; grid-template-columns: 1fr 1fr; gap: 2em; align-items: start; }
+        .highlight { color: #42affa; }
+        .small { font-size: 0.7em; }
+        .reveal ul { margin-top: 0.5em; }
+        .reveal table { font-size: 0.8em; margin-top: 1em; }
+    </style>
+</head>
+<body>
+    <div class="reveal">
+        <div class="slides">
+            <!-- Title Slide -->
+            <section>
+                <h1>Class 3</h1>
+                <h2>Language Models and Projectors</h2>
+                <p>How the projector bridges audio and text modalities</p>
+                <p class="small">Tiny Audio Course • 20 minutes</p>
+            </section>
+
+            <!-- What is a Language Model -->
+            <section>
+                <h2>What is a Language Model?</h2>
+                <p>A language model predicts the next word (token) given previous words</p>
+                <div style="margin-top: 1.5em; font-family: monospace; font-size: 0.9em;">
+                    <p>Input: "The quick brown"</p>
+                    <p>Output: "fox" (predicted next word)</p>
+                </div>
+            </section>
+
+            <!-- How Language Models Work -->
+            <section>
+                <h2>How Language Models Work</h2>
+                <div class="two-column">
+                    <div>
+                        <h4 class="highlight">Training</h4>
+                        <ul class="small">
+                            <li>Learn patterns from massive text corpora</li>
+                            <li>SmolLM3 trained on trillions of tokens</li>
+                            <li>Learns grammar, facts, reasoning</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h4 class="highlight">Inference</h4>
+                        <p class="small">Generate text token by token:</p>
+                        <ul class="small" style="font-family: monospace;">
+                            <li>"Hello"</li>
+                            <li>"Hello, how"</li>
+                            <li>"Hello, how are"</li>
+                            <li>"Hello, how are you?"</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SmolLM3-3B Architecture -->
+            <section>
+                <h2>SmolLM3-3B Architecture</h2>
+                <ul>
+                    <li>3 billion parameters</li>
+                    <li>32 transformer layers</li>
+                    <li>2048 hidden dimensions</li>
+                    <li>32 attention heads</li>
+                    <li>Trained on diverse text data</li>
+                </ul>
+                <p style="margin-top: 1.5em;"><span class="highlight">Why SmolLM3?</span></p>
+                <ul class="small">
+                    <li>Small enough to train efficiently</li>
+                    <li>Large enough to be capable</li>
+                    <li>Open source and well-documented</li>
+                </ul>
+            </section>
+
+            <!-- Decoder-Only Architecture -->
+            <section>
+                <h2>Decoder-Only Architecture</h2>
+                <p>SmolLM3 is "decoder-only" (like GPT)</p>
+                <p style="font-family: monospace; font-size: 0.8em; margin-top: 1.5em;">
+                    Input tokens → Embeddings → Transformer Layers → Next token
+                </p>
+                <ul style="margin-top: 1.5em;">
+                    <li><strong>Causal attention:</strong> Can only look backward</li>
+                    <li><strong>Auto-regressive generation:</strong> One token at a time</li>
+                    <li><strong>Flash Attention 2:</strong> For speed</li>
+                </ul>
+            </section>
+
+            <!-- The Modality Gap Problem -->
+            <section>
+                <h2>The Modality Gap Problem</h2>
+                <p>We have two different "languages":</p>
+                <ul>
+                    <li><strong>Audio embeddings:</strong> 1280 dimensions from HuBERT</li>
+                    <li><strong>Text embeddings:</strong> 2048 dimensions from SmolLM3</li>
+                </ul>
+                <p style="margin-top: 1.5em;"><span class="highlight">Problem:</span> Can't directly feed audio embeddings to text model!</p>
+                <ul class="small">
+                    <li>Different dimensions (1280 vs 2048)</li>
+                    <li>Different statistical distributions</li>
+                    <li>Different semantic spaces</li>
+                </ul>
+                <p class="small" style="margin-top: 1em;">🔌 <em>Like trying to plug a European power plug into an American outlet</em></p>
+            </section>
+
+            <!-- The Solution: AudioProjector -->
+            <section>
+                <h2>The Solution: AudioProjector</h2>
+                <p>A trainable neural network that:</p>
+                <ol>
+                    <li><strong>Transforms dimensions:</strong> 1280D → 2048D</li>
+                    <li><strong>Aligns distributions:</strong> Audio stats → Text stats</li>
+                    <li><strong>Downsamples time:</strong> 5x reduction for efficiency</li>
+                    <li><strong>Bridges modalities:</strong> Audio space → Language space</li>
+                </ol>
+                <p style="margin-top: 1.5em; color: #42affa;">
+                    <strong>Key insight:</strong> This is the ONLY fully trainable component (~122M params)!
+                </p>
+            </section>
+
+            <!-- What is SwiGLU -->
+            <section>
+                <h2>What is SwiGLU?</h2>
+                <p><strong>SwiGLU</strong> = <strong>Swi</strong>sh <strong>G</strong>ated <strong>L</strong>inear <strong>U</strong>nit</p>
+                <p style="margin-top: 1.5em;">Used in modern architectures (Llama, PaLM, etc.) for better performance than simple MLPs</p>
+                <p style="margin-top: 1.5em; font-family: monospace; font-size: 0.8em;">
+                    Formula: Swish(Wx) ⊗ (Vx)<br>
+                    where Swish(x) = x * sigmoid(x)
+                </p>
+            </section>
+
+            <!-- SwiGLU Architecture Flow -->
+            <section>
+                <h2>AudioProjector Architecture</h2>
+                <ol style="font-size: 0.8em;">
+                    <li><strong>Frame Stacking:</strong> Stack 5 frames (149 × 1280 → ~30 × 6400)</li>
+                    <li><strong>Pre-normalization:</strong> RMSNorm fixes concatenation stats</li>
+                    <li><strong>SwiGLU Transformation:</strong>
+                        <ul class="small">
+                            <li>gate_proj: 6400 → 8192</li>
+                            <li>up_proj: 6400 → 8192</li>
+                            <li>Activation: silu(gate) * up</li>
+                        </ul>
+                    </li>
+                    <li><strong>Down Projection:</strong> 8192 → 2048</li>
+                    <li><strong>Post-normalization:</strong> Match LLM's expected distribution</li>
+                </ol>
+            </section>
+
+            <!-- Why Frame Stacking -->
+            <section>
+                <h2>Why Frame Stacking?</h2>
+                <ul>
+                    <li><strong>Input:</strong> 149 frames × 1280D</li>
+                    <li><strong>Process:</strong> Concatenate 5 consecutive frames → 1 super-frame</li>
+                    <li><strong>Output:</strong> ~30 frames × 6400D</li>
+                </ul>
+                <p style="margin-top: 1.5em; color: #42affa;">
+                    <strong>Why?</strong> Efficiency! Reduces sequence length 5x for decoder
+                </p>
+                <p class="small" style="margin-top: 1em;">Each output frame represents ~100ms of audio</p>
+            </section>
+
+            <!-- RMSNorm vs LayerNorm -->
+            <section>
+                <h2>RMSNorm vs LayerNorm</h2>
+                <p><strong>RMSNorm</strong> (Root Mean Square Norm):</p>
+                <p style="font-family: monospace; font-size: 0.8em; margin-top: 1em;">
+                    output = x / sqrt(mean(x²) + epsilon)
+                </p>
+                <p style="margin-top: 1.5em;"><span class="highlight">Advantages:</span></p>
+                <ul>
+                    <li>Simpler than LayerNorm (no mean subtraction)</li>
+                    <li>Faster computation</li>
+                    <li>Similar performance</li>
+                    <li>Used in Llama, SmolLM3, etc.</li>
+                </ul>
+            </section>
+
+            <!-- SwiGLU vs Other Activations -->
+            <section>
+                <h2>SwiGLU vs Other Activations</h2>
+                <ul>
+                    <li><strong>ReLU:</strong> max(0, x) - Simple but loses negative info</li>
+                    <li><strong>GELU:</strong> Smoother, but no gating</li>
+                    <li><strong>GLU:</strong> Gating but with sigmoid (saturates)</li>
+                    <li><strong>SwiGLU:</strong> Best of both! Gating + smooth activation</li>
+                </ul>
+            </section>
+
+            <!-- Key Takeaways -->
+            <section>
+                <h2>Key Takeaways</h2>
+                <ul>
+                    <li>Language models predict next tokens auto-regressively</li>
+                    <li>SmolLM3-3B: 3B params, decoder-only, Flash Attention 2</li>
+                    <li>AudioProjector bridges the modality gap (1280D → 2048D)</li>
+                    <li>SwiGLU is a gated activation function (better than ReLU)</li>
+                    <li>Frame stacking reduces sequence length 5x for efficiency</li>
+                    <li>Projector is 100% trainable (~122M params)</li>
+                </ul>
+            </section>
+
+            <!-- Today's Workshop -->
+            <section>
+                <h2>Today's Hands-On Workshop</h2>
+                <p>What you'll do in the next 40 minutes:</p>
+                <ul>
+                    <li><strong>Exercise 1:</strong> Trace the projection process step-by-step</li>
+                    <li><strong>Exercise 2:</strong> Visualize embedding distributions</li>
+                    <li><strong>Exercise 3:</strong> Compare projector configurations</li>
+                </ul>
+                <p style="margin-top: 1.5em; color: #42affa;">
+                    By the end, you'll understand how audio becomes language!
+                </p>
+            </section>
+
+            <!-- Thank You -->
+            <section>
+                <h2>Questions?</h2>
+                <p>Let's move to the hands-on workshop!</p>
+                <p class="small">Press <code>Esc</code> for slide overview • <code>S</code> for speaker notes</p>
+            </section>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/notes/notes.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/highlight/highlight.js"></script>
+    <script>
+        Reveal.initialize({
+            hash: true,
+            plugins: [ RevealNotes, RevealHighlight ],
+            transition: 'slide',
+            backgroundTransition: 'fade'
+        });
+    </script>
+</body>
+</html>

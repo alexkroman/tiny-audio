@@ -296,6 +296,17 @@ Solutions:
 >
 > **Instructor**: Circulate and help students.
 
+## Workshop Overview
+
+In the next 40 minutes, you will:
+
+- **Exercise 1**: Run evaluation on your trained model
+- **Exercise 2**: Analyze error patterns and predictions
+- **Exercise 3**: Debug training issues (if any)
+- **Exercise 4**: Calculate and interpret WER metrics
+
+By the end, you'll know exactly how well your model performs!
+
 ---
 
 ## Workshop Exercise 1: Evaluate Your Model (15 min)

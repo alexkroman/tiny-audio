@@ -213,6 +213,16 @@ output = x / sqrt(mean(x²) + epsilon)
 >
 > **Instructor**: Circulate and help students.
 
+## Workshop Overview
+
+In the next 40 minutes, you will:
+
+- **Exercise 1**: Trace the projection process step-by-step
+- **Exercise 2**: Visualize embedding distributions
+- **Exercise 3**: Compare projector configurations
+
+By the end, you'll understand how audio becomes language!
+
 ---
 
 ## Workshop Exercise 1: Trace the Projection Process (15 min)

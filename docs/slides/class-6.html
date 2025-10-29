@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Class 6: Publishing and Deployment | Tiny Audio Course</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reset.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/theme/black.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/highlight/monokai.css">
+    <style>
+        .reveal h1, .reveal h2, .reveal h3 { text-transform: none; }
+        .reveal section img { border: none; background: none; box-shadow: none; }
+        .reveal pre code { max-height: 500px; }
+        .two-column { display: grid; grid-template-columns: 1fr 1fr; gap: 2em; align-items: start; }
+        .highlight { color: #42affa; }
+        .small { font-size: 0.7em; }
+        .reveal ul { margin-top: 0.5em; }
+        .reveal table { font-size: 0.8em; margin-top: 1em; }
+    </style>
+</head>
+<body>
+    <div class="reveal">
+        <div class="slides">
+            <!-- Title Slide -->
+            <section>
+                <h1>Class 6</h1>
+                <h2>Publishing and Deployment</h2>
+                <p>Deploy your model and join the community</p>
+                <p class="small">Tiny Audio Course • 20 minutes</p>
+            </section>
+
+            <!-- What is HuggingFace Hub -->
+            <section>
+                <h2>What is HuggingFace Hub?</h2>
+                <p><strong>The GitHub for Machine Learning Models</strong></p>
+                <ul>
+                    <li>Host models, datasets, and demos</li>
+                    <li>Version control for ML artifacts</li>
+                    <li>Easy sharing and collaboration</li>
+                    <li>500K+ models hosted</li>
+                    <li>Industry standard for ML deployment</li>
+                </ul>
+            </section>
+
+            <!-- Why Host on Hub -->
+            <section>
+                <h2>Why Host on Hub?</h2>
+                <ul>
+                    <li><strong>Free hosting:</strong> No cost for public models</li>
+                    <li><strong>Easy deployment:</strong> One line of code to use</li>
+                    <li><strong>Version control:</strong> Track model iterations</li>
+                    <li><strong>Community visibility:</strong> Others can find and use your model</li>
+                    <li><strong>Portfolio piece:</strong> Show off your work!</li>
+                </ul>
+            </section>
+
+            <!-- Model Repository Structure -->
+            <section>
+                <h2>Model Repository Structure</h2>
+                <pre style="font-size: 0.6em;"><code data-trim>
+your-username/your-model-name/
+├── config.json                  # Model architecture
+├── model.safetensors           # Trained weights
+├── tokenizer_config.json       # Text tokenizer
+├── preprocessor_config.json    # Audio preprocessing
+├── README.md                   # Model card
+├── encoder_lora_config.json    # Encoder LoRA
+├── decoder_lora_config.json    # Decoder LoRA
+└── asr_*.py                    # Model code files
+                </code></pre>
+            </section>
+
+            <!-- Authentication -->
+            <section>
+                <h2>HuggingFace Authentication</h2>
+                <p>You need a <strong>HuggingFace token</strong> to push models:</p>
+                <ol>
+                    <li>Create account at <a href="https://huggingface.co">huggingface.co</a></li>
+                    <li>Go to Settings → Access Tokens</li>
+                    <li>Create token with "write" permissions</li>
+                    <li>Keep it secret!</li>
+                </ol>
+            </section>
+
+            <!-- What is a Model Card -->
+            <section>
+                <h2>What is a Model Card?</h2>
+                <p><strong>Documentation for your model</strong></p>
+                <ul>
+                    <li>What it does</li>
+                    <li>How it was trained</li>
+                    <li>Performance metrics</li>
+                    <li>Usage examples</li>
+                    <li>Limitations and biases</li>
+                </ul>
+                <p style="margin-top: 1.5em;"><span class="highlight">Why important?</span></p>
+                <p class="small">Helps others understand and use your model professionally</p>
+            </section>
+
+            <!-- Model Card Structure -->
+            <section>
+                <h2>Model Card Structure</h2>
+                <p>Essential sections:</p>
+                <ol class="small">
+                    <li><strong>Model Description:</strong> What it does, architecture, key features</li>
+                    <li><strong>Training Details:</strong> Dataset, time, hardware, cost</li>
+                    <li><strong>Performance:</strong> WER score, test set, baselines</li>
+                    <li><strong>Usage:</strong> Code examples, installation, I/O</li>
+                    <li><strong>Limitations:</strong> Known issues, ethical considerations</li>
+                </ol>
+            </section>
+
+            <!-- Pre-Deployment Checklist -->
+            <section>
+                <h2>Pre-Deployment Checklist</h2>
+                <p>Before pushing to Hub:</p>
+                <ul>
+                    <li>☑ Training completed successfully</li>
+                    <li>☑ Model evaluation done (WER calculated)</li>
+                    <li>☑ Tested inference locally</li>
+                    <li>☑ Model card prepared</li>
+                    <li>☑ HuggingFace token ready</li>
+                </ul>
+            </section>
+
+            <!-- Post-Deployment Testing -->
+            <section>
+                <h2>Post-Deployment Testing</h2>
+                <p>After pushing to Hub:</p>
+                <ol>
+                    <li><strong>Load from Hub:</strong> Verify model downloads correctly</li>
+                    <li><strong>Test inference:</strong> Run transcription on sample audio</li>
+                    <li><strong>Check model card:</strong> Renders properly on Hub</li>
+                    <li><strong>Test pipeline:</strong> Use transformers pipeline integration</li>
+                </ol>
+            </section>
+
+            <!-- Common Deployment Issues -->
+            <section>
+                <h2>Common Deployment Issues</h2>
+                <div class="two-column">
+                    <div>
+                        <h4 class="highlight">Model fails to load</h4>
+                        <ul class="small">
+                            <li>Check all files uploaded</li>
+                            <li>Verify config.json is valid</li>
+                            <li>Ensure asr_*.py files present</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h4 class="highlight">Inference errors</h4>
+                        <ul class="small">
+                            <li>Test locally first</li>
+                            <li>Check transformers version</li>
+                            <li>Verify audio format support</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- The Leaderboard -->
+            <section>
+                <h2>The Community Leaderboard</h2>
+                <p><strong>Location:</strong> Main README.md in the repo</p>
+                <p style="margin-top: 1.5em;"><strong>Purpose:</strong></p>
+                <ul>
+                    <li>Track community progress</li>
+                    <li>Healthy competition</li>
+                    <li>Share knowledge</li>
+                    <li>Build community</li>
+                </ul>
+                <p style="margin-top: 1.5em;"><strong>What to include:</strong></p>
+                <p class="small">Your name, WER score, model link, git hash, date</p>
+            </section>
+
+            <!-- Beyond the Leaderboard -->
+            <section>
+                <h2>Beyond the Leaderboard</h2>
+                <p>Ways to contribute:</p>
+                <ul>
+                    <li>Share training tips and insights</li>
+                    <li>Report issues and bugs</li>
+                    <li>Improve documentation</li>
+                    <li>Help other students</li>
+                    <li>Experiment with architecture changes</li>
+                </ul>
+            </section>
+
+            <!-- Key Takeaways -->
+            <section>
+                <h2>Key Takeaways</h2>
+                <ul>
+                    <li>HuggingFace Hub is the industry standard for model hosting</li>
+                    <li>Model cards document your work professionally</li>
+                    <li>Always test locally before deploying</li>
+                    <li>Verify deployment with post-deployment tests</li>
+                    <li>Contributing to the leaderboard helps the community</li>
+                    <li>You now have a real, working, deployed ASR model!</li>
+                </ul>
+            </section>
+
+            <!-- Today's Workshop -->
+            <section>
+                <h2>Today's Hands-On Workshop</h2>
+                <p>What you'll do in the next 40 minutes:</p>
+                <ul>
+                    <li><strong>Exercise 1:</strong> Prepare model card and metadata</li>
+                    <li><strong>Exercise 2:</strong> Push your model to HuggingFace Hub</li>
+                    <li><strong>Exercise 3:</strong> Test your deployed model</li>
+                    <li><strong>Exercise 4:</strong> Submit your results to the leaderboard</li>
+                </ul>
+                <p style="margin-top: 1.5em; color: #42affa;">
+                    By the end, you'll have a publicly accessible ASR model with your name on it!
+                </p>
+            </section>
+
+            <!-- Congratulations -->
+            <section>
+                <h2>Congratulations! 🎉</h2>
+                <p>You've completed the Tiny Audio course!</p>
+                <p style="margin-top: 1.5em;">You now have:</p>
+                <ul>
+                    <li>✅ Deep understanding of ASR architecture</li>
+                    <li>✅ Hands-on training experience</li>
+                    <li>✅ A deployed model on HuggingFace</li>
+                    <li>✅ Your name on the leaderboard</li>
+                </ul>
+                <p style="margin-top: 1.5em; color: #42affa;">
+                    <strong>Keep building, keep learning, keep sharing!</strong>
+                </p>
+            </section>
+
+            <!-- Thank You -->
+            <section>
+                <h2>Questions?</h2>
+                <p>Let's move to the hands-on workshop!</p>
+                <p class="small">Press <code>Esc</code> for slide overview • <code>S</code> for speaker notes</p>
+            </section>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/notes/notes.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/highlight/highlight.js"></script>
+    <script>
+        Reveal.initialize({
+            hash: true,
+            plugins: [ RevealNotes, RevealHighlight ],
+            transition: 'slide',
+            backgroundTransition: 'fade'
+        });
+    </script>
+</body>
+</html>

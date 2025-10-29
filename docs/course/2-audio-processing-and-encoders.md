@@ -161,6 +161,16 @@ In Tiny Audio, we add small LoRA adapters:
 >
 > **Instructor**: Circulate and help students.
 
+## Workshop Overview
+
+In the next 40 minutes, you will:
+
+- **Exercise 1**: Visualize audio processing (raw vs normalized waveforms)
+- **Exercise 2**: Explore HuBERT outputs (dimensions and compression)
+- **Exercise 3**: Count trainable parameters by component
+
+By the end, you'll see exactly how audio becomes embeddings!
+
 ---
 
 ## Workshop Exercise 1: Visualize Audio Processing (15 min)
