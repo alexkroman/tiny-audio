@@ -649,7 +649,7 @@ class ASRModel(PreTrainedModel):
             system_prompt = self.system_prompt
 
         if user_prompt is None:
-            user_prompt = "Transcribe: <audio>"
+            user_prompt = "Transcribe in English: <audio>"
 
         messages = []
         if system_prompt:
