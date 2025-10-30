@@ -113,25 +113,26 @@ def install_python_dependencies(host, port):
          mkdir -p /root/.config/pip && \
          echo -e "[global]\\nbreak-system-packages = true" > /root/.config/pip/pip.conf && \
          echo "--- Installing Poetry (if not present) ---" && \
-         command -v poetry >/dev/null 2>&1 || pip install poetry && \
+         command -v poetry >/dev/null 2>&1 || pip install --user poetry && \
          echo "--- Installing Poetry export plugin ---" && \
-         pip install poetry-plugin-export && \
+         pip install --user poetry-plugin-export && \
          echo "--- Configuring Poetry ---" && \
          poetry config virtualenvs.create false && \
          poetry config installer.max-workers 10 && \
          echo "--- Installing flash-attn (if not present) ---" && \
-         python -c "import flash_attn" 2>/dev/null || pip install flash-attn --no-build-isolation && \
-         echo "--- Installing PyTorch with CUDA 12.8 support ---" && \
-         pip install torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128 && \
-         echo "--- Installing torchcodec with CUDA support ---" && \
-         pip install torchcodec~=0.7.0 --index-url=https://download.pytorch.org/whl/cu128 && \
+         python -c "import flash_attn" 2>/dev/null || pip install --user flash-attn --no-build-isolation && \
+         echo "--- Installing PyTorch with CUDA 12.8 support (if needed) ---" && \
+         python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || pip install --user torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128 && \
+         echo "--- Installing torchcodec with CUDA support (if needed) ---" && \
+         python -c "import torchcodec" 2>/dev/null || pip install --user torchcodec~=0.7.0 --index-url=https://download.pytorch.org/whl/cu128 && \
          echo "--- Installing accelerate ---" && \
-         pip install accelerate && \
+         pip install --user accelerate && \
          echo "--- Installing project dependencies from poetry.lock (production only) ---" && \
-         echo "Note: Skipping torch/torchcodec to preserve CUDA versions" && \
-         poetry export --only main --without-hashes | grep -v "^torch==" | grep -v "^torchcodec==" | pip install -r /dev/stdin && \
+         echo "Note: Only installing missing packages to avoid conflicts with system packages" && \
+         poetry export --only main --without-hashes | grep -v "^torch==" | grep -v "^torchcodec==" > /tmp/requirements.txt && \
+         pip install --user -r /tmp/requirements.txt 2>&1 | grep -v "already satisfied" || true && \
          echo "--- Installing project in editable mode ---" && \
-         pip install -e . --no-deps && \
+         pip install --user -e . --no-deps && \
          echo "--- Verifying accelerate installation ---" && \
          which accelerate && \
          python -c "import accelerate; print('accelerate', accelerate.__version__)"'
