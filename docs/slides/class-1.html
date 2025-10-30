@@ -111,7 +111,7 @@
                 <ul style="margin-top: 1.5em;">
                     <li><strong>Audio Encoder</strong> (HuBERT-XLarge) - Converts audio to embeddings</li>
                     <li><strong>Audio Projector</strong> (SwiGLU MLP) - Bridges audio ↔ language</li>
-                    <li><strong>Language Model</strong> (SmolLM3-3B) - Generates text transcription</li>
+                    <li><strong>Language Model</strong> (Qwen-3 8B) - Generates text transcription</li>
                 </ul>
             </section>
 
@@ -145,7 +145,7 @@
             <!-- Component 3: Language Model -->
             <section>
                 <h3>Component 3: Language Model</h3>
-                <p><strong>SmolLM3-3B</strong> (3 billion parameters)</p>
+                <p><strong>Qwen-3 8B</strong> (8 billion parameters)</p>
                 <ul class="small">
                     <li><span class="highlight">Purpose:</span> Generate text transcription</li>
                     <li><span class="highlight">Input:</span> Audio embeddings (from projector)</li>
@@ -216,7 +216,7 @@
                 <h2>Key Takeaways</h2>
                 <ul>
                     <li>ASR converts audio waveforms → text using ML</li>
-                    <li>Tiny Audio = HuBERT encoder + Projector + SmolLM3 decoder</li>
+                    <li>Tiny Audio = HuBERT encoder + Projector + Qwen-3 8B decoder</li>
                     <li>Train only 3.2% of parameters (139M / 4.3B)</li>
                     <li>24 hours training for ~$12 = accessible ASR!</li>
                 </ul>

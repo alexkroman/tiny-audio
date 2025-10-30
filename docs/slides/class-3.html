@@ -48,7 +48,7 @@
                         <h4 class="highlight">Training</h4>
                         <ul class="small">
                             <li>Learn patterns from massive text corpora</li>
-                            <li>SmolLM3 trained on trillions of tokens</li>
+                            <li>Qwen-3 8B trained on trillions of tokens</li>
                             <li>Learns grammar, facts, reasoning</li>
                         </ul>
                     </div>
@@ -65,9 +65,9 @@
                 </div>
             </section>
 
-            <!-- SmolLM3-3B Architecture -->
+            <!-- Qwen-3 8B Architecture -->
             <section>
-                <h2>SmolLM3-3B Architecture</h2>
+                <h2>Qwen-3 8B Architecture</h2>
                 <ul>
                     <li>3 billion parameters</li>
                     <li>32 transformer layers</li>
@@ -75,7 +75,7 @@
                     <li>32 attention heads</li>
                     <li>Trained on diverse text data</li>
                 </ul>
-                <p style="margin-top: 1.5em;"><span class="highlight">Why SmolLM3?</span></p>
+                <p style="margin-top: 1.5em;"><span class="highlight">Why Qwen-3 8B?</span></p>
                 <ul class="small">
                     <li>Small enough to train efficiently</li>
                     <li>Large enough to be capable</li>
@@ -86,7 +86,7 @@
             <!-- Decoder-Only Architecture -->
             <section>
                 <h2>Decoder-Only Architecture</h2>
-                <p>SmolLM3 is "decoder-only" (like GPT)</p>
+                <p>Qwen-3 8B is "decoder-only" (like GPT)</p>
                 <p style="font-family: monospace; font-size: 0.8em; margin-top: 1.5em;">
                     Input tokens → Embeddings → Transformer Layers → Next token
                 </p>
@@ -103,7 +103,7 @@
                 <p>We have two different "languages":</p>
                 <ul>
                     <li><strong>Audio embeddings:</strong> 1280 dimensions from HuBERT</li>
-                    <li><strong>Text embeddings:</strong> 2048 dimensions from SmolLM3</li>
+                    <li><strong>Text embeddings:</strong> 2048 dimensions from Qwen-3 8B</li>
                 </ul>
                 <p style="margin-top: 1.5em;"><span class="highlight">Problem:</span> Can't directly feed audio embeddings to text model!</p>
                 <ul class="small">
@@ -184,7 +184,7 @@
                     <li>Simpler than LayerNorm (no mean subtraction)</li>
                     <li>Faster computation</li>
                     <li>Similar performance</li>
-                    <li>Used in Llama, SmolLM3, etc.</li>
+                    <li>Used in Llama, Qwen-3 8B, etc.</li>
                 </ul>
             </section>
 
@@ -204,7 +204,7 @@
                 <h2>Key Takeaways</h2>
                 <ul>
                     <li>Language models predict next tokens auto-regressively</li>
-                    <li>SmolLM3-3B: 3B params, decoder-only, Flash Attention 2</li>
+                    <li>Qwen-3 8B: 8B params, decoder-only, Flash Attention 2</li>
                     <li>AudioProjector bridges the modality gap (1280D → 2048D)</li>
                     <li>SwiGLU is a gated activation function (better than ReLU)</li>
                     <li>Frame stacking reduces sequence length 5x for efficiency</li>

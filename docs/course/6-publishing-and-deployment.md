@@ -392,7 +392,7 @@ pipeline_tag: automatic-speech-recognition
 This is a speech recognition model trained using the Tiny Audio framework. It combines:
 - **Audio Encoder**: HuBERT-XLarge (1.3B params) with LoRA adapters (r=8, ~2M trainable)
 - **Audio Projector**: SwiGLU MLP (~122M params, fully trainable)
-- **Text Decoder**: SmolLM3-3B (3B params) with LoRA adapters (r=64, ~15M trainable)
+- **Text Decoder**: Qwen-3 8B3-3B (3B params) with LoRA adapters (r=64, ~15M trainable)
 
 **Total**: 139M trainable parameters out of 4.3B total (3.2%)
 
@@ -459,7 +459,7 @@ Built with [Tiny Audio](https://github.com/alexkroman/tiny-audio) by Alex Kroman
 Based on:
 
 - HuBERT (Facebook AI)
-- SmolLM3 (HuggingFace)
+- Qwen-3 8B3 (HuggingFace)
 - LoquaciousSet (SpeechBrain)
 
 ```

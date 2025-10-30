@@ -26,8 +26,8 @@ By the end of this class, you will:
 **Traditional approach**: Update all model parameters
 
 - HuBERT encoder: 1.3B params
-- SmolLM3 decoder: 3B params
-- **Total**: 4.3B+ parameters to train
+- Qwen-3 8B decoder: 8B params
+- **Total**: 9.3B+ parameters to train
 
 **Problems**:
 
@@ -45,7 +45,7 @@ Instead, we:
 
 1. **Freeze** most parameters (keep pre-trained knowledge)
 2. **Add small adapters** that learn the specific task
-3. **Train only adapters** (~3% of total params)
+3. **Train only adapters** (~1.5% of total params)
 
 **Results**:
 
@@ -386,7 +386,7 @@ poetry run python src/train.py +experiments=mac_minimal
 ```
 Loading model...
 ✓ Loaded encoder (HuBERT-XLarge + LoRA r=8)
-✓ Loaded decoder (SmolLM3-3B + LoRA r=64)
+✓ Loaded decoder (Qwen-3 8B + LoRA r=8)
 ✓ Loaded projector (122M params)
 
 Loading dataset...

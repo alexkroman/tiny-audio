@@ -8,7 +8,7 @@
 By the end of this class, you will:
 
 - Understand what language models do and how they generate text
-- Know the SmolLM3 architecture
+- Know the Qwen-3 8B architecture
 - Understand the AudioProjector's SwiGLU architecture
 - Implement and visualize the projection process
 - See how audio embeddings become text embeddings
@@ -36,7 +36,7 @@ Output: "fox" (predicted next word)
 
 **Training**: Learn patterns from massive text corpora
 
-- SmolLM3 trained on trillions of tokens
+- Qwen-3 8B trained on trillions of tokens
 - Learns grammar, facts, reasoning patterns
 - Develops understanding of language structure
 
@@ -50,26 +50,27 @@ Step 3: "Hello, how are you"
 Step 4: "Hello, how are you?" [STOP]
 ```
 
-### SmolLM3-3B Architecture
+### Qwen-3 8B Architecture
 
 **Stats:**
 
-- 3 billion parameters
+- 8 billion parameters
 - 32 transformer layers
 - 2048 hidden dimensions
 - 32 attention heads
-- Trained on diverse text data
+- Trained on diverse multilingual data
 
-**Why SmolLM3?**
+**Why Qwen-3 8B?**
 
-- Small enough to train efficiently
-- Large enough to be capable
+- Large enough for strong performance
+- Efficient with LoRA fine-tuning
 - Open source and well-documented
-- Good text generation quality
+- Excellent text generation quality
+- Multilingual capabilities
 
 ### Decoder-Only Architecture
 
-SmolLM3 is "decoder-only" (like GPT):
+Qwen-3 8B is "decoder-only" (like GPT):
 
 ```
 Input tokens → Embeddings → Transformer Layers → Next token prediction
@@ -90,7 +91,7 @@ Input tokens → Embeddings → Transformer Layers → Next token prediction
 We have two different "languages":
 
 - **Audio embeddings**: 1280 dimensions from HuBERT
-- **Text embeddings**: 2048 dimensions from SmolLM3
+- **Text embeddings**: 2048 dimensions from Qwen-3 8B
 
 **Problem**: Can't directly feed audio embeddings to text model!
 
@@ -194,7 +195,7 @@ output = x / sqrt(mean(x²) + epsilon)
 - Simpler than LayerNorm (no mean subtraction)
 - Faster computation
 - Similar performance
-- Used in Llama, SmolLM3, etc.
+- Used in Llama, Qwen-3 8B, etc.
 
 ### SwiGLU vs Other Activations
 
@@ -333,7 +334,7 @@ print("\n" + "="*60)
 print("SUMMARY")
 print("="*60)
 print(f"Input:  {encoder_output.shape[1]} frames × {encoder_output.shape[2]}D (HuBERT)")
-print(f"Output: {output.shape[1]} frames × {output.shape[2]}D (SmolLM3-ready)")
+print(f"Output: {output.shape[1]} frames × {output.shape[2]}D (Qwen-3 8B-ready)")
 print(f"Time reduction: {encoder_output.shape[1] / output.shape[1]:.1f}x")
 print(f"Dimension change: {encoder_output.shape[2]}D → {output.shape[2]}D")
 print(f"\n✓ Audio embeddings are now ready for the language model!")
@@ -636,7 +637,7 @@ Tiny Audio's choice (5x, 8192 hidden):
 **Lecture (20 min):**
 
 - Language models and text generation
-- SmolLM3-3B architecture
+- Qwen-3 8B-3B architecture
 - The modality gap problem
 - SwiGLU and RMSNorm explained
 
@@ -692,7 +693,7 @@ Before Class 4:
 
 - [GLU Variants Improve Transformer](https://arxiv.org/abs/2002.05202)
 - [RMSNorm](https://arxiv.org/abs/1910.07467)
-- [SmolLM](https://huggingface.co/blog/smollm)
+- [Qwen Technical Report](https://arxiv.org/abs/2309.16609)
 
 ### Code
 

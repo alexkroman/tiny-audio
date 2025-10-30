@@ -426,7 +426,7 @@ def count_params(module, name):
 # Count by component
 count_params(model.encoder, "ENCODER (HuBERT + LoRA)")
 count_params(model.projector, "PROJECTOR (SwiGLU MLP)")
-count_params(model.decoder, "DECODER (SmolLM3 + LoRA)")
+count_params(model.decoder, "DECODER (Qwen-3 8B + LoRA)")
 
 # Overall
 total = sum(p.numel() for p in model.parameters())
@@ -439,7 +439,7 @@ print(f"  Total params:      {total:>15,}")
 print(f"  Trainable params:  {trainable:>15,}")
 print(f"  Frozen params:     {total - trainable:>15,}")
 print(f"  Efficiency:        {100 * trainable / total:>14.2f}%")
-print("\n✓ We train only 3.2% of the total parameters!")
+print("\n✓ We train only 1.5% of the total parameters!")
 ```
 
 **Step 2: Run the script**
@@ -465,22 +465,22 @@ PROJECTOR (SwiGLU MLP)
   Frozen params:                  0
   Trainable:                 100.00%
 
-DECODER (SmolLM3 + LoRA)
+DECODER (Qwen-3 8B + LoRA)
 ==================================================
-  Total params:       2,953,383,936
+  Total params:       8,000,000,000
   Trainable params:      15,335,424
-  Frozen params:      2,938,048,512
-  Trainable:                   0.52%
+  Frozen params:      7,984,664,576
+  Trainable:                   0.19%
 
 ==================================================
 OVERALL MODEL
 ==================================================
-  Total params:       4,342,227,200
+  Total params:       9,388,843,264
   Trainable params:     138,944,768
-  Frozen params:      4,203,282,432
-  Efficiency:                  3.20%
+  Frozen params:      9,249,898,496
+  Efficiency:                  1.48%
 
-✓ We train only 3.2% of the total parameters!
+✓ We train only 1.5% of the total parameters!
 ```
 
 ### Success Checkpoint
@@ -570,7 +570,7 @@ Before Class 3:
 In [Class 3: Language Models and Projectors](./3-language-models-and-projectors.md), we'll explore:
 
 - How language models generate text
-- The SmolLM3 decoder architecture
+- The Qwen-3 8B decoder architecture
 - Deep dive into the AudioProjector and SwiGLU
 - Why downsampling matters for efficiency
 

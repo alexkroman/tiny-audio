@@ -6,7 +6,7 @@
 
 ## Train your own speech recognition model in 24 hours for $12
 
-This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in 24 hours. Tiny Audio combines a HuBERT-XLarge encoder (1.3B params) with a SmolLM3-3B decoder (3B params), connected by a trainable audio projector (~122M params). Both the encoder and decoder use **LoRA (Low-Rank Adaptation)** for parameter-efficient fine-tuning. The result is a speech-to-text system you can train in under 24 hours for ~$12, deploy to HuggingFace, and use just like Whisper or any other ASR model.
+This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in 24 hours. Tiny Audio combines a HuBERT-XLarge encoder (1.3B params) with a Qwen-3 8B decoder (8B params), connected by a trainable audio projector (~122M params). Both the encoder and decoder use **LoRA (Low-Rank Adaptation)** for parameter-efficient fine-tuning. The result is a speech-to-text system you can train in under 24 hours for ~$12, deploy to HuggingFace, and use just like Whisper or any other ASR model.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
@@ -106,8 +106,8 @@ Audio Projector (SwiGLU MLP, ~122M params)
     ↓
 Language Embeddings [~30 frames × 2048 dim]
     ↓
-SmolLM3-3B Decoder (3B params, frozen)
-    + LoRA Adapters (r=64, ~15M params)
+Qwen-3 8B Decoder (8B params, frozen)
+    + LoRA Adapters (r=8, ~15M params)
     + Flash Attention 2
     ↓
 Text Transcription
@@ -120,9 +120,9 @@ Text Transcription
    - Stacks 5 consecutive frames (5x time reduction: ~149 → ~30 frames)
    - Maps 6400-dim stacked features → 8192-dim hidden → 2048-dim output
    - Uses pre/post RMSNorm for stable training
-3. **Language Decoder (LoRA Fine-tuned)**: SmolLM3-3B (3B parameters frozen) with LoRA adapters on attention layers (q_proj, v_proj) - adds ~15M trainable parameters (r=64, alpha=32). Generates text transcription with Flash Attention 2
+3. **Language Decoder (LoRA Fine-tuned)**: Qwen-3 8B (8B parameters frozen) with LoRA adapters on attention layers (q_proj, v_proj) - adds ~15M trainable parameters (r=8, alpha=32). Generates text transcription with Flash Attention 2
 
-**Total trainable: ~139M params (3.2% of 4.3B total)**
+**Total trainable: ~139M params (1.5% of 9.3B total)**
 
 ### Key Concepts Explained
 
@@ -147,14 +147,14 @@ Text Transcription
 
 *Decoder LoRA:*
 
-- Rank: 64 (default)
-- Alpha: 32 (scaling factor = 0.5)
-- Target modules: q_proj, v_proj in SmolLM3 attention layers
+- Rank: 8 (default)
+- Alpha: 32 (scaling factor = 4.0)
+- Target modules: q_proj, v_proj in Qwen-3 attention layers
 - Adds ~15M trainable parameters
 
 Why use parameter-efficient training with LoRA on both encoder and decoder? Because:
 
-- **You train ~139M parameters** instead of 4.3+ billion (projector: ~122M + encoder LoRA: ~2M + decoder LoRA: ~15M)
+- **You train ~139M parameters** instead of 9.3+ billion (projector: ~122M + encoder LoRA: ~2M + decoder LoRA: ~15M)
 - **Training is fast** (~24 hours on A40) thanks to reduced gradient computations
 - **It's cheap** (~$12 for a full run)
 - **You leverage pretrained knowledge** from both audio and language domains
@@ -318,7 +318,7 @@ Tiny Audio is nowhere finished. The goal is to make ASR training accessible on b
 This project builds upon:
 
 - [HuBERT](https://huggingface.co/docs/transformers/model_doc/hubert) by Facebook AI for audio encoding
-- [SmolLM3-3B](https://huggingface.co/HuggingFaceTB/SmolLM3-3B) by HuggingFace for language modeling
+- [Qwen-3 8B](https://huggingface.co/Qwen/Qwen3-8B) by Alibaba for language modeling
 - [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) by SpeechBrain for training data
 
 ## Citation

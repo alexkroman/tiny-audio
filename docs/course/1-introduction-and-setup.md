@@ -77,7 +77,7 @@ Tiny Audio uses a three-component architecture:
 
 ```
 Audio File → Audio Encoder → Audio Projector → Language Model → Text
-            (HuBERT)         (SwiGLU MLP)      (SmolLM3)
+            (HuBERT)         (SwiGLU MLP)      (Qwen-3 8B)
 ```
 
 Let's understand each component:
@@ -118,7 +118,7 @@ Let's understand each component:
 
 **Analogy**: Like a translator who converts spoken French into written English, adapting both language and medium.
 
-### Component 3: Language Model Decoder (SmolLM3-3B)
+### Component 3: Language Model Decoder (Qwen-3 8B)
 
 **Purpose**: Generate text transcription from audio features
 
@@ -128,9 +128,9 @@ Let's understand each component:
 - Uses linguistic knowledge to predict text
 - Handles grammar, spelling, punctuation
 
-**Key insight**: SmolLM3 is also **pre-trained** on massive text corpora, so it already knows English grammar, vocabulary, and context before seeing any audio!
+**Key insight**: Qwen-3 is also **pre-trained** on massive text corpora, so it already knows English grammar, vocabulary, and context before seeing any audio!
 
-**Size**: 3 billion parameters (we use LoRA to adapt efficiently)
+**Size**: 8 billion parameters (we use LoRA to adapt efficiently)
 
 **Analogy**: Like a skilled writer who can dictate text, knowing proper grammar and spelling naturally.
 
@@ -483,7 +483,7 @@ print(f"Downsampling rate: {config.audio_downsample_rate}x")
 
 ```
 Audio encoder: facebook/hubert-xlarge-ls960-ft
-Language model: HuggingFaceTB/SmolLM3-3B
+Language model: Qwen/Qwen3-8B
 Encoder dimension: 1280
 LLM dimension: 2048
 Downsampling rate: 5x
@@ -569,8 +569,8 @@ Before Class 2, try to:
 ## Key Takeaways
 
 ✅ ASR converts audio waveforms to text using ML models
-✅ Tiny Audio uses: Encoder (HuBERT) → Projector → Decoder (SmolLM3)
-✅ We train only ~139M params (3.2%) instead of the full 4.3B model
+✅ Tiny Audio uses: Encoder (HuBERT) → Projector → Decoder (Qwen-3 8B)
+✅ We train only ~139M params (1.5%) instead of the full 9.3B model
 ✅ You can run inference on any audio file and get transcriptions
 
 ## Check Your Understanding
@@ -580,10 +580,10 @@ Before moving to Class 2, make sure you can answer:
 1. **What are the three main components of Tiny Audio?**
    - Audio Encoder (HuBERT)
    - Audio Projector (SwiGLU MLP)
-   - Language Model Decoder (SmolLM3)
+   - Language Model Decoder (Qwen-3 8B)
 
 2. **Why is parameter-efficient training important?**
-   - Trains only ~139M parameters instead of 4.3B+
+   - Trains only ~139M parameters instead of 9.3B+
    - Faster, cheaper, accessible on consumer hardware
    - Enables $12 / 24-hour training runs
 

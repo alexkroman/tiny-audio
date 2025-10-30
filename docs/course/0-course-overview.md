@@ -38,7 +38,7 @@ Welcome! This course will teach you how to build, train, and deploy your own aut
 ### [Class 3: Language Models and Projectors](./3-language-models-and-projectors.md) (1 hour)
 
 - What are language models?
-- The SmolLM3 decoder
+- The Qwen-3 8B decoder
 - Bridging audio and text: the AudioProjector
 - SwiGLU architecture explained
 

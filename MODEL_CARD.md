@@ -9,11 +9,11 @@ language:
   - en
 base_model:
   - facebook/hubert-xlarge-ls960-ft
-  - HuggingFaceTB/SmolLM3-3B
+  - Qwen/Qwen3-8B
 pipeline_tag: automatic-speech-recognition
 tags:
   - hubert
-  - smollm3
+  - qwen3
   - asr
   - speech-recognition
   - audio
@@ -43,7 +43,7 @@ model-index:
 
 ## Efficient Speech Recognition with Parameter-Efficient Fine-Tuning
 
-Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a **LoRA-adapted HuBERT-XLarge encoder** with a **LoRA-adapted SmolLM3-3B language model decoder**, connected via a trainable audio projector. By applying LoRA (Low-Rank Adaptation) to both the encoder and decoder, this architecture enables efficient training by fine-tuning only ~139M parameters (projector: ~122M + encoder LoRA: ~2M + decoder LoRA: ~15M adapters) while leveraging the power of large pretrained models.
+Tiny Audio is a lightweight automatic speech recognition (ASR) model that combines a **LoRA-adapted HuBERT-XLarge encoder** with a **LoRA-adapted Qwen-3 8B language model decoder**, connected via a trainable audio projector. By applying LoRA (Low-Rank Adaptation) to both the encoder and decoder, this architecture enables efficient training by fine-tuning only ~139M parameters (projector: ~122M + encoder LoRA: ~2M + decoder LoRA: ~15M adapters) while leveraging the power of large pretrained models.
 
 ## Model Description
 
@@ -54,11 +54,11 @@ Tiny Audio is a lightweight automatic speech recognition (ASR) model that combin
 - **Architecture:** Encoder-Projector-Decoder
   - Audio Encoder: HuBERT-XLarge (1.3B params + LoRA adapters, r=8, ~2M trainable)
   - Audio Projector: SwiGLU MLP (~122M params, fully trainable)
-  - Text Decoder: SmolLM3-3B (3B params + LoRA adapters, r=64, ~15M trainable)
+  - Text Decoder: Qwen-3 8B (8B params + LoRA adapters, r=8, ~15M trainable)
 
 ## Key Features
 
-✅ **Parameter Efficient**: Only ~139M trainable parameters (projector + encoder LoRA + decoder LoRA) - 3.2% of total model size (4.3B)
+✅ **Parameter Efficient**: Only ~139M trainable parameters (projector + encoder LoRA + decoder LoRA) - 1.5% of total model size (9.3B)
 
 ✅ **Dual LoRA Adaptation**: LoRA fine-tuning applied to both encoder and decoder for targeted optimization
 
@@ -133,11 +133,11 @@ The model automatically handles:
 
 3. **Language Model Decoder (LoRA Fine-tuned)**
 
-   - Base Model: `HuggingFaceTB/SmolLM3-3B`
-   - Parameters: 3B base + ~15-20M LoRA adapters
+   - Base Model: `Qwen/Qwen3-8B`
+   - Parameters: 8B base + ~15-20M LoRA adapters
    - LoRA Configuration:
-     - Rank: 64
-     - Alpha: 32 (scaling factor = 0.5)
+     - Rank: 8
+     - Alpha: 32 (scaling factor = 4.0)
      - Target modules: q_proj, v_proj (attention projections)
      - Dropout: 0.0
    - Generates text transcriptions autoregressively with greedy decoding
@@ -158,7 +158,7 @@ Audio Projector (SwiGLU MLP, trainable, 5x downsample)
     ↓
 Language Embeddings [batch, ~300, 2048]
     ↓
-SmolLM3-3B Decoder (3B + LoRA adapters on q_proj, v_proj, Flash Attention 2)
+Qwen-3 8B Decoder (8B + LoRA adapters on q_proj, v_proj, Flash Attention 2)
     ↓
 Text Transcription
 ```
@@ -192,7 +192,7 @@ The model uses **parameter-efficient fine-tuning (PEFT) with LoRA on both encode
 
 1. **Audio Projector** (~122M params): Trained from scratch to map audio to language embeddings
 1. **Encoder LoRA Adapters** (~1-2M params): Fine-tune HuBERT attention layers (q_proj, k_proj) with rank 8
-1. **Decoder LoRA Adapters** (~15-20M params): Fine-tune SmolLM3 attention layers (q_proj, v_proj) with rank 64
+1. **Decoder LoRA Adapters** (~15-20M params): Fine-tune Qwen-3 attention layers (q_proj, v_proj) with rank 8
 
 The base weights of both encoder and decoder remain **frozen**, with only LoRA adapters and the projector being trained. This dual LoRA approach allows both models to adapt to the speech-to-text task without catastrophic forgetting.
 
@@ -205,7 +205,7 @@ This dual LoRA approach:
 - Makes training affordable (~$12 on A40) through parameter efficiency
 - Allows targeted adaptation of both encoder and decoder attention mechanisms
 - Provides independent control over encoder and decoder adaptation strength
-- Total trainable parameters: ~139M (3.2% of the full 4.3B model)
+- Total trainable parameters: ~139M (1.5% of the full 9.3B model)
   - Projector: ~122M (fully trained)
   - Encoder LoRA: ~2M adapters
   - Decoder LoRA: ~15M adapters
@@ -303,7 +303,7 @@ If you use Tiny Audio in your research, please cite:
 This project builds upon excellent prior work:
 
 - **HuBERT** ([Hsu et al., 2021](https://huggingface.co/docs/transformers/model_doc/hubert)): Self-supervised speech representation learning
-- **SmolLM3-3B** ([HuggingFace](https://huggingface.co/HuggingFaceTB/SmolLM3-3B)): Efficient small language model
+- **Qwen-3 8B** ([Alibaba](https://huggingface.co/Qwen/Qwen3-8B)): Efficient multilingual language model
 - **LoRA** ([Hu et al., 2021](https://arxiv.org/abs/2106.09685)): Low-Rank Adaptation of Large Language Models
 - **PEFT** ([HuggingFace](https://github.com/huggingface/peft)): Parameter-Efficient Fine-Tuning library
 
