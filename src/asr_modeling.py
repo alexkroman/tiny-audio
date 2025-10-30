@@ -265,7 +265,18 @@ class ASRModel(PreTrainedModel):
         # Create decoder first (needed for tokenizer init)
         self.decoder = self._create_decoder(config, peft_config)
         self.generation_config = self.decoder.generation_config
+
+        # Override generation_config with ASR-appropriate defaults
         self.generation_config.num_beams = config.num_beams
+        self.generation_config.max_new_tokens = config.max_new_tokens
+        self.generation_config.min_new_tokens = config.min_new_tokens
+        self.generation_config.do_sample = config.do_sample
+        self.generation_config.top_k = config.top_k
+        self.generation_config.top_p = config.top_p
+        self.generation_config.use_cache = config.use_cache
+
+        # Remove temperature since we set top_k and top_p explicitly
+        self.generation_config.temperature = None
 
         # Initialize tokenizer and resize embeddings after decoder is created
         self._init_tokenizer()
@@ -788,9 +799,13 @@ class ASRModel(PreTrainedModel):
         total_seq_len = inputs_embeds.shape[1]
         attention_mask = torch.ones(batch_size, total_seq_len, dtype=torch.long, device=device)
 
-        generate_kwargs.setdefault("max_new_tokens", 150)
+        generate_kwargs.setdefault("max_new_tokens", self.config.max_new_tokens)
+        generate_kwargs.setdefault("min_new_tokens", self.config.min_new_tokens)
         generate_kwargs.setdefault("num_beams", self.config.num_beams)
-        generate_kwargs.setdefault("do_sample", False)
+        generate_kwargs.setdefault("do_sample", self.config.do_sample)
+        generate_kwargs.setdefault("top_k", self.config.top_k)
+        generate_kwargs.setdefault("top_p", self.config.top_p)
+        generate_kwargs.setdefault("use_cache", self.config.use_cache)
 
         im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         generate_kwargs.setdefault("eos_token_id", im_end_id)

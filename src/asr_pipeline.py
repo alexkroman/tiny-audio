@@ -165,7 +165,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         im_end_id = self.model.tokenizer.convert_tokens_to_ids("<|im_end|>")
         generate_kwargs.setdefault("eos_token_id", im_end_id)
-        generate_kwargs.setdefault("max_new_tokens", 448)  # ~30s audio @ 15 tokens/s
+        generate_kwargs.setdefault("max_new_tokens", self.model.config.max_new_tokens)
 
         generated_ids = self.model.generate(
             input_values, system_prompt=self.model.config.system_prompt, **generate_kwargs

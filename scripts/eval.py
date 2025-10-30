@@ -227,18 +227,16 @@ def evaluate_huggingface(
         from src.asr_modeling import ASRModel
         from src.asr_pipeline import ASRPipeline
 
-        # Load model first to handle device placement properly
+        # Determine device
         device = "mps" if torch.backends.mps.is_available() else "cpu"
 
-        # Load model with low_cpu_mem_usage to avoid meta tensor issues
+        # Load model directly to device
         model = ASRModel.from_pretrained(
             model_or_endpoint,
             dtype=torch.float16 if device == "cuda" else torch.float32,
-            low_cpu_mem_usage=True,
+            device_map=None,
+            device=device,
         )
-
-        # Move model to device after loading (handles meta tensors properly)
-        model = model.to(device)
 
         # Create pipeline using local ASRPipeline class directly
         pipe = ASRPipeline(

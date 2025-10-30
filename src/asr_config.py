@@ -27,6 +27,13 @@ class ASRConfig(transformers.PretrainedConfig):
         # Inference parameters
         inference_diversity_penalty: float = 0.5,
         inference_warmup_tokens: int = 10,
+        # Generation parameters
+        max_new_tokens: int = 256,
+        min_new_tokens: int = 1,
+        do_sample: bool = False,
+        top_k: int = 0,
+        top_p: float = 0.8,
+        use_cache: bool = True,
         **kwargs,
     ):
         self.audio_model_id = audio_model_id
@@ -45,6 +52,12 @@ class ASRConfig(transformers.PretrainedConfig):
         self.lora_default_dropout = lora_default_dropout
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
+        self.max_new_tokens = max_new_tokens
+        self.min_new_tokens = min_new_tokens
+        self.do_sample = do_sample
+        self.top_k = top_k
+        self.top_p = top_p
+        self.use_cache = use_cache
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
         else:
@@ -111,5 +124,11 @@ class ASRConfig(transformers.PretrainedConfig):
         output["lora_default_dropout"] = self.lora_default_dropout
         output["inference_diversity_penalty"] = self.inference_diversity_penalty
         output["inference_warmup_tokens"] = self.inference_warmup_tokens
+        output["max_new_tokens"] = self.max_new_tokens
+        output["min_new_tokens"] = self.min_new_tokens
+        output["do_sample"] = self.do_sample
+        output["top_k"] = self.top_k
+        output["top_p"] = self.top_p
+        output["use_cache"] = self.use_cache
 
         return output
