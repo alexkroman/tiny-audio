@@ -214,7 +214,7 @@ class ASRModel(PreTrainedModel):
                     "The repository may not have been trained yet."
                 )
             total_params = sum(v.numel() for v in projector_state.values())
-            model.projector.load_state_dict(projector_state, strict=True)
+            model.projector.load_state_dict(projector_state, strict=True, assign=True)
             print(f"✓ Loaded projector weights ({total_params:,} parameters)")
 
             # Load encoder LoRA weights
@@ -225,7 +225,7 @@ class ASRModel(PreTrainedModel):
                         "The repository may not have been trained yet."
                     )
                 total_params = sum(v.numel() for v in encoder_state.values())
-                model.encoder.load_state_dict(encoder_state, strict=False)
+                model.encoder.load_state_dict(encoder_state, strict=False, assign=True)
                 print(
                     f"✓ Loaded encoder LoRA (r={encoder_lora_config.get('r', 0)}, {total_params:,} parameters)"
                 )
@@ -238,10 +238,15 @@ class ASRModel(PreTrainedModel):
                         "The repository may not have been trained yet."
                     )
                 total_params = sum(v.numel() for v in decoder_state.values())
-                model.decoder.load_state_dict(decoder_state, strict=False)
+                model.decoder.load_state_dict(decoder_state, strict=False, assign=True)
                 print(
                     f"✓ Loaded decoder LoRA (r={decoder_lora_config.get('r', 0)}, {total_params:,} parameters)"
                 )
+
+            # Move model to device if specified (needed after loading weights from meta tensors)
+            device = kwargs.get("device")
+            if device is not None:
+                model = model.to(device)
 
             return model
         finally:
