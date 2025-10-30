@@ -1,4 +1,5 @@
 .env
+audio/
 CLAUDE.md
 datasets_cache
 myenv

@@ -1,2 +1,7 @@
-# The base image already has gradio, numpy, pandas, etc.
-huggingface_hub  # Required for InferenceClient
+# Use latest compatible versions
+gradio
+transformers>=4.57.1
+torch
+torchaudio
+torchcodec
+peft

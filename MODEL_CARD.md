@@ -59,12 +59,19 @@ Tiny Audio is a lightweight automatic speech recognition (ASR) model that combin
 ## Key Features
 
 ✅ **Parameter Efficient**: Only ~139M trainable parameters (projector + encoder LoRA + decoder LoRA) - 3.2% of total model size (4.3B)
+
 ✅ **Dual LoRA Adaptation**: LoRA fine-tuning applied to both encoder and decoder for targeted optimization
+
 ✅ **Fast Training**: LoRA on both models enables rapid training (~24 hours on A40)
+
 ✅ **Modular Design**: Easy to swap different encoder or decoder models
+
 ✅ **Production Ready**: Includes evaluation tools and remote training scripts
+
 ✅ **HuggingFace Native**: Full integration with transformers library and PEFT
+
 ✅ **Optimized Performance**: Flash Attention 2 for faster inference
+
 ✅ **Flexible Training**: Independently configure encoder/decoder LoRA rank, target modules, alpha, and more
 
 ## Quick Start
@@ -249,16 +256,23 @@ Users should evaluate the model on their specific use case and demographics befo
 ### Primary Use Cases
 
 ✅ **Transcription Services**: Converting speech to text for podcasts, videos, interviews
+
 ✅ **Accessibility Tools**: Generating captions and subtitles
+
 ✅ **Voice Assistants**: Speech-to-text component in voice interfaces
+
 ✅ **Research**: ASR research and experimentation
+
 ✅ **Education**: Learning about multimodal models and parameter-efficient training
 
 ### Out-of-Scope Use
 
 ❌ Real-time critical systems (medical, legal) without thorough validation
+
 ❌ Surveillance or privacy-invasive applications
+
 ❌ Non-English languages (not trained for this)
+
 ❌ Child safety applications without age-appropriate testing
 
 ## Environmental Impact

@@ -54,20 +54,40 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             all_outputs = []
             for chunk in model_inputs:
                 chunk_output = self._forward(chunk, **generate_kwargs)
+                # Move tensors to CPU before adding to outputs
+                for key, value in chunk_output.items():
+                    if torch.is_tensor(value):
+                        chunk_output[key] = value.cpu()
                 all_outputs.append(chunk_output)
 
-            transcriptions = []
+            # Merge chunks and decode ourselves to ensure skip_special_tokens=True
+            all_tokens = []
             for output in all_outputs:
-                chunk_result = self.postprocess(output)
-                transcriptions.append(chunk_result.get("text", ""))
+                tokens = output.get("tokens")
+                if tokens is None:
+                    tokens = output.get("generated_ids")
+                if tokens is not None:
+                    if torch.is_tensor(tokens):
+                        tokens = tokens.cpu()
+                    if len(tokens.shape) > 1:
+                        tokens = tokens[0]
+                    all_tokens.extend(tokens.tolist() if torch.is_tensor(tokens) else tokens)
 
-            return {"text": " ".join(transcriptions).strip()}
+            # Decode the merged tokens with skip_special_tokens
+            text = self.tokenizer.decode(all_tokens, skip_special_tokens=True)
+            text = text.strip()
+            return {"text": text}
+
         model_outputs = self._forward(model_inputs, **generate_kwargs)
         return self.postprocess(model_outputs)
 
     def preprocess(self, inputs, **preprocess_params):
         if isinstance(inputs, list):
             raise ValueError("Lists should not reach preprocess - bug in __call__")
+
+        # Set default chunking to 30 seconds with 5 second overlap
+        preprocess_params.setdefault("chunk_length_s", 30)
+        preprocess_params.setdefault("stride_length_s", (5, 5))
 
         # Handle different formats from datasets
         if isinstance(inputs, dict):
@@ -155,6 +175,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     def postprocess(
         self, model_outputs: Dict[str, Any], return_timestamps=None, return_language=None
     ):
+        # Handle chunked outputs from iterator
+        if isinstance(model_outputs, list):
+            # Move all tensors to CPU before calling parent postprocess
+            for output_dict in model_outputs:
+                for key, value in output_dict.items():
+                    if torch.is_tensor(value):
+                        output_dict[key] = value.cpu()
+            return super().postprocess(model_outputs)
+
         if "is_last" in model_outputs:
             model_outputs.pop("is_last")
 
@@ -166,6 +195,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             raise ValueError(
                 f"Expected 'tokens' or 'generated_ids' in model_outputs, got: {model_outputs.keys()}"
             )
+
+        # Move to CPU if on MPS or other device
+        if torch.is_tensor(tokens) and tokens.device.type != "cpu":
+            tokens = tokens.cpu()
 
         if len(tokens.shape) > 1:
             tokens = tokens[0]

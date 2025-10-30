@@ -287,8 +287,16 @@ class ASRModel(PreTrainedModel):
         )
         self.projector: AudioProjector = AudioProjector(projector_config)
 
-        decoder_dtype = next(self.decoder.parameters()).dtype
-        self.projector.to(dtype=decoder_dtype)
+        # Match projector dtype and device to decoder
+        # When device_map="auto" is used, we need to explicitly move the projector
+        # to match the decoder's device, since it's a custom module not handled by device_map
+        decoder_param = next(self.decoder.parameters())
+        if decoder_param.device.type != "meta":
+            # Normal case: move to decoder's device
+            self.projector.to(dtype=decoder_param.dtype, device=decoder_param.device)
+        else:
+            # Meta device case: only set dtype, device will be set later
+            self.projector.to(dtype=decoder_param.dtype)
 
         self._no_split_modules = self.decoder._no_split_modules
 

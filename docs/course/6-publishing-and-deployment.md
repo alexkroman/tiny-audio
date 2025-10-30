@@ -1,7 +1,7 @@
 # Class 6: Publishing and Deployment
 
-**Duration**: 1 hour (20 min lecture + 40 min hands-on)
-**Goal**: Deploy your model and add your results to the community leaderboard
+**Duration**: 1 hour (15 min lecture + 45 min hands-on)
+**Goal**: Deploy your model to HuggingFace Hub with production endpoints and web demo
 
 ## Learning Objectives
 
@@ -9,17 +9,19 @@ By the end of this class, you will:
 
 - Push your model to HuggingFace Hub
 - Create a professional model card
-- Test your deployed model via the transformers pipeline
+- Deploy your model to a production inference endpoint
+- Create an interactive web demo on HuggingFace Spaces
+- Test your deployed model via multiple interfaces
 - Add your results to the community leaderboard
-- Have a publicly accessible, working ASR model!
+- Have a fully deployed, publicly accessible ASR system!
 
 ---
 
-# PART A: LECTURE (20 minutes)
+# PART A: LECTURE (15 minutes)
 
 > **Instructor**: Present these concepts. Students should just listen.
 
-## 1. HuggingFace Hub Overview (5 min)
+## 1. HuggingFace Hub & Deployment Options (5 min)
 
 ### What is HuggingFace Hub?
 
@@ -55,18 +57,21 @@ your-username/your-model-name/
 └── asr_*.py                    # Model code files
 ```
 
-### Authentication
+### Deployment Options Overview
 
-You need a **HuggingFace token** to push models:
+Once your model is on the Hub, you have **three deployment options**:
 
-1. Create account at [huggingface.co](https://huggingface.co)
-2. Go to Settings → Access Tokens
-3. Create token with "write" permissions
-4. Keep it secret!
+1. **Direct usage via transformers** - Users download and run locally (free)
+2. **Inference Endpoints** - Serverless API for production (pay-per-use, scales to zero)
+3. **Spaces (Gradio demo)** - Interactive web UI for demos (free tier available)
+
+**Authentication**
+
+You need a **HuggingFace token** with "write" permissions to push models and create deployments.
 
 ---
 
-## 2. Writing a Model Card (5 min)
+## 2. Writing a Model Card (3 min)
 
 ### What is a Model Card?
 
@@ -117,7 +122,7 @@ You need a **HuggingFace token** to push models:
 
 ---
 
-## 3. Testing and Validation (5 min)
+## 3. Testing and Validation (3 min)
 
 ### Pre-Deployment Checklist
 
@@ -154,7 +159,7 @@ After pushing:
 
 ---
 
-## 4. Community Contribution (5 min)
+## 4. Community Contribution (4 min)
 
 ### The Leaderboard
 
@@ -187,7 +192,7 @@ After pushing:
 
 ---
 
-# PART B: HANDS-ON WORKSHOP (40 minutes)
+# PART B: HANDS-ON WORKSHOP (45 minutes)
 
 > **Students**: Follow these instructions step-by-step.
 >
@@ -195,26 +200,32 @@ After pushing:
 
 ## Workshop Overview
 
-In the next 40 minutes, you will:
+In the next 45 minutes, you will:
 
-- **Exercise 1**: Prepare model card and metadata
-- **Exercise 2**: Push your model to HuggingFace Hub
-- **Exercise 3**: Test your deployed model
-- **Exercise 4**: Submit your results to the leaderboard
+- **Exercise 1**: Setup and push model to Hub (10 min)
+- **Exercise 2**: Create professional model card (8 min)
+- **Exercise 3**: Deploy to HF Inference Endpoints OR Spaces (12 min) - *Choose one*
+- **Exercise 4**: Test deployment and add to leaderboard (10 min)
+- **Bonus (optional)**: Deploy the other option if time permits (5 min)
 
-By the end, you'll have a publicly accessible ASR model with your name on it!
+By the end, you'll have:
+- A publicly accessible ASR model with documentation
+- Either a production API endpoint OR an interactive web demo
+- Your results on the community leaderboard
+
+**Note**: Exercises 4-5 from the detailed instructions are **optional** and can be completed after class!
 
 ---
 
-## Workshop Exercise 1: Prepare for Publishing (10 min)
+## Workshop Exercise 1: Setup and Push to Hub (10 min)
 
 ### Goal
 
-Set up HuggingFace account and prepare model files.
+Set up HuggingFace account and push your model to the Hub.
 
 ### Your Task
 
-Create account, get token, and verify model is ready.
+Create account, get token, verify model files, and upload to Hub.
 
 ### Instructions
 
@@ -248,41 +259,7 @@ poetry run huggingface-cli login
 
 Paste your token when prompted.
 
-**Step 5: Verify model files**
-
-```bash
-ls outputs/stage1/  # or your training directory
-```
-
-Make sure you have:
-
-- [ ] config.json
-- [ ] model.safetensors
-- [ ] tokenizer files
-- [ ] asr_*.py files
-
-### Success Checkpoint
-
-- [ ] HuggingFace account created
-- [ ] Access token obtained
-- [ ] Logged in via CLI
-- [ ] Model files verified
-
----
-
-## Workshop Exercise 2: Push Model to Hub (15 min)
-
-### Goal
-
-Upload your trained model to HuggingFace Hub.
-
-### Your Task
-
-Create repository and push all model files.
-
-### Instructions
-
-**Step 1: Choose model name**
+**Step 5: Choose model name**
 
 Pick a good name for your model:
 
@@ -291,7 +268,7 @@ Pick a good name for your model:
 - Lowercase recommended
 - Your full model ID: "your-username/your-model-name"
 
-**Step 2: Create push script**
+**Step 6: Create push script**
 
 Create `push_to_hub.py`:
 
@@ -332,7 +309,7 @@ if __name__ == "__main__":
     main()
 ```
 
-**Step 3: Push to Hub**
+**Step 7: Push to Hub**
 
 ```bash
 poetry run python push_to_hub.py outputs/stage1 your-username/your-model-name
@@ -349,7 +326,7 @@ poetry run python push_to_hub.py outputs/stage1 your-username/your-model-name
    - Code files (asr_*.py)
 4. Creates initial README
 
-**Step 5: Verify upload**
+**Step 8: Verify upload**
 
 Visit: `https://huggingface.co/your-username/your-model-name`
 
@@ -361,14 +338,15 @@ You should see:
 
 ### Success Checkpoint
 
-- [ ] Script ran successfully
-- [ ] Model uploaded to Hub
+- [ ] HuggingFace account created
+- [ ] Access token obtained and logged in
+- [ ] Model uploaded to Hub successfully
 - [ ] Can see model page on HuggingFace
 - [ ] All files present
 
 ---
 
-## Workshop Exercise 3: Create Model Card (10 min)
+## Workshop Exercise 2: Create Model Card (8 min)
 
 ### Goal
 
@@ -508,7 +486,156 @@ Click "Commit changes to main"
 
 ---
 
-## Workshop Exercise 4: Test and Add to Leaderboard (5 min)
+## Workshop Exercise 3: Deploy Demo to Hugging Face Spaces (12 min)
+
+**Goal**: Create a public web demo for your model using Hugging Face Spaces.
+
+**Instructions**
+
+**Step 1: Create a new Space**
+
+- Go to [huggingface.co/new-space](https://huggingface.co/new-space)
+- **Owner**: Your username
+- **Space name**: `tiny-audio-demo` (or your preferred name)
+- **License**: MIT
+- **Select SDK**: Gradio
+- **Space hardware**: CPU basic (free) or CPU upgrade ($0.03/hour for faster)
+- **Visibility**: Public
+- Click "Create Space"
+
+**Step 2: Prepare demo files**
+
+Clone the demo files from the tiny-audio repository:
+
+```bash
+# Copy demo files to a temporary directory
+mkdir ~/my-tiny-audio-demo
+cp demo/app.py ~/my-tiny-audio-demo/
+cp demo/requirements.txt ~/my-tiny-audio-demo/
+cp demo/README.md ~/my-tiny-audio-demo/
+cd ~/my-tiny-audio-demo
+```
+
+**Step 3: Customize for your model**
+
+Edit `app.py` to use your model:
+
+```python
+# Find this line (around line 17):
+def create_demo(model_path: str = "mazesmazes/tiny-audio"):
+
+# Change to:
+def create_demo(model_path: str = "your-username/your-model-name"):
+
+# And update the main call (around line 34):
+demo = create_demo("your-username/your-model-name")
+```
+
+Edit `README.md` to update:
+
+- Model name and links
+- Your username in tags and citations
+- Description and features
+
+**Step 4: Verify requirements.txt**
+
+The file should only need:
+
+```
+gradio  # Gradio automatically handles model loading via HF Inference API
+```
+
+That's it! Gradio's `gr.load()` function automatically loads your model from the Hub.
+
+**Step 5: Initialize git and push to Space**
+
+```bash
+# Initialize git repo
+git init
+git remote add origin https://huggingface.co/spaces/your-username/tiny-audio-demo
+
+# Login if you haven't
+git config user.email "you@example.com"
+git config user.name "Your Name"
+
+# Add files and commit
+git add .
+git commit -m "Initial demo deployment"
+
+# Push to Space
+git push -u origin main
+```
+
+**Step 6: Watch build process**
+
+- Go to your Space: `https://huggingface.co/spaces/your-username/tiny-audio-demo`
+- You'll see "Building..." status
+- Wait 2-5 minutes for build to complete
+- Once ready, status shows "Running"
+
+**Step 7: Test your demo**
+
+- Click on your Space URL
+- Upload a test audio file or record using microphone
+- Click "Submit" to transcribe
+- Verify transcription appears correctly
+
+### How It Works
+
+Gradio's `gr.load()` automatically:
+- Detects your model is an ASR model
+- Creates the appropriate audio input UI
+- Calls the HuggingFace Inference API with your model
+- Returns transcription results
+- All with just one line of code!
+
+### Customization Ideas (Optional)
+
+**Add examples:**
+
+```python
+examples = [
+    ["demo/samples/sample1.wav"],
+    ["demo/samples/sample2.wav"],
+]
+
+return gr.Interface(
+    fn=lambda audio: transcribe_audio(audio, model_path),
+    inputs=gr.Audio(sources=["upload", "microphone"], type="filepath"),
+    outputs=gr.Textbox(label="Transcription"),
+    examples=examples,  # Add this
+    title="Tiny Audio - Speech Recognition",
+    description="Upload audio or record to transcribe speech to text.",
+)
+```
+
+**Add model info:**
+
+```python
+description = f"""
+Upload an audio file or record directly to transcribe speech to text.
+
+**Model**: [{model_path}](https://huggingface.co/{model_path})
+**WER**: XX.XX% on LoquaciousSet test set
+**Training**: Efficient fine-tuning with LoRA (3.2% trainable params)
+"""
+```
+
+**Add microphone input:**
+
+```python
+inputs=gr.Audio(sources=["upload", "microphone"], type="filepath"),
+```
+
+### Success Checkpoint
+- [ ] Space created on Hugging Face
+- [ ] Demo is live and working
+- [ ] Can transcribe audio through web interface
+- [ ] Model automatically loaded via Gradio's HF Inference API
+
+---
+
+## Workshop Exercise 4: Test and Add to Leaderboard (10 min)
 
 ### Goal
 Test your deployed model and add results to the community leaderboard.
@@ -621,13 +748,20 @@ Then on GitHub:
 - Deployment testing
 - Community contribution
 
-**Workshop (40 min):**
+**Workshop (45 min):**
 
-- Set up HuggingFace account
-- Pushed model to Hub
-- Created professional model card
+- Set up HuggingFace account and authentication
+- Pushed model to Hub with all artifacts
+- Created professional model card with documentation
+- Deployed to either Inference Endpoints OR Spaces (student choice)
 - Tested deployed model
 - Added to community leaderboard
+
+**Optional (after class):**
+
+- Complete the deployment option you didn't choose
+- Experiment with customizations
+- Share your demo with the community
 
 ## Course Journey Complete! 🎉
 

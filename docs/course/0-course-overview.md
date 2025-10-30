@@ -10,7 +10,7 @@ Welcome! This course will teach you how to build, train, and deploy your own aut
 - Add your results to the community leaderboard
 
 **Time Commitment**: 6 hours (6 one-hour sessions)
-**Cost**: ~$12 for GPU training (or free with local GPU)
+**Cost**: ~$12 for GPU training (or free with local GPU), plus optional deployment costs
 **Prerequisites**: Basic Python knowledge, some ML familiarity helpful but not required
 
 **Format**: Can be used for:
@@ -59,8 +59,10 @@ Welcome! This course will teach you how to build, train, and deploy your own aut
 ### [Class 6: Publishing and Deployment](./6-publishing-and-deployment.md) (1 hour)
 
 - Pushing to HuggingFace Hub
-- Creating a model card
-- Testing with the transformers pipeline
+- Creating a professional model card
+- Deploying to HuggingFace Inference Endpoints (production APIs)
+- Creating interactive demos on HuggingFace Spaces
+- Testing with multiple interfaces (transformers, API, web UI)
 - Adding your results to the leaderboard
 
 ## Learning Goals

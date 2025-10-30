@@ -27,7 +27,7 @@
                 <h1>Class 6</h1>
                 <h2>Publishing and Deployment</h2>
                 <p>Deploy your model and join the community</p>
-                <p class="small">Tiny Audio Course • 20 minutes</p>
+                <p class="small">Tiny Audio Course • 15 minutes</p>
             </section>
 
             <!-- What is HuggingFace Hub -->
@@ -71,11 +71,29 @@ your-username/your-model-name/
                 </code></pre>
             </section>
 
+            <!-- Deployment Options -->
+            <section>
+                <h2>Deployment Options</h2>
+                <p>Once your model is on the Hub, you have <strong>three options</strong>:</p>
+                <ol>
+                    <li><strong>Direct usage via transformers</strong>
+                        <span class="small">Users download and run locally (free)</span>
+                    </li>
+                    <li><strong>Inference Endpoints</strong>
+                        <span class="small">Serverless API for production (pay-per-use, scales to zero)</span>
+                    </li>
+                    <li><strong>Spaces (Gradio demo)</strong>
+                        <span class="small">Interactive web UI for demos (free tier available)</span>
+                    </li>
+                </ol>
+            </section>
+
             <!-- Authentication -->
             <section>
                 <h2>HuggingFace Authentication</h2>
-                <p>You need a <strong>HuggingFace token</strong> to push models:</p>
-                <ol>
+                <p>You need a <strong>HuggingFace token</strong> with "write" permissions</p>
+                <p class="small" style="margin-top: 1em;">Required for pushing models and creating deployments</p>
+                <ol style="margin-top: 1.5em;">
                     <li>Create account at <a href="https://huggingface.co">huggingface.co</a></li>
                     <li>Go to Settings → Access Tokens</li>
                     <li>Create token with "write" permissions</li>
@@ -203,15 +221,46 @@ your-username/your-model-name/
             <!-- Today's Workshop -->
             <section>
                 <h2>Today's Hands-On Workshop</h2>
-                <p>What you'll do in the next 40 minutes:</p>
-                <ul>
-                    <li><strong>Exercise 1:</strong> Prepare model card and metadata</li>
-                    <li><strong>Exercise 2:</strong> Push your model to HuggingFace Hub</li>
-                    <li><strong>Exercise 3:</strong> Test your deployed model</li>
-                    <li><strong>Exercise 4:</strong> Submit your results to the leaderboard</li>
+                <p>What you'll do in the next 45 minutes:</p>
+                <ul class="small">
+                    <li><strong>Exercise 1 (10 min):</strong> Setup and push model to Hub</li>
+                    <li><strong>Exercise 2 (8 min):</strong> Create professional model card</li>
+                    <li><strong>Exercise 3 (12 min):</strong> Deploy to Inference Endpoints OR Spaces <span class="highlight">(choose one)</span></li>
+                    <li><strong>Exercise 4 (10 min):</strong> Test deployment and add to leaderboard</li>
+                    <li><strong>Bonus (5 min):</strong> Deploy the other option if time permits</li>
                 </ul>
                 <p style="margin-top: 1.5em; color: #42affa;">
-                    By the end, you'll have a publicly accessible ASR model with your name on it!
+                    You'll have a deployed model with either a production API or interactive demo!
+                </p>
+            </section>
+
+            <!-- Inference Endpoints Overview -->
+            <section>
+                <h2>Option A: Inference Endpoints</h2>
+                <p><strong>Serverless API for production use</strong></p>
+                <ul>
+                    <li>Deploy model as a REST API endpoint</li>
+                    <li>Pay-per-use pricing (scales to zero when idle)</li>
+                    <li>GPU or CPU instances available</li>
+                    <li>Perfect for: Production apps, mobile backends, integrations</li>
+                </ul>
+                <p class="small" style="margin-top: 1.5em;">
+                    <strong>Cost:</strong> CPU ~$0.06/hr • GPU ~$0.60/hr (only when running)
+                </p>
+            </section>
+
+            <!-- Spaces Overview -->
+            <section>
+                <h2>Option B: HuggingFace Spaces</h2>
+                <p><strong>Interactive web demos with Gradio</strong></p>
+                <ul>
+                    <li>Create a shareable web interface for your model</li>
+                    <li>Free tier available (CPU basic)</li>
+                    <li>Upload or record audio directly in browser</li>
+                    <li>Perfect for: Demos, portfolios, sharing with non-technical users</li>
+                </ul>
+                <p class="small" style="margin-top: 1.5em;">
+                    <strong>Cost:</strong> Free (CPU basic) • $0.03/hr (CPU upgrade)
                 </p>
             </section>
 
@@ -223,7 +272,8 @@ your-username/your-model-name/
                 <ul>
                     <li>✅ Deep understanding of ASR architecture</li>
                     <li>✅ Hands-on training experience</li>
-                    <li>✅ A deployed model on HuggingFace</li>
+                    <li>✅ A deployed model on HuggingFace Hub</li>
+                    <li>✅ Production endpoint OR interactive demo</li>
                     <li>✅ Your name on the leaderboard</li>
                 </ul>
                 <p style="margin-top: 1.5em; color: #42affa;">
