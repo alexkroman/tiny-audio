@@ -373,13 +373,16 @@ class ASRModel(PreTrainedModel):
 
         target_dtype = getattr(torch, config.model_dtype)
 
-        encoder = AutoModel.from_pretrained(
-            config.audio_model_id,
-            attn_implementation=config.attn_implementation,
-            dtype=target_dtype,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-        )
+        # When loading from pretrained, avoid device_map="auto" to prevent meta tensor issues
+        encoder_kwargs = {
+            "attn_implementation": config.attn_implementation,
+            "dtype": target_dtype,
+        }
+        if not cls._is_loading_from_pretrained:
+            encoder_kwargs["device_map"] = "auto"
+            encoder_kwargs["low_cpu_mem_usage"] = True
+
+        encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
         encoder.requires_grad_(False)
 
         # Wrap encoder forward BEFORE applying LoRA to filter invalid kwargs
@@ -431,14 +434,17 @@ class ASRModel(PreTrainedModel):
         """
         target_dtype = getattr(torch, config.model_dtype)
 
-        decoder = AutoModelForCausalLM.from_pretrained(
-            config.text_model_id,
-            attn_implementation=config.attn_implementation,
-            dtype=target_dtype,
-            trust_remote_code=True,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-        )
+        # When loading from pretrained, avoid device_map="auto" to prevent meta tensor issues
+        decoder_kwargs = {
+            "attn_implementation": config.attn_implementation,
+            "dtype": target_dtype,
+            "trust_remote_code": True,
+        }
+        if not cls._is_loading_from_pretrained:
+            decoder_kwargs["device_map"] = "auto"
+            decoder_kwargs["low_cpu_mem_usage"] = True
+
+        decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
         decoder.requires_grad_(False)
 
         # Apply LoRA to decoder if configured
