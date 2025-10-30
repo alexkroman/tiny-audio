@@ -51,14 +51,21 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         from collections.abc import Iterator
 
         if isinstance(model_inputs, Iterator):
+            # Convert iterator to list to count chunks
+            chunks = list(model_inputs)
+            total_chunks = len(chunks)
+            print(f"Starting transcription of {total_chunks} chunks...", flush=True)
+
             all_outputs = []
-            for chunk in model_inputs:
+            for chunk_num, chunk in enumerate(chunks, start=1):
+                print(f"Processing chunk {chunk_num}/{total_chunks}...", flush=True)
                 chunk_output = self._forward(chunk, **generate_kwargs)
                 # Move tensors to CPU before adding to outputs
                 for key, value in chunk_output.items():
                     if torch.is_tensor(value):
                         chunk_output[key] = value.cpu()
                 all_outputs.append(chunk_output)
+                print(f"Chunk {chunk_num}/{total_chunks} completed.", flush=True)
 
             # Merge chunks and decode ourselves to ensure skip_special_tokens=True
             all_tokens = []
