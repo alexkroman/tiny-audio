@@ -48,8 +48,8 @@ training:
 
   per_device_train_batch_size: 3
   per_device_eval_batch_size: 3
-  gradient_accumulation_steps: 3
-  eval_accumulation_steps: 3
+  gradient_accumulation_steps: 5
+  eval_accumulation_steps: 5
 
   # Learning rate - Higher for LoRA
 
