@@ -82,6 +82,21 @@ Input tokens → Embeddings → Transformer Layers → Next token prediction
 - Auto-regressive generation
 - Flash Attention 2 for speed
 
+**Why Decoder-Only?**
+
+The choice of architecture is a critical decision. While other architectures exist, decoder-only models have become the standard for large-scale language generation tasks.
+
+- **Encoder-Decoder Models** (like T5) are great for tasks that require a deep understanding of the input, like summarization or translation. However, they are more complex to train and are less common for generative assistants.
+- **Mixture-of-Experts (MoE) Models** (like Mixtral) are very powerful and efficient at inference, but they are more complex to train and require more memory.
+
+For our project, a **decoder-only model is the perfect choice** because:
+
+- It excels at **generative tasks** like ASR.
+- It's **simpler to train and understand** than other architectures.
+- The vast majority of **open-source tools and research** are focused on decoder-only models, making it easier to find support and resources.
+
+By choosing a decoder-only model, we are building on a solid, well-understood foundation.
+
 ---
 
 ## 2. The Modality Gap Problem (5 min)
@@ -205,6 +220,16 @@ output = x / sqrt(mean(x²) + epsilon)
 **SwiGLU**: Best of both! Gating + smooth activation
 
 **Formula**: `Swish(Wx) ⊗ (Vx)` where `Swish(x) = x * sigmoid(x)`
+
+### Why SwiGLU?
+
+SwiGLU has become the de-facto standard activation function in modern language models like Llama, PaLM, and Qwen. Here's why:
+
+- **Gated Mechanism**: The "G" in SwiGLU stands for "Gated." The gating mechanism allows the network to control the flow of information, which has been shown to be more effective than a simple non-linearity like ReLU.
+- **Expressiveness**: The combination of the Swish activation function and the gating mechanism allows the network to learn more complex patterns in the data.
+- **Performance**: In practice, SwiGLU has been shown to outperform other activation functions on a wide range of language modeling tasks.
+
+By using SwiGLU, we are using a modern, high-performance component that is known to work well in large-scale language models.
 
 ---
 

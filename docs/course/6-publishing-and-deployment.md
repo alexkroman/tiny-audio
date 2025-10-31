@@ -21,7 +21,22 @@ By the end of this class, you will:
 
 > **Instructor**: Present these concepts. Students should just listen.
 
-## 1. HuggingFace Hub & Deployment Options (5 min)
+## 1. Why Share Your Work? (3 min)
+
+Before we get into the technical details of deployment, let's talk about why it's so important to share your work. The open-source community is the engine that drives progress in machine learning. By sharing your model, you are not just publishing a file; you are contributing to a global collaboration.
+
+**Benefits of Sharing:**
+
+- **Community Contribution**: You are giving back to the community that created the tools and models you used.
+- **Feedback and Improvement**: Others can test your model, find its weaknesses, and suggest improvements.
+- **Build Your Portfolio**: A public model on the Hugging Face Hub is a powerful demonstration of your skills as an ML engineer.
+- **Advance the Field**: Every shared model, no matter how small, adds to our collective understanding of what works and what doesn't.
+
+In this chapter, you'll learn how to share your work in a way that is professional, responsible, and valuable to the community.
+
+---
+
+## 2. HuggingFace Hub & Deployment Options (5 min)
 
 ### What is HuggingFace Hub?
 
@@ -71,58 +86,30 @@ You need a **HuggingFace token** with "write" permissions to push models and cre
 
 ---
 
-## 2. Writing a Model Card (3 min)
+## 3. Writing a Model Card: Your Contribution to the Community (3 min)
 
 ### What is a Model Card?
 
-**Documentation for your model**
+A model card is more than just documentation; it's your primary contribution to the community. It's where you explain not just *what* your model does, but *how* it was built, *why* you made certain decisions, and *what* you learned along the way. A good model card makes your work useful and accessible to others.
 
-- What it does
-- How it was trained
-- Performance metrics
-- Usage examples
-- Limitations and biases
+### Why it Matters
 
-**Why important?**
-
-- Helps others understand and use your model
-- Professional presentation
-- Reproducibility
-- Ethical AI practice
+- **Reproducibility**: A detailed model card allows others to understand and reproduce your work.
+- **Transparency**: It's an ethical practice that promotes transparency about a model's capabilities and limitations.
+- **Usability**: It provides clear instructions on how to use your model, making it more valuable to the community.
 
 ### Model Card Structure
 
-**Essential sections:**
+As we'll see in the workshop, a good model card includes:
 
-1. **Model Description**
-   - What the model does
-   - Architecture summary
-   - Key features
-
-2. **Training Details**
-   - Dataset used
-   - Training time
-   - Hardware used
-   - Cost
-
-3. **Performance**
-   - WER score
-   - Test set used
-   - Comparison with baselines
-
-4. **Usage**
-   - Code examples
-   - How to install dependencies
-   - Expected input/output
-
-5. **Limitations**
-   - What doesn't work well
-   - Known issues
-   - Ethical considerations
+1.  **Model Description**: What is it, and what is its architecture?
+2.  **Training Details**: What data did you use? What were your hyperparameters?
+3.  **Performance**: How well does it work? What are its limitations?
+4.  **Usage**: How can others use it?
 
 ---
 
-## 3. Testing and Validation (3 min)
+## 4. Testing and Validation (3 min)
 
 ### Pre-Deployment Checklist
 
@@ -159,7 +146,7 @@ After pushing:
 
 ---
 
-## 4. Community Contribution (4 min)
+## 5. Community Contribution (4 min)
 
 ### The Leaderboard
 
@@ -180,15 +167,18 @@ After pushing:
 - Git commit hash
 - Training date
 
-### Beyond the Leaderboard
+### Beyond the Leaderboard: Sharing Your Story
+
+The story behind a model is often as valuable as the model itself. The failures, the dead ends, and the unexpected discoveries are all part of the learning process. We encourage you to share not just your final results, but also your journey.
 
 **Ways to contribute:**
 
-- Share training tips
-- Report issues
-- Improve documentation
-- Help other students
-- Experiment with architecture changes
+- **Share your training logs**: A public Weights & Biases report can be incredibly insightful for others.
+- **Write a blog post**: Share what you learned, what went wrong, and what you'd do differently next time.
+- **Contribute to the discussion**: Help other students, answer questions, and share your experiences in the GitHub Discussions.
+- **Improve the course**: If you find a bug, a typo, or have an idea for an improvement, open an issue or a pull request!
+
+By sharing your story, you help us all learn and grow together.
 
 ---
 

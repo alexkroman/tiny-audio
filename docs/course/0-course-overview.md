@@ -2,7 +2,9 @@
 
 ## Course Overview
 
-Welcome! This course will teach you how to build, train, and deploy your own automatic speech recognition (ASR) model from scratch. By the end of this course, you will:
+Welcome to a hands-on journey into the heart of modern AI. This course isn't just about learning how speech recognition works; it's about building, training, and deploying your own powerful ASR model from scratch. By the end of this course, you will have a real, working model with your name on it, and you'll understand exactly how it works.
+
+By the end of this course, you will:
 
 - Understand the architecture of modern multimodal ASR systems
 - Train your own model using parameter-efficient techniques (LoRA)
@@ -87,6 +89,16 @@ This course emphasizes:
 - **Real results**: Your model will actually work and be deployable
 - **Community contribution**: Share your results and learn from others
 
+### The Training Compass: Why → What → How
+
+Before we dive into the technical details, it's important to think strategically about our project. A valuable framework for this is the "Training Compass":
+
+1.  **Why are we building this?** What is our goal? Are we trying to achieve state-of-the-art performance, build a model for a specific niche, or simply learn?
+2.  **What should we build?** Based on our "why," what kind of model should we build? What are the architectural choices and data considerations?
+3.  **How will we build it?** What are the practical steps, tools, and techniques we'll use to train, evaluate, and deploy our model?
+
+Throughout this course, we'll return to this compass to guide our decisions.
+
 ## Prerequisites
 
 ### Required Knowledge
@@ -119,7 +131,7 @@ Don't worry if you're missing some prerequisites! The course is designed to teac
 
 ## Getting Started
 
-**Quick Start**: See the [Quick Start Guide](../QUICKSTART.md) for a 5-minute setup!
+**For the fastest path to a working environment, see the [5-Minute Quick Start Guide](../../README.md#quick-start) in the main README.**
 
 1. **Clone the repository**
 

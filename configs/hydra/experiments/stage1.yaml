@@ -32,7 +32,7 @@ encoder_lora:
 peft:
   peft_method: lora  # Enable LoRA fine-tuning on decoder
   r: 8  # LoRA rank for decoder (matching encoder)
-  lora_alpha: 32  # Scaling factor (alpha/r = 1.0)
+  lora_alpha: 8
   target_modules: ["q_proj", "v_proj"]  
   bias: none  # No bias training
   task_type: CAUSAL_LM  # Causal language modeling
@@ -68,7 +68,7 @@ training:
   gradient_checkpointing: false
 
   # Training duration
-  max_steps: 100000
+  max_steps: 25000
 
   # Reproducibility
   seed: 42

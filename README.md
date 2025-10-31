@@ -4,19 +4,21 @@
 
 # Tiny Audio
 
-## Train your own speech recognition model in 24 hours for $12
+## Train Your Own Speech Recognition Model in 24 Hours for $12
 
-This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in 24 hours. Tiny Audio combines a HuBERT-XLarge encoder (1.3B params) with a Qwen-3 8B decoder (8B params), connected by a trainable audio projector (~122M params). Both the encoder and decoder use **LoRA (Low-Rank Adaptation)** for parameter-efficient fine-tuning. The result is a speech-to-text system you can train in under 24 hours for ~$12, deploy to HuggingFace, and use just like Whisper or any other ASR model.
+This isn't just another ASR model. This is a launchpad. A minimal, hackable, and deeply understandable codebase that empowers you to build, train, and deploy your own speech recognition system from scratch. In a single day, on a single GPU, for the price of a few coffees.
+
+Tiny Audio combines the power of massive pretrained models like HuBERT and Qwen-3 8B with the efficiency of LoRA, allowing you to create a high-quality, custom ASR model that is truly yours.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![Hugging Face Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 
-## Talk to it
+## Talk to It
 
-You can try the model right now at [huggingface.co/spaces/mazesmazes/tiny-audio](https://huggingface.co/spaces/mazesmazes/tiny-audio). Upload an audio file and watch it transcribe. It's not perfect - you'll notice it makes mistakes, especially with background noise or heavy accents - but what makes it unique is that **it's fully yours**: fully configurable, tweakable, hackable, and trained by you from start to end.
+Experience the magic firsthand. Try the live demo on Hugging Face Spaces, or run it yourself with just a few lines of Python.
 
-Or use it via the transformers library:
+**[🚀 Live Demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)**
 
 ```python
 from transformers import pipeline
@@ -29,100 +31,46 @@ result = pipe("path/to/audio.wav")
 print(result["text"])
 ```
 
-The model handles various audio formats (WAV, MP3, FLAC, etc.) and automatically resamples to 16kHz.
+## 🎓 Learn by Building: A Free, Hands-On Course
 
-## 🎓 Learn by Building: Free ASR Course
+This repository is also a free, 6-hour course designed to teach you the art and science of building modern ASR systems. No black boxes. No magic. Just clean, understandable code and a clear path from raw audio to a deployed model.
 
-Want to deeply understand how speech recognition works? We've created a **6-hour hands-on course** that teaches you ASR by building your own model from scratch.
+**[📚 Start the Course](docs/QUICKSTART.md)** | **[📖 See the Full Curriculum](docs/course/0-course-overview.md)**
 
-**[📚 Start the Course](docs/QUICKSTART.md)** | **[📖 Course Overview](docs/course/0-course-overview.md)**
+In just six hours, you will:
 
-**What you'll learn:**
-- How audio becomes numbers and how encoders process them
-- Language model architectures and multimodal bridging
-- Parameter-efficient training with LoRA
-- Model evaluation, debugging, and deployment
+-   **Understand the Architecture:** Go deep on the encoder-projector-decoder model that powers modern ASR.
+-   **Master PEFT:** Learn the theory and practice of parameter-efficient fine-tuning with LoRA.
+-   **Train Your Own Model:** Get your hands dirty and train a model from scratch on a real-world dataset.
+-   **Deploy and Share:** Push your model to the Hugging Face Hub, write a professional model card, and share your work with the world.
 
-**What you'll build:**
-- Your own trained ASR model
-- Published to HuggingFace Hub with your name on it
-- Results added to the community leaderboard
+## Quick Start: Train Your Own Model
 
-**Time**: 6 hours (6 one-hour classes) | **Cost**: ~$12 for GPU training
-
-Each class has a 20-minute lecture and 40 minutes of hands-on coding. All exercise scripts are pre-created for you!
-
-## Quick start
-
-The fastest way to feel the magic is to train your own model. Boot up an A40 GPU box from your favorite provider (I like RunPod), clone this repo, and kick off training:
+Ready to build? You can train your own model in just a few steps.
 
 ```bash
+# 1. Clone the repo and install dependencies
 git clone https://github.com/alexkroman/tiny-audio.git
 cd tiny-audio
 poetry install
 
-# Quick test run (20 steps, ~5 minutes)
-poetry run python src/train.py
+# 2. Run a quick test to make sure everything is working (~5 minutes)
+poetry run python src/train.py +experiments=mac_minimal
 
-# Full production training with encoder LoRA (~24 hours on A40)
-export HF_TOKEN='your-token'  # Get from https://huggingface.co/settings/tokens
+# 3. Start the full training (~24 hours on an A40 GPU)
+export HF_TOKEN='your-hugging-face-token' # Get from hf.co/settings/tokens
 poetry run python src/train.py +experiments=stage1
 ```
 
-If you want to run it on a remote GPU like RunPod, there are deployment scripts to make your life easier:
+## How It Works: The Tiny Audio Architecture
 
-```bash
-# Deploy code to remote GPU
-poetry run deploy-runpod --host <pod-id>.runpod.io --port 22
+Tiny Audio is built on a simple, powerful idea: combine the best pretrained models for audio and language, and efficiently teach them to work together.
 
-# Start training remotely
-poetry run remote-train \
-  --host <pod-id>.runpod.io \
-  --port 22 \
-  --config stage1
-```
+1.  **The Ear (Audio Encoder):** We start with `facebook/hubert-xlarge-ls960-ft`, a massive model that has already learned to understand the nuances of human speech. We use LoRA to fine-tune it, teaching it to focus on the specific sounds of our dataset.
+2.  **The Bridge (Audio Projector):** This is a small, trainable neural network that acts as a translator, converting the audio features from the encoder into a format the language model can understand.
+3.  **The Brain (Language Model):** We use `Qwen/Qwen-3 8B`, a powerful language model that already knows how to generate coherent text. We use LoRA to teach it to generate transcriptions instead of just general-purpose text.
 
-Now wait ~24 hours. Once it's done, your model will be pushed to HuggingFace Hub automatically (if you set `HF_TOKEN`), and you can use it just like in the example above!
-
-## How it works
-
-Tiny Audio uses a parameter-efficient three-component architecture with **LoRA adapters on both the encoder and decoder**:
-
-```text
-Audio Waveform (16kHz)
-    ↓
-HuBERT-XLarge Encoder (1.3B params, frozen)
-    + LoRA Adapters (r=8, ~2M params)
-    ↓
-Audio Embeddings [~149 frames × 1280 dim]
-    ↓
-Audio Projector (SwiGLU MLP, ~122M params)
-    - Frame stacking (5x downsample)
-    - Pre-norm (RMSNorm)
-    - gate_proj & up_proj (6400 → 8192)
-    - SwiGLU activation
-    - down_proj (8192 → 2048)
-    - Post-norm (RMSNorm)
-    ↓
-Language Embeddings [~30 frames × 2048 dim]
-    ↓
-Qwen-3 8B Decoder (8B params, frozen)
-    + LoRA Adapters (r=8, ~15M params)
-    + Flash Attention 2
-    ↓
-Text Transcription
-```
-
-**Three trainable components:**
-
-1. **Audio Encoder (LoRA Fine-tuned)**: HuBERT-XLarge (1.3B parameters frozen) with LoRA adapters on attention layers (q_proj, k_proj) - adds ~2M trainable parameters (r=8, alpha=8)
-2. **Audio Projector (Fully Trainable)**: A SwiGLU MLP (~122M parameters) that:
-   - Stacks 5 consecutive frames (5x time reduction: ~149 → ~30 frames)
-   - Maps 6400-dim stacked features → 8192-dim hidden → 2048-dim output
-   - Uses pre/post RMSNorm for stable training
-3. **Language Decoder (LoRA Fine-tuned)**: Qwen-3 8B (8B parameters frozen) with LoRA adapters on attention layers (q_proj, v_proj) - adds ~15M trainable parameters (r=8, alpha=32). Generates text transcription with Flash Attention 2
-
-**Total trainable: ~139M params (1.5% of 9.3B total)**
+By freezing the vast majority of the parameters in the encoder and decoder and only training the small LoRA adapters and the projector, we can achieve incredible efficiency without sacrificing performance.
 
 ### Key Concepts Explained
 

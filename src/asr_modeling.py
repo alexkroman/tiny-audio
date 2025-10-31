@@ -276,12 +276,18 @@ class ASRModel(PreTrainedModel):
         self.generation_config.max_new_tokens = config.max_new_tokens
         self.generation_config.min_new_tokens = config.min_new_tokens
         self.generation_config.do_sample = config.do_sample
-        self.generation_config.top_k = config.top_k
-        self.generation_config.top_p = config.top_p
         self.generation_config.use_cache = config.use_cache
 
-        # Remove temperature since we set top_k and top_p explicitly
-        self.generation_config.temperature = None
+        # Only set sampling parameters if sampling is enabled
+        if config.do_sample:
+            self.generation_config.top_k = config.top_k
+            self.generation_config.top_p = config.top_p
+            self.generation_config.temperature = config.temperature
+        else:
+            # Remove sampling parameters when not sampling
+            self.generation_config.top_k = None
+            self.generation_config.top_p = None
+            self.generation_config.temperature = None
 
         # Initialize tokenizer and resize embeddings after decoder is created
         self._init_tokenizer()
@@ -383,6 +389,16 @@ class ASRModel(PreTrainedModel):
             encoder_kwargs["low_cpu_mem_usage"] = True
 
         encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
+
+        # Set activation dropout to match wav2vec2 (HuBERT default is 0.0)
+        # IMPORTANT: Must update both config AND the actual dropout modules!
+        if hasattr(encoder.config, 'activation_dropout'):
+            encoder.config.activation_dropout = 0.1
+            # Update all intermediate_dropout modules (activation dropout)
+            for name, module in encoder.named_modules():
+                if name.endswith('intermediate_dropout'):
+                    module.p = 0.1
+
         encoder.requires_grad_(False)
 
         # Wrap encoder forward BEFORE applying LoRA to filter invalid kwargs
@@ -814,8 +830,13 @@ class ASRModel(PreTrainedModel):
         generate_kwargs.setdefault("min_new_tokens", self.config.min_new_tokens)
         generate_kwargs.setdefault("num_beams", self.config.num_beams)
         generate_kwargs.setdefault("do_sample", self.config.do_sample)
+        generate_kwargs.setdefault("temperature", self.config.temperature)
         generate_kwargs.setdefault("top_k", self.config.top_k)
         generate_kwargs.setdefault("top_p", self.config.top_p)
+        generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
+        generate_kwargs.setdefault("length_penalty", self.config.length_penalty)
+        generate_kwargs.setdefault("no_repeat_ngram_size", self.config.no_repeat_ngram_size)
+        generate_kwargs.setdefault("early_stopping", self.config.early_stopping)
         generate_kwargs.setdefault("use_cache", self.config.use_cache)
 
         im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")

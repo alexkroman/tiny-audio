@@ -19,7 +19,21 @@ By the end of this class, you will:
 
 > **Instructor**: Present these concepts. Students should just listen.
 
-## 1. Understanding Word Error Rate (5 min)
+## 1. A Philosophy of Evaluation (5 min)
+
+Before we dive into the specifics of Word Error Rate (WER), let's talk about how to think about evaluation. Relying on a single metric can be misleading. A good evaluation strategy is layered and includes both quantitative and qualitative measures.
+
+**The Layered Evaluation Suite:**
+
+- **Primary Metric (WER)**: This is our main quantitative measure of performance. It's great for tracking progress and comparing models, but it doesn't tell the whole story.
+- **Secondary Benchmarks**: In a real-world project, you would also track performance on a range of other benchmarks that test for different capabilities, such as robustness to noise, performance on different accents, or understanding of specific domains.
+- **Qualitative Analysis ("Vibe Testing")**: This is where you interact with your model directly. You listen to its transcriptions, you try it on different kinds of audio, and you get a feel for its strengths and weaknesses. This is often where you'll find subtle bugs or quirks that the metrics don't capture.
+
+Throughout this chapter, we'll focus on WER as our primary metric, but always keep in mind that it's just one piece of the puzzle.
+
+---
+
+## 2. Understanding Word Error Rate (5 min)
 
 ### What is WER?
 
@@ -161,132 +175,62 @@ Both reference and hypothesis are normalized:
 
 ---
 
-## 3. Common Issues and Solutions (10 min)
+## 3. Proactive Stability Measures (5 min)
 
-### Training Issues
+The best way to deal with training instabilities is to prevent them from happening in the first place. Here are a few proactive measures that are commonly used in large-scale training:
+
+- **Data Filtering and Shuffling**: A surprising number of training instabilities can be traced back to bad data. Properly cleaning, filtering, and shuffling your training data is one of the most effective ways to ensure a stable training run.
+- **Z-loss**: This is a regularization technique that penalizes the model for producing logits that are too large, which can be a source of instability. It's a simple and effective way to keep the model's outputs in a reasonable range.
+- **QK-Norm**: This involves normalizing the query and key vectors in the attention mechanism. It's another technique that has been shown to improve training stability, especially in large models.
+
+While we won't be implementing these techniques in this course, it's important to know that they exist and are part of the standard toolkit for large-scale training.
+
+---
+
+## 4. Debugging Common Issues (10 min)
+
+Training instabilities, often seen as "spikes" in the loss curve, are a common part of the training marathon. Here's a more systematic way to think about them.
+
+### Recoverable vs. Non-recoverable Spikes
+
+- **Recoverable Spikes**: The loss jumps up but then returns to its previous trajectory. These are common and usually not a cause for alarm. They are often caused by a few "bad" batches of data.
+- **Non-recoverable Spikes**: The loss jumps up and stays there, or even continues to increase. This is a sign of a more serious problem, and it usually requires intervention.
+
+### Common Culprits
+
+- **Learning Rate Too High**: This is the most common cause of instability, especially at the beginning of training.
+- **Bad Data**: A batch of corrupted or out-of-distribution data can cause a sudden loss spike.
+- **Data-Parameter Interactions**: Sometimes, a specific batch of data will interact with the model's weights in an unfortunate way, leading to a spike. This is often hard to predict.
+
+### Damage Control
+
+When you encounter a non-recoverable spike, here are a few things you can try:
+
+1.  **Rewind and Skip**: The most common solution is to go back to a checkpoint from before the spike and restart the training, skipping the problematic batch of data.
+2.  **Reduce the Learning Rate**: If the instability persists, you may need to reduce the learning rate. You can do this by modifying the `learning_rate` parameter in your Hydra config and restarting the training.
+3.  **Tighten Gradient Clipping**: Gradient clipping prevents the gradients from becoming too large. If you're seeing a lot of instability, you can try reducing the `max_grad_norm` parameter in your Hydra config.
+
+### Specific Scenarios
 
 **Problem 1: Loss not decreasing**
 
-Symptoms:
+- **Symptoms**: Loss stays flat or increases.
+- **Solutions**: Try a lower learning rate, a larger effective batch size, or adjusting gradient clipping.
 
-- Loss stays flat or increases
-- No improvement over time
+**Problem 2: Overfitting**
 
-Possible causes:
-
-- Learning rate too high
-- Batch size too small
-- Gradient clipping too aggressive
-- Data quality issues
-
-Solutions:
-
-```yaml
-# Try lower learning rate
-training:
-  learning_rate: 5e-5  # instead of 1e-4
-
-# Increase effective batch size
-training:
-  gradient_accumulation_steps: 8  # instead of 4
-
-# Adjust gradient clipping
-training:
-  max_grad_norm: 5.0  # instead of 1.0
-```
-
-**Problem 2: Loss decreasing but val loss increasing**
-
-Symptoms:
-
-- Training loss goes down
-- Validation loss goes up
-- Model is overfitting!
-
-Solutions:
-
-```yaml
-# Add more data
-data:
-  max_train_samples: null  # Use all data
-
-# Increase regularization (LoRA dropout)
-peft:
-  lora_dropout: 0.1
-
-encoder_lora:
-  lora_dropout: 0.1
-```
+- **Symptoms**: Training loss goes down, but validation loss goes up.
+- **Solutions**: Add more data, or increase regularization (e.g., by adding LoRA dropout).
 
 **Problem 3: Model outputs gibberish**
 
-Symptoms:
-
-- Transcriptions are nonsense
-- Repeating words
-- Random characters
-
-Possible causes:
-
-- Projector not learning properly
-- Decoder LoRA rank too low
-- Learning rate too high
-
-Solutions:
-
-```yaml
-# Increase decoder capacity
-peft:
-  r: 128  # instead of 64
-
-# Lower learning rate
-training:
-  learning_rate: 5e-5
-```
+- **Symptoms**: Transcriptions are nonsense or repetitive.
+- **Solutions**: This could be a sign that the projector is not learning correctly. You could try increasing the LoRA rank of the decoder or lowering the learning rate.
 
 **Problem 4: Out of memory**
 
-Symptoms:
-
-- CUDA out of memory errors
-- Training crashes
-
-Solutions:
-
-```yaml
-# Reduce batch size
-training:
-  per_device_train_batch_size: 4  # instead of 8
-  gradient_accumulation_steps: 8  # keep effective batch size
-
-# Use gradient checkpointing
-training:
-  gradient_checkpointing: true
-
-# Shorter audio
-data:
-  max_audio_seconds: 25  # instead of 30
-```
-
-### Inference Issues
-
-**Problem: Slow inference**
-
-Solutions:
-
-- Use Flash Attention 2 (already enabled)
-- Batch multiple samples
-- Use mixed precision (bf16)
-- Consider model quantization
-
-**Problem: Poor quality on specific audio types**
-
-Solutions:
-
-- Collect more data of that type
-- Analyze error patterns
-- Adjust training data distribution
-- Fine-tune on domain-specific data
+- **Symptoms**: CUDA out of memory errors.
+- **Solutions**: Reduce the `per_device_train_batch_size` and increase `gradient_accumulation_steps` to maintain the same effective batch size. You can also enable `gradient_checkpointing`.
 
 ---
 

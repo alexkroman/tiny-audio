@@ -30,6 +30,18 @@
                 <p class="small">Tiny Audio Course • 20 minutes</p>
             </section>
 
+            <!-- The Training Marathon -->
+            <section>
+                <h2>The Training Marathon</h2>
+                <p>Training isn't a sprint; it's a marathon</p>
+                <ul style="margin-top: 1.5em;">
+                    <li><span class="highlight">Preparation:</span> Setup, data, and configuration</li>
+                    <li><span class="highlight">Monitoring:</span> Keep an eye on your run</li>
+                    <li><span class="highlight">Debugging:</span> Be ready for the unexpected</li>
+                    <li><span class="highlight">Patience:</span> It takes time!</li>
+                </ul>
+            </section>
+
             <!-- The Full Fine-Tuning Problem -->
             <section>
                 <h2>The Full Fine-Tuning Problem</h2>
@@ -223,12 +235,37 @@ configs/hydra/
                 <h2>Key Training Hyperparameters</h2>
                 <ul class="small">
                     <li><strong>Learning Rate:</strong> 1e-4 (how fast the model learns)</li>
+                    <li><strong>Learning Rate Schedule:</strong> Cosine decay with warmup</li>
                     <li><strong>Batch Size:</strong> 8 per device (samples per gradient update)</li>
                     <li><strong>Gradient Accumulation:</strong> 4 steps (effective batch size = 32)</li>
                     <li><strong>Max Steps:</strong> 10,000 (~24 hours on A40)</li>
-                    <li><strong>Warmup Steps:</strong> 500 (gradually increase learning rate)</li>
-                    <li><strong>Mixed Precision:</strong> bf16 (brain float 16-bit for speed)</li>
+                    <li><strong>Mixed Precision:</strong> bf16 (for speed and memory)</li>
                 </ul>
+            </section>
+
+            <!-- Pre-flight Checklist -->
+            <section>
+                <h2>Pre-flight Checklist</h2>
+                <p>Before a long training run, always check:</p>
+                <ul>
+                    <li><span class="highlight">Infrastructure:</span> Is the GPU working?</li>
+                    <li><span class="highlight">Evaluation:</span> Are your evals ready?</li>
+                    <li><span class="highlight">Checkpoints:</span> Is auto-resume working?</li>
+                    <li><span class="highlight">Logging:</span> Are you logging all key metrics?</li>
+                </ul>
+            </section>
+
+            <!-- Scaling Laws -->
+            <section>
+                <h2>A Glimpse into Scaling Laws</h2>
+                <p>How do big labs decide what to train?</p>
+                <p style="margin-top: 1.5em;">They use <strong class="highlight">scaling laws</strong> to predict performance based on:</p>
+                <ul>
+                    <li>Model size (parameters)</li>
+                    <li>Training data (tokens)</li>
+                    <li>Compute (FLOPs)</li>
+                </ul>
+                <p class="small" style="margin-top: 1em;">This helps them allocate their massive compute budgets effectively.</p>
             </section>
 
             <!-- Key Takeaways -->

@@ -19,7 +19,22 @@ By the end of this class, you will:
 
 > **Instructor**: Present these concepts. Students should just listen.
 
-## 1. From Sound Waves to Numbers (5 min)
+## 1. The Importance of Data Quality (5 min)
+
+Before we dive into the technical details of audio processing, let's talk about the single most important factor in training a great model: **data quality**.
+
+No amount of architectural cleverness or hyperparameter tuning can make up for a poor-quality dataset. The goal of all the processing steps we're about to discuss is to create a **clean, consistent, and high-quality** dataset that our model can learn from effectively.
+
+Think of it this way:
+
+- **Good Data**: A clear, consistent signal that the model can learn from.
+- **Bad Data**: Noise that confuses the model and hurts performance.
+
+Our job in this chapter is to turn raw, messy audio into good data.
+
+---
+
+## 2. From Sound Waves to Numbers (5 min)
 
 ### What is Sound?
 
@@ -86,16 +101,11 @@ Transforms audio through:
 
 **HuBERT** = **H**idden **U**nit **BERT**
 
-Key innovation: **Self-supervised learning on unlabeled audio**
+Key innovation: **Self-supervised learning as data curation at scale**.
 
-- No transcriptions needed!
-- Trained on 60,000 hours of speech
-- Learns by predicting masked audio segments
+HuBERT was pre-trained on 60,000 hours of unlabeled speech. This is a powerful example of the principle from "The Smol Training Playbook": leveraging massive, diverse datasets to build foundational knowledge. Instead of needing transcriptions, HuBERT learns the structure of speech by predicting masked audio segments.
 
-**Analogy**: Like learning English by filling in blanks:
-
-- "The quick brown ___ jumped over the lazy dog"
-- No explicit grammar lessons needed!
+**Analogy**: Like learning a language by listening to thousands of hours of conversation and learning to predict missing words, without ever opening a dictionary.
 
 ### Architecture
 

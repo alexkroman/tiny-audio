@@ -22,7 +22,7 @@ By the end of this class, you will:
 
 ### The Problem
 
-Humans communicate primarily through speech, but computers understand text. ASR bridges this gap by converting audio waveforms into written text.
+Humans communicate primarily through speech, but computers understand text. ASR is the magic that bridges this gap, turning the rich, messy, and beautiful complexity of human speech into structured, machine-readable text.
 
 **Real-world applications:**
 
@@ -86,7 +86,7 @@ Let's understand each component:
 
 **Purpose**: Convert raw audio waveforms into meaningful feature representations
 
-**What it does:**
+**What it does**
 
 - Takes audio waveform (numbers representing sound pressure over time)
 - Outputs a sequence of embedding vectors (one per ~20ms of audio)
@@ -94,15 +94,15 @@ Let's understand each component:
 
 **Key insight**: HuBERT is **pre-trained** on thousands of hours of unlabeled speech, so it already "understands" human speech patterns before we even start training!
 
-**Analogy**: Think of it like a musician who can hear a song and recognize the notes, rhythm, and instruments without reading sheet music.
+**Analogy**: An expert musician who can listen to any piece of music and instantly transcribe the notes, rhythm, and instrumentation, without ever seeing the sheet music.
 
 **Size**: 1.3 billion parameters (frozen during our training)
 
 ### Component 2: Audio Projector (~122M parameters)
 
-**Purpose**: Bridge the gap between audio features and language model expectations
+**Purpose**: Bridge the gap between the audio and language worlds.
 
-**What it does:**
+**What it does**
 
 - Takes HuBERT's audio embeddings
 - Downsamples by 5x (reduces sequence length for efficiency)
@@ -116,23 +116,23 @@ Let's understand each component:
 
 **Key insight**: This is the **largest trainable component** - all ~122M parameters learn during training.
 
-**Analogy**: Like a translator who converts spoken French into written English, adapting both language and medium.
+**Analogy**: A skilled diplomat who can fluently translate between two very different cultures, ensuring the meaning and nuance are preserved.
 
 ### Component 3: Language Model Decoder (Qwen-3 8B)
 
-**Purpose**: Generate text transcription from audio features
+**Purpose**: Generate a coherent and grammatically correct text transcription.
 
-**What it does:**
+**What it does**
 
 - Receives audio embeddings (via projector)
-- Uses linguistic knowledge to predict text
-- Handles grammar, spelling, punctuation
+- Uses its vast linguistic knowledge to predict the text
+- Handles grammar, spelling, and punctuation
 
-**Key insight**: Qwen-3 is also **pre-trained** on massive text corpora, so it already knows English grammar, vocabulary, and context before seeing any audio!
+**Key insight**: Qwen-3 is also **pre-trained** on a massive amount of text, so it already has a deep understanding of language before it ever "hears" any audio.
 
 **Size**: 8 billion parameters (we use LoRA to adapt efficiently)
 
-**Analogy**: Like a skilled writer who can dictate text, knowing proper grammar and spelling naturally.
+**Analogy**: A master storyteller who can take a sequence of events (the audio features) and weave them into a compelling narrative (the final transcription).
 
 ### Why This Architecture?
 
@@ -147,6 +147,25 @@ Let's understand each component:
 **Cost**: ~$12 for a full training run
 
 **Quality**: Leverages pre-trained knowledge from both audio and language domains
+
+**A Note on Architectural Choices:**
+
+The Tiny Audio architecture is a **dense transformer-based** model. It's crucial to start with a **proven, stable baseline**. While other exciting architectures like Mixture-of-Experts (MoE) and Hybrids (combining transformers with other architectures like SSMs) exist, they introduce complexity that isn't necessary for our goal.
+
+- **Dense models** are well-understood, stable to train, and perform exceptionally well, especially for a focused task like ours.
+- **MoE and Hybrid models** are powerful but can be more complex to train and tune. They are often used for massive, general-purpose models, but for our specific use case, a dense model is the most direct path to a high-quality, custom ASR model.
+
+By starting with a solid, well-understood architecture, we can focus on the nuances of audio processing, data, and training, which is where we'll see the biggest improvements.
+
+### Rules of Engagement
+
+A disciplined, empirical approach to model training is crucial. As we go through this course, we'll follow a few key "rules of engagement":
+
+1.  **Systematic Beats Intuitive**: Don't just guess what will work. We'll use systematic experiments (ablations) to validate our choices.
+2.  **Change One Thing at a Time**: When we run experiments, we'll only change one variable at a time. This is the only way to know for sure what's responsible for any improvements (or regressions!).
+3.  **Validate Every Change**: Every modification, no matter how small, should be tested. We'll rely on evaluation metrics, not just gut feelings, to guide our decisions.
+
+Adopting this mindset will not only lead to a better final model but will also teach you the disciplined process that professionals use to build world-class models.
 
 ---
 

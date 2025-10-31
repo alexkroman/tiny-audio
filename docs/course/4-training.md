@@ -19,7 +19,20 @@ By the end of this class, you will:
 
 > **Instructor**: Present these concepts. Students should just listen.
 
-## 1. Why Parameter-Efficient Training? (5 min)
+## 1. The Training Marathon (5 min)
+
+Before we dive into the specifics of LoRA and Hydra, let's talk about what it means to train a model. Training isn't a sprint; it's a **marathon**. It's not just about hitting "run" and waiting for it to finish. It involves:
+
+- **Preparation**: Setting up your environment, data, and configuration correctly.
+- **Monitoring**: Keeping an eye on your training run to make sure it's progressing as expected.
+- **Debugging**: Being prepared to diagnose and fix problems when they inevitably arise.
+- **Patience**: Long training runs can take hours or even days. You need to be patient and methodical.
+
+This chapter will guide you through the first steps of this marathon: preparing for and starting your training run.
+
+---
+
+## 2. Why Parameter-Efficient Training? (5 min)
 
 ### The Full Fine-Tuning Problem
 
@@ -199,37 +212,59 @@ configs/hydra/
 
 ### Key Training Hyperparameters
 
+These are the most important knobs to turn when training a model. Understanding them is key to successful training.
+
 **Learning Rate**: `1e-4`
 
-- How fast the model learns
-- Too high = unstable, diverges
-- Too low = slow convergence
+- **What it is**: How big of a step the optimizer takes with each update.
+- **Why this value?**: It's a safe, standard starting point for fine-tuning with the AdamW optimizer. The optimal learning rate is often found through experimentation (sweeps), but `1e-4` is a solid default.
+- **Trade-offs**: Too high, and the training can become unstable and diverge. Too low, and the model will learn too slowly.
+
+**Learning Rate Schedule**: `cosine`
+
+- **What it is**: A plan for changing the learning rate over time. We don't use a fixed learning rate throughout the entire training. Instead, we use a schedule that includes:
+    - **Warmup**: We start with a very low learning rate and gradually increase it to the peak value (`1e-4`) over the first `500` steps. This prevents the model from making large, destabilizing updates at the beginning of training.
+    - **Decay**: After the warmup, we gradually decrease the learning rate, following a cosine curve. This allows the model to settle into a good minimum.
+- **Why this is important**: A good learning rate schedule is crucial for stable and efficient training.
 
 **Batch Size**: `8` (per device)
 
-- How many samples per gradient update
-- Larger = more stable, faster, more memory
-- Smaller = less memory, noisier gradients
-
-**Gradient Accumulation**: `4` steps
-
-- Effective batch size = 8 × 4 = 32
-- Simulates larger batches with less memory
+- **What it is**: The number of training examples processed in a single forward/backward pass.
+- **Why this value?**: It's a balance between memory usage and gradient quality. A larger batch size provides a more accurate estimate of the gradient, but it also requires more GPU memory.
+- **Effective Batch Size**: With `gradient_accumulation_steps=4`, our effective batch size is `8 * 4 = 32`. This means we accumulate gradients over 4 small batches before updating the model, simulating a larger batch size without the memory overhead.
 
 **Max Steps**: `10,000`
 
-- Total training iterations
-- ~24 hours on A40
-
-**Warmup Steps**: `500`
-
-- Gradually increase learning rate
-- Prevents early instability
+- **What it is**: The total number of training iterations.
+- **Why this value?**: This is chosen to be long enough for the model to converge on the Loquacious dataset, which takes about 24 hours on an A40 GPU.
 
 **Mixed Precision**: `bf16`
 
-- Brain floating point 16-bit
-- Faster, less memory, similar accuracy
+- **What it is**: Using a 16-bit floating-point format (bfloat16) for training instead of the standard 32-bit format.
+- **Why?**: It dramatically reduces memory usage and speeds up training on modern GPUs (like the A40 and H100) with minimal impact on accuracy.
+
+### Pre-flight Checklist
+
+Before launching a long training run, it's a good practice to go through a pre-flight checklist:
+
+- **[ ] Infrastructure Readiness**: Is your GPU available and working correctly? (We'll do a local test run to verify this).
+- **[ ] Evaluation Setup**: Are your evaluation metrics and scripts ready to go? (We'll cover this in the next chapter).
+- **[ ] Checkpoint & Auto-resume**: Is your training script set up to save checkpoints periodically and resume from the latest one if it gets interrupted? (The `transformers` Trainer does this for us automatically!).
+- **[ ] Logging**: Are you logging all the important metrics (loss, learning rate, etc.) to a tool like Weights & Biases? (We'll set this up in the workshop).
+
+### A Glimpse into Scaling Laws
+
+How do researchers at large labs decide how big of a model to train and for how long? They use **scaling laws**.
+
+Scaling laws are empirical formulas that predict how a model's performance will improve as you increase:
+
+- **Model size** (number of parameters)
+- **Training data** (number of tokens)
+- **Compute** (total FLOPs)
+
+These laws allow researchers to make informed decisions about how to allocate their massive compute budgets. For example, the "Chinchilla" scaling laws from DeepMind suggested that for a given amount of compute, it's often better to train a smaller model on more data.
+
+While we won't be deriving our own scaling laws in this course, it's a fascinating area of research that drives many of the decisions behind the models we use every day.
 
 ---
 

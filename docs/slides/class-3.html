@@ -69,7 +69,7 @@
             <section>
                 <h2>Qwen-3 8B Architecture</h2>
                 <ul>
-                    <li>3 billion parameters</li>
+                    <li>8 billion parameters</li>
                     <li>32 transformer layers</li>
                     <li>2048 hidden dimensions</li>
                     <li>32 attention heads</li>
@@ -95,6 +95,7 @@
                     <li><strong>Auto-regressive generation:</strong> One token at a time</li>
                     <li><strong>Flash Attention 2:</strong> For speed</li>
                 </ul>
+                <p class="small" style="margin-top: 1em;"><strong>Why Decoder-Only?</strong> It excels at generative tasks, is simpler to train, and has strong community support. Other architectures like Encoder-Decoder or MoE are powerful but more complex.</p>
             </section>
 
             <!-- The Modality Gap Problem -->
@@ -138,6 +139,17 @@
                     Formula: Swish(Wx) ⊗ (Vx)<br>
                     where Swish(x) = x * sigmoid(x)
                 </p>
+            </section>
+
+            <!-- Why SwiGLU -->
+            <section>
+                <h2>Why SwiGLU?</h2>
+                <p>The de-facto standard in modern LLMs</p>
+                <ul>
+                    <li><span class="highlight">Gated Mechanism:</span> Controls information flow</li>
+                    <li><span class="highlight">Expressiveness:</span> Learns more complex patterns</li>
+                    <li><span class="highlight">Performance:</span> Outperforms older activations like ReLU</li>
+                </ul>
             </section>
 
             <!-- SwiGLU Architecture Flow -->

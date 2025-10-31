@@ -104,6 +104,17 @@
                 </table>
             </section>
 
+            <!-- The Training Compass -->
+            <section>
+                <h2>The Training Compass</h2>
+                <p>A framework for strategic thinking</p>
+                <ul>
+                    <li><span class="highlight">Why</span> are we building this? (Goal)</li>
+                    <li><span class="highlight">What</span> should we build? (Architecture, Data)</li>
+                    <li><span class="highlight">How</span> will we build it? (Tools, Techniques)</li>
+                </ul>
+            </section>
+
             <!-- Architecture Overview -->
             <section>
                 <h2>The Tiny Audio Architecture</h2>
@@ -153,7 +164,7 @@
                     <li><span class="highlight">Key insight:</span> Also pre-trained! Knows English already</li>
                     <li><span class="highlight">Training:</span> Uses LoRA (efficient adaptation)</li>
                 </ul>
-                <p class="small">✍️ <em>Analogy: Skilled writer dictating text naturally</em></p>
+                <p class="small">✍️ <em>Analogy: A skilled writer dictating text naturally</em></p>
             </section>
 
             <!-- Why This Architecture -->
@@ -180,6 +191,18 @@
                         </ul>
                     </div>
                 </div>
+                <p class="small" style="margin-top: 1em;"><strong>Note on Architectural Choices:</strong> We use a dense transformer, a proven and stable architecture. Other types like Mixture-of-Experts (MoE) and Hybrids are powerful but more complex, making them less ideal for our focused goal.</p>
+            </section>
+
+            <!-- Rules of Engagement -->
+            <section>
+                <h2>Rules of Engagement</h2>
+                <p>A disciplined approach to training</p>
+                <ul>
+                    <li><span class="highlight">Systematic Beats Intuitive:</span> We use experiments to validate choices.</li>
+                    <li><span class="highlight">Change One Thing at a Time:</span> Isolate variables to understand their impact.</li>
+                    <li><span class="highlight">Validate Every Change:</span> Rely on metrics, not just gut feelings.</li>
+                </ul>
             </section>
 
             <!-- Course Goals -->

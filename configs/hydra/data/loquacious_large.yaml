@@ -15,6 +15,12 @@ max_audio_seconds: 25.0
 # Audio processing
 sample_rate: 16000
 
+# SpecAugment parameters (wav2vec2-style masking)
+mask_time_prob: 0.065  # Probability of masking time steps (6.5% - wav2vec2 pretraining default)
+mask_time_length: 10  # Length of time mask spans
+mask_feature_prob: 0.0  # Feature masking disabled (not used for waveforms)
+mask_feature_length: 10
+
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 num_proc: 8
