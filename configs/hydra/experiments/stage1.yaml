@@ -5,7 +5,7 @@
 # This is the most comprehensive training approach with ~18M trainable parameters
 defaults:
   - override /model: large
-  - override /data: loquacious_clean
+  - override /data: loquacious_large
   - override /training: production
   - override /encoder_lora: default
 
@@ -22,9 +22,9 @@ model:
 
 # Encoder LoRA Configuration
 encoder_lora:
-  r: 8  # LoRA rank for encoder
-  lora_alpha: 8  # Scaling factor (alpha/r = 1.0)
-  target_modules: ["q_proj", "k_proj"]  # HuBERT attention projections
+  r: 16  # LoRA rank for encoder
+  lora_alpha: 16  # Scaling factor (alpha/r = 1.0)
+  target_modules: [q_proj, k_proj, v_proj, o_proj]  # HuBERT attention projections
   lora_dropout: 0.05
   bias: none
 
@@ -32,7 +32,7 @@ encoder_lora:
 peft:
   peft_method: lora  # Enable LoRA fine-tuning on decoder
   r: 8  # LoRA rank for decoder (matching encoder)
-  lora_alpha: 8
+  lora_alpha: 32
   target_modules: ["q_proj", "v_proj"]  
   bias: none  # No bias training
   task_type: CAUSAL_LM  # Causal language modeling
@@ -48,10 +48,8 @@ training:
 
   per_device_train_batch_size: 3
   per_device_eval_batch_size: 3
-  gradient_accumulation_steps: 5
-  eval_accumulation_steps: 5
-
-  # Learning rate - Higher for LoRA
+  gradient_accumulation_steps: 4
+  eval_accumulation_steps: 4
 
   learning_rate: 1.0e-4
 
@@ -68,7 +66,7 @@ training:
   gradient_checkpointing: false
 
   # Training duration
-  max_steps: 25000
+  max_steps: 50000
 
   # Reproducibility
   seed: 42

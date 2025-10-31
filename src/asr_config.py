@@ -44,7 +44,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # Set default values for generation params if not present in kwargs
         # This allows config.json values to take precedence when loading from pretrained
         generation_defaults = {
-            "num_beams": 3,
+            "num_beams": 1,
             "max_new_tokens": 128,
             "min_new_tokens": 1,
             "do_sample": False,
