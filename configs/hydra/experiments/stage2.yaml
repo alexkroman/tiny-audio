@@ -5,13 +5,13 @@
 # This is the most comprehensive training approach with ~18M trainable parameters
 defaults:
   - override /model: large
-  - override /data: loquacious_clean
+  - override /data: loquacious_large
   - override /training: production
   - override /encoder_lora: default
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
-  # pretrained_model_path: "mazesmazes/tiny-audio"
+  pretrained_model_path: "mazesmazes/tiny-audio"
   
   decoder_model_name: Qwen/Qwen3-8B
   encoder_model_name: facebook/hubert-xlarge-ls960-ft
@@ -22,16 +22,16 @@ model:
 
 # Encoder LoRA Configuration
 encoder_lora:
-  r: 0  # LoRA rank for encoder
+  r: 16  # LoRA rank for encoder
   lora_alpha: 16  # Scaling factor (alpha/r = 1.0)
-  target_modules: [q_proj, k_proj, v_proj, o_proj]  # HuBERT attention projections
+  target_modules: [q_proj, k_proj]  # HuBERT attention projections
   lora_dropout: 0.05
   bias: none
 
 # Decoder LoRA Configuration
 peft:
   peft_method: lora  # Enable LoRA fine-tuning on decoder
-  r: 0  # LoRA rank for decoder (matching encoder)
+  r: 8  # LoRA rank for decoder (matching encoder)
   lora_alpha: 32
   target_modules: ["q_proj", "v_proj"]  
   bias: none  # No bias training
@@ -46,12 +46,12 @@ training:
   hub_strategy: "checkpoint"
   hub_private_repo: false
 
-  per_device_train_batch_size: 4
-  per_device_eval_batch_size: 4
-  gradient_accumulation_steps: 3
-  eval_accumulation_steps: 3
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 6
+  eval_accumulation_steps: 6
 
-  learning_rate: 1.0e-4
+  learning_rate: 5.0e-6
 
   warmup_steps: 1000
   lr_scheduler_type: "cosine_with_min_lr"
@@ -66,16 +66,16 @@ training:
   gradient_checkpointing: false
 
   # Training duration
-  max_steps: 5000
+  max_steps: 50000
 
   # Reproducibility
-  seed: 42
+  seed: 45
   ignore_data_skip: true
 
 # Data configuration
 data:
-  max_audio_seconds: 10.0
-  mask_time_prob: 0.0
+  max_audio_seconds: 16.0
+  mask_time_prob: 0.05
 
 # Early stopping configuration
 early_stopping:

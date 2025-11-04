@@ -390,15 +390,6 @@ class ASRModel(PreTrainedModel):
 
         encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
-        # Set activation dropout to match wav2vec2 (HuBERT default is 0.0)
-        # IMPORTANT: Must update both config AND the actual dropout modules!
-        if hasattr(encoder.config, 'activation_dropout'):
-            encoder.config.activation_dropout = 0.1
-            # Update all intermediate_dropout modules (activation dropout)
-            for name, module in encoder.named_modules():
-                if name.endswith('intermediate_dropout'):
-                    module.p = 0.1
-
         encoder.requires_grad_(False)
 
         # Wrap encoder forward BEFORE applying LoRA to filter invalid kwargs
