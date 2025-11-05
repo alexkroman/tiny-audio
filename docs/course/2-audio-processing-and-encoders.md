@@ -366,112 +366,13 @@ We adapt these because they control *what* the model pays attention to - crucial
 
 In the next 40 minutes, you will:
 
-- **Exercise 1** (15 min): Visualize audio processing (raw vs normalized waveforms)
-- **Exercise 2** (25 min): Swap the encoder (HuBERT → Whisper)
+- **Swap the encoder** (HuBERT → Whisper) and understand the power of modular architecture
 
-By the end, you'll understand audio preprocessing and experience the power of modular architecture by swapping components!
-
----
-
-## Workshop Exercise 1: Visualize Audio Processing (15 min)
-
-
-### Goal
-
-See how raw audio becomes normalized features.
-
-
-### Your Task
-
-Create visualizations showing audio before and after processing.
-
-
-### Instructions
-
-**Step 1: Create `explore_audio.py`**
-
-(Note: librosa and matplotlib are already installed as part of the course dependencies)
-
-
-```python
-import librosa
-import librosa.display
-import matplotlib.pyplot as plt
-import numpy as np
-from transformers import Wav2Vec2FeatureExtractor
-
-# Load an audio file
-audio_path = "test.wav"  # Update to your audio file
-waveform, sr = librosa.load(audio_path, sr=16000)
-
-print(f"Sample rate: {sr} Hz")
-print(f"Duration: {len(waveform) / sr:.2f} seconds")
-print(f"Shape: {waveform.shape}")
-print(f"Value range: [{waveform.min():.4f}, {waveform.max():.4f}]")
-
-# Apply feature extraction
-feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
-    "facebook/hubert-xlarge-ls960-ft"
-)
-inputs = feature_extractor(waveform, sampling_rate=sr, return_tensors="pt")
-
-print(f"\nAfter feature extraction:")
-print(f"Shape: {inputs.input_values.shape}")
-print(f"Mean: {inputs.input_values.mean():.4f}")
-print(f"Std: {inputs.input_values.std():.4f}")
-
-# Visualize
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4))
-
-# Original waveform
-ax1.plot(np.arange(len(waveform)) / sr, waveform)
-ax1.set_title("Raw Waveform")
-ax1.set_xlabel("Time (seconds)")
-ax1.set_ylabel("Amplitude")
-ax1.grid(True, alpha=0.3)
-
-# Normalized waveform
-normalized = inputs.input_values.squeeze().numpy()
-ax2.plot(np.arange(len(normalized)) / sr, normalized)
-ax2.set_title("After Z-Normalization")
-ax2.set_xlabel("Time (seconds)")
-ax2.set_ylabel("Normalized Amplitude")
-ax2.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig("audio_processing.png", dpi=150)
-print("\n✓ Saved visualization to audio_processing.png")
-
-
-```
-
-**Step 2: Run the script**
-
-
-```bash
-poetry run python explore_audio.py
-
-
-```
-
-**Step 3: Open and examine `audio_processing.png`**
-
-
-### Success Checkpoint
-
-- [ ] Script ran without errors
-
-- [ ] Generated `audio_processing.png`
-
-- [ ] Can see difference between raw and normalized waveforms
-
-- [ ] Normalized waveform is centered around 0
-
-**Observations**: Notice how normalization centers the audio and makes it more uniform!
+By the end, you'll experience firsthand how to experiment with different components and understand the trade-offs between different encoders!
 
 ---
 
-## Workshop Exercise 2: Swap the Encoder (25 min)
+## Workshop Exercise: Swap the Encoder (40 min)
 
 ### Goal
 
@@ -641,73 +542,9 @@ Each component is independent. Experiment freely!
 
 **Workshop (40 min):**
 
-- Visualized raw vs normalized audio waveforms
+- Hands-on encoder swapping (HuBERT → Whisper)
 
-- Experimented with swapping encoders (HuBERT vs Whisper)
-
-## Key Takeaways
-
-
-✅ Audio is digitized through sampling (16kHz for speech)
-
-✅ Wav2Vec2FeatureExtractor normalizes audio for training
-
-✅ HuBERT compresses audio ~320x (48k samples → 149 embeddings)
-
-✅ Each embedding represents ~20ms of audio in 1280 dimensions
-
-✅ Only 1.6% of model parameters are trainable (146M / 9.3B)
-
-## Homework (Optional)
-
-Before Class 3, experiment with:
-
-1. **Audio Preprocessing Challenge**:
-   - Test 5 different audio files with varying quality
-   - Measure embedding dimensions for each
-   - Plot the relationship between audio length and number of embeddings
-
-2. **Encoder Experiments**:
-   - Compare HuBERT vs Wav2Vec2 on the same audio
-   - Test inference speed on different hardware (CPU vs GPU if available)
-   - Try different model sizes (base, large, xlarge)
-
-3. **LoRA Analysis**:
-   - Calculate memory savings for different rank values
-   - Read about LoRA in the original paper
-   - Think: Why do we use different ranks for encoder (r=16) vs decoder (r=8)?
-
-4. **Code Exploration**:
-   - Read the `AudioProjector` class in `src/asr_modeling.py:29-77`
-   - Find where LoRA is applied in the code
-   - Think: "How would you bridge 1280-dim audio to 2048-dim text?"
-
-5. **Advanced Experiments**:
-   - What happens if you skip normalization?
-   - Can you visualize attention patterns in HuBERT?
-   - How do embeddings change for different speakers?
-
-## Check Your Understanding
-
-1. **Why do we use 16kHz sampling rate?**
-   - Captures human speech frequency range
-   - Balances quality with computational efficiency
-   - Industry standard for ASR
-
-2. **What does z-normalization do?**
-   - Centers audio around 0 (zero mean)
-   - Scales to unit variance (std=1)
-   - Stabilizes training
-
-3. **How much does HuBERT compress the time dimension?**
-   - ~320x reduction
-   - 48,000 samples → ~149 frames
-   - Each frame = ~20ms of audio
-
-4. **Why use LoRA instead of full fine-tuning?**
-   - Only trains 4M params vs 1.3B (0.3%)
-   - Faster, less memory, cheaper
-   - Preserves pre-trained knowledge
+- Understanding modular architecture and component trade-offs
 
 ---
 

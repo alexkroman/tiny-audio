@@ -1143,32 +1143,6 @@ Over 6 classes, you've:
 
 - Real ML engineering experience!
 
-## Key Takeaways from Entire Course
-
-🎯 **Technical Skills:**
-
-- Parameter-efficient fine-tuning with LoRA
-
-- Multimodal architecture (audio + text)
-
-- Training pipeline configuration
-
-- Model evaluation and debugging
-
-- ML model deployment
-
-🎯 **Practical Skills:**
-
-- Cloud GPU management
-
-- Git/GitHub workflow
-
-- Technical writing (model cards)
-
-- Community contribution
-
-- End-to-end ML project
-
 ## Your Model Stats
 
 **Fill in your achievements:**
@@ -1279,31 +1253,6 @@ Over 6 classes, you've:
 - [Axolotl](https://github.com/OpenAccess-AI-Collective/axolotl)
 
 - [Unsloth](https://github.com/unslothai/unsloth)
-
-## Final Check Your Understanding
-
-1. **What's the full training pipeline?**
-   - Data → Encoder → Projector → Decoder → Loss
-   - LoRA adapters on encoder and decoder
-   - Projector fully trained
-
-2. **Why is Tiny Audio "tiny"?**
-   - Only 3.2% of parameters trainable
-   - Fast, cheap, accessible training
-   - Yet produces working models!
-
-3. **What makes a model "production-ready"?**
-   - Good evaluation metrics
-   - Professional documentation
-   - Easy to use (one-line API)
-   - Publicly accessible
-
-4. **How do you improve a model?**
-   - More/better data
-   - Longer training
-   - Hyperparameter tuning
-   - Architecture changes
-   - Error analysis → targeted fixes
 
 ---
 
