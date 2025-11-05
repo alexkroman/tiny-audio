@@ -1,6 +1,7 @@
 # Class 2: Audio Processing and Encoders
 
 **Duration**: 1 hour (20 min lecture + 40 min hands-on)
+
 **Goal**: Understand how audio becomes data and how HuBERT processes it
 
 ## Learning Objectives
@@ -8,16 +9,18 @@
 By the end of this class, you will:
 
 - Understand how audio is digitized (sampling, bit depth)
+
 - Know what feature extraction does
+
 - Understand HuBERT's self-supervised pre-training
+
 - Visualize audio waveforms and embeddings
+
 - Explore the encoder's outputs hands-on
 
 ---
 
 # PART A: LECTURE (20 minutes)
-
-> **Instructor**: Present these concepts with interactive demonstrations and experiments.
 
 ## 1. The Importance of Data Quality (5 min)
 
@@ -28,6 +31,7 @@ No amount of architectural cleverness or hyperparameter tuning can make up for a
 Think of it this way:
 
 - **Good Data**: A clear, consistent signal that the model can learn from.
+
 - **Bad Data**: Noise that confuses the model and hurts performance.
 
 Our job in this chapter is to turn raw, messy audio into good data.
@@ -36,6 +40,7 @@ Our job in this chapter is to turn raw, messy audio into good data.
 
 ## 2. From Sound Waves to Numbers (5 min)
 
+
 ### What is Sound?
 
 Sound = vibrations traveling through air as pressure waves
@@ -43,8 +48,11 @@ Sound = vibrations traveling through air as pressure waves
 **Key Properties:**
 
 - **Amplitude**: How loud (wave height)
+
 - **Frequency**: Pitch (oscillation speed)
+
 - **Duration**: How long
+
 
 ### Digitizing Audio
 
@@ -53,36 +61,48 @@ Computers need numbers, not waves. We use **sampling**:
 **Sampling Rate**: Measurements per second
 
 - CD quality: 44,100 Hz
+
 - Phone: 8,000 Hz
+
 - **Tiny Audio: 16,000 Hz** ← Perfect for speech!
 
 **Why 16 kHz?**
 
 - Captures human speech range (85-255 Hz fundamental + harmonics to ~8 kHz)
+
 - Balances quality vs efficiency
+
 - Industry standard for ASR
 
 **Example:**
 
 - 1 second of audio at 16kHz = 16,000 numbers
+
 - 3 second audio file = 48,000 numbers!
 
 **Quick Experiment**: Later we'll test how different sample rates affect quality:
+
 - Downsample to 8kHz (telephone quality)
+
 - Upsample to 44.1kHz (CD quality)
+
 - Compare transcription accuracy
 
 ---
 
 ## 2. Feature Extraction with Wav2Vec2 (5 min)
 
+
 ### The Problem
 
 Raw waveforms are:
 
 - High-dimensional (16,000 numbers/second!)
+
 - Noisy
+
 - Hard for models to learn from
+
 
 ### The Solution: Wav2Vec2FeatureExtractor
 
@@ -102,6 +122,7 @@ Transforms audio through:
 
 ## 3. The HuBERT Encoder (10 min)
 
+
 ### What is HuBERT?
 
 **HuBERT** = **H**idden **U**nit **BERT**
@@ -112,7 +133,10 @@ HuBERT was pre-trained on 60,000 hours of unlabeled speech. This is a powerful e
 
 **Analogy**: Like learning a language by listening to thousands of hours of conversation and learning to predict missing words, without ever opening a dictionary.
 
+
 ### Architecture
+
+
 
 ```
 Audio waveform (16 kHz)
@@ -124,46 +148,67 @@ Audio features (~50 Hz)
 24 Transformer Layers
     ↓
 1280-dim embeddings per frame
+
+
 ```
 
 **HuBERT-XLarge Stats:**
 
 - 24 transformer layers
+
 - 1280 hidden dimensions
+
 - 16 attention heads/layer
+
 - ~1.3 billion parameters
+
 - Pre-trained on LibriLight (60K hours)
+
 
 ### What HuBERT Learned
 
 During pre-training, HuBERT learned:
 
 - Phonemes (speech sounds)
+
 - Speaker characteristics
+
 - Acoustic environments
+
 - Prosody (rhythm, stress, intonation)
 
 **This is why we don't train from scratch!**
 
+
 ### Time Compression
+
+
 
 ```
 3 seconds audio at 16kHz = 48,000 samples
     ↓ (HuBERT encoder)
 ~149 embeddings × 1280 dimensions
+
+
 ```
 
 - **Compression**: ~320x reduction
+
 - **Each embedding**: Represents ~20ms of audio
+
 - **Dense representation**: More meaningful than raw waveform
+
 
 ### LoRA Adaptation
 
 In Tiny Audio, we add small LoRA adapters:
 
 - **Base model**: Frozen (1.3B params)
+
 - **LoRA adapters**: Trainable (~2M params, r=8)
+
 - **Target**: q_proj, k_proj in attention layers
+
 - **Result**: 0.15% of encoder params are trainable!
 
 **Analogy**: Putting adjustable glasses on a camera - camera unchanged, but output is tuned.
@@ -172,16 +217,16 @@ In Tiny Audio, we add small LoRA adapters:
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
-> **Students**: Follow these step-by-step instructions.
 >
-> **Instructor**: Circulate and help students.
 
 ## Workshop Overview
 
 In the next 40 minutes, you will:
 
 - **Exercise 1**: Visualize audio processing and experiment with preprocessing
+
 - **Exercise 2**: Explore HuBERT outputs and compare with Wav2Vec2
+
 - **Exercise 3**: Count trainable parameters and experiment with LoRA ranks
 
 By the end, you'll see exactly how audio becomes embeddings and how different choices affect the model!
@@ -190,19 +235,23 @@ By the end, you'll see exactly how audio becomes embeddings and how different ch
 
 ## Workshop Exercise 1: Visualize Audio Processing (15 min)
 
+
 ### Goal
 
 See how raw audio becomes normalized features.
 
+
 ### Your Task
 
 Create visualizations showing audio before and after processing.
+
 
 ### Instructions
 
 **Step 1: Create `explore_audio.py`**
 
 (Note: librosa and matplotlib are already installed as part of the course dependencies)
+
 
 ```python
 import librosa
@@ -252,30 +301,41 @@ ax2.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.savefig("audio_processing.png", dpi=150)
 print("\n✓ Saved visualization to audio_processing.png")
+
+
 ```
 
 **Step 2: Run the script**
 
+
 ```bash
 poetry run python explore_audio.py
+
+
 ```
 
 **Step 3: Open and examine `audio_processing.png`**
 
+
 ### Success Checkpoint
 
 - [ ] Script ran without errors
+
 - [ ] Generated `audio_processing.png`
+
 - [ ] Can see difference between raw and normalized waveforms
+
 - [ ] Normalized waveform is centered around 0
 
 **Observations**: Notice how normalization centers the audio and makes it more uniform!
 
-### Experimentation Time!
+
+### Experimentation Time
 
 **Experiment 1: Test different sample rates**
 
 Add this to your `explore_audio.py`:
+
 
 ```python
 # Experiment with different sample rates
@@ -299,9 +359,12 @@ for idx, target_sr in enumerate(sample_rates):
 plt.tight_layout()
 plt.savefig("sample_rate_comparison.png", dpi=150)
 print("✓ Saved sample rate comparison to sample_rate_comparison.png")
+
+
 ```
 
 **Experiment 2: Test noise addition**
+
 
 ```python
 # Add different levels of noise
@@ -326,28 +389,37 @@ for idx, noise_level in enumerate(noise_levels):
 plt.tight_layout()
 plt.savefig("noise_robustness.png", dpi=150)
 print("✓ Saved noise analysis to noise_robustness.png")
+
+
 ```
 
 **Questions to explore:**
+
 - How does sample rate affect frequency resolution?
+
 - Does normalization help with noise robustness?
+
 - What's the minimum sample rate for intelligible speech?
 
 ---
 
 ## Workshop Exercise 2: Explore HuBERT Outputs (15 min)
 
+
 ### Goal
 
 See how HuBERT converts audio waveforms into embeddings.
+
 
 ### Your Task
 
 Pass audio through HuBERT and examine the output dimensions.
 
+
 ### Instructions
 
 **Step 1: Create `explore_hubert.py`**
+
 
 ```python
 import torch
@@ -407,15 +479,22 @@ print(f"Min: {embeddings.min():.4f}")
 print(f"Max: {embeddings.max():.4f}")
 
 print("\n✓ Processing complete!")
+
+
 ```
 
 **Step 2: Run the script**
 
+
 ```bash
 poetry run python explore_hubert.py
+
+
 ```
 
 **Expected output:**
+
+
 
 ```
 Loading HuBERT model...
@@ -449,22 +528,30 @@ Min: -2.3456
 Max: 3.1234
 
 ✓ Processing complete!
+
+
 ```
+
 
 ### Success Checkpoint
 
 - [ ] Script ran successfully
+
 - [ ] Saw input dimensions (e.g., `[1, 48000]`)
+
 - [ ] Saw output dimensions (e.g., `[1, 149, 1280]`)
+
 - [ ] Understand the ~320x compression ratio
 
 **Key Insight**: 48,000 audio samples → 149 embeddings of 1280 dimensions each!
+
 
 ### Encoder Comparison Experiment
 
 Now let's compare HuBERT with Wav2Vec2:
 
 **Step 1: Create `compare_encoders.py`**
+
 
 ```python
 import torch
@@ -530,9 +617,12 @@ if len(results) == 2:
     speedup = results[1]['inference_time'] / results[0]['inference_time']
     size_ratio = results[0]['params'] / results[1]['params']
     print(f"\nHuBERT is {size_ratio:.1f}x larger but only {1/speedup:.1f}x slower")
+
+
 ```
 
 **Step 2: Visualize embedding differences**
+
 
 ```python
 # Add to compare_encoders.py
@@ -562,28 +652,37 @@ for idx, r in enumerate(results[:2]):
 plt.tight_layout()
 plt.savefig("encoder_embeddings.png", dpi=150)
 print("\n✓ Saved embedding comparison to encoder_embeddings.png")
+
+
 ```
 
 **Questions to explore:**
+
 - Which encoder is faster? Why?
+
 - How do embedding patterns differ between encoders?
+
 - Would Wav2Vec2 work as a drop-in replacement?
 
 ---
 
 ## Workshop Exercise 3: Count Trainable Parameters (10 min)
 
+
 ### Goal
 
 Understand which parts of the model are trainable vs frozen.
+
 
 ### Your Task
 
 Count parameters in the encoder, projector, and decoder.
 
+
 ### Instructions
 
 **Step 1: Create `count_params.py`**
+
 
 ```python
 from src.asr_modeling import ASRModel
@@ -626,15 +725,22 @@ print(f"  Trainable params:  {trainable:>15,}")
 print(f"  Frozen params:     {total - trainable:>15,}")
 print(f"  Efficiency:        {100 * trainable / total:>14.2f}%")
 print("\n✓ We train only 1.5% of the total parameters!")
+
+
 ```
 
 **Step 2: Run the script**
 
+
 ```bash
 poetry run python count_params.py
+
+
 ```
 
 **Expected output:**
+
+
 
 ```
 ENCODER (HuBERT + LoRA)
@@ -667,22 +773,30 @@ OVERALL MODEL
   Efficiency:                  1.48%
 
 ✓ We train only 1.5% of the total parameters!
+
+
 ```
+
 
 ### Success Checkpoint
 
 - [ ] Script ran successfully
+
 - [ ] Saw parameter counts for all three components
+
 - [ ] Understand that projector is 100% trainable
+
 - [ ] Understand that encoder/decoder use small LoRA adapters
 
 **Key Insight**: We're only training 139M out of 9.3B parameters - that's the magic of parameter-efficient fine-tuning!
+
 
 ### LoRA Rank Experiment
 
 Let's explore how LoRA rank affects trainable parameters:
 
 **Create `lora_experiment.py`:**
+
 
 ```python
 def calculate_lora_params(in_dim, out_dim, rank):
@@ -747,11 +861,14 @@ def recommend_usage(rank):
         return "Complex adaptation, domain shift"
     else:
         return "Maximum flexibility, longer training"
+
+
 ```
 
 **Experiment: Test different LoRA configurations**
 
 Add this analysis:
+
 
 ```python
 # Compare LoRA targets
@@ -776,11 +893,16 @@ for targets, name in lora_targets:
 
     params_total = 24 * params  # 24 layers
     print(f"{name:20s}: {params_total/1e6:6.2f}M params")
+
+
 ```
 
 **Discussion Questions:**
+
 - How does rank affect model capacity?
+
 - What's the sweet spot for rank vs performance?
+
 - Which LoRA targets are most important?
 
 ---
@@ -792,22 +914,32 @@ for targets, name in lora_targets:
 **Lecture (20 min):**
 
 - How audio becomes numbers (sampling, bit depth)
+
 - Feature extraction with Wav2Vec2
+
 - HuBERT architecture and self-supervised pre-training
+
 - LoRA adaptation strategy
 
 **Workshop (40 min):**
 
 - Visualized raw vs normalized audio
+
 - Explored HuBERT's embedding outputs
+
 - Counted trainable vs frozen parameters
 
 ## Key Takeaways
 
+
 ✅ Audio is digitized through sampling (16kHz for speech)
+
 ✅ Wav2Vec2FeatureExtractor normalizes audio for training
+
 ✅ HuBERT compresses audio ~320x (48k samples → 149 embeddings)
+
 ✅ Each embedding represents ~20ms of audio in 1280 dimensions
+
 ✅ Only 3.2% of model parameters are trainable (139M / 4.3B)
 
 ## Homework (Optional)
@@ -865,26 +997,19 @@ Before Class 3, experiment with:
 
 ## Further Reading (Optional)
 
+
 ### Papers
 
 - [HuBERT: Self-Supervised Speech Representation Learning](https://arxiv.org/abs/2106.07447)
+
 - [Wav2Vec 2.0](https://arxiv.org/abs/2006.11477)
+
 
 ### Tutorials
 
 - [Librosa documentation](https://librosa.org/doc/main/index.html)
+
 - [Audio processing basics](https://pytorch.org/audio/stable/tutorials/audio_preprocessing_tutorial.html)
-
----
-
-## Next Class
-
-In [Class 3: Language Models and Projectors](./3-language-models-and-projectors.md), we'll explore:
-
-- How language models generate text
-- The Qwen-3 8B decoder architecture
-- Deep dive into the AudioProjector and SwiGLU
-- Why downsampling matters for efficiency
 
 [Previous: Class 1: Introduction and Setup](./1-introduction-and-setup.md) | [Next: Class 3: Language Models and Projectors](./3-language-models-and-projectors.md)
 

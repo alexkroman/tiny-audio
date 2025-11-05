@@ -88,21 +88,21 @@ By freezing the vast majority of the parameters in the encoder and decoder and o
 
 **Encoder LoRA:**
 
-- Rank: 8 (default)
-- Alpha: 8 (scaling factor)
+- Rank: 16
+- Alpha: 16 (scaling factor)
 - Target modules: q_proj, k_proj in HuBERT attention layers
-- Adds ~2M trainable parameters
+- Adds ~4M trainable parameters (3,932,160)
 
-*Decoder LoRA:*
+**Decoder LoRA:**
 
-- Rank: 8 (default)
+- Rank: 8
 - Alpha: 32 (scaling factor = 4.0)
 - Target modules: q_proj, v_proj in Qwen-3 attention layers
-- Adds ~15M trainable parameters
+- Adds ~4M trainable parameters (3,833,856)
 
 Why use parameter-efficient training with LoRA on both encoder and decoder? Because:
 
-- **You train ~139M parameters** instead of 9.3+ billion (projector: ~122M + encoder LoRA: ~2M + decoder LoRA: ~15M)
+- **You train ~146M parameters** instead of 9.3+ billion (projector: ~138M + encoder LoRA: ~4M + decoder LoRA: ~4M)
 - **Training is fast** (~24 hours on A40) thanks to reduced gradient computations
 - **It's cheap** (~$12 for a full run)
 - **You leverage pretrained knowledge** from both audio and language domains
@@ -205,7 +205,7 @@ poetry run eval mazesmazes/tiny-audio --max-samples 100
 Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable, hackable codebase** designed to train an ASR model start to end and produce a working model you can actually use and learn from.
 
 - **~1000 lines of core code** across 7 Python files in `src/`
-- **Parameter-efficient training**: Train only ~139M parameters (projector + encoder LoRA + decoder LoRA) instead of 4.3B+
+- **Parameter-efficient training**: Train only ~146M parameters (projector + encoder LoRA + decoder LoRA) instead of 9.3B+
 - **Dependency-lite**: Just PyTorch, transformers, datasets, PEFT, and a few other essentials via Poetry
 - **No magic**: Read the code and understand exactly what's happening
 - **Fully yours**: Train it, modify it, deploy it however you want

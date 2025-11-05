@@ -1,6 +1,7 @@
 # Class 4: Training
 
 **Duration**: 1 hour (20 min lecture + 40 min hands-on)
+
 **Goal**: Understand parameter-efficient training and start your first training run
 
 ## Learning Objectives
@@ -8,24 +9,29 @@
 By the end of this class, you will:
 
 - Understand LoRA (Low-Rank Adaptation) and why it works
+
 - Know how to configure training with Hydra
+
 - Set up cloud GPU infrastructure
+
 - Start a training run and monitor progress
+
 - Understand key training hyperparameters
 
 ---
 
 # PART A: LECTURE (20 minutes)
 
-> **Instructor**: Present these concepts with hands-on experimentation opportunities.
-
 ## 1. The Training Marathon (5 min)
 
 Before we dive into the specifics of LoRA and Hydra, let's talk about what it means to train a model. Training isn't a sprint; it's a **marathon**. It's not just about hitting "run" and waiting for it to finish. It involves:
 
 - **Preparation**: Setting up your environment, data, and configuration correctly.
+
 - **Monitoring**: Keeping an eye on your training run to make sure it's progressing as expected.
+
 - **Debugging**: Being prepared to diagnose and fix problems when they inevitably arise.
+
 - **Patience**: Long training runs can take hours or even days. You need to be patient and methodical.
 
 This chapter will guide you through the first steps of this marathon: preparing for and starting your training run.
@@ -34,21 +40,29 @@ This chapter will guide you through the first steps of this marathon: preparing 
 
 ## 2. Why Parameter-Efficient Training? (5 min)
 
+
 ### The Full Fine-Tuning Problem
 
 **Traditional approach**: Update all model parameters
 
 - HuBERT encoder: 1.3B params
+
 - Qwen-3 8B decoder: 8B params
+
 - **Total**: 9.3B+ parameters to train
 
 **Problems**:
 
 - Requires massive GPU memory (80GB+ per GPU)
+
 - Very slow (weeks of training)
+
 - Expensive ($1000s in compute)
+
 - Risk of catastrophic forgetting
+
 - Hard to reproduce
+
 
 ### The Solution: Parameter-Efficient Fine-Tuning (PEFT)
 
@@ -63,14 +77,19 @@ Instead, we:
 **Results**:
 
 - Faster training (24 hours vs weeks)
+
 - Cheaper (~$12 vs $1000s)
+
 - Less memory (40GB vs 80GB+)
+
 - Better generalization
+
 - Easy to share (only save adapter weights)
 
 ---
 
 ## 2. Understanding LoRA (10 min)
+
 
 ### What is LoRA?
 
@@ -78,33 +97,47 @@ Instead, we:
 
 **Core idea**: Large weight matrices can be approximated by low-rank decompositions.
 
+
 ### The Math (Simplified)
 
 Normal training updates weight matrix W:
 
+
+
 ```
 W_new = W_old + ΔW
+
+
 ```
 
 LoRA approximates ΔW with two small matrices:
 
+
+
 ```
 ΔW ≈ B × A
+
+
 ```
 
 Where:
 
 - W is large (e.g., 2048 × 2048 = 4.2M params)
+
 - B is tall and thin (2048 × 8 = 16K params)
+
 - A is short and wide (8 × 2048 = 16K params)
+
 - **Total**: 32K params instead of 4.2M! (0.76%)
 
 **Rank (r)**: The middle dimension (8 in this example)
 
 - Lower rank = fewer parameters, less capacity
+
 - Higher rank = more parameters, more capacity
 
 **Quick Experiment**: Calculate parameter savings for different ranks:
+
 ```python
 # Try ranks 1, 4, 8, 16, 32, 64
 for rank in [1, 4, 8, 16, 32, 64]:
@@ -112,9 +145,13 @@ for rank in [1, 4, 8, 16, 32, 64]:
     original = 2048 * 2048
     savings = 100 * (1 - lora_params/original)
     print(f"Rank {rank:2d}: {lora_params:,} params ({savings:.1f}% savings)")
+
+
 ```
 
+
 ### How LoRA Works in Practice
+
 
 ```python
 # Original forward pass
@@ -123,82 +160,113 @@ output = linear_layer(input)  # Uses W
 # With LoRA
 output = linear_layer(input) + lora_B(lora_A(input))
          └─────frozen──────┘   └────────trainable────────┘
+
+
 ```
 
 **During training**:
 
 - W stays frozen
+
 - Only B and A get gradient updates
+
 - Much less memory and computation
 
 **During inference**:
 
 - Can merge: W' = W + B×A
+
 - No speed penalty!
+
 - Same inference cost as original model
+
 
 ### LoRA Hyperparameters
 
 **Rank (r)**:
 
 - Controls adapter capacity
+
 - Encoder: r=8 (conservative)
+
 - Decoder: r=64 (more capacity for language task)
 
 **Alpha (lora_alpha)**:
 
 - Scaling factor: `scale = alpha / r`
+
 - Encoder: alpha=8 (scale=1.0)
+
 - Decoder: alpha=32 (scale=0.5)
+
 - Controls magnitude of adapter contribution
 
 **Target Modules**:
 
 - Which layers get adapters
+
 - Encoder: q_proj, k_proj (query and key in attention)
+
 - Decoder: q_proj, v_proj (query and value in attention)
+
 - More modules = more parameters but more capacity
 
 **Dropout**:
 
 - Regularization for adapters
+
 - We use 0.0 (no dropout)
+
 - Pre-trained models already well-regularized
+
 
 ### Why These Specific Configurations?
 
 **Encoder (r=8, small)**:
 
 - Already well pre-trained on speech
+
 - Just needs small adjustments
+
 - ~2M parameters
 
 **Decoder (r=64, larger)**:
 
 - Bigger adaptation needed (text → speech-aware text)
+
 - More capacity for language generation
+
 - ~15M parameters
 
 **Projector (no LoRA)**:
 
 - Brand new component (no pre-training)
+
 - Train fully from scratch
+
 - ~122M parameters
 
 ---
 
 ## 3. Training Configuration with Hydra (5 min)
 
+
 ### What is Hydra?
 
 **Hydra**: Configuration management framework
 
 - Compose configs from multiple files
+
 - Override via command line
+
 - Experiment tracking
+
 - Clean, maintainable configs
 
+
 ### Tiny Audio Config Structure
+
+
 
 ```
 configs/hydra/
@@ -218,7 +286,10 @@ configs/hydra/
 └── experiments/
     ├── stage1.yaml         # Full training preset
     └── mac_minimal.yaml    # Local testing preset
+
+
 ```
+
 
 ### Key Training Hyperparameters
 
@@ -227,7 +298,9 @@ These are the most important knobs to turn when training a model. Understanding 
 **Learning Rate**: `1e-4`
 
 - **What it is**: How big of a step the optimizer takes with each update.
+
 - **Why this value?**: It's a safe, standard starting point for fine-tuning with the AdamW optimizer. The optimal learning rate is often found through experimentation (sweeps), but `1e-4` is a solid default.
+
 - **Trade-offs**: Too high, and the training can become unstable and diverge. Too low, and the model will learn too slowly.
 
 **Learning Rate Schedule**: `cosine`
@@ -235,32 +308,42 @@ These are the most important knobs to turn when training a model. Understanding 
 - **What it is**: A plan for changing the learning rate over time. We don't use a fixed learning rate throughout the entire training. Instead, we use a schedule that includes:
     - **Warmup**: We start with a very low learning rate and gradually increase it to the peak value (`1e-4`) over the first `500` steps. This prevents the model from making large, destabilizing updates at the beginning of training.
     - **Decay**: After the warmup, we gradually decrease the learning rate, following a cosine curve. This allows the model to settle into a good minimum.
+
 - **Why this is important**: A good learning rate schedule is crucial for stable and efficient training.
 
 **Batch Size**: `8` (per device)
 
 - **What it is**: The number of training examples processed in a single forward/backward pass.
+
 - **Why this value?**: It's a balance between memory usage and gradient quality. A larger batch size provides a more accurate estimate of the gradient, but it also requires more GPU memory.
+
 - **Effective Batch Size**: With `gradient_accumulation_steps=4`, our effective batch size is `8 * 4 = 32`. This means we accumulate gradients over 4 small batches before updating the model, simulating a larger batch size without the memory overhead.
 
 **Max Steps**: `10,000`
 
 - **What it is**: The total number of training iterations.
+
 - **Why this value?**: This is chosen to be long enough for the model to converge on the Loquacious dataset, which takes about 24 hours on an A40 GPU.
 
 **Mixed Precision**: `bf16`
 
 - **What it is**: Using a 16-bit floating-point format (bfloat16) for training instead of the standard 32-bit format.
+
 - **Why?**: It dramatically reduces memory usage and speeds up training on modern GPUs (like the A40 and H100) with minimal impact on accuracy.
+
 
 ### Pre-flight Checklist
 
 Before launching a long training run, it's a good practice to go through a pre-flight checklist:
 
 - **[ ] Infrastructure Readiness**: Is your GPU available and working correctly? (We'll do a local test run to verify this).
+
 - **[ ] Evaluation Setup**: Are your evaluation metrics and scripts ready to go? (We'll cover this in the next chapter).
+
 - **[ ] Checkpoint & Auto-resume**: Is your training script set up to save checkpoints periodically and resume from the latest one if it gets interrupted? (The `transformers` Trainer does this for us automatically!).
+
 - **[ ] Logging**: Are you logging all the important metrics (loss, learning rate, etc.) to a tool like Weights & Biases? (We'll set this up in the workshop).
+
 
 ### A Glimpse into Scaling Laws
 
@@ -269,7 +352,9 @@ How do researchers at large labs decide how big of a model to train and for how 
 Scaling laws are empirical formulas that predict how a model's performance will improve as you increase:
 
 - **Model size** (number of parameters)
+
 - **Training data** (number of tokens)
+
 - **Compute** (total FLOPs)
 
 These laws allow researchers to make informed decisions about how to allocate their massive compute budgets. For example, the "Chinchilla" scaling laws from DeepMind suggested that for a given amount of compute, it's often better to train a smaller model on more data.
@@ -280,17 +365,18 @@ While we won't be deriving our own scaling laws in this course, it's a fascinati
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
-> **Students**: Follow these instructions step-by-step.
 >
-> **Instructor**: Circulate and help students.
 
 ## Workshop Overview
 
 In the next 40 minutes, you will:
 
 - **Exercise 1**: Explore configs and experiment with hyperparameters
+
 - **Exercise 2**: Set up cloud GPU (RunPod or similar)
+
 - **Exercise 3**: Start training and test different configurations
+
 - **Exercise 4**: Monitor progress and experiment with metrics
 
 By the end, you'll have a model training in the cloud and understand how to optimize it!
@@ -299,56 +385,76 @@ By the end, you'll have a model training in the cloud and understand how to opti
 
 ## Workshop Exercise 1: Explore Training Configs (10 min)
 
+
 ### Goal
 
 Understand the training configuration files.
+
 
 ### Your Task
 
 Read and understand the configuration structure.
 
+
 ### Instructions
 
 **Step 1: Examine the main config**
 
+
 ```bash
 cat configs/hydra/config.yaml
+
+
 ```
 
 Look for:
 
 - Which sub-configs are imported (model, data, training, etc.)
+
 - Default values
+
 - How components are composed
 
 **Step 2: Check the experiment config**
 
+
 ```bash
 cat configs/hydra/experiments/stage1.yaml
+
+
 ```
 
 This shows the full production training setup:
 
 - Which configs it overrides
+
 - LoRA settings
+
 - Dataset configuration
+
 - Training hyperparameters
 
 **Step 3: Compare with minimal config**
 
+
 ```bash
 cat configs/hydra/experiments/mac_minimal.yaml
+
+
 ```
 
 This is for quick local testing:
 
 - Small dataset samples
+
 - Fewer steps
+
 - Same architecture
 
 **Step 4: Create your own experiment config**
 
 Create `configs/hydra/experiments/my_experiment.yaml`:
+
 
 ```yaml
 # @package _global_
@@ -379,20 +485,28 @@ model:
 
 # Experiment notes
 # TODO: Describe what you're testing here
+
+
 ```
+
 
 ### Success Checkpoint
 
 - [ ] Examined config.yaml
+
 - [ ] Understood stage1.yaml
+
 - [ ] Created my_experiment.yaml
+
 - [ ] Ready to customize training settings
 
-### Experimentation Time!
+
+### Experimentation Time
 
 **Experiment 1: Compare different learning rates**
 
 Create multiple experiment configs to test:
+
 
 ```bash
 # Create configs for different learning rates
@@ -409,9 +523,12 @@ training:
   max_steps: 100  # Short test
 EOF
 done
+
+
 ```
 
 **Experiment 2: Test batch size effects**
+
 
 ```python
 # Create a script to calculate effective batch sizes
@@ -429,9 +546,12 @@ for bs in batch_sizes:
             print(f"{bs:10} | {ga:10} | {effective:9} | {memory:6.1f} GB ✓")
         else:
             print(f"{bs:10} | {ga:10} | {effective:9} | {memory:6.1f} GB ✗")
+
+
 ```
 
 **Experiment 3: LoRA rank analysis**
+
 
 ```bash
 # Test different LoRA ranks
@@ -449,23 +569,29 @@ EOF
   # Count parameters
   echo "Encoder LoRA params: ~$(( 2 * 1280 * rank * 2 * 24 / 1000000 ))M"
 done
+
+
 ```
 
 ---
 
 ## Workshop Exercise 2: Local Test Run (15 min)
 
+
 ### Goal
 
 Run a quick training test on your local machine.
+
 
 ### Your Task
 
 Start a minimal training run to verify everything works.
 
+
 ### Instructions
 
 **Step 1: Check available compute**
+
 
 ```bash
 # Check if you have a GPU
@@ -473,13 +599,18 @@ python -c "import torch; print(f'GPU available: {torch.cuda.is_available()}'); p
 
 # Or for Mac
 python -c "import torch; print(f'MPS available: {torch.backends.mps.is_available()}')"
+
+
 ```
 
 **Step 2: Run minimal test**
 
+
 ```bash
 # This will train for just 20 steps (~5-10 minutes)
 poetry run python src/train.py +experiments=mac_minimal
+
+
 ```
 
 **What happens:**
@@ -490,6 +621,8 @@ poetry run python src/train.py +experiments=mac_minimal
 4. Saves checkpoint
 
 **Expected output:**
+
+
 
 ```
 Loading model...
@@ -510,35 +643,49 @@ Step 20/20 | Loss: 3.4567
 
 ✓ Training complete!
 ✓ Saved checkpoint to outputs/mac_minimal/
+
+
 ```
 
 **Step 3: Check the output**
 
+
 ```bash
 ls outputs/mac_minimal/
+
+
 ```
 
 You should see:
 
 - `config.json` - Model configuration
+
 - `model.safetensors` - Trained weights (projector + LoRA)
+
 - `training_args.bin` - Training settings
+
 - `trainer_state.json` - Training state
+
 
 ### Success Checkpoint
 
 - [ ] Training started successfully
+
 - [ ] Saw loss decreasing over steps
+
 - [ ] Checkpoint saved to outputs/
+
 - [ ] No errors or crashes
 
 **Note**: This is a minimal test! The model won't be good yet - we need full training.
+
 
 ### Training Experiments
 
 **Experiment 1: Monitor loss curves**
 
 Create a script to visualize training progress:
+
 
 ```python
 # monitor_training.py
@@ -570,9 +717,12 @@ if len(losses) > 5:
     reduction = (initial_loss - final_loss) / initial_loss * 100
     print(f"Loss reduction: {reduction:.1f}%")
     print(f"Average loss per step: {sum(losses)/len(losses):.3f}")
+
+
 ```
 
 **Experiment 2: Test different datasets**
+
 
 ```bash
 # Try with different data configs
@@ -588,9 +738,12 @@ poetry run python src/train.py \
   data.max_train_samples=200 \
   training.max_steps=40 \
   training.run_name="medium-test"
+
+
 ```
 
 **Experiment 3: Learning rate warmup test**
+
 
 ```python
 # Test different warmup strategies
@@ -605,19 +758,24 @@ for warmup_steps, name in warmup_configs:
     print(f"\nTesting {name} ({warmup_steps} steps)...")
     # Run training with different warmup
     # Compare convergence speed
+
+
 ```
 
 ---
 
 ## Workshop Exercise 3: Set Up Cloud Training (15 min)
 
+
 ### Goal
 
 Prepare for full-scale training on cloud GPU.
 
+
 ### Your Task
 
 Set up a cloud GPU and prepare to train.
+
 
 ### Instructions
 
@@ -626,24 +784,33 @@ Set up a cloud GPU and prepare to train.
 **Step 1: Create RunPod account**
 
 - Go to [runpod.io](https://runpod.io)
+
 - Sign up and add credit ($20-30 recommended)
 
 **Step 2: Launch a pod**
 
 - Click "Deploy"
+
 - Select "NVIDIA A40" or "A40" (40GB VRAM)
+
 - Choose "RunPod Pytorch" template
+
 - Click "Deploy"
+
 - Wait for pod to start (~2 min)
 
 **Step 3: Connect via SSH**
 
+
 ```bash
 # Get SSH command from RunPod dashboard (looks like this)
 ssh root@<pod-id>.runpod.io -p 22115 -i ~/.ssh/id_ed25519
+
+
 ```
 
 **Step 4: Set up environment on pod**
+
 
 ```bash
 # Once connected to pod
@@ -654,26 +821,35 @@ poetry install
 
 # Set up HuggingFace token (for pushing model)
 export HF_TOKEN='your_token_here'  # Get from https://huggingface.co/settings/tokens
+
+
 ```
 
 **Step 5: Start training**
 
+
 ```bash
 # Full production training
 poetry run python src/train.py +experiments=stage1
+
+
 ```
 
 **Step 6: Monitor (optional)**
+
 
 ```bash
 # In a separate terminal, watch logs
 ssh root@<pod-id>.runpod.io -p 22115 -i ~/.ssh/id_ed25519
 tail -f tiny-audio/outputs/stage1/trainer_log.txt
+
+
 ```
 
 **Option B: Using Local GPU**
 
 If you have NVIDIA RTX 3090/4090 or better:
+
 
 ```bash
 # Make sure CUDA is available
@@ -684,6 +860,8 @@ export WANDB_API_KEY='your_key'  # From https://wandb.ai/settings
 
 # Start training
 poetry run python src/train.py +experiments=stage1
+
+
 ```
 
 **Option C: Using Google Colab (Not Recommended for 24hr run)**
@@ -695,14 +873,19 @@ Good for testing but may disconnect:
 3. Use GPU runtime
 4. Run training cells
 
+
 ### Success Checkpoint
 
 - [ ] Cloud GPU pod is running
+
 - [ ] SSH connection works
+
 - [ ] Code is cloned and dependencies installed
+
 - [ ] Ready to start full training
 
 **Important**: Training takes ~24 hours. Don't close the connection! Use `tmux` or `screen` to keep it running:
+
 
 ```bash
 # Start a persistent session
@@ -713,6 +896,8 @@ poetry run python src/train.py +experiments=stage1
 
 # Detach: Ctrl+B, then D
 # Re-attach later: tmux attach -t training
+
+
 ```
 
 ---
@@ -724,22 +909,32 @@ poetry run python src/train.py +experiments=stage1
 **Lecture (20 min):**
 
 - Why parameter-efficient training matters
+
 - LoRA's low-rank adaptation explained
+
 - Training configuration with Hydra
+
 - Key hyperparameters
 
 **Workshop (40 min):**
 
 - Explored training configs
+
 - Ran local test training
+
 - Set up cloud GPU infrastructure
 
 ## Key Takeaways
 
+
 ✅ LoRA trains only ~3% of parameters (139M / 4.3B)
+
 ✅ Low-rank decomposition: ΔW ≈ B × A
+
 ✅ Encoder uses r=8, decoder uses r=64
+
 ✅ Hydra manages complex configurations
+
 ✅ Training takes ~24 hours on A40 (~$12)
 
 ## Homework
@@ -802,35 +997,30 @@ poetry run python src/train.py +experiments=stage1
 
 ## Further Reading (Optional)
 
+
 ### Papers
 
 - [LoRA: Low-Rank Adaptation](https://arxiv.org/abs/2106.09685)
+
 - [QLoRA: Efficient Finetuning](https://arxiv.org/abs/2305.14314)
+
 - [Parameter-Efficient Transfer Learning](https://arxiv.org/abs/1902.00751)
+
 
 ### Tools
 
 - [Hydra documentation](https://hydra.cc/)
+
 - [Weights & Biases](https://wandb.ai/)
+
 - [RunPod guides](https://docs.runpod.io/)
+
 
 ### Code
 
 - [PEFT library](https://github.com/huggingface/peft)
+
 - [Training script](../../src/train.py)
-
----
-
-## Next Class
-
-In [Class 5: Evaluation and Debugging](./5-evaluation-and-debugging.md), we'll:
-
-- Evaluate your trained model
-- Calculate Word Error Rate (WER)
-- Debug common training issues
-- Improve model performance
-
-**Prerequisites**: Have your training run completed or nearly done!
 
 [Previous: Class 3: Language Models and Projectors](./3-language-models-and-projectors.md) | [Next: Class 5: Evaluation and Debugging](./5-evaluation-and-debugging.md)
 

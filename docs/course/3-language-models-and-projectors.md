@@ -1,6 +1,7 @@
 # Class 3: Language Models and Projectors
 
 **Duration**: 1 hour (20 min lecture + 40 min hands-on)
+
 **Goal**: Understand how the projector bridges audio and text modalities
 
 ## Learning Objectives
@@ -8,18 +9,21 @@
 By the end of this class, you will:
 
 - Understand what language models do and how they generate text
+
 - Know the Qwen-3 8B architecture
+
 - Understand the AudioProjector's SwiGLU architecture
+
 - Implement and visualize the projection process
+
 - See how audio embeddings become text embeddings
 
 ---
 
 # PART A: LECTURE (20 minutes)
 
-> **Instructor**: Present these concepts with opportunities for experimentation.
-
 ## 1. Language Models Basics (5 min)
+
 
 ### What is a Language Model?
 
@@ -27,20 +31,29 @@ A language model predicts the next word (token) given previous words.
 
 **Example:**
 
+
+
 ```
 Input:  "The quick brown"
 Output: "fox" (predicted next word)
+
+
 ```
+
 
 ### How They Work
 
 **Training**: Learn patterns from massive text corpora
 
 - Qwen-3 8B trained on trillions of tokens
+
 - Learns grammar, facts, reasoning patterns
+
 - Develops understanding of language structure
 
 **Inference**: Generate text token by token
+
+
 
 ```
 Start: "Hello"
@@ -48,43 +61,64 @@ Step 1: "Hello, how"
 Step 2: "Hello, how are"
 Step 3: "Hello, how are you"
 Step 4: "Hello, how are you?" [STOP]
+
+
 ```
+
 
 ### Qwen-3 8B Architecture
 
 **Stats:**
 
 - 8 billion parameters
+
 - 32 transformer layers
+
 - 2048 hidden dimensions
+
 - 32 attention heads
+
 - Trained on diverse multilingual data
 
 **Why Qwen-3 8B?**
 
 - Large enough for strong performance
+
 - Efficient with LoRA fine-tuning
+
 - Open source and well-documented
+
 - Excellent text generation quality
+
 - Multilingual capabilities
 
 **Experiment Preview**: Later we'll test:
+
 - Different decoder models (Qwen vs Llama vs Mistral)
+
 - Various model sizes (1B, 3B, 8B parameters)
+
 - Impact of decoder choice on accuracy
+
 
 ### Decoder-Only Architecture
 
 Qwen-3 8B is "decoder-only" (like GPT):
 
+
+
 ```
 Input tokens → Embeddings → Transformer Layers → Next token prediction
+
+
 ```
 
 **Key features:**
 
 - Causal attention (can only look backward)
+
 - Auto-regressive generation
+
 - Flash Attention 2 for speed
 
 **Why Decoder-Only?**
@@ -92,12 +126,15 @@ Input tokens → Embeddings → Transformer Layers → Next token prediction
 The choice of architecture is a critical decision. While other architectures exist, decoder-only models have become the standard for large-scale language generation tasks.
 
 - **Encoder-Decoder Models** (like T5) are great for tasks that require a deep understanding of the input, like summarization or translation. However, they are more complex to train and are less common for generative assistants.
+
 - **Mixture-of-Experts (MoE) Models** (like Mixtral) are very powerful and efficient at inference, but they are more complex to train and require more memory.
 
 For our project, a **decoder-only model is the perfect choice** because:
 
 - It excels at **generative tasks** like ASR.
+
 - It's **simpler to train and understand** than other architectures.
+
 - The vast majority of **open-source tools and research** are focused on decoder-only models, making it easier to find support and resources.
 
 By choosing a decoder-only model, we are building on a solid, well-understood foundation.
@@ -106,20 +143,25 @@ By choosing a decoder-only model, we are building on a solid, well-understood fo
 
 ## 2. The Modality Gap Problem (5 min)
 
+
 ### The Challenge
 
 We have two different "languages":
 
 - **Audio embeddings**: 1280 dimensions from HuBERT
+
 - **Text embeddings**: 2048 dimensions from Qwen-3 8B
 
 **Problem**: Can't directly feed audio embeddings to text model!
 
 - Different dimensions (1280 vs 2048)
+
 - Different statistical distributions
+
 - Different semantic spaces
 
 **Analogy**: Like trying to plug a European power plug into an American outlet - same purpose, different format!
+
 
 ### The Solution: AudioProjector
 
@@ -136,13 +178,16 @@ A trainable neural network that:
 
 ## 3. SwiGLU Architecture Deep Dive (10 min)
 
+
 ### What is SwiGLU?
 
 **SwiGLU** = **Swi**sh **G**ated **L**inear **U**nit
 
 Used in modern architectures (Llama, PaLM, etc.) for better performance than simple MLPs.
 
+
 ### Architecture Breakdown
+
 
 ```python
 # Pseudocode for AudioProjector
@@ -168,54 +213,75 @@ def forward(audio_features):
     output = rms_norm(output)
 
     return output
+
+
 ```
+
 
 ### Why Each Component Matters
 
 **1. Frame Stacking (5x downsampling)**
 
 - Input: 149 frames × 1280D
+
 - Concatenate 5 consecutive frames → 1 super-frame
+
 - Output: ~30 frames × 6400D
+
 - **Why?** Efficiency! Reduces sequence length for decoder
 
 **2. Pre-normalization (RMSNorm)**
 
 - Concatenation breaks normalized statistics
+
 - RMSNorm re-normalizes: `x / sqrt(mean(x²))`
+
 - **Why?** Stable training, better gradients
 
 **3. SwiGLU Activation**
 
 - `gate_proj`: Controls information flow
+
 - `up_proj`: Transforms features
+
 - `silu(gate) * up`: Gated activation (selective)
+
 - **Why?** Better than ReLU, more expressive
 
 **4. Down Projection**
 
 - Maps 8192D → 2048D (LLM dimension)
+
 - **Why?** Match decoder's input size
 
 **5. Post-normalization**
 
 - Ensure output matches LLM's expected distribution
+
 - **Why?** LLM was trained on specific input stats
+
 
 ### RMSNorm vs LayerNorm
 
 **RMSNorm** (Root Mean Square Norm):
 
+
 ```python
 output = x / sqrt(mean(x²) + epsilon)
+
+
 ```
 
 **Advantages:**
 
 - Simpler than LayerNorm (no mean subtraction)
+
 - Faster computation
+
 - Similar performance
+
 - Used in Llama, Qwen-3 8B, etc.
+
 
 ### SwiGLU vs Other Activations
 
@@ -226,12 +292,15 @@ output = x / sqrt(mean(x²) + epsilon)
 
 **Formula**: `Swish(Wx) ⊗ (Vx)` where `Swish(x) = x * sigmoid(x)`
 
+
 ### Why SwiGLU?
 
 SwiGLU has become the de-facto standard activation function in modern language models like Llama, PaLM, and Qwen. Here's why:
 
 - **Gated Mechanism**: The "G" in SwiGLU stands for "Gated." The gating mechanism allows the network to control the flow of information, which has been shown to be more effective than a simple non-linearity like ReLU.
+
 - **Expressiveness**: The combination of the Swish activation function and the gating mechanism allows the network to learn more complex patterns in the data.
+
 - **Performance**: In practice, SwiGLU has been shown to outperform other activation functions on a wide range of language modeling tasks.
 
 By using SwiGLU, we are using a modern, high-performance component that is known to work well in large-scale language models.
@@ -240,16 +309,16 @@ By using SwiGLU, we are using a modern, high-performance component that is known
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
-> **Students**: Follow these instructions step-by-step.
 >
-> **Instructor**: Circulate and help students.
 
 ## Workshop Overview
 
 In the next 40 minutes, you will:
 
 - **Exercise 1**: Trace the projection process and experiment with dimensions
+
 - **Exercise 2**: Visualize embeddings and test different activations
+
 - **Exercise 3**: Compare projector configurations and decoder models
 
 By the end, you'll understand how audio becomes language and how to optimize this bridge!
@@ -258,17 +327,21 @@ By the end, you'll understand how audio becomes language and how to optimize thi
 
 ## Workshop Exercise 1: Trace the Projection Process (15 min)
 
+
 ### Goal
 
 Follow audio embeddings through the projector step-by-step.
+
 
 ### Your Task
 
 Create a script that shows dimensions at each projector stage.
 
+
 ### Instructions
 
 **Step 1: Create `trace_projector.py`**
+
 
 ```python
 import torch
@@ -368,15 +441,22 @@ print(f"Output: {output.shape[1]} frames × {output.shape[2]}D (Qwen-3 8B-ready)
 print(f"Time reduction: {encoder_output.shape[1] / output.shape[1]:.1f}x")
 print(f"Dimension change: {encoder_output.shape[2]}D → {output.shape[2]}D")
 print(f"\n✓ Audio embeddings are now ready for the language model!")
+
+
 ```
 
 **Step 2: Run the script**
 
+
 ```bash
 poetry run python trace_projector.py
+
+
 ```
 
 **Expected output:**
+
+
 
 ```
 ============================================================
@@ -397,20 +477,28 @@ After stacking: torch.Size([1, 30, 6400])
   Each frame now = ~100ms of audio
 
 ... (etc)
+
+
 ```
+
 
 ### Success Checkpoint
 
 - [ ] Script ran successfully
+
 - [ ] Saw all 6 steps of the projection process
+
 - [ ] Understand the 5x downsampling (149 → 30 frames)
+
 - [ ] Understand dimension change (1280 → 6400 → 8192 → 2048)
 
-### Experimentation Time!
+
+### Experimentation Time
 
 **Experiment 1: Test different downsampling rates**
 
 Add this to your script:
+
 
 ```python
 # Test different downsampling rates
@@ -430,9 +518,12 @@ for rate in rates:
     dim = 2048
     memory_mb = (frames_out * dim * 4) / (1024 * 1024)  # 4 bytes per float32
     print(f"  Memory for embeddings: {memory_mb:.2f} MB")
+
+
 ```
 
 **Experiment 2: Compare activation functions**
+
 
 ```python
 import torch.nn.functional as F
@@ -462,28 +553,37 @@ for name, act_fn in activations.items():
     print(f"  Range: {range_val:.2f}")
     print(f"  Mean: {output.mean().item():.4f}")
     print(f"  Std: {output.std().item():.4f}")
+
+
 ```
 
 **Questions to explore:**
+
 - What's the optimal downsampling rate?
+
 - How does activation choice affect gradient flow?
+
 - Why is SwiGLU better than simple activations?
 
 ---
 
 ## Workshop Exercise 2: Visualize Embedding Distributions (15 min)
 
+
 ### Goal
 
 See how embeddings change from audio to text space.
+
 
 ### Your Task
 
 Plot the distribution of embedding values at each stage.
 
+
 ### Instructions
 
 **Step 1: Create `visualize_projector.py`**
+
 
 ```python
 import torch
@@ -557,30 +657,41 @@ print("="*60)
 print(f"{'Audio (HuBERT)':<25} {audio_flat.mean():<10.4f} {audio_flat.std():<10.4f} {audio_flat.min():<10.4f} {audio_flat.max():<10.4f}")
 print(f"{'After Projector':<25} {text_flat.mean():<10.4f} {text_flat.std():<10.4f} {text_flat.min():<10.4f} {text_flat.max():<10.4f}")
 print(f"{'Text (LLM Native)':<25} {llm_flat.mean():<10.4f} {llm_flat.std():<10.4f} {llm_flat.min():<10.4f} {llm_flat.max():<10.4f}")
+
+
 ```
 
 **Step 2: Run the script**
 
+
 ```bash
 poetry run python visualize_projector.py
+
+
 ```
 
 **Step 3: Open `embedding_distributions.png`**
 
+
 ### Success Checkpoint
 
 - [ ] Script ran successfully
+
 - [ ] Generated `embedding_distributions.png`
+
 - [ ] Can see three histograms showing embedding distributions
+
 - [ ] Notice how projector output resembles LLM native embeddings
 
 **Observation**: The projector transforms audio embeddings to match the LLM's expected input distribution!
+
 
 ### Advanced Visualization Experiments
 
 **Experiment 1: Compare before/after normalization**
 
 Add this analysis:
+
 
 ```python
 # Trace through projector with intermediate saves
@@ -639,9 +750,12 @@ axes[5].set_title(f'Target LLM (μ={llm_data.mean():.3f}, σ={llm_data.std():.3f
 plt.tight_layout()
 plt.savefig('projection_stages.png', dpi=150)
 print("✓ Saved stage-by-stage visualization")
+
+
 ```
 
 **Experiment 2: Analyze dimension importance**
+
 
 ```python
 # Compute variance per dimension
@@ -677,23 +791,29 @@ plt.savefig('dimension_importance.png', dpi=150)
 total_var = sorted_dims.sum().item()
 top_100_var = sorted_dims[:100].sum().item()
 print(f"\nTop 100 dims capture {100*top_100_var/total_var:.1f}% of variance")
+
+
 ```
 
 ---
 
 ## Workshop Exercise 3: Test Projector Configurations (10 min)
 
+
 ### Goal
 
 Understand how projector parameters affect the model.
+
 
 ### Your Task
 
 Experiment with different projector configurations.
 
+
 ### Instructions
 
 **Step 1: Create `test_projector_config.py`**
+
 
 ```python
 from types import SimpleNamespace
@@ -783,15 +903,22 @@ print("\nTiny Audio's choice (5x, 8192 hidden):")
 print("  ✓ Balances capacity with efficiency")
 print("  ✓ ~122M params (trainable)")
 print("  ✓ ~100ms per frame (good temporal resolution)")
+
+
 ```
 
 **Step 2: Run the script**
 
+
 ```bash
 poetry run python test_projector_config.py
+
+
 ```
 
 **Expected output:**
+
+
 
 ```
 ================================================================================
@@ -816,17 +943,24 @@ Tiny Audio's choice (5x, 8192 hidden):
   ✓ Balances capacity with efficiency
   ✓ ~122M params (trainable)
   ✓ ~100ms per frame (good temporal resolution)
+
+
 ```
+
 
 ### Success Checkpoint
 
 - [ ] Script ran successfully
+
 - [ ] Saw comparison of different projector configs
+
 - [ ] Understand tradeoff between params, speed, and quality
+
 
 ### Decoder Model Comparison Experiment
 
 **Create `compare_decoders.py`:**
+
 
 ```python
 # Compare different decoder models
@@ -916,11 +1050,16 @@ for decoder in decoders[:3]:  # Top 3 models
     memory_gb = (total_trainable * 4 * 3) / 1e9  # 4 bytes, 3x for Adam
 
     print(f"{decoder['name']:<20} ~{memory_gb:.1f} GB training memory")
+
+
 ```
 
 **Questions to explore:**
+
 - How does decoder size affect ASR accuracy?
+
 - Is a larger decoder always better?
+
 - What's the speed/accuracy tradeoff?
 
 ---
@@ -932,22 +1071,32 @@ for decoder in decoders[:3]:  # Top 3 models
 **Lecture (20 min):**
 
 - Language models and text generation
+
 - Qwen-3 8B-3B architecture
+
 - The modality gap problem
+
 - SwiGLU and RMSNorm explained
 
 **Workshop (40 min):**
 
 - Traced audio through projector step-by-step
+
 - Visualized embedding distribution changes
+
 - Analyzed projector configuration tradeoffs
 
 ## Key Takeaways
 
+
 ✅ Language models predict next tokens using learned patterns
+
 ✅ AudioProjector bridges 1280D audio → 2048D text space
+
 ✅ SwiGLU uses gated activation for better performance
+
 ✅ 5x downsampling balances efficiency and temporal resolution
+
 ✅ Projector is the only fully trainable component (~122M params)
 
 ## Homework (Optional)
@@ -1006,27 +1155,21 @@ Before Class 4, experiment with:
 
 ## Further Reading (Optional)
 
+
 ### Papers
 
 - [GLU Variants Improve Transformer](https://arxiv.org/abs/2002.05202)
+
 - [RMSNorm](https://arxiv.org/abs/1910.07467)
+
 - [Qwen Technical Report](https://arxiv.org/abs/2309.16609)
+
 
 ### Code
 
 - [AudioProjector implementation](../../src/asr_modeling.py#L29-L77)
+
 - [Llama SwiGLU](https://github.com/meta-llama/llama/blob/main/llama/model.py)
-
----
-
-## Next Class
-
-In [Class 4: Training](./4-training.md), we'll:
-
-- Understand LoRA's low-rank adaptation
-- Configure training with Hydra
-- Start a training run (finally!)
-- Monitor training with Weights & Biases
 
 [Previous: Class 2: Audio Processing and Encoders](./2-audio-processing-and-encoders.md) | [Next: Class 4: Training](./4-training.md)
 
