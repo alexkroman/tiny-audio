@@ -122,12 +122,54 @@ normalized = (audio - mean) / std
 - Makes all files comparable in amplitude
 
 **Step 3: Padding & Batching**
-- Pads shorter files to match batch max length
-- Enables efficient parallel processing on GPU
+
+Training is much faster when we process multiple audio files simultaneously (batching). But GPUs require all items in a batch to be the same length.
+
+*The problem*: Audio files have different durations
+- File A: 2.5 seconds = 40,000 samples
+- File B: 1.3 seconds = 20,800 samples
+- File C: 3.2 seconds = 51,200 samples
+
+*The solution*: Padding
+- Find the longest file in the batch (File C: 51,200 samples)
+- Pad shorter files with zeros to match
+- File A: [audio data... + 11,200 zeros]
+- File B: [audio data... + 30,400 zeros]
+- File C: [audio data... (no padding needed)]
+
+Now all three files are 51,200 samples long and can be processed in parallel as a tensor with shape `[3, 51200]`.
+
+The model learns to ignore padded regions using an **attention mask** that marks which values are real audio vs padding.
+
+**Why this matters**: Batching improves training speed by ~10-50x compared to processing files one at a time.
 
 **Step 4: Tensor Conversion**
-- NumPy arrays → PyTorch tensors
-- Ready for model consumption
+
+PyTorch (our deep learning framework) operates on **tensors**, not NumPy arrays.
+
+*What's a tensor?*
+- A multi-dimensional array optimized for GPU computation
+- Similar to NumPy arrays but with automatic differentiation (gradients)
+- Can be moved to GPU for massive parallelization
+
+*The conversion*:
+```python
+# Before: NumPy array (CPU-only)
+audio_numpy = np.array([0.1, 0.2, 0.3, ...])  # shape: (48000,)
+
+# After: PyTorch tensor (CPU or GPU)
+audio_tensor = torch.tensor([0.1, 0.2, 0.3, ...])  # shape: torch.Size([48000])
+
+# Can move to GPU for fast processing
+audio_tensor = audio_tensor.to('cuda')  # Now on GPU
+```
+
+*Why this matters*:
+- **Speed**: GPU operations are 10-100x faster than CPU
+- **Gradients**: Automatic computation of derivatives for training
+- **Compatibility**: All PyTorch models expect tensor inputs
+
+After this step, our audio is ready to be consumed by the HuBERT model.
 
 **Why this matters**: Normalization reduces the model's learning burden. Instead of learning "loud audio = this, quiet audio = that," it focuses on the actual speech patterns.
 
@@ -175,18 +217,6 @@ Audio features (~50 Hz)
 
 
 ```
-
-**HuBERT-XLarge Stats:**
-
-- 24 transformer layers
-
-- 1280 hidden dimensions
-
-- 16 attention heads/layer
-
-- ~1.3 billion parameters
-
-- Pre-trained on LibriLight (60K hours)
 
 
 ### What HuBERT Learned
@@ -239,19 +269,77 @@ HuBERT performs dramatic temporal compression while increasing semantic density:
 **Think of it this way**: Instead of describing every brush stroke in a painting (raw samples), we describe what the painting depicts (embeddings). Fewer words, more meaning.
 
 
-### LoRA Adaptation
+### LoRA Adaptation: Efficient Fine-Tuning
 
-In Tiny Audio, we add small LoRA adapters:
+**The Challenge**: HuBERT has 1.3 billion parameters. Full fine-tuning would:
+- Require massive GPU memory (40GB+)
+- Take weeks to train
+- Cost hundreds of dollars
+- Risk destroying the pre-trained knowledge (catastrophic forgetting)
 
-- **Base model**: Frozen (1.3B params)
+**The Solution**: LoRA (Low-Rank Adaptation)
 
+**What is LoRA?**
+
+LoRA is a technique that lets us adapt a large pre-trained model without modifying its weights. Instead of updating the original 1.3B parameters, we add small "adapter" matrices that learn the adjustments.
+
+**How LoRA Works**:
+
+In a transformer, attention layers compute queries (Q) and keys (K) using weight matrices:
+```
+Q = input × W_q    (where W_q is a 1280×1280 matrix = 1.6M parameters)
+K = input × W_k    (where W_k is a 1280×1280 matrix = 1.6M parameters)
+```
+
+Instead of updating W_q and W_k directly, LoRA adds small adapter matrices:
+```
+Q = input × (W_q + ΔW_q)    where ΔW_q = A × B
+```
+
+The magic: ΔW is factored into two small matrices:
+- **A**: 1280 × 16 (rank r=16)
+- **B**: 16 × 1280
+
+Total parameters in ΔW: (1280 × 16) + (16 × 1280) = 40,960 parameters
+
+**The Savings**:
+- **Original**: 1,638,400 parameters per projection (1280²)
+- **LoRA**: 40,960 parameters per projection
+- **Reduction**: 40x fewer parameters!
+
+**In Tiny Audio**:
+
+- **Base model**: Frozen (1.3B params) - never updated during training
 - **LoRA adapters**: Trainable (~4M params, r=16)
+  - Applied to `q_proj` and `k_proj` (query and key projections) in all 24 attention layers
+  - Each layer gets two small adapter matrices
+- **Result**: We train only 0.3% of the encoder's parameters!
 
-- **Target**: q_proj, k_proj in attention layers
+**What is "rank" (r=16)?**
 
-- **Result**: 0.3% of encoder params are trainable!
+The rank controls the adapter size:
+- **Low rank (r=4-8)**: Fewer parameters, faster training, less adaptation capacity
+- **Medium rank (r=16-32)**: Good balance for most tasks
+- **High rank (r=64-128)**: More parameters, stronger adaptation, slower training
 
-**Analogy**: Putting adjustable glasses on a camera - the camera stays unchanged, but what it captures is tuned for your specific needs.
+We use **r=16** for the encoder because HuBERT's pre-trained representations are already excellent - we only need light adaptation for our specific dataset.
+
+**What are q_proj and k_proj?**
+
+In transformer attention:
+- **q_proj** (query projection): Transforms input into "what am I looking for?"
+- **k_proj** (key projection): Transforms input into "what information do I have?"
+- Together they compute attention scores: which parts of the audio to focus on
+
+We adapt these because they control *what* the model pays attention to - crucial for ASR where we need to focus on speech-relevant features.
+
+**Why this works**:
+1. **Preserves knowledge**: The original 1.3B weights stay frozen, keeping learned speech patterns
+2. **Task-specific adaptation**: LoRA learns adjustments for our transcription task
+3. **Efficient**: 0.3% of parameters means 40x less memory and much faster training
+4. **Modular**: Can save/load different LoRA adapters for different tasks
+
+**Analogy**: Imagine HuBERT is a master chef with 1.3 billion skills. Instead of retraining the chef entirely (expensive, risky), we give them a small recipe card (LoRA adapter) with adjustments: "add a pinch more salt here, cook 2 minutes longer there." The chef's core skills remain intact, but the output is customized for your taste.
 
 ---
 
@@ -263,13 +351,10 @@ In Tiny Audio, we add small LoRA adapters:
 
 In the next 40 minutes, you will:
 
-- **Exercise 1**: Visualize audio processing and experiment with preprocessing
+- **Exercise 1** (15 min): Visualize audio processing (raw vs normalized waveforms)
+- **Exercise 2** (25 min): Swap the encoder (HuBERT → Whisper)
 
-- **Exercise 2**: Explore HuBERT outputs and compare with Wav2Vec2
-
-- **Exercise 3**: Count trainable parameters and experiment with LoRA ranks
-
-By the end, you'll see exactly how audio becomes embeddings and how different choices affect the model!
+By the end, you'll understand audio preprocessing and experience the power of modular architecture by swapping components!
 
 ---
 
@@ -369,581 +454,157 @@ poetry run python explore_audio.py
 
 **Observations**: Notice how normalization centers the audio and makes it more uniform!
 
-
-### Experimentation Time
-
-**Experiment 1: Test different sample rates**
-
-Add this to your `explore_audio.py`:
-
-
-```python
-# Experiment with different sample rates
-sample_rates = [8000, 16000, 32000, 44100]
-fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-axes = axes.flatten()
-
-for idx, target_sr in enumerate(sample_rates):
-    # Resample audio
-    resampled = librosa.resample(waveform, orig_sr=sr, target_sr=target_sr)
-
-    # Plot spectrogram
-    D = librosa.stft(resampled, n_fft=512)
-    S_db = librosa.amplitude_to_db(np.abs(D), ref=np.max)
-
-    img = librosa.display.specshow(S_db, sr=target_sr, x_axis='time',
-                                    y_axis='hz', ax=axes[idx])
-    axes[idx].set_title(f'Sample Rate: {target_sr} Hz')
-    axes[idx].set_ylim(0, 8000)  # Focus on speech range
-
-plt.tight_layout()
-plt.savefig("sample_rate_comparison.png", dpi=150)
-print("✓ Saved sample rate comparison to sample_rate_comparison.png")
-
-
-```
-
-**Experiment 2: Test noise addition**
-
-
-```python
-# Add different levels of noise
-noise_levels = [0, 0.01, 0.05, 0.1]
-fig, axes = plt.subplots(2, 2, figsize=(12, 6))
-axes = axes.flatten()
-
-for idx, noise_level in enumerate(noise_levels):
-    # Add Gaussian noise
-    noise = np.random.normal(0, noise_level, len(waveform))
-    noisy_waveform = waveform + noise
-
-    # Apply feature extraction
-    inputs = feature_extractor(noisy_waveform, sampling_rate=sr, return_tensors="pt")
-    normalized = inputs.input_values.squeeze().numpy()
-
-    # Plot
-    axes[idx].plot(normalized[:1000])  # Show first 1000 samples
-    axes[idx].set_title(f'Noise Level: {noise_level}')
-    axes[idx].set_ylabel('Normalized Amplitude')
-
-plt.tight_layout()
-plt.savefig("noise_robustness.png", dpi=150)
-print("✓ Saved noise analysis to noise_robustness.png")
-
-
-```
-
-**Questions to explore:**
-
-- How does sample rate affect frequency resolution?
-
-- Does normalization help with noise robustness?
-
-- What's the minimum sample rate for intelligible speech?
-
 ---
 
-## Workshop Exercise 2: Explore HuBERT Outputs (15 min)
-
+## Workshop Exercise 2: Swap the Encoder (25 min)
 
 ### Goal
 
-See how HuBERT converts audio waveforms into embeddings.
+Learn how to experiment with different audio encoders by swapping HuBERT for Whisper's encoder.
 
+### Why This Matters
+
+One of the most powerful aspects of modular architectures is the ability to swap components. The encoder is the "ear" of your ASR system - different encoders have different strengths:
+- **HuBERT**: Self-supervised on 60K hours, excellent general-purpose representations
+- **Whisper**: Trained on 680K hours of weakly-supervised multilingual data, strong multilingual capabilities
 
 ### Your Task
 
-Pass audio through HuBERT and examine the output dimensions.
-
+Modify the Tiny Audio configuration to use OpenAI's Whisper encoder instead of HuBERT.
 
 ### Instructions
 
-**Step 1: Create `explore_hubert.py`**
+**Step 1: Understand the current encoder configuration**
 
-
-```python
-import torch
-from transformers import AutoModel, Wav2Vec2FeatureExtractor
-import librosa
-
-print("Loading HuBERT model...")
-encoder = AutoModel.from_pretrained("facebook/hubert-xlarge-ls960-ft")
-feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
-    "facebook/hubert-xlarge-ls960-ft"
-)
-print("✓ Model loaded!\n")
-
-# Load audio
-audio_path = "test.wav"  # Update to your audio file
-waveform, sr = librosa.load(audio_path, sr=16000)
-
-# Extract features
-inputs = feature_extractor(waveform, sampling_rate=sr, return_tensors="pt")
-
-# Pass through encoder
-print("Processing audio through HuBERT...")
-with torch.no_grad():
-    outputs = encoder(**inputs)
-
-embeddings = outputs.last_hidden_state
-
-# Print dimensions
-print("\n" + "="*50)
-print("INPUT (Raw Audio)")
-print("="*50)
-print(f"Shape: {inputs.input_values.shape}")
-print(f"Interpretation: [batch_size=1, samples={inputs.input_values.shape[-1]}]")
-print(f"Duration: {inputs.input_values.shape[-1] / sr:.2f} seconds")
-
-print("\n" + "="*50)
-print("OUTPUT (Audio Embeddings)")
-print("="*50)
-print(f"Shape: {embeddings.shape}")
-print(f"Interpretation: [batch_size=1, time_steps={embeddings.shape[1]}, embedding_dim={embeddings.shape[2]}]")
-
-# Calculate compression
-time_reduction = inputs.input_values.shape[-1] / embeddings.shape[1]
-time_per_frame = (inputs.input_values.shape[-1] / embeddings.shape[1]) / sr
-
-print(f"\nTime dimension reduction: {time_reduction:.1f}x")
-print(f"Each embedding represents: ~{time_per_frame * 1000:.1f}ms of audio")
-print(f"Embedding dimensionality: {embeddings.shape[-1]}D")
-
-# Statistics
-print("\n" + "="*50)
-print("EMBEDDING STATISTICS")
-print("="*50)
-print(f"Mean: {embeddings.mean():.4f}")
-print(f"Std: {embeddings.std():.4f}")
-print(f"Min: {embeddings.min():.4f}")
-print(f"Max: {embeddings.max():.4f}")
-
-print("\n✓ Processing complete!")
-
-
-```
-
-**Step 2: Run the script**
-
-
-```bash
-poetry run python explore_hubert.py
-
-
-```
-
-**Expected output:**
-
-
-
-```
-Loading HuBERT model...
-✓ Model loaded!
-
-Processing audio through HuBERT...
-
-==================================================
-INPUT (Raw Audio)
-==================================================
-Shape: torch.Size([1, 48000])
-Interpretation: [batch_size=1, samples=48000]
-Duration: 3.00 seconds
-
-==================================================
-OUTPUT (Audio Embeddings)
-==================================================
-Shape: torch.Size([1, 149, 1280])
-Interpretation: [batch_size=1, time_steps=149, embedding_dim=1280]
-
-Time dimension reduction: 322.1x
-Each embedding represents: ~20.1ms of audio
-Embedding dimensionality: 1280D
-
-==================================================
-EMBEDDING STATISTICS
-==================================================
-Mean: 0.0123
-Std: 0.4567
-Min: -2.3456
-Max: 3.1234
-
-✓ Processing complete!
-
-
-```
-
-
-### Success Checkpoint
-
-- [ ] Script ran successfully
-
-- [ ] Saw input dimensions (e.g., `[1, 48000]`)
-
-- [ ] Saw output dimensions (e.g., `[1, 149, 1280]`)
-
-- [ ] Understand the ~320x compression ratio
-
-**Key Insight**: 48,000 audio samples → 149 embeddings of 1280 dimensions each!
-
-
-### Encoder Comparison Experiment
-
-Now let's compare HuBERT with Wav2Vec2:
-
-**Step 1: Create `compare_encoders.py`**
-
+Look at the current model config:
 
 ```python
-import torch
-from transformers import AutoModel, Wav2Vec2FeatureExtractor
-import librosa
-import time
+from transformers import AutoConfig
 
-# Load audio
-audio_path = "test.wav"
-waveform, sr = librosa.load(audio_path, sr=16000)
+config = AutoConfig.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
 
-# Test different encoders
-encoders_to_test = [
-    ("facebook/hubert-xlarge-ls960-ft", "HuBERT-XLarge"),
-    ("facebook/wav2vec2-large-960h", "Wav2Vec2-Large"),
-]
-
-results = []
-
-for model_id, name in encoders_to_test:
-    print(f"\nTesting {name}...")
-
-    # Load model
-    encoder = AutoModel.from_pretrained(model_id)
-    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
-
-    # Prepare input
-    inputs = feature_extractor(waveform, sampling_rate=sr, return_tensors="pt")
-
-    # Time the forward pass
-    start = time.time()
-    with torch.no_grad():
-        outputs = encoder(**inputs)
-    inference_time = time.time() - start
-
-    embeddings = outputs.last_hidden_state
-
-    # Collect results
-    results.append({
-        "name": name,
-        "params": sum(p.numel() for p in encoder.parameters()) / 1e6,
-        "embedding_dim": embeddings.shape[-1],
-        "num_frames": embeddings.shape[1],
-        "inference_time": inference_time,
-        "mean": embeddings.mean().item(),
-        "std": embeddings.std().item()
-    })
-
-# Compare results
-print("\n" + "="*60)
-print("ENCODER COMPARISON")
-print("="*60)
-for r in results:
-    print(f"\n{r['name']}:")
-    print(f"  Parameters: {r['params']:.1f}M")
-    print(f"  Embedding dim: {r['embedding_dim']}")
-    print(f"  Frames produced: {r['num_frames']}")
-    print(f"  Inference time: {r['inference_time']:.3f}s")
-    print(f"  Output stats: mean={r['mean']:.4f}, std={r['std']:.4f}")
-
-# Performance comparison
-if len(results) == 2:
-    speedup = results[1]['inference_time'] / results[0]['inference_time']
-    size_ratio = results[0]['params'] / results[1]['params']
-    print(f"\nHuBERT is {size_ratio:.1f}x larger but only {1/speedup:.1f}x slower")
-
-
+print("Current encoder:", config.audio_model_id)
+print("Encoder output dim:", config.encoder_dim)
+print("Downsampling rate:", config.audio_downsample_rate)
 ```
 
-**Step 2: Visualize embedding differences**
+**Step 2: Create a new config with Whisper encoder**
 
-
-```python
-# Add to compare_encoders.py
-import matplotlib.pyplot as plt
-
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-for idx, r in enumerate(results[:2]):
-    # For visualization, we need to recompute embeddings
-    # (In practice, save them during the loop above)
-    model_id = encoders_to_test[idx][0]
-    encoder = AutoModel.from_pretrained(model_id)
-    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
-    inputs = feature_extractor(waveform, sampling_rate=sr, return_tensors="pt")
-
-    with torch.no_grad():
-        outputs = encoder(**inputs)
-    embeddings = outputs.last_hidden_state.squeeze().numpy()
-
-    # Plot first 50 dimensions of first 100 frames
-    im = axes[idx].imshow(embeddings[:100, :50].T, aspect='auto', cmap='coolwarm')
-    axes[idx].set_title(r['name'])
-    axes[idx].set_xlabel('Time (frames)')
-    axes[idx].set_ylabel('Embedding dimensions')
-    plt.colorbar(im, ax=axes[idx])
-
-plt.tight_layout()
-plt.savefig("encoder_embeddings.png", dpi=150)
-print("\n✓ Saved embedding comparison to encoder_embeddings.png")
-
-
-```
-
-**Questions to explore:**
-
-- Which encoder is faster? Why?
-
-- How do embedding patterns differ between encoders?
-
-- Would Wav2Vec2 work as a drop-in replacement?
-
----
-
-## Workshop Exercise 3: Count Trainable Parameters (10 min)
-
-
-### Goal
-
-Understand which parts of the model are trainable vs frozen.
-
-
-### Your Task
-
-Count parameters in the encoder, projector, and decoder.
-
-
-### Instructions
-
-**Step 1: Create `count_params.py`**
-
+Create `swap_encoder.py`:
 
 ```python
-from src.asr_modeling import ASRModel
 from src.asr_config import ASRConfig
+from src.asr_modeling import ASRModel
+import torch
 
-print("Loading Tiny Audio model...")
-config = ASRConfig.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
-model = ASRModel.from_pretrained("mazesmazes/tiny-audio", config=config)
-print("✓ Model loaded!\n")
+# Load base config
+base_config = ASRConfig.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
 
-def count_params(module, name):
-    """Count total and trainable parameters in a module."""
-    total = sum(p.numel() for p in module.parameters())
-    trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
-    frozen = total - trainable
-    percent = 100 * trainable / total if total > 0 else 0
+print("="*60)
+print("ORIGINAL CONFIGURATION")
+print("="*60)
+print(f"Encoder: {base_config.audio_model_id}")
+print(f"Encoder dim: {base_config.encoder_dim}")
+print(f"Decoder: {base_config.text_model_id}")
+print(f"LLM dim: {base_config.llm_dim}")
+print(f"Downsampling: {base_config.audio_downsample_rate}x")
 
-    print(f"{name}")
-    print(f"{'='*50}")
-    print(f"  Total params:      {total:>15,}")
-    print(f"  Trainable params:  {trainable:>15,}")
-    print(f"  Frozen params:     {frozen:>15,}")
-    print(f"  Trainable:         {percent:>14.2f}%")
-    print()
+# Create new config with Whisper encoder
+new_config = ASRConfig(
+    audio_model_id="openai/whisper-large-v3",  # Swap to Whisper
+    encoder_dim=1280,  # Whisper-large outputs 1280-dim embeddings
+    text_model_id=base_config.text_model_id,  # Keep same decoder
+    llm_dim=base_config.llm_dim,
+    audio_downsample_rate=5,  # Keep same downsampling
+    system_prompt=base_config.system_prompt,
+    max_new_tokens=base_config.max_new_tokens,
+)
 
-# Count by component
-count_params(model.encoder, "ENCODER (HuBERT + LoRA)")
-count_params(model.projector, "PROJECTOR (SwiGLU MLP)")
-count_params(model.decoder, "DECODER (Qwen-3 8B + LoRA)")
+print("\n" + "="*60)
+print("NEW CONFIGURATION (with Whisper)")
+print("="*60)
+print(f"Encoder: {new_config.audio_model_id}")
+print(f"Encoder dim: {new_config.encoder_dim}")
+print(f"Decoder: {new_config.text_model_id}")
+print(f"LLM dim: {new_config.llm_dim}")
+print(f"Downsampling: {new_config.audio_downsample_rate}x")
 
-# Overall
-total = sum(p.numel() for p in model.parameters())
-trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-print("="*50)
-print("OVERALL MODEL")
-print("="*50)
-print(f"  Total params:      {total:>15,}")
-print(f"  Trainable params:  {trainable:>15,}")
-print(f"  Frozen params:     {total - trainable:>15,}")
-print(f"  Efficiency:        {100 * trainable / total:>14.2f}%")
-print("\n✓ We train only 1.6% of the total parameters!")
-
-
+print("\n" + "="*60)
+print("COMPARISON")
+print("="*60)
+print(f"HuBERT: Pre-trained on 60K hours (LibriLight)")
+print(f"Whisper: Pre-trained on 680K hours (multilingual, weakly-supervised)")
+print(f"\nBoth output 1280-dimensional embeddings ✓")
+print(f"Drop-in replacement possible!")
 ```
 
-**Step 2: Run the script**
+**Step 3: Understanding the implications**
 
+When you swap encoders, consider:
+
+**What stays the same:**
+- Projector architecture (it just transforms 1280-dim → 2048-dim)
+- Decoder (Qwen-3 8B + LoRA)
+- Training procedure
+
+**What changes:**
+- Audio representations (different "listening" capabilities)
+- Multilingual support (Whisper handles 100+ languages)
+- Pre-training domain (Whisper saw more diverse data)
+
+**Trade-offs:**
+| Aspect | HuBERT | Whisper |
+|--------|---------|----------|
+| Training data | 60K hours (English) | 680K hours (multilingual) |
+| Languages | Primarily English | 100+ languages |
+| Model size | 1.3B params | 1.5B params (large-v3) |
+| Speed | Fast | Slightly slower |
+| Domain | General speech | Diverse (YouTube, podcasts, etc.) |
+
+**Step 4: Test the swap (conceptual)**
+
+To actually train with Whisper, you would:
 
 ```bash
-poetry run python count_params.py
+# Create a new experiment config: configs/hydra/experiments/whisper_encoder.yaml
+model:
+  audio_model_id: "openai/whisper-large-v3"
+  encoder_dim: 1280
 
-
+# Train with the new encoder
+poetry run python src/train.py +experiments=whisper_encoder
 ```
 
-**Expected output:**
+**What to expect:**
+- **Initialization**: Projector reinitialized (encoder dim matches)
+- **Training**: Encoder LoRA adapts Whisper instead of HuBERT
+- **Performance**: May be better on multilingual data, similar on English
 
+### Discussion Questions
 
+1. **When would you choose Whisper over HuBERT?**
+   - Multilingual ASR required
+   - Training data matches Whisper's domain (YouTube, podcasts)
+   - Want stronger baseline (more pre-training data)
 
-```
-ENCODER (HuBERT + LoRA)
-==================================================
-  Total params:       1,267,200,000
-  Trainable params:       1,966,080
-  Frozen params:      1,265,233,920
-  Trainable:                   0.16%
+2. **What if encoder dimensions don't match?**
+   - Projector input dimension must match encoder output
+   - Would need to adjust `encoder_dim` in config
+   - Example: Wav2Vec2-base outputs 768-dim (not 1280-dim)
 
-PROJECTOR (SwiGLU MLP)
-==================================================
-  Total params:         121,643,264
-  Trainable params:     121,643,264
-  Frozen params:                  0
-  Trainable:                 100.00%
+3. **Can you mix and match any encoder/decoder?**
+   - Yes! As long as dimensions are compatible
+   - Projector bridges the gap
+   - This is the power of modular architecture
 
-DECODER (Qwen-3 8B + LoRA)
-==================================================
-  Total params:       8,000,000,000
-  Trainable params:      15,335,424
-  Frozen params:      7,984,664,576
-  Trainable:                   0.19%
+### Key Insight
 
-==================================================
-OVERALL MODEL
-==================================================
-  Total params:       9,388,843,264
-  Trainable params:     138,944,768
-  Frozen params:      9,249,898,496
-  Efficiency:                  1.6%
+The beauty of the encoder-projector-decoder architecture is **modularity**. You can:
+- Swap encoders (HuBERT → Whisper → Wav2Vec2)
+- Swap decoders (Qwen → Llama → Mistral)
+- Adjust projector (SwiGLU → simple MLP)
 
-✓ We train only 1.6% of the total parameters!
-
-
-```
-
-
-### Success Checkpoint
-
-- [ ] Script ran successfully
-
-- [ ] Saw parameter counts for all three components
-
-- [ ] Understand that projector is 100% trainable
-
-- [ ] Understand that encoder/decoder use small LoRA adapters
-
-**Key Insight**: We're only training 146M out of 9.3B parameters - that's the magic of parameter-efficient fine-tuning!
-
-
-### LoRA Rank Experiment
-
-Let's explore how LoRA rank affects trainable parameters:
-
-**Create `lora_experiment.py`:**
-
-
-```python
-def calculate_lora_params(in_dim, out_dim, rank):
-    """Calculate LoRA parameters for a given rank."""
-    # LoRA: W = W0 + BA where B: in_dim x rank, A: rank x out_dim
-    down_proj = in_dim * rank  # B matrix
-    up_proj = rank * out_dim    # A matrix
-    return down_proj + up_proj
-
-# HuBERT attention dimensions
-hubert_dims = {
-    "hidden_size": 1280,
-    "num_attention_heads": 16,
-    "head_dim": 80,  # 1280 / 16
-}
-
-# Calculate for different ranks
-ranks = [1, 2, 4, 8, 16, 32, 64, 128]
-print("="*60)
-print("LoRA RANK ANALYSIS FOR HUBERT")
-print("="*60)
-
-for rank in ranks:
-    # Q and K projections (typical LoRA targets)
-    params_per_layer = 2 * calculate_lora_params(
-        hubert_dims["hidden_size"],
-        hubert_dims["hidden_size"],
-        rank
-    )
-
-    # 24 transformer layers
-    total_params = 24 * params_per_layer
-
-    # Percentage of original model
-    original_params = 1.3e9  # 1.3B for HuBERT
-    percent = 100 * total_params / original_params
-
-    print(f"Rank {rank:3d}: {total_params/1e6:6.2f}M params ({percent:.2f}% of model)")
-
-print("\n" + "="*60)
-print("MEMORY & SPEED TRADEOFFS")
-print("="*60)
-
-# Estimate memory and speed impact
-baseline_rank = 8
-for rank in [4, 8, 16, 32]:
-    memory_factor = rank / baseline_rank
-    # Speed impact is roughly linear with rank for small ranks
-    speed_factor = 1 + 0.1 * (rank - baseline_rank) / baseline_rank
-
-    print(f"Rank {rank:2d}:")
-    print(f"  Memory: {memory_factor:.1f}x vs rank-8")
-    print(f"  Speed impact: ~{speed_factor:.1f}x training time")
-    print(f"  Recommendation: {recommend_usage(rank)}")
-
-def recommend_usage(rank):
-    if rank <= 4:
-        return "Quick experiments, limited adaptation"
-    elif rank <= 16:
-        return "Good balance for most tasks"
-    elif rank <= 32:
-        return "Complex adaptation, domain shift"
-    else:
-        return "Maximum flexibility, longer training"
-
-
-```
-
-**Experiment: Test different LoRA configurations**
-
-Add this analysis:
-
-
-```python
-# Compare LoRA targets
-lora_targets = [
-    (["q_proj", "v_proj"], "Attention QV"),
-    (["q_proj", "k_proj"], "Attention QK"),
-    (["q_proj", "k_proj", "v_proj", "o_proj"], "All Attention"),
-    (["mlp.fc1", "mlp.fc2"], "FFN layers"),
-]
-
-print("\n" + "="*60)
-print("LoRA TARGET COMPARISON")
-print("="*60)
-
-rank = 8  # Fixed rank for comparison
-for targets, name in lora_targets:
-    # Rough parameter calculation
-    if "mlp" in targets[0]:
-        params = len(targets) * calculate_lora_params(1280, 5120, rank)
-    else:
-        params = len(targets) * calculate_lora_params(1280, 1280, rank)
-
-    params_total = 24 * params  # 24 layers
-    print(f"{name:20s}: {params_total/1e6:6.2f}M params")
-
-
-```
-
-**Discussion Questions:**
-
-- How does rank affect model capacity?
-
-- What's the sweet spot for rank vs performance?
-
-- Which LoRA targets are most important?
+Each component is independent. Experiment freely!
 
 ---
 
@@ -953,21 +614,21 @@ for targets, name in lora_targets:
 
 **Lecture (20 min):**
 
-- How audio becomes numbers (sampling, bit depth)
+- The audio processing pipeline (digitization, normalization, encoding)
 
-- Feature extraction with Wav2Vec2
+- How sound becomes numbers (sampling at 16kHz)
+
+- Feature extraction and preprocessing (z-normalization, padding, tensors)
 
 - HuBERT architecture and self-supervised pre-training
 
-- LoRA adaptation strategy
+- LoRA adaptation for efficient fine-tuning
 
 **Workshop (40 min):**
 
-- Visualized raw vs normalized audio
+- Visualized raw vs normalized audio waveforms
 
-- Explored HuBERT's embedding outputs
-
-- Counted trainable vs frozen parameters
+- Experimented with swapping encoders (HuBERT vs Whisper)
 
 ## Key Takeaways
 
@@ -1052,5 +713,3 @@ Before Class 3, experiment with:
 - [Audio processing basics](https://pytorch.org/audio/stable/tutorials/audio_preprocessing_tutorial.html)
 
 [Previous: Class 1: Introduction and Setup](./1-introduction-and-setup.md) | [Next: Class 3: Language Models and Projectors](./3-language-models-and-projectors.md)
-
-**See you next time!**
