@@ -24,7 +24,7 @@ model:
 encoder_lora:
   r: 0  # LoRA rank for encoder
   lora_alpha: 16  # Scaling factor (alpha/r = 1.0)
-  target_modules: [q_proj, k_proj, v_proj, o_proj]  # HuBERT attention projections
+  target_modules: [q_proj, k_proj]  # HuBERT attention projections
   lora_dropout: 0.05
   bias: none
 
