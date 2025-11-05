@@ -22,19 +22,22 @@ By the end of this class, you will:
 
 # PART A: LECTURE (20 minutes)
 
-## 1. The Importance of Data Quality (5 min)
+## 1. The Audio Processing Pipeline (5 min)
 
-Before we dive into the technical details of audio processing, let's talk about the single most important factor in training a great model: **data quality**.
+Today we're answering a fundamental question: **How does a computer "hear" and understand audio?**
 
-No amount of architectural cleverness or hyperparameter tuning can make up for a poor-quality dataset. The goal of all the processing steps we're about to discuss is to create a **clean, consistent, and high-quality** dataset that our model can learn from effectively.
+The journey from sound waves to meaningful embeddings involves three critical steps:
 
-Think of it this way:
+1. **Digitization**: Converting continuous sound waves into discrete numbers
+2. **Normalization**: Cleaning and standardizing the audio data
+3. **Encoding**: Transforming raw audio into rich, semantic representations
 
-- **Good Data**: A clear, consistent signal that the model can learn from.
+Think of it like preparing ingredients for cooking:
+- **Raw ingredients** (sound waves) → **Cleaned and prepped** (normalized audio) → **Cooked dish** (embeddings)
 
-- **Bad Data**: Noise that confuses the model and hurts performance.
+Each step is crucial. Skip normalization, and your model learns from noisy, inconsistent data. Use a weak encoder, and you lose the semantic richness needed for accurate transcription.
 
-Our job in this chapter is to turn raw, messy audio into good data.
+**The goal**: Turn messy, real-world audio into clean, dense representations that a language model can transcribe.
 
 ---
 
@@ -90,48 +93,69 @@ Computers need numbers, not waves. We use **sampling**:
 
 ---
 
-## 2. Feature Extraction with Wav2Vec2 (5 min)
+## 3. Feature Extraction: Preparing Audio for Models (5 min)
 
+### The Challenge
 
-### The Problem
+Raw waveforms create three problems for training:
 
-Raw waveforms are:
+1. **Inconsistent scale**: One file's amplitude ranges [-0.1, 0.1], another's [-1.0, 1.0]
+2. **Varying sample rates**: 8kHz phone audio mixed with 44.1kHz CD quality
+3. **Different lengths**: 2-second clips vs 10-minute recordings in the same batch
 
-- High-dimensional (16,000 numbers/second!)
-
-- Noisy
-
-- Hard for models to learn from
-
+Without preprocessing, the model wastes capacity learning to handle these variations instead of learning to transcribe speech.
 
 ### The Solution: Wav2Vec2FeatureExtractor
 
-Transforms audio through:
+This preprocessing pipeline standardizes all audio:
 
-1. **Resampling**: Convert any sample rate → 16 kHz
-2. **Z-Normalization**: `(x - mean) / std`
-   - Centers audio around 0
-   - Scales to unit variance
-   - Stabilizes training
-3. **Padding**: Makes all samples same length (enables batching)
-4. **Tensor Conversion**: NumPy arrays → PyTorch tensors
+**Step 1: Resampling**
+- Convert any sample rate → 16 kHz
+- Ensures consistent time resolution
 
-**Result**: Clean, normalized, ready-to-train audio!
+**Step 2: Z-Normalization**
+```python
+normalized = (audio - mean) / std
+```
+- Centers audio around 0 (zero mean)
+- Scales to unit variance (std ≈ 1)
+- Makes all files comparable in amplitude
+
+**Step 3: Padding & Batching**
+- Pads shorter files to match batch max length
+- Enables efficient parallel processing on GPU
+
+**Step 4: Tensor Conversion**
+- NumPy arrays → PyTorch tensors
+- Ready for model consumption
+
+**Why this matters**: Normalization reduces the model's learning burden. Instead of learning "loud audio = this, quiet audio = that," it focuses on the actual speech patterns.
+
+**Result**: Clean, consistent, model-ready audio!
 
 ---
 
-## 3. The HuBERT Encoder (10 min)
+## 4. The HuBERT Encoder: From Audio to Meaning (10 min)
 
 
 ### What is HuBERT?
 
 **HuBERT** = **H**idden **U**nit **BERT**
 
-Key innovation: **Self-supervised learning as data curation at scale**.
+HuBERT solves a critical problem: **How do you learn rich audio representations without expensive manual transcriptions?**
 
-HuBERT was pre-trained on 60,000 hours of unlabeled speech. This is a powerful example of the principle from "The Smol Training Playbook": leveraging massive, diverse datasets to build foundational knowledge. Instead of needing transcriptions, HuBERT learns the structure of speech by predicting masked audio segments.
+**The Innovation**: Self-supervised learning on unlabeled audio
 
-**Analogy**: Like learning a language by listening to thousands of hours of conversation and learning to predict missing words, without ever opening a dictionary.
+HuBERT was pre-trained on 60,000 hours of unlabeled speech from LibriLight - that's nearly 7 years of continuous audio! During pre-training, it learned to predict masked audio segments, similar to how BERT predicts masked words in text.
+
+**What makes this powerful**:
+- No transcriptions needed (unlabeled data is abundant)
+- Learns universal speech patterns (phonemes, prosody, speaker characteristics)
+- Transfers to any language or domain
+
+**Analogy**: Like a child learning language by listening for years before speaking. They internalize patterns, rhythms, and sounds without explicit grammar lessons.
+
+**Why we use pre-trained HuBERT**: It already "understands" speech. We just need to fine-tune it for our specific transcription task.
 
 
 ### Architecture
@@ -167,36 +191,52 @@ Audio features (~50 Hz)
 
 ### What HuBERT Learned
 
-During pre-training, HuBERT learned:
+During 60,000 hours of self-supervised pre-training, HuBERT developed internal representations of:
 
-- Phonemes (speech sounds)
+**Phonetic Knowledge**:
+- Phonemes (/t/, /d/, /k/, etc.) - the atomic units of speech
+- Phoneme boundaries and transitions
+- Contextual pronunciation variations
 
-- Speaker characteristics
+**Acoustic Understanding**:
+- Speaker characteristics (gender, age, accent)
+- Environmental acoustics (room reverb, background noise)
+- Channel effects (microphone quality, compression)
 
-- Acoustic environments
+**Prosodic Patterns**:
+- Rhythm and timing
+- Stress and emphasis
+- Intonation and pitch patterns
 
-- Prosody (rhythm, stress, intonation)
+**Why this matters**: Training from scratch would require labeled data for all these patterns. HuBERT learned them "for free" from unlabeled audio, saving us millions of dollars and months of annotation work.
 
-**This is why we don't train from scratch!**
-
-
-### Time Compression
+**This is why pre-trained encoders are game-changers** - we inherit this knowledge and focus our training budget on the transcription task.
 
 
+### Time Compression: From Samples to Semantics
+
+HuBERT performs dramatic temporal compression while increasing semantic density:
 
 ```
-3 seconds audio at 16kHz = 48,000 samples
-    ↓ (HuBERT encoder)
-~149 embeddings × 1280 dimensions
-
-
+3 seconds audio at 16kHz = 48,000 samples (just amplitude values)
+    ↓ (CNN Feature Encoder: 7 conv layers)
+~149 frame features
+    ↓ (24 Transformer Layers)
+~149 embeddings × 1280 dimensions (rich semantic vectors)
 ```
 
-- **Compression**: ~320x reduction
+**The transformation**:
+- **Input**: 48,000 numbers representing air pressure over time
+- **Output**: 149 vectors, each capturing ~20ms of speech meaning
+- **Compression ratio**: ~320x in time dimension
+- **Information density**: ↑↑↑ (much more meaningful)
 
-- **Each embedding**: Represents ~20ms of audio
+**Why compression matters**:
+1. **Efficiency**: Decoder processes 149 frames instead of 48,000 samples
+2. **Context**: Each frame summarizes 20ms of audio context
+3. **Semantics**: Embeddings encode meaning, not just waveform shape
 
-- **Dense representation**: More meaningful than raw waveform
+**Think of it this way**: Instead of describing every brush stroke in a painting (raw samples), we describe what the painting depicts (embeddings). Fewer words, more meaning.
 
 
 ### LoRA Adaptation
@@ -205,13 +245,13 @@ In Tiny Audio, we add small LoRA adapters:
 
 - **Base model**: Frozen (1.3B params)
 
-- **LoRA adapters**: Trainable (~2M params, r=8)
+- **LoRA adapters**: Trainable (~4M params, r=16)
 
 - **Target**: q_proj, k_proj in attention layers
 
-- **Result**: 0.15% of encoder params are trainable!
+- **Result**: 0.3% of encoder params are trainable!
 
-**Analogy**: Putting adjustable glasses on a camera - camera unchanged, but output is tuned.
+**Analogy**: Putting adjustable glasses on a camera - the camera stays unchanged, but what it captures is tuned for your specific needs.
 
 ---
 
@@ -724,7 +764,7 @@ print(f"  Total params:      {total:>15,}")
 print(f"  Trainable params:  {trainable:>15,}")
 print(f"  Frozen params:     {total - trainable:>15,}")
 print(f"  Efficiency:        {100 * trainable / total:>14.2f}%")
-print("\n✓ We train only 1.5% of the total parameters!")
+print("\n✓ We train only 1.6% of the total parameters!")
 
 
 ```
@@ -770,9 +810,9 @@ OVERALL MODEL
   Total params:       9,388,843,264
   Trainable params:     138,944,768
   Frozen params:      9,249,898,496
-  Efficiency:                  1.48%
+  Efficiency:                  1.6%
 
-✓ We train only 1.5% of the total parameters!
+✓ We train only 1.6% of the total parameters!
 
 
 ```
@@ -788,7 +828,7 @@ OVERALL MODEL
 
 - [ ] Understand that encoder/decoder use small LoRA adapters
 
-**Key Insight**: We're only training 139M out of 9.3B parameters - that's the magic of parameter-efficient fine-tuning!
+**Key Insight**: We're only training 146M out of 9.3B parameters - that's the magic of parameter-efficient fine-tuning!
 
 
 ### LoRA Rank Experiment
@@ -940,7 +980,7 @@ for targets, name in lora_targets:
 
 ✅ Each embedding represents ~20ms of audio in 1280 dimensions
 
-✅ Only 3.2% of model parameters are trainable (139M / 4.3B)
+✅ Only 1.6% of model parameters are trainable (146M / 9.3B)
 
 ## Homework (Optional)
 
@@ -959,7 +999,7 @@ Before Class 3, experiment with:
 3. **LoRA Analysis**:
    - Calculate memory savings for different rank values
    - Read about LoRA in the original paper
-   - Think: Why do we use different ranks for encoder (r=8) vs decoder (r=64)?
+   - Think: Why do we use different ranks for encoder (r=16) vs decoder (r=8)?
 
 4. **Code Exploration**:
    - Read the `AudioProjector` class in `src/asr_modeling.py:29-77`
@@ -989,7 +1029,7 @@ Before Class 3, experiment with:
    - Each frame = ~20ms of audio
 
 4. **Why use LoRA instead of full fine-tuning?**
-   - Only trains 2M params vs 1.3B (0.16%)
+   - Only trains 4M params vs 1.3B (0.3%)
    - Faster, less memory, cheaper
    - Preserves pre-trained knowledge
 

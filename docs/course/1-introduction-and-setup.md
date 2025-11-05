@@ -146,7 +146,7 @@ Let's understand each component:
 **Size**: 1.3 billion parameters (frozen during our training)
 
 
-### Component 2: Audio Projector (~122M parameters)
+### Component 2: Audio Projector (~138M parameters)
 
 **Purpose**: Bridge the gap between the audio and language worlds.
 
@@ -166,7 +166,7 @@ Let's understand each component:
 
 - Post-normalization layer
 
-**Key insight**: This is the **largest trainable component** - all ~122M parameters learn during training.
+**Key insight**: This is the **largest trainable component** - all ~138M parameters learn during training.
 
 **Analogy**: A skilled diplomat who can fluently translate between two very different cultures, ensuring the meaning and nuance are preserved.
 
@@ -192,13 +192,13 @@ Let's understand each component:
 
 ### Why This Architecture?
 
-**Efficiency**: We train ~139M parameters instead of 4.3+ billion (3.2% of total model)
+**Efficiency**: We train ~146M parameters instead of 9.3+ billion (1.6% of total model)
 
-- Projector: ~122M (fully trained)
+- Projector: ~138M (fully trained)
 
-- Encoder LoRA: ~2M (adapter weights, r=8)
+- Encoder LoRA: ~4M (adapter weights, r=16)
 
-- Decoder LoRA: ~15M (adapter weights, r=64)
+- Decoder LoRA: ~4M (adapter weights, r=8)
 
 **Speed**: Training completes in ~24 hours on a single GPU
 
@@ -1064,7 +1064,7 @@ Before Class 2, experiment with:
 
 ✅ Tiny Audio uses: Encoder (HuBERT) → Projector → Decoder (Qwen-3 8B)
 
-✅ We train only ~139M params (1.5%) instead of the full 9.3B model
+✅ We train only ~146M params (1.6%) instead of the full 9.3B model
 
 ✅ You can run inference on any audio file and get transcriptions
 
@@ -1078,7 +1078,7 @@ Before moving to Class 2, make sure you can answer:
    - Language Model Decoder (Qwen-3 8B)
 
 2. **Why is parameter-efficient training important?**
-   - Trains only ~139M parameters instead of 9.3B+
+   - Trains only ~146M parameters instead of 9.3B+
    - Faster, cheaper, accessible on consumer hardware
    - Enables $12 / 24-hour training runs
 
