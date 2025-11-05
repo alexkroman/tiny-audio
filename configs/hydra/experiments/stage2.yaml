@@ -25,7 +25,7 @@ encoder_lora:
   r: 16  # LoRA rank for encoder
   lora_alpha: 16  # Scaling factor (alpha/r = 1.0)
   target_modules: [q_proj, k_proj]  # HuBERT attention projections
-  lora_dropout: 0.1
+  lora_dropout: 0.05
   bias: none
 
 # Decoder LoRA Configuration
@@ -36,7 +36,7 @@ peft:
   target_modules: ["q_proj", "v_proj"]  
   bias: none  # No bias training
   task_type: CAUSAL_LM  # Causal language modeling
-  lora_dropout: 0.1  
+  lora_dropout: 0.05  
   inference_mode: false  # Training mode
 
 training:
@@ -48,17 +48,17 @@ training:
 
   per_device_train_batch_size: 3
   per_device_eval_batch_size: 3
-  gradient_accumulation_steps: 12
-  eval_accumulation_steps: 12
+  gradient_accumulation_steps: 6
+  eval_accumulation_steps: 6
 
-  learning_rate: 1.0e-6
+  learning_rate: 1.0e-4
 
-  warmup_steps: 500
+  warmup_steps: 100
   lr_scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs: {"min_lr_rate": 0.1}
 
   # Optimization
-  weight_decay: 0.05
+  weight_decay: 0.01
   max_grad_norm: 1.0
 
   # Memory optimization
@@ -74,8 +74,8 @@ training:
 
 # Data configuration
 data:
-  max_audio_seconds: 16.0
-  mask_time_prob: 0.10
+  max_audio_seconds: 15.0
+  mask_time_prob: 0.05
 
 # Early stopping configuration
 early_stopping:

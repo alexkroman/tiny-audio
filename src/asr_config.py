@@ -55,7 +55,7 @@ class ASRConfig(transformers.PretrainedConfig):
             "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,
             "early_stopping": True,
-            "use_cache": True,
+            "use_cache": False,  # Always False - this architecture uses inputs_embeds which breaks caching
         }
         for param_name, default_value in generation_defaults.items():
             if param_name not in kwargs:

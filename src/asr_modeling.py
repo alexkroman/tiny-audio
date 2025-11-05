@@ -276,7 +276,8 @@ class ASRModel(PreTrainedModel):
         self.generation_config.max_new_tokens = config.max_new_tokens
         self.generation_config.min_new_tokens = config.min_new_tokens
         self.generation_config.do_sample = config.do_sample
-        self.generation_config.use_cache = config.use_cache
+        # Force use_cache=False for this architecture (uses inputs_embeds)
+        self.generation_config.use_cache = False
 
         # Only set sampling parameters if sampling is enabled
         if config.do_sample:
@@ -452,6 +453,11 @@ class ASRModel(PreTrainedModel):
             decoder_kwargs["low_cpu_mem_usage"] = True
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
+
+        # Set use_cache=False on the decoder config to prevent cache during training
+        # This is critical because we concatenate text+audio embeddings, which invalidates any cache
+        decoder.config.use_cache = False
+
         decoder.requires_grad_(False)
 
         # Apply LoRA to decoder if configured
@@ -484,24 +490,6 @@ class ASRModel(PreTrainedModel):
         inherits from GenerationMixin.
         """
         return True
-
-    def _set_gradient_checkpointing(self, module, value=False):
-        """Control gradient checkpointing for the model.
-
-        Only apply gradient checkpointing to the decoder, not the encoder.
-        The encoder either has no gradients (frozen) or has LoRA adapters
-        which handle gradients differently.
-        """
-        if hasattr(module, "gradient_checkpointing_enable"):
-            if value:
-                # Only enable gradient checkpointing on the decoder
-                if module is self.decoder or (
-                    hasattr(self, "decoder") and module is self.decoder.base_model
-                ):
-                    module.gradient_checkpointing_enable()
-            else:
-                if hasattr(module, "gradient_checkpointing_disable"):
-                    module.gradient_checkpointing_disable()
 
     @property
     def _tied_weights_keys(self):
@@ -654,7 +642,11 @@ class ASRModel(PreTrainedModel):
 
             # Remove any decoder-specific kwargs that shouldn't go to the encoder
             kwargs.pop("past_key_values", None)
-            kwargs.pop("use_cache", None)
+
+            # Important: Must explicitly set use_cache=False during training
+            # because we're constructing new embeddings (text + audio concatenation)
+            # which invalidates any cached key-values from previous passes
+            use_cache = kwargs.pop("use_cache", None)
 
             audio_embeds = self._encode_audio(
                 input_values=input_values,
@@ -734,6 +726,7 @@ class ASRModel(PreTrainedModel):
             inputs_embeds=inputs_embeds,
             attention_mask=full_attention_mask,
             labels=labels,
+            use_cache=False,  # Always False when training with audio to prevent cache corruption
             **kwargs,
         )
 
@@ -828,7 +821,9 @@ class ASRModel(PreTrainedModel):
         generate_kwargs.setdefault("length_penalty", self.config.length_penalty)
         generate_kwargs.setdefault("no_repeat_ngram_size", self.config.no_repeat_ngram_size)
         generate_kwargs.setdefault("early_stopping", self.config.early_stopping)
-        generate_kwargs.setdefault("use_cache", self.config.use_cache)
+        # Always disable cache for this architecture because we use inputs_embeds (not input_ids)
+        # with audio embeddings mixed in, which the cache system doesn't handle correctly
+        generate_kwargs["use_cache"] = False
 
         im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         generate_kwargs.setdefault("eos_token_id", im_end_id)

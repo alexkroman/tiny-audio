@@ -391,6 +391,12 @@ def main(cfg: DictConfig) -> None:
             asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config
         )
 
+    # Disable cache during training (required for gradient checkpointing)
+    if hasattr(model.config, 'use_cache'):
+        model.config.use_cache = False
+    if hasattr(model.generation_config, 'use_cache'):
+        model.generation_config.use_cache = False
+
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
     # Create separate collators for training (with augmentation) and eval (without)

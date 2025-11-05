@@ -555,7 +555,7 @@ for decoder in decoders[:3]:  # Top 3 models
 
 - The modality gap problem
 
-- SwiGLU and RMSNorm explained
+- AudioProjector architecture
 
 **Workshop (40 min):**
 
