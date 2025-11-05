@@ -245,6 +245,21 @@ During 60,000 hours of self-supervised pre-training, HuBERT developed internal r
 
 ### Time Compression: From Samples to Semantics
 
+**What is time compression?**
+
+Time compression is the process of reducing the temporal resolution (number of time steps) while preserving or even enhancing the information content. Think of it like this:
+
+- **Before compression**: Every 1/16000th of a second gets its own data point (raw samples)
+- **After compression**: Every ~20 milliseconds gets a rich summary vector (embeddings)
+
+Instead of storing raw air pressure measurements 16,000 times per second, we create 50 summary vectors per second that capture the *meaning* of what was said during those time windows.
+
+**Why compress?**
+
+1. **Computational efficiency**: Language models can't process 16,000 tokens per second of audio
+2. **Semantic grouping**: ~20ms is roughly one phoneme - the right granularity for speech
+3. **Information density**: Embeddings encode patterns, not just raw amplitudes
+
 HuBERT performs dramatic temporal compression while increasing semantic density:
 
 ```
