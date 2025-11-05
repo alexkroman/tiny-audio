@@ -132,6 +132,9 @@
                     <li><strong>Encoder:</strong> r=8 (conservative, ~2M params)</li>
                     <li><strong>Decoder:</strong> r=64 (more capacity, ~15M params)</li>
                 </ul>
+                <p class="small highlight" style="margin-top: 1em;">
+                    🧪 <strong>Experiment:</strong> Test ranks 1, 4, 8, 16, 32, 64, 128 - find optimal!
+                </p>
             </section>
 
             <!-- How LoRA Works -->
@@ -281,18 +284,35 @@ configs/hydra/
                 </ul>
             </section>
 
+            <!-- Workshop Experiments -->
+            <section>
+                <h2>Workshop Experiments</h2>
+                <p>What you'll test today:</p>
+                <ul>
+                    <li>📊 Compare learning rates (5e-5, 1e-4, 2e-4, 5e-4)</li>
+                    <li>🎯 Test batch size effects on convergence</li>
+                    <li>🔢 Experiment with LoRA ranks (4, 8, 16, 32)</li>
+                    <li>📈 Monitor and visualize loss curves</li>
+                    <li>🔄 Test different warmup strategies</li>
+                    <li>⚡ Measure training speed vs accuracy tradeoffs</li>
+                </ul>
+                <p class="small highlight" style="margin-top: 1em;">
+                    Track every experiment - data drives decisions!
+                </p>
+            </section>
+
             <!-- Today's Workshop -->
             <section>
                 <h2>Today's Hands-On Workshop</h2>
                 <p>What you'll do in the next 40 minutes:</p>
                 <ul>
-                    <li><strong>Exercise 1:</strong> Explore training configs (Hydra structure)</li>
+                    <li><strong>Exercise 1:</strong> Explore configs and experiment with hyperparams</li>
                     <li><strong>Exercise 2:</strong> Set up cloud GPU (RunPod or similar)</li>
-                    <li><strong>Exercise 3:</strong> Start your first training run</li>
-                    <li><strong>Exercise 4:</strong> Monitor training progress (wandb)</li>
+                    <li><strong>Exercise 3:</strong> Start training and test configurations</li>
+                    <li><strong>Exercise 4:</strong> Monitor progress and experiment with metrics</li>
                 </ul>
                 <p style="margin-top: 1.5em; color: #42affa;">
-                    By the end, you'll have a model training in the cloud!
+                    By the end, you'll have a model training with optimized settings!
                 </p>
             </section>
 

@@ -17,7 +17,7 @@ By the end of this class, you will:
 
 # PART A: LECTURE (20 minutes)
 
-> **Instructor**: Present these concepts. Students should just listen.
+> **Instructor**: Present these concepts with opportunities for experimentation.
 
 ## 1. Language Models Basics (5 min)
 
@@ -67,6 +67,11 @@ Step 4: "Hello, how are you?" [STOP]
 - Open source and well-documented
 - Excellent text generation quality
 - Multilingual capabilities
+
+**Experiment Preview**: Later we'll test:
+- Different decoder models (Qwen vs Llama vs Mistral)
+- Various model sizes (1B, 3B, 8B parameters)
+- Impact of decoder choice on accuracy
 
 ### Decoder-Only Architecture
 
@@ -243,11 +248,11 @@ By using SwiGLU, we are using a modern, high-performance component that is known
 
 In the next 40 minutes, you will:
 
-- **Exercise 1**: Trace the projection process step-by-step
-- **Exercise 2**: Visualize embedding distributions
-- **Exercise 3**: Compare projector configurations
+- **Exercise 1**: Trace the projection process and experiment with dimensions
+- **Exercise 2**: Visualize embeddings and test different activations
+- **Exercise 3**: Compare projector configurations and decoder models
 
-By the end, you'll understand how audio becomes language!
+By the end, you'll understand how audio becomes language and how to optimize this bridge!
 
 ---
 
@@ -401,6 +406,69 @@ After stacking: torch.Size([1, 30, 6400])
 - [ ] Understand the 5x downsampling (149 → 30 frames)
 - [ ] Understand dimension change (1280 → 6400 → 8192 → 2048)
 
+### Experimentation Time!
+
+**Experiment 1: Test different downsampling rates**
+
+Add this to your script:
+
+```python
+# Test different downsampling rates
+rates = [2, 3, 5, 8, 10]
+for rate in rates:
+    # Simulate downsampling
+    frames_in = 149  # typical for 3-second audio
+    frames_out = (frames_in + rate - 1) // rate  # ceiling division
+    ms_per_frame = (3000 / frames_out)  # 3000ms total
+
+    print(f"\nDownsample {rate}x:")
+    print(f"  Frames: {frames_in} → {frames_out}")
+    print(f"  Time resolution: {ms_per_frame:.1f}ms per frame")
+    print(f"  LLM tokens to process: {frames_out}")
+
+    # Memory calculation
+    dim = 2048
+    memory_mb = (frames_out * dim * 4) / (1024 * 1024)  # 4 bytes per float32
+    print(f"  Memory for embeddings: {memory_mb:.2f} MB")
+```
+
+**Experiment 2: Compare activation functions**
+
+```python
+import torch.nn.functional as F
+
+# Sample input
+x = torch.randn(1, 30, 8192)
+
+# Test different activations
+activations = {
+    "ReLU": F.relu,
+    "GELU": F.gelu,
+    "SiLU/Swish": F.silu,
+    "Tanh": torch.tanh,
+}
+
+for name, act_fn in activations.items():
+    output = act_fn(x)
+
+    # Analyze sparsity (zeros)
+    sparsity = (output == 0).float().mean().item()
+
+    # Analyze dynamic range
+    range_val = (output.max() - output.min()).item()
+
+    print(f"\n{name}:")
+    print(f"  Sparsity: {sparsity:.2%} zeros")
+    print(f"  Range: {range_val:.2f}")
+    print(f"  Mean: {output.mean().item():.4f}")
+    print(f"  Std: {output.std().item():.4f}")
+```
+
+**Questions to explore:**
+- What's the optimal downsampling rate?
+- How does activation choice affect gradient flow?
+- Why is SwiGLU better than simple activations?
+
 ---
 
 ## Workshop Exercise 2: Visualize Embedding Distributions (15 min)
@@ -507,6 +575,109 @@ poetry run python visualize_projector.py
 - [ ] Notice how projector output resembles LLM native embeddings
 
 **Observation**: The projector transforms audio embeddings to match the LLM's expected input distribution!
+
+### Advanced Visualization Experiments
+
+**Experiment 1: Compare before/after normalization**
+
+Add this analysis:
+
+```python
+# Trace through projector with intermediate saves
+intermediates = {}
+
+with torch.no_grad():
+    audio_emb = model.encoder(**inputs).last_hidden_state
+
+    # Manual projector forward pass
+    k = model.projector.k
+    batch_size, seq_len, dim = audio_emb.shape
+
+    # Stack frames
+    remainder = seq_len % k
+    if remainder:
+        pad_len = k - remainder
+        audio_emb = F.pad(audio_emb, (0, 0, 0, pad_len))
+    stacked = audio_emb.contiguous().view(batch_size, -1, dim * k)
+    intermediates['stacked'] = stacked.clone()
+
+    # Pre-norm
+    prenorm = model.projector.ln_pre(stacked)
+    intermediates['prenorm'] = prenorm.clone()
+
+    # SwiGLU
+    gate = model.projector.gate_proj(prenorm)
+    up = model.projector.up_proj(prenorm)
+    activated = F.silu(gate) * up
+    intermediates['swiglu'] = activated.clone()
+
+    # Down projection
+    down = model.projector.down_proj(activated)
+    intermediates['down'] = down.clone()
+
+    # Post-norm
+    output = model.projector.ln_post(down)
+    intermediates['final'] = output.clone()
+
+# Plot all stages
+fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+axes = axes.flatten()
+
+stages = ['stacked', 'prenorm', 'swiglu', 'down', 'final']
+for idx, stage in enumerate(stages):
+    data = intermediates[stage].flatten().numpy()
+    axes[idx].hist(data, bins=50, alpha=0.7, edgecolor='black')
+    axes[idx].set_title(f'{stage.capitalize()} (μ={data.mean():.3f}, σ={data.std():.3f})')
+    axes[idx].set_xlabel('Value')
+    axes[idx].set_ylabel('Frequency')
+
+# Compare with target LLM distribution
+llm_data = llm_emb.flatten().numpy()
+axes[5].hist(llm_data, bins=50, alpha=0.7, color='gold', edgecolor='black')
+axes[5].set_title(f'Target LLM (μ={llm_data.mean():.3f}, σ={llm_data.std():.3f})')
+
+plt.tight_layout()
+plt.savefig('projection_stages.png', dpi=150)
+print("✓ Saved stage-by-stage visualization")
+```
+
+**Experiment 2: Analyze dimension importance**
+
+```python
+# Compute variance per dimension
+with torch.no_grad():
+    text_emb = model.projector(audio_emb)
+
+    # Variance per dimension
+    dim_variance = text_emb.var(dim=(0, 1))  # variance across batch and time
+
+    # Sort dimensions by importance
+    sorted_dims, indices = torch.sort(dim_variance, descending=True)
+
+# Plot dimension importance
+plt.figure(figsize=(12, 4))
+plt.subplot(1, 2, 1)
+plt.plot(sorted_dims.numpy())
+plt.xlabel('Dimension (sorted)')
+plt.ylabel('Variance')
+plt.title('Dimension Importance Distribution')
+plt.yscale('log')
+
+plt.subplot(1, 2, 2)
+top_k = 100
+plt.bar(range(top_k), sorted_dims[:top_k].numpy())
+plt.xlabel('Top Dimensions')
+plt.ylabel('Variance')
+plt.title(f'Top {top_k} Most Important Dimensions')
+
+plt.tight_layout()
+plt.savefig('dimension_importance.png', dpi=150)
+
+# Analysis
+total_var = sorted_dims.sum().item()
+top_100_var = sorted_dims[:100].sum().item()
+print(f"\nTop 100 dims capture {100*top_100_var/total_var:.1f}% of variance")
+```
 
 ---
 
@@ -653,6 +824,105 @@ Tiny Audio's choice (5x, 8192 hidden):
 - [ ] Saw comparison of different projector configs
 - [ ] Understand tradeoff between params, speed, and quality
 
+### Decoder Model Comparison Experiment
+
+**Create `compare_decoders.py`:**
+
+```python
+# Compare different decoder models
+decoders = [
+    {
+        "name": "Qwen-3 8B (Actual)",
+        "model_id": "Qwen/Qwen3-8B",
+        "params": 8e9,
+        "hidden_dim": 2048,
+        "vocab_size": 151936,
+    },
+    {
+        "name": "Llama-3 8B",
+        "model_id": "meta-llama/Meta-Llama-3-8B",
+        "params": 8e9,
+        "hidden_dim": 4096,
+        "vocab_size": 128256,
+    },
+    {
+        "name": "Mistral 7B",
+        "model_id": "mistralai/Mistral-7B-v0.1",
+        "params": 7e9,
+        "hidden_dim": 4096,
+        "vocab_size": 32000,
+    },
+    {
+        "name": "Qwen-3 1.5B",
+        "model_id": "Qwen/Qwen3-1.5B",
+        "params": 1.5e9,
+        "hidden_dim": 1536,
+        "vocab_size": 151936,
+    },
+]
+
+print("="*80)
+print("DECODER MODEL COMPARISON FOR ASR")
+print("="*80)
+print(f"{'Model':<20} {'Params':<10} {'Hidden':<10} {'Vocab':<10} {'Projector Params':<20}")
+print("="*80)
+
+for decoder in decoders:
+    # Calculate projector params for this decoder
+    encoder_dim = 1280
+    downsample = 5
+    stacked_dim = encoder_dim * downsample
+    hidden_proj = 8192
+    llm_dim = decoder["hidden_dim"]
+
+    # Projector params
+    ln_params = stacked_dim + llm_dim
+    gate_params = stacked_dim * hidden_proj
+    up_params = stacked_dim * hidden_proj
+    down_params = hidden_proj * llm_dim
+    proj_params = ln_params + gate_params + up_params + down_params
+
+    print(f"{decoder['name']:<20} {decoder['params']/1e9:.1f}B {decoder['hidden_dim']:<10} {decoder['vocab_size']:<10} {proj_params/1e6:.1f}M")
+
+print("\n" + "="*80)
+print("ANALYSIS")
+print("="*80)
+print("Considerations for decoder choice:")
+print("  • Larger models → Better language understanding")
+print("  • Smaller hidden_dim → Smaller projector")
+print("  • Vocab size → Affects tokenization efficiency")
+print("  • Qwen-3 8B balances size, performance, and efficiency")
+
+# Memory estimation
+print("\n" + "="*80)
+print("MEMORY REQUIREMENTS (LoRA fine-tuning)")
+print("="*80)
+
+for decoder in decoders[:3]:  # Top 3 models
+    # LoRA memory estimate
+    lora_rank = 64
+    num_layers = 32
+    hidden = decoder["hidden_dim"]
+
+    # LoRA params (Q,K,V,O projections)
+    lora_params = 4 * 2 * hidden * lora_rank * num_layers
+
+    # Total trainable
+    proj_params = 122e6  # Fixed projector
+    encoder_lora = 2e6  # Fixed encoder LoRA
+    total_trainable = proj_params + encoder_lora + lora_params
+
+    # Memory estimate (params + gradients + optimizer states)
+    memory_gb = (total_trainable * 4 * 3) / 1e9  # 4 bytes, 3x for Adam
+
+    print(f"{decoder['name']:<20} ~{memory_gb:.1f} GB training memory")
+```
+
+**Questions to explore:**
+- How does decoder size affect ASR accuracy?
+- Is a larger decoder always better?
+- What's the speed/accuracy tradeoff?
+
 ---
 
 # CLASS SUMMARY
@@ -682,11 +952,33 @@ Tiny Audio's choice (5x, 8192 hidden):
 
 ## Homework (Optional)
 
-Before Class 4:
+Before Class 4, experiment with:
 
-1. Read the training script `src/train.py`
-2. Browse `configs/hydra/experiments/stage1.yaml`
-3. Think: "What hyperparameters would I tune?"
+1. **Projector Architecture Experiments**:
+   - Calculate params for different hidden dimensions (4096, 8192, 16384)
+   - Test different downsampling rates (2x, 5x, 10x)
+   - Think: How would you modify the projector for streaming ASR?
+
+2. **Decoder Exploration**:
+   - Research different decoder models (Phi, Gemma, StableLM)
+   - Compare tokenizer vocabularies
+   - Calculate LoRA memory requirements for each
+
+3. **Activation Function Study**:
+   - Implement and test GLU, ReGLU, GeGLU variants
+   - Measure gradient flow through different activations
+   - Compare convergence speed in toy experiments
+
+4. **Code Reading**:
+   - Read the training script `src/train.py`
+   - Browse `configs/hydra/experiments/stage1.yaml`
+   - Find where the projector is initialized
+   - Identify hyperparameters you'd want to tune
+
+5. **Advanced Experiments**:
+   - What if we used multiple projectors (ensemble)?
+   - Can we make the downsampling rate learnable?
+   - How would cross-attention compare to our concatenation approach?
 
 ## Check Your Understanding
 

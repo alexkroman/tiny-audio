@@ -16,7 +16,7 @@ By the end of this class, you will:
 
 # PART A: LECTURE (20 minutes)
 
-> **Instructor**: Present these concepts. Students should just listen and absorb.
+> **Instructor**: Present these concepts with opportunities for exploration and experimentation.
 
 ## 1. What is Automatic Speech Recognition? (5 min)
 
@@ -79,6 +79,12 @@ Tiny Audio uses a three-component architecture:
 Audio File → Audio Encoder → Audio Projector → Language Model → Text
             (HuBERT)         (SwiGLU MLP)      (Qwen-3 8B)
 ```
+
+**Experiment Preview**: In this course, you'll experiment with:
+- Swapping encoders (HuBERT vs Wav2Vec2)
+- Adjusting projector dimensions
+- Using different language models
+- Testing on various audio types
 
 Let's understand each component:
 
@@ -284,11 +290,11 @@ If you hit any issues, raise your hand for help!
 
 ### Goal
 
-Transcribe an audio file using the pre-trained Tiny Audio model.
+Transcribe an audio file using the pre-trained Tiny Audio model and experiment with different inputs.
 
 ### Your Task
 
-Run inference on an audio file and see the transcription output.
+Run inference on an audio file, see the transcription output, and experiment with model behavior.
 
 ### Instructions
 
@@ -412,52 +418,136 @@ Hello, this is a test of the Tiny Audio speech recognition system.
 
 **Note**: You might notice some mistakes - that's normal! Our model achieves ~12% Word Error Rate, meaning it gets about 88% of words correct.
 
+### Experimentation Time!
+
+Now let's experiment with different parameters:
+
+**Experiment 1: Test confidence scores**
+```python
+# Modify your test_inference.py to show confidence
+result = pipe(audio_path, return_timestamps=True)
+print(f"Text: {result['text']}")
+if 'chunks' in result:
+    print("\nWord-level confidence:")
+    for chunk in result['chunks'][:10]:  # Show first 10 words
+        print(f"  {chunk['text']}: {chunk.get('confidence', 'N/A')}")
+```
+
+**Experiment 2: Try different audio formats**
+- Test with WAV, MP3, FLAC files
+- Try different sample rates (8kHz, 16kHz, 44.1kHz)
+- Note any differences in accuracy or speed
+
+**Experiment 3: Test edge cases**
+- Very short audio (< 1 second)
+- Very long audio (> 1 minute)
+- Silent audio
+- Multiple speakers
+- Different languages
+
 ---
 
-## Workshop Exercise 3: Explore Model Behavior (10 min)
+## Workshop Exercise 3: Explore Model Behavior & Components (10 min)
 
 ### Goal
 
-Understand how the model performs on different types of audio.
+Understand how the model performs on different types of audio and explore component interactions.
 
 ### Your Task
 
-Test the model on at least 3 different audio files and observe the results.
+Test the model systematically and explore its components.
 
 ### Instructions
 
-**Step 1: Test different audio types**
+**Step 1: Systematic Testing**
 
-Try transcribing:
+Create a test script `systematic_test.py`:
 
-1. Clear speech (someone speaking clearly)
-2. Noisy audio (background sounds)
-3. Different accent or speaking style
+```python
+from transformers import pipeline
+import time
 
-For each one, run:
+pipe = pipeline(
+    "automatic-speech-recognition",
+    model="mazesmazes/tiny-audio",
+    trust_remote_code=True
+)
 
-```bash
-poetry run python test_inference.py
+# Test different scenarios
+test_cases = [
+    ("clear_speech.wav", "Clear speech"),
+    ("noisy_audio.wav", "Noisy environment"),
+    ("accented_speech.wav", "Different accent"),
+    ("fast_speech.wav", "Fast speaking"),
+    ("whisper.wav", "Quiet/whispered speech"),
+]
+
+results = []
+for audio_path, description in test_cases:
+    try:
+        start = time.time()
+        result = pipe(audio_path)
+        duration = time.time() - start
+
+        results.append({
+            "description": description,
+            "text": result["text"],
+            "time": duration,
+            "words": len(result["text"].split())
+        })
+        print(f"✓ {description}: {duration:.2f}s")
+    except Exception as e:
+        print(f"✗ {description}: {e}")
+
+# Analyze results
+print("\n=== Analysis ===")
+for r in results:
+    print(f"{r['description']}:")
+    print(f"  Speed: {r['words']/r['time']:.1f} words/sec")
+    print(f"  Text preview: {r['text'][:50]}...")
 ```
 
-(Remember to update `audio_path` each time!)
+**Step 2: Component Exploration**
 
-**Step 2: Record your observations**
+Explore how changes affect the pipeline:
 
-Create a file called `observations.txt` and note:
+```python
+# Experiment with chunk length
+result_short = pipe(audio_path, chunk_length_s=10)  # Shorter chunks
+result_long = pipe(audio_path, chunk_length_s=30)   # Longer chunks
 
-- Which audio worked best?
-- What kinds of mistakes did you see?
-- Did it handle noise well?
-- Did accents affect accuracy?
+# Compare outputs
+print(f"Short chunks: {result_short['text'][:100]}")
+print(f"Long chunks: {result_long['text'][:100]}")
+```
+
+**Step 3: Record Your Experiments**
+
+Create `experiment_log.md`:
+
+```markdown
+# Experiment Log
+
+## Audio Quality Tests
+- Clear speech: [accuracy/speed]
+- Noisy audio: [accuracy/speed]
+- Accents: [accuracy/speed]
+
+## Parameter Experiments
+- Chunk length impact:
+- Batch size effect:
+
+## Key Findings
+1. Model performs best when...
+2. Performance degrades with...
+3. Surprising observation...
+```
 
 ### Discussion Questions
 
-We'll discuss as a class:
-
-- What patterns did you notice?
-- When does the model struggle?
-- Why might certain audio be harder to transcribe?
+- How does audio quality affect transcription accuracy?
+- What's the relationship between chunk size and memory usage?
+- Which component (encoder/projector/decoder) is the bottleneck?
 
 ---
 
@@ -579,11 +669,27 @@ print(f"Result: {result['text']}")
 
 ## Homework (Optional)
 
-Before Class 2, try to:
+Before Class 2, experiment with:
 
-1. Test the model on 5+ different audio files
-2. Start thinking: "How would I represent sound as numbers?"
-3. Browse `src/asr_modeling.py` - don't worry if it's confusing yet!
+1. **Audio Testing Challenge**: Test the model on 5+ different audio files
+   - Try different languages
+   - Test with music in the background
+   - Record yourself at different distances from the microphone
+
+2. **Component Exploration**:
+   - Measure inference time for different audio lengths
+   - Calculate the real-time factor (audio duration / processing time)
+   - Try to make the model fail (what breaks it?)
+
+3. **Code Exploration**:
+   - Browse `src/asr_modeling.py` - don't worry if it's confusing yet!
+   - Look for the three main components we discussed
+   - Think: "How would I represent sound as numbers?"
+
+4. **Experimentation Ideas**:
+   - What happens with non-English audio?
+   - How does the model handle singing vs. speaking?
+   - Can it transcribe multiple speakers in conversation?
 
 ## Key Takeaways
 

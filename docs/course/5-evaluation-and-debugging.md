@@ -17,7 +17,7 @@ By the end of this class, you will:
 
 # PART A: LECTURE (20 minutes)
 
-> **Instructor**: Present these concepts. Students should just listen.
+> **Instructor**: Present these concepts with opportunities for experimentation.
 
 ## 1. A Philosophy of Evaluation (5 min)
 
@@ -104,6 +104,38 @@ Hyp: "hello"
 - Noisy environments: Higher WER acceptable
 - Accented speech: Often higher WER
 - Domain-specific: Medical/legal need very low WER
+
+**Quick Experiment**: Calculate WER manually:
+```python
+def calculate_wer(reference, hypothesis):
+    ref_words = reference.lower().split()
+    hyp_words = hypothesis.lower().split()
+
+    # Simple WER (not optimal alignment)
+    errors = 0
+    for i in range(max(len(ref_words), len(hyp_words))):
+        if i >= len(ref_words):  # Insertion
+            errors += 1
+        elif i >= len(hyp_words):  # Deletion
+            errors += 1
+        elif ref_words[i] != hyp_words[i]:  # Substitution
+            errors += 1
+
+    wer = errors / len(ref_words) if ref_words else 0
+    return wer * 100
+
+# Test cases
+test_cases = [
+    ("hello world", "hello world"),  # Perfect
+    ("the cat sat", "the dog sat"),  # Substitution
+    ("hello", "hello world"),  # Insertion
+    ("hello world", "hello"),  # Deletion
+]
+
+for ref, hyp in test_cases:
+    wer = calculate_wer(ref, hyp)
+    print(f"Ref: '{ref}' | Hyp: '{hyp}' | WER: {wer:.1f}%")
+```
 
 ### Beyond WER
 
@@ -244,12 +276,12 @@ When you encounter a non-recoverable spike, here are a few things you can try:
 
 In the next 40 minutes, you will:
 
-- **Exercise 1**: Run evaluation on your trained model
-- **Exercise 2**: Analyze error patterns and predictions
-- **Exercise 3**: Debug training issues (if any)
-- **Exercise 4**: Calculate and interpret WER metrics
+- **Exercise 1**: Run evaluation and experiment with metrics
+- **Exercise 2**: Analyze errors and test on different datasets
+- **Exercise 3**: Debug issues and test improvements
+- **Exercise 4**: Compare models and optimize performance
 
-By the end, you'll know exactly how well your model performs!
+By the end, you'll know exactly how well your model performs and how to improve it!
 
 ---
 
@@ -362,6 +394,66 @@ WER: 0.0%
 - [ ] Saved results file for later
 
 **Your WER**: ___________% (write it down!)
+
+### Evaluation Experiments
+
+**Experiment 1: Test on different audio types**
+
+```bash
+# Create test samples with different characteristics
+# Noisy audio
+poetry run eval outputs/stage1 --test-type noisy --max-samples 50
+
+# Different accents
+poetry run eval outputs/stage1 --test-type accented --max-samples 50
+
+# Fast speech
+poetry run eval outputs/stage1 --test-type fast --max-samples 50
+```
+
+**Experiment 2: Compare with baseline models**
+
+```python
+# compare_models.py
+models_to_test = [
+    "outputs/stage1",  # Your model
+    "mazesmazes/tiny-audio",  # Original
+    "openai/whisper-tiny",  # Baseline
+]
+
+results = {}
+for model_path in models_to_test:
+    print(f"Testing {model_path}...")
+    # Run evaluation
+    # Store WER
+    results[model_path] = wer
+
+# Plot comparison
+import matplotlib.pyplot as plt
+plt.bar(range(len(results)), list(results.values()))
+plt.xlabel("Model")
+plt.ylabel("WER (%)")
+plt.xticks(range(len(results)), list(results.keys()), rotation=45)
+plt.title("Model Comparison")
+plt.tight_layout()
+plt.savefig("model_comparison.png")
+```
+
+**Experiment 3: Test different decoding strategies**
+
+```python
+# Test beam search vs greedy
+decoding_strategies = [
+    {"do_sample": False, "num_beams": 1},  # Greedy
+    {"do_sample": False, "num_beams": 4},  # Beam search
+    {"do_sample": True, "temperature": 0.8},  # Sampling
+]
+
+for strategy in decoding_strategies:
+    print(f"Testing strategy: {strategy}")
+    # Run evaluation with strategy
+    # Compare WER
+```
 
 ---
 
@@ -476,6 +568,92 @@ Look for patterns:
 2. \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
 3. \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
 
+### Advanced Error Analysis Experiments
+
+**Experiment 1: Confusion matrix for common words**
+
+```python
+# Create confusion matrix for top words
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Get top confused words
+top_words = ["the", "a", "to", "too", "there", "their", "they're"]
+confusion_matrix = np.zeros((len(top_words), len(top_words)))
+
+# Fill matrix based on errors
+for (ref, hyp), count in error_counts.items():
+    if ref in top_words and hyp in top_words:
+        i = top_words.index(ref)
+        j = top_words.index(hyp)
+        confusion_matrix[i][j] = count
+
+# Plot
+plt.figure(figsize=(8, 6))
+sns.heatmap(confusion_matrix, annot=True, fmt='.0f',
+            xticklabels=top_words, yticklabels=top_words)
+plt.xlabel("Hypothesis")
+plt.ylabel("Reference")
+plt.title("Word Confusion Matrix")
+plt.savefig("confusion_matrix.png")
+print("✓ Saved confusion matrix")
+```
+
+**Experiment 2: Error rate by audio length**
+
+```python
+# Analyze if longer audio has higher error rates
+length_buckets = {"short": [], "medium": [], "long": []}
+
+for sample in results:
+    audio_duration = sample["duration"]  # seconds
+    wer = sample["wer"]
+
+    if audio_duration < 3:
+        length_buckets["short"].append(wer)
+    elif audio_duration < 10:
+        length_buckets["medium"].append(wer)
+    else:
+        length_buckets["long"].append(wer)
+
+# Calculate average WER per bucket
+for bucket, wers in length_buckets.items():
+    avg_wer = sum(wers) / len(wers) if wers else 0
+    print(f"{bucket}: {avg_wer:.2f}% WER ({len(wers)} samples)")
+```
+
+**Experiment 3: Test error correction strategies**
+
+```python
+# Simple post-processing to fix common errors
+def post_process(text):
+    corrections = {
+        "there ": "they're ",  # Context-based
+        "too ": "to ",  # Most common
+        "it's ": "its ",  # Possessive
+    }
+
+    for wrong, right in corrections.items():
+        text = text.replace(wrong, right)
+
+    return text
+
+# Test on sample outputs
+improved_count = 0
+for sample in test_samples:
+    original_hyp = sample["hypothesis"]
+    corrected_hyp = post_process(original_hyp)
+
+    if corrected_hyp != original_hyp:
+        # Recalculate WER
+        new_wer = calculate_wer(sample["reference"], corrected_hyp)
+        if new_wer < sample["wer"]:
+            improved_count += 1
+
+print(f"Post-processing improved {improved_count} samples")
+```
+
 ---
 
 ## Workshop Exercise 3: Compare with Baseline (10 min)
@@ -585,11 +763,32 @@ poetry run python compare_models.py
    - Example transcriptions
 3. **Create HuggingFace account** if you don't have one
 
-**Optional**:
+**Experimentation Tasks**:
 
-1. Try to improve your WER by tweaking hyperparameters
-2. Run evaluation on different test sets
-3. Analyze specific error categories
+1. **Comprehensive Evaluation Suite**:
+   - Test on 5 different datasets (LibriSpeech, CommonVoice, etc.)
+   - Create evaluation report with WER for each
+   - Identify which datasets are hardest
+
+2. **Error Reduction Strategies**:
+   - Implement 3 post-processing rules
+   - Test language model rescoring
+   - Measure WER improvement from each
+
+3. **Performance Analysis**:
+   - Measure inference speed (audio seconds/compute second)
+   - Profile memory usage during inference
+   - Compare batch vs single-sample processing
+
+4. **Robustness Testing**:
+   - Add noise to clean audio and measure WER degradation
+   - Test on out-of-domain audio (podcasts, meetings)
+   - Evaluate on non-English languages
+
+5. **Advanced Metrics**:
+   - Implement and calculate CER (Character Error Rate)
+   - Calculate confidence-weighted WER
+   - Analyze insertion/deletion/substitution ratios
 
 ## Check Your Understanding
 

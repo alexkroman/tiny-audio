@@ -19,7 +19,7 @@ By the end of this class, you will:
 
 # PART A: LECTURE (15 minutes)
 
-> **Instructor**: Present these concepts. Students should just listen.
+> **Instructor**: Present these concepts with hands-on demonstrations and experiments.
 
 ## 1. Why Share Your Work? (3 min)
 
@@ -79,6 +79,19 @@ Once your model is on the Hub, you have **three deployment options**:
 1. **Direct usage via transformers** - Users download and run locally (free)
 2. **Inference Endpoints** - Serverless API for production (pay-per-use, scales to zero)
 3. **Spaces (Gradio demo)** - Interactive web UI for demos (free tier available)
+
+**Quick Experiment**: Compare deployment options:
+```python
+# Compare deployment characteristics
+options = {
+    "Local": {"cost": 0, "latency": "low", "scale": "limited"},
+    "Endpoints": {"cost": "$$$", "latency": "medium", "scale": "unlimited"},
+    "Spaces": {"cost": "$", "latency": "high", "scale": "moderate"},
+}
+
+for name, specs in options.items():
+    print(f"{name}: Cost={specs['cost']}, Latency={specs['latency']}, Scale={specs['scale']}")
+```
 
 **Authentication**
 
@@ -192,18 +205,19 @@ By sharing your story, you help us all learn and grow together.
 
 In the next 45 minutes, you will:
 
-- **Exercise 1**: Setup and push model to Hub (10 min)
-- **Exercise 2**: Create professional model card (8 min)
-- **Exercise 3**: Deploy to HF Inference Endpoints OR Spaces (12 min) - *Choose one*
-- **Exercise 4**: Test deployment and add to leaderboard (10 min)
-- **Bonus (optional)**: Deploy the other option if time permits (5 min)
+- **Exercise 1**: Setup and push model to Hub with experiments (10 min)
+- **Exercise 2**: Create model card and test variations (8 min)
+- **Exercise 3**: Deploy and experiment with configurations (12 min)
+- **Exercise 4**: Test, benchmark, and optimize deployment (10 min)
+- **Bonus**: Advanced deployment experiments (5 min)
 
 By the end, you'll have:
 - A publicly accessible ASR model with documentation
-- Either a production API endpoint OR an interactive web demo
+- Production deployment with performance benchmarks
 - Your results on the community leaderboard
+- Experience with deployment optimization
 
-**Note**: Exercises 4-5 from the detailed instructions are **optional** and can be completed after class!
+**Note**: We'll experiment with different deployment configurations throughout!
 
 ---
 
@@ -333,6 +347,50 @@ You should see:
 - [ ] Model uploaded to Hub successfully
 - [ ] Can see model page on HuggingFace
 - [ ] All files present
+
+### Upload Experiments
+
+**Experiment 1: Test different upload strategies**
+
+```python
+# Compare upload methods
+import time
+
+methods = [
+    {"name": "Direct push", "command": "model.push_to_hub('repo-id')"},
+    {"name": "Save then push", "command": "model.save_pretrained('local'); push_to_hub('local', 'repo-id')"},
+    {"name": "Git LFS", "command": "git lfs track '*.safetensors'; git push"},
+]
+
+for method in methods:
+    print(f"{method['name']}: {method['command']}")
+    # Time the upload
+    # Compare speeds
+```
+
+**Experiment 2: Model size optimization**
+
+```python
+# Check model sizes
+import os
+
+def get_size_mb(path):
+    size = os.path.getsize(path)
+    return size / (1024 * 1024)
+
+files = ["model.safetensors", "config.json", "tokenizer.json"]
+total_size = 0
+
+for file in files:
+    size = get_size_mb(f"outputs/stage1/{file}")
+    print(f"{file}: {size:.2f} MB")
+    total_size += size
+
+print(f"Total: {total_size:.2f} MB")
+
+# Compare with quantized version
+# Test int8 quantization impact
+```
 
 ---
 
@@ -623,6 +681,64 @@ inputs=gr.Audio(sources=["upload", "microphone"], type="filepath"),
 - [ ] Can transcribe audio through web interface
 - [ ] Model automatically loaded via Gradio's HF Inference API
 
+### Deployment Experiments
+
+**Experiment 1: Benchmark inference speed**
+
+```python
+# benchmark_deployment.py
+import time
+import requests
+
+def test_inference_speed(model_id, audio_file):
+    times = []
+
+    for i in range(5):
+        start = time.time()
+        # Call inference API
+        result = pipe(audio_file)
+        duration = time.time() - start
+        times.append(duration)
+
+    avg_time = sum(times) / len(times)
+    audio_duration = get_audio_duration(audio_file)
+    rtf = avg_time / audio_duration  # Real-time factor
+
+    print(f"Average inference: {avg_time:.2f}s")
+    print(f"Audio duration: {audio_duration:.2f}s")
+    print(f"Real-time factor: {rtf:.2f}x")
+    print(f"Can process: {1/rtf:.1f}x real-time")
+```
+
+**Experiment 2: Test different audio formats**
+
+```python
+# Test format support
+formats = ["wav", "mp3", "flac", "ogg", "m4a"]
+for fmt in formats:
+    test_file = f"test.{fmt}"
+    try:
+        result = pipe(test_file)
+        print(f"✓ {fmt}: Supported")
+    except:
+        print(f"✗ {fmt}: Not supported")
+```
+
+**Experiment 3: Compare deployment options**
+
+```python
+# Compare latencies
+deployments = {
+    "Local": test_local_inference,
+    "Spaces": test_spaces_api,
+    "Endpoints": test_inference_endpoint,
+}
+
+for name, test_func in deployments.items():
+    latency = test_func(audio_file)
+    print(f"{name}: {latency:.2f}s latency")
+```
+
 ---
 
 ## Workshop Exercise 4: Test and Add to Leaderboard (10 min)
@@ -807,14 +923,36 @@ Over 6 classes, you've:
 
 ### Continue Improving
 
-**Experiment with:**
+**Systematic Experimentation Plan:**
 
-- Different LoRA ranks
-- Various learning rates
-- More training data
-- Different encoder/decoder models
-- Data augmentation
-- Domain-specific fine-tuning
+1. **Architecture Experiments:**
+   - Test encoder swaps (Wav2Vec2 vs HuBERT vs Whisper encoder)
+   - Try different decoder sizes (1B, 3B, 7B, 13B)
+   - Experiment with projector architectures (MLP vs Transformer)
+
+2. **Training Experiments:**
+   - LoRA rank ablations (r=1 to r=256)
+   - Learning rate schedules (cosine vs linear vs constant)
+   - Batch size studies (effective batch 8 to 256)
+   - Dataset mixing strategies
+
+3. **Optimization Experiments:**
+   - Quantization (int8, int4 with GPTQ/AWQ)
+   - Distillation to smaller models
+   - Pruning experiments
+   - Flash Attention integration
+
+4. **Domain Adaptation:**
+   - Medical transcription
+   - Legal proceedings
+   - Podcast/meeting transcription
+   - Multi-speaker scenarios
+
+5. **Production Experiments:**
+   - Streaming inference
+   - Batch processing optimization
+   - Multi-GPU serving
+   - Edge deployment (mobile, browser)
 
 ### Share Your Work
 

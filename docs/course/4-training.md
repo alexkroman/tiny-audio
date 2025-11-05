@@ -17,7 +17,7 @@ By the end of this class, you will:
 
 # PART A: LECTURE (20 minutes)
 
-> **Instructor**: Present these concepts. Students should just listen.
+> **Instructor**: Present these concepts with hands-on experimentation opportunities.
 
 ## 1. The Training Marathon (5 min)
 
@@ -103,6 +103,16 @@ Where:
 
 - Lower rank = fewer parameters, less capacity
 - Higher rank = more parameters, more capacity
+
+**Quick Experiment**: Calculate parameter savings for different ranks:
+```python
+# Try ranks 1, 4, 8, 16, 32, 64
+for rank in [1, 4, 8, 16, 32, 64]:
+    lora_params = 2 * 2048 * rank  # B + A matrices
+    original = 2048 * 2048
+    savings = 100 * (1 - lora_params/original)
+    print(f"Rank {rank:2d}: {lora_params:,} params ({savings:.1f}% savings)")
+```
 
 ### How LoRA Works in Practice
 
@@ -278,12 +288,12 @@ While we won't be deriving our own scaling laws in this course, it's a fascinati
 
 In the next 40 minutes, you will:
 
-- **Exercise 1**: Explore training configs (Hydra structure)
+- **Exercise 1**: Explore configs and experiment with hyperparameters
 - **Exercise 2**: Set up cloud GPU (RunPod or similar)
-- **Exercise 3**: Start your first training run
-- **Exercise 4**: Monitor training progress (wandb)
+- **Exercise 3**: Start training and test different configurations
+- **Exercise 4**: Monitor progress and experiment with metrics
 
-By the end, you'll have a model training in the cloud!
+By the end, you'll have a model training in the cloud and understand how to optimize it!
 
 ---
 
@@ -378,6 +388,69 @@ model:
 - [ ] Created my_experiment.yaml
 - [ ] Ready to customize training settings
 
+### Experimentation Time!
+
+**Experiment 1: Compare different learning rates**
+
+Create multiple experiment configs to test:
+
+```bash
+# Create configs for different learning rates
+for lr in 5e-5 1e-4 2e-4 5e-4; do
+  cat << EOF > configs/hydra/experiments/lr_${lr}.yaml
+# @package _global_
+defaults:
+  - /experiments/mac_minimal
+
+training:
+  run_name: "lr-test-${lr}"
+  output_dir: "./outputs/lr_${lr}"
+  learning_rate: ${lr}
+  max_steps: 100  # Short test
+EOF
+done
+```
+
+**Experiment 2: Test batch size effects**
+
+```python
+# Create a script to calculate effective batch sizes
+batch_sizes = [1, 2, 4, 8, 16]
+grad_accum_steps = [1, 2, 4, 8]
+
+print("Batch Size | Grad Accum | Effective | Memory (est.)")
+print("-" * 50)
+for bs in batch_sizes:
+    for ga in grad_accum_steps:
+        effective = bs * ga
+        # Rough memory estimate (GB)
+        memory = bs * 2.5  # ~2.5GB per sample for our model
+        if memory <= 40:  # A40 has 40GB
+            print(f"{bs:10} | {ga:10} | {effective:9} | {memory:6.1f} GB ✓")
+        else:
+            print(f"{bs:10} | {ga:10} | {effective:9} | {memory:6.1f} GB ✗")
+```
+
+**Experiment 3: LoRA rank analysis**
+
+```bash
+# Test different LoRA ranks
+for rank in 4 8 16 32; do
+  echo "Testing rank $rank..."
+
+  # Create encoder LoRA config
+  cat << EOF > configs/hydra/encoder_lora/r${rank}.yaml
+r: ${rank}
+lora_alpha: ${rank}
+target_modules: ["q_proj", "k_proj"]
+lora_dropout: 0.0
+EOF
+
+  # Count parameters
+  echo "Encoder LoRA params: ~$(( 2 * 1280 * rank * 2 * 24 / 1000000 ))M"
+done
+```
+
 ---
 
 ## Workshop Exercise 2: Local Test Run (15 min)
@@ -460,6 +533,79 @@ You should see:
 - [ ] No errors or crashes
 
 **Note**: This is a minimal test! The model won't be good yet - we need full training.
+
+### Training Experiments
+
+**Experiment 1: Monitor loss curves**
+
+Create a script to visualize training progress:
+
+```python
+# monitor_training.py
+import json
+import matplotlib.pyplot as plt
+
+# Load trainer state
+with open('outputs/mac_minimal/trainer_state.json') as f:
+    state = json.load(f)
+
+# Extract losses
+steps = [h['step'] for h in state['log_history'] if 'loss' in h]
+losses = [h['loss'] for h in state['log_history'] if 'loss' in h]
+
+# Plot
+plt.figure(figsize=(10, 5))
+plt.plot(steps, losses, marker='o')
+plt.xlabel('Step')
+plt.ylabel('Loss')
+plt.title('Training Loss Curve')
+plt.grid(True, alpha=0.3)
+plt.savefig('loss_curve.png')
+print("✓ Saved loss curve to loss_curve.png")
+
+# Analyze convergence
+if len(losses) > 5:
+    initial_loss = losses[0]
+    final_loss = losses[-1]
+    reduction = (initial_loss - final_loss) / initial_loss * 100
+    print(f"Loss reduction: {reduction:.1f}%")
+    print(f"Average loss per step: {sum(losses)/len(losses):.3f}")
+```
+
+**Experiment 2: Test different datasets**
+
+```bash
+# Try with different data configs
+poetry run python src/train.py \
+  +experiments=mac_minimal \
+  data.max_train_samples=50 \
+  training.max_steps=10 \
+  training.run_name="tiny-test"
+
+# Compare with more data
+poetry run python src/train.py \
+  +experiments=mac_minimal \
+  data.max_train_samples=200 \
+  training.max_steps=40 \
+  training.run_name="medium-test"
+```
+
+**Experiment 3: Learning rate warmup test**
+
+```python
+# Test different warmup strategies
+warmup_configs = [
+    (0, "no-warmup"),
+    (100, "quick-warmup"),
+    (500, "standard-warmup"),
+    (1000, "slow-warmup")
+]
+
+for warmup_steps, name in warmup_configs:
+    print(f"\nTesting {name} ({warmup_steps} steps)...")
+    # Run training with different warmup
+    # Compare convergence speed
+```
 
 ---
 
@@ -604,11 +750,33 @@ poetry run python src/train.py +experiments=stage1
 2. Check back every few hours to ensure it's running
 3. Training should complete before Class 5
 
-**Optional**:
+**Experimentation Tasks**:
 
-1. Set up Weights & Biases for training monitoring
-2. Experiment with different hyperparameters
-3. Read about LoRA paper (link below)
+1. **Hyperparameter Grid Search**:
+   - Create 3 different experiment configs
+   - Test different learning rates (5e-5, 1e-4, 2e-4)
+   - Compare convergence speeds
+
+2. **LoRA Rank Experiments**:
+   - Try encoder LoRA with r=4, 8, 16
+   - Try decoder LoRA with r=32, 64, 128
+   - Calculate parameter counts for each
+   - Hypothesize which will work best
+
+3. **Dataset Size Analysis**:
+   - Plot learning curves for different data sizes
+   - Estimate how much data you'd need for 5% WER
+   - Research data scaling laws
+
+4. **Advanced Monitoring**:
+   - Set up Weights & Biases for real-time tracking
+   - Create custom metrics (tokens/sec, GPU utilization)
+   - Set up alerts for training issues
+
+5. **Optimization Experiments**:
+   - Research different optimizers (AdamW, Lion, Sophia)
+   - Compare gradient accumulation strategies
+   - Test mixed precision training (fp16 vs bf16)
 
 ## Check Your Understanding
 

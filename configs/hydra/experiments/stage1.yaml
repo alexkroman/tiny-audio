@@ -32,7 +32,7 @@ encoder_lora:
 peft:
   peft_method: lora  # Enable LoRA fine-tuning on decoder
   r: 0  # LoRA rank for decoder (matching encoder)
-  lora_alpha: 32
+  lora_alpha: 8
   target_modules: ["q_proj", "v_proj"]  
   bias: none  # No bias training
   task_type: CAUSAL_LM  # Causal language modeling

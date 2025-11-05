@@ -29,6 +29,7 @@ By the end of this course, you will:
 - Understanding the Tiny Audio architecture
 - Setting up your development environment
 - Running your first inference
+- **Experiments**: Test different audio samples, explore model outputs, adjust confidence thresholds
 
 ### [Class 2: Audio Processing and Encoders](./2-audio-processing-and-encoders.md) (1 hour)
 
@@ -36,6 +37,7 @@ By the end of this course, you will:
 - Feature extraction with Wav2Vec2
 - Understanding the HuBERT encoder
 - Exploring audio embeddings
+- **Experiments**: Compare Wav2Vec2 vs HuBERT, test different audio preprocessing, visualize embeddings
 
 ### [Class 3: Language Models and Projectors](./3-language-models-and-projectors.md) (1 hour)
 
@@ -43,6 +45,7 @@ By the end of this course, you will:
 - The Qwen-3 8B decoder
 - Bridging audio and text: the AudioProjector
 - SwiGLU architecture explained
+- **Experiments**: Try different decoder models, modify projection dimensions, test activation functions
 
 ### [Class 4: Training](./4-training.md) (1 hour)
 
@@ -50,6 +53,7 @@ By the end of this course, you will:
 - Understanding LoRA (Low-Rank Adaptation)
 - Configuring training with Hydra
 - Starting your first training run
+- **Experiments**: Adjust LoRA rank, test learning rates, experiment with batch sizes, try different datasets
 
 ### [Class 5: Evaluation and Debugging](./5-evaluation-and-debugging.md) (1 hour)
 
@@ -57,6 +61,7 @@ By the end of this course, you will:
 - Evaluating your model
 - Debugging common issues
 - Improving model performance
+- **Experiments**: Compare metrics across datasets, test data augmentation, analyze error patterns
 
 ### [Class 6: Publishing and Deployment](./6-publishing-and-deployment.md) (1 hour)
 
@@ -66,6 +71,7 @@ By the end of this course, you will:
 - Creating interactive demos on HuggingFace Spaces
 - Testing with multiple interfaces (transformers, API, web UI)
 - Adding your results to the leaderboard
+- **Experiments**: Test different deployment configurations, benchmark inference speeds, compare serving options
 
 ## Learning Goals
 
@@ -85,9 +91,19 @@ This course emphasizes:
 
 - **Hands-on learning**: You'll write and modify real code
 - **Understanding over memorization**: We explain the "why" behind every concept
+- **Experimentation first**: Every concept is reinforced through active experimentation
 - **Minimal complexity**: ~1200 lines of hackable code
 - **Real results**: Your model will actually work and be deployable
 - **Community contribution**: Share your results and learn from others
+
+### Learning Through Experimentation
+
+Throughout this course, you'll be encouraged to experiment constantly:
+- **Component swapping**: Try different encoders, decoders, and configurations
+- **Hyperparameter tuning**: Discover how changes affect model performance
+- **Dataset exploration**: Test your models on various audio sources
+- **Architecture modifications**: Understand the impact of design choices
+- **Performance optimization**: Balance accuracy, speed, and resource usage
 
 ### The Training Compass: Why → What → How
 
