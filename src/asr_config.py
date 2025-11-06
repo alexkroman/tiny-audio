@@ -14,7 +14,7 @@ class ASRConfig(transformers.PretrainedConfig):
         audio_downsample_rate: int = 5,
         num_beams: int = None,
         system_prompt: str = "/no_think /system_override",
-        user_prompt: str = "Transcribe in English: <audio>",
+        user_prompt: str = "Transcribe: <audio>",
         encoder_dim: int = None,
         llm_dim: int = None,
         projector_hidden_dim: int = 8192,

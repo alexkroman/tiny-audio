@@ -231,7 +231,7 @@ class ASRModel(PreTrainedModel):
                 )
 
             # Load decoder LoRA weights
-            if decoder_lora_config:
+            if decoder_lora_config and decoder_lora_config.get("r", 0) > 0:
                 if not decoder_state:
                     raise FileNotFoundError(
                         f"decoder.safetensors not found in {pretrained_model_name_or_path}. "
