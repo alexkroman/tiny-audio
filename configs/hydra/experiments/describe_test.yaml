@@ -1,0 +1,22 @@
+# @package _global_
+defaults:
+  - override /model: large
+  - override /data: audioset_describe
+  - override /training: mac
+
+# Override for quick testing
+data:
+  max_train_samples: 50  # Small sample for testing
+  max_eval_samples: 10
+
+training:
+  output_dir: outputs/describe_test_model
+  num_train_epochs: 1  # Just 1 epoch for testing
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  eval_strategy: steps
+  eval_steps: 10
+  save_strategy: steps
+  save_steps: 20
+  logging_steps: 2
+  report_to: none  # Disable wandb for testing

@@ -36,6 +36,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             "temperature",
             "top_p",
             "user_prompt",
+            "task",
         ]:
             if key in kwargs:
                 generate_kwargs[key] = kwargs.pop(key)

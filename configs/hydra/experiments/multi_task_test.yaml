@@ -1,0 +1,22 @@
+# @package _global_
+defaults:
+  - override /model: large
+  - override /data: multi_task
+  - override /training: mac
+
+# Override for quick testing
+data:
+  max_train_samples: 100  # Small sample for testing
+  max_eval_samples: 20
+
+training:
+  output_dir: outputs/multi_task_test_model
+  num_train_epochs: 1  # Just 1 epoch for testing
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  eval_strategy: steps
+  eval_steps: 25
+  save_strategy: steps
+  save_steps: 25
+  logging_steps: 5
+  report_to: none  # Disable wandb for testing

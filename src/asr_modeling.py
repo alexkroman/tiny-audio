@@ -448,9 +448,8 @@ class ASRModel(PreTrainedModel):
             "dtype": target_dtype,
             "trust_remote_code": True,
         }
-        if not cls._is_loading_from_pretrained:
-            decoder_kwargs["device_map"] = "auto"
-            decoder_kwargs["low_cpu_mem_usage"] = True
+        # Don't use device_map="auto" as it can cause meta tensor issues with Trainer
+        # The Trainer will handle device placement
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
 
@@ -736,6 +735,7 @@ class ASRModel(PreTrainedModel):
         input_values: Optional[torch.Tensor] = None,
         system_prompt: Optional[str] = None,
         user_prompt: Optional[str] = None,
+        task: Optional[str] = None,
         **generate_kwargs,
     ) -> Union[
         torch.Tensor,
@@ -754,8 +754,17 @@ class ASRModel(PreTrainedModel):
         if system_prompt is None:
             system_prompt = self.system_prompt
 
+        # Determine user prompt based on task
         if user_prompt is None:
-            user_prompt = self.config.user_prompt
+            if task == "continue":
+                user_prompt = "Continue: <audio>"
+            elif task == "describe":
+                user_prompt = "Describe: <audio>"
+            elif task == "emotion":
+                user_prompt = "Emotion: <audio>"
+            else:
+                # Default to transcribe
+                user_prompt = self.config.user_prompt if self.config.user_prompt else "Transcribe: <audio>"
 
         messages = []
         if system_prompt:

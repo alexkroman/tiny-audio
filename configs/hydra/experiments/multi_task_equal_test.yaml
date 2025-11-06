@@ -1,0 +1,72 @@
+# @package _global_
+defaults:
+  - override /model: large
+  - override /data: multi_task_complete
+  - override /training: mac
+
+# Override for equal weighting of all tasks
+data:
+  datasets:
+    # Transcription task - LoquaciousSet
+    - path: speechbrain/LoquaciousSet
+      name: clean
+      audio_column: wav
+      text_column: text
+      task: transcribe
+      train_splits:
+        - train
+      eval_splits:
+        - dev
+      sampling_weight: 0.25  # Equal 25% weight
+
+    # Continuation task - SODA-Audio
+    - path: fixie-ai/soda-audio
+      name: default
+      audio_column: audio_second_last_turn
+      text_column: alt_last_turn
+      task: continue
+      train_splits:
+        - train
+      eval_splits:
+        - validation
+      sampling_weight: 0.25  # Equal 25% weight
+
+    # Description task - AudioSet Strong
+    - path: CLAPv2/audioset_strong
+      audio_column: audio
+      text_column: text
+      task: describe
+      train_splits:
+        - train
+      eval_splits:
+        - validation
+      sampling_weight: 0.25  # Equal 25% weight
+
+    # Emotion task - CAMEO
+    - path: amu-cai/CAMEO
+      audio_column: audio
+      text_column: emotion
+      task: emotion
+      train_splits:
+        - crema_d  # Use full split for streaming
+      eval_splits:
+        - cafe  # Use different split for validation
+      sampling_weight: 0.25  # Equal 25% weight
+
+  # Small samples for quick testing
+  max_train_samples: 100  # 25 samples per task
+  max_eval_samples: 20   # 5 samples per task
+
+training:
+  output_dir: outputs/multi_task_equal_test_model
+  max_steps: 20  # Very short for testing
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 2
+  eval_strategy: steps
+  eval_steps: 10
+  save_strategy: steps
+  save_steps: 10
+  logging_steps: 2
+  report_to: none  # Disable wandb for testing
+  dataloader_num_workers: 0  # Avoid multiprocessing issues

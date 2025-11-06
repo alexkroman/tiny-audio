@@ -59,9 +59,17 @@ class DatasetLoader:
         self.cache_dir = self.config.dataset_cache_dir
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
+        # Get dataset path (required)
+        dataset_path = dataset_cfg.get("path")
+        if not dataset_path:
+            raise ValueError("Dataset path is required")
+
+        # Get optional name/config for datasets with multiple configurations
+        dataset_name = dataset_cfg.get("name", None)
+
         ds = load_dataset(
-            dataset_cfg.get("path", dataset_cfg.name),
-            name=dataset_cfg.get("name"),
+            dataset_path,
+            name=dataset_name,  # Can be None for datasets without configs
             split=split,
             streaming=True,
             cache_dir=self.cache_dir,
@@ -78,13 +86,26 @@ class DatasetLoader:
         # Cast audio column to correct format
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
+        # Add task type to each example - store it as metadata, will be added during iteration
+        # Can't use map here because it breaks with AudioDecoder objects
+        task = dataset_cfg.get("task", "transcribe")  # Default to transcribe
+        # Wrap the dataset to add task field during iteration
+        original_iter = ds.__iter__
+        def wrapped_iter():
+            for item in original_iter():
+                item["task"] = task
+                yield item
+        ds.__iter__ = wrapped_iter
+
         return ds
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
+        train_weights = []
         for d_cfg in self.config.datasets:
             train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
             eval_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
+            sampling_weight = d_cfg.get("sampling_weight", 1.0)  # Default equal weight
 
             if "configs" in d_cfg:
                 configs = d_cfg.configs
@@ -93,15 +114,23 @@ class DatasetLoader:
                     split_cfg.name = config
                     train_datasets.append(self._prepare_split(split_cfg, train_split))
                     val_datasets.append(self._prepare_split(split_cfg, eval_split))
+                    train_weights.append(sampling_weight)
             else:
                 for train_split in train_splits:
                     train_datasets.append(self._prepare_split(d_cfg, train_split))
+                    train_weights.append(sampling_weight)
                 for eval_split in eval_splits:
                     val_datasets.append(self._prepare_split(d_cfg, eval_split))
 
-        train_ds = (
-            interleave_datasets(train_datasets) if len(train_datasets) > 1 else train_datasets[0]
-        )
+        # Use sampling weights if provided and we have multiple datasets
+        if len(train_datasets) > 1:
+            # Normalize weights
+            total_weight = sum(train_weights[:len(train_datasets)])
+            probabilities = [w / total_weight for w in train_weights[:len(train_datasets)]]
+            train_ds = interleave_datasets(train_datasets, probabilities=probabilities)
+        else:
+            train_ds = train_datasets[0]
+
         val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
 
         train_ds = train_ds.shuffle(seed=42)
@@ -223,12 +252,37 @@ class DataCollator(DataCollatorForSeq2Seq):
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "Transcribe: <audio>",
-                }
-            )
+
+            # Choose prompt based on task type
+            task = f.get("task", "transcribe")  # Default to transcribe
+            if task == "continue":
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Continue: <audio>",
+                    }
+                )
+            elif task == "describe":
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Describe: <audio>",
+                    }
+                )
+            elif task == "emotion":
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Emotion: <audio>",
+                    }
+                )
+            else:  # Default to transcribe
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Transcribe: <audio>",
+                    }
+                )
             messages.append({"role": "assistant", "content": text})
 
             tokens = self.tokenizer.apply_chat_template(
