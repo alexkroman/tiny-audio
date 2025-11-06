@@ -27,7 +27,7 @@ greater_is_better: false
 # Hub
 push_to_hub: true
 hub_model_id: "mazesmazes/tiny-audio"  # Change this to your repo
-hub_strategy: checkpoint  # Push every checkpoint
+hub_strategy: all_checkpoints  # Push all checkpoints + final model
 hub_token: null  # Will use HF_TOKEN env var if not set
 hub_private_repo: false
 

@@ -1,4 +1,5 @@
 .env
+audio/
 CLAUDE.md
 datasets_cache
 myenv
@@ -174,6 +175,7 @@ logs/
 checkpoints/
 models/
 outputs/
+samples/
 
 # Weights & Biases
 wandb/
@@ -187,6 +189,11 @@ events.out.tfevents.*
 *.mp3
 *.flac
 *.m4a
+
+# Course exercise outputs
+audio_processing.png
+embedding_distributions.png
+observations.txt
 
 # Temporary files
 *.tmp

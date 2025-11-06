@@ -29,31 +29,31 @@ def parse_results_file(file_path: Path) -> tuple[dict, list[dict]]:
     Returns:
         tuple: (metadata dict, list of sample dicts)
     """
-    with open(file_path, 'r') as f:
+    with open(file_path) as f:
         content = f.read()
 
     # Extract metadata (first section)
     metadata = {}
-    lines = content.split('\n')
+    lines = content.split("\n")
     for line in lines[:10]:  # Metadata is in first few lines
-        if line.startswith('Model:'):
-            metadata['model'] = line.split('Model:', 1)[1].strip()
-        elif line.startswith('Dataset:'):
-            metadata['dataset'] = line.split('Dataset:', 1)[1].strip()
-        elif line.startswith('Samples:'):
-            metadata['samples'] = line.split('Samples:', 1)[1].strip()
-        elif line.startswith('WER:'):
-            metadata['overall_wer'] = line.split('WER:', 1)[1].strip()
-        elif line.startswith('Avg Response Time:'):
-            metadata['avg_time'] = line.split('Avg Response Time:', 1)[1].strip()
+        if line.startswith("Model:"):
+            metadata["model"] = line.split("Model:", 1)[1].strip()
+        elif line.startswith("Dataset:"):
+            metadata["dataset"] = line.split("Dataset:", 1)[1].strip()
+        elif line.startswith("Samples:"):
+            metadata["samples"] = line.split("Samples:", 1)[1].strip()
+        elif line.startswith("WER:"):
+            metadata["overall_wer"] = line.split("WER:", 1)[1].strip()
+        elif line.startswith("Avg Response Time:"):
+            metadata["avg_time"] = line.split("Avg Response Time:", 1)[1].strip()
 
     # Split into sample blocks
     # Pattern: "Sample N - WER: X.XX%, Time: X.XXs"
     sample_pattern = re.compile(
-        r'Sample (\d+) - WER: ([\d.]+)%, Time: ([\d.]+)s\n'
-        r'Ground Truth: (.*?)\n'
-        r'Prediction:\s+(.*?)\n',
-        re.MULTILINE
+        r"Sample (\d+) - WER: ([\d.]+)%, Time: ([\d.]+)s\n"
+        r"Ground Truth: (.*?)\n"
+        r"Prediction:\s+(.*?)\n",
+        re.MULTILINE,
     )
 
     samples = []
@@ -64,23 +64,27 @@ def parse_results_file(file_path: Path) -> tuple[dict, list[dict]]:
         ground_truth = match.group(4).strip()
         prediction = match.group(5).strip()
 
-        samples.append({
-            'sample_num': sample_num,
-            'wer': wer,
-            'time': time,
-            'ground_truth': ground_truth,
-            'prediction': prediction,
-        })
+        samples.append(
+            {
+                "sample_num": sample_num,
+                "wer": wer,
+                "time": time,
+                "ground_truth": ground_truth,
+                "prediction": prediction,
+            }
+        )
 
     return metadata, samples
 
 
 def filter_samples_by_wer(samples: list[dict], threshold: float) -> list[dict]:
     """Filter samples to only those with WER above threshold."""
-    return [s for s in samples if s['wer'] > threshold]
+    return [s for s in samples if s["wer"] > threshold]
 
 
-def format_output(metadata: dict, filtered_samples: list[dict], threshold: float, total_samples: int) -> str:
+def format_output(
+    metadata: dict, filtered_samples: list[dict], threshold: float, total_samples: int
+) -> str:
     """Format the filtered results for output."""
     output_lines = []
 
@@ -92,16 +96,20 @@ def format_output(metadata: dict, filtered_samples: list[dict], threshold: float
     output_lines.append(f"Dataset: {metadata.get('dataset', 'Unknown')}")
     output_lines.append(f"Overall WER: {metadata.get('overall_wer', 'Unknown')}")
     output_lines.append(f"Total Samples: {total_samples}")
-    output_lines.append(f"Filtered Samples: {len(filtered_samples)} ({len(filtered_samples)/total_samples*100:.1f}%)")
+    output_lines.append(
+        f"Filtered Samples: {len(filtered_samples)} ({len(filtered_samples) / total_samples * 100:.1f}%)"
+    )
     output_lines.append("=" * 80)
     output_lines.append("")
 
     # Sort by WER descending (worst first)
-    sorted_samples = sorted(filtered_samples, key=lambda x: x['wer'], reverse=True)
+    sorted_samples = sorted(filtered_samples, key=lambda x: x["wer"], reverse=True)
 
     # Output each filtered sample
     for i, sample in enumerate(sorted_samples, 1):
-        output_lines.append(f"Sample {sample['sample_num']} - WER: {sample['wer']:.2f}%, Time: {sample['time']:.2f}s")
+        output_lines.append(
+            f"Sample {sample['sample_num']} - WER: {sample['wer']:.2f}%, Time: {sample['time']:.2f}s"
+        )
         output_lines.append(f"Ground Truth: {sample['ground_truth']}")
         output_lines.append(f"Prediction:   {sample['prediction']}")
         output_lines.append("-" * 80)
@@ -109,10 +117,10 @@ def format_output(metadata: dict, filtered_samples: list[dict], threshold: float
 
     # Summary statistics
     if filtered_samples:
-        avg_wer = sum(s['wer'] for s in filtered_samples) / len(filtered_samples)
-        max_wer = max(s['wer'] for s in filtered_samples)
-        min_wer = min(s['wer'] for s in filtered_samples)
-        avg_time = sum(s['time'] for s in filtered_samples) / len(filtered_samples)
+        avg_wer = sum(s["wer"] for s in filtered_samples) / len(filtered_samples)
+        max_wer = max(s["wer"] for s in filtered_samples)
+        min_wer = min(s["wer"] for s in filtered_samples)
+        avg_time = sum(s["time"] for s in filtered_samples) / len(filtered_samples)
 
         output_lines.append("=" * 80)
         output_lines.append("Summary Statistics (for filtered samples)")
@@ -124,7 +132,7 @@ def format_output(metadata: dict, filtered_samples: list[dict], threshold: float
         output_lines.append(f"Avg Time: {avg_time:.2f}s")
         output_lines.append("=" * 80)
 
-    return '\n'.join(output_lines)
+    return "\n".join(output_lines)
 
 
 def main():
@@ -141,23 +149,18 @@ Examples:
 
   # Show only high error samples (WER > 50%)
   %(prog)s outputs/eval_loquacious_model/results.txt 50
-        """
+        """,
+    )
+    parser.add_argument("input_file", type=Path, help="Path to the eval results.txt file")
+    parser.add_argument(
+        "wer_threshold", type=float, help="WER threshold percentage (e.g., 20 for 20%%)"
     )
     parser.add_argument(
-        'input_file',
-        type=Path,
-        help='Path to the eval results.txt file'
-    )
-    parser.add_argument(
-        'wer_threshold',
-        type=float,
-        help='WER threshold percentage (e.g., 20 for 20%%)'
-    )
-    parser.add_argument(
-        '--output', '-o',
+        "--output",
+        "-o",
         type=Path,
         default=None,
-        help='Output file path (default: print to stdout)'
+        help="Output file path (default: print to stdout)",
     )
 
     args = parser.parse_args()
@@ -187,7 +190,7 @@ Examples:
     # Write or print
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        with open(args.output, 'w') as f:
+        with open(args.output, "w") as f:
             f.write(output)
         print(f"Filtered results saved to: {args.output}")
         print(f"Found {len(filtered_samples)} samples with WER > {args.wer_threshold}%")
@@ -195,5 +198,5 @@ Examples:
         print(output)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

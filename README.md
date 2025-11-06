@@ -4,19 +4,21 @@
 
 # Tiny Audio
 
-**Train your own speech recognition model in 24 hours for $12**
+## Train Your Own Speech Recognition Model in 24 Hours for $12
 
-This repo is a minimal, hackable implementation of an ASR (Automatic Speech Recognition) model that you can train from scratch on a single GPU in 24 hours. Tiny Audio combines a frozen HuBERT-XLarge encoder (1.3B params) with a frozen SmolLM3-3B decoder (3B params), connected by a small trainable audio projector (~13M params). The result is a speech-to-text system you can train in a few hours, deploy to HuggingFace, and use just like Whisper or any other ASR model.
+This isn't just another ASR model. This is a launchpad. A minimal, hackable, and deeply understandable codebase that empowers you to build, train, and deploy your own speech recognition system from scratch. In a single day, on a single GPU, for the price of a few coffees.
+
+Tiny Audio combines the power of massive pretrained models like HuBERT and Qwen-3 8B with the efficiency of LoRA, allowing you to create a high-quality, custom ASR model that is truly yours.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![Hugging Face Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 
-## Talk to it
+## Talk to It
 
-You can try the model right now at [huggingface.co/spaces/mazesmazes/tiny-audio](https://huggingface.co/spaces/mazesmazes/tiny-audio). Upload an audio file and watch it transcribe. It's not perfect - you'll notice it makes mistakes, especially with background noise or heavy accents - but what makes it unique is that **it's fully yours**: fully configurable, tweakable, hackable, and trained by you from start to end.
+Experience the magic firsthand. Try the live demo on Hugging Face Spaces, or run it yourself with just a few lines of Python.
 
-Or use it via the transformers library:
+**[🚀 Live Demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)**
 
 ```python
 from transformers import pipeline
@@ -29,82 +31,84 @@ result = pipe("path/to/audio.wav")
 print(result["text"])
 ```
 
-The model handles various audio formats (WAV, MP3, FLAC, etc.) and automatically resamples to 16kHz.
+## 🎓 Learn by Building: A Free, Hands-On Course
 
-## Quick start
+This repository is also a free, 6-hour course designed to teach you the art and science of building modern ASR systems. No black boxes. No magic. Just clean, understandable code and a clear path from raw audio to a deployed model.
 
-The fastest way to feel the magic is to train your own model. Boot up an A40 GPU box from your favorite provider (I like RunPod), clone this repo, and kick off training:
+**[📚 Start the Course](docs/QUICKSTART.md)** | **[📖 See the Full Curriculum](docs/course/0-course-overview.md)**
+
+In just six hours, you will:
+
+-   **Understand the Architecture:** Go deep on the encoder-projector-decoder model that powers modern ASR.
+-   **Master PEFT:** Learn the theory and practice of parameter-efficient fine-tuning with LoRA.
+-   **Train Your Own Model:** Get your hands dirty and train a model from scratch on a real-world dataset.
+-   **Deploy and Share:** Push your model to the Hugging Face Hub, write a professional model card, and share your work with the world.
+
+## Quick Start: Train Your Own Model
+
+Ready to build? You can train your own model in just a few steps.
 
 ```bash
+# 1. Clone the repo and install dependencies
 git clone https://github.com/alexkroman/tiny-audio.git
 cd tiny-audio
 poetry install
 
-# Quick test run (20 steps, ~5 minutes)
-poetry run python src/train.py
+# 2. Run a quick test to make sure everything is working (~5 minutes)
+poetry run python src/train.py +experiments=mac_minimal
 
-# Full production training with encoder LoRA (~24 hours on A40)
-export HF_TOKEN='your-token'  # Get from https://huggingface.co/settings/tokens
+# 3. Start the full training (~24 hours on an A40 GPU)
+export HF_TOKEN='your-hugging-face-token' # Get from hf.co/settings/tokens
 poetry run python src/train.py +experiments=stage1
 ```
 
-If you want to run it on a remote GPU like RunPod, there are deployment scripts to make your life easier:
+## How It Works: The Tiny Audio Architecture
 
-```bash
-# Deploy code to remote GPU
-poetry run deploy-runpod --host <pod-id>.runpod.io --port 22
+Tiny Audio is built on a simple, powerful idea: combine the best pretrained models for audio and language, and efficiently teach them to work together.
 
-# Start training remotely
-poetry run remote-train \
-  --host <pod-id>.runpod.io \
-  --port 22 \
-  --config stage1
-```
+1.  **The Ear (Audio Encoder):** We start with `facebook/hubert-xlarge-ls960-ft`, a massive model that has already learned to understand the nuances of human speech. We use LoRA to fine-tune it, teaching it to focus on the specific sounds of our dataset.
+2.  **The Bridge (Audio Projector):** This is a small, trainable neural network that acts as a translator, converting the audio features from the encoder into a format the language model can understand.
+3.  **The Brain (Language Model):** We use `Qwen/Qwen-3 8B`, a powerful language model that already knows how to generate coherent text. We use LoRA to teach it to generate transcriptions instead of just general-purpose text.
 
-Now wait ~24 hours. Once it's done, your model will be pushed to HuggingFace Hub automatically (if you set `HF_TOKEN`), and you can use it just like in the example above!
+By freezing the vast majority of the parameters in the encoder and decoder and only training the small LoRA adapters and the projector, we can achieve incredible efficiency without sacrificing performance.
 
-## How it works
+### Key Concepts Explained
 
-Tiny Audio uses a parameter-efficient three-component architecture:
+**What is LoRA?** Low-Rank Adaptation adds small trainable "adapter" matrices to frozen model weights. Instead of updating a 2048×2048 weight matrix (4.2M params), LoRA uses two small matrices: 2048×8 and 8×2048 (32K params). This is 0.76% the size but captures most of the adaptation needed!
 
-```text
-Audio Waveform → HuBERT-XLarge → Audio Projector → SmolLM3-3B → Text
-                 (1.3B + LoRA)   (~13M, trainable)  (3B + LoRA)
-```
+**What is SwiGLU?** Swish Gated Linear Unit - a modern activation function that gates information flow. Used in Llama and other state-of-the-art models. Formula: `SwiGLU(x) = Swish(Wx) ⊗ (Vx)` where `Swish(x) = x × sigmoid(x)`.
 
-1. **Audio Encoder (LoRA Fine-tuned)**: HuBERT-XLarge (1.3B) with LoRA adapters on attention layers (q_proj, k_proj)
-2. **Audio Projector (Trainable)**: A SwiGLU MLP that downsamples 5x and maps audio features to language model space
-3. **Language Decoder (LoRA Fine-tuned)**: SmolLM3-3B with LoRA adapters on attention layers (q_proj, v_proj) generates text transcription with Flash Attention 2
+**What is RMSNorm?** Root Mean Square Normalization - a simpler, faster alternative to LayerNorm that just normalizes by the RMS value: `x / sqrt(mean(x²))`. Used in modern transformers like Llama.
 
-The projector uses a **SwiGLU** architecture (like Llama):
-- Pre-norm: RMSNorm on stacked encoder features
-- `gate_proj`: Linear(6400 → 8192, no bias)
-- `up_proj`: Linear(6400 → 8192, no bias)
-- `down_proj`: Linear(8192 → 2048, no bias)
-- Activation: `silu(gate) * up` → `down`
-- Post-norm: RMSNorm on output embeddings
+**Why 16kHz audio?** This sample rate captures human speech frequency range (85-255 Hz fundamental + harmonics up to ~8kHz) while being computationally efficient. Industry standard for ASR.
 
-**LoRA Configuration** (optional, configurable):
+**Why 5x downsampling?** Reduces computational cost in the decoder while maintaining ~100ms temporal resolution per frame - detailed enough for accurate transcription.
 
-*Encoder LoRA:*
-- Rank: 8 (default)
-- Alpha: 8 (scaling factor)
+### LoRA Configuration
+
+**Encoder LoRA:**
+
+- Rank: 16
+- Alpha: 16 (scaling factor)
 - Target modules: q_proj, k_proj in HuBERT attention layers
-- Adds ~1-2M trainable parameters
+- Adds ~4M trainable parameters (3,932,160)
 
-*Decoder LoRA:*
-- Rank: 64 (default)
-- Alpha: 32 (scaling factor = 0.5)
-- Target modules: q_proj, v_proj in SmolLM3 attention layers
-- Adds ~15-20M trainable parameters
+**Decoder LoRA:**
 
-Why use parameter-efficient training? Because:
-- **You train ~30M parameters** instead of 4+ billion (projector + encoder LoRA + decoder LoRA)
-- **Training is fast** (~24 hours on A40)
+- Rank: 8
+- Alpha: 32 (scaling factor = 4.0)
+- Target modules: q_proj, v_proj in Qwen-3 attention layers
+- Adds ~4M trainable parameters (3,833,856)
+
+Why use parameter-efficient training with LoRA on both encoder and decoder? Because:
+
+- **You train ~146M parameters** instead of 9.3+ billion (projector: ~138M + encoder LoRA: ~4M + decoder LoRA: ~4M)
+- **Training is fast** (~24 hours on A40) thanks to reduced gradient computations
 - **It's cheap** (~$12 for a full run)
 - **You leverage pretrained knowledge** from both audio and language domains
-- **Memory efficient** - runs on a single A40 40GB
+- **Memory efficient** - runs on a single A40 40GB with LoRA adapters
 - **LoRA enables targeted adaptation** of both encoder and decoder without full fine-tuning
+- **Flexible configuration** - easily adjust LoRA rank, target modules, and alpha for both models
 
 ## Training details
 
@@ -184,6 +188,7 @@ Contributors who have trained and evaluated Tiny Audio models:
 Want to see your name here? Train a model, evaluate it on LoquaciousSet, and submit a PR with your results!
 
 **To reproduce or generate your own WER score:**
+
 ```bash
 # Evaluate on 500 samples
 poetry run eval mazesmazes/tiny-audio --max-samples 500
@@ -200,7 +205,7 @@ poetry run eval mazesmazes/tiny-audio --max-samples 100
 Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable, hackable codebase** designed to train an ASR model start to end and produce a working model you can actually use and learn from.
 
 - **~1000 lines of core code** across 7 Python files in `src/`
-- **Parameter-efficient training**: Train only ~18M parameters (projector + encoder LoRA + decoder LoRA) instead of 4B+
+- **Parameter-efficient training**: Train only ~146M parameters (projector + encoder LoRA + decoder LoRA) instead of 9.3B+
 - **Dependency-lite**: Just PyTorch, transformers, datasets, PEFT, and a few other essentials via Poetry
 - **No magic**: Read the code and understand exactly what's happening
 - **Fully yours**: Train it, modify it, deploy it however you want
@@ -259,8 +264,9 @@ Tiny Audio is nowhere finished. The goal is to make ASR training accessible on b
 ## Acknowledgments
 
 This project builds upon:
+
 - [HuBERT](https://huggingface.co/docs/transformers/model_doc/hubert) by Facebook AI for audio encoding
-- [SmolLM3-3B](https://huggingface.co/HuggingFaceTB/SmolLM3-3B) by HuggingFace for language modeling
+- [Qwen-3 8B](https://huggingface.co/Qwen/Qwen3-8B) by Alibaba for language modeling
 - [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) by SpeechBrain for training data
 
 ## Citation

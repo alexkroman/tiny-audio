@@ -16,8 +16,8 @@ import json
 import shutil
 from pathlib import Path
 
-from safetensors.torch import load_file, save_file
 import torch
+from safetensors.torch import load_file, save_file
 
 
 def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool = False):
@@ -46,8 +46,13 @@ def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool 
         # Copy all non-model files to output directory
         if checkpoint_path != output_path:
             for file in checkpoint_path.glob("*"):
-                if file.name not in ["model.safetensors", "pytorch_model.bin", "projector.safetensors",
-                                      "adapter_model.safetensors", "adapter_model.bin"]:
+                if file.name not in [
+                    "model.safetensors",
+                    "pytorch_model.bin",
+                    "projector.safetensors",
+                    "adapter_model.safetensors",
+                    "adapter_model.bin",
+                ]:
                     dest = output_path / file.name
                     if file.is_dir():
                         if dest.exists():
@@ -59,7 +64,7 @@ def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool 
     # Check if already in new format
     new_projector_path = output_path / "projector.safetensors"
     if new_projector_path.exists() and not force:
-        print(f"Checkpoint already in new format. Use --force to overwrite.")
+        print("Checkpoint already in new format. Use --force to overwrite.")
         return
 
     # Load the old model file
@@ -119,7 +124,7 @@ def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool 
             lora_alpha = 32  # Default value
             target_modules = set()
 
-            for key in peft_weights.keys():
+            for key in peft_weights:
                 if "lora_A" in key:
                     # Extract r from lora_A weight shape
                     if r is None:
@@ -129,14 +134,22 @@ def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool 
                     # Example: base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight
                     parts = key.split(".")
                     for i, part in enumerate(parts):
-                        if part in ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]:
+                        if part in [
+                            "q_proj",
+                            "v_proj",
+                            "k_proj",
+                            "o_proj",
+                            "gate_proj",
+                            "up_proj",
+                            "down_proj",
+                        ]:
                             target_modules.add(part)
                             break
 
             # Check for existing peft_config.json for additional settings
             peft_config_path = checkpoint_path / "peft_config.json"
             if peft_config_path.exists():
-                with open(peft_config_path, "r") as f:
+                with open(peft_config_path) as f:
                     peft_config = json.load(f)
                     r = peft_config.get("r", r or 8)
                     lora_alpha = peft_config.get("lora_alpha", lora_alpha)
@@ -149,12 +162,16 @@ def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool 
                 "lora_dropout": 0.05,
                 "bias": "none",
                 "task_type": "CAUSAL_LM",
-                "target_modules": sorted(list(target_modules)) if target_modules else ["q_proj", "v_proj"],
+                "target_modules": (
+                    sorted(list(target_modules)) if target_modules else ["q_proj", "v_proj"]
+                ),
                 "peft_type": "LORA",
-                "base_model_name_or_path": "HuggingFaceTB/SmolLM3-3B"  # You may need to update this
+                "base_model_name_or_path": "HuggingFaceTB/SmolLM3-3B",  # You may need to update this
             }
 
-            print(f"Creating adapter_config.json with r={adapter_config['r']}, target_modules={adapter_config['target_modules']}")
+            print(
+                f"Creating adapter_config.json with r={adapter_config['r']}, target_modules={adapter_config['target_modules']}"
+            )
             with open(adapter_config_path, "w") as f:
                 json.dump(adapter_config, f, indent=2)
     else:
@@ -182,26 +199,20 @@ def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool 
         print(f"  - projector.safetensors ({len(projector_weights)} weights)")
     if lora_weights:
         print(f"  - adapter_model.safetensors ({len(lora_weights)} weights)")
-        print(f"  - adapter_config.json")
+        print("  - adapter_config.json")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Convert checkpoint to new separated format")
-    parser.add_argument(
-        "checkpoint_dir",
-        type=str,
-        help="Path to checkpoint directory to convert"
-    )
+    parser.add_argument("checkpoint_dir", type=str, help="Path to checkpoint directory to convert")
     parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
-        help="Output directory (defaults to in-place conversion)"
+        help="Output directory (defaults to in-place conversion)",
     )
     parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force overwrite if output files already exist"
+        "--force", action="store_true", help="Force overwrite if output files already exist"
     )
 
     args = parser.parse_args()

@@ -4,8 +4,9 @@ Check what's available in a HuggingFace Hub model repository.
 """
 
 import argparse
-from huggingface_hub import list_repo_files, hf_hub_download, HfApi
-import json
+
+from huggingface_hub import HfApi, list_repo_files
+
 
 def check_hub_model(repo_id: str):
     """Check what files and checkpoints are available in a Hub repository."""
@@ -75,7 +76,7 @@ def check_hub_model(repo_id: str):
         else:
             print("\n⚠ No config.json found in root - may not be a complete model")
             if checkpoints:
-                print(f"\nTry using a specific checkpoint:")
+                print("\nTry using a specific checkpoint:")
                 print(f"  resume_from_checkpoint: {repo_id}/{checkpoints[-1]}")
 
         # Check for model card
@@ -89,16 +90,16 @@ def check_hub_model(repo_id: str):
         print("  2. You have access (if private)")
         print("  3. You're logged in: huggingface-cli login")
 
+
 def main():
     parser = argparse.ArgumentParser(description="Check HuggingFace Hub model repository")
     parser.add_argument(
-        "repo_id",
-        type=str,
-        help="HuggingFace Hub repository ID (e.g., 'username/model-name')"
+        "repo_id", type=str, help="HuggingFace Hub repository ID (e.g., 'username/model-name')"
     )
 
     args = parser.parse_args()
     check_hub_model(args.repo_id)
+
 
 if __name__ == "__main__":
     main()

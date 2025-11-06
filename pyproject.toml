@@ -57,6 +57,9 @@ assemblyai = "*"
 typer = ">=0.19.2"
 truecase = "*"
 nltk = "*"
+# Course exercise dependencies
+librosa = ">=0.10.0"
+matplotlib = ">=3.7.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
@@ -66,6 +69,10 @@ mypy = ">=1.5.0"
 mdformat = ">=0.7.0"
 
 [tool.poetry.scripts]
+# Course tools
+download-samples = "scripts.download_samples:download_samples"
+verify-setup = "scripts.verify_setup:main"
+
 # Model scripts (use: poetry run python src/train.py for training due to Hydra config paths)
 eval = "scripts.eval:main"
 push-to-hub = "scripts.push_to_hub:main"

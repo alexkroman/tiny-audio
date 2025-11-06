@@ -6,21 +6,50 @@ from typing import Any, Dict, List
 
 import hydra
 import nltk
+import numpy as np
 import torch
 import truecase
 import wandb
 from datasets import Audio, Dataset, interleave_datasets, load_dataset
 from omegaconf import DictConfig, OmegaConf
-from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Trainer, TrainingArguments, WhisperTokenizer
+from transformers import (
+    DataCollatorForSeq2Seq,
+    EarlyStoppingCallback,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+    WhisperTokenizer,
+)
+from transformers.models.wav2vec2.modeling_wav2vec2 import _compute_mask_indices
 
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
 
 # Download required NLTK data for truecase
 try:
-    nltk.data.find('tokenizers/punkt_tab')
+    nltk.data.find("tokenizers/punkt_tab")
 except LookupError:
-    nltk.download('punkt_tab', quiet=True)
+    nltk.download("punkt_tab", quiet=True)
+
+
+class CollatorSwapCallback(TrainerCallback):
+    """Callback to swap data collators between training and evaluation."""
+
+    def __init__(self, train_collator, eval_collator):
+        self.train_collator = train_collator
+        self.eval_collator = eval_collator
+
+    def on_train_begin(self, args, state, control, model, **kwargs):
+        # Store reference to trainer to swap collators
+        pass
+
+    def on_evaluate_begin(self, args, state, control, model, **kwargs):
+        # Temporarily disable augmentation for evaluation
+        self.train_collator.apply_augmentation = False
+
+    def on_evaluate_end(self, args, state, control, model, **kwargs):
+        # Re-enable augmentation after evaluation
+        self.train_collator.apply_augmentation = True
 
 
 class DatasetLoader:
@@ -93,6 +122,11 @@ class DataCollator(DataCollatorForSeq2Seq):
         sample_rate: int,
         max_audio_seconds: float,
         system_prompt: str = None,
+        mask_time_prob: float = 0.065,
+        mask_time_length: int = 10,
+        mask_feature_prob: float = 0.0,
+        mask_feature_length: int = 10,
+        apply_augmentation: bool = True,
     ):
         super().__init__(tokenizer=tokenizer, padding=True)
         self.feature_extractor = feature_extractor
@@ -100,15 +134,22 @@ class DataCollator(DataCollatorForSeq2Seq):
         self.max_audio_samples = int(max_audio_seconds * sample_rate)
         self.system_prompt = system_prompt
 
+        # SpecAugment parameters for data augmentation
+        self.mask_time_prob = mask_time_prob
+        self.mask_time_length = mask_time_length
+        self.mask_feature_prob = mask_feature_prob
+        self.mask_feature_length = mask_feature_length
+        self.apply_augmentation = apply_augmentation
+
         # Initialize WhisperTokenizer for text normalization (matches eval script)
         self.whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
 
     def _preprocess_text(self, text: str) -> str:
         """Preprocess text before Whisper normalization (matches eval script)."""
         # Remove <inaudible> tags
-        text = re.sub(r'<inaudible>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
         # Remove disfluencies (uh, um)
-        text = re.sub(r'\b(uh|um)\b', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
         return text
 
     def _normalize_text(self, text: str) -> str:
@@ -123,11 +164,49 @@ class DataCollator(DataCollatorForSeq2Seq):
         audio_array = audio_samples.data[: self.max_audio_samples]
         return audio_array.squeeze().numpy()
 
+    def _apply_spec_augment(self, input_values: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
+        """
+        Apply SpecAugment using the exact Transformers implementation.
+        This masks time steps (and optionally features) during training.
+
+        Args:
+            input_values: Input features [batch_size, seq_len]
+            attention_mask: Attention mask [batch_size, seq_len]
+
+        Returns:
+            Masked input_values
+        """
+        # Skip augmentation if disabled or masking is set to 0
+        if not self.apply_augmentation or (self.mask_time_prob == 0 and self.mask_feature_prob == 0):
+            return input_values
+
+        batch_size, sequence_length = input_values.shape
+
+        # Apply time masking
+        if self.mask_time_prob > 0:
+            mask_time_indices = _compute_mask_indices(
+                (batch_size, sequence_length),
+                mask_prob=self.mask_time_prob,
+                mask_length=self.mask_time_length,
+                attention_mask=attention_mask,
+                min_masks=2,  # wav2vec2 default
+            )
+            mask_time_indices = torch.tensor(mask_time_indices, device=input_values.device, dtype=torch.bool)
+            input_values[mask_time_indices] = 0.0
+
+        return input_values
+
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_arrays = [self._extract_audio(f["audio"]) for f in features]
 
         audio_features = self.feature_extractor(
             audio_arrays, sampling_rate=self.sample_rate, padding=True, return_tensors="pt"
+        )
+
+        # Apply SpecAugment using Transformers' implementation (if enabled)
+        audio_features["input_values"] = self._apply_spec_augment(
+            audio_features["input_values"],
+            audio_features.get("attention_mask")
         )
 
         text_features = []
@@ -138,7 +217,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             text = self._normalize_text(text)
 
             # Apply truecasing in main process (not in DataLoader workers)
-            text = text.replace('<COMMA>', ',').replace('<PERIOD>', '.')
+            text = text.replace("<COMMA>", ",").replace("<PERIOD>", ".")
             text = truecase.get_true_case(text)
 
             messages = []
@@ -176,7 +255,10 @@ class DataCollator(DataCollatorForSeq2Seq):
                     # Skip the </think> token and any newlines after it
                     content_start = i + 1
                     # Skip newlines
-                    while content_start < len(tokens) and self.tokenizer.decode([tokens[content_start]]).strip() == "":
+                    while (
+                        content_start < len(tokens)
+                        and self.tokenizer.decode([tokens[content_start]]).strip() == ""
+                    ):
                         content_start += 1
                     break
 
@@ -242,7 +324,9 @@ def main(cfg: DictConfig) -> None:
     from transformers import AutoConfig as HFAutoConfig
 
     encoder_config = HFAutoConfig.from_pretrained(cfg.model.encoder_model_name)
-    decoder_config = HFAutoConfig.from_pretrained(cfg.model.decoder_model_name, trust_remote_code=True)
+    decoder_config = HFAutoConfig.from_pretrained(
+        cfg.model.decoder_model_name, trust_remote_code=True
+    )
 
     asr_config = ASRConfig(
         text_model_id=cfg.model.decoder_model_name,
@@ -268,42 +352,83 @@ def main(cfg: DictConfig) -> None:
     # Load from pretrained if specified, otherwise create new model
     if cfg.model.get("pretrained_model_path"):
         print(f"Loading pretrained model from: {cfg.model.pretrained_model_path}")
-        # Pass our config to override the Hub config dimensions
-        # Don't apply LoRA yet when loading from pretrained - apply it after loading
+        # from_pretrained will automatically load LoRA weights if they exist in the checkpoint
+        # It reads encoder_lora_config.json and decoder_lora_config.json from the Hub
         model = ASRModel.from_pretrained(
             cfg.model.pretrained_model_path,
             config=asr_config,
-            peft_config=None,  # Don't apply LoRA during loading
-            encoder_lora_config=None  # Don't apply encoder LoRA during loading
         )
-        print(f"✓ Loaded pretrained model with projector weights")
+        print("✓ Loaded pretrained model (projector + LoRA weights if present)")
 
-        # Now apply LoRA if configured
-        if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
+        # If no LoRA weights were in checkpoint but we want to add them, apply fresh LoRA
+        # Check if encoder already has LoRA
+        has_encoder_lora = any(
+            "lora" in name.lower() for name, _ in model.encoder.named_parameters()
+        )
+        if encoder_lora_config and encoder_lora_config.get("r", 0) > 0 and not has_encoder_lora:
             from peft import TaskType
-            print("Applying encoder LoRA adapters to the loaded model...")
-            model.encoder = model._apply_lora(model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder")
+
+            print("⚠️  No encoder LoRA in checkpoint - applying fresh encoder LoRA adapters...")
+            model.encoder = model._apply_lora(
+                model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
+            )
             model.encoder_lora_config = encoder_lora_config
 
-        if peft_config and peft_config.get("peft_method") == "lora":
+        # Check if decoder already has LoRA
+        has_decoder_lora = any(
+            "lora" in name.lower() for name, _ in model.decoder.named_parameters()
+        )
+        if peft_config and peft_config.get("peft_method") == "lora" and not has_decoder_lora:
             from peft import TaskType
-            print("Applying decoder LoRA adapters to the loaded model...")
-            model.decoder = model._apply_lora(model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder")
+
+            print("⚠️  No decoder LoRA in checkpoint - applying fresh decoder LoRA adapters...")
+            model.decoder = model._apply_lora(
+                model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder"
+            )
             model.peft_config = peft_config
     else:
-        model = ASRModel(asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config)
+        model = ASRModel(
+            asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config
+        )
+
+    # Disable cache during training (required for gradient checkpointing)
+    if hasattr(model.config, 'use_cache'):
+        model.config.use_cache = False
+    if hasattr(model.generation_config, 'use_cache'):
+        model.generation_config.use_cache = False
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
-    data_collator = DataCollator(
+    # Create separate collators for training (with augmentation) and eval (without)
+    train_collator = DataCollator(
         tokenizer=model.tokenizer,
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         max_audio_seconds=cfg.data.max_audio_seconds,
         system_prompt=cfg.model.system_prompt,
+        mask_time_prob=cfg.data.get("mask_time_prob", 0.05),
+        mask_time_length=cfg.data.get("mask_time_length", 10),
+        mask_feature_prob=cfg.data.get("mask_feature_prob", 0.0),
+        mask_feature_length=cfg.data.get("mask_feature_length", 10),
+        apply_augmentation=True,  # Enable augmentation for training
     )
 
-    callbacks = []
+    eval_collator = DataCollator(
+        tokenizer=model.tokenizer,
+        feature_extractor=model.feature_extractor,
+        sample_rate=cfg.data.sample_rate,
+        max_audio_seconds=cfg.data.max_audio_seconds,
+        system_prompt=cfg.model.system_prompt,
+        mask_time_prob=cfg.data.get("mask_time_prob", 0.05),
+        mask_time_length=cfg.data.get("mask_time_length", 10),
+        mask_feature_prob=cfg.data.get("mask_feature_prob", 0.0),
+        mask_feature_length=cfg.data.get("mask_feature_length", 10),
+        apply_augmentation=False,  # Disable augmentation for evaluation
+    )
+
+    callbacks = [
+        CollatorSwapCallback(train_collator, eval_collator)
+    ]
 
     # PEFT's trainer integration automatically handles LoRA checkpoint saving
 
@@ -328,7 +453,7 @@ def main(cfg: DictConfig) -> None:
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         processing_class=processor,
-        data_collator=data_collator,
+        data_collator=train_collator,  # Callback will toggle augmentation for eval
         callbacks=callbacks,
     )
 

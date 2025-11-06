@@ -45,10 +45,13 @@ class AudioProjector(nn.Module):
         # Post-norm: normalize output to match LLM's expected embedding distribution
         self.ln_post = LlamaRMSNorm(out_dim)
 
+        # Initialize weights with small std to avoid exploding gradients
+        # std value is configurable via config.projector_init_std
+        init_std = getattr(config, 'projector_init_std', 0.02)
         with torch.no_grad():
-            nn.init.normal_(self.gate_proj.weight, std=0.02)
-            nn.init.normal_(self.up_proj.weight, std=0.02)
-            nn.init.normal_(self.down_proj.weight, std=0.02)
+            nn.init.normal_(self.gate_proj.weight, std=init_std)
+            nn.init.normal_(self.up_proj.weight, std=init_std)
+            nn.init.normal_(self.down_proj.weight, std=init_std)
 
     def forward(self, x):
         batch_size, seq_len, dim = x.size()
@@ -107,8 +110,8 @@ class ASRModel(PreTrainedModel):
         cls._pretrained_model_path = pretrained_model_name_or_path
 
         # Extract subfolder/revision from kwargs for cached_file calls
-        subfolder = kwargs.get("subfolder", None)
-        revision = kwargs.get("revision", None)
+        subfolder = kwargs.get("subfolder")
+        revision = kwargs.get("revision")
         cache_kwargs = {}
         if subfolder:
             cache_kwargs["subfolder"] = subfolder
@@ -118,6 +121,7 @@ class ASRModel(PreTrainedModel):
         try:
             # Helper function to load LoRA config
             def load_lora_config(config_filename):
+                # Try loading from main directory first
                 try:
                     config_file = cached_file(
                         pretrained_model_name_or_path,
@@ -127,10 +131,31 @@ class ASRModel(PreTrainedModel):
                     )
                     if config_file:
                         from pathlib import Path as PathlibPath
+
                         with PathlibPath(config_file).open() as f:
                             return json.load(f)
                 except Exception:
                     pass
+
+                # Fallback: try loading from last-checkpoint subfolder
+                try:
+                    fallback_kwargs = cache_kwargs.copy()
+                    fallback_kwargs["subfolder"] = "last-checkpoint"
+                    config_file = cached_file(
+                        pretrained_model_name_or_path,
+                        config_filename,
+                        _raise_exceptions_for_missing_entries=False,
+                        **fallback_kwargs,
+                    )
+                    if config_file:
+                        from pathlib import Path as PathlibPath
+
+                        print(f"Loading {config_filename} from last-checkpoint subfolder")
+                        with PathlibPath(config_file).open() as f:
+                            return json.load(f)
+                except Exception:
+                    pass
+
                 return None
 
             # Load LoRA configs
@@ -138,53 +163,90 @@ class ASRModel(PreTrainedModel):
             decoder_lora_config = load_lora_config("decoder_lora_config.json")
 
             # Create model with LoRA configs
-            model = cls(config, peft_config=decoder_lora_config, encoder_lora_config=encoder_lora_config)
-
-            # Load all weights from model.safetensors
-            model_path = cached_file(
-                pretrained_model_name_or_path,
-                "model.safetensors",
-                **cache_kwargs,
+            model = cls(
+                config, peft_config=decoder_lora_config, encoder_lora_config=encoder_lora_config
             )
-            model_state = load_file(model_path)
 
-            # Load projector weights
-            projector_state = {
-                k.replace("projector.", ""): v
-                for k, v in model_state.items()
-                if k.startswith("projector.")
-            }
-            if projector_state:
-                model.projector.load_state_dict(projector_state, strict=True)
-                print(f"✓ Loaded projector weights ({len(projector_state)} tensors)")
+            # Load from separate component files
+            # Each component is saved in its own safetensors file for clarity
 
-            # Load encoder LoRA weights from model.safetensors
+            def load_component(filename):
+                """Load a component file, with fallback to last-checkpoint subfolder."""
+                # Try loading from main directory first
+                try:
+                    component_path = cached_file(
+                        pretrained_model_name_or_path,
+                        filename,
+                        _raise_exceptions_for_missing_entries=False,
+                        **cache_kwargs,
+                    )
+                    if component_path:
+                        return load_file(component_path)
+                except Exception:
+                    pass
+
+                # Fallback: try loading from last-checkpoint subfolder
+                try:
+                    fallback_kwargs = cache_kwargs.copy()
+                    fallback_kwargs["subfolder"] = "last-checkpoint"
+                    component_path = cached_file(
+                        pretrained_model_name_or_path,
+                        filename,
+                        _raise_exceptions_for_missing_entries=False,
+                        **fallback_kwargs,
+                    )
+                    if component_path:
+                        print(f"Loading {filename} from last-checkpoint subfolder")
+                        return load_file(component_path)
+                except Exception:
+                    pass
+
+                return None
+
+            encoder_state = load_component("encoder.safetensors")
+            decoder_state = load_component("decoder.safetensors")
+            projector_state = load_component("projector.safetensors")
+
+            # Load projector weights (required)
+            if not projector_state:
+                raise FileNotFoundError(
+                    f"projector.safetensors not found in {pretrained_model_name_or_path}. "
+                    "The repository may not have been trained yet."
+                )
+            total_params = sum(v.numel() for v in projector_state.values())
+            model.projector.load_state_dict(projector_state, strict=True, assign=True)
+            print(f"✓ Loaded projector weights ({total_params:,} parameters)")
+
+            # Load encoder LoRA weights
             if encoder_lora_config:
-                encoder_lora_state = {
-                    k.replace("encoder.", ""): v
-                    for k, v in model_state.items()
-                    if k.startswith("encoder.")
-                }
-                if encoder_lora_state:
-                    total_params = sum(v.numel() for v in encoder_lora_state.values())
-                    model.encoder.load_state_dict(encoder_lora_state, strict=False)
-                    print(f"✓ Loaded encoder LoRA from model.safetensors (r={encoder_lora_config.get('r', 0)}, {total_params:,} parameters)")
-                else:
-                    print(f"⚠ No encoder LoRA weights in model.safetensors, using fresh initialization")
+                if not encoder_state:
+                    raise FileNotFoundError(
+                        f"encoder.safetensors not found in {pretrained_model_name_or_path}. "
+                        "The repository may not have been trained yet."
+                    )
+                total_params = sum(v.numel() for v in encoder_state.values())
+                model.encoder.load_state_dict(encoder_state, strict=False, assign=True)
+                print(
+                    f"✓ Loaded encoder LoRA (r={encoder_lora_config.get('r', 0)}, {total_params:,} parameters)"
+                )
 
-            # Load decoder LoRA weights from model.safetensors
-            if decoder_lora_config:
-                decoder_lora_state = {
-                    k.replace("decoder.", ""): v
-                    for k, v in model_state.items()
-                    if k.startswith("decoder.")
-                }
-                if decoder_lora_state:
-                    total_params = sum(v.numel() for v in decoder_lora_state.values())
-                    model.decoder.load_state_dict(decoder_lora_state, strict=False)
-                    print(f"✓ Loaded decoder LoRA from model.safetensors (r={decoder_lora_config.get('r', 0)}, {total_params:,} parameters)")
-                else:
-                    print(f"⚠ No decoder LoRA weights in model.safetensors, using fresh initialization")
+            # Load decoder LoRA weights
+            if decoder_lora_config and decoder_lora_config.get("r", 0) > 0:
+                if not decoder_state:
+                    raise FileNotFoundError(
+                        f"decoder.safetensors not found in {pretrained_model_name_or_path}. "
+                        "The repository may not have been trained yet."
+                    )
+                total_params = sum(v.numel() for v in decoder_state.values())
+                model.decoder.load_state_dict(decoder_state, strict=False, assign=True)
+                print(
+                    f"✓ Loaded decoder LoRA (r={decoder_lora_config.get('r', 0)}, {total_params:,} parameters)"
+                )
+
+            # Move model to device if specified (needed after loading weights from meta tensors)
+            device = kwargs.get("device")
+            if device is not None:
+                model = model.to(device)
 
             return model
         finally:
@@ -208,7 +270,25 @@ class ASRModel(PreTrainedModel):
         # Create decoder first (needed for tokenizer init)
         self.decoder = self._create_decoder(config, peft_config)
         self.generation_config = self.decoder.generation_config
+
+        # Override generation_config with ASR-appropriate defaults
         self.generation_config.num_beams = config.num_beams
+        self.generation_config.max_new_tokens = config.max_new_tokens
+        self.generation_config.min_new_tokens = config.min_new_tokens
+        self.generation_config.do_sample = config.do_sample
+        # Force use_cache=False for this architecture (uses inputs_embeds)
+        self.generation_config.use_cache = False
+
+        # Only set sampling parameters if sampling is enabled
+        if config.do_sample:
+            self.generation_config.top_k = config.top_k
+            self.generation_config.top_p = config.top_p
+            self.generation_config.temperature = config.temperature
+        else:
+            # Remove sampling parameters when not sampling
+            self.generation_config.top_k = None
+            self.generation_config.top_p = None
+            self.generation_config.temperature = None
 
         # Initialize tokenizer and resize embeddings after decoder is created
         self._init_tokenizer()
@@ -230,13 +310,21 @@ class ASRModel(PreTrainedModel):
         )
         self.projector: AudioProjector = AudioProjector(projector_config)
 
-        decoder_dtype = next(self.decoder.parameters()).dtype
-        self.projector.to(dtype=decoder_dtype)
+        # Match projector dtype and device to decoder
+        # When device_map="auto" is used, we need to explicitly move the projector
+        # to match the decoder's device, since it's a custom module not handled by device_map
+        decoder_param = next(self.decoder.parameters())
+        if decoder_param.device.type != "meta":
+            # Normal case: move to decoder's device
+            self.projector.to(dtype=decoder_param.dtype, device=decoder_param.device)
+        else:
+            # Meta device case: only set dtype, device will be set later
+            self.projector.to(dtype=decoder_param.dtype)
 
         self._no_split_modules = self.decoder._no_split_modules
 
     @staticmethod
-    def _apply_lora(model, lora_config: dict, task_type, model_name: str = "model"):
+    def _apply_lora(model, lora_config: dict, task_type, model_name: str = "model", default_dropout: float = 0.0):
         """Apply LoRA adapters to a model (encoder or decoder).
 
         Args:
@@ -244,6 +332,7 @@ class ASRModel(PreTrainedModel):
             lora_config: Dict with LoRA configuration (r, lora_alpha, target_modules, etc.)
             task_type: peft.TaskType (FEATURE_EXTRACTION for encoder, CAUSAL_LM for decoder)
             model_name: Name for logging purposes
+            default_dropout: Default dropout value from config
         """
         if lora_config.get("r", 0) == 0:
             # Freeze the model if r=0
@@ -266,7 +355,7 @@ class ASRModel(PreTrainedModel):
             r=lora_config.get("r", 8),
             lora_alpha=lora_config.get("lora_alpha", 8),
             target_modules=target_modules,
-            lora_dropout=lora_config.get("lora_dropout", 0.0),
+            lora_dropout=lora_config.get("lora_dropout", default_dropout),
             bias=lora_config.get("bias", "none"),
             task_type=task_type,
             modules_to_save=lora_config.get("modules_to_save"),
@@ -291,13 +380,17 @@ class ASRModel(PreTrainedModel):
 
         target_dtype = getattr(torch, config.model_dtype)
 
-        encoder = AutoModel.from_pretrained(
-            config.audio_model_id,
-            attn_implementation=config.attn_implementation,
-            dtype=target_dtype,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-        )
+        # When loading from pretrained, avoid device_map="auto" to prevent meta tensor issues
+        encoder_kwargs = {
+            "attn_implementation": config.attn_implementation,
+            "dtype": target_dtype,
+        }
+        if not cls._is_loading_from_pretrained:
+            encoder_kwargs["device_map"] = "auto"
+            encoder_kwargs["low_cpu_mem_usage"] = True
+
+        encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
+
         encoder.requires_grad_(False)
 
         # Wrap encoder forward BEFORE applying LoRA to filter invalid kwargs
@@ -310,7 +403,7 @@ class ASRModel(PreTrainedModel):
             output_attentions=None,
             output_hidden_states=None,
             return_dict=None,
-            **kwargs  # Catch and discard invalid kwargs like input_ids
+            **kwargs,  # Catch and discard invalid kwargs like input_ids
         ):
             return original_forward(
                 input_values=input_values,
@@ -325,7 +418,14 @@ class ASRModel(PreTrainedModel):
         # Apply LoRA to encoder if configured (after wrapping base forward)
         if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
             from peft import TaskType
-            encoder = cls._apply_lora(encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder")
+
+            encoder = cls._apply_lora(
+                encoder,
+                encoder_lora_config,
+                TaskType.FEATURE_EXTRACTION,
+                "encoder",
+                default_dropout=config.lora_default_dropout
+            )
 
         return encoder
 
@@ -342,20 +442,35 @@ class ASRModel(PreTrainedModel):
         """
         target_dtype = getattr(torch, config.model_dtype)
 
-        decoder = AutoModelForCausalLM.from_pretrained(
-            config.text_model_id,
-            attn_implementation=config.attn_implementation,
-            dtype=target_dtype,
-            trust_remote_code=True,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-        )
+        # When loading from pretrained, avoid device_map="auto" to prevent meta tensor issues
+        decoder_kwargs = {
+            "attn_implementation": config.attn_implementation,
+            "dtype": target_dtype,
+            "trust_remote_code": True,
+        }
+        if not cls._is_loading_from_pretrained:
+            decoder_kwargs["device_map"] = "auto"
+            decoder_kwargs["low_cpu_mem_usage"] = True
+
+        decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
+
+        # Set use_cache=False on the decoder config to prevent cache during training
+        # This is critical because we concatenate text+audio embeddings, which invalidates any cache
+        decoder.config.use_cache = False
+
         decoder.requires_grad_(False)
 
         # Apply LoRA to decoder if configured
         if peft_config and peft_config.get("peft_method") == "lora":
             from peft import TaskType
-            decoder = cls._apply_lora(decoder, peft_config, TaskType.CAUSAL_LM, "decoder")
+
+            decoder = cls._apply_lora(
+                decoder,
+                peft_config,
+                TaskType.CAUSAL_LM,
+                "decoder",
+                default_dropout=config.lora_default_dropout
+            )
 
         return decoder
 
@@ -375,22 +490,6 @@ class ASRModel(PreTrainedModel):
         inherits from GenerationMixin.
         """
         return True
-
-    def _set_gradient_checkpointing(self, module, value=False):
-        """Control gradient checkpointing for the model.
-
-        Only apply gradient checkpointing to the decoder, not the encoder.
-        The encoder either has no gradients (frozen) or has LoRA adapters
-        which handle gradients differently.
-        """
-        if hasattr(module, "gradient_checkpointing_enable"):
-            if value:
-                # Only enable gradient checkpointing on the decoder
-                if module is self.decoder or (hasattr(self, 'decoder') and module is self.decoder.base_model):
-                    module.gradient_checkpointing_enable()
-            else:
-                if hasattr(module, "gradient_checkpointing_disable"):
-                    module.gradient_checkpointing_disable()
 
     @property
     def _tied_weights_keys(self):
@@ -449,27 +548,47 @@ class ASRModel(PreTrainedModel):
         return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
 
     def state_dict(self, *args, **kwargs):
-        """Only save trainable parameters for efficient checkpointing.
+        """Save trainable parameters in separate component files.
 
-        This prevents saving frozen encoder/decoder weights in training checkpoints.
-        LoRA adapters are saved separately by PEFT's integration with Trainer.
+        Instead of one large file, we save:
+        - encoder.safetensors: encoder LoRA adapters
+        - decoder.safetensors: decoder LoRA adapters
+        - projector.safetensors: projector weights
+
+        This eliminates key-matching complexity and makes loading more reliable.
         """
-        full_state = super().state_dict(*args, **kwargs)
-        return self.diff_state_dict(full_state)
+        # Note: HuggingFace Trainer calls this method and expects a single dict.
+        # We'll return the combined state dict here, but save_pretrained() will
+        # split into separate files.
+        return self._get_trainable_state_dict()
 
-    def diff_state_dict(self, state_dict=None):
-        """Filter state dict to only include trainable parameters.
+    def _get_trainable_state_dict(self):
+        """Get all trainable parameters as a single state dict.
 
-        This ensures minimal checkpoint size by only saving what's being trained.
+        This is used by Trainer for checkpointing during training.
         """
-        if state_dict is None:
-            state_dict = super().state_dict()
+        state = {}
 
-        # Get all trainable parameter names
-        trainable_params = {k for k, v in self.named_parameters() if v.requires_grad}
+        # Get encoder trainable params (LoRA adapters)
+        encoder_state = self.encoder.state_dict()
+        encoder_trainable = {name for name, param in self.encoder.named_parameters() if param.requires_grad}
+        for name, tensor in encoder_state.items():
+            if name in encoder_trainable:
+                state[f"encoder.{name}"] = tensor
 
-        # Only keep trainable parameters
-        return {k: v for k, v in state_dict.items() if k in trainable_params}
+        # Get decoder trainable params (LoRA adapters)
+        decoder_state = self.decoder.state_dict()
+        decoder_trainable = {name for name, param in self.decoder.named_parameters() if param.requires_grad}
+        for name, tensor in decoder_state.items():
+            if name in decoder_trainable:
+                state[f"decoder.{name}"] = tensor
+
+        # Get projector params (always trainable)
+        projector_state = self.projector.state_dict()
+        for name, tensor in projector_state.items():
+            state[f"projector.{name}"] = tensor
+
+        return state
 
     def get_input_embeddings(self):
         """Delegate to decoder for proper HF Trainer integration."""
@@ -523,7 +642,11 @@ class ASRModel(PreTrainedModel):
 
             # Remove any decoder-specific kwargs that shouldn't go to the encoder
             kwargs.pop("past_key_values", None)
-            kwargs.pop("use_cache", None)
+
+            # Important: Must explicitly set use_cache=False during training
+            # because we're constructing new embeddings (text + audio concatenation)
+            # which invalidates any cached key-values from previous passes
+            use_cache = kwargs.pop("use_cache", None)
 
             audio_embeds = self._encode_audio(
                 input_values=input_values,
@@ -603,6 +726,7 @@ class ASRModel(PreTrainedModel):
             inputs_embeds=inputs_embeds,
             attention_mask=full_attention_mask,
             labels=labels,
+            use_cache=False,  # Always False when training with audio to prevent cache corruption
             **kwargs,
         )
 
@@ -631,7 +755,7 @@ class ASRModel(PreTrainedModel):
             system_prompt = self.system_prompt
 
         if user_prompt is None:
-            user_prompt = "Transcribe: <audio>"
+            user_prompt = self.config.user_prompt
 
         messages = []
         if system_prompt:
@@ -686,9 +810,20 @@ class ASRModel(PreTrainedModel):
         total_seq_len = inputs_embeds.shape[1]
         attention_mask = torch.ones(batch_size, total_seq_len, dtype=torch.long, device=device)
 
-        generate_kwargs.setdefault("max_new_tokens", 150)
+        generate_kwargs.setdefault("max_new_tokens", self.config.max_new_tokens)
+        generate_kwargs.setdefault("min_new_tokens", self.config.min_new_tokens)
         generate_kwargs.setdefault("num_beams", self.config.num_beams)
-        generate_kwargs.setdefault("do_sample", False)
+        generate_kwargs.setdefault("do_sample", self.config.do_sample)
+        generate_kwargs.setdefault("temperature", self.config.temperature)
+        generate_kwargs.setdefault("top_k", self.config.top_k)
+        generate_kwargs.setdefault("top_p", self.config.top_p)
+        generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
+        generate_kwargs.setdefault("length_penalty", self.config.length_penalty)
+        generate_kwargs.setdefault("no_repeat_ngram_size", self.config.no_repeat_ngram_size)
+        generate_kwargs.setdefault("early_stopping", self.config.early_stopping)
+        # Always disable cache for this architecture because we use inputs_embeds (not input_ids)
+        # with audio embeddings mixed in, which the cache system doesn't handle correctly
+        generate_kwargs["use_cache"] = False
 
         im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         generate_kwargs.setdefault("eos_token_id", im_end_id)
@@ -716,17 +851,34 @@ class ASRModel(PreTrainedModel):
         if hasattr(self, "generation_config") and self.generation_config is not None:
             self.generation_config.save_pretrained(save_dir)
 
-        # Save all trainable parameters (projector + encoder LoRA + decoder LoRA) to model.safetensors
-        state_dict = self.diff_state_dict()
-        if state_dict:
-            save_file(state_dict, save_dir / "model.safetensors")
+        # Save trainable parameters as separate component files for clarity and reliability
+        # This prevents key-matching issues and makes it easy to update individual components
 
-        # Save decoder LoRA config (weights are already in model.safetensors via diff_state_dict)
+        # Save encoder LoRA adapters
+        encoder_state = self.encoder.state_dict()
+        encoder_trainable = {name for name, param in self.encoder.named_parameters() if param.requires_grad}
+        encoder_state = {k: v for k, v in encoder_state.items() if k in encoder_trainable}
+        if encoder_state:
+            save_file(encoder_state, save_dir / "encoder.safetensors")
+
+        # Save decoder LoRA adapters
+        decoder_state = self.decoder.state_dict()
+        decoder_trainable = {name for name, param in self.decoder.named_parameters() if param.requires_grad}
+        decoder_state = {k: v for k, v in decoder_state.items() if k in decoder_trainable}
+        if decoder_state:
+            save_file(decoder_state, save_dir / "decoder.safetensors")
+
+        # Save projector weights (always trainable)
+        projector_state = self.projector.state_dict()
+        if projector_state:
+            save_file(projector_state, save_dir / "projector.safetensors")
+
+        # Save decoder LoRA config
         if self.peft_config and self.peft_config.get("peft_method") == "lora":
             with (save_dir / "decoder_lora_config.json").open("w") as f:
                 json.dump(self.peft_config, f, indent=2)
 
-        # Save encoder LoRA config (weights are already in model.safetensors via diff_state_dict)
+        # Save encoder LoRA config
         if (
             hasattr(self, "encoder_lora_config")
             and self.encoder_lora_config is not None

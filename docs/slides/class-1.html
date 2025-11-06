@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Class 1: Introduction and Setup | Tiny Audio Course</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reset.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/theme/black.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/highlight/monokai.css">
+    <style>
+        .reveal h1, .reveal h2, .reveal h3 { text-transform: none; }
+        .reveal section img { border: none; background: none; box-shadow: none; }
+        .reveal pre code { max-height: 500px; }
+        .two-column { display: grid; grid-template-columns: 1fr 1fr; gap: 2em; align-items: start; }
+        .highlight { color: #42affa; }
+        .small { font-size: 0.7em; }
+        .reveal ul { margin-top: 0.5em; }
+        .reveal table { font-size: 0.8em; margin-top: 1em; }
+    </style>
+</head>
+<body>
+    <div class="reveal">
+        <div class="slides">
+            <!-- Title Slide -->
+            <section>
+                <h1>Class 1</h1>
+                <h2>Introduction and Setup</h2>
+                <p>Understanding ASR and the Tiny Audio Architecture</p>
+                <p class="small">Tiny Audio Course • 20 minutes</p>
+            </section>
+
+            <!-- What is ASR -->
+            <section>
+                <h2>What is Automatic Speech Recognition?</h2>
+                <p>Converting audio waveforms into written text</p>
+                <p><span class="highlight">The Problem:</span> Humans speak, computers understand text</p>
+            </section>
+
+            <!-- Real-World Applications -->
+            <section>
+                <h3>Real-World Applications</h3>
+                <ul>
+                    <li>🎤 Voice assistants (Siri, Alexa, Google Assistant)</li>
+                    <li>📝 Transcription services (meetings, podcasts, interviews)</li>
+                    <li>♿ Accessibility tools (live captioning)</li>
+                    <li>🔍 Voice search and commands</li>
+                    <li>🏥 Medical dictation systems</li>
+                </ul>
+            </section>
+
+            <!-- Why is ASR Hard -->
+            <section>
+                <h3>Why is ASR Hard?</h3>
+                <div class="two-column">
+                    <div>
+                        <h4>Audio Variability</h4>
+                        <ul class="small">
+                            <li>Different accents</li>
+                            <li>Speaking speeds</li>
+                            <li>Background noise</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h4>Linguistic Challenges</h4>
+                        <ul class="small">
+                            <li>Ambiguity ("ice cream" vs "I scream")</li>
+                            <li>Context dependency</li>
+                            <li>Real-time constraints</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Evolution of ASR -->
+            <section>
+                <h3>Evolution of ASR</h3>
+                <table style="font-size: 0.6em;">
+                    <tr>
+                        <th>Era</th>
+                        <th>Technology</th>
+                        <th>Characteristics</th>
+                    </tr>
+                    <tr>
+                        <td>1950s-1980s</td>
+                        <td>Rule-based</td>
+                        <td>~100 word vocabulary</td>
+                    </tr>
+                    <tr>
+                        <td>1980s-2010s</td>
+                        <td>Hidden Markov Models</td>
+                        <td>Better accuracy, struggled with noise</td>
+                    </tr>
+                    <tr>
+                        <td>2010s-2020s</td>
+                        <td>Deep Learning (RNNs)</td>
+                        <td>Dramatic improvements</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #42affa;">2020s-Present</td>
+                        <td style="color: #42affa;">Multimodal Transformers</td>
+                        <td style="color: #42affa;">← Tiny Audio!</td>
+                    </tr>
+                </table>
+            </section>
+
+            <!-- The Training Compass -->
+            <section>
+                <h2>The Training Compass</h2>
+                <p>A framework for strategic thinking</p>
+                <ul>
+                    <li><span class="highlight">Why</span> are we building this? (Goal)</li>
+                    <li><span class="highlight">What</span> should we build? (Architecture, Data)</li>
+                    <li><span class="highlight">How</span> will we build it? (Tools, Techniques)</li>
+                </ul>
+            </section>
+
+            <!-- Architecture Overview -->
+            <section>
+                <h2>The Tiny Audio Architecture</h2>
+                <p>Three components working together</p>
+                <ul style="margin-top: 1.5em;">
+                    <li><strong>Audio Encoder</strong> (HuBERT-XLarge) - Converts audio to embeddings</li>
+                    <li><strong>Audio Projector</strong> (SwiGLU MLP) - Bridges audio ↔ language</li>
+                    <li><strong>Language Model</strong> (Qwen-3 8B) - Generates text transcription</li>
+                </ul>
+                <p class="small highlight" style="margin-top: 1em;">
+                    🧪 You'll experiment with: Different encoders, projector dimensions, decoder models, audio types
+                </p>
+            </section>
+
+            <!-- Component 1: Audio Encoder -->
+            <section>
+                <h3>Component 1: Audio Encoder</h3>
+                <p><strong>HuBERT-XLarge</strong> (1.3 billion parameters)</p>
+                <ul class="small">
+                    <li><span class="highlight">Purpose:</span> Convert raw audio → meaningful features</li>
+                    <li><span class="highlight">Input:</span> Waveform (16,000 numbers/second)</li>
+                    <li><span class="highlight">Output:</span> Embeddings (one per ~20ms of audio)</li>
+                    <li><span class="highlight">Key insight:</span> Pre-trained on 60,000 hours of speech!</li>
+                </ul>
+                <p class="small">🎵 <em>Analogy: A musician recognizing notes without sheet music</em></p>
+            </section>
+
+            <!-- Component 2: Audio Projector -->
+            <section>
+                <h3>Component 2: Audio Projector</h3>
+                <p><strong>SwiGLU MLP</strong> (~122 million parameters)</p>
+                <ul class="small">
+                    <li><span class="highlight">Purpose:</span> Bridge audio ↔ language</li>
+                    <li><span class="highlight">Input:</span> Audio embeddings (1280 dimensions)</li>
+                    <li><span class="highlight">Process:</span> 5x time reduction + dimension transform</li>
+                    <li><span class="highlight">Output:</span> Language-ready embeddings (2048 dimensions)</li>
+                    <li><span class="highlight">Key insight:</span> This is the LARGEST trainable part!</li>
+                </ul>
+                <p class="small">🌉 <em>Analogy: Translator converting spoken French to written English</em></p>
+            </section>
+
+            <!-- Component 3: Language Model -->
+            <section>
+                <h3>Component 3: Language Model</h3>
+                <p><strong>Qwen-3 8B</strong> (8 billion parameters)</p>
+                <ul class="small">
+                    <li><span class="highlight">Purpose:</span> Generate text transcription</li>
+                    <li><span class="highlight">Input:</span> Audio embeddings (from projector)</li>
+                    <li><span class="highlight">Output:</span> Text with grammar, spelling, punctuation</li>
+                    <li><span class="highlight">Key insight:</span> Also pre-trained! Knows English already</li>
+                    <li><span class="highlight">Training:</span> Uses LoRA (efficient adaptation)</li>
+                </ul>
+                <p class="small">✍️ <em>Analogy: A skilled writer dictating text naturally</em></p>
+            </section>
+
+            <!-- Why This Architecture -->
+            <section>
+                <h3>Why This Architecture?</h3>
+                <div class="two-column">
+                    <div>
+                        <h4 class="highlight">Efficiency</h4>
+                        <p class="small">Train only <strong>139M params</strong><br>(3.2% of 4.3B total)</p>
+                        <ul class="small">
+                            <li>Projector: ~122M</li>
+                            <li>Encoder LoRA: ~2M</li>
+                            <li>Decoder LoRA: ~15M</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h4 class="highlight">Cost & Speed</h4>
+                        <p class="small">Training completes in:</p>
+                        <ul class="small">
+                            <li>⏱️ ~24 hours</li>
+                            <li>💰 ~$12 total cost</li>
+                            <li>🖥️ Single GPU (A40)</li>
+                            <li>✅ High quality results</li>
+                        </ul>
+                    </div>
+                </div>
+                <p class="small" style="margin-top: 1em;"><strong>Note on Architectural Choices:</strong> We use a dense transformer, a proven and stable architecture. Other types like Mixture-of-Experts (MoE) and Hybrids are powerful but more complex, making them less ideal for our focused goal.</p>
+            </section>
+
+            <!-- Rules of Engagement -->
+            <section>
+                <h2>Rules of Engagement</h2>
+                <p>A disciplined approach to training</p>
+                <ul>
+                    <li><span class="highlight">Systematic Beats Intuitive:</span> We use experiments to validate choices.</li>
+                    <li><span class="highlight">Change One Thing at a Time:</span> Isolate variables to understand their impact.</li>
+                    <li><span class="highlight">Validate Every Change:</span> Rely on metrics, not just gut feelings.</li>
+                </ul>
+            </section>
+
+            <!-- Course Goals -->
+            <section>
+                <h2>Course Goals</h2>
+                <p>What you'll build in 6 hours</p>
+                <ul>
+                    <li>✅ Train your own customized ASR model</li>
+                    <li>✅ Evaluate it on standard benchmarks</li>
+                    <li>✅ Push it to your HuggingFace account</li>
+                    <li>✅ Add results to the community leaderboard</li>
+                </ul>
+                <p style="margin-top: 1em; color: #42affa;">
+                    This isn't just learning—<br>you'll have a <strong>real, working, deployed model</strong> with your name on it!
+                </p>
+            </section>
+
+            <!-- Course Structure -->
+            <section>
+                <h3>Course Structure</h3>
+                <ol class="small">
+                    <li><strong>Class 1:</strong> Introduction and Setup (today!)</li>
+                    <li><strong>Class 2:</strong> Audio Processing and Encoders</li>
+                    <li><strong>Class 3:</strong> Language Models and Projectors</li>
+                    <li><strong>Class 4:</strong> Training</li>
+                    <li><strong>Class 5:</strong> Evaluation and Debugging</li>
+                    <li><strong>Class 6:</strong> Publishing and Deployment</li>
+                </ol>
+                <p class="small">Each class: 20 min lecture + 40 min hands-on workshop</p>
+            </section>
+
+            <!-- Experimentation Preview -->
+            <section>
+                <h2>Workshop Experiments</h2>
+                <p>What you'll try today:</p>
+                <ul>
+                    <li>🎤 Test different audio samples and formats</li>
+                    <li>📊 Explore model outputs and confidence scores</li>
+                    <li>⚡ Measure inference speed on various inputs</li>
+                    <li>🔬 Compare chunk sizes and processing strategies</li>
+                    <li>🎛️ Adjust model parameters and see effects</li>
+                </ul>
+                <p class="small highlight" style="margin-top: 1em;">
+                    Remember: Change one variable at a time and measure results!
+                </p>
+            </section>
+
+            <!-- Key Takeaways -->
+            <section>
+                <h2>Key Takeaways</h2>
+                <ul>
+                    <li>ASR converts audio waveforms → text using ML</li>
+                    <li>Tiny Audio = HuBERT encoder + Projector + Qwen-3 8B decoder</li>
+                    <li>Train only 3.2% of parameters (139M / 4.3B)</li>
+                    <li>24 hours training for ~$12 = accessible ASR!</li>
+                    <li class="highlight">🧪 Experimentation is key to understanding</li>
+                </ul>
+                <p style="margin-top: 1.5em; color: #42affa;">
+                    <strong>Next:</strong> Hands-on workshop! Let's set up and run experiments →
+                </p>
+            </section>
+
+            <!-- Today's Workshop -->
+            <section>
+                <h2>Today's Hands-On Workshop</h2>
+                <p>What you'll do in the next 40 minutes:</p>
+                <ul>
+                    <li><strong>Exercise 1:</strong> Set up your environment (install dependencies, download samples)</li>
+                    <li><strong>Exercise 2:</strong> Run inference with the pretrained model</li>
+                    <li><strong>Exercise 3:</strong> Inspect the model configuration</li>
+                    <li><strong>Exercise 4:</strong> Count trainable parameters</li>
+                </ul>
+                <p style="margin-top: 1.5em; color: #42affa;">
+                    By the end, you'll have a working setup and understand the complete model architecture!
+                </p>
+            </section>
+
+            <!-- Thank You -->
+            <section>
+                <h2>Questions?</h2>
+                <p>Let's move to the hands-on workshop!</p>
+                <p class="small">Press <code>Esc</code> for slide overview • <code>S</code> for speaker notes</p>
+            </section>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/notes/notes.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/highlight/highlight.js"></script>
+    <script>
+        Reveal.initialize({
+            hash: true,
+            plugins: [ RevealNotes, RevealHighlight ],
+            transition: 'slide',
+            backgroundTransition: 'fade'
+        });
+    </script>
+</body>
+</html>

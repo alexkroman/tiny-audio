@@ -98,8 +98,9 @@ def start_training(host, port, experiment, session_name):
         cd /workspace
 
         echo "--- Launching Training ---"
-        # Use python -m to ensure we find the module even if binary isn't in PATH
-        python -m accelerate.commands.launch --config_file configs/accelerate/a40.yaml -m src.train +experiments={experiment}
+        # Use accelerate directly (it's installed in system Python)
+        # Then pass python path explicitly for training script
+        accelerate launch --config_file configs/accelerate/a40.yaml -m src.train +experiments={experiment}
         EXIT_CODE=$?
 
         if [ $EXIT_CODE -eq 0 ]; then

@@ -40,11 +40,10 @@ def audio_to_wav_bytes(audio_array, sample_rate):
 
     # Write to temp file and use torchcodec to encode as WAV
     # torchcodec is primarily a decoder, so we'll use a simple WAV writer
-    import struct
     import wave
 
     buffer = io.BytesIO()
-    with wave.open(buffer, 'wb') as wav_file:
+    with wave.open(buffer, "wb") as wav_file:
         wav_file.setnchannels(1)  # mono
         wav_file.setsampwidth(2)  # 16-bit
         wav_file.setframerate(sample_rate)
@@ -58,7 +57,7 @@ def audio_to_wav_bytes(audio_array, sample_rate):
 def wav_bytes_to_audio(wav_bytes):
     """Convert WAV bytes to audio array using torchcodec."""
     # Write bytes to temp file for torchcodec
-    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         f.write(wav_bytes)
         temp_path = f.name
 
@@ -75,9 +74,9 @@ def wav_bytes_to_audio(wav_bytes):
 def prepare_wav_bytes(wav_data):
     """Convert various WAV data formats to bytes for API calls."""
     # Handle AudioDecoder objects (datasets library lazy loading)
-    if hasattr(wav_data, '__class__') and 'AudioDecoder' in str(type(wav_data)):
+    if hasattr(wav_data, "__class__") and "AudioDecoder" in str(type(wav_data)):
         # AudioDecoder has get_all_samples method
-        if hasattr(wav_data, 'get_all_samples'):
+        if hasattr(wav_data, "get_all_samples"):
             samples = wav_data.get_all_samples()
             # samples should have .data and metadata with sample_rate
             audio_array = samples.data.squeeze().numpy()
@@ -88,18 +87,27 @@ def prepare_wav_bytes(wav_data):
         if "bytes" in wav_data:
             # Already in bytes format
             return wav_data["bytes"]
-        elif "array" in wav_data and "sampling_rate" in wav_data:
+        if "array" in wav_data and "sampling_rate" in wav_data:
             # Dict with array and sampling_rate (earnings22 format)
             return audio_to_wav_bytes(wav_data["array"], wav_data["sampling_rate"])
 
     # Audio object format (LoquaciousSet)
-    if hasattr(wav_data, 'array') and hasattr(wav_data, 'sampling_rate'):
+    if hasattr(wav_data, "array") and hasattr(wav_data, "sampling_rate"):
         return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
 
-    raise ValueError(f"Unsupported audio format: {type(wav_data)}, available attributes: {dir(wav_data) if hasattr(wav_data, '__dir__') else 'N/A'}")
+    raise ValueError(
+        f"Unsupported audio format: {type(wav_data)}, available attributes: {dir(wav_data) if hasattr(wav_data, '__dir__') else 'N/A'}"
+    )
 
 
-def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None, user_prompt=None, audio_field="wav", text_field="text"):
+def evaluate_huggingface(
+    dataset,
+    model_or_endpoint,
+    system_prompt=None,
+    user_prompt=None,
+    audio_field="wav",
+    text_field="text",
+):
     """Evaluate using local transformers pipeline or HuggingFace Inference Endpoint.
 
     Args:
@@ -112,16 +120,17 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None, user_pr
     """
 
     import re
+
     from jiwer import wer
     from transformers import WhisperTokenizer
 
     # Custom preprocessing to remove <inaudible> tags and disfluencies before Whisper normalization
     def preprocess_text(text: str) -> str:
         # Remove <inaudible> tags
-        text = re.sub(r'<inaudible>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
         # Remove disfluencies (uh, um) - these are in Whisper's ignore patterns already
         # but we keep this for compatibility with non-Whisper datasets
-        text = re.sub(r'\b(uh|um)\b', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
         return text
 
     predictions = []
@@ -203,11 +212,11 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None, user_pr
                     normalized_refs = [normalize_text(r) for r in references]
                     corpus_wer = wer(normalized_refs, normalized_preds) * 100
                     avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
-                    print(f"\n{'='*80}")
+                    print(f"\n{'=' * 80}")
                     print(f"CHECKPOINT @ {i + 1} samples:")
                     print(f"  Corpus WER: {corpus_wer:.2f}%")
                     print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
-                    print(f"{'='*80}\n")
+                    print(f"{'=' * 80}\n")
         finally:
             # Clean up temporary directory
             import shutil
@@ -215,37 +224,27 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None, user_pr
             shutil.rmtree(temp_dir, ignore_errors=True)
     else:
         # Load model locally using custom ASRPipeline
-        print(f"Loading model locally: {model_or_endpoint}")
-        from transformers import pipeline
+        from src.asr_modeling import ASRModel
+        from src.asr_pipeline import ASRPipeline
 
-        # Use pipeline with trust_remote_code to load our custom ASRPipeline
+        # Determine device
         device = "mps" if torch.backends.mps.is_available() else "cpu"
-        pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model_or_endpoint,
-            trust_remote_code=True,
+
+        # Load model directly to device
+        model = ASRModel.from_pretrained(
+            model_or_endpoint,
+            dtype=torch.float16 if device == "cuda" else torch.float32,
+            device_map=None,
             device=device,
         )
-        print(f"Model loaded on device: {pipe.device}")
 
-        # Print original system prompt from model
-        if hasattr(pipe.model, "system_prompt"):
-            print(f"Original system prompt from model: {pipe.model.system_prompt}")
-        else:
-            print("Original system prompt: Not available")
-
-        # Override with custom system prompt if provided
-        if system_prompt is not None and hasattr(pipe.model, "system_prompt"):
-            pipe.model.system_prompt = system_prompt
-            print(f"Using custom system prompt: {system_prompt}")
-        else:
-            print("Using model's default system prompt")
-
-        # Print user_prompt info
-        if user_prompt is not None:
-            print(f"Using custom user prompt: {user_prompt}")
-        else:
-            print("Using default user prompt: 'Transcribe: <audio>'")
+        # Create pipeline using local ASRPipeline class directly
+        pipe = ASRPipeline(
+            model=model,
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
+            device=device,
+        )
 
         for i, sample in enumerate(dataset):
             try:
@@ -298,11 +297,11 @@ def evaluate_huggingface(dataset, model_or_endpoint, system_prompt=None, user_pr
                 normalized_refs = [normalize_text(r) for r in references]
                 corpus_wer = wer(normalized_refs, normalized_preds) * 100
                 avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
-                print(f"\n{'='*80}")
+                print(f"\n{'=' * 80}")
                 print(f"CHECKPOINT @ {i + 1} samples:")
                 print(f"  Corpus WER: {corpus_wer:.2f}%")
                 print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
-                print(f"{'='*80}\n")
+                print(f"{'=' * 80}\n")
 
     return predictions, references, per_sample_wers, per_sample_times
 
@@ -318,6 +317,7 @@ def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_
         text_field: Name of the text field in the dataset (default: "text")
     """
     import re
+
     import assemblyai as aai
     from jiwer import wer
     from transformers import WhisperTokenizer
@@ -325,9 +325,9 @@ def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_
     # Custom preprocessing to remove <inaudible> tags and disfluencies before Whisper normalization
     def preprocess_text(text: str) -> str:
         # Remove <inaudible> tags
-        text = re.sub(r'<inaudible>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
         # Remove disfluencies (uh, um)
-        text = re.sub(r'\b(uh|um)\b', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
         return text
 
     aai.settings.api_key = api_key
@@ -394,11 +394,11 @@ def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_
             normalized_refs = [normalize_text(r) for r in references]
             corpus_wer = wer(normalized_refs, normalized_preds) * 100
             avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
-            print(f"\n{'='*80}")
+            print(f"\n{'=' * 80}")
             print(f"CHECKPOINT @ {i + 1} samples:")
             print(f"  Corpus WER: {corpus_wer:.2f}%")
             print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
-            print(f"{'='*80}\n")
+            print(f"{'=' * 80}\n")
 
         # Rate limiting
         time.sleep(0.5)
@@ -487,7 +487,9 @@ def main():
     # Validate arguments
     if args.assemblyai:
         if not args.api_key:
-            raise ValueError("AssemblyAI API key required. Set --api-key or ASSEMBLYAI_API_KEY env var")
+            raise ValueError(
+                "AssemblyAI API key required. Set --api-key or ASSEMBLYAI_API_KEY env var"
+            )
     else:
         if not args.model:
             raise ValueError("Model argument is required when not using --assemblyai")
@@ -495,7 +497,9 @@ def main():
     # Set default output dir
     if args.output_dir is None:
         if args.assemblyai:
-            args.output_dir = Path(f"outputs/eval_{args.dataset}_assemblyai_{args.assemblyai_model}")
+            args.output_dir = Path(
+                f"outputs/eval_{args.dataset}_assemblyai_{args.assemblyai_model}"
+            )
         else:
             # Sanitize model name for directory
             model_name = args.model.replace("/", "_").replace(":", "_")
@@ -515,24 +519,16 @@ def main():
         dataset_config = args.config if args.config != "medium" else "medium"
         audio_field = "wav"
         text_field = "text"
-        print(
-            f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})..."
-        )
-        dataset = load_dataset(
-            dataset_name, dataset_config, split=args.split, streaming=True
-        )
+        print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
+        dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
     elif args.dataset == "earnings22":
         dataset_name = "distil-whisper/earnings22"
         # Use chunked config by default for earnings22, or user-specified config
         dataset_config = args.config if args.config != "medium" else "chunked"
         audio_field = "audio"
         text_field = "transcription"
-        print(
-            f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})..."
-        )
-        dataset = load_dataset(
-            dataset_name, dataset_config, split=args.split, streaming=True
-        )
+        print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
+        dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 
@@ -559,12 +555,13 @@ def main():
 
     # Normalize text before computing WER using Whisper's normalizer
     import re
+
     from transformers import WhisperTokenizer
 
     # Custom preprocessing to remove <inaudible> tags and disfluencies
     def preprocess_text(text: str) -> str:
-        text = re.sub(r'<inaudible>', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\b(uh|um)\b', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
         return text
 
     whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
