@@ -44,9 +44,9 @@ model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
 # Streaming compatibility settings
-dataloader_num_workers: 1
-dataloader_persistent_workers: true  
-dataloader_prefetch_factor: 1  
+dataloader_num_workers: 0  # Set to 0 to avoid torchcodec resource issues
+dataloader_persistent_workers: false  # Not needed with 0 workers
+dataloader_prefetch_factor: null  # Not used with 0 workers 
 dataloader_pin_memory: true
 
 # Misc

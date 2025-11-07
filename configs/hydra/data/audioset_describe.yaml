@@ -9,9 +9,6 @@ datasets:
     eval_splits:
       - validation
 
-# Data filtering
-max_audio_seconds: 15.0
-
 # Audio processing
 sample_rate: 16000
 

@@ -133,7 +133,7 @@ class DatasetLoader:
 
         val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
 
-        train_ds = train_ds.shuffle(seed=42)
+        # train_ds = train_ds.shuffle(seed=42)
 
         if self.config.max_train_samples:
             train_ds = train_ds.take(self.config.max_train_samples)
@@ -149,7 +149,6 @@ class DataCollator(DataCollatorForSeq2Seq):
         tokenizer: Any,
         feature_extractor: Any,
         sample_rate: int,
-        max_audio_seconds: float,
         system_prompt: str = None,
         mask_time_prob: float = 0.065,
         mask_time_length: int = 10,
@@ -160,7 +159,6 @@ class DataCollator(DataCollatorForSeq2Seq):
         super().__init__(tokenizer=tokenizer, padding=True)
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
-        self.max_audio_samples = int(max_audio_seconds * sample_rate)
         self.system_prompt = system_prompt
 
         # SpecAugment parameters for data augmentation
@@ -190,7 +188,7 @@ class DataCollator(DataCollatorForSeq2Seq):
         # Wav2Vec2FeatureExtractor does z-normalization → mean=0, std=1
         # No additional normalization needed here!
         audio_samples = audio_decoder.get_all_samples()
-        audio_array = audio_samples.data[: self.max_audio_samples]
+        audio_array = audio_samples.data
         return audio_array.squeeze().numpy()
 
     def _apply_spec_augment(self, input_values: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
@@ -458,7 +456,6 @@ def main(cfg: DictConfig) -> None:
         tokenizer=model.tokenizer,
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
-        max_audio_seconds=cfg.data.max_audio_seconds,
         system_prompt=cfg.model.system_prompt,
         mask_time_prob=cfg.data.get("mask_time_prob", 0.05),
         mask_time_length=cfg.data.get("mask_time_length", 10),
@@ -471,7 +468,6 @@ def main(cfg: DictConfig) -> None:
         tokenizer=model.tokenizer,
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
-        max_audio_seconds=cfg.data.max_audio_seconds,
         system_prompt=cfg.model.system_prompt,
         mask_time_prob=cfg.data.get("mask_time_prob", 0.05),
         mask_time_length=cfg.data.get("mask_time_length", 10),

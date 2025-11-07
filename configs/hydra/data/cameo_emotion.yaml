@@ -5,12 +5,22 @@ datasets:
     text_column: emotion  # Use the emotion labels as target text
     task: emotion  # Mark this as an emotion recognition task
     train_splits:
-      - crema_d  # Use full crema_d split for training (7442 samples)
+      # Use all CAMEO splits except oreau (smallest, reserved for validation)
+      # Total training samples: 40,761 (vs previous 7,442)
+      - crema_d       # 7,440 samples
+      - cafe          # 936 samples
+      - emns          # 1,205 samples
+      - emozionalmente  # 6,902 samples
+      - enterface     # 1,257 samples
+      - jl_corpus     # 2,400 samples
+      - mesd          # 862 samples
+      - nemo          # 4,481 samples
+      - pavoque       # 5,442 samples
+      - ravdess       # 1,440 samples
+      - resd          # 1,396 samples
+      - subesco       # 7,000 samples
     eval_splits:
-      - ravdess  # Use ravdess split for validation (1440 samples) - no overlap with training
-
-# Data filtering
-max_audio_seconds: 15.0
+      - oreau  # Use oreau split for validation (502 samples) - smallest split
 
 # Audio processing
 sample_rate: 16000
