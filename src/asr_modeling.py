@@ -6,11 +6,13 @@ import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from transformers import (
     AutoConfig,
+    AutoFeatureExtractor,
     AutoModel,
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
     Wav2Vec2FeatureExtractor,
+    WhisperFeatureExtractor,
 )
 from transformers.generation.utils import (
     GenerateBeamDecoderOnlyOutput,
@@ -265,7 +267,11 @@ class ASRModel(PreTrainedModel):
 
         self.encoder = self._create_encoder(config, encoder_lora_config)
 
-        self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(config.audio_model_id)
+        # Use appropriate feature extractor based on model type
+        if hasattr(self.encoder.config, "model_type") and "whisper" in self.encoder.config.model_type.lower():
+            self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.audio_model_id)
+        else:
+            self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(config.audio_model_id)
 
         # Create decoder first (needed for tokenizer init)
         self.decoder = self._create_decoder(config, peft_config)
@@ -391,6 +397,15 @@ class ASRModel(PreTrainedModel):
 
         encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
+        # Enable SpecAugment for Whisper models during training
+        if hasattr(encoder.config, "model_type") and "whisper" in encoder.config.model_type.lower():
+            # These are Whisper-specific SpecAugment parameters
+            encoder.config.apply_spec_augment = True  # Enable during training, will be disabled during eval
+            encoder.config.mask_time_prob = config.mask_time_prob if hasattr(config, 'mask_time_prob') else 0.05
+            encoder.config.mask_time_length = config.mask_time_length if hasattr(config, 'mask_time_length') else 10
+            encoder.config.mask_feature_prob = config.mask_feature_prob if hasattr(config, 'mask_feature_prob') else 0.0
+            encoder.config.mask_feature_length = config.mask_feature_length if hasattr(config, 'mask_feature_length') else 10
+
         encoder.requires_grad_(False)
 
         # Wrap encoder forward BEFORE applying LoRA to filter invalid kwargs
@@ -405,13 +420,23 @@ class ASRModel(PreTrainedModel):
             return_dict=None,
             **kwargs,  # Catch and discard invalid kwargs like input_ids
         ):
-            return original_forward(
-                input_values=input_values,
-                attention_mask=attention_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
+            # Check if this is a Whisper model (expects input_features instead of input_values)
+            if hasattr(self_encoder.config, "model_type") and "whisper" in self_encoder.config.model_type.lower():
+                return original_forward(
+                    input_features=input_values,  # Map input_values to input_features for Whisper
+                    attention_mask=attention_mask,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+            else:
+                return original_forward(
+                    input_values=input_values,
+                    attention_mask=attention_mask,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
 
         encoder.forward = types.MethodType(safe_encoder_forward, encoder)
 
@@ -631,11 +656,14 @@ class ASRModel(PreTrainedModel):
         self,
         input_ids: Optional[torch.Tensor] = None,
         input_values: Optional[torch.Tensor] = None,
+        input_features: Optional[torch.Tensor] = None,  # For Whisper
         labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        if input_values is not None:
+        # Handle both input_values (Wav2Vec2/HuBERT) and input_features (Whisper)
+        audio_inputs = input_values if input_values is not None else input_features
+        if audio_inputs is not None:
             # Extract audio-specific kwargs, don't pass input_ids to encoder
             audio_attention_mask = kwargs.pop("audio_attention_mask", None)
 
@@ -648,7 +676,7 @@ class ASRModel(PreTrainedModel):
             use_cache = kwargs.pop("use_cache", None)
 
             audio_embeds = self._encode_audio(
-                input_values=input_values,
+                input_values=audio_inputs,  # Will be mapped to input_features for Whisper by safe_encoder_forward
                 audio_attention_mask=audio_attention_mask,
             )
 
@@ -733,6 +761,7 @@ class ASRModel(PreTrainedModel):
     def generate(
         self,
         input_values: Optional[torch.Tensor] = None,
+        input_features: Optional[torch.Tensor] = None,  # For Whisper
         system_prompt: Optional[str] = None,
         user_prompt: Optional[str] = None,
         task: Optional[str] = None,
@@ -744,10 +773,12 @@ class ASRModel(PreTrainedModel):
         GenerateBeamDecoderOnlyOutput,
         GenerateBeamEncoderDecoderOutput,
     ]:
-        if input_values is None:
-            raise ValueError("input_values must be provided for generation")
+        # Handle both input_values (Wav2Vec2/HuBERT) and input_features (Whisper)
+        audio_inputs = input_values if input_values is not None else input_features
+        if audio_inputs is None:
+            raise ValueError("input_values or input_features must be provided for generation")
 
-        audio_embeds = self._encode_audio(input_values)
+        audio_embeds = self._encode_audio(audio_inputs)
         batch_size = audio_embeds.shape[0]
         device = audio_embeds.device
 

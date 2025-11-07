@@ -161,6 +161,9 @@ class DataCollator(DataCollatorForSeq2Seq):
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
 
+        # Check if this is a Whisper feature extractor
+        self.is_whisper = feature_extractor.__class__.__name__ == 'WhisperFeatureExtractor'
+
         # SpecAugment parameters for data augmentation
         self.mask_time_prob = mask_time_prob
         self.mask_time_length = mask_time_length
@@ -230,11 +233,18 @@ class DataCollator(DataCollatorForSeq2Seq):
             audio_arrays, sampling_rate=self.sample_rate, padding=True, return_tensors="pt"
         )
 
-        # Apply SpecAugment using Transformers' implementation (if enabled)
-        audio_features["input_values"] = self._apply_spec_augment(
-            audio_features["input_values"],
-            audio_features.get("attention_mask")
-        )
+        # Handle different feature key names and augmentation
+        if self.is_whisper:
+            # Whisper uses 'input_features' and has built-in SpecAugment (applied in the model)
+            # No need to apply SpecAugment here for Whisper
+            pass
+        else:
+            # Wav2Vec2/HuBERT use 'input_values' - apply our SpecAugment implementation
+            if "input_values" in audio_features and self.apply_augmentation:
+                audio_features["input_values"] = self._apply_spec_augment(
+                    audio_features["input_values"],
+                    audio_features.get("attention_mask")
+                )
 
         text_features = []
         for f in features:

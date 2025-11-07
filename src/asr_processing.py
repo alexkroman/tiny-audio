@@ -1,5 +1,5 @@
 import transformers
-from transformers import AutoFeatureExtractor, AutoTokenizer, Wav2Vec2Processor
+from transformers import AutoFeatureExtractor, AutoTokenizer, ProcessorMixin
 
 # Handle both package and standalone imports
 try:
@@ -8,7 +8,16 @@ except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
 
 
-class ASRProcessor(Wav2Vec2Processor):
+class ASRProcessor(ProcessorMixin):
+    """Generic processor that can handle both Wav2Vec2 and Whisper feature extractors."""
+
+    feature_extractor_class = "AutoFeatureExtractor"
+    tokenizer_class = "AutoTokenizer"
+
+    def __init__(self, feature_extractor, tokenizer):
+        self.feature_extractor = feature_extractor
+        self.tokenizer = tokenizer
+
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
         config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
