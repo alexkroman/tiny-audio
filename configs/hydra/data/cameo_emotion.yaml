@@ -5,9 +5,9 @@ datasets:
     text_column: emotion  # Use the emotion labels as target text
     task: emotion  # Mark this as an emotion recognition task
     train_splits:
-      - crema_d[:80%]  # Use 80% of crema_d split for training
+      - crema_d  # Use full crema_d split for training (7442 samples)
     eval_splits:
-      - crema_d[80%:]  # Use 20% of crema_d split for validation
+      - ravdess  # Use ravdess split for validation (1440 samples) - no overlap with training
 
 # Data filtering
 max_audio_seconds: 15.0
