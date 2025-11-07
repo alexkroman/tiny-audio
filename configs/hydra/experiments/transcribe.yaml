@@ -1,7 +1,7 @@
 # @package _global_
 
-# Whisper Transcription Configuration
-# Uses Whisper encoder with LoRA fine-tuning for speech recognition
+# HuBERT Transcription Configuration
+# Uses HuBERT encoder with LoRA fine-tuning for speech recognition
 # Projector (trainable) + Encoder LoRA + Decoder LoRA
 defaults:
   - override /model: large
@@ -13,7 +13,7 @@ model:
   # pretrained_model_path: "mazesmazes/tiny-audio"
   
   decoder_model_name: Qwen/Qwen3-8B
-  encoder_model_name: openai/whisper-large-v3-turbo
+  encoder_model_name: facebook/hubert-xlarge-ls960-ft
 
   # Projector configuration
   audio_downsample_rate: 5
@@ -23,7 +23,7 @@ model:
 encoder_lora:
   r: 0  # Enable LoRA with rank 16
   lora_alpha: 16  # Scaling factor (alpha/r = 1.0)
-  target_modules: ["self_attn.q_proj", "self_attn.k_proj"]  # Whisper attention projections
+  target_modules: ["attention.q_proj", "attention.k_proj"]  # HuBERT attention projections
   lora_dropout: 0.05
   bias: none
 
@@ -61,7 +61,7 @@ training:
   max_grad_norm: 1.0
 
   # Memory optimization
-  torch_compile: true  # Disabled - causes issues with encoder LoRA
+  torch_compile: false  # Disabled - causes issues with encoder LoRA
   gradient_checkpointing: false
 
   # Training duration

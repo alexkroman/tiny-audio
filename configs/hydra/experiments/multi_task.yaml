@@ -14,7 +14,7 @@ model:
   # pretrained_model_path: "mazesmazes/tiny-audio"
 
   decoder_model_name: Qwen/Qwen3-8B
-  encoder_model_name: facebook/hubert-xlarge-ls960-ft
+  encoder_model_name: facebook/wav2vec2-large-robust-ft-libri-960h
 
   # Projector configuration
   audio_downsample_rate: 5

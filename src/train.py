@@ -469,10 +469,10 @@ def main(cfg: DictConfig) -> None:
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         system_prompt=cfg.model.system_prompt,
-        mask_time_prob=cfg.data.get("mask_time_prob", 0.05),
-        mask_time_length=cfg.data.get("mask_time_length", 10),
+        mask_time_prob=cfg.data.get("mask_time_prob", 0.00),
+        mask_time_length=cfg.data.get("mask_time_length", 0),
         mask_feature_prob=cfg.data.get("mask_feature_prob", 0.0),
-        mask_feature_length=cfg.data.get("mask_feature_length", 10),
+        mask_feature_length=cfg.data.get("mask_feature_length", 0),
         apply_augmentation=False,  # Disable augmentation for evaluation
     )
 
