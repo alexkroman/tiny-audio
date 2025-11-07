@@ -13,8 +13,8 @@ model:
   # Load the pretrained model from Hub (this loads the projector weights)
   # pretrained_model_path: "mazesmazes/tiny-audio"
 
-  decoder_model_name: Qwen/Qwen3-8B
-  encoder_model_name: facebook/hubert-xlarge-ls960-ft
+  decoder_model_name: HuggingFaceTB/SmolLM3-3B
+  encoder_model_name: openai/whisper-large-v3-turbo
 
   # Projector configuration
   audio_downsample_rate: 5

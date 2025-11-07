@@ -235,16 +235,58 @@ class DataCollator(DataCollatorForSeq2Seq):
 
         # Handle different feature key names and augmentation
         if self.is_whisper:
-            # Whisper uses 'input_features' and has built-in SpecAugment (applied in the model)
-            # No need to apply SpecAugment here for Whisper
-            pass
+            # Whisper uses 'input_features' and requires padding to 3000 frames
+            if "input_features" in audio_features:
+                input_features = audio_features["input_features"]
+                batch_size, feature_dim, seq_len = input_features.shape
+
+                # Whisper expects exactly 3000 frames
+                expected_length = 3000
+
+                if seq_len < expected_length:
+                    # Pad with zeros to reach 3000 frames
+                    padding_length = expected_length - seq_len
+                    padding = torch.zeros(batch_size, feature_dim, padding_length,
+                                        dtype=input_features.dtype,
+                                        device=input_features.device)
+                    audio_features["input_features"] = torch.cat([input_features, padding], dim=-1)
+
+                    # Create attention mask to indicate valid vs padded frames
+                    # 1 for valid frames, 0 for padded frames
+                    attention_mask = torch.ones(batch_size, expected_length,
+                                               dtype=torch.long,
+                                               device=input_features.device)
+                    attention_mask[:, seq_len:] = 0
+                    audio_features["attention_mask"] = attention_mask
+                elif seq_len > expected_length:
+                    # Truncate if longer than 3000 frames
+                    audio_features["input_features"] = input_features[:, :, :expected_length]
+                    audio_features["attention_mask"] = torch.ones(batch_size, expected_length,
+                                                                  dtype=torch.long,
+                                                                  device=input_features.device)
+                else:
+                    # Exactly 3000 frames, create full attention mask
+                    audio_features["attention_mask"] = torch.ones(batch_size, expected_length,
+                                                                  dtype=torch.long,
+                                                                  device=input_features.device)
         else:
             # Wav2Vec2/HuBERT use 'input_values' - apply our SpecAugment implementation
-            if "input_values" in audio_features and self.apply_augmentation:
-                audio_features["input_values"] = self._apply_spec_augment(
-                    audio_features["input_values"],
-                    audio_features.get("attention_mask")
-                )
+            if "input_values" in audio_features:
+                input_values = audio_features["input_values"]
+                batch_size, seq_len = input_values.shape
+
+                # For Wav2Vec2/HuBERT, ensure proper padding and attention mask
+                # The feature extractor should have already done padding, but let's ensure we have attention mask
+                if "attention_mask" not in audio_features:
+                    # Create attention mask based on non-zero values (assuming padding is zeros)
+                    audio_features["attention_mask"] = (input_values != 0.0).long()
+
+                # Apply SpecAugment if enabled
+                if self.apply_augmentation:
+                    audio_features["input_values"] = self._apply_spec_augment(
+                        input_values,
+                        audio_features.get("attention_mask")
+                    )
 
         text_features = []
         for f in features:
@@ -355,7 +397,12 @@ class DataCollator(DataCollatorForSeq2Seq):
 
         batch = super().__call__(text_features)
 
-        batch["input_values"] = audio_features.input_values
+        # Handle both Wav2Vec2 (input_values) and Whisper (input_features)
+        if "input_values" in audio_features:
+            batch["input_values"] = audio_features.input_values
+        elif "input_features" in audio_features:
+            batch["input_features"] = audio_features.input_features
+
         if "attention_mask" in audio_features:
             batch["audio_attention_mask"] = audio_features.attention_mask
 
@@ -506,6 +553,9 @@ def main(cfg: DictConfig) -> None:
     assert isinstance(training_args, dict), "training_args must be a dict"
     training_args.pop("model_dtype", None)
     training_args.pop("attn_implementation", None)
+
+    # Disable FLOPs computation to avoid warnings with custom model architecture
+    training_args["include_num_input_tokens_seen"] = False
 
     trainer = Trainer(
         model=model,

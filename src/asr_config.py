@@ -22,6 +22,7 @@ class ASRConfig(transformers.PretrainedConfig):
         audio_sample_rate: int = 16000,
         # Projector initialization constants
         projector_init_std: float = 0.02,
+        projector_dropout: float = 0.05,
         # LoRA default parameters
         lora_default_dropout: float = 0.0,
         # Inference parameters
@@ -73,6 +74,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_hidden_dim = projector_hidden_dim
         self.audio_sample_rate = audio_sample_rate
         self.projector_init_std = projector_init_std
+        self.projector_dropout = projector_dropout
         self.lora_default_dropout = lora_default_dropout
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
@@ -140,6 +142,7 @@ class ASRConfig(transformers.PretrainedConfig):
         output["num_beams"] = self.num_beams
         output["audio_sample_rate"] = self.audio_sample_rate
         output["projector_init_std"] = self.projector_init_std
+        output["projector_dropout"] = self.projector_dropout
         output["lora_default_dropout"] = self.lora_default_dropout
         output["inference_diversity_penalty"] = self.inference_diversity_penalty
         output["inference_warmup_tokens"] = self.inference_warmup_tokens

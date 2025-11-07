@@ -21,6 +21,7 @@ from transformers.generation.utils import (
     GenerateEncoderDecoderOutput,
 )
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
+from transformers.activations import ACT2FN
 
 try:
     from .asr_config import ASRConfig
@@ -29,20 +30,33 @@ except ImportError:
 
 
 class AudioProjector(nn.Module):
+    """Audio projector using Llama-style SwiGLU architecture.
+
+    This follows the exact pattern of LlamaMLP but allows for dimension changes
+    (input_dim != output_dim), which LlamaMLP doesn't support.
+    """
     def __init__(self, config):
         super().__init__()
         self.k = config.encoder_projector_ds_rate
-        hidden_dim = config.projector_hidden_dim
         in_dim = config.encoder_dim * self.k
         out_dim = config.llm_dim
+        hidden_dim = config.projector_hidden_dim
 
         # Pre-norm: normalize stacked encoder features (fixes broken normalization from concatenation)
         self.ln_pre = LlamaRMSNorm(in_dim)
 
-        # SwiGLU layers, following the Llama architecture
+        # SwiGLU layers following LlamaMLP architecture
+        # Using the same naming convention as LlamaMLP for consistency
         self.gate_proj = nn.Linear(in_dim, hidden_dim, bias=False)
         self.up_proj = nn.Linear(in_dim, hidden_dim, bias=False)
         self.down_proj = nn.Linear(hidden_dim, out_dim, bias=False)
+
+        # Use the same activation function as Llama
+        self.act_fn = ACT2FN["silu"]
+
+        # Dropout for regularization (configurable, defaults to 0.05)
+        dropout_rate = getattr(config, 'projector_dropout', 0.05)
+        self.dropout = nn.Dropout(dropout_rate)
 
         # Post-norm: normalize output to match LLM's expected embedding distribution
         self.ln_post = LlamaRMSNorm(out_dim)
@@ -70,13 +84,15 @@ class AudioProjector(nn.Module):
         # Re-normalize after stacking
         x = self.ln_pre(x)
 
-        # SwiGLU projection
-        gate = self.gate_proj(x)
-        up = self.up_proj(x)
-        gated_output = F.silu(gate) * up
+        # Apply SwiGLU following LlamaMLP's exact pattern
+        # down_proj(act_fn(gate_proj(x)) * up_proj(x))
+        hidden_states = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
 
-        # Project to LLM dimension
-        output = self.down_proj(gated_output)
+        # Apply dropout after activation
+        hidden_states = self.dropout(hidden_states)
+
+        # Final projection
+        output = self.down_proj(hidden_states)
 
         # Normalize before LLM to ensure stable input distribution
         return self.ln_post(output)
@@ -268,7 +284,8 @@ class ASRModel(PreTrainedModel):
         self.encoder = self._create_encoder(config, encoder_lora_config)
 
         # Use appropriate feature extractor based on model type
-        if hasattr(self.encoder.config, "model_type") and "whisper" in self.encoder.config.model_type.lower():
+        is_whisper = "whisper" in config.audio_model_id.lower() or (hasattr(self.encoder.config, "model_type") and "whisper" in self.encoder.config.model_type.lower())
+        if is_whisper:
             self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.audio_model_id)
         else:
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(config.audio_model_id)
@@ -395,10 +412,19 @@ class ASRModel(PreTrainedModel):
             encoder_kwargs["device_map"] = "auto"
             encoder_kwargs["low_cpu_mem_usage"] = True
 
-        encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
+        # Check if this is a Whisper model and load only the encoder part
+        if "whisper" in config.audio_model_id.lower():
+            from transformers import WhisperModel
+            full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
+            encoder = full_model.encoder
+            # Clean up the full model to save memory
+            del full_model
+        else:
+            encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
         # Enable SpecAugment for Whisper models during training
-        if hasattr(encoder.config, "model_type") and "whisper" in encoder.config.model_type.lower():
+        is_whisper = "whisper" in config.audio_model_id.lower() or (hasattr(encoder.config, "model_type") and "whisper" in encoder.config.model_type.lower())
+        if is_whisper:
             # These are Whisper-specific SpecAugment parameters
             encoder.config.apply_spec_augment = True  # Enable during training, will be disabled during eval
             encoder.config.mask_time_prob = config.mask_time_prob if hasattr(config, 'mask_time_prob') else 0.05
@@ -421,7 +447,9 @@ class ASRModel(PreTrainedModel):
             **kwargs,  # Catch and discard invalid kwargs like input_ids
         ):
             # Check if this is a Whisper model (expects input_features instead of input_values)
-            if hasattr(self_encoder.config, "model_type") and "whisper" in self_encoder.config.model_type.lower():
+            # Note: config.audio_model_id is not accessible here, so we check the encoder config
+            is_whisper_encoder = hasattr(self_encoder.config, "model_type") and "whisper" in self_encoder.config.model_type.lower()
+            if is_whisper_encoder:
                 return original_forward(
                     input_features=input_values,  # Map input_values to input_features for Whisper
                     attention_mask=attention_mask,
@@ -451,6 +479,10 @@ class ASRModel(PreTrainedModel):
                 "encoder",
                 default_dropout=config.lora_default_dropout
             )
+
+            # Re-apply the safe_encoder_forward wrapper after PEFT wrapping
+            # PEFT wrapping loses our custom forward, so we need to re-apply it
+            encoder.forward = types.MethodType(safe_encoder_forward, encoder)
 
         return encoder
 
