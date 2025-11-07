@@ -1,20 +1,19 @@
 # @package _global_
 
-# Multi-task training configuration - All tasks combined
-# Includes: transcription, continuation, description, and emotion recognition
-# Based on stage1 configuration with multi-task data
+# HuBERT Transcription Configuration
+# Uses HuBERT encoder with LoRA fine-tuning for speech recognition
+# Projector (trainable) + Encoder LoRA + Decoder LoRA
 defaults:
   - override /model: large
-  - override /data: multi_task_complete
+  - override /data: loquacious_large
   - override /training: production
-  - override /encoder_lora: default
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
   # pretrained_model_path: "mazesmazes/tiny-audio"
-
+  
   decoder_model_name: Qwen/Qwen3-8B
-  encoder_model_name: facebook/hubert-xlarge-ls960-ft
+  encoder_model_name: openai/whisper-large-v3-turbo
 
   # Projector configuration
   audio_downsample_rate: 5
@@ -22,16 +21,16 @@ model:
 
 # Encoder LoRA Configuration
 encoder_lora:
-  r: 0 # Disable LoRA (same as stage1)
+  r: 0  # Enable LoRA with rank 16
   lora_alpha: 16  # Scaling factor (alpha/r = 1.0)
-  target_modules: [q_proj, k_proj]  # HuBERT attention projections
+  target_modules: ["attention.q_proj", "attention.k_proj"]  # HuBERT attention projections
   lora_dropout: 0.05
   bias: none
 
 # Decoder LoRA Configuration
 peft:
   peft_method: lora  # Enable LoRA fine-tuning on decoder
-  r: 0  # Disable LORA (same as stage1)
+  r: 0  # Enable LoRA with rank 8
   lora_alpha: 8
   target_modules: ["q_proj", "v_proj"]
   bias: none  # No bias training
@@ -42,18 +41,18 @@ peft:
 training:
   # Hub configuration
   push_to_hub: true
-  hub_model_id: "mazesmazes/tiny-audio-multi-task"
+  hub_model_id: "mazesmazes/tiny-audio"
   hub_strategy: "checkpoint"
   hub_private_repo: false
 
-  per_device_train_batch_size: 6
-  per_device_eval_batch_size: 6
-  gradient_accumulation_steps: 4
-  eval_accumulation_steps: 4
+  per_device_train_batch_size: 7
+  per_device_eval_batch_size: 7
+  gradient_accumulation_steps: 3
+  eval_accumulation_steps: 3
 
   learning_rate: 1.0e-4
 
-  warmup_steps: 1000  # Increased for LoRA stability (2% of 50k steps)
+  warmup_steps: 1000  # Increased for LoRA stability (1% of max_steps)
   lr_scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs: {"min_lr_rate": 0.1}
 
@@ -65,19 +64,14 @@ training:
   torch_compile: false  # Disabled - causes issues with encoder LoRA
   gradient_checkpointing: false
 
-  # Training duration - 50000 steps as requested
+  # Training duration
   max_steps: 50000
 
   # Reproducibility
   seed: 42
   ignore_data_skip: true
 
-# Data configuration (inherited from multi_task_complete)
-# Includes all 4 tasks with balanced sampling:
-# - Transcription (30%): LoquaciousSet
-# - Continuation (25%): SODA-Audio
-# - Description (25%): AudioSet Strong
-# - Emotion (20%): CAMEO
+# Data configuration
 data:
   mask_time_prob: 0.05
 

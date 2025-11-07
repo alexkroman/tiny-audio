@@ -5,7 +5,7 @@
 # Projector (trainable) + Encoder LoRA + Decoder LoRA
 defaults:
   - override /model: large
-  - override /data: loquacious_clean
+  - override /data: loquacious_large
   - override /training: production
 
 model:

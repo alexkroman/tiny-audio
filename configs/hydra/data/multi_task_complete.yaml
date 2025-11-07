@@ -2,7 +2,7 @@
 datasets:
   # Transcription task - LoquaciousSet
   - path: speechbrain/LoquaciousSet
-    name: clean
+    name: large
     audio_column: wav
     text_column: text
     task: transcribe  # Mark as transcription task
