@@ -1,9 +1,11 @@
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, Tuple, Dict, Any
+import warnings
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
+import numpy as np
 from transformers import (
     AutoConfig,
     AutoFeatureExtractor,
@@ -345,6 +347,17 @@ class ASRModel(PreTrainedModel):
             self.projector.to(dtype=decoder_param.dtype)
 
         self._no_split_modules = self.decoder._no_split_modules
+
+        # Initialize TTS components (only in inference mode)
+        self.tts_pipeline = None
+        self.tts_enabled = False
+        self.tts_voice = "af_heart"  # Default voice
+        self.tts_lang_code = "a"  # Default to American English
+        self.tts_speed = 1.0  # Normal speed
+
+        # Initialize TTS if not in training mode
+        if not self.training:
+            self._initialize_tts()
 
     @staticmethod
     def _apply_lora(model, lora_config: dict, task_type, model_name: str = "model", default_dropout: float = 0.0):
@@ -967,6 +980,424 @@ class ASRModel(PreTrainedModel):
         src_dir = PathlibPath(__file__).parent
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
+
+    def _initialize_tts(self):
+        """Initialize the Kokoro TTS pipeline if available."""
+        try:
+            # Try to import kokoro
+            from kokoro import KPipeline, KModel
+
+            # Use HuggingFace's automatic device placement
+            # This follows the same pattern as transformers models
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+                dtype = torch.float16 if torch.cuda.is_bf16_supported() else torch.float32
+            elif torch.backends.mps.is_available():
+                # Apple Silicon GPU
+                device = torch.device("mps")
+                dtype = torch.float32
+            else:
+                device = torch.device("cpu")
+                dtype = torch.float32
+
+            # If the decoder has a specific device, prefer that
+            # This ensures TTS and ASR are on the same device
+            decoder_param = next(self.decoder.parameters())
+            if decoder_param.device.type != "meta":
+                device = decoder_param.device
+                dtype = decoder_param.dtype
+
+            # Initialize the TTS model with automatic device placement
+            try:
+                # Load model and move to appropriate device
+                self.tts_model = KModel().eval().to(device=device, dtype=dtype)
+
+                # Create pipeline with the GPU/device-aware model
+                self.tts_pipeline = KPipeline(
+                    lang_code=self.tts_lang_code,
+                    model=self.tts_model
+                )
+
+                self.tts_device = device
+                print(f"TTS initialized on {device} with dtype {dtype}")
+
+            except Exception as e:
+                # Fallback to default pipeline if custom loading fails
+                warnings.warn(f"Failed to load TTS on {device}, falling back to CPU: {e}")
+                self.tts_pipeline = KPipeline(lang_code=self.tts_lang_code)
+                self.tts_device = torch.device("cpu")
+
+            self.tts_enabled = True
+            print(f"TTS initialized with Kokoro model (voice: {self.tts_voice}, lang: {self.tts_lang_code})")
+
+        except ImportError:
+            warnings.warn(
+                "Kokoro TTS not available. Install with: pip install kokoro>=0.9.4 soundfile\n"
+                "Also ensure espeak-ng is installed on your system."
+            )
+            self.tts_enabled = False
+            self.tts_device = torch.device("cpu")
+        except Exception as e:
+            warnings.warn(f"Failed to initialize TTS: {e}")
+            self.tts_enabled = False
+            self.tts_device = torch.device("cpu")
+
+    def configure_tts(
+        self,
+        enabled: bool = True,
+        voice: str = "af_heart",
+        lang_code: str = "a",
+        speed: float = 1.0
+    ):
+        """Configure TTS settings.
+
+        Args:
+            enabled: Whether to enable TTS generation
+            voice: Voice to use for TTS (e.g., 'af_heart', 'af_bella', 'am_michael')
+            lang_code: Language code ('a' for American, 'b' for British, etc.)
+            speed: Speech speed multiplier (0.5 to 2.0)
+        """
+        self.tts_enabled = enabled and (self.tts_pipeline is not None)
+        self.tts_voice = voice
+        self.tts_lang_code = lang_code
+        self.tts_speed = max(0.5, min(2.0, speed))  # Clamp to valid range
+
+        # Reinitialize pipeline if language changed
+        if enabled and self.tts_pipeline is not None:
+            try:
+                from kokoro import KPipeline
+                old_lang = getattr(self.tts_pipeline, 'lang_code', None)
+                if old_lang != lang_code:
+                    # Recreate pipeline with new language, keeping the same device
+                    if hasattr(self, 'tts_model') and self.tts_model is not None:
+                        self.tts_pipeline = KPipeline(
+                            lang_code=lang_code,
+                            model=self.tts_model
+                        )
+                    else:
+                        self.tts_pipeline = KPipeline(lang_code=lang_code)
+                    print(f"TTS language changed to: {lang_code}")
+            except Exception as e:
+                warnings.warn(f"Failed to update TTS language: {e}")
+
+    def _generate_tts(self, text: str) -> Optional[Tuple[np.ndarray, int]]:
+        """Generate TTS audio from text.
+
+        Args:
+            text: Text to convert to speech
+
+        Returns:
+            Tuple of (audio_array, sample_rate) or None if TTS is disabled
+        """
+        if not self.tts_enabled or self.tts_pipeline is None:
+            return None
+
+        try:
+            # Generate audio using Kokoro
+            generator = self.tts_pipeline(
+                text,
+                voice=self.tts_voice,
+                speed=self.tts_speed
+            )
+
+            # Collect all audio segments
+            audio_segments = []
+            for _, _, audio in generator:
+                audio_segments.append(audio)
+
+            # Concatenate all segments
+            if audio_segments:
+                full_audio = np.concatenate(audio_segments)
+                return full_audio, 24000  # Kokoro outputs at 24kHz
+
+        except Exception as e:
+            warnings.warn(f"TTS generation failed: {e}")
+
+        return None
+
+    ) -> Dict[str, Any]:
+        """Generate text from audio and optionally convert to speech.
+
+        This method extends the base generate() to add TTS functionality.
+
+        Args:
+            input_values: Audio tensor for Wav2Vec2/HuBERT models
+            input_features: Audio features for Whisper models
+            system_prompt: System prompt for the model
+            user_prompt: User prompt template
+            task: Task type (transcribe, describe, continue, emotion)
+            generate_tts: Whether to generate TTS from the output text
+            return_text: Whether to return the decoded text
+            save_audio_path: Optional path to save the generated audio
+            **generate_kwargs: Additional generation arguments
+
+        Returns:
+            Dictionary containing:
+                - 'generated_ids': Token IDs from the model
+                - 'text': Decoded text (if return_text=True)
+                - 'audio': TTS audio array (if generate_tts=True and TTS enabled)
+                - 'audio_sample_rate': Sample rate of audio (if audio is generated)
+        """
+        # Generate text using the base model
+        generated_ids = self.generate(
+            input_values=input_values,
+            input_features=input_features,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            task=task,
+            **generate_kwargs
+        )
+
+        result = {'generated_ids': generated_ids}
+
+        # Decode text if requested
+        if return_text or (generate_tts and self.tts_enabled):
+            # Handle different return types from generate()
+            if isinstance(generated_ids, torch.Tensor):
+                ids_to_decode = generated_ids
+            else:
+                # Handle GenerateOutput types
+                ids_to_decode = generated_ids.sequences
+
+            # Decode the generated text
+            decoded_text = self.tokenizer.batch_decode(
+                ids_to_decode,
+                skip_special_tokens=True
+            )
+
+            # Get the first result if batch size is 1
+            text = decoded_text[0] if len(decoded_text) == 1 else decoded_text
+
+            if return_text:
+                result['text'] = text
+
+            # Generate TTS if requested and enabled
+            if generate_tts and self.tts_enabled:
+                tts_result = self._generate_tts(text if isinstance(text, str) else text[0])
+
+                if tts_result is not None:
+                    audio, sample_rate = tts_result
+                    result['audio'] = audio
+                    result['audio_sample_rate'] = sample_rate
+
+                    # Save audio if path provided
+                    if save_audio_path:
+                        try:
+                            import soundfile as sf
+                            sf.write(save_audio_path, audio, sample_rate)
+                            result['audio_saved_to'] = save_audio_path
+                        except ImportError:
+                            warnings.warn("soundfile not installed. Cannot save audio.")
+                        except Exception as e:
+                            warnings.warn(f"Failed to save audio: {e}")
+
+        return result
+
+    ) -> Optional[Tuple[np.ndarray, int]]:
+        """Convert any text to speech using the configured TTS model.
+
+        Args:
+            text: Text to convert to speech
+            voice: Optional voice override (uses configured voice if None)
+            speed: Optional speed override (uses configured speed if None)
+            save_path: Optional path to save the audio file
+
+        Returns:
+            Tuple of (audio_array, sample_rate) or None if TTS is disabled
+        """
+        if not self.tts_enabled or self.tts_pipeline is None:
+            warnings.warn("TTS is not enabled or not available")
+            return None
+
+        # Temporarily override voice/speed if provided
+        original_voice = self.tts_voice
+        original_speed = self.tts_speed
+
+        if voice is not None:
+            self.tts_voice = voice
+        if speed is not None:
+            self.tts_speed = max(0.5, min(2.0, speed))
+
+        try:
+            # Generate TTS
+            result = self._generate_tts(text)
+
+            # Save if requested
+            if result is not None and save_path is not None:
+                try:
+                    import soundfile as sf
+                    audio, sample_rate = result
+                    sf.write(save_path, audio, sample_rate)
+                    print(f"Audio saved to: {save_path}")
+                except ImportError:
+                    warnings.warn("soundfile not installed. Cannot save audio.")
+                except Exception as e:
+                    warnings.warn(f"Failed to save audio: {e}")
+
+            return result
+
+        finally:
+            # Restore original settings
+            self.tts_voice = original_voice
+            self.tts_speed = original_speed
+
+    def process_audio_for_agent(
+        self,
+        audio: Optional[Union[np.ndarray, torch.Tensor, bytes]] = None,
+        text: Optional[str] = None,
+        sample_rate: int = 16000,
+        task: str = "continue",
+        return_audio: bool = True,
+        max_new_tokens: int = 100,
+        voice: Optional[str] = None,
+        speed: Optional[float] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Simple one-call method for voice agents to process audio or text.
+
+        This is the ONLY method that returns TTS audio. It handles:
+        - Audio-to-text-to-speech (full pipeline)
+        - Text-to-speech only (if text is provided instead of audio)
+        - Audio format conversion and resampling
+        - Device management
+
+        Args:
+            audio: Input audio (numpy array, tensor, or bytes) for ASR
+            text: Input text for TTS-only mode (if no audio provided)
+            sample_rate: Sample rate of input audio
+            task: Task to perform (continue, transcribe, describe, emotion)
+            return_audio: Whether to return TTS audio
+            max_new_tokens: Maximum tokens to generate
+            voice: Optional TTS voice override
+            speed: Optional TTS speed override
+            **kwargs: Additional generation parameters
+
+        Returns:
+            Dictionary with:
+                - text: Generated or input text
+                - audio: TTS audio (if return_audio=True and TTS enabled)
+                - audio_sample_rate: Sample rate of TTS audio
+                - processing_time: Time taken to process
+        """
+        import time
+        start_time = time.time()
+
+        result = {}
+
+        # Check inputs
+        if audio is None and text is None:
+            raise ValueError("Either audio or text must be provided")
+
+        # If text is provided directly, skip ASR
+        if text is not None:
+            result['text'] = text
+        else:
+            # Process audio through ASR
+            # Convert audio to tensor
+            if isinstance(audio, bytes):
+                # Convert bytes to numpy
+                audio = np.frombuffer(audio, dtype=np.float32)
+
+            if isinstance(audio, np.ndarray):
+                audio_tensor = torch.from_numpy(audio).float()
+            else:
+                audio_tensor = audio.float()
+
+            # Ensure correct shape (batch_size=1, sequence_length)
+            if audio_tensor.dim() == 1:
+                audio_tensor = audio_tensor.unsqueeze(0)
+            elif audio_tensor.dim() > 2:
+                audio_tensor = audio_tensor.squeeze()
+                if audio_tensor.dim() > 2:
+                    audio_tensor = audio_tensor[0]  # Take first channel if multi-channel
+
+            # Resample if needed (simple linear interpolation)
+            if sample_rate != 16000:
+                current_length = audio_tensor.shape[-1]
+                target_length = int(current_length * 16000 / sample_rate)
+                audio_tensor = torch.nn.functional.interpolate(
+                    audio_tensor.unsqueeze(1),
+                    size=target_length,
+                    mode='linear',
+                    align_corners=False
+                ).squeeze(1)
+
+            # Move to model device
+            device = next(self.parameters()).device
+            audio_tensor = audio_tensor.to(device)
+
+            # Generate text with ASR
+            generated_ids = self.generate(
+                input_values=audio_tensor,
+                task=task,
+                max_new_tokens=max_new_tokens,
+                **kwargs
+            )
+
+            # Decode text
+            if isinstance(generated_ids, torch.Tensor):
+                ids_to_decode = generated_ids
+            else:
+                ids_to_decode = generated_ids.sequences
+
+            text = self.tokenizer.batch_decode(
+                ids_to_decode,
+                skip_special_tokens=True
+            )[0]
+
+            result['text'] = text
+
+        # Generate TTS if requested and enabled
+        if return_audio and self.tts_enabled and result.get('text'):
+            # Apply voice/speed overrides if provided
+            original_voice = self.tts_voice
+            original_speed = self.tts_speed
+
+            if voice is not None:
+                self.tts_voice = voice
+            if speed is not None:
+                self.tts_speed = max(0.5, min(2.0, speed))
+
+            try:
+                tts_result = self._generate_tts(result['text'])
+                if tts_result is not None:
+                    audio, sample_rate = tts_result
+                    result['audio'] = audio
+                    result['audio_sample_rate'] = sample_rate
+            finally:
+                # Restore original settings
+                self.tts_voice = original_voice
+                self.tts_speed = original_speed
+
+        # Add processing time
+        result['processing_time'] = time.time() - start_time
+
+        return result
+
+
+    def list_available_voices(self) -> Dict[str, list]:
+        """List available TTS voices organized by language.
+
+        Returns:
+            Dictionary mapping language codes to voice lists
+        """
+        return {
+            'a': [  # American English
+                'af_heart', 'af_bella', 'af_sarah', 'af_nicole', 'af_sky',
+                'am_adam', 'am_michael'
+            ],
+            'b': [  # British English
+                'bf_emma', 'bf_isabella',
+                'bm_george', 'bm_lewis'
+            ],
+            'e': [],  # Spanish (if supported)
+            'f': [],  # French (if supported)
+            'h': [],  # Hindi (if supported)
+            'i': [],  # Italian (if supported)
+            'j': [],  # Japanese (if supported)
+            'p': [],  # Brazilian Portuguese (if supported)
+            'z': [],  # Mandarin Chinese (if supported)
+        }
 
 
 AutoConfig.register("asr_model", ASRConfig)
