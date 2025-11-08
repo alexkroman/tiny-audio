@@ -117,8 +117,8 @@ class TinyAudioVoiceAgent:
                 sample_rate=self.config.sample_rate,
                 task="continue",  # Use continue task as requested
                 return_audio=True,
-                max_new_tokens=150,  # Reasonable response length
-                num_beams=3,  # Balance quality and speed
+                max_new_tokens=50,  # Short responses for low latency voice agents
+                num_beams=1,  # Greedy decoding for fastest response
             )
 
             # Get the generated text and audio
