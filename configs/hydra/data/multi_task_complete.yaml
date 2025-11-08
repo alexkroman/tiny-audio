@@ -10,7 +10,7 @@ datasets:
       - train
     eval_splits:
       - dev
-    sampling_weight: 0.33
+    sampling_weight: 0.5
 
   # Continuation task - SODA-Audio
   - path: fixie-ai/soda-audio
@@ -22,18 +22,7 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.33
-
-  # Description task - AudioSet Strong
-  - path: CLAPv2/audioset_strong
-    audio_column: audio
-    text_column: text
-    task: describe  # Mark as description task
-    train_splits:
-      - train
-    eval_splits:
-      - validation
-    sampling_weight: 0.33
+    sampling_weight: 0.5
 
 # Audio processing
 sample_rate: 16000

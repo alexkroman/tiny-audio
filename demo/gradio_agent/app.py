@@ -21,11 +21,7 @@ from typing import Optional, Tuple, List, Dict, Any
 from dataclasses import dataclass
 import threading
 import queue
-
-# Add parent directory to path to import model
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from src.asr_modeling import ASRModel
-from src.asr_config import ASRConfig
+from transformers import AutoModel, pipeline
 
 # Configure logging
 logging.basicConfig(
@@ -56,7 +52,8 @@ class VoiceAgent:
 
     def __init__(self, config: AgentConfig):
         self.config = config
-        self.model: Optional[ASRModel] = None
+        self.model = None
+        self.pipeline = None
         self.conversation_history: List[Dict[str, Any]] = []
         self.is_processing = False
         self.audio_queue = queue.Queue()
@@ -67,16 +64,33 @@ class VoiceAgent:
         try:
             logger.info(f"Loading model from {self.config.model_path}")
 
-            if self.config.use_local_model:
-                self.model = ASRModel.from_pretrained(self.config.model_path)
+            # Load model using AutoModel
+            # Choose dtype based on device - MPS doesn't fully support bfloat16
+            if torch.backends.mps.is_available():
+                # Use float32 on Apple Silicon (MPS)
+                dtype = torch.float32
+            elif torch.cuda.is_available():
+                # Use bfloat16 on CUDA for better performance
+                dtype = torch.bfloat16
             else:
-                self.model = ASRModel.from_pretrained(
-                    self.config.model_path,
-                    trust_remote_code=True
-                )
+                # Use float32 on CPU
+                dtype = torch.float32
+
+            self.model = AutoModel.from_pretrained(
+                self.config.model_path,
+                trust_remote_code=True,
+                torch_dtype=dtype
+            )
+
+            # Ensure all model components use the same dtype
+            self.model = self.model.to(dtype)
 
             # Put model in eval mode
             self.model.eval()
+
+            # Initialize TTS (needs to be done after eval mode since it's skipped in training mode)
+            if hasattr(self.model, '_initialize_tts'):
+                self.model._initialize_tts()
 
             # Configure TTS if available
             if hasattr(self.model, 'configure_tts') and self.model.tts_enabled:
@@ -89,7 +103,30 @@ class VoiceAgent:
             else:
                 logger.warning("TTS not available - will return text only")
 
-            logger.info("Model loaded successfully")
+            # Create pipeline - try to load VoiceAgentPipeline for TTS support
+            try:
+                # Import from src if running locally
+                import sys
+                import os
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src'))
+                from voice_agent_pipeline import VoiceAgentPipeline
+
+                self.pipeline = VoiceAgentPipeline(
+                    model=self.model,
+                    feature_extractor=self.model.feature_extractor,
+                    tokenizer=self.model.tokenizer
+                )
+                logger.info("Using VoiceAgentPipeline with TTS support")
+            except ImportError:
+                # Fall back to standard ASR pipeline (no TTS)
+                self.pipeline = pipeline(
+                    "automatic-speech-recognition",
+                    model=self.model,
+                    trust_remote_code=True
+                )
+                logger.warning("Using standard ASR pipeline (TTS may not work)")
+
+            logger.info("Model and pipeline loaded successfully")
             return True
 
         except Exception as e:
@@ -113,7 +150,7 @@ class VoiceAgent:
         Returns:
             Tuple of (transcribed_text, tts_audio, conversation_history)
         """
-        if self.model is None:
+        if self.model is None or self.pipeline is None:
             return "Model not loaded. Please wait...", None, []
 
         if audio_input is None:
@@ -125,41 +162,32 @@ class VoiceAgent:
         if len(audio_data.shape) > 1:
             audio_data = audio_data.mean(axis=1)
 
-        # Normalize audio to float32 in range [-1, 1]
-        if audio_data.dtype == np.int16:
-            audio_data = audio_data.astype(np.float32) / 32768.0
-        elif audio_data.dtype == np.int32:
-            audio_data = audio_data.astype(np.float32) / 2147483648.0
-
-        # Resample if necessary
-        if sample_rate != self.config.sample_rate:
-            audio_data = self.resample_audio(audio_data, sample_rate, self.config.sample_rate)
-
         try:
             logger.info(f"Processing audio with task: {task}")
             start_time = time.time()
 
-            # Process with the model
-            result = self.model.process_audio_for_agent(
-                audio=audio_data,
-                sample_rate=self.config.sample_rate,
+            # Use VoiceAgentPipeline - supports return_audio, tts_voice, etc.
+            result = self.pipeline(
+                {"raw": audio_data, "sampling_rate": sample_rate},
                 task=task,
-                return_audio=True,
                 max_new_tokens=self.config.max_new_tokens,
                 temperature=self.config.temperature,
                 num_beams=self.config.num_beams,
+                chunk_length_s=30,
+                return_audio=True,  # Get TTS audio back
+                tts_voice=self.config.tts_voice,
+                tts_speed=self.config.tts_speed
             )
-
-            processing_time = time.time() - start_time
-
-            # Extract results
             generated_text = result.get('text', '')
             tts_audio = result.get('audio')
 
-            # Add to conversation history
+            processing_time = time.time() - start_time
+
+            # Add to conversation history with transcribed text
+            user_message = generated_text if task == "transcribe" else f"[Audio input - {len(audio_data)/sample_rate:.1f}s]"
             self.conversation_history.append({
                 'role': 'user',
-                'content': f"[Audio input - {len(audio_data)/self.config.sample_rate:.1f}s]",
+                'content': user_message,
                 'task': task
             })
 
@@ -174,9 +202,13 @@ class VoiceAgent:
             # Prepare audio output if available
             audio_output = None
             if tts_audio is not None:
-                # Ensure proper format for Gradio
-                if tts_audio.dtype != np.float32:
-                    tts_audio = tts_audio.astype(np.float32)
+                # Convert to int16 format that Gradio expects
+                if tts_audio.dtype == np.float32 or tts_audio.dtype == np.float64:
+                    # Convert from float [-1, 1] to int16 [-32768, 32767]
+                    tts_audio = np.clip(tts_audio, -1.0, 1.0)
+                    tts_audio = (tts_audio * 32767).astype(np.int16)
+                elif tts_audio.dtype != np.int16:
+                    tts_audio = tts_audio.astype(np.int16)
                 audio_output = (self.config.tts_sample_rate, tts_audio)
 
             return generated_text, audio_output, self.conversation_history
@@ -223,20 +255,6 @@ class VoiceAgent:
 
         return "\n".join(context)
 
-    @staticmethod
-    def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-        """Simple audio resampling using linear interpolation."""
-        if orig_sr == target_sr:
-            return audio
-
-        duration = len(audio) / orig_sr
-        target_length = int(duration * target_sr)
-
-        indices = np.linspace(0, len(audio) - 1, target_length)
-        resampled = np.interp(indices, np.arange(len(audio)), audio)
-
-        return resampled
-
     def clear_conversation(self):
         """Clear the conversation history."""
         self.conversation_history = []
@@ -249,6 +267,10 @@ def create_gradio_interface():
     # Initialize agent
     config = AgentConfig()
     agent = VoiceAgent(config)
+
+    # Load model immediately
+    print("Loading model...")
+    model_loaded = agent.load_model()
 
     # Custom CSS for better styling
     custom_css = """
@@ -282,31 +304,14 @@ def create_gradio_interface():
         gr.Markdown(
             """
             # 🎤 Tiny Audio Voice Agent
-
-            Interactive voice agent powered by the Tiny Audio model with continuous conversation capabilities.
-
-            ## Features:
-            - 🎙️ Real-time voice recording and processing
-            - 💬 Continuous conversation with context
-            - 🔊 Text-to-speech synthesis for responses
-            - 📝 Conversation history tracking
             """
         )
 
         with gr.Row():
             with gr.Column(scale=1):
-                # Model loading status
-                model_status = gr.Textbox(
-                    label="Model Status",
-                    value="Click 'Load Model' to start",
-                    interactive=False
-                )
-
-                load_btn = gr.Button("Load Model", variant="primary")
-
                 # Task selection
                 task_selector = gr.Radio(
-                    choices=["continue", "transcribe", "translate"],
+                    choices=["continue", "transcribe"],
                     value="continue",
                     label="Task Mode",
                     info="Select the task for audio processing"
@@ -357,101 +362,47 @@ def create_gradio_interface():
                 audio_input = gr.Audio(
                     sources=["microphone"],
                     type="numpy",
-                    label="🎙️ Record Audio",
+                    label="🎙️ Record Audio (click stop to process)",
                     elem_id="audio-input"
                 )
 
-                # Process button
-                process_btn = gr.Button("Process Audio", variant="primary", size="lg")
-
-                # Response display
-                response_text = gr.Textbox(
-                    label="Response",
-                    placeholder="Agent's response will appear here...",
-                    lines=3,
-                    interactive=False
+                # Conversation display with audio playback
+                conversation_display = gr.Chatbot(
+                    label="Conversation",
+                    height=400,
+                    elem_id="conversation",
+                    type="messages"
                 )
 
-                # TTS output
+                # Hidden audio component for autoplay
                 audio_output = gr.Audio(
-                    label="🔊 Agent Voice",
-                    type="numpy",
+                    visible=False,
                     autoplay=True,
                     elem_id="audio-output"
-                )
-
-                # Conversation history
-                with gr.Accordion("Conversation History", open=True):
-                    conversation_display = gr.Chatbot(
-                        label="Conversation",
-                        height=300,
-                        elem_id="conversation"
-                    )
-
-                # Clear button
-                clear_btn = gr.Button("Clear Conversation", variant="secondary")
-
-        # Continuous conversation mode
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown(
-                    """
-                    ## 🔄 Continuous Conversation Mode
-
-                    Enable continuous listening for natural back-and-forth conversation.
-                    The agent will use the "continue" task to maintain context.
-                    """
-                )
-
-                continuous_audio = gr.Audio(
-                    sources=["microphone"],
-                    type="numpy",
-                    streaming=True,
-                    label="🎤 Continuous Recording",
-                    elem_id="continuous-audio"
-                )
-
-                continuous_output = gr.Audio(
-                    label="🔊 Live Response",
-                    type="numpy",
-                    autoplay=True,
-                    streaming=True,
-                    elem_id="continuous-output"
                 )
 
         # State management
         conversation_state = gr.State([])
 
         # Event handlers
-        def load_model_handler():
-            success = agent.load_model()
-            if success:
-                agent.config.tts_voice = tts_voice.value
-                agent.config.tts_speed = tts_speed.value
-                return "✅ Model loaded successfully!"
-            else:
-                return "❌ Failed to load model. Check logs."
-
         def process_audio_handler(audio, task, state):
             if audio is None:
-                return "", None, [], state
+                return None, [], state
 
             text, tts, history = agent.process_audio(audio, task)
 
-            # Format for chatbot display
+            # Format for chatbot display using OpenAI-style messages format
             chat_history = []
             for entry in history:
                 role = entry.get('role')
                 content = entry.get('content')
-                if role == 'user':
-                    chat_history.append((content, None))
-                elif role == 'assistant':
-                    if len(chat_history) > 0:
-                        chat_history[-1] = (chat_history[-1][0], content)
-                    else:
-                        chat_history.append((None, content))
+                if role in ['user', 'assistant']:
+                    chat_history.append({
+                        'role': role,
+                        'content': content
+                    })
 
-            return text, tts, chat_history, history
+            return tts, chat_history, history
 
         def update_tts_settings(voice, speed):
             if agent.model is not None:
@@ -463,67 +414,24 @@ def create_gradio_interface():
                         voice=voice,
                         speed=speed
                     )
-            return f"TTS updated: {voice} at {speed}x speed"
-
-        def clear_conversation_handler():
-            agent.clear_conversation()
-            return [], [], None, None
-
-        # Continuous conversation handler
-        def continuous_handler(audio_stream, state):
-            if audio_stream is None:
-                return None, state
-
-            # Process continuous audio with continue task
-            _, tts_audio, updated_state = agent.continuous_conversation(
-                audio_stream,
-                state
-            )
-
-            return tts_audio, updated_state
 
         # Wire up events
-        load_btn.click(
-            fn=load_model_handler,
-            outputs=model_status
-        )
-
-        process_btn.click(
-            fn=process_audio_handler,
-            inputs=[audio_input, task_selector, conversation_state],
-            outputs=[response_text, audio_output, conversation_display, conversation_state]
-        )
-
         # Auto-process when audio is recorded
         audio_input.stop_recording(
             fn=process_audio_handler,
             inputs=[audio_input, task_selector, conversation_state],
-            outputs=[response_text, audio_output, conversation_display, conversation_state]
+            outputs=[audio_output, conversation_display, conversation_state]
         )
 
         # Update TTS settings
         tts_voice.change(
             fn=update_tts_settings,
-            inputs=[tts_voice, tts_speed],
-            outputs=model_status
+            inputs=[tts_voice, tts_speed]
         )
 
         tts_speed.change(
             fn=update_tts_settings,
-            inputs=[tts_voice, tts_speed],
-            outputs=model_status
-        )
-
-        clear_btn.click(
-            fn=clear_conversation_handler,
-            outputs=[conversation_display, conversation_state, response_text, audio_output]
-        )
-
-        # Continuous conversation streaming
-        continuous_audio.stream(
-            fn=continuous_handler,
-            inputs=[continuous_audio, conversation_state],
-            outputs=[continuous_output, conversation_state]
+            inputs=[tts_voice, tts_speed]
         )
 
     return demo

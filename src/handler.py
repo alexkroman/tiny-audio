@@ -47,16 +47,11 @@ class EndpointHandler:
         # Load model (this loads the model, tokenizer, and feature extractor from checkpoint)
         self.model = ASRModel.from_pretrained(path, **model_kwargs)
 
-        # Use the tokenizer and feature extractor that were loaded with the model
-        # This ensures they match the fine-tuned checkpoint
-        feature_extractor = self.model.feature_extractor
-        tokenizer = self.model.tokenizer
-
-        # Instantiate custom pipeline
+        # Instantiate custom pipeline - it will get feature_extractor and tokenizer from model
         self.pipe = ASRPipeline(
             model=self.model,
-            feature_extractor=feature_extractor,
-            tokenizer=tokenizer,
+            feature_extractor=self.model.feature_extractor,
+            tokenizer=self.model.tokenizer,
             device=self.device,
         )
 

@@ -138,6 +138,21 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     def _forward(self, model_inputs, **generate_kwargs):
         is_last = True
         input_values = None
+        input_features = None
+
+        # Extract task from generate_kwargs if present
+        task = generate_kwargs.pop('task', None)
+
+        # Set sampling parameters based on task
+        if task == 'continue':
+            # For continue task, use sampling for more creative responses
+            generate_kwargs.setdefault('do_sample', True)
+            generate_kwargs.setdefault('temperature', 1.0)
+        elif task == 'transcribe':
+            # For transcribe task, use greedy decoding for accuracy
+            generate_kwargs.setdefault('do_sample', False)
+            # Remove temperature if present since we're not sampling
+            generate_kwargs.pop('temperature', None)
 
         if isinstance(model_inputs, torch.Tensor):
             input_values = model_inputs
@@ -149,7 +164,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                         is_last = first_item.pop("is_last")
                     if "stride" in first_item:
                         first_item.pop("stride")
+                    # Check for both input_values (Wav2Vec2) and input_features (Whisper)
                     input_values = first_item.get("input_values")
+                    input_features = first_item.get("input_features")
                 elif isinstance(first_item, torch.Tensor):
                     input_values = first_item
             else:
@@ -159,25 +176,44 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 is_last = model_inputs.pop("is_last")
             if "stride" in model_inputs:
                 model_inputs.pop("stride")
+            # Check for both input_values (Wav2Vec2) and input_features (Whisper)
             input_values = model_inputs.get("input_values")
+            input_features = model_inputs.get("input_features")
         else:
             input_values = model_inputs
 
-        if input_values is None:
-            raise ValueError(f"Could not extract input_values from {type(model_inputs)}")
+        # Use whichever is available (input_features for Whisper, input_values for others)
+        audio_inputs = input_features if input_features is not None else input_values
 
-        if isinstance(input_values, torch.Tensor):
-            input_values = input_values.to(self.model.device)
+        if audio_inputs is None:
+            raise ValueError(f"Could not extract input_values or input_features from {type(model_inputs)}")
+
+        if isinstance(audio_inputs, torch.Tensor):
+            audio_inputs = audio_inputs.to(self.model.device)
         else:
-            raise ValueError(f"input_values must be a tensor, got {type(input_values)}")
+            raise ValueError(f"audio inputs must be a tensor, got {type(audio_inputs)}")
 
         im_end_id = self.model.tokenizer.convert_tokens_to_ids("<|im_end|>")
         generate_kwargs.setdefault("eos_token_id", im_end_id)
         generate_kwargs.setdefault("max_new_tokens", self.model.config.max_new_tokens)
 
-        generated_ids = self.model.generate(
-            input_values, system_prompt=self.model.config.system_prompt, **generate_kwargs
-        )
+        # Pass the appropriate input type to generate
+        if input_features is not None:
+            # Whisper model - use input_features
+            generated_ids = self.model.generate(
+                input_features=audio_inputs,
+                system_prompt=self.model.config.system_prompt,
+                task=task,
+                **generate_kwargs
+            )
+        else:
+            # Wav2Vec2/HuBERT model - use input_values
+            generated_ids = self.model.generate(
+                input_values=audio_inputs,
+                system_prompt=self.model.config.system_prompt,
+                task=task,
+                **generate_kwargs
+            )
 
         return {"tokens": generated_ids, "is_last": is_last}
 

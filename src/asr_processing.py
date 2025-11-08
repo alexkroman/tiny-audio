@@ -44,10 +44,17 @@ class ASRProcessor(ProcessorMixin):
             self.tokenizer.save_pretrained(save_directory)
 
         # Save processor config
+        # Detect the actual feature extractor type
+        feature_extractor_type = self.feature_extractor.__class__.__name__
+
         processor_config = {
             "processor_class": self.__class__.__name__,
             "feature_extractor_class": self.feature_extractor_class,
-            "tokenizer_class": self.tokenizer_class
+            "tokenizer_class": self.tokenizer_class,
+            "feature_extractor_type": feature_extractor_type,  # Dynamic based on actual type
+            "auto_map": {
+                "AutoProcessor": "asr_processing.ASRProcessor"
+            }
         }
 
         with open(os.path.join(save_directory, "preprocessor_config.json"), "w") as f:

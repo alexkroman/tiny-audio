@@ -15,17 +15,27 @@ import sys
 import os
 from typing import Optional
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+import torch
 from livekit import agents, rtc
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli
-from livekit.agents.pipeline import VoicePipelineAgent
 from livekit.plugins import silero
+from transformers import AutoModel, pipeline
 
-# Add parent directory to path to import model
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from src.asr_modeling import ASRModel
-from src.asr_config import ASRConfig
+# Load environment variables from .env file
+from dotenv import load_dotenv
+
+# Load .env file from the same directory as this script
+env_path = Path(__file__).parent / '.env'
+if env_path.exists():
+    load_dotenv(env_path)
+    logging.info(f"Loaded environment from {env_path}")
+else:
+    logging.warning(f"No .env file found at {env_path}")
+    # Try loading from current directory as fallback
+    load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +58,8 @@ class TinyAudioVoiceAgent:
 
     def __init__(self, config: AgentConfig):
         self.config = config
-        self.model: Optional[ASRModel] = None
+        self.model = None
+        self.pipeline = None
         self.audio_buffer = []
         self.is_processing = False
 
@@ -57,19 +68,33 @@ class TinyAudioVoiceAgent:
         logger.info(f"Loading model from {self.config.model_path}")
 
         try:
-            # Load the model
-            if self.config.use_local_model:
-                # Load from local path
-                self.model = ASRModel.from_pretrained(self.config.model_path)
+            # Load model using AutoModel
+            # Choose dtype based on device - MPS doesn't fully support bfloat16
+            if torch.backends.mps.is_available():
+                # Use float32 on Apple Silicon (MPS)
+                dtype = torch.float32
+            elif torch.cuda.is_available():
+                # Use bfloat16 on CUDA for better performance
+                dtype = torch.bfloat16
             else:
-                # Load from HuggingFace Hub
-                self.model = ASRModel.from_pretrained(
-                    self.config.model_path,
-                    trust_remote_code=True
-                )
+                # Use float32 on CPU
+                dtype = torch.float32
+
+            self.model = AutoModel.from_pretrained(
+                self.config.model_path,
+                trust_remote_code=True,
+                torch_dtype=dtype
+            )
+
+            # Ensure all model components use the same dtype
+            self.model = self.model.to(dtype)
 
             # Put model in eval mode for inference
             self.model.eval()
+
+            # Initialize TTS (needs to be done after eval mode since it's skipped in training mode)
+            if hasattr(self.model, '_initialize_tts'):
+                self.model._initialize_tts()
 
             # Configure TTS if available
             if hasattr(self.model, 'configure_tts') and self.model.tts_enabled:
@@ -82,7 +107,14 @@ class TinyAudioVoiceAgent:
             else:
                 logger.warning("TTS not available in model - will return text only")
 
-            logger.info("Model loaded successfully")
+            # Create pipeline from the model
+            self.pipeline = pipeline(
+                "automatic-speech-recognition",
+                model=self.model,
+                trust_remote_code=True
+            )
+
+            logger.info("Model and pipeline loaded successfully")
 
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
@@ -98,7 +130,7 @@ class TinyAudioVoiceAgent:
         Returns:
             TTS audio as numpy array (24kHz) or None
         """
-        if self.model is None:
+        if self.model is None or self.pipeline is None:
             logger.error("Model not initialized")
             return None
 
@@ -111,31 +143,46 @@ class TinyAudioVoiceAgent:
         try:
             logger.debug(f"Processing audio shape: {audio_data.shape}")
 
-            # Use the new simplified method
-            result = self.model.process_audio_for_agent(
-                audio=audio_data,
-                sample_rate=self.config.sample_rate,
-                task="continue",  # Use continue task as requested
-                return_audio=True,
-                max_new_tokens=50,  # Short responses for low latency voice agents
-                num_beams=1,  # Greedy decoding for fastest response
+            # Use pipeline for ASR - it handles all preprocessing
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.pipeline(
+                    {"raw": audio_data, "sampling_rate": self.config.sample_rate},
+                    task="continue",
+                    max_new_tokens=50,  # Short responses for low latency
+                    num_beams=1,  # Greedy decoding for fastest response
+                    chunk_length_s=30
+                    # Don't set return_timestamps to avoid CTC errors
+                )
             )
 
-            # Get the generated text and audio
             text = result.get('text', '')
-            audio = result.get('audio')
-            processing_time = result.get('processing_time', 0)
 
             if text:
                 logger.info(f"Generated response: {text}")
-                logger.debug(f"Processing took {processing_time:.2f}s")
 
-            if audio is not None:
-                logger.debug(f"Generated TTS audio shape: {audio.shape}")
-                return audio
-            else:
-                logger.warning("No TTS audio generated")
-                return None
+            # Generate TTS using the pipeline
+            if text:
+                try:
+                    # Use the pipeline for TTS generation
+                    tts_result = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self.pipeline(
+                            text=text,
+                            return_audio=True,
+                            tts_voice=self.config.tts_voice,
+                            tts_speed=self.config.tts_speed
+                        )
+                    )
+                    tts_audio = tts_result.get('audio')
+                    if tts_audio is not None:
+                        logger.debug(f"Generated TTS audio shape: {tts_audio.shape}")
+                        return tts_audio
+                except Exception as tts_error:
+                    logger.warning(f"TTS generation failed: {tts_error}")
+
+            logger.warning("No TTS audio generated")
+            return None
 
         except Exception as e:
             logger.error(f"Error processing audio: {e}")
@@ -160,6 +207,7 @@ class LiveKitVoiceAgent:
         self.audio_track: Optional[rtc.LocalAudioTrack] = None
         self.vad = silero.VAD.load() if agent.config.vad_enabled else None
         self.audio_buffer = []
+        self.buffer_sample_rate = 48000  # LiveKit default
         self.min_audio_duration = 0.5  # Minimum seconds of audio before processing
 
     async def start(self):
@@ -177,8 +225,7 @@ class LiveKitVoiceAgent:
 
         # Publish the track
         await self.room.local_participant.publish_track(
-            self.audio_track,
-            rtc.TrackPublishOptions(name="agent-voice")
+            self.audio_track
         )
 
         logger.info("Agent started and audio track published")
@@ -219,24 +266,25 @@ class LiveKitVoiceAgent:
                 # Convert frame to numpy array
                 audio_data = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
 
-                # Resample if necessary (LiveKit usually provides 48kHz)
-                if frame.sample_rate != self.agent.config.sample_rate:
-                    audio_data = self.resample_audio(
-                        audio_data,
-                        frame.sample_rate,
-                        self.agent.config.sample_rate
-                    )
+                # Store the original sample rate - pipeline will handle resampling
+                self.buffer_sample_rate = frame.sample_rate
 
                 # Add to buffer
                 self.audio_buffer.extend(audio_data)
 
                 # Process if we have enough audio
-                buffer_duration = len(self.audio_buffer) / self.agent.config.sample_rate
+                buffer_duration = len(self.audio_buffer) / self.buffer_sample_rate
                 if buffer_duration >= self.min_audio_duration:
                     # Check VAD if enabled
                     if self.vad:
                         audio_array = np.array(self.audio_buffer)
-                        if not self.vad.is_speech(audio_array, self.agent.config.sample_rate):
+                        # VAD expects 16kHz, so we need to resample for VAD check
+                        if self.buffer_sample_rate != 16000:
+                            # Simple resampling for VAD
+                            target_length = int(len(audio_array) * 16000 / self.buffer_sample_rate)
+                            indices = np.linspace(0, len(audio_array) - 1, target_length)
+                            audio_array = np.interp(indices, np.arange(len(audio_array)), audio_array)
+                        if not self.vad.is_speech(audio_array, 16000):
                             # No speech detected, clear buffer and continue
                             self.audio_buffer = []
                             continue
@@ -253,14 +301,44 @@ class LiveKitVoiceAgent:
         audio_array = np.array(self.audio_buffer, dtype=np.float32)
         self.audio_buffer = []  # Clear buffer
 
-        logger.debug(f"Processing {len(audio_array) / self.agent.config.sample_rate:.2f}s of audio")
+        logger.debug(f"Processing {len(audio_array) / self.buffer_sample_rate:.2f}s of audio")
 
-        # Process with ASR model
-        tts_audio = await self.agent.process_audio(audio_array)
+        # Update the agent's pipeline to use the correct sample rate
+        # The pipeline will handle resampling internally
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self.agent.pipeline(
+                {"raw": audio_array, "sampling_rate": self.buffer_sample_rate},
+                task="continue",
+                max_new_tokens=50,
+                num_beams=1,
+                chunk_length_s=30
+                # Don't set return_timestamps to avoid CTC errors
+            )
+        )
 
-        if tts_audio is not None:
-            # Send TTS audio back to LiveKit
-            await self.send_audio(tts_audio)
+        text = result.get('text', '')
+
+        if text:
+            logger.info(f"Generated response: {text}")
+
+            # Generate TTS using the pipeline
+            try:
+                tts_result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self.agent.pipeline(
+                        text=text,
+                        return_audio=True,
+                        tts_voice=self.agent.config.tts_voice,
+                        tts_speed=self.agent.config.tts_speed
+                    )
+                )
+                tts_audio = tts_result.get('audio')
+                if tts_audio is not None:
+                    # Send TTS audio back to LiveKit
+                    await self.send_audio(tts_audio)
+            except Exception as tts_error:
+                logger.warning(f"TTS generation failed: {tts_error}")
 
     async def send_audio(self, audio_data: np.ndarray):
         """Send audio to LiveKit."""
@@ -294,20 +372,6 @@ class LiveKitVoiceAgent:
         except Exception as e:
             logger.error(f"Error sending audio: {e}")
 
-    @staticmethod
-    def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-        """Simple audio resampling."""
-        if orig_sr == target_sr:
-            return audio
-
-        # Simple linear interpolation resampling
-        duration = len(audio) / orig_sr
-        target_length = int(duration * target_sr)
-
-        indices = np.linspace(0, len(audio) - 1, target_length)
-        resampled = np.interp(indices, np.arange(len(audio)), audio)
-
-        return resampled
 
 
 async def entrypoint(ctx: JobContext):
@@ -324,14 +388,16 @@ async def entrypoint(ctx: JobContext):
     agent = TinyAudioVoiceAgent(config)
     await agent.initialize()
 
-    # Create LiveKit integration
+    # Connect to the room FIRST
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+
+    logger.info("Connected to room")
+
+    # Create LiveKit integration AFTER connecting
     lk_agent = LiveKitVoiceAgent(ctx, agent)
 
-    # Start the agent
+    # Start the agent (now it can publish tracks)
     await lk_agent.start()
-
-    # Connect to the room
-    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
     logger.info("Agent connected and ready")
 
@@ -347,6 +413,5 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
-            prewarm=False,  # Don't prewarm to save resources
         )
     )

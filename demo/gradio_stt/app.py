@@ -21,7 +21,7 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
     # Determine device
     device = 0 if torch.cuda.is_available() else -1
 
-    # Load ASR pipeline with trust_remote_code
+    # Load ASR pipeline directly from the model - it will load everything needed
     pipe = pipeline(
         "automatic-speech-recognition",
         model=model_path,
