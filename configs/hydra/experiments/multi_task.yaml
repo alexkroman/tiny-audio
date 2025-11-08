@@ -7,7 +7,6 @@ defaults:
   - override /model: large
   - override /data: multi_task_complete
   - override /training: production
-  - override /encoder_lora: default
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
@@ -42,7 +41,7 @@ peft:
 training:
   # Hub configuration
   push_to_hub: true
-  hub_model_id: "mazesmazes/tiny-audio-multi-task"
+  hub_model_id: "mazesmazes/tiny-audio"
   hub_strategy: "checkpoint"
   hub_private_repo: false
 
@@ -72,12 +71,6 @@ training:
   seed: 42
   ignore_data_skip: true
 
-# Data configuration (inherited from multi_task_complete)
-# Includes all 4 tasks with balanced sampling:
-# - Transcription (30%): LoquaciousSet
-# - Continuation (25%): SODA-Audio
-# - Description (25%): AudioSet Strong
-# - Emotion (20%): CAMEO
 data:
   mask_time_prob: 0.05
 

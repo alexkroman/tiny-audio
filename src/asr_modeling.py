@@ -320,31 +320,13 @@ class ASRModel(PreTrainedModel):
 
         from types import SimpleNamespace
 
-        if config.encoder_dim is None or config.llm_dim is None:
-            raise ValueError(
-                "encoder_dim and llm_dim must be specified in config. "
-                "These dimensions should match the checkpoint weights. "
-                "If loading an old model, please update the config file on HuggingFace Hub."
-            )
-
         projector_config = SimpleNamespace(
             encoder_projector_ds_rate=config.audio_downsample_rate,
             encoder_dim=config.encoder_dim,
             llm_dim=config.llm_dim,
             projector_hidden_dim=config.projector_hidden_dim,
         )
-        self.projector: AudioProjector = AudioProjector(projector_config)
-
-        # Match projector dtype and device to decoder
-        # When device_map="auto" is used, we need to explicitly move the projector
-        # to match the decoder's device, since it's a custom module not handled by device_map
-        decoder_param = next(self.decoder.parameters())
-        if decoder_param.device.type != "meta":
-            # Normal case: move to decoder's device
-            self.projector.to(dtype=decoder_param.dtype, device=decoder_param.device)
-        else:
-            # Meta device case: only set dtype, device will be set later
-            self.projector.to(dtype=decoder_param.dtype)
+        self.projector = AudioProjector(projector_config)
 
         self._no_split_modules = self.decoder._no_split_modules
 
@@ -680,18 +662,23 @@ class ASRModel(PreTrainedModel):
         input_values: torch.Tensor,
         audio_attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        # Ensure input is on encoder's device and has the right dtype
+        encoder_device = next(self.encoder.parameters()).device
+        encoder_dtype = next(self.encoder.parameters()).dtype
+        input_values = input_values.to(device=encoder_device, dtype=encoder_dtype)
+
         # Only pass explicit valid arguments to encoder
         # Never use **kwargs to prevent torch.compile from injecting decoder args like input_ids
         # Don't use no_grad if encoder has LoRA (needs gradients for training)
         if self.encoder_lora_config and self.encoder_lora_config.get("r", 0) > 0:
             audio_features = self.encoder(
-                input_values=input_values.to(self.encoder.dtype),
+                input_values=input_values,
                 attention_mask=audio_attention_mask,
             ).last_hidden_state
         else:
             with torch.no_grad():
                 audio_features = self.encoder(
-                    input_values=input_values.to(self.encoder.dtype),
+                    input_values=input_values,
                     attention_mask=audio_attention_mask,
                 ).last_hidden_state
 
@@ -715,9 +702,6 @@ class ASRModel(PreTrainedModel):
             # Remove any decoder-specific kwargs that shouldn't go to the encoder
             kwargs.pop("past_key_values", None)
 
-            # Important: Must explicitly set use_cache=False during training
-            # because we're constructing new embeddings (text + audio concatenation)
-            # which invalidates any cached key-values from previous passes
             use_cache = kwargs.pop("use_cache", None)
 
             audio_embeds = self._encode_audio(
@@ -936,34 +920,31 @@ class ASRModel(PreTrainedModel):
         if hasattr(self, "generation_config") and self.generation_config is not None:
             self.generation_config.save_pretrained(save_dir)
 
-        # Save trainable parameters as separate component files for clarity and reliability
-        # This prevents key-matching issues and makes it easy to update individual components
-
-        # Save encoder LoRA adapters
         encoder_state = self.encoder.state_dict()
         encoder_trainable = {name for name, param in self.encoder.named_parameters() if param.requires_grad}
         encoder_state = {k: v for k, v in encoder_state.items() if k in encoder_trainable}
         if encoder_state:
             save_file(encoder_state, save_dir / "encoder.safetensors")
 
-        # Save decoder LoRA adapters
         decoder_state = self.decoder.state_dict()
         decoder_trainable = {name for name, param in self.decoder.named_parameters() if param.requires_grad}
         decoder_state = {k: v for k, v in decoder_state.items() if k in decoder_trainable}
         if decoder_state:
             save_file(decoder_state, save_dir / "decoder.safetensors")
 
-        # Save projector weights (always trainable)
         projector_state = self.projector.state_dict()
         if projector_state:
             save_file(projector_state, save_dir / "projector.safetensors")
 
-        # Save decoder LoRA config
-        if self.peft_config and self.peft_config.get("peft_method") == "lora":
+        if (
+            self.peft_config
+            and self.peft_config.get("peft_method") == "lora"
+            and self.peft_config.get("r", 0) > 0
+        ):
             with (save_dir / "decoder_lora_config.json").open("w") as f:
                 json.dump(self.peft_config, f, indent=2)
 
-        # Save encoder LoRA config
+        # Save encoder LoRA config (only if LoRA is actually used, r > 0)
         if (
             hasattr(self, "encoder_lora_config")
             and self.encoder_lora_config is not None
@@ -1115,132 +1096,6 @@ class ASRModel(PreTrainedModel):
 
         return None
 
-    ) -> Dict[str, Any]:
-        """Generate text from audio and optionally convert to speech.
-
-        This method extends the base generate() to add TTS functionality.
-
-        Args:
-            input_values: Audio tensor for Wav2Vec2/HuBERT models
-            input_features: Audio features for Whisper models
-            system_prompt: System prompt for the model
-            user_prompt: User prompt template
-            task: Task type (transcribe, describe, continue, emotion)
-            generate_tts: Whether to generate TTS from the output text
-            return_text: Whether to return the decoded text
-            save_audio_path: Optional path to save the generated audio
-            **generate_kwargs: Additional generation arguments
-
-        Returns:
-            Dictionary containing:
-                - 'generated_ids': Token IDs from the model
-                - 'text': Decoded text (if return_text=True)
-                - 'audio': TTS audio array (if generate_tts=True and TTS enabled)
-                - 'audio_sample_rate': Sample rate of audio (if audio is generated)
-        """
-        # Generate text using the base model
-        generated_ids = self.generate(
-            input_values=input_values,
-            input_features=input_features,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            task=task,
-            **generate_kwargs
-        )
-
-        result = {'generated_ids': generated_ids}
-
-        # Decode text if requested
-        if return_text or (generate_tts and self.tts_enabled):
-            # Handle different return types from generate()
-            if isinstance(generated_ids, torch.Tensor):
-                ids_to_decode = generated_ids
-            else:
-                # Handle GenerateOutput types
-                ids_to_decode = generated_ids.sequences
-
-            # Decode the generated text
-            decoded_text = self.tokenizer.batch_decode(
-                ids_to_decode,
-                skip_special_tokens=True
-            )
-
-            # Get the first result if batch size is 1
-            text = decoded_text[0] if len(decoded_text) == 1 else decoded_text
-
-            if return_text:
-                result['text'] = text
-
-            # Generate TTS if requested and enabled
-            if generate_tts and self.tts_enabled:
-                tts_result = self._generate_tts(text if isinstance(text, str) else text[0])
-
-                if tts_result is not None:
-                    audio, sample_rate = tts_result
-                    result['audio'] = audio
-                    result['audio_sample_rate'] = sample_rate
-
-                    # Save audio if path provided
-                    if save_audio_path:
-                        try:
-                            import soundfile as sf
-                            sf.write(save_audio_path, audio, sample_rate)
-                            result['audio_saved_to'] = save_audio_path
-                        except ImportError:
-                            warnings.warn("soundfile not installed. Cannot save audio.")
-                        except Exception as e:
-                            warnings.warn(f"Failed to save audio: {e}")
-
-        return result
-
-    ) -> Optional[Tuple[np.ndarray, int]]:
-        """Convert any text to speech using the configured TTS model.
-
-        Args:
-            text: Text to convert to speech
-            voice: Optional voice override (uses configured voice if None)
-            speed: Optional speed override (uses configured speed if None)
-            save_path: Optional path to save the audio file
-
-        Returns:
-            Tuple of (audio_array, sample_rate) or None if TTS is disabled
-        """
-        if not self.tts_enabled or self.tts_pipeline is None:
-            warnings.warn("TTS is not enabled or not available")
-            return None
-
-        # Temporarily override voice/speed if provided
-        original_voice = self.tts_voice
-        original_speed = self.tts_speed
-
-        if voice is not None:
-            self.tts_voice = voice
-        if speed is not None:
-            self.tts_speed = max(0.5, min(2.0, speed))
-
-        try:
-            # Generate TTS
-            result = self._generate_tts(text)
-
-            # Save if requested
-            if result is not None and save_path is not None:
-                try:
-                    import soundfile as sf
-                    audio, sample_rate = result
-                    sf.write(save_path, audio, sample_rate)
-                    print(f"Audio saved to: {save_path}")
-                except ImportError:
-                    warnings.warn("soundfile not installed. Cannot save audio.")
-                except Exception as e:
-                    warnings.warn(f"Failed to save audio: {e}")
-
-            return result
-
-        finally:
-            # Restore original settings
-            self.tts_voice = original_voice
-            self.tts_speed = original_speed
-
     def process_audio_for_agent(
         self,
         audio: Optional[Union[np.ndarray, torch.Tensor, bytes]] = None,
@@ -1323,7 +1178,7 @@ class ASRModel(PreTrainedModel):
                 ).squeeze(1)
 
             # Move to model device
-            device = next(self.parameters()).device
+            device = next(self.decoder.parameters()).device
             audio_tensor = audio_tensor.to(device)
 
             # Generate text with ASR
