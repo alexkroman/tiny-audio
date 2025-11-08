@@ -29,20 +29,34 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
         device=device,
     )
 
-    def transcribe(audio):
-        """Transcribe audio file or recording."""
+    def process_audio(audio, task):
+        """Process audio file with selected task."""
         if audio is None:
             return ""
-        result = pipe(audio)
+
+        # Pass the task parameter to the pipeline
+        result = pipe(audio, task=task)
         return result["text"]
 
-    # Create Gradio interface
+    # Create Gradio interface with task selection
     demo = gr.Interface(
-        fn=transcribe,
-        inputs=gr.Audio(type="filepath"),
-        outputs=gr.Textbox(label="Transcription"),
-        title="Tiny Audio ASR",
-        description="Upload an audio file or record from microphone to transcribe.",
+        fn=process_audio,
+        inputs=[
+            gr.Audio(type="filepath", label="Audio Input"),
+            gr.Dropdown(
+                choices=["transcribe", "describe", "continue", "emotion"],
+                value="transcribe",
+                label="Task",
+                info="Select the task to perform on the audio"
+            )
+        ],
+        outputs=gr.Textbox(label="Output"),
+        title="Tiny Audio - Multi-Task Audio Processing",
+        description="Upload an audio file or record from microphone. Select a task to perform:\n"
+                   "• **transcribe**: Convert speech to text\n"
+                   "• **describe**: Describe the audio content\n"
+                   "• **continue**: Continue/complete the audio\n"
+                   "• **emotion**: Analyze emotional content",
         examples=[],
     )
 
