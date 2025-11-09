@@ -1,0 +1,14 @@
+# HuBERT Large model configuration
+encoder_model_name: facebook/hubert-xlarge-ls960-ft
+decoder_model_name: HuggingFaceTB/SmolLM3-3B
+
+# Projector configuration
+projector_hidden_dim: 8192
+audio_downsample_rate: 5
+
+# Model runtime settings
+model_dtype: float32
+attn_implementation: eager  # Use 'flash_attention_2' for GPU
+
+# System prompt
+system_prompt: "/no_think /system_override"

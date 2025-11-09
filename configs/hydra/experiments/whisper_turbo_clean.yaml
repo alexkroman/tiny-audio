@@ -1,0 +1,31 @@
+# @package _global_
+# Whisper Large V3 Turbo experiment
+
+defaults:
+  - /model: whisper_turbo
+  - /data: loquacious_clean
+  - /training: mac_override
+  - optional /encoder_lora: default
+  - optional /peft: default
+  - _self_
+
+# Experiment-specific overrides
+model:
+  pretrained_model_path: null  # Or "mazesmazes/tiny-audio" to load from Hub
+
+# Disable encoder LoRA for Whisper (optional)
+encoder_lora:
+  r: 0  # Set to 16 to enable
+
+# Decoder LoRA
+peft:
+  r: 8
+
+training:
+  output_dir: ./outputs/whisper_turbo_${now:%Y%m%d_%H%M%S}
+  run_name: whisper_turbo_loquacious
+
+  # Hub settings (if pushing)
+  push_to_hub: false
+  hub_model_id: username/whisper-turbo-asr
+  hub_private_repo: true

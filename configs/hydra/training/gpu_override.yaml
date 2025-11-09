@@ -1,0 +1,22 @@
+# GPU-specific training overrides
+defaults:
+  - base
+
+# GPU optimizations
+dataloader_num_workers: 4
+dataloader_prefetch_factor: 2
+dataloader_pin_memory: true
+
+# Mixed precision
+fp16: false
+bf16: true  # Prefer bf16 over fp16
+
+# Larger batch sizes for GPU
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 2
+eval_accumulation_steps: 2
+
+# Enable torch compile for speed
+torch_compile: true
+gradient_checkpointing: true

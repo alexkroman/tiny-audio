@@ -1,0 +1,10 @@
+# Default encoder LoRA configuration
+r: 16  # LoRA rank
+lora_alpha: 16  # Scaling factor (alpha/r = 1.0)
+lora_dropout: 0.05
+bias: none
+
+# Target modules (will be auto-detected if not specified)
+# For HuBERT: ["attention.q_proj", "attention.k_proj"]
+# For Whisper: ["q_proj", "k_proj"]
+target_modules: null  # Auto-detect based on model type

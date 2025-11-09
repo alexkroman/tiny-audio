@@ -1,0 +1,11 @@
+# Default decoder LoRA configuration
+peft_method: lora
+r: 8  # LoRA rank
+lora_alpha: 8  # Scaling factor
+lora_dropout: 0.05
+bias: none
+task_type: CAUSAL_LM
+inference_mode: false
+
+# Target attention layers
+target_modules: ["q_proj", "v_proj"]

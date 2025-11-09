@@ -1,11 +1,13 @@
+# Main Hydra configuration (simplified)
 defaults:
-  - model: large  # Default to small model
-  - data: loquacious_clean  # Default to tiny dataset
-  - training: mac  # Default to mac training settings
-  - optional encoder_lora: default  # Optional encoder LoRA config
+  - model: whisper_turbo  # Model architecture
+  - data: loquacious_clean  # Dataset
+  - training: mac_override  # Training settings
+  - optional encoder_lora: default  # Optional encoder LoRA
+  - optional peft: default  # Optional decoder LoRA/PEFT
   - _self_
 
-# Output directories - relative to where the command is run
+# Hydra configuration
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
@@ -14,12 +16,10 @@ hydra:
     subdir: ${hydra.job.num}
   job:
     chdir: true
-    
-resume_from_checkpoint: null
 
-# Early stopping configuration
+# Global overrides
 early_stopping:
-  patience: null  # Set to a number to enable early stopping
+  patience: null  # Set to enable
   threshold: 0.0
 
-
+verbose: false  # Set to true for debug output

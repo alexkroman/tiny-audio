@@ -16,6 +16,12 @@ from transformers import (
     Wav2Vec2FeatureExtractor,
     WhisperFeatureExtractor,
 )
+from transformers.generation.utils import (
+    GenerateBeamDecoderOnlyOutput,
+    GenerateBeamEncoderDecoderOutput,
+    GenerateDecoderOnlyOutput,
+    GenerateEncoderDecoderOutput,
+)
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.activations import ACT2FN
 
