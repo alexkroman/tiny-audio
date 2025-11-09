@@ -1,6 +1,11 @@
-# Complete multi-task dataset configuration with transcribe, emotion, and describe tasks
+# Instruction tuning dataset configuration
+# Based on multi_task_complete but with:
+# - More balanced task distribution (60% ASR vs 95%)
+# - Instruction templates enabled for all tasks
+# - Designed for second-stage instruction following training
+
 datasets:
-  # Transcription task - LoquaciousSet (95% - dominant task matching Kimi-Audio)
+  # Transcription task - LoquaciousSet (60% - reduced for more balanced multi-task)
   - path: speechbrain/LoquaciousSet
     name: large
     audio_column: wav
@@ -10,9 +15,9 @@ datasets:
       - train
     eval_splits:
       - dev
-    sampling_weight: 0.80
+    sampling_weight: 0.60
 
-  # Description task - AudioSet Strong (4% - audio understanding)
+  # Description task - AudioSet Strong (35% - increased for audio understanding)
   - path: CLAPv2/audioset_strong
     audio_column: audio
     text_column: text  # Use simplified text descriptions
@@ -21,9 +26,9 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.10
+    sampling_weight: 0.20
 
-  # Emotion recognition task - LAION's Got Talent (1% - voice emotion tags)
+  # Emotion recognition task - LAION's Got Talent (5% - voice emotion tags)
   - path: laion/laions_got_talent_with_voice_emotion_speed_tags_for_orpheus_tuning
     audio_column: audio
     text_column: emotion  # Emotion tags (comma-separated)
@@ -31,7 +36,7 @@ datasets:
     train_splits:
       - train  # Only train split available
     eval_splits: []  # No separate eval split
-    sampling_weight: 0.10
+    sampling_weight: 0.20
 
 # Audio processing
 sample_rate: 16000
@@ -47,3 +52,7 @@ dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
 max_eval_samples: 500  # Keep eval manageable
 use_streaming: true
+
+# INSTRUCTION TUNING - Enable instruction template variations
+use_instruction_templates: true
+instruction_seed: 44  # Different seed from instruction_following experiment (43)

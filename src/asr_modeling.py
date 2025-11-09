@@ -155,93 +155,68 @@ class ASRModel(PreTrainedModel):
             cache_kwargs["revision"] = revision
 
         try:
-            # Helper function to load LoRA config
-            def load_lora_config(config_filename):
-                # Try loading from main directory first
+            # Helper function to load file with fallback to last-checkpoint subfolder
+            def load_cached_file(filename, load_fn=None):
+                """Load a file with fallback to last-checkpoint subfolder.
+
+                Args:
+                    filename: Name of file to load
+                    load_fn: Function to apply to loaded path (default: load_file for safetensors)
+                """
+                from pathlib import Path as PathlibPath
+
+                if load_fn is None:
+                    load_fn = load_file
+
+                # Try main directory first
                 try:
-                    config_file = cached_file(
+                    file_path = cached_file(
                         pretrained_model_name_or_path,
-                        config_filename,
+                        filename,
                         _raise_exceptions_for_missing_entries=False,
                         **cache_kwargs,
                     )
-                    if config_file:
-                        from pathlib import Path as PathlibPath
-
-                        with PathlibPath(config_file).open() as f:
-                            return json.load(f)
+                    if file_path:
+                        return load_fn(file_path)
                 except Exception:
                     pass
 
-                # Fallback: try loading from last-checkpoint subfolder
+                # Fallback to last-checkpoint subfolder
                 try:
                     fallback_kwargs = cache_kwargs.copy()
                     fallback_kwargs["subfolder"] = "last-checkpoint"
-                    config_file = cached_file(
+                    file_path = cached_file(
                         pretrained_model_name_or_path,
-                        config_filename,
+                        filename,
                         _raise_exceptions_for_missing_entries=False,
                         **fallback_kwargs,
                     )
-                    if config_file:
-                        from pathlib import Path as PathlibPath
-
-                        print(f"Loading {config_filename} from last-checkpoint subfolder")
-                        with PathlibPath(config_file).open() as f:
-                            return json.load(f)
+                    if file_path:
+                        print(f"Loading {filename} from last-checkpoint subfolder")
+                        return load_fn(file_path)
                 except Exception:
                     pass
 
                 return None
 
-            # Load LoRA configs
-            encoder_lora_config = load_lora_config("encoder_lora_config.json")
-            decoder_lora_config = load_lora_config("decoder_lora_config.json")
+            # Load LoRA configs (JSON files)
+            def load_json(path):
+                from pathlib import Path as PathlibPath
+                with PathlibPath(path).open() as f:
+                    return json.load(f)
+
+            encoder_lora_config = load_cached_file("encoder_lora_config.json", load_json)
+            decoder_lora_config = load_cached_file("decoder_lora_config.json", load_json)
 
             # Create model with LoRA configs
             model = cls(
                 config, peft_config=decoder_lora_config, encoder_lora_config=encoder_lora_config
             )
 
-            # Load from separate component files
-            # Each component is saved in its own safetensors file for clarity
-
-            def load_component(filename):
-                """Load a component file, with fallback to last-checkpoint subfolder."""
-                # Try loading from main directory first
-                try:
-                    component_path = cached_file(
-                        pretrained_model_name_or_path,
-                        filename,
-                        _raise_exceptions_for_missing_entries=False,
-                        **cache_kwargs,
-                    )
-                    if component_path:
-                        return load_file(component_path)
-                except Exception:
-                    pass
-
-                # Fallback: try loading from last-checkpoint subfolder
-                try:
-                    fallback_kwargs = cache_kwargs.copy()
-                    fallback_kwargs["subfolder"] = "last-checkpoint"
-                    component_path = cached_file(
-                        pretrained_model_name_or_path,
-                        filename,
-                        _raise_exceptions_for_missing_entries=False,
-                        **fallback_kwargs,
-                    )
-                    if component_path:
-                        print(f"Loading {filename} from last-checkpoint subfolder")
-                        return load_file(component_path)
-                except Exception:
-                    pass
-
-                return None
-
-            encoder_state = load_component("encoder.safetensors")
-            decoder_state = load_component("decoder.safetensors")
-            projector_state = load_component("projector.safetensors")
+            # Load component weights (safetensors files)
+            encoder_state = load_cached_file("encoder.safetensors")
+            decoder_state = load_cached_file("decoder.safetensors")
+            projector_state = load_cached_file("projector.safetensors")
 
             # Load projector weights (required)
             if not projector_state:
@@ -366,17 +341,6 @@ class ASRModel(PreTrainedModel):
 
         self._no_split_modules = self.decoder._no_split_modules
 
-        # Initialize TTS components (only in inference mode)
-        self.tts_pipeline = None
-        self.tts_enabled = False
-        self.tts_voice = "af_heart"  # Default voice
-        self.tts_lang_code = "a"  # Default to American English
-        self.tts_speed = 1.0  # Normal speed
-
-        # Initialize TTS if not in training mode
-        if not self.training:
-            self._initialize_tts()
-
     @staticmethod
     def _apply_lora(model, lora_config: dict, task_type, model_name: str = "model", default_dropout: float = 0.0):
         """Apply LoRA adapters to a model (encoder or decoder).
@@ -453,11 +417,22 @@ class ASRModel(PreTrainedModel):
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
-        # Enable SpecAugment for Whisper models during training
+        # Enable SpecAugment for both Whisper and Wav2Vec2 models during training
+        # Both models apply augmentation automatically in train() mode via their forward pass
         is_whisper = "whisper" in config.audio_model_id.lower() or (hasattr(encoder.config, "model_type") and "whisper" in encoder.config.model_type.lower())
+        is_wav2vec2 = hasattr(encoder.config, "model_type") and "wav2vec2" in encoder.config.model_type.lower()
+
         if is_whisper:
-            # These are Whisper-specific SpecAugment parameters
-            encoder.config.apply_spec_augment = True  # Enable during training, will be disabled during eval
+            # Whisper-specific SpecAugment parameters (applied to input_features)
+            encoder.config.apply_spec_augment = True
+            encoder.config.mask_time_prob = config.mask_time_prob if hasattr(config, 'mask_time_prob') else 0.05
+            encoder.config.mask_time_length = config.mask_time_length if hasattr(config, 'mask_time_length') else 10
+            encoder.config.mask_feature_prob = config.mask_feature_prob if hasattr(config, 'mask_feature_prob') else 0.0
+            encoder.config.mask_feature_length = config.mask_feature_length if hasattr(config, 'mask_feature_length') else 10
+        elif is_wav2vec2:
+            # Wav2Vec2-specific SpecAugment parameters (applied to hidden states)
+            # Note: Wav2Vec2 has apply_spec_augment=True by default
+            encoder.config.apply_spec_augment = True
             encoder.config.mask_time_prob = config.mask_time_prob if hasattr(config, 'mask_time_prob') else 0.05
             encoder.config.mask_time_length = config.mask_time_length if hasattr(config, 'mask_time_length') else 10
             encoder.config.mask_feature_prob = config.mask_feature_prob if hasattr(config, 'mask_feature_prob') else 0.0
@@ -1083,143 +1058,6 @@ class ASRModel(PreTrainedModel):
         src_dir = PathlibPath(__file__).parent
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
-
-    def _initialize_tts(self):
-        """Initialize the Kokoro TTS pipeline if available."""
-        try:
-            # Try to import kokoro
-            from kokoro import KPipeline, KModel
-
-            # Use HuggingFace's automatic device placement
-            # This follows the same pattern as transformers models
-            if torch.cuda.is_available():
-                device = torch.device("cuda")
-                dtype = torch.float16 if torch.cuda.is_bf16_supported() else torch.float32
-            elif torch.backends.mps.is_available():
-                # Apple Silicon GPU
-                device = torch.device("mps")
-                dtype = torch.float32
-            else:
-                device = torch.device("cpu")
-                dtype = torch.float32
-
-            # If the decoder has a specific device, prefer that
-            # This ensures TTS and ASR are on the same device
-            decoder_param = next(self.decoder.parameters())
-            if decoder_param.device.type != "meta":
-                device = decoder_param.device
-                dtype = decoder_param.dtype
-
-            # Initialize the TTS model with automatic device placement
-            try:
-                # Load model and move to appropriate device
-                self.tts_model = KModel(repo_id='hexgrad/Kokoro-82M').eval().to(device=device, dtype=dtype)
-
-                # Create pipeline with the GPU/device-aware model
-                self.tts_pipeline = KPipeline(
-                    lang_code=self.tts_lang_code,
-                    model=self.tts_model
-                )
-
-                self.tts_device = device
-                print(f"TTS initialized on {device} with dtype {dtype}")
-
-            except Exception as e:
-                # Fallback to default pipeline if custom loading fails
-                warnings.warn(f"Failed to load TTS on {device}, falling back to CPU: {e}")
-                self.tts_pipeline = KPipeline(lang_code=self.tts_lang_code)
-                self.tts_device = torch.device("cpu")
-
-            self.tts_enabled = True
-            print(f"TTS initialized with Kokoro model (voice: {self.tts_voice}, lang: {self.tts_lang_code})")
-
-        except ImportError:
-            warnings.warn(
-                "Kokoro TTS not available. Install with: pip install kokoro>=0.9.4 soundfile\n"
-                "Also ensure espeak-ng is installed on your system."
-            )
-            self.tts_enabled = False
-            self.tts_device = torch.device("cpu")
-        except Exception as e:
-            warnings.warn(f"Failed to initialize TTS: {e}")
-            self.tts_enabled = False
-            self.tts_device = torch.device("cpu")
-
-    def configure_tts(
-        self,
-        enabled: bool = True,
-        voice: str = "af_heart",
-        lang_code: str = "a",
-        speed: float = 1.0
-    ):
-        """Configure TTS settings.
-
-        Args:
-            enabled: Whether to enable TTS generation
-            voice: Voice to use for TTS (e.g., 'af_heart', 'af_bella', 'am_michael')
-            lang_code: Language code ('a' for American, 'b' for British, etc.)
-            speed: Speech speed multiplier (0.5 to 2.0)
-        """
-        self.tts_enabled = enabled and (self.tts_pipeline is not None)
-        self.tts_voice = voice
-        self.tts_lang_code = lang_code
-        self.tts_speed = max(0.5, min(2.0, speed))  # Clamp to valid range
-
-        # Reinitialize pipeline if language changed
-        if enabled and self.tts_pipeline is not None:
-            try:
-                from kokoro import KPipeline
-                old_lang = getattr(self.tts_pipeline, 'lang_code', None)
-                if old_lang != lang_code:
-                    # Recreate pipeline with new language, keeping the same device
-                    if hasattr(self, 'tts_model') and self.tts_model is not None:
-                        self.tts_pipeline = KPipeline(
-                            lang_code=lang_code,
-                            model=self.tts_model
-                        )
-                    else:
-                        self.tts_pipeline = KPipeline(lang_code=lang_code)
-                    print(f"TTS language changed to: {lang_code}")
-            except Exception as e:
-                warnings.warn(f"Failed to update TTS language: {e}")
-
-    def _generate_tts(self, text: str) -> Optional[Tuple[np.ndarray, int]]:
-        """Generate TTS audio from text.
-
-        Args:
-            text: Text to convert to speech
-
-        Returns:
-            Tuple of (audio_array, sample_rate) or None if TTS is disabled
-        """
-        if not self.tts_enabled or self.tts_pipeline is None:
-            return None
-
-        try:
-            # Generate audio using Kokoro
-            generator = self.tts_pipeline(
-                text,
-                voice=self.tts_voice,
-                speed=self.tts_speed
-            )
-
-            # Collect all audio segments
-            audio_segments = []
-            for _, _, audio in generator:
-                audio_segments.append(audio)
-
-            # Concatenate all segments
-            if audio_segments:
-                full_audio = np.concatenate(audio_segments)
-                return full_audio, 24000  # Kokoro outputs at 24kHz
-
-        except Exception as e:
-            warnings.warn(f"TTS generation failed: {e}")
-
-        return None
-
-
-
 
 
 AutoConfig.register("asr_model", ASRConfig)

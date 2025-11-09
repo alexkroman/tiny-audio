@@ -20,7 +20,6 @@ from transformers import (
     TrainingArguments,
     WhisperTokenizer,
 )
-from transformers.models.wav2vec2.modeling_wav2vec2 import _compute_mask_indices
 
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
@@ -30,26 +29,6 @@ try:
     nltk.data.find("tokenizers/punkt_tab")
 except LookupError:
     nltk.download("punkt_tab", quiet=True)
-
-
-class CollatorSwapCallback(TrainerCallback):
-    """Callback to swap data collators between training and evaluation."""
-
-    def __init__(self, train_collator, eval_collator):
-        self.train_collator = train_collator
-        self.eval_collator = eval_collator
-
-    def on_train_begin(self, args, state, control, model, **kwargs):
-        # Store reference to trainer to swap collators
-        pass
-
-    def on_evaluate_begin(self, args, state, control, model, **kwargs):
-        # Temporarily disable augmentation for evaluation
-        self.train_collator.apply_augmentation = False
-
-    def on_evaluate_end(self, args, state, control, model, **kwargs):
-        # Re-enable augmentation after evaluation
-        self.train_collator.apply_augmentation = True
 
 
 class DatasetLoader:
@@ -156,11 +135,6 @@ class DataCollator(DataCollatorForSeq2Seq):
         feature_extractor: Any,
         sample_rate: int,
         system_prompt: str = None,
-        mask_time_prob: float = 0.065,
-        mask_time_length: int = 10,
-        mask_feature_prob: float = 0.0,
-        mask_feature_length: int = 10,
-        apply_augmentation: bool = True,
         use_instruction_templates: bool = False,
         instruction_seed: int = None,
     ):
@@ -179,15 +153,13 @@ class DataCollator(DataCollatorForSeq2Seq):
         # Check if this is a Whisper feature extractor
         self.is_whisper = feature_extractor.__class__.__name__ == 'WhisperFeatureExtractor'
 
-        # SpecAugment parameters for data augmentation
-        self.mask_time_prob = mask_time_prob
-        self.mask_time_length = mask_time_length
-        self.mask_feature_prob = mask_feature_prob
-        self.mask_feature_length = mask_feature_length
-        self.apply_augmentation = apply_augmentation
-
-        # Initialize WhisperTokenizer for text normalization (matches eval script)
-        self.whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+        # Use tokenizer's normalize method if available, otherwise use WhisperTokenizer for normalization
+        # The Whisper normalizer is a standard text preprocessing utility
+        if hasattr(tokenizer, 'normalize'):
+            self.text_normalizer = tokenizer
+        else:
+            # Fallback to whisper-tiny tokenizer for its normalize() method only
+            self.text_normalizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
 
     def _preprocess_text(self, text: str) -> str:
         """Preprocess text before Whisper normalization (matches eval script)."""
@@ -199,7 +171,7 @@ class DataCollator(DataCollatorForSeq2Seq):
 
     def _normalize_text(self, text: str) -> str:
         """Apply Whisper normalization (matches eval script)."""
-        return self.whisper_tokenizer.normalize(self._preprocess_text(text))
+        return self.text_normalizer.normalize(self._preprocess_text(text))
 
     def _extract_audio(self, audio_decoder) -> Any:
         # Note: Audio() does peak normalization → [-1, 1]
@@ -209,99 +181,22 @@ class DataCollator(DataCollatorForSeq2Seq):
         audio_array = audio_samples.data
         return audio_array.squeeze().numpy()
 
-    def _apply_spec_augment(self, input_values: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
-        """
-        Apply SpecAugment using the exact Transformers implementation.
-        This masks time steps (and optionally features) during training.
-
-        Args:
-            input_values: Input features [batch_size, seq_len]
-            attention_mask: Attention mask [batch_size, seq_len]
-
-        Returns:
-            Masked input_values
-        """
-        # Skip augmentation if disabled or masking is set to 0
-        if not self.apply_augmentation or (self.mask_time_prob == 0 and self.mask_feature_prob == 0):
-            return input_values
-
-        batch_size, sequence_length = input_values.shape
-
-        # Apply time masking
-        if self.mask_time_prob > 0:
-            mask_time_indices = _compute_mask_indices(
-                (batch_size, sequence_length),
-                mask_prob=self.mask_time_prob,
-                mask_length=self.mask_time_length,
-                attention_mask=attention_mask,
-                min_masks=2,  # wav2vec2 default
-            )
-            mask_time_indices = torch.tensor(mask_time_indices, device=input_values.device, dtype=torch.bool)
-            input_values[mask_time_indices] = 0.0
-
-        return input_values
-
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_arrays = [self._extract_audio(f["audio"]) for f in features]
 
+        # Extract audio features with attention mask
+        # SpecAugment is applied automatically by the encoder model during training
+        # For Whisper: padding="max_length" pads to 3000 frames (30 seconds)
+        # For Wav2Vec2: padding=True pads to longest in batch
+        padding_strategy = "max_length" if self.is_whisper else True
+
         audio_features = self.feature_extractor(
-            audio_arrays, sampling_rate=self.sample_rate, padding=True, return_tensors="pt"
+            audio_arrays,
+            sampling_rate=self.sample_rate,
+            padding=padding_strategy,
+            return_tensors="pt",
+            return_attention_mask=True  # Required for both Whisper and Wav2Vec2
         )
-
-        # Handle different feature key names and augmentation
-        if self.is_whisper:
-            # Whisper uses 'input_features' and requires padding to 3000 frames
-            if "input_features" in audio_features:
-                input_features = audio_features["input_features"]
-                batch_size, feature_dim, seq_len = input_features.shape
-
-                # Whisper expects exactly 3000 frames
-                expected_length = 3000
-
-                if seq_len < expected_length:
-                    # Pad with zeros to reach 3000 frames
-                    padding_length = expected_length - seq_len
-                    padding = torch.zeros(batch_size, feature_dim, padding_length,
-                                        dtype=input_features.dtype,
-                                        device=input_features.device)
-                    audio_features["input_features"] = torch.cat([input_features, padding], dim=-1)
-
-                    # Create attention mask to indicate valid vs padded frames
-                    # 1 for valid frames, 0 for padded frames
-                    attention_mask = torch.ones(batch_size, expected_length,
-                                               dtype=torch.long,
-                                               device=input_features.device)
-                    attention_mask[:, seq_len:] = 0
-                    audio_features["attention_mask"] = attention_mask
-                elif seq_len > expected_length:
-                    # Truncate if longer than 3000 frames
-                    audio_features["input_features"] = input_features[:, :, :expected_length]
-                    audio_features["attention_mask"] = torch.ones(batch_size, expected_length,
-                                                                  dtype=torch.long,
-                                                                  device=input_features.device)
-                else:
-                    # Exactly 3000 frames, create full attention mask
-                    audio_features["attention_mask"] = torch.ones(batch_size, expected_length,
-                                                                  dtype=torch.long,
-                                                                  device=input_features.device)
-        else:
-            # Wav2Vec2/HuBERT use 'input_values' - apply our SpecAugment implementation
-            if "input_values" in audio_features:
-                input_values = audio_features["input_values"]
-                batch_size, seq_len = input_values.shape
-
-                # For Wav2Vec2/HuBERT, ensure proper padding and attention mask
-                # The feature extractor should have already done padding, but let's ensure we have attention mask
-                if "attention_mask" not in audio_features:
-                    # Create attention mask based on non-zero values (assuming padding is zeros)
-                    audio_features["attention_mask"] = (input_values != 0.0).long()
-
-                # Apply SpecAugment if enabled
-                if self.apply_augmentation:
-                    audio_features["input_values"] = self._apply_spec_augment(
-                        input_values,
-                        audio_features.get("attention_mask")
-                    )
 
         text_features = []
         for f in features:
@@ -373,9 +268,16 @@ class DataCollator(DataCollatorForSeq2Seq):
             if content_start == -1:
                 im_start_id = self.tokenizer.convert_tokens_to_ids("<|im_start|>")
                 assistant_id = self.tokenizer.convert_tokens_to_ids("assistant")
-                for i in range(len(tokens) - 1):
+                for i in range(len(tokens) - 2):  # -2 to safely check i+1 and i+2
                     if tokens[i] == im_start_id and tokens[i + 1] == assistant_id:
-                        content_start = i + 3  # Skip <|im_start|>, assistant, \n
+                        # Start after <|im_start|> and assistant
+                        # Now, find the actual content start by skipping newlines
+                        content_start = i + 2
+                        while (
+                            content_start < len(tokens)
+                            and self.tokenizer.decode([tokens[content_start]]).strip() == ""
+                        ):
+                            content_start += 1
                         break
 
             # Find the closing <|im_end|> for the assistant message
@@ -388,7 +290,8 @@ class DataCollator(DataCollatorForSeq2Seq):
 
             # Unmask only the actual transcription text (not thinking tags)
             if content_start > 0 and content_end > 0:
-                for i in range(content_start, content_end + 1):  # +1 to include <|im_end|>
+                # Do NOT include the final <|im_end|> token in the loss
+                for i in range(content_start, content_end):
                     labels[i] = tokens[i]
 
             text_features.append(
@@ -511,41 +414,19 @@ def main(cfg: DictConfig) -> None:
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
-    # Create separate collators for training (with augmentation) and eval (without)
-    train_collator = DataCollator(
+    # Create data collator for both training and evaluation
+    # SpecAugment is now handled automatically by the model (enabled in train(), disabled in eval())
+    data_collator = DataCollator(
         tokenizer=model.tokenizer,
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         system_prompt=cfg.model.system_prompt,
-        mask_time_prob=cfg.data.get("mask_time_prob", 0.05),
-        mask_time_length=cfg.data.get("mask_time_length", 10),
-        mask_feature_prob=cfg.data.get("mask_feature_prob", 0.0),
-        mask_feature_length=cfg.data.get("mask_feature_length", 10),
-        apply_augmentation=True,  # Enable augmentation for training
         use_instruction_templates=cfg.data.get("use_instruction_templates", False),
         instruction_seed=cfg.data.get("instruction_seed", None),
     )
 
-    eval_collator = DataCollator(
-        tokenizer=model.tokenizer,
-        feature_extractor=model.feature_extractor,
-        sample_rate=cfg.data.sample_rate,
-        system_prompt=cfg.model.system_prompt,
-        mask_time_prob=cfg.data.get("mask_time_prob", 0.00),
-        mask_time_length=cfg.data.get("mask_time_length", 0),
-        mask_feature_prob=cfg.data.get("mask_feature_prob", 0.0),
-        mask_feature_length=cfg.data.get("mask_feature_length", 0),
-        apply_augmentation=False,  # Disable augmentation for evaluation
-        use_instruction_templates=cfg.data.get("use_instruction_templates", False),
-        instruction_seed=cfg.data.get("instruction_seed", None),
-    )
-
-    callbacks = [
-        CollatorSwapCallback(train_collator, eval_collator)
-    ]
-
-    # PEFT's trainer integration automatically handles LoRA checkpoint saving
-
+    # Setup callbacks
+    callbacks = []
     if cfg.early_stopping.patience:
         callbacks.append(
             EarlyStoppingCallback(
@@ -570,7 +451,7 @@ def main(cfg: DictConfig) -> None:
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         processing_class=processor,
-        data_collator=train_collator,  # Callback will toggle augmentation for eval
+        data_collator=data_collator,
         callbacks=callbacks,
     )
 
