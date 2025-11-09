@@ -16,12 +16,6 @@ from transformers import (
     Wav2Vec2FeatureExtractor,
     WhisperFeatureExtractor,
 )
-from transformers.generation.utils import (
-    GenerateBeamDecoderOnlyOutput,
-    GenerateBeamEncoderDecoderOutput,
-    GenerateDecoderOnlyOutput,
-    GenerateEncoderDecoderOutput,
-)
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.activations import ACT2FN
 
@@ -394,18 +388,17 @@ class ASRModel(PreTrainedModel):
         Returns:
             Configured encoder model (potentially with LoRA)
         """
-        import types
-
         target_dtype = getattr(torch, config.model_dtype)
 
-        # When loading from pretrained, avoid device_map="auto" to prevent meta tensor issues
+        # Configure model loading kwargs
         encoder_kwargs = {
             "attn_implementation": config.attn_implementation,
-            "dtype": target_dtype,
+            "torch_dtype": target_dtype,  # Use torch_dtype instead of dtype
+            "low_cpu_mem_usage": True,
         }
+        # Avoid device_map="auto" when loading from pretrained to prevent meta tensor issues
         if not cls._is_loading_from_pretrained:
             encoder_kwargs["device_map"] = "auto"
-            encoder_kwargs["low_cpu_mem_usage"] = True
 
         # Check if this is a Whisper model and load only the encoder part
         if "whisper" in config.audio_model_id.lower():
@@ -422,21 +415,13 @@ class ASRModel(PreTrainedModel):
         is_whisper = "whisper" in config.audio_model_id.lower() or (hasattr(encoder.config, "model_type") and "whisper" in encoder.config.model_type.lower())
         is_wav2vec2 = hasattr(encoder.config, "model_type") and "wav2vec2" in encoder.config.model_type.lower()
 
-        if is_whisper:
-            # Whisper-specific SpecAugment parameters (applied to input_features)
+        # Configure SpecAugment for both Whisper and Wav2Vec2
+        if is_whisper or is_wav2vec2:
             encoder.config.apply_spec_augment = True
-            encoder.config.mask_time_prob = config.mask_time_prob if hasattr(config, 'mask_time_prob') else 0.05
-            encoder.config.mask_time_length = config.mask_time_length if hasattr(config, 'mask_time_length') else 10
-            encoder.config.mask_feature_prob = config.mask_feature_prob if hasattr(config, 'mask_feature_prob') else 0.0
-            encoder.config.mask_feature_length = config.mask_feature_length if hasattr(config, 'mask_feature_length') else 10
-        elif is_wav2vec2:
-            # Wav2Vec2-specific SpecAugment parameters (applied to hidden states)
-            # Note: Wav2Vec2 has apply_spec_augment=True by default
-            encoder.config.apply_spec_augment = True
-            encoder.config.mask_time_prob = config.mask_time_prob if hasattr(config, 'mask_time_prob') else 0.05
-            encoder.config.mask_time_length = config.mask_time_length if hasattr(config, 'mask_time_length') else 10
-            encoder.config.mask_feature_prob = config.mask_feature_prob if hasattr(config, 'mask_feature_prob') else 0.0
-            encoder.config.mask_feature_length = config.mask_feature_length if hasattr(config, 'mask_feature_length') else 10
+            encoder.config.mask_time_prob = getattr(config, 'mask_time_prob', 0.05)
+            encoder.config.mask_time_length = getattr(config, 'mask_time_length', 10)
+            encoder.config.mask_feature_prob = getattr(config, 'mask_feature_prob', 0.0)
+            encoder.config.mask_feature_length = getattr(config, 'mask_feature_length', 10)
 
         encoder.requires_grad_(False)
 
@@ -472,6 +457,7 @@ class ASRModel(PreTrainedModel):
                     return_dict=return_dict,
                 )
 
+        import types
         encoder.forward = types.MethodType(safe_encoder_forward, encoder)
 
         # Apply LoRA to encoder if configured (after wrapping base forward)
@@ -1013,15 +999,21 @@ class ASRModel(PreTrainedModel):
         if hasattr(self, "generation_config") and self.generation_config is not None:
             self.generation_config.save_pretrained(save_dir)
 
-        encoder_state = self.encoder.state_dict()
-        encoder_trainable = {name for name, param in self.encoder.named_parameters() if param.requires_grad}
-        encoder_state = {k: v for k, v in encoder_state.items() if k in encoder_trainable}
+        # Save only trainable parameters for encoder
+        encoder_state = {
+            name: param.data
+            for name, param in self.encoder.named_parameters()
+            if param.requires_grad
+        }
         if encoder_state:
             save_file(encoder_state, save_dir / "encoder.safetensors")
 
-        decoder_state = self.decoder.state_dict()
-        decoder_trainable = {name for name, param in self.decoder.named_parameters() if param.requires_grad}
-        decoder_state = {k: v for k, v in decoder_state.items() if k in decoder_trainable}
+        # Save only trainable parameters for decoder
+        decoder_state = {
+            name: param.data
+            for name, param in self.decoder.named_parameters()
+            if param.requires_grad
+        }
         if decoder_state:
             save_file(decoder_state, save_dir / "decoder.safetensors")
 

@@ -5,7 +5,6 @@ import re
 from typing import Any, Dict, List
 
 import hydra
-import nltk
 import numpy as np
 import torch
 import truecase
@@ -24,11 +23,6 @@ from transformers import (
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
 
-# Download required NLTK data for truecase
-try:
-    nltk.data.find("tokenizers/punkt_tab")
-except LookupError:
-    nltk.download("punkt_tab", quiet=True)
 
 
 class DatasetLoader:
@@ -118,8 +112,6 @@ class DatasetLoader:
 
         val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
 
-        # train_ds = train_ds.shuffle(seed=42)
-
         if self.config.max_train_samples:
             train_ds = train_ds.take(self.config.max_train_samples)
         if self.config.max_eval_samples:
@@ -205,7 +197,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             # Apply Whisper normalization (matches eval script preprocessing)
             text = self._normalize_text(text)
 
-            # Apply truecasing in main process (not in DataLoader workers)
+            # Apply truecasing to restore proper capitalization
             text = text.replace("<COMMA>", ",").replace("<PERIOD>", ".")
             text = truecase.get_true_case(text)
 
@@ -317,15 +309,20 @@ class DataCollator(DataCollatorForSeq2Seq):
 
 @hydra.main(version_base=None, config_path="../configs/hydra", config_name="config")
 def main(cfg: DictConfig) -> None:
+    # Use HuggingFace's logging utilities
+    from transformers import logging as transformers_logging
+    transformers_logging.set_verbosity_error()  # Reduces transformer trainer logs
+
+    # Suppress HTTP and dataset loading logs
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("datasets.utils.file_utils").setLevel(logging.WARNING)
-    logging.getLogger("datasets").setLevel(logging.INFO)
-    logging.getLogger("transformers.trainer").setLevel(logging.ERROR)
+    logging.getLogger("datasets").setLevel(logging.WARNING)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    print(OmegaConf.to_yaml(cfg))
+    # Log configuration if needed
+    if cfg.get("verbose", False):
+        print(OmegaConf.to_yaml(cfg))
 
     # Initialize wandb
     if cfg.training.get("report_to") == "wandb":
@@ -375,42 +372,31 @@ def main(cfg: DictConfig) -> None:
         )
         print("✓ Loaded pretrained model (projector + LoRA weights if present)")
 
-        # If no LoRA weights were in checkpoint but we want to add them, apply fresh LoRA
-        # Check if encoder already has LoRA
-        has_encoder_lora = any(
-            "lora" in name.lower() for name, _ in model.encoder.named_parameters()
-        )
-        if encoder_lora_config and encoder_lora_config.get("r", 0) > 0 and not has_encoder_lora:
-            from peft import TaskType
+        # Apply fresh LoRA if needed (when loading base model without LoRA)
+        if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
+            if not any("lora" in n.lower() for n, _ in model.encoder.named_parameters()):
+                from peft import TaskType
+                print("⚠️  Applying fresh encoder LoRA adapters...")
+                model.encoder = model._apply_lora(
+                    model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
+                )
+                model.encoder_lora_config = encoder_lora_config
 
-            print("⚠️  No encoder LoRA in checkpoint - applying fresh encoder LoRA adapters...")
-            model.encoder = model._apply_lora(
-                model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
-            )
-            model.encoder_lora_config = encoder_lora_config
-
-        # Check if decoder already has LoRA
-        has_decoder_lora = any(
-            "lora" in name.lower() for name, _ in model.decoder.named_parameters()
-        )
-        if peft_config and peft_config.get("peft_method") == "lora" and not has_decoder_lora:
-            from peft import TaskType
-
-            print("⚠️  No decoder LoRA in checkpoint - applying fresh decoder LoRA adapters...")
-            model.decoder = model._apply_lora(
-                model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder"
-            )
-            model.peft_config = peft_config
+        if peft_config and peft_config.get("peft_method") == "lora":
+            if not any("lora" in n.lower() for n, _ in model.decoder.named_parameters()):
+                from peft import TaskType
+                print("⚠️  Applying fresh decoder LoRA adapters...")
+                model.decoder = model._apply_lora(
+                    model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder"
+                )
+                model.peft_config = peft_config
     else:
         model = ASRModel(
             asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config
         )
 
     # Disable cache during training (required for gradient checkpointing)
-    if hasattr(model.config, 'use_cache'):
-        model.config.use_cache = False
-    if hasattr(model.generation_config, 'use_cache'):
-        model.generation_config.use_cache = False
+    model.config.use_cache = False
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
@@ -437,13 +423,11 @@ def main(cfg: DictConfig) -> None:
 
     processor = model.get_processor()
 
+    # Convert config to dict and remove non-TrainingArguments fields
     training_args = OmegaConf.to_container(cfg.training, resolve=True)
-    assert isinstance(training_args, dict), "training_args must be a dict"
-    training_args.pop("model_dtype", None)
-    training_args.pop("attn_implementation", None)
-
-    # Disable FLOPs computation to avoid warnings with custom model architecture
-    training_args["include_num_input_tokens_seen"] = False
+    # Remove custom fields that aren't TrainingArguments parameters
+    for key in ["model_dtype", "attn_implementation"]:
+        training_args.pop(key, None)
 
     trainer = Trainer(
         model=model,
