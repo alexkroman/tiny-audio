@@ -280,10 +280,10 @@ class DataCollator(DataCollatorForSeq2Seq):
                         content_end = i
                         break
 
-            # Unmask only the actual transcription text (not thinking tags)
+            # Unmask the actual transcription text AND the EOS token
             if content_start > 0 and content_end > 0:
-                # Do NOT include the final <|im_end|> token in the loss
-                for i in range(content_start, content_end):
+                # Include the <|im_end|> token in the loss so model learns to stop
+                for i in range(content_start, content_end + 1):  # +1 to include EOS
                     labels[i] = tokens[i]
 
             text_features.append(
