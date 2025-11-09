@@ -103,7 +103,9 @@ class AudioProjector(nn.Module):
 class ASRModel(PreTrainedModel):
     config_class = ASRConfig
     base_model_prefix = "model"
-    main_input_name = "input_values"
+    # Note: main_input_name will be set dynamically in __init__ based on encoder type
+    # Whisper uses "input_features", others use "input_values"
+    main_input_name = "input_values"  # Default, will be overridden
     _supports_flash_attn_2 = True
     supports_gradient_checkpointing = True
     _keys_to_ignore_on_save = ["encoder", "decoder.base_model"]
@@ -125,6 +127,20 @@ class ASRModel(PreTrainedModel):
             # If config is provided, still need to load subfolder/revision info
             # but use the provided config's values
             pass
+
+        # IMPORTANT: Always load feature extractor from the audio model, not from the saved checkpoint
+        # This ensures we get the correct mel bin configuration (e.g., 128 for Whisper V3 Turbo)
+        is_whisper = "whisper" in config.audio_model_id.lower()
+        if is_whisper:
+            num_mel_bins = getattr(config.audio_config, "num_mel_bins", 80)
+            kwargs["feature_extractor"] = WhisperFeatureExtractor.from_pretrained(
+                config.audio_model_id,
+                feature_size=num_mel_bins
+            )
+        else:
+            kwargs["feature_extractor"] = Wav2Vec2FeatureExtractor.from_pretrained(
+                config.audio_model_id
+            )
 
         cls._is_loading_from_pretrained = True
         cls._pretrained_model_path = pretrained_model_name_or_path
@@ -278,6 +294,7 @@ class ASRModel(PreTrainedModel):
 
         peft_config = kwargs.pop("peft_config", None)
         encoder_lora_config = kwargs.pop("encoder_lora_config", None)
+        feature_extractor = kwargs.pop("feature_extractor", None)
 
         self.system_prompt = config.system_prompt
         self.peft_config = peft_config
@@ -285,12 +302,31 @@ class ASRModel(PreTrainedModel):
 
         self.encoder = self._create_encoder(config, encoder_lora_config)
 
-        # Use appropriate feature extractor based on model type
+        # Determine if this is a Whisper model
         is_whisper = "whisper" in config.audio_model_id.lower() or (hasattr(self.encoder.config, "model_type") and "whisper" in self.encoder.config.model_type.lower())
+
+        # Set main_input_name based on encoder type
+        # Whisper uses "input_features", others use "input_values"
         if is_whisper:
-            self.feature_extractor = WhisperFeatureExtractor.from_pretrained(config.audio_model_id)
+            self.main_input_name = "input_features"
         else:
-            self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(config.audio_model_id)
+            self.main_input_name = "input_values"
+
+        # Use provided feature extractor or create one
+        if feature_extractor is not None:
+            self.feature_extractor = feature_extractor
+        else:
+            # Use appropriate feature extractor based on model type
+            if is_whisper:
+                # For Whisper models, we need to ensure the feature extractor matches the encoder's mel bin configuration
+                # Whisper Large V3 Turbo uses 128 mel bins instead of the standard 80
+                num_mel_bins = getattr(config.audio_config, "num_mel_bins", 80)
+                self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
+                    config.audio_model_id,
+                    feature_size=num_mel_bins  # Override feature_size to match model's mel bins
+                )
+            else:
+                self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(config.audio_model_id)
 
         # Create decoder first (needed for tokenizer init)
         self.decoder = self._create_decoder(config, peft_config)
@@ -682,7 +718,15 @@ class ASRModel(PreTrainedModel):
                     attention_mask=audio_attention_mask,
                 ).last_hidden_state
 
-        return self.projector(audio_features)
+        # Project audio features and ensure dtype matches decoder
+        audio_embeds = self.projector(audio_features)
+
+        # Convert to decoder's dtype if needed (e.g., bfloat16)
+        decoder_dtype = next(self.decoder.parameters()).dtype
+        if audio_embeds.dtype != decoder_dtype:
+            audio_embeds = audio_embeds.to(dtype=decoder_dtype)
+
+        return audio_embeds
 
     def forward(
         self,
@@ -696,6 +740,15 @@ class ASRModel(PreTrainedModel):
         # Handle both input_values (Wav2Vec2/HuBERT) and input_features (Whisper)
         audio_inputs = input_values if input_values is not None else input_features
         if audio_inputs is not None:
+            # During inference, the pipeline may call forward with only audio inputs
+            # In that case, we should raise an error directing to use generate() instead
+            if input_ids is None:
+                raise ValueError(
+                    "forward() requires both audio inputs and input_ids (for training). "
+                    "For inference, use the generate() method instead, or use the pipeline "
+                    "which will automatically call generate()."
+                )
+
             # Extract audio-specific kwargs, don't pass input_ids to encoder
             audio_attention_mask = kwargs.pop("audio_attention_mask", None)
 
@@ -787,6 +840,59 @@ class ASRModel(PreTrainedModel):
         )
 
     @torch.no_grad()
+    def _generate_text_only(
+        self,
+        text_input: str,
+        system_prompt: Optional[str] = None,
+        **generate_kwargs,
+    ):
+        """
+        Generate text from text input only (no audio).
+        Useful for testing the LLM directly without audio encoding.
+        """
+        device = self.decoder.device
+
+        if system_prompt is None:
+            system_prompt = self.system_prompt
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": text_input})
+
+        # Tokenize the prompt
+        input_ids = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            enable_thinking=False,
+        ).to(device)
+
+        if len(input_ids.shape) == 1:
+            input_ids = input_ids.unsqueeze(0)
+
+        # Set default generation parameters
+        generate_kwargs.setdefault("max_new_tokens", self.config.max_new_tokens)
+        generate_kwargs.setdefault("min_new_tokens", self.config.min_new_tokens)
+        generate_kwargs.setdefault("num_beams", self.config.num_beams)
+        generate_kwargs.setdefault("do_sample", self.config.do_sample)
+        generate_kwargs.setdefault("temperature", self.config.temperature)
+        generate_kwargs.setdefault("top_k", self.config.top_k)
+        generate_kwargs.setdefault("top_p", self.config.top_p)
+        generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
+
+        # Set eos token
+        im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+        generate_kwargs.setdefault("eos_token_id", im_end_id)
+
+        # Generate using decoder only
+        return self.decoder.generate(
+            input_ids=input_ids,
+            **generate_kwargs,
+        )
+
+    @torch.no_grad()
     def generate(
         self,
         input_values: Optional[torch.Tensor] = None,
@@ -794,6 +900,7 @@ class ASRModel(PreTrainedModel):
         system_prompt: Optional[str] = None,
         user_prompt: Optional[str] = None,
         task: Optional[str] = None,
+        text_input: Optional[str] = None,  # For text-only mode
         **generate_kwargs,
     ) -> Union[
         torch.Tensor,
@@ -802,6 +909,14 @@ class ASRModel(PreTrainedModel):
         GenerateBeamDecoderOnlyOutput,
         GenerateBeamEncoderDecoderOutput,
     ]:
+        # Handle text-only mode (no audio)
+        if task == "text" or text_input is not None:
+            return self._generate_text_only(
+                text_input=text_input or user_prompt,
+                system_prompt=system_prompt,
+                **generate_kwargs
+            )
+
         # Handle both input_values (Wav2Vec2/HuBERT) and input_features (Whisper)
         audio_inputs = input_values if input_values is not None else input_features
         if audio_inputs is None:
@@ -835,6 +950,9 @@ class ASRModel(PreTrainedModel):
                 "content": user_prompt,
             }
         )
+
+        # Print the prompt being used for debugging
+        print(f"[Tiny Audio] Using prompt: {user_prompt}")
 
         prompt_ids = self.tokenizer.apply_chat_template(
             messages,
@@ -955,7 +1073,11 @@ class ASRModel(PreTrainedModel):
                 json.dump(self.encoder_lora_config, f, indent=2)
 
         self.tokenizer.save_pretrained(save_dir)
+
+        # Save feature extractor with correct configuration
+        # For Whisper models, ensure feature_size matches num_mel_bins from encoder config
         self.feature_extractor.save_pretrained(save_dir)
+
         self.get_processor().save_pretrained(save_dir)
 
         src_dir = PathlibPath(__file__).parent

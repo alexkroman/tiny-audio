@@ -37,9 +37,16 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             "top_p",
             "user_prompt",
             "task",
+            "text_input",
         ]:
             if key in kwargs:
                 generate_kwargs[key] = kwargs.pop(key)
+
+        # Handle text-only mode
+        task = generate_kwargs.get("task")
+        if task == "text" or generate_kwargs.get("text_input"):
+            return self._process_text_only(generate_kwargs)
+
         if isinstance(inputs, list):
             results = []
             for single_input in inputs:
@@ -144,15 +151,23 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         task = generate_kwargs.pop('task', None)
 
         # Set sampling parameters based on task
-        if task == 'continue':
-            # For continue task, use sampling for more creative responses
-            generate_kwargs.setdefault('do_sample', True)
-            generate_kwargs.setdefault('temperature', 1.0)
-        elif task == 'transcribe':
+        if task == 'transcribe':
             # For transcribe task, use greedy decoding for accuracy
             generate_kwargs.setdefault('do_sample', False)
             # Remove temperature if present since we're not sampling
             generate_kwargs.pop('temperature', None)
+        elif task == 'emotion':
+            # For emotion task, use sampling for varied responses
+            generate_kwargs.setdefault('do_sample', True)
+            generate_kwargs.setdefault('temperature', 0.7)
+        elif task == 'describe':
+            # For describe task, allow some creativity
+            generate_kwargs.setdefault('do_sample', True)
+            generate_kwargs.setdefault('temperature', 0.7)
+        elif task == 'continue':
+            # For continue task (if still used), use sampling for creative responses
+            generate_kwargs.setdefault('do_sample', True)
+            generate_kwargs.setdefault('temperature', 1.0)
 
         if isinstance(model_inputs, torch.Tensor):
             input_values = model_inputs
@@ -216,6 +231,27 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             )
 
         return {"tokens": generated_ids, "is_last": is_last}
+
+    def _process_text_only(self, generate_kwargs):
+        """Process text-only input without audio encoding."""
+        text_input = generate_kwargs.pop("text_input", None)
+        if text_input is None:
+            raise ValueError("text_input is required for text task")
+
+        # Remove task from generate_kwargs to avoid duplicate argument
+        generate_kwargs.pop("task", None)
+
+        # Generate text using the model
+        generated_ids = self.model.generate(
+            task="text",
+            text_input=text_input,
+            **generate_kwargs
+        )
+
+        # Decode the generated text
+        generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+        return {"text": generated_text}
 
     def postprocess(
         self, model_outputs: Dict[str, Any], return_timestamps=None, return_language=None

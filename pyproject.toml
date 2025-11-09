@@ -57,16 +57,6 @@ assemblyai = "*"
 typer = ">=0.19.2"
 truecase = "*"
 nltk = "*"
-# Course exercise dependencies
-librosa = ">=0.10.0"
-matplotlib = ">=3.7.0"
-torchaudio = "~2.8.0"
-kokoro = ">=0.9.4"
-soundfile = "*"
-livekit = "*"
-livekit-agents = "*"
-livekit-plugins-silero = "*"
-python-dotenv = "^1.2.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"

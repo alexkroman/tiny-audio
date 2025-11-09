@@ -1,6 +1,6 @@
-# Complete multi-task dataset configuration with all four tasks
+# Complete multi-task dataset configuration with transcribe, emotion, and describe tasks
 datasets:
-  # Transcription task - LoquaciousSet
+  # Transcription task - LoquaciousSet (95% - dominant task matching Kimi-Audio)
   - path: speechbrain/LoquaciousSet
     name: large
     audio_column: wav
@@ -10,19 +10,28 @@ datasets:
       - train
     eval_splits:
       - dev
-    sampling_weight: 0.5
+    sampling_weight: 0.95
 
-  # Continuation task - SODA-Audio
-  - path: fixie-ai/soda-audio
-    name: default
-    audio_column: audio_second_last_turn
-    text_column: alt_last_turn
-    task: continue  # Mark as continuation task
+  # Description task - AudioSet Strong (4% - audio understanding)
+  - path: CLAPv2/audioset_strong
+    audio_column: audio
+    text_column: text  # Use simplified text descriptions
+    task: describe  # Mark as description task
     train_splits:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.5
+    sampling_weight: 0.04
+
+  # Emotion recognition task - LAION's Got Talent (1% - voice emotion tags)
+  - path: laion/laions_got_talent_with_voice_emotion_speed_tags_for_orpheus_tuning
+    audio_column: audio
+    text_column: emotion  # Emotion tags (comma-separated)
+    task: emotion  # Mark as emotion recognition task
+    train_splits:
+      - train  # Only train split available
+    eval_splits: []  # No separate eval split
+    sampling_weight: 0.01
 
 # Audio processing
 sample_rate: 16000

@@ -77,10 +77,16 @@ class DatasetLoader:
 
         text_column = dataset_cfg.get("text_column", "text")
         if text_column != "text" and text_column in ds.column_names:
+            # If "text" already exists in the dataset, remove it first
+            if "text" in ds.column_names:
+                ds = ds.remove_columns(["text"])
             ds = ds.rename_column(text_column, "text")
 
         audio_column = dataset_cfg.get("audio_column", "audio")
         if audio_column != "audio" and audio_column in ds.column_names:
+            # If "audio" already exists in the dataset, remove it first
+            if "audio" in ds.column_names:
+                ds = ds.remove_columns(["audio"])
             ds = ds.rename_column(audio_column, "audio")
 
         # Cast audio column to correct format
@@ -155,11 +161,20 @@ class DataCollator(DataCollatorForSeq2Seq):
         mask_feature_prob: float = 0.0,
         mask_feature_length: int = 10,
         apply_augmentation: bool = True,
+        use_instruction_templates: bool = False,
+        instruction_seed: int = None,
     ):
         super().__init__(tokenizer=tokenizer, padding=True)
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
+        self.use_instruction_templates = use_instruction_templates
+        self.instruction_seed = instruction_seed
+
+        # Import instruction templates if needed
+        if self.use_instruction_templates:
+            from instruction_templates import get_random_instruction
+            self.get_random_instruction = get_random_instruction
 
         # Check if this is a Whisper feature extractor
         self.is_whisper = feature_extractor.__class__.__name__ == 'WhisperFeatureExtractor'
@@ -305,34 +320,22 @@ class DataCollator(DataCollatorForSeq2Seq):
 
             # Choose prompt based on task type
             task = f.get("task", "transcribe")  # Default to transcribe
-            if task == "continue":
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "Continue: <audio>",
-                    }
-                )
-            elif task == "describe":
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "Describe: <audio>",
-                    }
-                )
-            elif task == "emotion":
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "Emotion: <audio>",
-                    }
-                )
-            else:  # Default to transcribe
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "Transcribe: <audio>",
-                    }
-                )
+
+            # Use instruction templates if enabled
+            if self.use_instruction_templates:
+                instruction = self.get_random_instruction(task, seed=self.instruction_seed)
+            else:
+                # Use default single prompt per task
+                if task == "continue":
+                    instruction = "Continue: <audio>"
+                elif task == "describe":
+                    instruction = "Describe: <audio>"
+                elif task == "emotion":
+                    instruction = "Emotion: <audio>"
+                else:  # Default to transcribe
+                    instruction = "Transcribe: <audio>"
+
+            messages.append({"role": "user", "content": instruction})
             messages.append({"role": "assistant", "content": text})
 
             tokens = self.tokenizer.apply_chat_template(
@@ -519,6 +522,8 @@ def main(cfg: DictConfig) -> None:
         mask_feature_prob=cfg.data.get("mask_feature_prob", 0.0),
         mask_feature_length=cfg.data.get("mask_feature_length", 10),
         apply_augmentation=True,  # Enable augmentation for training
+        use_instruction_templates=cfg.data.get("use_instruction_templates", False),
+        instruction_seed=cfg.data.get("instruction_seed", None),
     )
 
     eval_collator = DataCollator(
@@ -531,6 +536,8 @@ def main(cfg: DictConfig) -> None:
         mask_feature_prob=cfg.data.get("mask_feature_prob", 0.0),
         mask_feature_length=cfg.data.get("mask_feature_length", 0),
         apply_augmentation=False,  # Disable augmentation for evaluation
+        use_instruction_templates=cfg.data.get("use_instruction_templates", False),
+        instruction_seed=cfg.data.get("instruction_seed", None),
     )
 
     callbacks = [
