@@ -132,10 +132,10 @@ class ASRModel(PreTrainedModel):
         # This ensures we get the correct mel bin configuration (e.g., 128 for Whisper V3 Turbo)
         is_whisper = "whisper" in config.audio_model_id.lower()
         if is_whisper:
-            num_mel_bins = getattr(config.audio_config, "num_mel_bins", 80)
+            # Load feature extractor directly from audio model to get correct mel bins
+            # Don't rely on config.audio_config which might have wrong value
             kwargs["feature_extractor"] = WhisperFeatureExtractor.from_pretrained(
-                config.audio_model_id,
-                feature_size=num_mel_bins
+                config.audio_model_id
             )
         else:
             kwargs["feature_extractor"] = Wav2Vec2FeatureExtractor.from_pretrained(
@@ -295,7 +295,8 @@ class ASRModel(PreTrainedModel):
             if is_whisper:
                 # For Whisper models, we need to ensure the feature extractor matches the encoder's mel bin configuration
                 # Whisper Large V3 Turbo uses 128 mel bins instead of the standard 80
-                num_mel_bins = getattr(config.audio_config, "num_mel_bins", 80)
+                # Use the actual encoder's config to get the correct number of mel bins
+                num_mel_bins = self.encoder.config.num_mel_bins
                 self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
                     config.audio_model_id,
                     feature_size=num_mel_bins  # Override feature_size to match model's mel bins
@@ -399,7 +400,7 @@ class ASRModel(PreTrainedModel):
         # Configure model loading kwargs
         encoder_kwargs = {
             "attn_implementation": config.attn_implementation,
-            "torch_dtype": target_dtype,  # Use torch_dtype instead of dtype
+            "dtype": target_dtype,
             "low_cpu_mem_usage": True,
         }
         # Avoid device_map="auto" when loading from pretrained to prevent meta tensor issues
@@ -1055,8 +1056,11 @@ class ASRModel(PreTrainedModel):
         # For Whisper models, ensure feature_size matches num_mel_bins from encoder config
         if hasattr(self.encoder.config, "num_mel_bins"):
             # For Whisper models, explicitly set the correct feature_size before saving
-            self.feature_extractor.feature_size = self.encoder.config.num_mel_bins
-            self.feature_extractor.n_mels = self.encoder.config.num_mel_bins
+            num_mel_bins = self.encoder.config.num_mel_bins
+            self.feature_extractor.feature_size = num_mel_bins
+            self.feature_extractor.num_mel_bins = num_mel_bins  # Explicitly set num_mel_bins
+            if hasattr(self.feature_extractor, 'n_mels'):
+                self.feature_extractor.n_mels = num_mel_bins
             self.feature_extractor.nb_max_frames = 3000  # Whisper's max frames
         self.feature_extractor.save_pretrained(save_dir)
 

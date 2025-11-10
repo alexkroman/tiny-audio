@@ -61,7 +61,7 @@ training:
   max_grad_norm: 1.0
 
   # Memory optimization
-  torch_compile: false  # Disabled - causes issues with encoder LoRA
+  torch_compile: true  # Disabled - causes issues with encoder LoRA
   gradient_checkpointing: false
 
   # Training duration - 50000 steps as requested
