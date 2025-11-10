@@ -4,6 +4,7 @@ datasets:
     name: clean
     audio_column: wav
     text_column: text
+    task: transcribe  # Explicitly set the task
     train_splits:
       - train
     eval_splits:

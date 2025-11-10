@@ -2,6 +2,7 @@
 
 import logging
 import re
+import nltk
 from typing import Any, Dict, List
 
 import hydra
@@ -9,7 +10,7 @@ import numpy as np
 import torch
 import truecase
 import wandb
-from datasets import Audio, Dataset, interleave_datasets, load_dataset
+from datasets import Audio, Dataset, Features, IterableDataset, interleave_datasets, load_dataset, Value
 from omegaconf import DictConfig, OmegaConf
 from transformers import (
     DataCollatorForSeq2Seq,
@@ -65,22 +66,34 @@ class DatasetLoader:
         # Cast audio column to correct format
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        # Add task type to each example - store it as metadata, will be added during iteration
-        # Can't use map here because it breaks with AudioDecoder objects
-        task = dataset_cfg.get("task", "transcribe")  # Default to transcribe
-        # Wrap the dataset to add task field during iteration
-        original_iter = ds.__iter__
-        def wrapped_iter():
-            for item in original_iter():
-                item["task"] = task
-                yield item
-        ds.__iter__ = wrapped_iter
+        # Get task for this dataset
+        task = dataset_cfg.get("task", "transcribe")
+
+        # Add task by creating a new IterableDataset from a generator that yields the task.
+        # This is done to explicitly set the features of the new dataset, which prevents
+        # interleave_datasets from trying to infer them and failing on the audio column.
+        def add_task_generator(dataset, task_value):
+            for example in dataset:
+                example["task"] = task_value
+                yield example
+
+        original_features = ds.info.features
+        new_features = original_features.copy()
+        if "task" not in new_features:
+            new_features["task"] = Value("string")
+
+        ds = IterableDataset.from_generator(
+            add_task_generator,
+            features=new_features,
+            gen_kwargs={"dataset": ds, "task_value": task},
+        )
 
         return ds
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
         train_weights = []
+
         for d_cfg in self.config.datasets:
             train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
             eval_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
@@ -206,7 +219,7 @@ class DataCollator(DataCollatorForSeq2Seq):
                 messages.append({"role": "system", "content": self.system_prompt})
 
             # Choose prompt based on task type
-            task = f.get("task", "transcribe")  # Default to transcribe
+            task = f.get("task", "transcribe")  # Get task field added by add_column
 
             # Use instruction templates if enabled
             if self.use_instruction_templates:
@@ -319,6 +332,9 @@ def main(cfg: DictConfig) -> None:
     logging.getLogger("datasets").setLevel(logging.WARNING)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+    # Download NLTK data for truecasing
+    nltk.download("punkt_tab")
 
     # Log configuration if needed
     if cfg.get("verbose", False):

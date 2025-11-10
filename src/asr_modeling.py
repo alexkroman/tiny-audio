@@ -1001,6 +1001,10 @@ class ASRModel(PreTrainedModel):
         self.config.vocab_size = actual_vocab_size
         self.config.text_config.vocab_size = actual_vocab_size
 
+        # Update audio config with actual encoder configuration
+        if hasattr(self.encoder.config, "num_mel_bins"):
+            self.config.audio_config.num_mel_bins = self.encoder.config.num_mel_bins
+
         self.config.save_pretrained(save_dir)
         if hasattr(self, "generation_config") and self.generation_config is not None:
             self.generation_config.save_pretrained(save_dir)
@@ -1049,6 +1053,11 @@ class ASRModel(PreTrainedModel):
 
         # Save feature extractor with correct configuration
         # For Whisper models, ensure feature_size matches num_mel_bins from encoder config
+        if hasattr(self.encoder.config, "num_mel_bins"):
+            # For Whisper models, explicitly set the correct feature_size before saving
+            self.feature_extractor.feature_size = self.encoder.config.num_mel_bins
+            self.feature_extractor.n_mels = self.encoder.config.num_mel_bins
+            self.feature_extractor.nb_max_frames = 3000  # Whisper's max frames
         self.feature_extractor.save_pretrained(save_dir)
 
         self.get_processor().save_pretrained(save_dir)

@@ -4,6 +4,7 @@ datasets:
     name: large  # Config name for LoquaciousSet
     audio_column: wav    # LoquaciousSet uses 'wav' instead of 'audio'
     text_column: text    # LoquaciousSet uses 'text' column
+    task: transcribe    # Explicitly set the task type
     train_splits:
       - train
     eval_splits:
