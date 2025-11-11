@@ -567,6 +567,13 @@ class ASRModel(PreTrainedModel):
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
+        # Set pad_token if not already set to avoid warnings during generation
+        # If pad_token is same as eos_token, we need a different token for padding
+        if self.tokenizer.pad_token is None or self.tokenizer.pad_token_id == self.tokenizer.eos_token_id:
+            # For SmolLM3, use the dedicated finetune_right_pad_id token
+            if "<|finetune_right_pad_id|>" in self.tokenizer.get_vocab():
+                self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
+
         existing_special = self.tokenizer.additional_special_tokens or []
 
         # Add single audio token if not present
