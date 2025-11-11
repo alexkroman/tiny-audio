@@ -45,8 +45,8 @@ training:
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
-  per_device_train_batch_size: 14
-  per_device_eval_batch_size: 14
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
 
@@ -61,7 +61,7 @@ training:
   max_grad_norm: 1.0
 
   # Memory optimization
-  torch_compile: false  # Disabled - causes issues with encoder LoRA
+  torch_compile: true  # Disabled - causes issues with encoder LoRA
   gradient_checkpointing: false
 
   # Training duration - 50000 steps as requested

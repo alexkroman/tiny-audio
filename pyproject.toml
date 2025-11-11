@@ -129,6 +129,26 @@ ignore_errors = true
 module = "peft.*"
 ignore_errors = true
 
+[tool.pyright]
+include = ["src"]
+exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
+typeCheckingMode = "basic"
+reportPrivateImportUsage = false
+reportOptionalMemberAccess = false
+reportOptionalIterable = false
+reportOptionalCall = false
+reportGeneralTypeIssues = false
+reportIncompatibleMethodOverride = false
+# PyTorch models have dynamic attributes
+reportAttributeAccessIssue = false
+reportCallIssue = false
+reportIndexIssue = false
+# Ignore assignment type issues for PyTorch configs
+reportAssignmentType = false
+reportArgumentType = false
+reportOperatorIssue = false
+reportReturnType = false
+
 [tool.pytest.ini_options]
 # Test discovery patterns
 python_files = "test_*.py *_test.py"

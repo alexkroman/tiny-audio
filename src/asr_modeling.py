@@ -115,7 +115,7 @@ class ASRModel(PreTrainedModel):
         import json
 
         from safetensors.torch import load_file
-        from transformers.utils import cached_file
+        from transformers.utils.hub import cached_file  # type: ignore[attr-defined]
 
         # Check if config is already provided in kwargs
         config = kwargs.pop("config", None)

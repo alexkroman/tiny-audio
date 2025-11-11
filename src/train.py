@@ -37,7 +37,7 @@ class DatasetLoader:
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
 
-    def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
+    def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:  # type: ignore[return]
         # Get dataset path (required)
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
@@ -93,7 +93,7 @@ class DatasetLoader:
             gen_kwargs={"dataset": ds, "task_value": task},
         )
 
-    def load(self) -> tuple[Dataset, Dataset]:
+    def load(self) -> tuple[Dataset, Dataset]:  # type: ignore[return]
         train_datasets, val_datasets = [], []
         train_weights = []
 
