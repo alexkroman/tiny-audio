@@ -269,7 +269,7 @@ class DataCollator(DataCollatorForSeq2Seq):
                     # Skip newlines
                     while (
                         content_start < len(tokens)
-                        and self.tokenizer.decode([tokens[content_start]]).strip() == ""
+                        and self.tokenizer.decode([int(tokens[content_start])]).strip() == ""
                     ):
                         content_start += 1
                     break
@@ -285,7 +285,7 @@ class DataCollator(DataCollatorForSeq2Seq):
                         content_start = i + 2
                         while (
                             content_start < len(tokens)
-                            and self.tokenizer.decode([tokens[content_start]]).strip() == ""
+                            and self.tokenizer.decode([int(tokens[content_start])]).strip() == ""
                         ):
                             content_start += 1
                         break
@@ -484,6 +484,7 @@ def main(cfg: DictConfig) -> None:
 
     # Convert config to dict and remove non-TrainingArguments fields
     training_args = OmegaConf.to_container(cfg.training, resolve=True)
+    assert isinstance(training_args, dict), "training_args must be a dict"
     # Remove custom fields that aren't TrainingArguments parameters
     for key in ["model_dtype", "attn_implementation"]:
         training_args.pop(key, None)

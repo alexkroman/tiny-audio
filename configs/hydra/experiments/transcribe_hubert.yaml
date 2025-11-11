@@ -45,8 +45,8 @@ training:
   hub_strategy: "checkpoint"
   hub_private_repo: false
 
-  per_device_train_batch_size: 7
-  per_device_eval_batch_size: 7
+  per_device_train_batch_size: 14
+  per_device_eval_batch_size: 14
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
 

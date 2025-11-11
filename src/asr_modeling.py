@@ -910,14 +910,16 @@ class ASRModel(PreTrainedModel):
 
         # Determine user prompt based on task
         if user_prompt is None:
-            if task == "continue":
+            if task == "transcribe":
+                user_prompt = "Transcribe: <audio>"
+            elif task == "continue":
                 user_prompt = "Continue: <audio>"
             elif task == "describe":
                 user_prompt = "Describe: <audio>"
             elif task == "emotion":
                 user_prompt = "Emotion: <audio>"
             else:
-                # Default to transcribe
+                # Default to config or transcribe
                 user_prompt = (
                     self.config.user_prompt if self.config.user_prompt else "Transcribe: <audio>"
                 )
@@ -1075,8 +1077,8 @@ class ASRModel(PreTrainedModel):
             if hasattr(self.feature_extractor, "n_mels"):
                 self.feature_extractor.n_mels = num_mel_bins
             self.feature_extractor.nb_max_frames = 3000  # Whisper's max frames
-        self.feature_extractor.save_pretrained(save_dir)
 
+        # Save processor (which will save feature_extractor and tokenizer with the modified settings)
         self.get_processor().save_pretrained(save_dir)
 
         src_dir = PathlibPath(__file__).parent

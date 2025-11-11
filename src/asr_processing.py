@@ -50,7 +50,7 @@ class ASRProcessor(ProcessorMixin):
         save_path = Path(save_directory)
         save_path.mkdir(parents=True, exist_ok=True)
 
-        # Save the feature extractor
+        # Save the feature extractor (this creates preprocessor_config.json with all feature extractor settings)
         if self.feature_extractor is not None:
             self.feature_extractor.save_pretrained(save_directory)
 
@@ -58,19 +58,27 @@ class ASRProcessor(ProcessorMixin):
         if self.tokenizer is not None:
             self.tokenizer.save_pretrained(save_directory)
 
-        # Save processor config
-        # Detect the actual feature extractor type
-        feature_extractor_type = self.feature_extractor.__class__.__name__
-
-        processor_config = {
-            "processor_class": self.__class__.__name__,
-            "feature_extractor_class": self.feature_extractor_class,
-            "tokenizer_class": self.tokenizer_class,
-            "feature_extractor_type": feature_extractor_type,  # Dynamic based on actual type
-            "auto_map": {"AutoProcessor": "asr_processing.ASRProcessor"},
-        }
-
+        # Load the existing preprocessor_config.json and add processor-specific metadata
         config_path = save_path / "preprocessor_config.json"
+        if config_path.exists():
+            with config_path.open() as f:
+                processor_config = json.load(f)
+        else:
+            processor_config = {}
+
+        # Add/update processor metadata while preserving feature extractor settings
+        feature_extractor_type = self.feature_extractor.__class__.__name__
+        processor_config.update(
+            {
+                "processor_class": self.__class__.__name__,
+                "feature_extractor_class": self.feature_extractor_class,
+                "tokenizer_class": self.tokenizer_class,
+                "feature_extractor_type": feature_extractor_type,  # Dynamic based on actual type
+                "auto_map": {"AutoProcessor": "asr_processing.ASRProcessor"},
+            }
+        )
+
+        # Save the merged config
         with config_path.open("w") as f:
             json.dump(processor_config, f, indent=2)
 

@@ -76,7 +76,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 print(f"Chunk {chunk_num}/{total_chunks} completed.", flush=True)
 
             # Merge chunks and decode ourselves to ensure skip_special_tokens=True
-            all_tokens = []
+            all_tokens: list[int] = []
             for output in all_outputs:
                 tokens = output.get("tokens")
                 if tokens is None:

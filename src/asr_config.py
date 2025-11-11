@@ -1,3 +1,5 @@
+from typing import Optional
+
 import transformers
 
 
@@ -12,11 +14,11 @@ class ASRConfig(transformers.PretrainedConfig):
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
         audio_downsample_rate: int = 5,
-        num_beams: int = None,
+        num_beams: Optional[int] = None,
         system_prompt: str = "/no_think /system_override",
         user_prompt: str = "Transcribe: <audio>",
-        encoder_dim: int = None,
-        llm_dim: int = None,
+        encoder_dim: Optional[int] = None,
+        llm_dim: Optional[int] = None,
         projector_hidden_dim: int = 8192,
         # Audio processing constants
         audio_sample_rate: int = 16000,
@@ -29,17 +31,17 @@ class ASRConfig(transformers.PretrainedConfig):
         inference_diversity_penalty: float = 0.5,
         inference_warmup_tokens: int = 10,
         # Generation parameters
-        max_new_tokens: int = None,
-        min_new_tokens: int = None,
-        do_sample: bool = None,
-        temperature: float = None,
-        top_k: int = None,
-        top_p: float = None,
-        repetition_penalty: float = None,
-        length_penalty: float = None,
-        no_repeat_ngram_size: int = None,
-        early_stopping: bool = None,
-        use_cache: bool = None,
+        max_new_tokens: Optional[int] = None,
+        min_new_tokens: Optional[int] = None,
+        do_sample: Optional[bool] = None,
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repetition_penalty: Optional[float] = None,
+        length_penalty: Optional[float] = None,
+        no_repeat_ngram_size: Optional[int] = None,
+        early_stopping: Optional[bool] = None,
+        use_cache: Optional[bool] = None,
         **kwargs,
     ):
         # Set default values for generation params if not present in kwargs

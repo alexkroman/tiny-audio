@@ -1,8 +1,8 @@
 # @package _global_
 
-# HuBERT Transcription Configuration
-# Uses HuBERT encoder with LoRA fine-tuning for speech recognition
-# Projector (trainable) + Encoder LoRA + Decoder LoRA
+# Multi-task training configuration - All tasks combined
+# Includes: transcription, continuation, description, and emotion recognition
+# Based on stage1 configuration with multi-task data
 defaults:
   - override /model: large
   - override /data: loquacious_large
@@ -11,7 +11,7 @@ defaults:
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
   # pretrained_model_path: "mazesmazes/tiny-audio"
-  
+
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
 
@@ -21,16 +21,16 @@ model:
 
 # Encoder LoRA Configuration
 encoder_lora:
-  r: 0  # Enable LoRA with rank 16
+  r: 0 # Disable LoRA (same as stage1)
   lora_alpha: 16  # Scaling factor (alpha/r = 1.0)
-  target_modules: ["attention.q_proj", "attention.k_proj"]  # HuBERT attention projections
+  target_modules: [q_proj, k_proj]  # HuBERT attention projections
   lora_dropout: 0.05
   bias: none
 
 # Decoder LoRA Configuration
 peft:
   peft_method: lora  # Enable LoRA fine-tuning on decoder
-  r: 0  # Enable LoRA with rank 8
+  r: 0  # Disable LORA (same as stage1)
   lora_alpha: 8
   target_modules: ["q_proj", "v_proj"]
   bias: none  # No bias training
@@ -42,17 +42,17 @@ training:
   # Hub configuration
   push_to_hub: true
   hub_model_id: "mazesmazes/tiny-audio"
-  hub_strategy: "checkpoint"
+  hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
-  per_device_train_batch_size: 7
-  per_device_eval_batch_size: 7
+  per_device_train_batch_size: 14
+  per_device_eval_batch_size: 14
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
 
   learning_rate: 1.0e-4
 
-  warmup_steps: 1000  # Increased for LoRA stability (1% of max_steps)
+  warmup_steps: 1000  # Increased for LoRA stability (2% of 50k steps)
   lr_scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs: {"min_lr_rate": 0.1}
 
@@ -64,14 +64,13 @@ training:
   torch_compile: false  # Disabled - causes issues with encoder LoRA
   gradient_checkpointing: false
 
-  # Training duration
+  # Training duration - 50000 steps as requested
   max_steps: 50000
 
   # Reproducibility
   seed: 42
   ignore_data_skip: true
 
-# Data configuration
 data:
   mask_time_prob: 0.05
 

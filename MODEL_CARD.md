@@ -1,16 +1,14 @@
-______________________________________________________________________
-
+---
 license: mit
 language:
-
 - en
-  datasets:
+datasets:
 - speechbrain/LoquaciousSet
-  base_model:
+base_model:
 - facebook/hubert-xlarge-ls960-ft
 - Qwen/Qwen-3-8B
-  pipeline_tag: automatic-speech-recognition
-  tags:
+pipeline_tag: automatic-speech-recognition
+tags:
 - asr
 - speech-recognition
 - audio
@@ -18,8 +16,7 @@ language:
 - peft
 - qwen
 - hubert
-
-______________________________________________________________________
+---
 
 # Tiny Audio Model Card
 
