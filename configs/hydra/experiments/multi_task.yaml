@@ -42,7 +42,7 @@ training:
   # Hub configuration
   push_to_hub: true
   hub_model_id: "mazesmazes/tiny-audio"
-  hub_strategy: "checkpoint"
+  hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
   per_device_train_batch_size: 14

@@ -159,3 +159,8 @@ class ASRConfig(transformers.PretrainedConfig):
         output["use_cache"] = self.use_cache
 
         return output
+
+
+# Register the config with transformers
+# This is needed for AutoConfig.from_pretrained to work
+transformers.AutoConfig.register("asr_model", ASRConfig)

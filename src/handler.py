@@ -44,7 +44,7 @@ class EndpointHandler:
                 "flash_attention_2" if self._is_flash_attn_available() else "sdpa"
             )
 
-        # Load model (this loads the model, tokenizer, and feature extractor from checkpoint)
+        # Load model (this loads the model, tokenizer, and feature extractor)
         self.model = ASRModel.from_pretrained(path, **model_kwargs)
 
         # Instantiate custom pipeline - it will get feature_extractor and tokenizer from model

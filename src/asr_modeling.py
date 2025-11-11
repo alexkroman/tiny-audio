@@ -155,9 +155,9 @@ class ASRModel(PreTrainedModel):
             cache_kwargs["revision"] = revision
 
         try:
-            # Helper function to load file with fallback to last-checkpoint subfolder
+            # Helper function to load file
             def load_cached_file(filename, load_fn=None):
-                """Load a file with fallback to last-checkpoint subfolder.
+                """Load a file from the model directory.
 
                 Args:
                     filename: Name of file to load
@@ -168,7 +168,6 @@ class ASRModel(PreTrainedModel):
                 if load_fn is None:
                     load_fn = load_file
 
-                # Try main directory first
                 try:
                     file_path = cached_file(
                         pretrained_model_name_or_path,
@@ -177,22 +176,6 @@ class ASRModel(PreTrainedModel):
                         **cache_kwargs,
                     )
                     if file_path:
-                        return load_fn(file_path)
-                except Exception:
-                    pass
-
-                # Fallback to last-checkpoint subfolder
-                try:
-                    fallback_kwargs = cache_kwargs.copy()
-                    fallback_kwargs["subfolder"] = "last-checkpoint"
-                    file_path = cached_file(
-                        pretrained_model_name_or_path,
-                        filename,
-                        _raise_exceptions_for_missing_entries=False,
-                        **fallback_kwargs,
-                    )
-                    if file_path:
-                        print(f"Loading {filename} from last-checkpoint subfolder")
                         return load_fn(file_path)
                 except Exception:
                     pass

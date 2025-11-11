@@ -123,7 +123,10 @@ class DatasetLoader:
         else:
             train_ds = train_datasets[0]
 
-        val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
+        if not val_datasets:
+            val_ds = None
+        else:
+            val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
 
         if self.config.max_train_samples:
             train_ds = train_ds.take(self.config.max_train_samples)
@@ -437,7 +440,7 @@ def main(cfg: DictConfig) -> None:
             )
         )
 
-    processor = model.get_processor()
+    # processor = model.get_processor()
 
     # Convert config to dict and remove non-TrainingArguments fields
     training_args = OmegaConf.to_container(cfg.training, resolve=True)
@@ -450,12 +453,12 @@ def main(cfg: DictConfig) -> None:
         args=TrainingArguments(**training_args),
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        processing_class=processor,
+        # processing_class=processor,
         data_collator=data_collator,
         callbacks=callbacks,
     )
 
-    trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
+    trainer.train()
     trainer.save_model()
 
 
