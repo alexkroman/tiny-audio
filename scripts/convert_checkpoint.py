@@ -133,7 +133,7 @@ def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool 
                     # Extract target module name
                     # Example: base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight
                     parts = key.split(".")
-                    for i, part in enumerate(parts):
+                    for part in parts:
                         if part in [
                             "q_proj",
                             "v_proj",
@@ -149,7 +149,7 @@ def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool 
             # Check for existing peft_config.json for additional settings
             peft_config_path = checkpoint_path / "peft_config.json"
             if peft_config_path.exists():
-                with open(peft_config_path) as f:
+                with peft_config_path.open() as f:
                     peft_config = json.load(f)
                     r = peft_config.get("r", r or 8)
                     lora_alpha = peft_config.get("lora_alpha", lora_alpha)
@@ -163,7 +163,7 @@ def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool 
                 "bias": "none",
                 "task_type": "CAUSAL_LM",
                 "target_modules": (
-                    sorted(list(target_modules)) if target_modules else ["q_proj", "v_proj"]
+                    sorted(target_modules) if target_modules else ["q_proj", "v_proj"]
                 ),
                 "peft_type": "LORA",
                 "base_model_name_or_path": "HuggingFaceTB/SmolLM3-3B",  # You may need to update this
@@ -172,7 +172,7 @@ def convert_checkpoint(checkpoint_dir: str, output_dir: str = None, force: bool 
             print(
                 f"Creating adapter_config.json with r={adapter_config['r']}, target_modules={adapter_config['target_modules']}"
             )
-            with open(adapter_config_path, "w") as f:
+            with adapter_config_path.open("w") as f:
                 json.dump(adapter_config, f, indent=2)
     else:
         print("No LoRA weights found")

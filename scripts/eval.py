@@ -68,20 +68,22 @@ def wav_bytes_to_audio(wav_bytes):
         sample_rate = decoder.metadata.sample_rate
         return audio_array, sample_rate
     finally:
-        os.unlink(temp_path)
+        Path(temp_path).unlink()
 
 
 def prepare_wav_bytes(wav_data):
     """Convert various WAV data formats to bytes for API calls."""
     # Handle AudioDecoder objects (datasets library lazy loading)
-    if hasattr(wav_data, "__class__") and "AudioDecoder" in str(type(wav_data)):
-        # AudioDecoder has get_all_samples method
-        if hasattr(wav_data, "get_all_samples"):
-            samples = wav_data.get_all_samples()
-            # samples should have .data and metadata with sample_rate
-            audio_array = samples.data.squeeze().numpy()
-            sample_rate = wav_data.metadata.sample_rate
-            return audio_to_wav_bytes(audio_array, sample_rate)
+    if (
+        hasattr(wav_data, "__class__")
+        and "AudioDecoder" in str(type(wav_data))
+        and hasattr(wav_data, "get_all_samples")
+    ):
+        samples = wav_data.get_all_samples()
+        # samples should have .data and metadata with sample_rate
+        audio_array = samples.data.squeeze().numpy()
+        sample_rate = wav_data.metadata.sample_rate
+        return audio_to_wav_bytes(audio_array, sample_rate)
 
     if isinstance(wav_data, dict):
         if "bytes" in wav_data:
@@ -130,8 +132,7 @@ def evaluate_huggingface(
         text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
         # Remove disfluencies (uh, um) - these are in Whisper's ignore patterns already
         # but we keep this for compatibility with non-Whisper datasets
-        text = re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
-        return text
+        return re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
 
     predictions = []
     references = []
@@ -327,8 +328,7 @@ def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_
         # Remove <inaudible> tags
         text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
         # Remove disfluencies (uh, um)
-        text = re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
-        return text
+        return re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
 
     aai.settings.api_key = api_key
 
@@ -561,8 +561,7 @@ def main():
     # Custom preprocessing to remove <inaudible> tags and disfluencies
     def preprocess_text(text: str) -> str:
         text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
-        return text
+        return re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
 
     whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
     normalized_predictions = [whisper_tokenizer.normalize(preprocess_text(p)) for p in predictions]

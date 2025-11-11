@@ -1,8 +1,10 @@
+import numpy as np
 import pytest
 from hydra import compose, initialize
-from src.train import DatasetLoader, DataCollator
-from transformers import WhisperTokenizer, WhisperFeatureExtractor, AutoTokenizer
-import numpy as np
+from transformers import AutoTokenizer, WhisperFeatureExtractor
+
+from src.train import DataCollator, DatasetLoader
+
 
 def test_multi_task_dataset_loading():
     """
@@ -11,7 +13,13 @@ def test_multi_task_dataset_loading():
     """
     # Initialize Hydra and compose the configuration
     with initialize(version_base="1.1", config_path="../configs/hydra", job_name="test_app"):
-        cfg = compose(config_name="config", overrides=["data=multi_task_complete", "data.dataset_cache_dir=/tmp/tiny_audio_test_cache"])
+        cfg = compose(
+            config_name="config",
+            overrides=[
+                "data=multi_task_complete",
+                "data.dataset_cache_dir=/tmp/tiny_audio_test_cache",
+            ],
+        )
 
         # Instantiate the DatasetLoader with the loaded configuration
         dataset_loader = DatasetLoader(cfg)
@@ -32,9 +40,11 @@ def test_multi_task_dataset_loading():
 
         # --- Start of new code for printing samples ---
         print("\n--- First 10 samples with prompts ---")
-        
+
         # We need a collator to generate the prompts
-        tokenizer = AutoTokenizer.from_pretrained(cfg.model.decoder_model_name, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            cfg.model.decoder_model_name, trust_remote_code=True
+        )
         feature_extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-tiny")
         data_collator = DataCollator(
             tokenizer=tokenizer,
@@ -43,34 +53,38 @@ def test_multi_task_dataset_loading():
         )
 
         for i, sample in enumerate(samples[:10]):
-            print(f"\n--- Sample {i+1} ---")
+            print(f"\n--- Sample {i + 1} ---")
             print(f"Task: {sample['task']}")
             print(f"Text: {sample['text']}")
-            
+
             # Generate the prompt
             batch = data_collator([sample])
             decoded_text = tokenizer.decode(batch["input_ids"][0])
-            
+
             # Extract just the prompt part
             prompt = decoded_text.split("assistant\n")[0] + "assistant\n"
             print(f"Prompt: {prompt}")
-        print("\n" + "="*40 + "\n")
+        print("\n" + "=" * 40 + "\n")
         # --- End of new code ---
 
         # Collect the tasks from the samples
-        tasks = {sample['task'] for sample in samples}
+        tasks = {sample["task"] for sample in samples}
 
         # Define the expected tasks
-        expected_tasks = {'transcribe', 'describe', 'emotion'}
+        expected_tasks = {"transcribe", "describe", "emotion"}
 
         # Assert that all expected tasks are present in the sample
         assert tasks == expected_tasks
 
-@pytest.mark.parametrize("task, expected_instruction", [
-    ("transcribe", "Transcribe: <audio>"),
-    ("describe", "Describe: <audio>"),
-    ("emotion", "Emotion: <audio>"),
-])
+
+@pytest.mark.parametrize(
+    "task, expected_instruction",
+    [
+        ("transcribe", "Transcribe: <audio>"),
+        ("describe", "Describe: <audio>"),
+        ("emotion", "Emotion: <audio>"),
+    ],
+)
 def test_prompt_strategy(task, expected_instruction, monkeypatch):
     """
     Tests that the DataCollator uses the correct prompt instruction for each task.
@@ -80,9 +94,11 @@ def test_prompt_strategy(task, expected_instruction, monkeypatch):
 
     with initialize(version_base="1.1", config_path="../configs/hydra", job_name="test_app"):
         cfg = compose(config_name="config", overrides=["data=multi_task_complete"])
-        
+
         # Load the correct tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(cfg.model.decoder_model_name, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            cfg.model.decoder_model_name, trust_remote_code=True
+        )
         feature_extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-tiny")
 
         # Instantiate the DataCollator

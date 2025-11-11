@@ -49,7 +49,7 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
             # Use text-only mode
             result = pipe(None, task="text", text_input=text_input)
             return result["text"]
-        elif task == "custom":
+        if task == "custom":
             if audio is None:
                 return "Please provide audio input"
             if not custom_prompt or not custom_prompt.strip():
@@ -57,56 +57,53 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
             # Use custom prompt with user_prompt parameter
             result = pipe(audio, user_prompt=f"{custom_prompt.strip()}: <audio>")
             return result["text"]
-        else:
-            if audio is None:
-                return "Please provide audio input"
-            # Pass the task parameter to the pipeline
-            result = pipe(audio, task=task)
-            return result["text"]
+        if audio is None:
+            return "Please provide audio input"
+        # Pass the task parameter to the pipeline
+        result = pipe(audio, task=task)
+        return result["text"]
 
     def update_inputs(task):
         """Update input visibility based on selected task."""
         if task == "text":
             # Show text input, hide audio and custom prompt
             return gr.update(visible=False), gr.update(visible=True), gr.update(visible=False)
-        elif task == "custom":
+        if task == "custom":
             # Show audio and custom prompt, hide text input
             return gr.update(visible=True), gr.update(visible=False), gr.update(visible=True)
-        else:
-            # Show audio, hide text input and custom prompt
-            return gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)
+        # Show audio, hide text input and custom prompt
+        return gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)
 
     # Create Gradio interface with task selection
     with gr.Blocks(title="Tiny Audio") as demo:
         gr.Markdown("# Tiny Audio")
 
-        with gr.Row():
-            with gr.Column():
-                task_selector = gr.Dropdown(
-                    choices=["transcribe", "describe", "emotion", "custom", "text"],
-                    value="transcribe",
-                    label="Task",
-                    info="Select the task to perform"
-                )
-                custom_prompt = gr.Textbox(
-                    label="Custom Prompt",
-                    placeholder="Enter your custom prompt (e.g., 'Classify', 'Summarize', 'Translate to Spanish')...",
-                    lines=2,
-                    visible=False
-                )
+        with gr.Row(), gr.Column():
+            task_selector = gr.Dropdown(
+                choices=["transcribe", "describe", "emotion", "custom", "text"],
+                value="transcribe",
+                label="Task",
+                info="Select the task to perform",
+            )
+            custom_prompt = gr.Textbox(
+                label="Custom Prompt",
+                placeholder="Enter your custom prompt (e.g., 'Classify', 'Summarize', 'Translate to Spanish')...",
+                lines=2,
+                visible=False,
+            )
 
         with gr.Row():
             audio_input = gr.Audio(
                 sources=["microphone", "upload"],
                 type="filepath",
                 label="Audio Input (Record from microphone or upload file)",
-                visible=True
+                visible=True,
             )
             text_input = gr.Textbox(
                 label="Text Input (for text task)",
                 placeholder="Enter text to process...",
                 lines=3,
-                visible=False
+                visible=False,
             )
 
         output_text = gr.Textbox(label="Output")
@@ -116,17 +113,16 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
         task_selector.change(
             fn=update_inputs,
             inputs=[task_selector],
-            outputs=[audio_input, text_input, custom_prompt]
+            outputs=[audio_input, text_input, custom_prompt],
         )
 
         process_btn.click(
             fn=process_audio,
             inputs=[audio_input, task_selector, text_input, custom_prompt],
-            outputs=output_text
+            outputs=output_text,
         )
 
     return demo
-
 
 
 if __name__ == "__main__":

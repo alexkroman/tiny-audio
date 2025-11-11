@@ -87,13 +87,11 @@ class DatasetLoader:
         if "task" not in new_features:
             new_features["task"] = Value("string")
 
-        ds = IterableDataset.from_generator(
+        return IterableDataset.from_generator(
             add_task_generator,
             features=new_features,
             gen_kwargs={"dataset": ds, "task_value": task},
         )
-
-        return ds
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -180,8 +178,7 @@ class DataCollator(DataCollatorForSeq2Seq):
         # Remove <inaudible> tags
         text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
         # Remove disfluencies (uh, um)
-        text = re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
-        return text
+        return re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
 
     def _normalize_text(self, text: str) -> str:
         """Apply Whisper normalization (matches eval script)."""
@@ -261,7 +258,6 @@ class DataCollator(DataCollatorForSeq2Seq):
 
             # Get special token IDs
             im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
-            think_start_id = self.tokenizer.convert_tokens_to_ids("<think>")
             think_end_id = self.tokenizer.convert_tokens_to_ids("</think>")
 
             # Find where </think> ends (if present) - the actual transcription starts after it
@@ -424,25 +420,31 @@ def main(cfg: DictConfig) -> None:
         print("✓ Loaded pretrained model (projector + LoRA weights if present)")
 
         # Apply fresh LoRA if needed (when loading base model without LoRA)
-        if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
-            if not any("lora" in n.lower() for n, _ in model.encoder.named_parameters()):
-                from peft import TaskType
+        if (
+            encoder_lora_config
+            and encoder_lora_config.get("r", 0) > 0
+            and not any("lora" in n.lower() for n, _ in model.encoder.named_parameters())
+        ):
+            from peft import TaskType
 
-                print("⚠️  Applying fresh encoder LoRA adapters...")
-                model.encoder = model._apply_lora(
-                    model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
-                )
-                model.encoder_lora_config = encoder_lora_config
+            print("⚠️  Applying fresh encoder LoRA adapters...")
+            model.encoder = model._apply_lora(
+                model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
+            )
+            model.encoder_lora_config = encoder_lora_config
 
-        if peft_config and peft_config.get("peft_method") == "lora":
-            if not any("lora" in n.lower() for n, _ in model.decoder.named_parameters()):
-                from peft import TaskType
+        if (
+            peft_config
+            and peft_config.get("peft_method") == "lora"
+            and not any("lora" in n.lower() for n, _ in model.decoder.named_parameters())
+        ):
+            from peft import TaskType
 
-                print("⚠️  Applying fresh decoder LoRA adapters...")
-                model.decoder = model._apply_lora(
-                    model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder"
-                )
-                model.peft_config = peft_config
+            print("⚠️  Applying fresh decoder LoRA adapters...")
+            model.decoder = model._apply_lora(
+                model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder"
+            )
+            model.peft_config = peft_config
     else:
         model = ASRModel(
             asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config

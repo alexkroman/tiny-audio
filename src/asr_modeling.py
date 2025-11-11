@@ -374,8 +374,7 @@ class ASRModel(PreTrainedModel):
             init_lora_weights=True,
         )
 
-        model = get_peft_model(model, peft_config)
-        return model
+        return get_peft_model(model, peft_config)
 
     @classmethod
     def _create_encoder(cls, config: ASRConfig, encoder_lora_config: Optional[dict] = None):
@@ -569,10 +568,12 @@ class ASRModel(PreTrainedModel):
 
         # Set pad_token if not already set to avoid warnings during generation
         # If pad_token is same as eos_token, we need a different token for padding
-        if self.tokenizer.pad_token is None or self.tokenizer.pad_token_id == self.tokenizer.eos_token_id:
+        if (
+            self.tokenizer.pad_token is None
+            or self.tokenizer.pad_token_id == self.tokenizer.eos_token_id
+        ) and "<|finetune_right_pad_id|>" in self.tokenizer.get_vocab():
             # For SmolLM3, use the dedicated finetune_right_pad_id token
-            if "<|finetune_right_pad_id|>" in self.tokenizer.get_vocab():
-                self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
+            self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
 
         existing_special = self.tokenizer.additional_special_tokens or []
 
@@ -735,8 +736,7 @@ class ASRModel(PreTrainedModel):
 
             # Remove any decoder-specific kwargs that shouldn't go to the encoder
             kwargs.pop("past_key_values", None)
-
-            use_cache = kwargs.pop("use_cache", None)
+            kwargs.pop("use_cache", None)
 
             audio_embeds = self._encode_audio(
                 input_values=audio_inputs,  # Will be mapped to input_features for Whisper by safe_encoder_forward
