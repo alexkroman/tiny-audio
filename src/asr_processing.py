@@ -21,7 +21,21 @@ class ASRProcessor(ProcessorMixin):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
         config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
-        feature_extractor = AutoFeatureExtractor.from_pretrained(config.audio_model_id)
+
+        # For Whisper models, ensure we load the feature extractor with correct mel bins
+        is_whisper = "whisper" in config.audio_model_id.lower()
+        if is_whisper:
+            from transformers import WhisperConfig, WhisperFeatureExtractor
+
+            encoder_config = WhisperConfig.from_pretrained(config.audio_model_id)
+            num_mel_bins = encoder_config.num_mel_bins
+            feature_extractor = WhisperFeatureExtractor.from_pretrained(
+                config.audio_model_id,
+                feature_size=num_mel_bins,  # Override to match encoder's mel bins (128 for V3 Turbo)
+            )
+        else:
+            feature_extractor = AutoFeatureExtractor.from_pretrained(config.audio_model_id)
+
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=True, **kwargs
         )

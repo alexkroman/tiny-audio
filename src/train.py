@@ -21,6 +21,7 @@ from transformers import (
     DataCollatorForSeq2Seq,
     EarlyStoppingCallback,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
     WhisperTokenizer,
 )
@@ -328,6 +329,31 @@ class DataCollator(DataCollatorForSeq2Seq):
         return batch
 
 
+class PushToHubCallback(TrainerCallback):
+    """Custom callback to push model to hub root directory on every save."""
+
+    def on_save(self, args, state, control, **kwargs):
+        """Called after a checkpoint is saved."""
+        if args.push_to_hub and args.hub_model_id:
+            # Get the model from kwargs
+            model = kwargs.get("model")
+            if model is not None:
+                print(f"\n📤 Pushing checkpoint (step {state.global_step}) to Hub root...")
+                try:
+                    # model.push_to_hub() will call model.save_pretrained() internally
+                    # which triggers your custom save logic (encoder, decoder, projector split)
+                    commit_message = f"Training in progress - step {state.global_step}"
+                    model.push_to_hub(
+                        repo_id=args.hub_model_id,
+                        commit_message=commit_message,
+                        private=args.hub_private_repo,
+                    )
+                    print(f"✅ Successfully pushed to {args.hub_model_id}")
+                except Exception as e:
+                    print(f"⚠️  Failed to push to hub: {e}")
+        return control
+
+
 @hydra.main(version_base=None, config_path="../configs/hydra", config_name="config")
 def main(cfg: DictConfig) -> None:
     # Use HuggingFace's logging utilities
@@ -448,6 +474,10 @@ def main(cfg: DictConfig) -> None:
             )
         )
 
+    # Add custom push to hub callback if configured
+    if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
+        callbacks.append(PushToHubCallback())
+
     # processor = model.get_processor()
 
     # Convert config to dict and remove non-TrainingArguments fields
@@ -468,6 +498,11 @@ def main(cfg: DictConfig) -> None:
 
     trainer.train()
     trainer.save_model()
+
+    # Push final model to hub if configured
+    if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
+        print(f"Pushing final model to Hub: {cfg.training.hub_model_id}")
+        trainer.push_to_hub(commit_message="Training complete - final model")
 
 
 if __name__ == "__main__":

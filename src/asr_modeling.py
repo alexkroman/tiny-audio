@@ -131,9 +131,14 @@ class ASRModel(PreTrainedModel):
         is_whisper = "whisper" in config.audio_model_id.lower()
         if is_whisper:
             # Load feature extractor directly from audio model to get correct mel bins
-            # Don't rely on config.audio_config which might have wrong value
+            # Must override feature_size to match the encoder's num_mel_bins
+            from transformers import WhisperConfig
+
+            encoder_config = WhisperConfig.from_pretrained(config.audio_model_id)
+            num_mel_bins = encoder_config.num_mel_bins
             kwargs["feature_extractor"] = WhisperFeatureExtractor.from_pretrained(
-                config.audio_model_id
+                config.audio_model_id,
+                feature_size=num_mel_bins,  # Override to match encoder's mel bins (128 for V3 Turbo)
             )
         else:
             kwargs["feature_extractor"] = Wav2Vec2FeatureExtractor.from_pretrained(
