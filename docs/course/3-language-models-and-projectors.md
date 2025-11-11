@@ -18,12 +18,11 @@ By the end of this class, you will:
 
 - See how audio embeddings become text embeddings
 
----
+______________________________________________________________________
 
 # PART A: LECTURE (20 minutes)
 
 ## 1. Language Models Basics (5 min)
-
 
 ### What is a Language Model?
 
@@ -31,15 +30,12 @@ A language model predicts the next word (token) given previous words.
 
 **Example:**
 
-
-
 ```
 Input:  "The quick brown"
 Output: "fox" (predicted next word)
 
 
 ```
-
 
 ### How They Work
 
@@ -53,8 +49,6 @@ Output: "fox" (predicted next word)
 
 **Inference**: Generate text token by token
 
-
-
 ```
 Start: "Hello"
 Step 1: "Hello, how"
@@ -64,7 +58,6 @@ Step 4: "Hello, how are you?" [STOP]
 
 
 ```
-
 
 ### Qwen-3 8B Architecture
 
@@ -82,12 +75,9 @@ Qwen-3 8B is our decoder - a powerful language model that generates the transcri
 
 - Multilingual capabilities
 
-
 ### Decoder-Only Architecture
 
 Qwen-3 8B is "decoder-only" (like GPT):
-
-
 
 ```
 Input tokens → Embeddings → Transformer Layers → Next token prediction
@@ -121,10 +111,9 @@ For our project, a **decoder-only model is the perfect choice** because:
 
 By choosing a decoder-only model, we are building on a solid, well-understood foundation.
 
----
+______________________________________________________________________
 
 ## 2. The Modality Gap Problem (5 min)
-
 
 ### The Challenge
 
@@ -144,22 +133,20 @@ We have two different "languages":
 
 **Analogy**: Like trying to plug a European power plug into an American outlet - same purpose, different format!
 
-
 ### The Solution: AudioProjector
 
 A trainable neural network that:
 
 1. **Transforms dimensions**: 1280D → 2048D
-2. **Aligns distributions**: Audio stats → Text stats
-3. **Downsamples time**: 5x reduction for efficiency
-4. **Bridges modalities**: Audio space → Language space
+1. **Aligns distributions**: Audio stats → Text stats
+1. **Downsamples time**: 5x reduction for efficiency
+1. **Bridges modalities**: Audio space → Language space
 
 **Key insight**: This is the ONLY fully trainable component (~122M params)!
 
----
+______________________________________________________________________
 
 ## 3. SwiGLU Architecture Deep Dive (10 min)
-
 
 ### What is SwiGLU?
 
@@ -167,9 +154,7 @@ A trainable neural network that:
 
 Used in modern architectures (Llama, PaLM, etc.) for better performance than simple MLPs.
 
-
 ### Architecture Breakdown
-
 
 ```python
 # Pseudocode for AudioProjector
@@ -198,7 +183,6 @@ def forward(audio_features):
 
 
 ```
-
 
 ### Why Each Component Matters
 
@@ -242,8 +226,7 @@ def forward(audio_features):
 
 - **Why?** LLM was trained on specific input stats
 
-
----
+______________________________________________________________________
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
@@ -259,25 +242,21 @@ In the next 40 minutes, you will:
 
 By the end, you'll understand how audio becomes language and how to optimize this bridge!
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 1: Test Projector Configurations (10 min)
-
 
 ### Goal
 
 Understand how projector parameters affect the model.
 
-
 ### Your Task
 
 Experiment with different projector configurations.
 
-
 ### Instructions
 
 **Step 1: Create `test_projector_config.py`**
-
 
 ```python
 from types import SimpleNamespace
@@ -373,7 +352,6 @@ print("  ✓ ~100ms per frame (good temporal resolution)")
 
 **Step 2: Run the script**
 
-
 ```bash
 poetry run python test_projector_config.py
 
@@ -381,8 +359,6 @@ poetry run python test_projector_config.py
 ```
 
 **Expected output:**
-
-
 
 ```
 ================================================================================
@@ -411,7 +387,6 @@ Tiny Audio's choice (5x, 8192 hidden):
 
 ```
 
-
 ### Success Checkpoint
 
 - [ ] Script ran successfully
@@ -420,26 +395,21 @@ Tiny Audio's choice (5x, 8192 hidden):
 
 - [ ] Understand tradeoff between params, speed, and quality
 
-
----
+______________________________________________________________________
 
 ## Workshop Exercise 2: Compare Decoder Models (30 min)
-
 
 ### Goal
 
 Understand how decoder choice affects ASR system design.
 
-
 ### Your Task
 
 Compare different language models as potential decoders.
 
-
 ### Instructions
 
 **Create `compare_decoders.py`:**
-
 
 ```python
 # Compare different decoder models
@@ -541,7 +511,7 @@ for decoder in decoders[:3]:  # Top 3 models
 
 - What's the speed/accuracy tradeoff?
 
----
+______________________________________________________________________
 
 # CLASS SUMMARY
 
@@ -563,10 +533,9 @@ for decoder in decoders[:3]:  # Top 3 models
 
 - Analyzed decoder model tradeoffs
 
----
+______________________________________________________________________
 
 ## Further Reading (Optional)
-
 
 ### Papers
 
@@ -575,7 +544,6 @@ for decoder in decoders[:3]:  # Top 3 models
 - [RMSNorm](https://arxiv.org/abs/1910.07467)
 
 - [Qwen Technical Report](https://arxiv.org/abs/2309.16609)
-
 
 ### Code
 

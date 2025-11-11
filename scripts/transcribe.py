@@ -2,7 +2,9 @@
 """Transcribe an audio file using the tiny-audio model."""
 
 import argparse
+
 import torch
+
 from src.asr_modeling import ASRModel
 from src.asr_pipeline import ASRPipeline
 

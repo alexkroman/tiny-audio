@@ -2,28 +2,32 @@
 
 import logging
 import re
-import nltk
 from typing import Any, Dict, List
 
 import hydra
-import numpy as np
+import nltk
 import torch
 import truecase
-import wandb
-from datasets import Audio, Dataset, Features, IterableDataset, interleave_datasets, load_dataset, Value
+from datasets import (
+    Audio,
+    Dataset,
+    IterableDataset,
+    Value,
+    interleave_datasets,
+    load_dataset,
+)
 from omegaconf import DictConfig, OmegaConf
 from transformers import (
     DataCollatorForSeq2Seq,
     EarlyStoppingCallback,
     Trainer,
-    TrainerCallback,
     TrainingArguments,
     WhisperTokenizer,
 )
 
+import wandb
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
-
 
 
 class DatasetLoader:
@@ -117,8 +121,8 @@ class DatasetLoader:
         # Use sampling weights if provided and we have multiple datasets
         if len(train_datasets) > 1:
             # Normalize weights
-            total_weight = sum(train_weights[:len(train_datasets)])
-            probabilities = [w / total_weight for w in train_weights[:len(train_datasets)]]
+            total_weight = sum(train_weights[: len(train_datasets)])
+            probabilities = [w / total_weight for w in train_weights[: len(train_datasets)]]
             train_ds = interleave_datasets(train_datasets, probabilities=probabilities)
         else:
             train_ds = train_datasets[0]
@@ -156,14 +160,15 @@ class DataCollator(DataCollatorForSeq2Seq):
         # Import instruction templates if needed
         if self.use_instruction_templates:
             from instruction_templates import get_random_instruction
+
             self.get_random_instruction = get_random_instruction
 
         # Check if this is a Whisper feature extractor
-        self.is_whisper = feature_extractor.__class__.__name__ == 'WhisperFeatureExtractor'
+        self.is_whisper = feature_extractor.__class__.__name__ == "WhisperFeatureExtractor"
 
         # Use tokenizer's normalize method if available, otherwise use WhisperTokenizer for normalization
         # The Whisper normalizer is a standard text preprocessing utility
-        if hasattr(tokenizer, 'normalize'):
+        if hasattr(tokenizer, "normalize"):
             self.text_normalizer = tokenizer
         else:
             # Fallback to whisper-tiny tokenizer for its normalize() method only
@@ -203,7 +208,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             sampling_rate=self.sample_rate,
             padding=padding_strategy,
             return_tensors="pt",
-            return_attention_mask=True  # Required for both Whisper and Wav2Vec2
+            return_attention_mask=True,  # Required for both Whisper and Wav2Vec2
         )
 
         text_features = []
@@ -327,6 +332,7 @@ class DataCollator(DataCollatorForSeq2Seq):
 def main(cfg: DictConfig) -> None:
     # Use HuggingFace's logging utilities
     from transformers import logging as transformers_logging
+
     transformers_logging.set_verbosity_error()  # Reduces transformer trainer logs
 
     # Suppress HTTP and dataset loading logs
@@ -395,6 +401,7 @@ def main(cfg: DictConfig) -> None:
         if encoder_lora_config and encoder_lora_config.get("r", 0) > 0:
             if not any("lora" in n.lower() for n, _ in model.encoder.named_parameters()):
                 from peft import TaskType
+
                 print("⚠️  Applying fresh encoder LoRA adapters...")
                 model.encoder = model._apply_lora(
                     model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
@@ -404,6 +411,7 @@ def main(cfg: DictConfig) -> None:
         if peft_config and peft_config.get("peft_method") == "lora":
             if not any("lora" in n.lower() for n, _ in model.decoder.named_parameters()):
                 from peft import TaskType
+
                 print("⚠️  Applying fresh decoder LoRA adapters...")
                 model.decoder = model._apply_lora(
                     model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder"

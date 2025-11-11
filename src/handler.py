@@ -85,7 +85,9 @@ class EndpointHandler:
             # The pipeline now handles GPU optimization internally
             with torch.inference_mode():
                 warmup_tokens = self.pipe.model.config.inference_warmup_tokens
-                _ = self.pipe({"raw": dummy_audio, "sampling_rate": sample_rate}, max_new_tokens=warmup_tokens)
+                _ = self.pipe(
+                    {"raw": dummy_audio, "sampling_rate": sample_rate}, max_new_tokens=warmup_tokens
+                )
 
             # Force CUDA synchronization to ensure kernels are compiled
             if torch.cuda.is_available():

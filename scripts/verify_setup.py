@@ -21,9 +21,8 @@ def check_python_version():
     if version.major == 3 and version.minor >= 10:
         print(f"   ✓ Python {version.major}.{version.minor}.{version.micro}")
         return True
-    else:
-        print(f"   ❌ Python {version.major}.{version.minor}.{version.micro} (need 3.10+)")
-        return False
+    print(f"   ❌ Python {version.major}.{version.minor}.{version.micro} (need 3.10+)")
+    return False
 
 
 def check_packages():
@@ -59,10 +58,10 @@ def check_audio_samples():
     samples_dir = Path("samples/LibriSpeech/test-clean")
 
     if test_wav.exists():
-        print(f"   ✓ test.wav exists")
+        print("   ✓ test.wav exists")
         has_test = True
     else:
-        print(f"   ⚠️  test.wav not found (run: poetry run download-samples)")
+        print("   ⚠️  test.wav not found (run: poetry run download-samples)")
         has_test = False
 
     if samples_dir.exists():
@@ -87,10 +86,8 @@ def check_model_loading():
     try:
         from transformers import AutoConfig
 
-        config = AutoConfig.from_pretrained(
-            "mazesmazes/tiny-audio", trust_remote_code=True
-        )
-        print(f"   ✓ Model config loaded successfully")
+        config = AutoConfig.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
+        print("   ✓ Model config loaded successfully")
         print(f"      Audio encoder: {config.audio_model_id}")
         print(f"      Language model: {config.text_model_id}")
         return True
@@ -135,14 +132,13 @@ def main():
         print("   2. Start: docs/course/1-introduction-and-setup.md")
         print("   3. Run: poetry run python test_inference.py")
         return 0
-    else:
-        print("⚠️  Some checks failed. Please fix the issues above.")
-        print("\n💡 Common fixes:")
-        if not results["Required Packages"]:
-            print("   - Run: poetry install")
-        if not results["Sample Audio Files"]:
-            print("   - Run: poetry run download-samples")
-        return 1
+    print("⚠️  Some checks failed. Please fix the issues above.")
+    print("\n💡 Common fixes:")
+    if not results["Required Packages"]:
+        print("   - Run: poetry install")
+    if not results["Sample Audio Files"]:
+        print("   - Run: poetry run download-samples")
+    return 1
 
 
 if __name__ == "__main__":

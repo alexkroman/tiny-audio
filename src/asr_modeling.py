@@ -1,14 +1,11 @@
 from pathlib import Path
-from typing import Optional, Union, Tuple, Dict, Any
-import warnings
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
-import numpy as np
 from transformers import (
     AutoConfig,
-    AutoFeatureExtractor,
     AutoModel,
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -16,6 +13,7 @@ from transformers import (
     Wav2Vec2FeatureExtractor,
     WhisperFeatureExtractor,
 )
+from transformers.activations import ACT2FN
 from transformers.generation.utils import (
     GenerateBeamDecoderOnlyOutput,
     GenerateBeamEncoderDecoderOutput,
@@ -23,7 +21,6 @@ from transformers.generation.utils import (
     GenerateEncoderDecoderOutput,
 )
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
-from transformers.activations import ACT2FN
 
 try:
     from .asr_config import ASRConfig
@@ -37,6 +34,7 @@ class AudioProjector(nn.Module):
     This follows the exact pattern of LlamaMLP but allows for dimension changes
     (input_dim != output_dim), which LlamaMLP doesn't support.
     """
+
     def __init__(self, config):
         super().__init__()
         self.k = config.encoder_projector_ds_rate
@@ -57,7 +55,7 @@ class AudioProjector(nn.Module):
         self.act_fn = ACT2FN["silu"]
 
         # Dropout for regularization (configurable, defaults to 0.05)
-        dropout_rate = getattr(config, 'projector_dropout', 0.05)
+        dropout_rate = getattr(config, "projector_dropout", 0.05)
         self.dropout = nn.Dropout(dropout_rate)
 
         # Post-norm: normalize output to match LLM's expected embedding distribution
@@ -65,7 +63,7 @@ class AudioProjector(nn.Module):
 
         # Initialize weights with small std to avoid exploding gradients
         # std value is configurable via config.projector_init_std
-        init_std = getattr(config, 'projector_init_std', 0.02)
+        init_std = getattr(config, "projector_init_std", 0.02)
         with torch.no_grad():
             nn.init.normal_(self.gate_proj.weight, std=init_std)
             nn.init.normal_(self.up_proj.weight, std=init_std)
@@ -163,7 +161,6 @@ class ASRModel(PreTrainedModel):
                     filename: Name of file to load
                     load_fn: Function to apply to loaded path (default: load_file for safetensors)
                 """
-                from pathlib import Path as PathlibPath
 
                 if load_fn is None:
                     load_fn = load_file
@@ -185,6 +182,7 @@ class ASRModel(PreTrainedModel):
             # Load LoRA configs (JSON files)
             def load_json(path):
                 from pathlib import Path as PathlibPath
+
                 with PathlibPath(path).open() as f:
                     return json.load(f)
 
@@ -261,7 +259,10 @@ class ASRModel(PreTrainedModel):
         self.encoder = self._create_encoder(config, encoder_lora_config)
 
         # Determine if this is a Whisper model
-        is_whisper = "whisper" in config.audio_model_id.lower() or (hasattr(self.encoder.config, "model_type") and "whisper" in self.encoder.config.model_type.lower())
+        is_whisper = "whisper" in config.audio_model_id.lower() or (
+            hasattr(self.encoder.config, "model_type")
+            and "whisper" in self.encoder.config.model_type.lower()
+        )
 
         # Set main_input_name based on encoder type
         # Whisper uses "input_features", others use "input_values"
@@ -282,10 +283,12 @@ class ASRModel(PreTrainedModel):
                 num_mel_bins = self.encoder.config.num_mel_bins
                 self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
                     config.audio_model_id,
-                    feature_size=num_mel_bins  # Override feature_size to match model's mel bins
+                    feature_size=num_mel_bins,  # Override feature_size to match model's mel bins
                 )
             else:
-                self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(config.audio_model_id)
+                self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
+                    config.audio_model_id
+                )
 
         # Create decoder first (needed for tokenizer init)
         self.decoder = self._create_decoder(config, peft_config)
@@ -326,7 +329,9 @@ class ASRModel(PreTrainedModel):
         self._no_split_modules = self.decoder._no_split_modules
 
     @staticmethod
-    def _apply_lora(model, lora_config: dict, task_type, model_name: str = "model", default_dropout: float = 0.0):
+    def _apply_lora(
+        model, lora_config: dict, task_type, model_name: str = "model", default_dropout: float = 0.0
+    ):
         """Apply LoRA adapters to a model (encoder or decoder).
 
         Args:
@@ -393,6 +398,7 @@ class ASRModel(PreTrainedModel):
         # Check if this is a Whisper model and load only the encoder part
         if "whisper" in config.audio_model_id.lower():
             from transformers import WhisperModel
+
             full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
             encoder = full_model.encoder
             # Clean up the full model to save memory
@@ -402,16 +408,21 @@ class ASRModel(PreTrainedModel):
 
         # Enable SpecAugment for both Whisper and Wav2Vec2 models during training
         # Both models apply augmentation automatically in train() mode via their forward pass
-        is_whisper = "whisper" in config.audio_model_id.lower() or (hasattr(encoder.config, "model_type") and "whisper" in encoder.config.model_type.lower())
-        is_wav2vec2 = hasattr(encoder.config, "model_type") and "wav2vec2" in encoder.config.model_type.lower()
+        is_whisper = "whisper" in config.audio_model_id.lower() or (
+            hasattr(encoder.config, "model_type") and "whisper" in encoder.config.model_type.lower()
+        )
+        is_wav2vec2 = (
+            hasattr(encoder.config, "model_type")
+            and "wav2vec2" in encoder.config.model_type.lower()
+        )
 
         # Configure SpecAugment for both Whisper and Wav2Vec2
         if is_whisper or is_wav2vec2:
             encoder.config.apply_spec_augment = True
-            encoder.config.mask_time_prob = getattr(config, 'mask_time_prob', 0.05)
-            encoder.config.mask_time_length = getattr(config, 'mask_time_length', 10)
-            encoder.config.mask_feature_prob = getattr(config, 'mask_feature_prob', 0.0)
-            encoder.config.mask_feature_length = getattr(config, 'mask_feature_length', 10)
+            encoder.config.mask_time_prob = getattr(config, "mask_time_prob", 0.05)
+            encoder.config.mask_time_length = getattr(config, "mask_time_length", 10)
+            encoder.config.mask_feature_prob = getattr(config, "mask_feature_prob", 0.0)
+            encoder.config.mask_feature_length = getattr(config, "mask_feature_length", 10)
 
         encoder.requires_grad_(False)
 
@@ -429,7 +440,10 @@ class ASRModel(PreTrainedModel):
         ):
             # Check if this is a Whisper model (expects input_features instead of input_values)
             # Note: config.audio_model_id is not accessible here, so we check the encoder config
-            is_whisper_encoder = hasattr(self_encoder.config, "model_type") and "whisper" in self_encoder.config.model_type.lower()
+            is_whisper_encoder = (
+                hasattr(self_encoder.config, "model_type")
+                and "whisper" in self_encoder.config.model_type.lower()
+            )
             if is_whisper_encoder:
                 return original_forward(
                     input_features=input_values,  # Map input_values to input_features for Whisper
@@ -438,16 +452,16 @@ class ASRModel(PreTrainedModel):
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
-            else:
-                return original_forward(
-                    input_values=input_values,
-                    attention_mask=attention_mask,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                )
+            return original_forward(
+                input_values=input_values,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
 
         import types
+
         encoder.forward = types.MethodType(safe_encoder_forward, encoder)
 
         # Apply LoRA to encoder if configured (after wrapping base forward)
@@ -459,7 +473,7 @@ class ASRModel(PreTrainedModel):
                 encoder_lora_config,
                 TaskType.FEATURE_EXTRACTION,
                 "encoder",
-                default_dropout=config.lora_default_dropout
+                default_dropout=config.lora_default_dropout,
             )
 
             # Re-apply the safe_encoder_forward wrapper after PEFT wrapping
@@ -507,7 +521,7 @@ class ASRModel(PreTrainedModel):
                 peft_config,
                 TaskType.CAUSAL_LM,
                 "decoder",
-                default_dropout=config.lora_default_dropout
+                default_dropout=config.lora_default_dropout,
             )
 
         return decoder
@@ -609,14 +623,18 @@ class ASRModel(PreTrainedModel):
 
         # Get encoder trainable params (LoRA adapters)
         encoder_state = self.encoder.state_dict()
-        encoder_trainable = {name for name, param in self.encoder.named_parameters() if param.requires_grad}
+        encoder_trainable = {
+            name for name, param in self.encoder.named_parameters() if param.requires_grad
+        }
         for name, tensor in encoder_state.items():
             if name in encoder_trainable:
                 state[f"encoder.{name}"] = tensor
 
         # Get decoder trainable params (LoRA adapters)
         decoder_state = self.decoder.state_dict()
-        decoder_trainable = {name for name, param in self.decoder.named_parameters() if param.requires_grad}
+        decoder_trainable = {
+            name for name, param in self.decoder.named_parameters() if param.requires_grad
+        }
         for name, tensor in decoder_state.items():
             if name in decoder_trainable:
                 state[f"decoder.{name}"] = tensor
@@ -863,9 +881,7 @@ class ASRModel(PreTrainedModel):
         # Handle text-only mode (no audio)
         if task == "text" or text_input is not None:
             return self._generate_text_only(
-                text_input=text_input or user_prompt,
-                system_prompt=system_prompt,
-                **generate_kwargs
+                text_input=text_input or user_prompt, system_prompt=system_prompt, **generate_kwargs
             )
 
         # Handle both input_values (Wav2Vec2/HuBERT) and input_features (Whisper)
@@ -890,7 +906,9 @@ class ASRModel(PreTrainedModel):
                 user_prompt = "Emotion: <audio>"
             else:
                 # Default to transcribe
-                user_prompt = self.config.user_prompt if self.config.user_prompt else "Transcribe: <audio>"
+                user_prompt = (
+                    self.config.user_prompt if self.config.user_prompt else "Transcribe: <audio>"
+                )
 
         messages = []
         if system_prompt:
@@ -1042,7 +1060,7 @@ class ASRModel(PreTrainedModel):
             num_mel_bins = self.encoder.config.num_mel_bins
             self.feature_extractor.feature_size = num_mel_bins
             self.feature_extractor.num_mel_bins = num_mel_bins  # Explicitly set num_mel_bins
-            if hasattr(self.feature_extractor, 'n_mels'):
+            if hasattr(self.feature_extractor, "n_mels"):
                 self.feature_extractor.n_mels = num_mel_bins
             self.feature_extractor.nb_max_frames = 3000  # Whisper's max frames
         self.feature_extractor.save_pretrained(save_dir)

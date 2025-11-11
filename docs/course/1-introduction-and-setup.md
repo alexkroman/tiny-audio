@@ -16,12 +16,11 @@ By the end of this class, you will:
 
 - Successfully run inference on an audio file
 
----
+______________________________________________________________________
 
 # PART A: LECTURE (20 minutes)
 
 ## 1. What is Automatic Speech Recognition? (5 min)
-
 
 ### The Problem
 
@@ -39,16 +38,14 @@ Humans communicate primarily through speech, but computers understand text. ASR 
 
 - Medical dictation systems
 
-
 ### The Challenge
 
 Speech recognition is hard because:
 
 1. **Audio variability**: Different accents, speaking speeds, background noise
-2. **Ambiguity**: "I scream" vs "ice cream" sound identical
-3. **Context dependency**: Understanding requires linguistic knowledge
-4. **Real-time constraints**: Users expect instant responses
-
+1. **Ambiguity**: "I scream" vs "ice cream" sound identical
+1. **Context dependency**: Understanding requires linguistic knowledge
+1. **Real-time constraints**: Users expect instant responses
 
 ### How Modern ASR Works
 
@@ -69,19 +66,23 @@ Modern ASR systems have evolved through several generations:
 **3rd Generation (2010s-2020s)**: Deep Learning Era
 
 - **RNNs and LSTMs** (2012-2015): Sequential processing of audio
+
   - Recurrent Neural Networks and Long Short-Term Memory networks
   - Better at capturing temporal dependencies than HMMs
 
 - **Attention Mechanisms** (2014-2017): Model learns what to focus on
+
   - Attention Is All You Need (2017) introduces the Transformer architecture
   - Enables parallelization and better long-range dependencies
 
 - **RNN-Transducer (RNN-T)** (2012-2019): Streaming ASR
+
   - Combines RNNs with CTC-like alignment
   - Enables real-time, low-latency transcription
   - Used in production systems (Google Assistant, etc.)
 
 - **Transformers** (2017-2020): Replaced RNNs as the dominant architecture
+
   - Self-attention for better context modeling
   - Parallelizable training (much faster than RNNs)
   - Foundation for modern ASR
@@ -96,16 +97,13 @@ Modern ASR systems have evolved through several generations:
 
 - **This is what Tiny Audio uses!**
 
----
+______________________________________________________________________
 
 ## 2. The Tiny Audio Architecture (10 min)
-
 
 ### High-Level Overview
 
 Tiny Audio uses a three-component architecture:
-
-
 
 ```
 Audio File → Audio Encoder → Audio Projector → Language Model → Text
@@ -126,7 +124,6 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 Let's understand each component:
 
-
 ### Component 1: Audio Encoder (HuBERT-XLarge)
 
 **Purpose**: Convert raw audio waveforms into meaningful feature representations
@@ -144,7 +141,6 @@ Let's understand each component:
 **Analogy**: An expert musician who can listen to any piece of music and instantly transcribe the notes, rhythm, and instrumentation, without ever seeing the sheet music.
 
 **Size**: 1.3 billion parameters (frozen during our training)
-
 
 ### Component 2: Audio Projector (~138M parameters)
 
@@ -170,7 +166,6 @@ Let's understand each component:
 
 **Analogy**: A skilled diplomat who can fluently translate between two very different cultures, ensuring the meaning and nuance are preserved.
 
-
 ### Component 3: Language Model Decoder (Qwen-3 8B)
 
 **Purpose**: Generate a coherent and grammatically correct text transcription.
@@ -188,7 +183,6 @@ Let's understand each component:
 **Size**: 8 billion parameters (we use LoRA to adapt efficiently)
 
 **Analogy**: A master storyteller who can take a sequence of events (the audio features) and weave them into a compelling narrative (the final transcription).
-
 
 ### Why This Architecture?
 
@@ -218,31 +212,30 @@ Recent research has shown that **instruct-tuned models** perform significantly b
 
 By starting with a solid, well-understood architecture, we can focus on the nuances of audio processing, data, and training, which is where we'll see the biggest improvements.
 
-
 ### Rules of Engagement
 
 A disciplined, empirical approach to model training is crucial. As we go through this course, we'll follow a few key "rules of engagement":
 
-1.  **Systematic Beats Intuitive**: Don't just guess what will work. We'll use systematic experiments (ablations) to validate our choices.
-2.  **Change One Thing at a Time**: When we run experiments, we'll only change one variable at a time. This is the only way to know for sure what's responsible for any improvements (or regressions!).
-3.  **Validate Every Change**: Every modification, no matter how small, should be tested. We'll rely on evaluation metrics, not just gut feelings, to guide our decisions.
+1. **Systematic Beats Intuitive**: Don't just guess what will work. We'll use systematic experiments (ablations) to validate our choices.
+1. **Change One Thing at a Time**: When we run experiments, we'll only change one variable at a time. This is the only way to know for sure what's responsible for any improvements (or regressions!).
+1. **Validate Every Change**: Every modification, no matter how small, should be tested. We'll rely on evaluation metrics, not just gut feelings, to guide our decisions.
 
 Adopting this mindset will not only lead to a better final model but will also teach you the disciplined process that professionals use to build world-class models.
 
----
+______________________________________________________________________
 
 ## 3. Course Goals (5 min)
 
 By the end of this 6-class course, each student will:
 
 1. **Train** their own customized ASR model
-2. **Evaluate** it on standard benchmarks
-3. **Push** it to their own HuggingFace account
-4. **Add** their results to the community leaderboard
+1. **Evaluate** it on standard benchmarks
+1. **Push** it to their own HuggingFace account
+1. **Add** their results to the community leaderboard
 
 This isn't just learning - you'll have a real, working, deployed model with your name on it!
 
----
+______________________________________________________________________
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
@@ -260,27 +253,23 @@ In the next 40 minutes, you will:
 
 By the end, you'll have a working setup and understand the complete model architecture!
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 1: Environment Setup (15 min)
-
 
 ### Goal
 
 Get a working development environment with all dependencies installed.
 
-
 ### Your Task
 
 Set up the Tiny Audio development environment.
-
 
 ### Instructions
 
 **Step 1: Check Prerequisites**
 
 Open your terminal and verify:
-
 
 ```bash
 python --version  # Should be 3.10 or newer
@@ -290,7 +279,6 @@ git --version     # Should show git version
 ```
 
 **Step 2: Clone the Repository**
-
 
 ```bash
 git clone https://github.com/alexkroman/tiny-audio.git
@@ -302,7 +290,6 @@ cd tiny-audio
 **Step 3: Install Poetry (if needed)**
 
 Poetry manages dependencies and virtual environments:
-
 
 ```bash
 # macOS/Linux
@@ -316,7 +303,6 @@ curl -sSL https://install.python-poetry.org | python3 -
 
 Add Poetry to your PATH if prompted, then verify:
 
-
 ```bash
 poetry --version
 
@@ -324,7 +310,6 @@ poetry --version
 ```
 
 **Step 4: Install Dependencies**
-
 
 ```bash
 poetry install
@@ -348,7 +333,6 @@ This will:
 
 **Step 5: Verify Installation**
 
-
 ```bash
 poetry run python scripts/verify_setup.py
 
@@ -356,13 +340,13 @@ poetry run python scripts/verify_setup.py
 ```
 
 This will check:
+
 - Python version (3.10+)
 - All required packages
 - Sample audio files
 - Model configuration
 
 You should see: `✅ All checks passed! You're ready to start the course.`
-
 
 ### Success Checkpoint
 
@@ -372,20 +356,17 @@ You should see: `✅ All checks passed! You're ready to start the course.`
 
 If you hit any issues, check the error messages from the verification script for guidance!
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 2: Run Your First Inference (15 min)
-
 
 ### Goal
 
 Transcribe an audio file using the pre-trained Tiny Audio model and experiment with different inputs.
 
-
 ### Your Task
 
 Run inference on an audio file, see the transcription output, and experiment with model behavior.
-
 
 ### Instructions
 
@@ -409,7 +390,6 @@ You need an audio file to transcribe. Choose one option:
 
 **Option C: Download a sample**
 
-
 ```bash
 # Download a LibriSpeech test sample
 wget https://www.openslr.org/resources/12/test-clean.tar.gz
@@ -424,7 +404,6 @@ tar -xzf test-clean.tar.gz
 Create a file called `test_inference.py` in the `tiny-audio/` directory:
 
 Create a file called `test_inference.py`:
-
 
 ```python
 from transformers import pipeline
@@ -456,7 +435,6 @@ print(result["text"])
 
 Edit `test_inference.py` and change this line:
 
-
 ```python
 audio_path = "path/to/your/audio.wav"
 
@@ -464,7 +442,6 @@ audio_path = "path/to/your/audio.wav"
 ```
 
 To point to your actual audio file, for example:
-
 
 ```python
 audio_path = "test.wav"
@@ -476,7 +453,6 @@ audio_path = "test-clean/1089/134686/1089-134686-0000.flac"
 
 **Step 4: Run inference**
 
-
 ```bash
 poetry run python test_inference.py
 
@@ -486,13 +462,11 @@ poetry run python test_inference.py
 **What's happening:**
 
 1. Model downloads from HuggingFace Hub (~4GB, first time only)
-2. Audio file is loaded and resampled to 16kHz
-3. Audio passes through: Encoder → Projector → Decoder
-4. Text transcription is returned
+1. Audio file is loaded and resampled to 16kHz
+1. Audio passes through: Encoder → Projector → Decoder
+1. Text transcription is returned
 
 **Expected output:**
-
-
 
 ```
 Loading model...
@@ -508,13 +482,11 @@ Hello, this is a test of the Tiny Audio speech recognition system.
 **What's happening:**
 
 1. Model downloads from HuggingFace Hub (~4GB, first time only - be patient!)
-2. Audio is loaded and resampled to 16kHz
-3. Audio passes through: Encoder → Projector → Decoder
-4. Text transcription is returned
+1. Audio is loaded and resampled to 16kHz
+1. Audio passes through: Encoder → Projector → Decoder
+1. Text transcription is returned
 
 **Expected output:**
-
-
 
 ```
 Loading model...
@@ -527,7 +499,6 @@ Hello, this is a test of the Tiny Audio speech recognition system.
 
 ```
 
-
 ### Success Checkpoint
 
 - [ ] I successfully ran the script
@@ -538,7 +509,7 @@ Hello, this is a test of the Tiny Audio speech recognition system.
 
 **Note**: You might notice some mistakes - that's normal! Our model achieves ~12% Word Error Rate, meaning it gets about 88% of words correct.
 
----
+______________________________________________________________________
 
 ## Understanding Generation Parameters (5 min)
 
@@ -549,27 +520,30 @@ Before we experiment, let's understand how text generation works and what parame
 The language model generates text **one token at a time** (auto-regressively):
 
 1. Receives audio embeddings from the projector
-2. Predicts the most likely next token
-3. Adds that token to the sequence
-4. Repeats until it generates an end-of-sequence token
+1. Predicts the most likely next token
+1. Adds that token to the sequence
+1. Repeats until it generates an end-of-sequence token
 
 **Key insight**: At each step, the model has a probability distribution over all possible next tokens. Generation parameters control how we sample from this distribution.
 
 ### Important Generation Parameters
 
 **1. `max_new_tokens` (default: 128)**
+
 - Maximum number of tokens to generate
 - **Too low**: Transcription gets cut off mid-sentence
 - **Too high**: Slower inference, may generate extra text
 - **Rule of thumb**: ~1 token per 0.4 seconds of audio
 
 **2. `num_beams` (default: 1)**
+
 - Controls beam search width
 - **1**: Greedy decoding (fastest, picks most likely token each step)
 - **3-5**: Beam search (explores multiple paths, often more accurate)
 - **Trade-off**: Higher beams = slower but potentially better quality
 
 **3. `temperature` (default: 1.0, only used with sampling)**
+
 - Controls randomness in token selection
 - **< 1.0**: More deterministic (conservative, repetitive)
 - **= 1.0**: Balanced (use model's actual probabilities)
@@ -577,17 +551,20 @@ The language model generates text **one token at a time** (auto-regressively):
 - **For ASR**: Usually keep at 1.0 or use greedy decoding
 
 **4. `do_sample` (default: False)**
+
 - **False**: Use deterministic decoding (greedy or beam search)
 - **True**: Sample from probability distribution (adds randomness)
 - **For ASR**: Usually False (we want accurate transcription, not creativity)
 
 **5. `chunk_length_s` (default: 30)**
+
 - How many seconds of audio to process at once
 - **Shorter (15-20s)**: Lower memory, more chunks to process
 - **Longer (30s)**: More context, fewer chunks
 - **Trade-off**: Memory usage vs. processing overhead
 
 **6. `stride_length_s` (default: (5, 5))**
+
 - Overlap between chunks as tuple (left_overlap, right_overlap) in seconds
 - Helps smooth transitions between chunks
 - Default (5, 5) means 5 seconds overlap on each side
@@ -603,7 +580,7 @@ The language model generates text **one token at a time** (auto-regressively):
 | `temperature` | 1.0 | With sampling only | Controls randomness |
 | `stride_length_s` | (5, 5) | Custom chunking | Overlap between chunks |
 
----
+______________________________________________________________________
 
 ### Experimentation Time
 
@@ -711,21 +688,25 @@ poetry run python experiment_generation.py
 **What to observe:**
 
 1. **Beam Search vs Greedy**:
+
    - Does beam search produce different (better?) text?
    - How much slower is it?
    - Is the quality improvement worth the speed cost?
 
-2. **Chunk Length**:
+1. **Chunk Length**:
+
    - How does chunk length affect processing time?
    - Do you notice any quality differences at chunk boundaries?
    - Which is best for your use case?
 
-3. **Sampling vs Deterministic**:
+1. **Sampling vs Deterministic**:
+
    - Are deterministic outputs truly identical?
    - How much does sampling vary?
    - Why might you want sampling (or not)?
 
-4. **Temperature**:
+1. **Temperature**:
+
    - How does temperature affect output?
    - Does higher temperature make transcription worse for ASR?
    - When might you want temperature > 1.0?
@@ -758,7 +739,7 @@ for audio, description in edge_cases:
         print(f"{description}: ✗ Error - {e}")
 ```
 
----
+______________________________________________________________________
 
 # CLASS SUMMARY
 
@@ -780,10 +761,9 @@ for audio, description in edge_cases:
 
 - Explored model behavior on different audio
 
----
+______________________________________________________________________
 
 ## Further Reading (Optional)
-
 
 ### Foundational Papers
 
@@ -793,7 +773,6 @@ for audio, description in edge_cases:
 
 - **Attention**: [Attention Is All You Need](https://arxiv.org/abs/1706.03762) (foundational)
 
-
 ### Documentation
 
 - [HuggingFace Transformers](https://huggingface.co/docs/transformers/index)
@@ -801,7 +780,6 @@ for audio, description in edge_cases:
 - [PyTorch Tutorials](https://pytorch.org/tutorials/)
 
 - [Wav2Vec2 Guide](https://huggingface.co/docs/transformers/model_doc/wav2vec2)
-
 
 ### Videos
 

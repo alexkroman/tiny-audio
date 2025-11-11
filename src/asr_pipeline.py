@@ -138,7 +138,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         elif hasattr(inputs, "__array__") and not isinstance(inputs, (dict, bytes, str)):
             inputs = {"raw": inputs, "sampling_rate": self.model.config.audio_sample_rate}
         elif torch.is_tensor(inputs):
-            inputs = {"raw": inputs.cpu().numpy(), "sampling_rate": self.model.config.audio_sample_rate}
+            inputs = {
+                "raw": inputs.cpu().numpy(),
+                "sampling_rate": self.model.config.audio_sample_rate,
+            }
 
         return super().preprocess(inputs, **preprocess_params)
 
@@ -148,26 +151,26 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         input_features = None
 
         # Extract task from generate_kwargs if present
-        task = generate_kwargs.pop('task', None)
+        task = generate_kwargs.pop("task", None)
 
         # Set sampling parameters based on task
-        if task == 'transcribe':
+        if task == "transcribe":
             # For transcribe task, use greedy decoding for accuracy
-            generate_kwargs.setdefault('do_sample', False)
+            generate_kwargs.setdefault("do_sample", False)
             # Remove temperature if present since we're not sampling
-            generate_kwargs.pop('temperature', None)
-        elif task == 'emotion':
+            generate_kwargs.pop("temperature", None)
+        elif task == "emotion":
             # For emotion task, use sampling for varied responses
-            generate_kwargs.setdefault('do_sample', True)
-            generate_kwargs.setdefault('temperature', 0.7)
-        elif task == 'describe':
+            generate_kwargs.setdefault("do_sample", True)
+            generate_kwargs.setdefault("temperature", 0.7)
+        elif task == "describe":
             # For describe task, allow some creativity
-            generate_kwargs.setdefault('do_sample', True)
-            generate_kwargs.setdefault('temperature', 0.7)
-        elif task == 'continue':
+            generate_kwargs.setdefault("do_sample", True)
+            generate_kwargs.setdefault("temperature", 0.7)
+        elif task == "continue":
             # For continue task (if still used), use sampling for creative responses
-            generate_kwargs.setdefault('do_sample', True)
-            generate_kwargs.setdefault('temperature', 1.0)
+            generate_kwargs.setdefault("do_sample", True)
+            generate_kwargs.setdefault("temperature", 1.0)
 
         if isinstance(model_inputs, torch.Tensor):
             input_values = model_inputs
@@ -201,7 +204,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         audio_inputs = input_features if input_features is not None else input_values
 
         if audio_inputs is None:
-            raise ValueError(f"Could not extract input_values or input_features from {type(model_inputs)}")
+            raise ValueError(
+                f"Could not extract input_values or input_features from {type(model_inputs)}"
+            )
 
         if isinstance(audio_inputs, torch.Tensor):
             audio_inputs = audio_inputs.to(self.model.device)
@@ -219,7 +224,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 input_features=audio_inputs,
                 system_prompt=self.model.config.system_prompt,
                 task=task,
-                **generate_kwargs
+                **generate_kwargs,
             )
         else:
             # Wav2Vec2/HuBERT model - use input_values
@@ -227,7 +232,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 input_values=audio_inputs,
                 system_prompt=self.model.config.system_prompt,
                 task=task,
-                **generate_kwargs
+                **generate_kwargs,
             )
 
         return {"tokens": generated_ids, "is_last": is_last}
@@ -242,11 +247,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         generate_kwargs.pop("task", None)
 
         # Generate text using the model
-        generated_ids = self.model.generate(
-            task="text",
-            text_input=text_input,
-            **generate_kwargs
-        )
+        generated_ids = self.model.generate(task="text", text_input=text_input, **generate_kwargs)
 
         # Decode the generated text
         generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)

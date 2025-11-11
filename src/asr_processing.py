@@ -30,8 +30,8 @@ class ASRProcessor(ProcessorMixin):
 
     def save_pretrained(self, save_directory, **kwargs):
         """Override save_pretrained to avoid attribute errors from base class."""
-        import os
         import json
+        import os
 
         os.makedirs(save_directory, exist_ok=True)
 
@@ -52,9 +52,7 @@ class ASRProcessor(ProcessorMixin):
             "feature_extractor_class": self.feature_extractor_class,
             "tokenizer_class": self.tokenizer_class,
             "feature_extractor_type": feature_extractor_type,  # Dynamic based on actual type
-            "auto_map": {
-                "AutoProcessor": "asr_processing.ASRProcessor"
-            }
+            "auto_map": {"AutoProcessor": "asr_processing.ASRProcessor"},
         }
 
         with open(os.path.join(save_directory, "preprocessor_config.json"), "w") as f:

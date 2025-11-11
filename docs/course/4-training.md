@@ -18,7 +18,7 @@ By the end of this class, you will:
 
 - Understand key training hyperparameters
 
----
+______________________________________________________________________
 
 # PART A: LECTURE (20 minutes)
 
@@ -36,10 +36,9 @@ Before we dive into the specifics of LoRA and Hydra, let's talk about what it me
 
 This chapter will guide you through the first steps of this marathon: preparing for and starting your training run.
 
----
+______________________________________________________________________
 
 ## 2. Why Parameter-Efficient Training? (5 min)
-
 
 ### The Full Fine-Tuning Problem
 
@@ -63,7 +62,6 @@ This chapter will guide you through the first steps of this marathon: preparing 
 
 - Hard to reproduce
 
-
 ### The Solution: Parameter-Efficient Fine-Tuning (PEFT)
 
 **Key insight**: You don't need to update all parameters!
@@ -71,8 +69,8 @@ This chapter will guide you through the first steps of this marathon: preparing 
 Instead, we:
 
 1. **Freeze** most parameters (keep pre-trained knowledge)
-2. **Add small adapters** that learn the specific task
-3. **Train only adapters** (~1.5% of total params)
+1. **Add small adapters** that learn the specific task
+1. **Train only adapters** (~1.5% of total params)
 
 **Results**:
 
@@ -86,10 +84,9 @@ Instead, we:
 
 - Easy to share (only save adapter weights)
 
----
+______________________________________________________________________
 
 ## 2. Understanding LoRA (10 min)
-
 
 ### What is LoRA?
 
@@ -97,12 +94,9 @@ Instead, we:
 
 **Core idea**: Large weight matrices can be approximated by low-rank decompositions.
 
-
 ### The Math (Simplified)
 
 Normal training updates weight matrix W:
-
-
 
 ```
 W_new = W_old + ΔW
@@ -111,8 +105,6 @@ W_new = W_old + ΔW
 ```
 
 LoRA approximates ΔW with two small matrices:
-
-
 
 ```
 ΔW ≈ B × A
@@ -149,9 +141,7 @@ for rank in [1, 4, 8, 16, 32, 64]:
 
 ```
 
-
 ### How LoRA Works in Practice
-
 
 ```python
 # Original forward pass
@@ -179,7 +169,6 @@ output = linear_layer(input) + lora_B(lora_A(input))
 - No speed penalty!
 
 - Same inference cost as original model
-
 
 ### LoRA Hyperparameters
 
@@ -219,7 +208,6 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Pre-trained models already well-regularized
 
-
 ### Why These Specific Configurations?
 
 **Encoder (r=8, small)**:
@@ -246,10 +234,9 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - ~122M parameters
 
----
+______________________________________________________________________
 
 ## 3. Training Configuration with Hydra (5 min)
-
 
 ### What is Hydra?
 
@@ -263,10 +250,7 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Clean, maintainable configs
 
-
 ### Tiny Audio Config Structure
-
-
 
 ```
 configs/hydra/
@@ -290,7 +274,6 @@ configs/hydra/
 
 ```
 
-
 ### Key Training Hyperparameters
 
 These are the most important knobs to turn when training a model. Understanding them is key to successful training.
@@ -306,8 +289,9 @@ These are the most important knobs to turn when training a model. Understanding 
 **Learning Rate Schedule**: `cosine`
 
 - **What it is**: A plan for changing the learning rate over time. We don't use a fixed learning rate throughout the entire training. Instead, we use a schedule that includes:
-    - **Warmup**: We start with a very low learning rate and gradually increase it to the peak value (`1e-4`) over the first `500` steps. This prevents the model from making large, destabilizing updates at the beginning of training.
-    - **Decay**: After the warmup, we gradually decrease the learning rate, following a cosine curve. This allows the model to settle into a good minimum.
+
+  - **Warmup**: We start with a very low learning rate and gradually increase it to the peak value (`1e-4`) over the first `500` steps. This prevents the model from making large, destabilizing updates at the beginning of training.
+  - **Decay**: After the warmup, we gradually decrease the learning rate, following a cosine curve. This allows the model to settle into a good minimum.
 
 - **Why this is important**: A good learning rate schedule is crucial for stable and efficient training.
 
@@ -331,7 +315,6 @@ These are the most important knobs to turn when training a model. Understanding 
 
 - **Why?**: It dramatically reduces memory usage and speeds up training on modern GPUs (like the A40 and H100) with minimal impact on accuracy.
 
-
 ### Pre-flight Checklist
 
 Before launching a long training run, it's a good practice to go through a pre-flight checklist:
@@ -343,7 +326,6 @@ Before launching a long training run, it's a good practice to go through a pre-f
 - **[ ] Checkpoint & Auto-resume**: Is your training script set up to save checkpoints periodically and resume from the latest one if it gets interrupted? (The `transformers` Trainer does this for us automatically!).
 
 - **[ ] Logging**: Are you logging all the important metrics (loss, learning rate, etc.) to a tool like Weights & Biases? (We'll set this up in the workshop).
-
 
 ### A Glimpse into Scaling Laws
 
@@ -361,7 +343,7 @@ These laws allow researchers to make informed decisions about how to allocate th
 
 While we won't be deriving our own scaling laws in this course, it's a fascinating area of research that drives many of the decisions behind the models we use every day.
 
----
+______________________________________________________________________
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
@@ -381,25 +363,21 @@ In the next 40 minutes, you will:
 
 By the end, you'll have a model training in the cloud and understand how to optimize it!
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 1: Explore Training Configs (10 min)
-
 
 ### Goal
 
 Understand the training configuration files.
 
-
 ### Your Task
 
 Read and understand the configuration structure.
 
-
 ### Instructions
 
 **Step 1: Examine the main config**
-
 
 ```bash
 cat configs/hydra/config.yaml
@@ -416,7 +394,6 @@ Look for:
 - How components are composed
 
 **Step 2: Check the experiment config**
-
 
 ```bash
 cat configs/hydra/experiments/stage1.yaml
@@ -436,7 +413,6 @@ This shows the full production training setup:
 
 **Step 3: Compare with minimal config**
 
-
 ```bash
 cat configs/hydra/experiments/mac_minimal.yaml
 
@@ -454,7 +430,6 @@ This is for quick local testing:
 **Step 4: Create your own experiment config**
 
 Create `configs/hydra/experiments/my_experiment.yaml`:
-
 
 ```yaml
 # @package _global_
@@ -489,7 +464,6 @@ model:
 
 ```
 
-
 ### Success Checkpoint
 
 - [ ] Examined config.yaml
@@ -500,26 +474,21 @@ model:
 
 - [ ] Ready to customize training settings
 
-
----
+______________________________________________________________________
 
 ## Workshop Exercise 2: Local Test Run (15 min)
-
 
 ### Goal
 
 Run a quick training test on your local machine.
 
-
 ### Your Task
 
 Start a minimal training run to verify everything works.
 
-
 ### Instructions
 
 **Step 1: Check available compute**
-
 
 ```bash
 # Check if you have a GPU
@@ -533,7 +502,6 @@ python -c "import torch; print(f'MPS available: {torch.backends.mps.is_available
 
 **Step 2: Run minimal test**
 
-
 ```bash
 # This will train for just 20 steps (~5-10 minutes)
 poetry run python src/train.py +experiments=mac_minimal
@@ -544,13 +512,11 @@ poetry run python src/train.py +experiments=mac_minimal
 **What happens:**
 
 1. Downloads/loads dataset samples
-2. Initializes model with LoRA adapters
-3. Trains for 20 steps
-4. Saves checkpoint
+1. Initializes model with LoRA adapters
+1. Trains for 20 steps
+1. Saves checkpoint
 
 **Expected output:**
-
-
 
 ```
 Loading model...
@@ -577,7 +543,6 @@ Step 20/20 | Loss: 3.4567
 
 **Step 3: Check the output**
 
-
 ```bash
 ls outputs/mac_minimal/
 
@@ -594,7 +559,6 @@ You should see:
 
 - `trainer_state.json` - Training state
 
-
 ### Success Checkpoint
 
 - [ ] Training started successfully
@@ -607,13 +571,11 @@ You should see:
 
 **Note**: This is a minimal test! The model won't be good yet - we need full training.
 
-
 ### Training Experiments
 
 **Experiment 1: Monitor loss curves**
 
 Create a script to visualize training progress:
-
 
 ```python
 # monitor_training.py
@@ -651,7 +613,6 @@ if len(losses) > 5:
 
 **Experiment 2: Test different datasets**
 
-
 ```bash
 # Try with different data configs
 poetry run python src/train.py \
@@ -672,7 +633,6 @@ poetry run python src/train.py \
 
 **Experiment 3: Learning rate warmup test**
 
-
 ```python
 # Test different warmup strategies
 warmup_configs = [
@@ -690,20 +650,17 @@ for warmup_steps, name in warmup_configs:
 
 ```
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 3: Set Up Cloud Training (15 min)
-
 
 ### Goal
 
 Prepare for full-scale training on cloud GPU.
 
-
 ### Your Task
 
 Set up a cloud GPU and prepare to train.
-
 
 ### Instructions
 
@@ -729,7 +686,6 @@ Set up a cloud GPU and prepare to train.
 
 **Step 3: Connect via SSH**
 
-
 ```bash
 # Get SSH command from RunPod dashboard (looks like this)
 ssh root@<pod-id>.runpod.io -p 22115 -i ~/.ssh/id_ed25519
@@ -738,7 +694,6 @@ ssh root@<pod-id>.runpod.io -p 22115 -i ~/.ssh/id_ed25519
 ```
 
 **Step 4: Set up environment on pod**
-
 
 ```bash
 # Once connected to pod
@@ -755,7 +710,6 @@ export HF_TOKEN='your_token_here'  # Get from https://huggingface.co/settings/to
 
 **Step 5: Start training**
 
-
 ```bash
 # Full production training
 poetry run python src/train.py +experiments=stage1
@@ -764,7 +718,6 @@ poetry run python src/train.py +experiments=stage1
 ```
 
 **Step 6: Monitor (optional)**
-
 
 ```bash
 # In a separate terminal, watch logs
@@ -777,7 +730,6 @@ tail -f tiny-audio/outputs/stage1/trainer_log.txt
 **Option B: Using Local GPU**
 
 If you have NVIDIA RTX 3090/4090 or better:
-
 
 ```bash
 # Make sure CUDA is available
@@ -797,10 +749,9 @@ poetry run python src/train.py +experiments=stage1
 Good for testing but may disconnect:
 
 1. Go to [colab.research.google.com](https://colab.research.google.com)
-2. Upload notebook with training code
-3. Use GPU runtime
-4. Run training cells
-
+1. Upload notebook with training code
+1. Use GPU runtime
+1. Run training cells
 
 ### Success Checkpoint
 
@@ -813,7 +764,6 @@ Good for testing but may disconnect:
 - [ ] Ready to start full training
 
 **Important**: Training takes ~24 hours. Don't close the connection! Use `tmux` or `screen` to keep it running:
-
 
 ```bash
 # Start a persistent session
@@ -828,7 +778,7 @@ poetry run python src/train.py +experiments=stage1
 
 ```
 
----
+______________________________________________________________________
 
 # CLASS SUMMARY
 
@@ -852,10 +802,9 @@ poetry run python src/train.py +experiments=stage1
 
 - Set up cloud GPU infrastructure
 
----
+______________________________________________________________________
 
 ## Further Reading (Optional)
-
 
 ### Papers
 
@@ -865,7 +814,6 @@ poetry run python src/train.py +experiments=stage1
 
 - [Parameter-Efficient Transfer Learning](https://arxiv.org/abs/1902.00751)
 
-
 ### Tools
 
 - [Hydra documentation](https://hydra.cc/)
@@ -873,7 +821,6 @@ poetry run python src/train.py +experiments=stage1
 - [Weights & Biases](https://wandb.ai/)
 
 - [RunPod guides](https://docs.runpod.io/)
-
 
 ### Code
 

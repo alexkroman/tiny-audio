@@ -24,7 +24,6 @@ ASR_TEMPLATES: List[str] = [
     "Please transcribe this recording: <audio>",
     "Transcribe the speech: <audio>",
     "Transcribe this speech: <audio>",
-
     # Question-based (15)
     "What is being said? <audio>",
     "What is the speaker saying? <audio>",
@@ -41,7 +40,6 @@ ASR_TEMPLATES: List[str] = [
     "What is the dialogue? <audio>",
     "What conversation is taking place? <audio>",
     "What is being narrated? <audio>",
-
     # Conversion requests (10)
     "Convert this speech to text: <audio>",
     "Convert the audio to text: <audio>",
@@ -53,7 +51,6 @@ ASR_TEMPLATES: List[str] = [
     "Transform audio into text: <audio>",
     "Turn the audio into text: <audio>",
     "Convert this to text: <audio>",
-
     # Writing/documentation (10)
     "Write down what you hear: <audio>",
     "Write what is being said: <audio>",
@@ -65,7 +62,6 @@ ASR_TEMPLATES: List[str] = [
     "Record what you hear: <audio>",
     "Note down what is said: <audio>",
     "Record the spoken words: <audio>",
-
     # Recognition/identification (8)
     "Recognize the speech: <audio>",
     "Identify the words: <audio>",
@@ -75,7 +71,6 @@ ASR_TEMPLATES: List[str] = [
     "Recognize the spoken words: <audio>",
     "Detect the speech: <audio>",
     "Identify the spoken content: <audio>",
-
     # Listen-based (7)
     "Listen and transcribe: <audio>",
     "Listen and write what you hear: <audio>",
@@ -84,7 +79,6 @@ ASR_TEMPLATES: List[str] = [
     "Listen and tell me what is said: <audio>",
     "Listen to this and transcribe: <audio>",
     "Listen and write: <audio>",
-
     # Provide/generate (8)
     "Provide a transcription: <audio>",
     "Generate a transcription: <audio>",
@@ -94,7 +88,6 @@ ASR_TEMPLATES: List[str] = [
     "Make a transcription: <audio>",
     "Supply the transcription: <audio>",
     "Deliver the transcription: <audio>",
-
     # Text extraction (7)
     "Extract the text: <audio>",
     "Extract the spoken text: <audio>",
@@ -103,7 +96,6 @@ ASR_TEMPLATES: List[str] = [
     "Extract text from the audio: <audio>",
     "Extract the words: <audio>",
     "Get the text from this audio: <audio>",
-
     # Detailed/polite requests (8)
     "Please listen to this audio and provide a transcription: <audio>",
     "I need a transcription of this audio: <audio>",
@@ -113,7 +105,6 @@ ASR_TEMPLATES: List[str] = [
     "Could you tell me what is being said? <audio>",
     "Please tell me what you hear: <audio>",
     "I need you to transcribe this: <audio>",
-
     # Accuracy-focused (7)
     "Transcribe word for word: <audio>",
     "Give me a word-for-word transcription: <audio>",
@@ -122,7 +113,6 @@ ASR_TEMPLATES: List[str] = [
     "Give a verbatim transcription: <audio>",
     "What exact words are spoken? <audio>",
     "Transcribe exactly what is said: <audio>",
-
     # Content-specific (10)
     "Transcribe the dialogue: <audio>",
     "Transcribe the conversation: <audio>",

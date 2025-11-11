@@ -28,7 +28,6 @@ By the end of this course, you will:
 
 ## Course Structure
 
-
 ### [Class 1: Introduction and Setup](./1-introduction-and-setup.md) (1 hour)
 
 - What is automatic speech recognition?
@@ -40,7 +39,6 @@ By the end of this course, you will:
 - Running your first inference
 
 - **Experiments**: Test different audio samples, explore model outputs, adjust confidence thresholds
-
 
 ### [Class 2: Audio Processing and Encoders](./2-audio-processing-and-encoders.md) (1 hour)
 
@@ -54,7 +52,6 @@ By the end of this course, you will:
 
 - **Experiments**: Compare Wav2Vec2 vs HuBERT, test different audio preprocessing, visualize embeddings
 
-
 ### [Class 3: Language Models and Projectors](./3-language-models-and-projectors.md) (1 hour)
 
 - What are language models?
@@ -66,7 +63,6 @@ By the end of this course, you will:
 - SwiGLU architecture explained
 
 - **Experiments**: Try different decoder models, modify projection dimensions, test activation functions
-
 
 ### [Class 4: Training](./4-training.md) (1 hour)
 
@@ -80,7 +76,6 @@ By the end of this course, you will:
 
 - **Experiments**: Adjust LoRA rank, test learning rates, experiment with batch sizes, try different datasets
 
-
 ### [Class 5: Evaluation and Debugging](./5-evaluation-and-debugging.md) (1 hour)
 
 - Understanding Word Error Rate (WER)
@@ -92,7 +87,6 @@ By the end of this course, you will:
 - Improving model performance
 
 - **Experiments**: Compare metrics across datasets, test data augmentation, analyze error patterns
-
 
 ### [Class 6: Publishing and Deployment](./6-publishing-and-deployment.md) (1 hour)
 
@@ -115,12 +109,12 @@ By the end of this course, you will:
 By completing this course, you will be able to:
 
 1. **Explain** how multimodal ASR systems work end-to-end
-2. **Implement** custom audio-language model architectures
-3. **Apply** parameter-efficient training techniques like LoRA
-4. **Train** a speech recognition model on real datasets
-5. **Evaluate** model performance using industry-standard metrics
-6. **Deploy** models to production-ready environments
-7. **Publish** models and contribute to open-source ML communities
+1. **Implement** custom audio-language model architectures
+1. **Apply** parameter-efficient training techniques like LoRA
+1. **Train** a speech recognition model on real datasets
+1. **Evaluate** model performance using industry-standard metrics
+1. **Deploy** models to production-ready environments
+1. **Publish** models and contribute to open-source ML communities
 
 ## Course Philosophy
 
@@ -138,7 +132,6 @@ This course emphasizes:
 
 - **Community contribution**: Share your results and learn from others
 
-
 ### Learning Through Experimentation
 
 Throughout this course, you'll be encouraged to experiment constantly:
@@ -153,19 +146,17 @@ Throughout this course, you'll be encouraged to experiment constantly:
 
 - **Performance optimization**: Balance accuracy, speed, and resource usage
 
-
 ### The Training Compass: Why → What → How
 
 Before we dive into the technical details, it's important to think strategically about our project. A valuable framework for this is the "Training Compass":
 
-1.  **Why are we building this?** What is our goal? Are we trying to achieve state-of-the-art performance, build a model for a specific niche, or simply learn?
-2.  **What should we build?** Based on our "why," what kind of model should we build? What are the architectural choices and data considerations?
-3.  **How will we build it?** What are the practical steps, tools, and techniques we'll use to train, evaluate, and deploy our model?
+1. **Why are we building this?** What is our goal? Are we trying to achieve state-of-the-art performance, build a model for a specific niche, or simply learn?
+1. **What should we build?** Based on our "why," what kind of model should we build? What are the architectural choices and data considerations?
+1. **How will we build it?** What are the practical steps, tools, and techniques we'll use to train, evaluate, and deploy our model?
 
 Throughout this course, we'll return to this compass to guide our decisions.
 
 ## Prerequisites
-
 
 ### Required Knowledge
 
@@ -174,7 +165,6 @@ Throughout this course, we'll return to this compass to guide our decisions.
 - Command line/terminal usage
 
 - Git basics
-
 
 ### Helpful But Not Required
 
@@ -188,7 +178,6 @@ Don't worry if you're missing some prerequisites! The course is designed to teac
 
 ## Hardware Requirements
 
-
 ### For Training (Class 4-5)
 
 - **Cloud GPU**: NVIDIA A40 40GB (~$0.50/hour, ~$12 total) - Recommended
@@ -196,7 +185,6 @@ Don't worry if you're missing some prerequisites! The course is designed to teac
 - **Local GPU**: NVIDIA RTX 3090/4090 24GB or better
 
 - **Apple Silicon**: M1/M2/M3 Max/Ultra with 32GB+ RAM (slower but works)
-
 
 ### For Development (Class 1-3, 6)
 
@@ -215,9 +203,11 @@ Don't worry if you're missing some prerequisites! The course is designed to teac
    ```bash
    git clone https://github.com/alexkroman/tiny-audio.git
    cd tiny-audio
-   
 
-```
+
+   ```
+
+````
 
 2. **Install dependencies**
 
@@ -225,13 +215,15 @@ Don't worry if you're missing some prerequisites! The course is designed to teac
    poetry install
    
 
-```
+````
 
 3. **Download sample audio files**
 
    ```bash
    poetry run download-samples
-   
+
+
+   ```
 
 ```
 
@@ -267,3 +259,4 @@ This course and all materials are released under the MIT License.
 ---
 
 [Next: Class 1: Introduction and Setup](./1-introduction-and-setup.md)
+```
