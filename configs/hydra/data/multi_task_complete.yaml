@@ -1,6 +1,6 @@
 # Complete multi-task dataset configuration with transcribe, emotion, and describe tasks
 datasets:
-  # Transcription task - LoquaciousSet (95% - dominant task matching Kimi-Audio)
+  # Transcription task - LoquaciousSet (85% - dominant task)
   - path: speechbrain/LoquaciousSet
     name: large
     audio_column: wav
@@ -10,7 +10,7 @@ datasets:
       - train
     eval_splits:
       - dev
-    sampling_weight: 0.80
+    sampling_weight: 0.85
 
   # Description task - AudioSet Strong (4% - audio understanding)
   - path: CLAPv2/audioset_strong
@@ -23,15 +23,16 @@ datasets:
       - validation
     sampling_weight: 0.10
 
-  # Emotion recognition task - LAION's Got Talent (1% - voice emotion tags)
-  - path: laion/laions_got_talent_with_voice_emotion_speed_tags_for_orpheus_tuning
+  # Emotion recognition task - CAMEO Dataset (5% of training)
+  - path: amu-cai/CAMEO
     audio_column: audio
-    text_column: emotion  # Emotion tags (comma-separated)
+    text_column: emotion  # Emotion label
     task: emotion  # Mark as emotion recognition task
     train_splits:
-      - train  # Only train split available
-    eval_splits: []  # No separate eval split
-    sampling_weight: 0.10
+      - crema_d
+    eval_splits:
+      - mesd
+    sampling_weight: 0.05
 
 # Audio processing
 sample_rate: 16000
