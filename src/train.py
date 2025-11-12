@@ -36,6 +36,7 @@ class DatasetLoader:
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
+        self.seed = config.training.get("seed", 42)  # Get seed from training config
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:  # type: ignore[return]
         # Get dataset path (required)
@@ -130,6 +131,10 @@ class DatasetLoader:
             val_ds = None
         else:
             val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
+
+        # Shuffle training data for better generalization
+        # Buffer size of 1000 balances memory usage and randomness
+        train_ds = train_ds.shuffle(seed=self.seed, buffer_size=1000)
 
         if self.config.max_train_samples:
             train_ds = train_ds.take(self.config.max_train_samples)

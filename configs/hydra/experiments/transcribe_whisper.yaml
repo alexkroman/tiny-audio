@@ -65,9 +65,10 @@ training:
   max_grad_norm: 1.0
 
   # Memory optimization
-  torch_compile: true
-  torch_compile_dynamic: true  # Enable dynamic shapes for variable sequence lengths
-  torch_compile_fullgraph: false  # Allow graph breaks for flexibility
+  torch_compile: false  # Disabled for faster startup
+  # torch_compile_mode: "default"  # Faster compilation than reduce-overhead
+  # torch_compile_dynamic: true  # Enable dynamic shapes for variable sequence lengths
+  # torch_compile_fullgraph: false  # Allow graph breaks for flexibility
   torch_compile_config:
     # Advanced torch.compile settings
     cache_size_limit: 128  # Allow layer-wise compilation + shape variants (default: 8)
