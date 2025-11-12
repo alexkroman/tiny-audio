@@ -515,16 +515,6 @@ def main(cfg: DictConfig) -> None:
     torch_compile_mode = training_args.pop("torch_compile_mode", None)
     torch_compile_fullgraph = training_args.pop("torch_compile_fullgraph", False)
 
-    # Configure torch._dynamo for dynamic shapes if enabled
-    if torch_compile_enabled:
-        if torch_compile_dynamic:
-            torch._dynamo.config.dynamic_shapes = True
-            print("[torch.compile] Enabled dynamic shapes")
-        if torch_compile_backend:
-            print(f"[torch.compile] Using backend: {torch_compile_backend}")
-        if torch_compile_mode:
-            print(f"[torch.compile] Using mode: {torch_compile_mode}")
-
     # Remove other custom fields that aren't TrainingArguments parameters
     for key in ["model_dtype", "attn_implementation"]:
         training_args.pop(key, None)
