@@ -17,7 +17,7 @@ model:
 
   # Projector configuration
   audio_downsample_rate: 5
-  projector_hidden_dim: 2048
+  projector_dropout: 0.05  # Linear projector with light dropout for regularization
 
 # Encoder LoRA Configuration
 encoder_lora:

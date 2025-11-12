@@ -17,8 +17,7 @@ model:
 
   # Projector configuration
   audio_downsample_rate: 5
-  projector_hidden_dim: 2048
-  projector_dropout: 0.1  # Increased from default 0.05 to match prior art (LLaVA, VL adapters)
+  projector_dropout: 0.05  # Reduced for simpler linear projector (no longer needs hidden_dim)
 
 # Encoder LoRA Configuration
 encoder_lora:
@@ -46,10 +45,10 @@ training:
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
-  per_device_train_batch_size: 14
-  per_device_eval_batch_size: 14
-  gradient_accumulation_steps: 3
-  eval_accumulation_steps: 3
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 2
+  eval_accumulation_steps: 2
 
   learning_rate: 1.0e-4
 
