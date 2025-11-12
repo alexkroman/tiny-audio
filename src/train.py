@@ -506,7 +506,6 @@ def main(cfg: DictConfig) -> None:
         # Enable parallel compilation for faster initial compile
         compile_threads = compile_config.get("compile_threads", 4)
         torch._inductor.config.compile_threads = compile_threads
-        print(f"[torch.compile] Using {compile_threads} parallel compilation threads")
 
     # Handle torch.compile settings (TrainingArguments doesn't support all options)
     torch_compile_enabled = training_args.get("torch_compile", False)
@@ -524,7 +523,6 @@ def main(cfg: DictConfig) -> None:
         args=TrainingArguments(**training_args),
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        # processing_class=processor,
         data_collator=data_collator,
         callbacks=callbacks,
     )
