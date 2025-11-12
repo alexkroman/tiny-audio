@@ -38,7 +38,7 @@ class DatasetLoader:
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)  # Get seed from training config
 
-    def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:  # type: ignore[return]
+    def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
         # Get dataset path (required)
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:

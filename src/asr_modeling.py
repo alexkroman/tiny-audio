@@ -25,7 +25,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 try:
     from .asr_config import ASRConfig
 except ImportError:
-    from asr_config import ASRConfig  # type: ignore[no-redef]
+    from asr_config import ASRConfig
 
 
 class AudioProjector(nn.Module):
@@ -90,7 +90,7 @@ class ASRModel(PreTrainedModel):
         import json
 
         from safetensors.torch import load_file
-        from transformers.utils.hub import cached_file  # type: ignore[attr-defined]
+        from transformers.utils.hub import cached_file
 
         config = kwargs.pop("config", None)
         if config is None:
@@ -923,9 +923,15 @@ class ASRModel(PreTrainedModel):
         generate_kwargs.setdefault("min_new_tokens", self.config.min_new_tokens)
         generate_kwargs.setdefault("num_beams", self.config.num_beams)
         generate_kwargs.setdefault("do_sample", self.config.do_sample)
-        generate_kwargs.setdefault("temperature", self.config.temperature)
-        generate_kwargs.setdefault("top_k", self.config.top_k)
-        generate_kwargs.setdefault("top_p", self.config.top_p)
+
+        # Only set sampling params if they exist in config (depends on do_sample)
+        if hasattr(self.config, 'temperature'):
+            generate_kwargs.setdefault("temperature", self.config.temperature)
+        if hasattr(self.config, 'top_k'):
+            generate_kwargs.setdefault("top_k", self.config.top_k)
+        if hasattr(self.config, 'top_p'):
+            generate_kwargs.setdefault("top_p", self.config.top_p)
+
         generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
 
         im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
@@ -1015,10 +1021,26 @@ class ASRModel(PreTrainedModel):
         attention_mask = torch.ones(batch_size, total_seq_len, dtype=torch.long, device=device)
 
         # Apply generation defaults from config
-        for key in ['max_new_tokens', 'min_new_tokens', 'num_beams', 'do_sample', 'temperature',
-                    'top_k', 'top_p', 'repetition_penalty', 'length_penalty', 'no_repeat_ngram_size',
-                    'early_stopping']:
-            generate_kwargs.setdefault(key, getattr(self.config, key))
+        generate_kwargs.setdefault("max_new_tokens", self.config.max_new_tokens)
+        generate_kwargs.setdefault("min_new_tokens", self.config.min_new_tokens)
+        generate_kwargs.setdefault("num_beams", self.config.num_beams)
+        generate_kwargs.setdefault("do_sample", self.config.do_sample)
+
+        # Only set sampling params if they exist in config (depends on do_sample)
+        if hasattr(self.config, 'temperature'):
+            generate_kwargs.setdefault("temperature", self.config.temperature)
+        if hasattr(self.config, 'top_k'):
+            generate_kwargs.setdefault("top_k", self.config.top_k)
+        if hasattr(self.config, 'top_p'):
+            generate_kwargs.setdefault("top_p", self.config.top_p)
+
+        generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
+        generate_kwargs.setdefault("length_penalty", self.config.length_penalty)
+        generate_kwargs.setdefault("no_repeat_ngram_size", self.config.no_repeat_ngram_size)
+
+        # Only set early_stopping if it exists in config (depends on num_beams)
+        if hasattr(self.config, 'early_stopping'):
+            generate_kwargs.setdefault("early_stopping", self.config.early_stopping)
 
         # Enable cache now that we use inputs_embeds consistently
         generate_kwargs.setdefault("use_cache", True)

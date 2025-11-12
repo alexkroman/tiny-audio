@@ -532,10 +532,6 @@ def main():
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 
-    # Shuffle dataset for reproducibility
-    print(f"Shuffling dataset with seed {args.seed}...")
-    dataset = dataset.shuffle(seed=args.seed, buffer_size=10000)
-
     if args.max_samples:
         dataset = dataset.take(args.max_samples)
 

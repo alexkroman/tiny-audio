@@ -51,15 +51,24 @@ class ASRConfig(transformers.PretrainedConfig):
             "max_new_tokens": 128,
             "min_new_tokens": 1,
             "do_sample": False,
-            "temperature": 0.0,
-            "top_k": 0,
-            "top_p": 0.8,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,
-            "early_stopping": True,
             "use_cache": True,  # Now enabled - we pre-expand audio tokens for consistent sequence length
         }
+
+        # Only add sampling parameters if do_sample=True
+        do_sample_value = kwargs.get("do_sample", generation_defaults["do_sample"])
+        if do_sample_value:
+            generation_defaults["temperature"] = 0.7
+            generation_defaults["top_k"] = 50
+            generation_defaults["top_p"] = 0.9
+
+        # Only add early_stopping if using beam search
+        num_beams_value = kwargs.get("num_beams", generation_defaults["num_beams"])
+        if num_beams_value > 1:
+            generation_defaults["early_stopping"] = True
+
         for param_name, default_value in generation_defaults.items():
             if param_name not in kwargs:
                 kwargs[param_name] = default_value
