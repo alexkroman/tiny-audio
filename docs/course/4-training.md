@@ -400,10 +400,15 @@ Look for:
 
 - How components are composed
 
-**Step 2: Check the experiment config**
+**Step 2: Check the experiment configs**
+
+Available experiment configurations:
+- `transcribe_whisper.yaml` - Whisper Turbo encoder (default, fastest)
+- `transcribe_hubert.yaml` - HuBERT encoder (alternative)
+- `multi_task.yaml` - Multi-task training (transcription + other tasks)
 
 ```bash
-cat configs/hydra/experiments/stage1.yaml
+cat configs/hydra/experiments/transcribe_whisper.yaml
 
 
 ```
@@ -418,21 +423,21 @@ This shows the full production training setup:
 
 - Training hyperparameters
 
-**Step 3: Compare with minimal config**
+**Step 3: View alternative encoder configuration**
 
 ```bash
-cat configs/hydra/experiments/mac_minimal.yaml
+cat configs/hydra/experiments/transcribe_hubert.yaml
 
 
 ```
 
-This is for quick local testing:
+This uses HuBERT instead of Whisper:
 
-- Small dataset samples
+- Different encoder (facebook/hubert-xlarge-ls960-ft)
 
-- Fewer steps
+- Same training procedure
 
-- Same architecture
+- Same architecture otherwise
 
 **Step 4: Create your own experiment config**
 
@@ -441,13 +446,14 @@ Create `configs/hydra/experiments/my_experiment.yaml`:
 ```yaml
 # @package _global_
 
-# Inherit from stage1 but with modifications
+# Custom experiment configuration
+# Based on transcribe_whisper but with modifications
 defaults:
-  - /model: default
-  - /data: loquacious
+  - /model: whisper_turbo
+  - /data: loquacious_large
   - /training: production
-  - /peft: lora
-  - /encoder_lora: r8
+  - /peft: default
+  - /encoder_lora: default
 
 # Custom modifications
 training:
@@ -626,19 +632,21 @@ if len(losses) > 5:
 **Experiment 2: Test different datasets**
 
 ```bash
-# Try with different data configs
+# Try with minimal config for quick testing (no experiment file needed)
 poetry run python src/train.py \
-  +experiments=mac_minimal \
   data.max_train_samples=50 \
   training.max_steps=10 \
-  training.run_name="tiny-test"
+  training.run_name="tiny-test" \
+  encoder_lora.r=0 \
+  peft.r=0
 
 # Compare with more data
 poetry run python src/train.py \
-  +experiments=mac_minimal \
   data.max_train_samples=200 \
   training.max_steps=40 \
-  training.run_name="medium-test"
+  training.run_name="medium-test" \
+  encoder_lora.r=0 \
+  peft.r=0
 
 
 ```
@@ -737,7 +745,9 @@ poetry run python src/train.py +experiments=transcribe_whisper
 ```bash
 # In a separate terminal, watch logs
 ssh root@<pod-id>.runpod.io -p 22115 -i ~/.ssh/id_ed25519
-tail -f tiny-audio/outputs/stage1/trainer_log.txt
+
+# Monitor the most recent training run
+tail -f tiny-audio/outputs/*/trainer_log.txt
 
 
 ```
@@ -750,11 +760,13 @@ If you have NVIDIA RTX 3090/4090 or better:
 # Make sure CUDA is available
 nvidia-smi
 
-# Set up W&B for monitoring
+# Set up W&B for monitoring (optional)
 export WANDB_API_KEY='your_key'  # From https://wandb.ai/settings
 
-# Start training
-poetry run python src/train.py +experiments=stage1
+# Start training (choose your encoder)
+poetry run python src/train.py +experiments=transcribe_whisper
+# OR
+poetry run python src/train.py +experiments=transcribe_hubert
 
 
 ```
@@ -784,8 +796,8 @@ Good for testing but may disconnect:
 # Start a persistent session
 tmux new -s training
 
-# Run training
-poetry run python src/train.py +experiments=stage1
+# Run training (choose your encoder)
+poetry run python src/train.py +experiments=transcribe_whisper
 
 # Detach: Ctrl+B, then D
 # Re-attach later: tmux attach -t training

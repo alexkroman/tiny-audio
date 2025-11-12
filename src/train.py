@@ -151,21 +151,11 @@ class DataCollator(DataCollatorForSeq2Seq):
         feature_extractor: Any,
         sample_rate: int,
         system_prompt: str = None,
-        use_instruction_templates: bool = False,
-        instruction_seed: int = None,
     ):
         super().__init__(tokenizer=tokenizer, padding=True)
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
-        self.use_instruction_templates = use_instruction_templates
-        self.instruction_seed = instruction_seed
-
-        # Import instruction templates if needed
-        if self.use_instruction_templates:
-            from instruction_templates import get_random_instruction
-
-            self.get_random_instruction = get_random_instruction
 
         # Check if this is a Whisper feature extractor
         self.is_whisper = feature_extractor.__class__.__name__ == "WhisperFeatureExtractor"
@@ -232,19 +222,15 @@ class DataCollator(DataCollatorForSeq2Seq):
             # Choose prompt based on task type
             task = f.get("task", "transcribe")  # Get task field added by add_column
 
-            # Use instruction templates if enabled
-            if self.use_instruction_templates:
-                instruction = self.get_random_instruction(task, seed=self.instruction_seed)
-            else:
-                # Use default single prompt per task
-                if task == "continue":
-                    instruction = "Continue: <audio>"
-                elif task == "describe":
-                    instruction = "Describe: <audio>"
-                elif task == "emotion":
-                    instruction = "Emotion: <audio>"
-                else:  # Default to transcribe
-                    instruction = "Transcribe: <audio>"
+            # Use default single prompt per task
+            if task == "continue":
+                instruction = "Continue: <audio>"
+            elif task == "describe":
+                instruction = "Describe: <audio>"
+            elif task == "emotion":
+                instruction = "Emotion: <audio>"
+            else:  # Default to transcribe
+                instruction = "Transcribe: <audio>"
 
             messages.append({"role": "user", "content": instruction})
             messages.append({"role": "assistant", "content": text})
@@ -470,8 +456,6 @@ def main(cfg: DictConfig) -> None:
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         system_prompt=cfg.model.system_prompt,
-        use_instruction_templates=cfg.data.get("use_instruction_templates", False),
-        instruction_seed=cfg.data.get("instruction_seed", None),
     )
 
     # Setup callbacks
