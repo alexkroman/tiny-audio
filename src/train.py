@@ -488,7 +488,39 @@ def main(cfg: DictConfig) -> None:
     # Convert config to dict and remove non-TrainingArguments fields
     training_args = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_args, dict), "training_args must be a dict"
-    # Remove custom fields that aren't TrainingArguments parameters
+
+    # Apply torch.compile config before creating TrainingArguments
+    if training_args.get("torch_compile_config"):
+        compile_config = training_args.pop("torch_compile_config")
+        # Configure torch._dynamo settings
+        cache_limit = compile_config.get("cache_size_limit", 64)
+        torch._dynamo.config.cache_size_limit = cache_limit
+        torch._dynamo.config.capture_scalar_outputs = compile_config.get("capture_scalar_outputs", True)
+        torch._dynamo.config.allow_unspec_int_on_nn_module = compile_config.get("allow_unspec_int_on_nn_module", True)
+
+        # Enable parallel compilation for faster initial compile
+        compile_threads = compile_config.get("compile_threads", 4)
+        torch._inductor.config.compile_threads = compile_threads
+        print(f"[torch.compile] Using {compile_threads} parallel compilation threads")
+
+    # Handle torch.compile settings (TrainingArguments doesn't support all options)
+    torch_compile_enabled = training_args.get("torch_compile", False)
+    torch_compile_dynamic = training_args.pop("torch_compile_dynamic", False)
+    torch_compile_backend = training_args.pop("torch_compile_backend", "inductor")
+    torch_compile_mode = training_args.pop("torch_compile_mode", None)
+    torch_compile_fullgraph = training_args.pop("torch_compile_fullgraph", False)
+
+    # Configure torch._dynamo for dynamic shapes if enabled
+    if torch_compile_enabled:
+        if torch_compile_dynamic:
+            torch._dynamo.config.dynamic_shapes = True
+            print("[torch.compile] Enabled dynamic shapes")
+        if torch_compile_backend:
+            print(f"[torch.compile] Using backend: {torch_compile_backend}")
+        if torch_compile_mode:
+            print(f"[torch.compile] Using mode: {torch_compile_mode}")
+
+    # Remove other custom fields that aren't TrainingArguments parameters
     for key in ["model_dtype", "attn_implementation"]:
         training_args.pop(key, None)
 
