@@ -230,8 +230,6 @@ In the next 40 minutes, you will:
 
 - **Exercise 3**: Inspect the model configuration
 
-- **Exercise 4**: Count trainable parameters
-
 By the end, you'll have a working setup and understand the complete model architecture!
 
 ______________________________________________________________________
@@ -248,7 +246,30 @@ Set up the Tiny Audio development environment.
 
 ### Instructions
 
-**Step 1: Check Prerequisites**
+**Step 1: Create Required Accounts**
+
+Before we begin, you'll need accounts on three platforms (if you don't have them already):
+
+**GitHub** (for version control and accessing the code):
+- Visit https://github.com/signup
+- Create a free account
+- Verify your email address
+
+**Hugging Face** (for downloading and sharing models):
+- Visit https://huggingface.co/join
+- Create a free account
+- Go to Settings → Access Tokens and create a new token with "read" permissions
+- Save this token somewhere safe - you'll need it later
+
+**Weights & Biases** (for tracking training experiments):
+- Visit https://wandb.ai/signup
+- Create a free account
+- After logging in, go to https://wandb.ai/authorize to get your API key
+- Save this API key - you'll need it when you start training
+
+**Note**: You can skip W&B for now if you want to get started quickly - it's only required for training (Class 4), not for running inference.
+
+**Step 2: Check Prerequisites**
 
 Open your terminal and verify:
 
@@ -259,7 +280,7 @@ git --version     # Should show git version
 
 ```
 
-**Step 2: Clone the Repository**
+**Step 3: Clone the Repository**
 
 ```bash
 git clone https://github.com/alexkroman/tiny-audio.git
@@ -268,7 +289,7 @@ cd tiny-audio
 
 ```
 
-**Step 3: Install Poetry (if needed)**
+**Step 4: Install Poetry (if needed)**
 
 Poetry manages dependencies and virtual environments.
 
@@ -302,7 +323,7 @@ Add Poetry to your PATH if prompted, then verify:
 poetry --version
 ```
 
-**Step 4: Install Dependencies**
+**Step 5: Install Dependencies**
 
 ```bash
 poetry install
@@ -324,7 +345,7 @@ This will:
 
 - If PyTorch installation fails, visit [pytorch.org](https://pytorch.org) for platform-specific instructions
 
-**Step 5: Download Samples and Verify Installation**
+**Step 6: Download Samples and Verify Installation**
 
 ```bash
 
@@ -389,7 +410,7 @@ Try recording yourself saying: "Hello, this is a test of the Tiny Audio speech r
 
 **Step 3: Run Quantitative Evaluation**
 
-While the demo is still running (or after stopping it with Ctrl+C), evaluate the model on 100 samples from LoquaciousSet:
+Stop the demo (press Ctrl+C in the terminal where it's running), then evaluate the model on 100 samples from LoquaciousSet:
 
 ```bash
 poetry run python scripts/eval.py mazesmazes/tiny-audio \
