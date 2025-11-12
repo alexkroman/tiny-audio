@@ -174,7 +174,6 @@ class ASRModel(PreTrainedModel):
                 )
             total_params = sum(v.numel() for v in projector_state.values())
             model.projector.load_state_dict(projector_state, strict=True, assign=True)
-            print(f"✓ Loaded projector weights ({total_params:,} parameters)")
 
             if encoder_lora_config:
                 if not encoder_state:
@@ -184,9 +183,6 @@ class ASRModel(PreTrainedModel):
                     )
                 total_params = sum(v.numel() for v in encoder_state.values())
                 model.encoder.load_state_dict(encoder_state, strict=False, assign=True)
-                print(
-                    f"✓ Loaded encoder LoRA (r={encoder_lora_config.get('r', 0)}, {total_params:,} parameters)"
-                )
 
             if decoder_lora_config and decoder_lora_config.get("r", 0) > 0:
                 if not decoder_state:
@@ -196,9 +192,6 @@ class ASRModel(PreTrainedModel):
                     )
                 total_params = sum(v.numel() for v in decoder_state.values())
                 model.decoder.load_state_dict(decoder_state, strict=False, assign=True)
-                print(
-                    f"✓ Loaded decoder LoRA (r={decoder_lora_config.get('r', 0)}, {total_params:,} parameters)"
-                )
 
             device = kwargs.get("device")
             if device is not None:
@@ -989,8 +982,6 @@ class ASRModel(PreTrainedModel):
                 "content": user_prompt,
             }
         )
-
-        print(f"[Tiny Audio] Using prompt: {user_prompt}")
 
         prompt_ids = self.tokenizer.apply_chat_template(
             messages,

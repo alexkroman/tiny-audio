@@ -6,9 +6,11 @@ Welcome to a hands-on journey into the heart of modern AI. This course isn't jus
 
 By the end of this course, you will:
 
-- Understand the architecture of modern multimodal ASR systems
+- Understand the architecture of modern multimodal ASR systems (encoder-projector-decoder)
 
-- Train your own model using parameter-efficient techniques (LoRA)
+- Train your own model using parameter-efficient techniques (LoRA on encoder and/or decoder)
+
+- Work with ~150M trainable parameters instead of 9.3+ billion (flexibility to enable/disable LoRA)
 
 - Publish your model to HuggingFace Hub
 
@@ -17,6 +19,7 @@ By the end of this course, you will:
 **Time Commitment**: 6 hours (6 one-hour sessions)
 **Cost**: ~$12 for GPU training (or free with local GPU), plus optional deployment costs
 **Prerequisites**: Basic Python knowledge, some ML familiarity helpful but not required
+**Model Architecture**: HuBERT/Whisper encoder + Linear projector + Qwen3-8B/SmolLM3-3B decoder
 
 **Format**: Can be used for:
 
@@ -56,11 +59,11 @@ By the end of this course, you will:
 
 - What are language models?
 
-- The Qwen-3 8B decoder
+- The Qwen3-8B or SmolLM3-3B decoder
 
 - Bridging audio and text: the AudioProjector
 
-- SwiGLU architecture explained
+- Linear projector architecture explained
 
 - **Experiments**: Try different decoder models, modify projection dimensions, test activation functions
 

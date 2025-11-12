@@ -59,7 +59,6 @@ class EndpointHandler:
         # Enable by default for significant speedup (20-40%)
         if torch.cuda.is_available() and os.getenv("ENABLE_TORCH_COMPILE", "1") == "1":
             compile_mode = os.getenv("TORCH_COMPILE_MODE", "reduce-overhead")
-            print(f"⚡ Enabling torch.compile (mode={compile_mode})")
             self.model = torch.compile(self.model, mode=compile_mode)
             # Update the pipeline with the compiled model
             self.pipe.model = self.model
@@ -76,7 +75,6 @@ class EndpointHandler:
 
     def _warmup(self):
         """Warmup to trigger model compilation and allocate GPU memory."""
-        print("Warming up model...")
         try:
             # Create dummy audio (1 second at config sample rate)
             sample_rate = self.pipe.model.config.audio_sample_rate
@@ -95,7 +93,6 @@ class EndpointHandler:
                 # Clear cache after warmup to free memory
                 torch.cuda.empty_cache()
 
-            print("Model warmup complete!")
         except Exception as e:
             print(f"Warmup skipped due to: {e}")
 

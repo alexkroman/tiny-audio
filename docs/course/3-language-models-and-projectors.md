@@ -10,9 +10,9 @@ By the end of this class, you will:
 
 - Understand what language models do and how they generate text
 
-- Know the Qwen-3 8B architecture
+- Know the Qwen3-8B and SmolLM3-3B architectures
 
-- Understand the AudioProjector's SwiGLU architecture
+- Understand the AudioProjector's linear architecture
 
 - Implement and visualize the projection process
 
@@ -59,25 +59,29 @@ Step 4: "Hello, how are you?" [STOP]
 
 ```
 
-### Qwen-3 8B Architecture
+### Qwen3-8B and SmolLM3-3B Architectures
 
-Qwen-3 8B is our decoder - a powerful language model that generates the transcription text.
+Tiny Audio supports multiple decoder options - powerful language models that generate the transcription text.
 
-**Why Qwen-3 8B?**
+**Default: Qwen3-8B**
 
-- Large enough for strong performance
+- 8 billion parameters
+- Excellent multilingual capabilities
+- Strong text generation quality
+- Efficient with LoRA fine-tuning (rank 8)
 
-- Efficient with LoRA fine-tuning
+**Alternative: SmolLM3-3B**
 
-- Open source and well-documented
+- 3 billion parameters
+- Smaller and faster
+- Good for resource-constrained environments
+- Also supports LoRA fine-tuning
 
-- Excellent text generation quality
-
-- Multilingual capabilities
+Both are open source and well-documented
 
 ### Decoder-Only Architecture
 
-Qwen-3 8B is "decoder-only" (like GPT):
+Both Qwen3-8B and SmolLM3-3B are "decoder-only" models (like GPT):
 
 ```
 Input tokens → Embeddings → Transformer Layers → Next token prediction
@@ -119,13 +123,13 @@ ______________________________________________________________________
 
 We have two different "languages":
 
-- **Audio embeddings**: 1280 dimensions from HuBERT
+- **Audio embeddings**: 1280 dimensions from HuBERT (or Whisper)
 
-- **Text embeddings**: 2048 dimensions from Qwen-3 8B
+- **Text embeddings**: 2048 dimensions from Qwen3-8B (or 1536 dimensions from SmolLM3-3B)
 
 **Problem**: Can't directly feed audio embeddings to text model!
 
-- Different dimensions (1280 vs 2048)
+- Different dimensions (1280 vs 2048/1536)
 
 - Different statistical distributions
 
@@ -137,94 +141,69 @@ We have two different "languages":
 
 A trainable neural network that:
 
-1. **Transforms dimensions**: 1280D → 2048D
-1. **Aligns distributions**: Audio stats → Text stats
-1. **Downsamples time**: 5x reduction for efficiency
+1. **Transforms dimensions**: 1280D×5 → 2048D (or 1536D depending on decoder)
+1. **Aligns distributions**: Audio stats → Text stats through normalization
+1. **Downsamples time**: 5x reduction for efficiency (~80% fewer frames)
 1. **Bridges modalities**: Audio space → Language space
 
-**Key insight**: This is the ONLY fully trainable component (~122M params)!
+**Key insight**: This is the ONLY fully trainable component from scratch (~13M params for the projection layer, plus normalization layers)!
 
 ______________________________________________________________________
 
-## 3. SwiGLU Architecture Deep Dive (10 min)
+## 3. Linear Projector Architecture Deep Dive (8 min)
 
-### What is SwiGLU?
+### What is the AudioProjector?
 
-**SwiGLU** = **Swi**sh **G**ated **L**inear **U**nit
+**AudioProjector** = Simple yet effective linear projection layer
 
-Used in modern architectures (Llama, PaLM, etc.) for better performance than simple MLPs.
+A streamlined architecture designed to bridge audio and text modalities efficiently. While more complex architectures like SwiGLU exist (used in Llama, PaLM, etc.), Tiny Audio uses a simpler design that prevents overfitting while maintaining strong alignment capacity.
 
 ### Architecture Breakdown
 
+The AudioProjector is surprisingly simple - just 4 operations:
+
 ```python
-# Pseudocode for AudioProjector
-def forward(audio_features):
-    # Input: [batch, time, 1280]
+class AudioProjector(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.k = 5  # Stack 5 frames together
+        in_dim = 1280 * 5  # = 6400
+        out_dim = 2048  # For Qwen3-8B (1536 for SmolLM3-3B)
 
-    # Step 1: Stack 5 frames together (downsampling)
-    stacked = stack_frames(audio_features, k=5)
-    # Shape: [batch, time/5, 1280*5] = [batch, time/5, 6400]
+        self.ln_pre = RMSNorm(in_dim)       # 1. Pre-normalize
+        self.proj = Linear(in_dim, out_dim)  # 2. Main projection
+        self.dropout = Dropout(0.05)         # 3. Regularization
+        self.ln_post = RMSNorm(out_dim)      # 4. Post-normalize
 
-    # Step 2: Pre-normalize (fix broken stats from stacking)
-    x = rms_norm(stacked)
-
-    # Step 3: SwiGLU transformation
-    gate = linear_gate(x)      # [batch, time/5, 8192]
-    up = linear_up(x)          # [batch, time/5, 8192]
-    activated = silu(gate) * up  # Element-wise multiply
-
-    # Step 4: Project to LLM dimension
-    output = linear_down(activated)  # [batch, time/5, 2048]
-
-    # Step 5: Post-normalize (match LLM's expected distribution)
-    output = rms_norm(output)
-
-    return output
-
-
+    def forward(self, x):
+        # Input: [batch, 149 frames, 1280 dim]
+        x = stack_5_frames(x)    # → [batch, 30 frames, 6400 dim]
+        x = self.ln_pre(x)       # → Normalize
+        x = self.proj(x)         # → [batch, 30 frames, 2048 dim]
+        x = self.dropout(x)      # → Regularize
+        return self.ln_post(x)   # → Final normalize
 ```
 
 ### Why Each Component Matters
 
-**1. Frame Stacking (5x downsampling)**
+**1. Frame Stacking**: Concatenate 5 frames → Reduces 149 frames to ~30 (~80% less computation)
 
-- Input: 149 frames × 1280D
+**2. Pre-normalize (RMSNorm)**: Stacking breaks statistics → normalize for stable training
 
-- Concatenate 5 consecutive frames → 1 super-frame
+**3. Linear Projection**: 6400D → 2048D mapping, simple but effective (~13M params)
 
-- Output: ~30 frames × 6400D
+**4. Dropout (5%)**: Prevents overfitting during training
 
-- **Why?** Efficiency! Reduces sequence length for decoder
+**5. Post-normalize (RMSNorm)**: Match what the LLM expects as input
 
-**2. Pre-normalization (RMSNorm)**
+### Why Not a More Complex Projector?
 
-- Concatenation breaks normalized statistics
-
-- RMSNorm re-normalizes: `x / sqrt(mean(x²))`
-
-- **Why?** Stable training, better gradients
-
-**3. SwiGLU Activation**
-
-- `gate_proj`: Controls information flow
-
-- `up_proj`: Transforms features
-
-- `silu(gate) * up`: Gated activation (selective)
-
-- **Why?** Better than ReLU, more expressive
-
-**4. Down Projection**
-
-- Maps 8192D → 2048D (LLM dimension)
-
-- **Why?** Match decoder's input size
-
-**5. Post-normalization**
-
-- Ensure output matches LLM's expected distribution
-
-- **Why?** LLM was trained on specific input stats
+**Simple is better here:**
+- **Parameter efficient**: ~13M vs ~40M+ with gated architectures
+- **Less overfitting**: Simpler generalizes better
+- **Faster**: Fewer computations
+- **Sufficient**: Job is alignment, not complex transformation
+- **Works**: Achieves competitive WER scores (12-15%)
 
 ______________________________________________________________________
 
@@ -415,28 +394,28 @@ Compare different language models as potential decoders.
 # Compare different decoder models
 decoders = [
     {
-        "name": "Qwen-3 8B (Actual)",
+        "name": "Qwen3-8B (Default)",
         "model_id": "Qwen/Qwen3-8B",
         "params": 8e9,
         "hidden_dim": 2048,
         "vocab_size": 151936,
     },
     {
-        "name": "Llama-3 8B",
-        "model_id": "meta-llama/Meta-Llama-3-8B",
-        "params": 8e9,
-        "hidden_dim": 4096,
+        "name": "SmolLM3-3B (Alternative)",
+        "model_id": "HuggingFaceTB/SmolLM3-3B",
+        "params": 3e9,
+        "hidden_dim": 1536,
+        "vocab_size": 49152,
+    },
+    {
+        "name": "Llama-3.2-3B (Possible)",
+        "model_id": "meta-llama/Llama-3.2-3B",
+        "params": 3e9,
+        "hidden_dim": 3072,
         "vocab_size": 128256,
     },
     {
-        "name": "Mistral 7B",
-        "model_id": "mistralai/Mistral-7B-v0.1",
-        "params": 7e9,
-        "hidden_dim": 4096,
-        "vocab_size": 32000,
-    },
-    {
-        "name": "Qwen-3 1.5B",
+        "name": "Qwen3-1.5B (Smallest)",
         "model_id": "Qwen/Qwen3-1.5B",
         "params": 1.5e9,
         "hidden_dim": 1536,

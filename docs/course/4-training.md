@@ -44,11 +44,11 @@ ______________________________________________________________________
 
 **Traditional approach**: Update all model parameters
 
-- HuBERT encoder: 1.3B params
+- HuBERT/Whisper encoder: 1.3-1.5B params
 
-- Qwen-3 8B decoder: 8B params
+- Qwen3-8B/SmolLM3-3B decoder: 3-8B params
 
-- **Total**: 9.3B+ parameters to train
+- **Total**: 4.3-9.5B+ parameters to train
 
 **Problems**:
 
@@ -69,8 +69,14 @@ ______________________________________________________________________
 Instead, we:
 
 1. **Freeze** most parameters (keep pre-trained knowledge)
-1. **Add small adapters** that learn the specific task
-1. **Train only adapters** (~1.5% of total params)
+2. **Train projector fully** (~13-138M params, bridges audio and text)
+3. **Add small LoRA adapters** (optional, for encoder and/or decoder)
+4. **Train only trainable components** (~1.6% of total params with full PEFT)
+
+**Training Modes**:
+- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~150M params)
+- **Projector + Decoder**: Frozen encoder, trainable projector + decoder LoRA (~142M params)
+- **Projector Only**: Frozen encoder and decoder, only projector trains (~138M params)
 
 **Results**:
 
@@ -82,7 +88,9 @@ Instead, we:
 
 - Better generalization
 
-- Easy to share (only save adapter weights)
+- Easy to share (only save adapter weights + projector)
+
+- Flexible configuration (enable/disable LoRA components)
 
 ______________________________________________________________________
 
@@ -94,52 +102,29 @@ ______________________________________________________________________
 
 **Core idea**: Large weight matrices can be approximated by low-rank decompositions.
 
-### The Math (Simplified)
+### The Math (Intuitive)
 
-Normal training updates weight matrix W:
-
-```
-W_new = W_old + ΔW
-
+Instead of updating a full weight matrix W (millions of params):
 
 ```
-
-LoRA approximates ΔW with two small matrices:
-
-```
-ΔW ≈ B × A
-
-
+Normal: W_new = W_old + ΔW   (update all 4.2M parameters)
+LoRA:   W_new = W_old + B×A  (update only 32K parameters!)
 ```
 
-Where:
+**The Key Insight**: Most updates are low-rank - they don't need millions of parameters.
 
-- W is large (e.g., 2048 × 2048 = 4.2M params)
+**Example**: For a 2048×2048 weight matrix with rank r=8:
+- Original: 2048 × 2048 = **4.2M parameters**
+- LoRA: (2048×8) + (8×2048) = **32K parameters** (0.76%!)
 
-- B is tall and thin (2048 × 8 = 16K params)
-
-- A is short and wide (8 × 2048 = 16K params)
-
-- **Total**: 32K params instead of 4.2M! (0.76%)
-
-**Rank (r)**: The middle dimension (8 in this example)
-
-- Lower rank = fewer parameters, less capacity
-
-- Higher rank = more parameters, more capacity
-
-**Quick Experiment**: Calculate parameter savings for different ranks:
-
-```python
-# Try ranks 1, 4, 8, 16, 32, 64
-for rank in [1, 4, 8, 16, 32, 64]:
-    lora_params = 2 * 2048 * rank  # B + A matrices
-    original = 2048 * 2048
-    savings = 100 * (1 - lora_params/original)
-    print(f"Rank {rank:2d}: {lora_params:,} params ({savings:.1f}% savings)")
-
-
+**Visual intuition:**
 ```
+[2048 × 2048]  =  [2048 × 8]  ×  [8 × 2048]
+   4.2M params      16K          16K
+   Full update      Matrix B     Matrix A
+```
+
+The "rank" (r=8) is how much information we allow the update to carry.
 
 ### How LoRA Works in Practice
 
@@ -176,17 +161,17 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Controls adapter capacity
 
-- Encoder: r=8 (conservative)
+- Encoder: r=0 (disabled, frozen) or r=16 (when enabled)
 
-- Decoder: r=64 (more capacity for language task)
+- Decoder: r=0 (disabled, frozen) or r=8 (when enabled)
 
 **Alpha (lora_alpha)**:
 
 - Scaling factor: `scale = alpha / r`
 
-- Encoder: alpha=8 (scale=1.0)
+- Encoder: alpha=16 (scale=1.0 when r=16)
 
-- Decoder: alpha=32 (scale=0.5)
+- Decoder: alpha=8 (scale=1.0 when r=8)
 
 - Controls magnitude of adapter contribution
 
@@ -194,9 +179,9 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Which layers get adapters
 
-- Encoder: q_proj, k_proj (query and key in attention)
+- Encoder: `attention.q_proj`, `attention.k_proj` (query and key in HuBERT attention)
 
-- Decoder: q_proj, v_proj (query and value in attention)
+- Decoder: `q_proj`, `v_proj` (query and value in decoder attention)
 
 - More modules = more parameters but more capacity
 
@@ -204,27 +189,27 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Regularization for adapters
 
-- We use 0.0 (no dropout)
+- Encoder: 0.05 (light dropout)
 
-- Pre-trained models already well-regularized
+- Decoder: 0.05 (light dropout)
+
+- Helps prevent overfitting
 
 ### Why These Specific Configurations?
 
-**Encoder (r=8, small)**:
+**Encoder LoRA (r=16 when enabled, or r=0 disabled)**:
 
+- **r=0 (disabled)**: Fastest training, relies on pre-trained features
+- **r=16 (enabled)**: Light adaptation for task-specific features
 - Already well pre-trained on speech
+- ~4M parameters when enabled
 
-- Just needs small adjustments
+**Decoder LoRA (r=8 when enabled, or r=0 disabled)**:
 
-- ~2M parameters
-
-**Decoder (r=64, larger)**:
-
-- Bigger adaptation needed (text → speech-aware text)
-
-- More capacity for language generation
-
-- ~15M parameters
+- **r=0 (disabled)**: Frozen decoder, only projector adapts
+- **r=8 (enabled)**: Adaptation for speech-aware text generation
+- More conservative rank than encoder
+- ~4M parameters when enabled
 
 **Projector (no LoRA)**:
 
@@ -232,7 +217,20 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Train fully from scratch
 
-- ~122M parameters
+- ~13M parameters (simple linear) to ~138M parameters (varies by encoder/decoder dimensions)
+
+**Configuration Examples**:
+
+```bash
+# Full PEFT (projector + encoder LoRA + decoder LoRA)
+poetry run python src/train.py encoder_lora.r=16 peft.r=8
+
+# Projector + Decoder LoRA only (frozen encoder)
+poetry run python src/train.py encoder_lora.r=0 peft.r=8
+
+# Projector only (fastest, both models frozen)
+poetry run python src/train.py encoder_lora.r=0 peft.r=0
+```
 
 ______________________________________________________________________
 
@@ -254,22 +252,28 @@ ______________________________________________________________________
 
 ```
 configs/hydra/
-├── config.yaml              # Main config (ties everything together)
+├── config.yaml                    # Main config (ties everything together)
 ├── model/
-│   ├── default.yaml         # Model architecture
-│   └── hubert_xlarge.yaml   # Encoder variant
+│   ├── whisper_turbo.yaml        # Default: Whisper Turbo encoder
+│   ├── large.yaml                # HuBERT-XLarge encoder
+│   └── hubert_large.yaml         # HuBERT-Large encoder
 ├── data/
-│   └── loquacious.yaml      # Dataset config
+│   ├── loquacious_clean.yaml     # Clean LoquaciousSet
+│   ├── loquacious_large.yaml     # Large LoquaciousSet
+│   └── multi_task_complete.yaml  # Multi-task dataset
 ├── training/
-│   ├── default.yaml         # Training hyperparameters
-│   └── production.yaml      # Production settings
+│   ├── base.yaml                 # Base training hyperparameters
+│   ├── production.yaml           # Production settings
+│   ├── mac.yaml                  # Mac-specific settings
+│   └── mac_override.yaml         # Mac overrides
 ├── peft/
-│   └── lora.yaml           # Decoder LoRA config
+│   └── default.yaml              # Decoder LoRA config
 ├── encoder_lora/
-│   └── r8.yaml             # Encoder LoRA config
+│   └── default.yaml              # Encoder LoRA config
 └── experiments/
-    ├── stage1.yaml         # Full training preset
-    └── mac_minimal.yaml    # Local testing preset
+    ├── transcribe_hubert.yaml    # HuBERT transcription
+    ├── transcribe_whisper.yaml   # Whisper transcription
+    └── multi_task.yaml           # Multi-task training
 
 
 ```
@@ -503,8 +507,13 @@ python -c "import torch; print(f'MPS available: {torch.backends.mps.is_available
 **Step 2: Run minimal test**
 
 ```bash
-# This will train for just 20 steps (~5-10 minutes)
-poetry run python src/train.py +experiments=mac_minimal
+# Quick local test with manual overrides (10 steps)
+poetry run python src/train.py \
+  training.max_steps=10 \
+  data.max_train_samples=50 \
+  training.per_device_train_batch_size=2 \
+  encoder_lora.r=0 \
+  peft.r=0
 
 
 ```
@@ -512,31 +521,29 @@ poetry run python src/train.py +experiments=mac_minimal
 **What happens:**
 
 1. Downloads/loads dataset samples
-1. Initializes model with LoRA adapters
-1. Trains for 20 steps
-1. Saves checkpoint
+2. Initializes model (encoder + projector + decoder)
+3. Trains projector only (LoRA disabled for speed)
+4. Trains for 10 steps
+5. Saves checkpoint
 
 **Expected output:**
 
 ```
 Loading model...
-✓ Loaded encoder (HuBERT-XLarge + LoRA r=8)
-✓ Loaded decoder (Qwen-3 8B + LoRA r=8)
-✓ Loaded projector (122M params)
+✓ Loaded encoder (Whisper Turbo, frozen)
+✓ Loaded projector (~13M params, trainable)
+✓ Loaded decoder (SmolLM3-3B, frozen)
 
 Loading dataset...
-✓ Train samples: 100
-✓ Eval samples: 50
+✓ Train samples: 50
 
 Training...
-Step 1/20 | Loss: 12.3456
-Step 5/20 | Loss: 8.2345
-Step 10/20 | Loss: 5.1234
-...
-Step 20/20 | Loss: 3.4567
+Step 1/10 | Loss: 8.3456
+Step 5/10 | Loss: 5.2345
+Step 10/10 | Loss: 3.4567
 
 ✓ Training complete!
-✓ Saved checkpoint to outputs/mac_minimal/
+✓ Saved checkpoint to outputs/[timestamp]/
 
 
 ```
@@ -544,7 +551,7 @@ Step 20/20 | Loss: 3.4567
 **Step 3: Check the output**
 
 ```bash
-ls outputs/mac_minimal/
+ls outputs/*/  # Check most recent output
 
 
 ```
@@ -553,9 +560,11 @@ You should see:
 
 - `config.json` - Model configuration
 
-- `model.safetensors` - Trained weights (projector + LoRA)
+- `projector.safetensors` - Projector weights (always present)
 
-- `training_args.bin` - Training settings
+- `encoder.safetensors` - Encoder LoRA (only if encoder_lora.r > 0)
+
+- `decoder.safetensors` - Decoder LoRA (only if peft.r > 0)
 
 - `trainer_state.json` - Training state
 
@@ -711,8 +720,11 @@ export HF_TOKEN='your_token_here'  # Get from https://huggingface.co/settings/to
 **Step 5: Start training**
 
 ```bash
-# Full production training
-poetry run python src/train.py +experiments=stage1
+# Full production training with HuBERT
+poetry run python src/train.py +experiments=transcribe_hubert
+
+# Or with Whisper encoder
+poetry run python src/train.py +experiments=transcribe_whisper
 
 
 ```

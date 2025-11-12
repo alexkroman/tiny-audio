@@ -244,15 +244,13 @@ ______________________________________________________________________
 
 In the next 45 minutes, you will:
 
-- **Exercise 1**: Setup and push model to Hub with experiments (10 min)
+- **Exercise 1**: Setup and push model to Hub (12 min)
 
-- **Exercise 2**: Create model card and test variations (8 min)
+- **Exercise 2**: Create model card (10 min)
 
-- **Exercise 3**: Deploy and experiment with configurations (12 min)
+- **Exercise 3**: Deploy demo to Hugging Face Spaces (15 min)
 
-- **Exercise 4**: Test, benchmark, and optimize deployment (10 min)
-
-- **Bonus**: Advanced deployment experiments (5 min)
+- **Exercise 4**: Test and add to leaderboard (8 min)
 
 By the end, you'll have:
 
@@ -268,7 +266,7 @@ By the end, you'll have:
 
 ______________________________________________________________________
 
-## Workshop Exercise 1: Setup and Push to Hub (10 min)
+## Workshop Exercise 1: Setup and Push to Hub (12 min)
 
 ### Goal
 
@@ -470,7 +468,7 @@ print(f"Total: {total_size:.2f} MB")
 
 ______________________________________________________________________
 
-## Workshop Exercise 2: Create Model Card (8 min)
+## Workshop Exercise 2: Create Model Card (10 min)
 
 ### Goal
 
@@ -525,13 +523,13 @@ pipeline_tag: automatic-speech-recognition
 
 This is a speech recognition model trained using the Tiny Audio framework. It combines:
 
-- **Audio Encoder**: HuBERT-XLarge (1.3B params) with LoRA adapters (r=8, ~2M trainable)
+- **Audio Encoder**: HuBERT-XLarge (1.3B params) with optional LoRA adapters (r=16, ~4M trainable)
 
-- **Audio Projector**: SwiGLU MLP (~122M params, fully trainable)
+- **Audio Projector**: Linear MLP (~13-138M params, fully trainable)
 
-- **Text Decoder**: Qwen-3 8B3-3B (3B params) with LoRA adapters (r=64, ~15M trainable)
+- **Text Decoder**: Qwen3-8B (8B params) or SmolLM3-3B (3B params) with optional LoRA adapters (r=8, ~4M trainable)
 
-**Total**: 139M trainable parameters out of 4.3B total (3.2%)
+**Total trainable (Full PEFT)**: ~150M parameters (projector + encoder LoRA + decoder LoRA)
 
 ## Training Details
 
@@ -609,7 +607,7 @@ Based on:
 
 - HuBERT (Facebook AI)
 
-- Qwen-3 8B3 (HuggingFace)
+- Qwen3-8B (Alibaba) or SmolLM3-3B (HuggingFace)
 
 - LoquaciousSet (SpeechBrain)
 
@@ -646,7 +644,7 @@ Click "Commit changes to main"
 
 ---
 
-## Workshop Exercise 3: Deploy Demo to Hugging Face Spaces (12 min)
+## Workshop Exercise 3: Deploy Demo to Hugging Face Spaces (15 min)
 
 **Goal**: Create a public web demo for your model using Hugging Face Spaces.
 
@@ -678,9 +676,9 @@ Clone the demo files from the tiny-audio repository:
 ```bash
 # Copy demo files to a temporary directory
 mkdir ~/my-tiny-audio-demo
-cp demo/app.py ~/my-tiny-audio-demo/
-cp demo/requirements.txt ~/my-tiny-audio-demo/
-cp demo/README.md ~/my-tiny-audio-demo/
+cp demo/gradio/app.py ~/my-tiny-audio-demo/
+cp demo/gradio/requirements.txt ~/my-tiny-audio-demo/
+cp demo/gradio/README.md ~/my-tiny-audio-demo/
 cd ~/my-tiny-audio-demo
 
 
@@ -898,7 +896,7 @@ for name, test_func in deployments.items():
 
 ______________________________________________________________________
 
-## Workshop Exercise 4: Test and Add to Leaderboard (10 min)
+## Workshop Exercise 4: Test and Add to Leaderboard (8 min)
 
 ### Goal
 

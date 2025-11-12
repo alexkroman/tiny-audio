@@ -353,27 +353,38 @@ Run evaluation on test set and get your WER score.
 Check that your model training finished:
 
 ```bash
-ls outputs/stage1/  # or outputs/my_experiment/
+# List output directories (they're timestamped)
+ls outputs/
+
+# Check the contents of your training output
+ls outputs/[your-timestamp-dir]/
 
 
 ```
 
 You should see:
 
-- `config.json`
+- `config.json` - Model configuration
 
-- `model.safetensors`
+- `projector.safetensors` - Projector weights (always present)
 
-- `trainer_state.json`
+- `encoder.safetensors` - Encoder LoRA (if enabled)
+
+- `decoder.safetensors` - Decoder LoRA (if enabled)
+
+- `trainer_state.json` - Training state
 
 **Step 2: Run evaluation**
 
 ```bash
-# Evaluate on 100 samples (quick test)
-poetry run eval outputs/stage1 --max-samples 100
+# Evaluate on 100 samples (quick test) - replace with your actual output directory
+poetry run eval outputs/[your-timestamp-dir] --max-samples 100
+
+# Or evaluate the baseline model
+poetry run eval mazesmazes/tiny-audio --max-samples 100
 
 # Full evaluation (takes ~30 min)
-poetry run eval outputs/stage1
+poetry run eval outputs/[your-timestamp-dir]
 
 
 ```

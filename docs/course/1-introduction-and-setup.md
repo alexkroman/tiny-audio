@@ -49,53 +49,28 @@ Speech recognition is hard because:
 
 ### How Modern ASR Works
 
-Modern ASR systems have evolved through several generations:
+Modern ASR has evolved dramatically:
 
-**1st Generation (1950s-1980s)**: Rule-based pattern matching
+**Classic Era (1950s-2010s)**: Rule-based systems → Hidden Markov Models
+- Limited by manual feature engineering
+- Required careful tuning for each language/domain
 
-- Limited vocabulary (~100 words)
+**Deep Learning Era (2010s-2020)**: RNNs → Attention → Transformers
+- Neural networks learn features automatically
+- Transformers (2017) enabled parallel processing and better context
+- Much better accuracy, but still data-hungry
 
-- Speaker-dependent
+**Modern Era (2020s-Present)**: Self-Supervised + Multimodal
+- **Self-supervised pre-training**: Models learn from unlabeled audio
+  - wav2vec 2.0, HuBERT, Whisper
+  - Millions of hours of audio without transcriptions
+- **Transfer learning**: Leverage pre-trained audio encoders + language models
+- **Multimodal architectures**: Connect audio directly to text generation
 
-**2nd Generation (1980s-2010s)**: Hidden Markov Models (HMMs)
-
-- Better accuracy
-
-- Still struggled with noise and accents
-
-**3rd Generation (2010s-2020s)**: Deep Learning Era
-
-- **RNNs and LSTMs** (2012-2015): Sequential processing of audio
-
-  - Recurrent Neural Networks and Long Short-Term Memory networks
-  - Better at capturing temporal dependencies than HMMs
-
-- **Attention Mechanisms** (2014-2017): Model learns what to focus on
-
-  - Attention Is All You Need (2017) introduces the Transformer architecture
-  - Enables parallelization and better long-range dependencies
-
-- **RNN-Transducer (RNN-T)** (2012-2019): Streaming ASR
-
-  - Combines RNNs with CTC-like alignment
-  - Enables real-time, low-latency transcription
-  - Used in production systems (Google Assistant, etc.)
-
-- **Transformers** (2017-2020): Replaced RNNs as the dominant architecture
-
-  - Self-attention for better context modeling
-  - Parallelizable training (much faster than RNNs)
-  - Foundation for modern ASR
-
-**4th Generation (2020s-Present)**: Self-Supervised + LLMs
-
-- **Self-supervised pre-training** on unlabeled audio (wav2vec 2.0, HuBERT, Whisper)
-
-- **Transfer learning** from massive language models
-
-- **Multimodal architectures** connecting audio and text
-
-- **This is what Tiny Audio uses!**
+**This is what Tiny Audio uses!** We combine:
+- Pre-trained audio encoder (HuBERT or Whisper)
+- Pre-trained language model (Qwen3-8B or SmolLM3-3B)
+- Small trainable bridge (projector) to connect them
 
 ______________________________________________________________________
 
@@ -107,7 +82,7 @@ Tiny Audio uses a three-component architecture:
 
 ```
 Audio File → Audio Encoder → Audio Projector → Language Model → Text
-            (Whisper)         (SwiGLU MLP)      (SmollM3)
+            (HuBERT/Whisper)   (Linear MLP)     (Qwen3-8B/SmolLM3-3B)
 
 
 ```
@@ -116,7 +91,7 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 Let's understand each component:
 
-### Component 1: Audio Encoder (Whisper)
+### Component 1: Audio Encoder (HuBERT or Whisper)
 
 **Purpose**: Convert raw audio waveforms into meaningful feature representations
 
@@ -128,37 +103,45 @@ Let's understand each component:
 
 - Each vector captures phonetic and acoustic information
 
-**Key insight**: Whisper is **pre-trained** on a massive dataset of diverse audio, so it already "understands" a wide range of speech patterns.
+**Default Encoder: HuBERT-XLarge**
+
+- Pre-trained on 60K hours of LibriLight (self-supervised learning)
+- 1.3 billion parameters (frozen during our training with optional LoRA adapters)
+- Excellent for English speech recognition
+
+**Alternative: Whisper**
+
+- Pre-trained on 680K hours of multilingual data
+- 1.5 billion parameters
+- Better for multilingual tasks
 
 **Analogy**: An expert musician who can listen to any piece of music and instantly transcribe the notes, rhythm, and instrumentation, without ever seeing the sheet music.
 
-**Size**: 1.55 billion parameters (frozen during our training)
-
-### Component 2: Audio Projector (~50M parameters)
+### Component 2: Audio Projector (~13-138M parameters)
 
 **Purpose**: Bridge the gap between the audio and language worlds.
 
 **What it does**
 
-- Takes Whisper's audio embeddings
+- Takes encoder's audio embeddings (1280-dim from HuBERT or Whisper)
 
 - Downsamples by 5x (reduces sequence length for efficiency)
 
-- Transforms to match the language model's input format
+- Transforms to match the language model's input format (2048-dim for Qwen3-8B, 1536-dim for SmolLM3-3B)
 
-**Architecture**: SwiGLU MLP (we'll dive deeper in Class 3)
+**Architecture**: Simple yet effective linear projection (we'll dive deeper in Class 3)
 
-- Pre-normalization layer
+- Pre-normalization layer (RMSNorm)
 
-- Gated projection (allows selective information flow)
+- Single linear projection with dropout for regularization
 
-- Post-normalization layer
+- Post-normalization layer (RMSNorm)
 
-**Key insight**: This is the **largest trainable component** - all ~50M parameters learn during training.
+**Key insight**: This is the **largest trainable component** - the projector is fully trained from scratch (no pre-training).
 
 **Analogy**: A skilled diplomat who can fluently translate between two very different cultures, ensuring the meaning and nuance are preserved.
 
-### Component 3: Language Model Decoder (SmollM3)
+### Component 3: Language Model Decoder (Qwen3-8B or SmolLM3-3B)
 
 **Purpose**: Generate a coherent and grammatically correct text transcription.
 
@@ -170,21 +153,34 @@ Let's understand each component:
 
 - Handles grammar, spelling, and punctuation
 
-**Key insight**: SmollM3 is a small, efficient language model that is also **pre-trained** on a large amount of text.
+**Default Decoder: Qwen3-8B**
 
-**Size**: 3 billion parameters (we use LoRA to adapt efficiently)
+- 8 billion parameters
+- Strong multilingual capabilities
+- We use LoRA (rank 8) to efficiently adapt (~4M trainable params)
+
+**Alternative: SmolLM3-3B**
+
+- 3 billion parameters
+- Smaller, faster, good for resource-constrained environments
+- Also uses LoRA for efficient adaptation
 
 **Analogy**: A master storyteller who can take a sequence of events (the audio features) and weave them into a compelling narrative (the final transcription).
 
 ### Why This Architecture?
 
-**Efficiency**: We train ~58M parameters instead of 4.6+ billion (~1.3% of total model)
+**Efficiency**: We train ~150M parameters instead of 9.3+ billion (~1.6% of total model)
 
-- Projector: ~50M (fully trained)
+- Projector: ~138M (fully trained, size varies based on encoder/decoder choice)
 
-- Encoder LoRA: ~4M (adapter weights, r=16)
+- Encoder LoRA: ~4M (adapter weights, r=16) - OPTIONAL, can be disabled
 
-- Decoder LoRA: ~4M (adapter weights, r=8)
+- Decoder LoRA: ~4M (adapter weights, r=8) - OPTIONAL, can be disabled
+
+**Flexibility**: You can train in different modes:
+- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~146M params)
+- **Projector + Decoder LoRA**: Frozen encoder, trainable projector and decoder adapters (~142M params)
+- **Projector Only**: Frozen encoder and decoder, only projector learns (~138M params)
 
 **Speed**: Training completes in ~24 hours on a single GPU
 
@@ -195,8 +191,6 @@ Let's understand each component:
 **A Note on Architectural Choices:**
 
 The Tiny Audio architecture is a **dense transformer-based** model. It's crucial to start with a **proven, stable baseline**. While other exciting architectures like Mixture-of-Experts (MoE) and Hybrids (combining transformers with other architectures like SSMs) exist, they introduce complexity that isn't necessary for our goal.
-
-Recent research has shown that **instruct-tuned models** perform significantly better for speech recognition tasks than their base counterparts. This is why we use SmollM3 Instruct rather than the base model - the instruction-following capabilities help the model better understand the task of transcribing audio to text.
 
 - **Dense models** are well-understood, stable to train, and perform exceptionally well, especially for a focused task like ours.
 
