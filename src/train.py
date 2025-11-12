@@ -421,7 +421,6 @@ def main(cfg: DictConfig) -> None:
         ):
             from peft import TaskType
 
-            print("⚠️  Applying fresh encoder LoRA adapters...")
             model.encoder = model._apply_lora(
                 model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
             )
@@ -434,7 +433,6 @@ def main(cfg: DictConfig) -> None:
         ):
             from peft import TaskType
 
-            print("⚠️  Applying fresh decoder LoRA adapters...")
             model.decoder = model._apply_lora(
                 model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder"
             )
