@@ -204,6 +204,7 @@ Tiny Audio uses HuBERT-XLarge by default - pre-trained on 60,000 hours of unlabe
 - Optional LoRA fine-tuning for task-specific adaptation
 
 **Why we use HuBERT as default**:
+
 - Excellent performance on English speech
 - Proven track record in ASR tasks
 - Efficient with LoRA adaptation (optional)
@@ -211,6 +212,7 @@ Tiny Audio uses HuBERT-XLarge by default - pre-trained on 60,000 hours of unlabe
 
 **Alternative: Whisper Encoder**:
 Tiny Audio also supports OpenAI's Whisper encoder (openai/whisper-large-v3):
+
 - Pre-trained on 680K hours of multilingual, weakly-supervised data
 - 1.5 billion parameters
 - Better for multilingual tasks
@@ -314,8 +316,9 @@ HuBERT performs dramatic temporal compression while increasing semantic density:
 **The Solution**: LoRA (Low-Rank Adaptation) - OPTIONAL
 
 **Important**: Encoder LoRA is **optional** in Tiny Audio. You can train with:
+
 1. **Frozen encoder**: No LoRA (encoder_lora.r=0), fastest training
-2. **With LoRA**: Small adapters (encoder_lora.r=16), more adaptation capacity
+1. **With LoRA**: Small adapters (encoder_lora.r=16), more adaptation capacity
 
 **What is LoRA?**
 
@@ -472,6 +475,7 @@ poetry run python explore_embeddings.py
 ```
 
 **Expected output:**
+
 ```
 Audio duration: 5.56 seconds
 Embedding shape: torch.Size([1, 174, 1280])
@@ -525,6 +529,7 @@ Experiment with swapping encoders by comparing HuBERT vs Whisper performance.
 ### Why This Matters
 
 Different encoders have different strengths:
+
 - **HuBERT**: Self-supervised on 60K hours, excellent for English
 - **Whisper**: Trained on 680K hours multilingual data, better for multiple languages
 

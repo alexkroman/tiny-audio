@@ -69,11 +69,12 @@ ______________________________________________________________________
 Instead, we:
 
 1. **Freeze** most parameters (keep pre-trained knowledge)
-2. **Train projector fully** (~13-138M params, bridges audio and text)
-3. **Add small LoRA adapters** (optional, for encoder and/or decoder)
-4. **Train only trainable components** (~1.6% of total params with full PEFT)
+1. **Train projector fully** (~13-138M params, bridges audio and text)
+1. **Add small LoRA adapters** (optional, for encoder and/or decoder)
+1. **Train only trainable components** (~1.6% of total params with full PEFT)
 
 **Training Modes**:
+
 - **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~150M params)
 - **Projector + Decoder**: Frozen encoder, trainable projector + decoder LoRA (~142M params)
 - **Projector Only**: Frozen encoder and decoder, only projector trains (~138M params)
@@ -114,10 +115,12 @@ LoRA:   W_new = W_old + B×A  (update only 32K parameters!)
 **The Key Insight**: Most updates are low-rank - they don't need millions of parameters.
 
 **Example**: For a 2048×2048 weight matrix with rank r=8:
+
 - Original: 2048 × 2048 = **4.2M parameters**
 - LoRA: (2048×8) + (8×2048) = **32K parameters** (0.76%!)
 
 **Visual intuition:**
+
 ```
 [2048 × 2048]  =  [2048 × 8]  ×  [8 × 2048]
    4.2M params      16K          16K
@@ -521,10 +524,10 @@ poetry run python src/train.py \
 **What happens:**
 
 1. Downloads/loads dataset samples
-2. Initializes model (encoder + projector + decoder)
-3. Trains projector only (LoRA disabled for speed)
-4. Trains for 10 steps
-5. Saves checkpoint
+1. Initializes model (encoder + projector + decoder)
+1. Trains projector only (LoRA disabled for speed)
+1. Trains for 10 steps
+1. Saves checkpoint
 
 **Expected output:**
 

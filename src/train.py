@@ -94,7 +94,7 @@ class DatasetLoader:
             gen_kwargs={"dataset": ds, "task_value": task},
         )
 
-    def load(self) -> tuple[Dataset, Dataset]:  # type: ignore[return]
+    def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
         train_weights = []
 
@@ -500,19 +500,23 @@ def main(cfg: DictConfig) -> None:
         # Configure torch._dynamo settings
         cache_limit = compile_config.get("cache_size_limit", 64)
         torch._dynamo.config.cache_size_limit = cache_limit
-        torch._dynamo.config.capture_scalar_outputs = compile_config.get("capture_scalar_outputs", True)
-        torch._dynamo.config.allow_unspec_int_on_nn_module = compile_config.get("allow_unspec_int_on_nn_module", True)
+        torch._dynamo.config.capture_scalar_outputs = compile_config.get(
+            "capture_scalar_outputs", True
+        )
+        torch._dynamo.config.allow_unspec_int_on_nn_module = compile_config.get(
+            "allow_unspec_int_on_nn_module", True
+        )
 
         # Enable parallel compilation for faster initial compile
         compile_threads = compile_config.get("compile_threads", 4)
         torch._inductor.config.compile_threads = compile_threads
 
     # Handle torch.compile settings (TrainingArguments doesn't support all options)
-    torch_compile_enabled = training_args.get("torch_compile", False)
-    torch_compile_dynamic = training_args.pop("torch_compile_dynamic", False)
-    torch_compile_backend = training_args.pop("torch_compile_backend", "inductor")
-    torch_compile_mode = training_args.pop("torch_compile_mode", None)
-    torch_compile_fullgraph = training_args.pop("torch_compile_fullgraph", False)
+    training_args.get("torch_compile", False)
+    training_args.pop("torch_compile_dynamic", False)
+    training_args.pop("torch_compile_backend", "inductor")
+    training_args.pop("torch_compile_mode", None)
+    training_args.pop("torch_compile_fullgraph", False)
 
     # Remove other custom fields that aren't TrainingArguments parameters
     for key in ["model_dtype", "attn_implementation"]:

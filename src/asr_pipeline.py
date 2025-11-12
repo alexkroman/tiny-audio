@@ -61,10 +61,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if isinstance(model_inputs, Iterator):
             # Convert iterator to list to count chunks
             chunks = list(model_inputs)
-            total_chunks = len(chunks)
+            len(chunks)
 
             all_outputs = []
-            for chunk_num, chunk in enumerate(chunks, start=1):
+            for _chunk_num, chunk in enumerate(chunks, start=1):
                 chunk_output = self._forward(chunk, **generate_kwargs)
                 # Move tensors to CPU before adding to outputs
                 for key, value in chunk_output.items():

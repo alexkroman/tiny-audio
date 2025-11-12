@@ -52,15 +52,18 @@ Speech recognition is hard because:
 Modern ASR has evolved dramatically:
 
 **Classic Era (1950s-2010s)**: Rule-based systems → Hidden Markov Models
+
 - Limited by manual feature engineering
 - Required careful tuning for each language/domain
 
 **Deep Learning Era (2010s-2020)**: RNNs → Attention → Transformers
+
 - Neural networks learn features automatically
 - Transformers (2017) enabled parallel processing and better context
 - Much better accuracy, but still data-hungry
 
 **Modern Era (2020s-Present)**: Self-Supervised + Multimodal
+
 - **Self-supervised pre-training**: Models learn from unlabeled audio
   - wav2vec 2.0, HuBERT, Whisper
   - Millions of hours of audio without transcriptions
@@ -68,6 +71,7 @@ Modern ASR has evolved dramatically:
 - **Multimodal architectures**: Connect audio directly to text generation
 
 **This is what Tiny Audio uses!** We combine:
+
 - Pre-trained audio encoder (HuBERT or Whisper)
 - Pre-trained language model (Qwen3-8B or SmolLM3-3B)
 - Small trainable bridge (projector) to connect them
@@ -178,6 +182,7 @@ Let's understand each component:
 - Decoder LoRA: ~4M (adapter weights, r=8) - OPTIONAL, can be disabled
 
 **Flexibility**: You can train in different modes:
+
 - **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~146M params)
 - **Projector + Decoder LoRA**: Frozen encoder, trainable projector and decoder adapters (~142M params)
 - **Projector Only**: Frozen encoder and decoder, only projector learns (~138M params)
@@ -270,16 +275,19 @@ Poetry manages dependencies and virtual environments.
 **Option A: Using Homebrew (macOS)**
 
 If you don't have Homebrew, install it first:
+
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
 Then, install Poetry with Homebrew:
+
 ```bash
 brew install poetry
 ```
 
 **Option B: Using the official installer (Linux, Windows)**
+
 ```bash
 # Linux
 curl -sSL https://install.python-poetry.org | python3 -
@@ -318,8 +326,6 @@ This will:
 
 **Step 5: Download Samples and Verify Installation**
 
-
-
 ```bash
 
 poetry run python scripts/download_samples.py
@@ -328,11 +334,7 @@ poetry run python scripts/verify_setup.py
 
 ```
 
-
-
 This will check:
-
-
 
 - Python version (3.10+)
 
@@ -342,11 +344,7 @@ This will check:
 
 - Model configuration
 
-
-
 You should see: `✅ All checks passed! You're ready to start the course.`
-
-
 
 ______________________________________________________________________
 
@@ -373,8 +371,8 @@ poetry run python demo/gradio/app.py --model mazesmazes/tiny-audio --port 7860
 **What's happening:**
 
 1. Model downloads from HuggingFace Hub (~4GB, first time only)
-2. Gradio interface starts on http://localhost:7860
-3. You can now interact with the model through your web browser
+1. Gradio interface starts on http://localhost:7860
+1. You can now interact with the model through your web browser
 
 **Step 2: Try the Demo**
 
@@ -404,10 +402,10 @@ poetry run python scripts/eval.py mazesmazes/tiny-audio \
 **What's happening:**
 
 1. Downloads LoquaciousSet test split (streaming, so only downloads what's needed)
-2. Runs inference on 100 randomly shuffled samples
-3. Computes Word Error Rate (WER) using Whisper's text normalization
-4. Shows per-sample results and cumulative statistics
-5. Saves detailed results to `outputs/eval_loquacious_mazesmazes_tiny-audio/`
+1. Runs inference on 100 randomly shuffled samples
+1. Computes Word Error Rate (WER) using Whisper's text normalization
+1. Shows per-sample results and cumulative statistics
+1. Saves detailed results to `outputs/eval_loquacious_mazesmazes_tiny-audio/`
 
 **Expected output:**
 
@@ -438,6 +436,7 @@ cat outputs/eval_loquacious_mazesmazes_tiny-audio/results.txt
 ```
 
 This file contains:
+
 - Overall WER and average response time
 - Per-sample predictions vs ground truth
 - Individual WER scores for each sample
@@ -456,22 +455,20 @@ Explore the codebase and locate the main components of the Tiny Audio architectu
 
 ### Instructions
 
-1.  **Open the project in your code editor** (e.g., VS Code).
-2.  **Inspect the `src/` directory**:
-    *   `asr_modeling.py`: This is where the core model architecture is defined. Can you find the `ASRModel` class?
-    *   `asr_pipeline.py`: This file defines the custom ASR pipeline used by transformers.
-    *   `train.py`: The main script for training the model. We'll use this in a later class.
-3.  **Look at the `configs/` directory**:
-    *   `experiments/`: This directory contains configuration files for different training experiments.
-    *   `model/`: Here you can find the configuration for different model architectures.
-4.  **Check the `demo/gradio/` directory**:
-    *   `app.py`: The Gradio demo interface you just launched.
-5.  **Explore the `scripts/` directory**:
-    *   `verify_setup.py`: The script you ran earlier to check your environment.
-    *   `eval.py`: The evaluation script you used to benchmark the model.
-    *   `transcribe.py`: A command-line tool for quick audio transcription.
-
-
+1. **Open the project in your code editor** (e.g., VS Code).
+1. **Inspect the `src/` directory**:
+   - `asr_modeling.py`: This is where the core model architecture is defined. Can you find the `ASRModel` class?
+   - `asr_pipeline.py`: This file defines the custom ASR pipeline used by transformers.
+   - `train.py`: The main script for training the model. We'll use this in a later class.
+1. **Look at the `configs/` directory**:
+   - `experiments/`: This directory contains configuration files for different training experiments.
+   - `model/`: Here you can find the configuration for different model architectures.
+1. **Check the `demo/gradio/` directory**:
+   - `app.py`: The Gradio demo interface you just launched.
+1. **Explore the `scripts/` directory**:
+   - `verify_setup.py`: The script you ran earlier to check your environment.
+   - `eval.py`: The evaluation script you used to benchmark the model.
+   - `transcribe.py`: A command-line tool for quick audio transcription.
 
 ## Key Takeaways
 

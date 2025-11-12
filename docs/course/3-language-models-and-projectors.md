@@ -199,6 +199,7 @@ class AudioProjector(nn.Module):
 ### Why Not a More Complex Projector?
 
 **Simple is better here:**
+
 - **Parameter efficient**: ~13M vs ~40M+ with gated architectures
 - **Less overfitting**: Simpler generalizes better
 - **Faster**: Fewer computations
