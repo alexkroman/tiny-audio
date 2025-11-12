@@ -70,7 +70,7 @@ def download_samples():
 
                 shutil.copy(first_audio, "test.wav")
                 print(f"\n✓ Created test.wav from {first_audio.name}")
-                print(f"  You can now run the course exercises!")
+                print("  You can now run the course exercises!")
 
     print("\n✅ Sample download complete!")
     print("\nℹ️  Sample audio files are in: samples/LibriSpeech/test-clean/")

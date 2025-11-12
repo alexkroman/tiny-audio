@@ -36,9 +36,17 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             "temperature",
             "top_p",
             "user_prompt",
+            "task",
+            "text_input",
         ]:
             if key in kwargs:
                 generate_kwargs[key] = kwargs.pop(key)
+
+        # Handle text-only mode
+        task = generate_kwargs.get("task")
+        if task == "text" or generate_kwargs.get("text_input"):
+            return self._process_text_only(generate_kwargs)
+
         if isinstance(inputs, list):
             results = []
             for single_input in inputs:
@@ -53,22 +61,19 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if isinstance(model_inputs, Iterator):
             # Convert iterator to list to count chunks
             chunks = list(model_inputs)
-            total_chunks = len(chunks)
-            print(f"Starting transcription of {total_chunks} chunks...", flush=True)
+            len(chunks)
 
             all_outputs = []
-            for chunk_num, chunk in enumerate(chunks, start=1):
-                print(f"Processing chunk {chunk_num}/{total_chunks}...", flush=True)
+            for _chunk_num, chunk in enumerate(chunks, start=1):
                 chunk_output = self._forward(chunk, **generate_kwargs)
                 # Move tensors to CPU before adding to outputs
                 for key, value in chunk_output.items():
                     if torch.is_tensor(value):
                         chunk_output[key] = value.cpu()
                 all_outputs.append(chunk_output)
-                print(f"Chunk {chunk_num}/{total_chunks} completed.", flush=True)
 
             # Merge chunks and decode ourselves to ensure skip_special_tokens=True
-            all_tokens = []
+            all_tokens: list[int] = []
             for output in all_outputs:
                 tokens = output.get("tokens")
                 if tokens is None:
@@ -130,13 +135,39 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         elif hasattr(inputs, "__array__") and not isinstance(inputs, (dict, bytes, str)):
             inputs = {"raw": inputs, "sampling_rate": self.model.config.audio_sample_rate}
         elif torch.is_tensor(inputs):
-            inputs = {"raw": inputs.cpu().numpy(), "sampling_rate": self.model.config.audio_sample_rate}
+            inputs = {
+                "raw": inputs.cpu().numpy(),
+                "sampling_rate": self.model.config.audio_sample_rate,
+            }
 
         return super().preprocess(inputs, **preprocess_params)
 
     def _forward(self, model_inputs, **generate_kwargs):
         is_last = True
         input_values = None
+        input_features = None
+
+        # Extract task from generate_kwargs if present
+        task = generate_kwargs.pop("task", None)
+
+        # Set sampling parameters based on task
+        if task == "transcribe":
+            # For transcribe task, use greedy decoding for accuracy
+            generate_kwargs.setdefault("do_sample", False)
+            # Remove temperature if present since we're not sampling
+            generate_kwargs.pop("temperature", None)
+        elif task == "emotion":
+            # For emotion task, use sampling for varied responses
+            generate_kwargs.setdefault("do_sample", True)
+            generate_kwargs.setdefault("temperature", 0.7)
+        elif task == "describe":
+            # For describe task, allow some creativity
+            generate_kwargs.setdefault("do_sample", True)
+            generate_kwargs.setdefault("temperature", 0.7)
+        elif task == "continue":
+            # For continue task (if still used), use sampling for creative responses
+            generate_kwargs.setdefault("do_sample", True)
+            generate_kwargs.setdefault("temperature", 1.0)
 
         if isinstance(model_inputs, torch.Tensor):
             input_values = model_inputs
@@ -148,7 +179,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                         is_last = first_item.pop("is_last")
                     if "stride" in first_item:
                         first_item.pop("stride")
+                    # Check for both input_values (Wav2Vec2) and input_features (Whisper)
                     input_values = first_item.get("input_values")
+                    input_features = first_item.get("input_features")
                 elif isinstance(first_item, torch.Tensor):
                     input_values = first_item
             else:
@@ -158,27 +191,65 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 is_last = model_inputs.pop("is_last")
             if "stride" in model_inputs:
                 model_inputs.pop("stride")
+            # Check for both input_values (Wav2Vec2) and input_features (Whisper)
             input_values = model_inputs.get("input_values")
+            input_features = model_inputs.get("input_features")
         else:
             input_values = model_inputs
 
-        if input_values is None:
-            raise ValueError(f"Could not extract input_values from {type(model_inputs)}")
+        # Use whichever is available (input_features for Whisper, input_values for others)
+        audio_inputs = input_features if input_features is not None else input_values
 
-        if isinstance(input_values, torch.Tensor):
-            input_values = input_values.to(self.model.device)
+        if audio_inputs is None:
+            raise ValueError(
+                f"Could not extract input_values or input_features from {type(model_inputs)}"
+            )
+
+        if isinstance(audio_inputs, torch.Tensor):
+            audio_inputs = audio_inputs.to(self.model.device)
         else:
-            raise ValueError(f"input_values must be a tensor, got {type(input_values)}")
+            raise ValueError(f"audio inputs must be a tensor, got {type(audio_inputs)}")
 
         im_end_id = self.model.tokenizer.convert_tokens_to_ids("<|im_end|>")
         generate_kwargs.setdefault("eos_token_id", im_end_id)
         generate_kwargs.setdefault("max_new_tokens", self.model.config.max_new_tokens)
 
-        generated_ids = self.model.generate(
-            input_values, system_prompt=self.model.config.system_prompt, **generate_kwargs
-        )
+        # Pass the appropriate input type to generate
+        if input_features is not None:
+            # Whisper model - use input_features
+            generated_ids = self.model.generate(
+                input_features=audio_inputs,
+                system_prompt=self.model.config.system_prompt,
+                task=task,
+                **generate_kwargs,
+            )
+        else:
+            # Wav2Vec2/HuBERT model - use input_values
+            generated_ids = self.model.generate(
+                input_values=audio_inputs,
+                system_prompt=self.model.config.system_prompt,
+                task=task,
+                **generate_kwargs,
+            )
 
         return {"tokens": generated_ids, "is_last": is_last}
+
+    def _process_text_only(self, generate_kwargs):
+        """Process text-only input without audio encoding."""
+        text_input = generate_kwargs.pop("text_input", None)
+        if text_input is None:
+            raise ValueError("text_input is required for text task")
+
+        # Remove task from generate_kwargs to avoid duplicate argument
+        generate_kwargs.pop("task", None)
+
+        # Generate text using the model
+        generated_ids = self.model.generate(task="text", text_input=text_input, **generate_kwargs)
+
+        # Decode the generated text
+        generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+        return {"text": generated_text}
 
     def postprocess(
         self, model_outputs: Dict[str, Any], return_timestamps=None, return_language=None

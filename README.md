@@ -39,10 +39,10 @@ This repository is also a free, 6-hour course designed to teach you the art and 
 
 In just six hours, you will:
 
--   **Understand the Architecture:** Go deep on the encoder-projector-decoder model that powers modern ASR.
--   **Master PEFT:** Learn the theory and practice of parameter-efficient fine-tuning with LoRA.
--   **Train Your Own Model:** Get your hands dirty and train a model from scratch on a real-world dataset.
--   **Deploy and Share:** Push your model to the Hugging Face Hub, write a professional model card, and share your work with the world.
+- **Understand the Architecture:** Go deep on the encoder-projector-decoder model that powers modern ASR.
+- **Master PEFT:** Learn the theory and practice of parameter-efficient fine-tuning with LoRA.
+- **Train Your Own Model:** Get your hands dirty and train a model from scratch on a real-world dataset.
+- **Deploy and Share:** Push your model to the Hugging Face Hub, write a professional model card, and share your work with the world.
 
 ## Quick Start: Train Your Own Model
 
@@ -66,9 +66,9 @@ poetry run python src/train.py +experiments=stage1
 
 Tiny Audio is built on a simple, powerful idea: combine the best pretrained models for audio and language, and efficiently teach them to work together.
 
-1.  **The Ear (Audio Encoder):** We start with `facebook/hubert-xlarge-ls960-ft`, a massive model that has already learned to understand the nuances of human speech. We use LoRA to fine-tune it, teaching it to focus on the specific sounds of our dataset.
-2.  **The Bridge (Audio Projector):** This is a small, trainable neural network that acts as a translator, converting the audio features from the encoder into a format the language model can understand.
-3.  **The Brain (Language Model):** We use `Qwen/Qwen-3 8B`, a powerful language model that already knows how to generate coherent text. We use LoRA to teach it to generate transcriptions instead of just general-purpose text.
+1. **The Ear (Audio Encoder):** We start with `facebook/hubert-xlarge-ls960-ft`, a massive model that has already learned to understand the nuances of human speech. We use LoRA to fine-tune it, teaching it to focus on the specific sounds of our dataset.
+1. **The Bridge (Audio Projector):** This is a small, trainable neural network that acts as a translator, converting the audio features from the encoder into a format the language model can understand.
+1. **The Brain (Language Model):** We use `Qwen/Qwen-3 8B`, a powerful language model that already knows how to generate coherent text. We use LoRA to teach it to generate transcriptions instead of just general-purpose text.
 
 By freezing the vast majority of the parameters in the encoder and decoder and only training the small LoRA adapters and the projector, we can achieve incredible efficiency without sacrificing performance.
 

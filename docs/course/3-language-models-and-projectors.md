@@ -10,20 +10,19 @@ By the end of this class, you will:
 
 - Understand what language models do and how they generate text
 
-- Know the Qwen-3 8B architecture
+- Know the Qwen3-8B and SmolLM3-3B architectures
 
-- Understand the AudioProjector's SwiGLU architecture
+- Understand the AudioProjector's linear architecture
 
 - Implement and visualize the projection process
 
 - See how audio embeddings become text embeddings
 
----
+______________________________________________________________________
 
 # PART A: LECTURE (20 minutes)
 
 ## 1. Language Models Basics (5 min)
-
 
 ### What is a Language Model?
 
@@ -31,15 +30,12 @@ A language model predicts the next word (token) given previous words.
 
 **Example:**
 
-
-
 ```
 Input:  "The quick brown"
 Output: "fox" (predicted next word)
 
 
 ```
-
 
 ### How They Work
 
@@ -53,8 +49,6 @@ Output: "fox" (predicted next word)
 
 **Inference**: Generate text token by token
 
-
-
 ```
 Start: "Hello"
 Step 1: "Hello, how"
@@ -65,29 +59,29 @@ Step 4: "Hello, how are you?" [STOP]
 
 ```
 
+### Qwen3-8B and SmolLM3-3B Architectures
 
-### Qwen-3 8B Architecture
+Tiny Audio supports multiple decoder options - powerful language models that generate the transcription text.
 
-Qwen-3 8B is our decoder - a powerful language model that generates the transcription text.
+**Default: Qwen3-8B**
 
-**Why Qwen-3 8B?**
+- 8 billion parameters
+- Excellent multilingual capabilities
+- Strong text generation quality
+- Efficient with LoRA fine-tuning (rank 8)
 
-- Large enough for strong performance
+**Alternative: SmolLM3-3B**
 
-- Efficient with LoRA fine-tuning
+- 3 billion parameters
+- Smaller and faster
+- Good for resource-constrained environments
+- Also supports LoRA fine-tuning
 
-- Open source and well-documented
-
-- Excellent text generation quality
-
-- Multilingual capabilities
-
+Both are open source and well-documented
 
 ### Decoder-Only Architecture
 
-Qwen-3 8B is "decoder-only" (like GPT):
-
-
+Both Qwen3-8B and SmolLM3-3B are "decoder-only" models (like GPT):
 
 ```
 Input tokens → Embeddings → Transformer Layers → Next token prediction
@@ -121,22 +115,21 @@ For our project, a **decoder-only model is the perfect choice** because:
 
 By choosing a decoder-only model, we are building on a solid, well-understood foundation.
 
----
+______________________________________________________________________
 
 ## 2. The Modality Gap Problem (5 min)
-
 
 ### The Challenge
 
 We have two different "languages":
 
-- **Audio embeddings**: 1280 dimensions from HuBERT
+- **Audio embeddings**: 1280 dimensions from HuBERT (or Whisper)
 
-- **Text embeddings**: 2048 dimensions from Qwen-3 8B
+- **Text embeddings**: 2048 dimensions from Qwen3-8B (or 1536 dimensions from SmolLM3-3B)
 
 **Problem**: Can't directly feed audio embeddings to text model!
 
-- Different dimensions (1280 vs 2048)
+- Different dimensions (1280 vs 2048/1536)
 
 - Different statistical distributions
 
@@ -144,106 +137,76 @@ We have two different "languages":
 
 **Analogy**: Like trying to plug a European power plug into an American outlet - same purpose, different format!
 
-
 ### The Solution: AudioProjector
 
 A trainable neural network that:
 
-1. **Transforms dimensions**: 1280D → 2048D
-2. **Aligns distributions**: Audio stats → Text stats
-3. **Downsamples time**: 5x reduction for efficiency
-4. **Bridges modalities**: Audio space → Language space
+1. **Transforms dimensions**: 1280D×5 → 2048D (or 1536D depending on decoder)
+1. **Aligns distributions**: Audio stats → Text stats through normalization
+1. **Downsamples time**: 5x reduction for efficiency (~80% fewer frames)
+1. **Bridges modalities**: Audio space → Language space
 
-**Key insight**: This is the ONLY fully trainable component (~122M params)!
+**Key insight**: This is the ONLY fully trainable component from scratch (~13M params for the projection layer, plus normalization layers)!
 
----
+______________________________________________________________________
 
-## 3. SwiGLU Architecture Deep Dive (10 min)
+## 3. Linear Projector Architecture Deep Dive (8 min)
 
+### What is the AudioProjector?
 
-### What is SwiGLU?
+**AudioProjector** = Simple yet effective linear projection layer
 
-**SwiGLU** = **Swi**sh **G**ated **L**inear **U**nit
-
-Used in modern architectures (Llama, PaLM, etc.) for better performance than simple MLPs.
-
+A streamlined architecture designed to bridge audio and text modalities efficiently. While more complex architectures like SwiGLU exist (used in Llama, PaLM, etc.), Tiny Audio uses a simpler design that prevents overfitting while maintaining strong alignment capacity.
 
 ### Architecture Breakdown
 
+The AudioProjector is surprisingly simple - just 4 operations:
 
 ```python
-# Pseudocode for AudioProjector
-def forward(audio_features):
-    # Input: [batch, time, 1280]
+class AudioProjector(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.k = 5  # Stack 5 frames together
+        in_dim = 1280 * 5  # = 6400
+        out_dim = 2048  # For Qwen3-8B (1536 for SmolLM3-3B)
 
-    # Step 1: Stack 5 frames together (downsampling)
-    stacked = stack_frames(audio_features, k=5)
-    # Shape: [batch, time/5, 1280*5] = [batch, time/5, 6400]
+        self.ln_pre = RMSNorm(in_dim)       # 1. Pre-normalize
+        self.proj = Linear(in_dim, out_dim)  # 2. Main projection
+        self.dropout = Dropout(0.05)         # 3. Regularization
+        self.ln_post = RMSNorm(out_dim)      # 4. Post-normalize
 
-    # Step 2: Pre-normalize (fix broken stats from stacking)
-    x = rms_norm(stacked)
-
-    # Step 3: SwiGLU transformation
-    gate = linear_gate(x)      # [batch, time/5, 8192]
-    up = linear_up(x)          # [batch, time/5, 8192]
-    activated = silu(gate) * up  # Element-wise multiply
-
-    # Step 4: Project to LLM dimension
-    output = linear_down(activated)  # [batch, time/5, 2048]
-
-    # Step 5: Post-normalize (match LLM's expected distribution)
-    output = rms_norm(output)
-
-    return output
-
-
+    def forward(self, x):
+        # Input: [batch, 149 frames, 1280 dim]
+        x = stack_5_frames(x)    # → [batch, 30 frames, 6400 dim]
+        x = self.ln_pre(x)       # → Normalize
+        x = self.proj(x)         # → [batch, 30 frames, 2048 dim]
+        x = self.dropout(x)      # → Regularize
+        return self.ln_post(x)   # → Final normalize
 ```
-
 
 ### Why Each Component Matters
 
-**1. Frame Stacking (5x downsampling)**
+**1. Frame Stacking**: Concatenate 5 frames → Reduces 149 frames to ~30 (~80% less computation)
 
-- Input: 149 frames × 1280D
+**2. Pre-normalize (RMSNorm)**: Stacking breaks statistics → normalize for stable training
 
-- Concatenate 5 consecutive frames → 1 super-frame
+**3. Linear Projection**: 6400D → 2048D mapping, simple but effective (~13M params)
 
-- Output: ~30 frames × 6400D
+**4. Dropout (5%)**: Prevents overfitting during training
 
-- **Why?** Efficiency! Reduces sequence length for decoder
+**5. Post-normalize (RMSNorm)**: Match what the LLM expects as input
 
-**2. Pre-normalization (RMSNorm)**
+### Why Not a More Complex Projector?
 
-- Concatenation breaks normalized statistics
+**Simple is better here:**
 
-- RMSNorm re-normalizes: `x / sqrt(mean(x²))`
+- **Parameter efficient**: ~13M vs ~40M+ with gated architectures
+- **Less overfitting**: Simpler generalizes better
+- **Faster**: Fewer computations
+- **Sufficient**: Job is alignment, not complex transformation
+- **Works**: Achieves competitive WER scores (12-15%)
 
-- **Why?** Stable training, better gradients
-
-**3. SwiGLU Activation**
-
-- `gate_proj`: Controls information flow
-
-- `up_proj`: Transforms features
-
-- `silu(gate) * up`: Gated activation (selective)
-
-- **Why?** Better than ReLU, more expressive
-
-**4. Down Projection**
-
-- Maps 8192D → 2048D (LLM dimension)
-
-- **Why?** Match decoder's input size
-
-**5. Post-normalization**
-
-- Ensure output matches LLM's expected distribution
-
-- **Why?** LLM was trained on specific input stats
-
-
----
+______________________________________________________________________
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
@@ -259,25 +222,21 @@ In the next 40 minutes, you will:
 
 By the end, you'll understand how audio becomes language and how to optimize this bridge!
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 1: Test Projector Configurations (10 min)
-
 
 ### Goal
 
 Understand how projector parameters affect the model.
 
-
 ### Your Task
 
 Experiment with different projector configurations.
 
-
 ### Instructions
 
 **Step 1: Create `test_projector_config.py`**
-
 
 ```python
 from types import SimpleNamespace
@@ -373,7 +332,6 @@ print("  ✓ ~100ms per frame (good temporal resolution)")
 
 **Step 2: Run the script**
 
-
 ```bash
 poetry run python test_projector_config.py
 
@@ -381,8 +339,6 @@ poetry run python test_projector_config.py
 ```
 
 **Expected output:**
-
-
 
 ```
 ================================================================================
@@ -411,7 +367,6 @@ Tiny Audio's choice (5x, 8192 hidden):
 
 ```
 
-
 ### Success Checkpoint
 
 - [ ] Script ran successfully
@@ -420,53 +375,48 @@ Tiny Audio's choice (5x, 8192 hidden):
 
 - [ ] Understand tradeoff between params, speed, and quality
 
-
----
+______________________________________________________________________
 
 ## Workshop Exercise 2: Compare Decoder Models (30 min)
-
 
 ### Goal
 
 Understand how decoder choice affects ASR system design.
 
-
 ### Your Task
 
 Compare different language models as potential decoders.
-
 
 ### Instructions
 
 **Create `compare_decoders.py`:**
 
-
 ```python
 # Compare different decoder models
 decoders = [
     {
-        "name": "Qwen-3 8B (Actual)",
+        "name": "Qwen3-8B (Default)",
         "model_id": "Qwen/Qwen3-8B",
         "params": 8e9,
         "hidden_dim": 2048,
         "vocab_size": 151936,
     },
     {
-        "name": "Llama-3 8B",
-        "model_id": "meta-llama/Meta-Llama-3-8B",
-        "params": 8e9,
-        "hidden_dim": 4096,
+        "name": "SmolLM3-3B (Alternative)",
+        "model_id": "HuggingFaceTB/SmolLM3-3B",
+        "params": 3e9,
+        "hidden_dim": 1536,
+        "vocab_size": 49152,
+    },
+    {
+        "name": "Llama-3.2-3B (Possible)",
+        "model_id": "meta-llama/Llama-3.2-3B",
+        "params": 3e9,
+        "hidden_dim": 3072,
         "vocab_size": 128256,
     },
     {
-        "name": "Mistral 7B",
-        "model_id": "mistralai/Mistral-7B-v0.1",
-        "params": 7e9,
-        "hidden_dim": 4096,
-        "vocab_size": 32000,
-    },
-    {
-        "name": "Qwen-3 1.5B",
+        "name": "Qwen3-1.5B (Smallest)",
         "model_id": "Qwen/Qwen3-1.5B",
         "params": 1.5e9,
         "hidden_dim": 1536,
@@ -541,7 +491,7 @@ for decoder in decoders[:3]:  # Top 3 models
 
 - What's the speed/accuracy tradeoff?
 
----
+______________________________________________________________________
 
 # CLASS SUMMARY
 
@@ -563,10 +513,9 @@ for decoder in decoders[:3]:  # Top 3 models
 
 - Analyzed decoder model tradeoffs
 
----
+______________________________________________________________________
 
 ## Further Reading (Optional)
-
 
 ### Papers
 
@@ -575,7 +524,6 @@ for decoder in decoders[:3]:  # Top 3 models
 - [RMSNorm](https://arxiv.org/abs/1910.07467)
 
 - [Qwen Technical Report](https://arxiv.org/abs/2309.16609)
-
 
 ### Code
 

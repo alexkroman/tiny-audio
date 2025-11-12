@@ -57,9 +57,6 @@ assemblyai = "*"
 typer = ">=0.19.2"
 truecase = "*"
 nltk = "*"
-# Course exercise dependencies
-librosa = ">=0.10.0"
-matplotlib = ">=3.7.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
@@ -131,6 +128,26 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 module = "peft.*"
 ignore_errors = true
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
+typeCheckingMode = "basic"
+reportPrivateImportUsage = false
+reportOptionalMemberAccess = false
+reportOptionalIterable = false
+reportOptionalCall = false
+reportGeneralTypeIssues = false
+reportIncompatibleMethodOverride = false
+# PyTorch models have dynamic attributes
+reportAttributeAccessIssue = false
+reportCallIssue = false
+reportIndexIssue = false
+# Ignore assignment type issues for PyTorch configs
+reportAssignmentType = false
+reportArgumentType = false
+reportOperatorIssue = false
+reportReturnType = false
 
 [tool.pytest.ini_options]
 # Test discovery patterns

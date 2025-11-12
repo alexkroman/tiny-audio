@@ -1,29 +1,26 @@
-# LoquaciousSet dataset configuration
+# LoquaciousSet clean configuration
 datasets:
   - path: speechbrain/LoquaciousSet
-    name: clean  # Config name for LoquaciousSet
-    audio_column: wav    # LoquaciousSet uses 'wav' instead of 'audio'
-    text_column: text    # LoquaciousSet uses 'text' column
+    name: clean
+    audio_column: wav
+    text_column: text
+    task: transcribe  # Explicitly set the task
     train_splits:
       - train
     eval_splits:
       - dev
 
-# Data filtering
-max_audio_seconds: 15.0
-
 # Audio processing
 sample_rate: 16000
 
-# SpecAugment parameters (wav2vec2-style masking)
-mask_time_prob: 0.05  # Probability of masking time steps (5% - wav2vec2 fine-tuning default)
-mask_time_length: 10  # Length of time mask spans
-mask_feature_prob: 0.0  # Feature masking disabled (not used for waveforms)
+# SpecAugment parameters (applied by model during training)
+mask_time_prob: 0.05
+mask_time_length: 10
+mask_feature_prob: 0.0
 mask_feature_length: 10
 
-# Processing options
+# Dataset processing
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
-num_proc: 8
 max_train_samples: null
 max_eval_samples: 1000
-use_streaming: true  # Enable streaming mode for faster startup
+use_streaming: true

@@ -16,12 +16,24 @@ By the end of this class, you will:
 
 - Successfully run inference on an audio file
 
----
+______________________________________________________________________
 
 # PART A: LECTURE (20 minutes)
 
-## 1. What is Automatic Speech Recognition? (5 min)
+## 1. Course Goals (5 min)
 
+By the end of this 6-class course, each student will:
+
+1. **Train** their own customized ASR model
+1. **Evaluate** it on standard benchmarks
+1. **Push** it to their own HuggingFace account
+1. **Add** their results to the community leaderboard
+
+This isn't just learning - you'll have a real, working, deployed model with your name on it!
+
+______________________________________________________________________
+
+## 2. What is Automatic Speech Recognition? (5 min)
 
 ### The Problem
 
@@ -39,95 +51,75 @@ Humans communicate primarily through speech, but computers understand text. ASR 
 
 - Medical dictation systems
 
-
 ### The Challenge
 
-Speech recognition is hard because:
+Speech recognition is hard because it must handle two distinct types of variability:
 
-1. **Audio variability**: Different accents, speaking speeds, background noise
-2. **Ambiguity**: "I scream" vs "ice cream" sound identical
-3. **Context dependency**: Understanding requires linguistic knowledge
-4. **Real-time constraints**: Users expect instant responses
+**Acoustic Variability** (handled by audio encoders):
 
+1. **Speaker differences**: Accents, pitch, speaking rate, gender, age
+1. **Environmental noise**: Background sounds, echo, interference
+1. **Recording quality**: Microphone quality, compression, sample rate
+1. **Pronunciation variations**: Casual vs formal speech, mumbling, emphasis
+
+**Linguistic Variability** (handled by language model decoders):
+
+1. **Homophone ambiguity**: "I scream" vs "ice cream" sound identical
+1. **Context dependency**: "read" (present) vs "read" (past) require sentence context
+1. **Domain knowledge**: Technical terms, proper nouns, specialized vocabulary
+1. **Grammar and punctuation**: Determining sentence boundaries and structure
+
+This two-part challenge is why modern ASR systems use **specialized components** for each type of variability - audio encoders for acoustic processing and language models for linguistic understanding. You'll see this design pattern in the Tiny Audio architecture!
 
 ### How Modern ASR Works
 
-Modern ASR systems have evolved through several generations:
+Modern ASR has evolved dramatically:
 
-**1st Generation (1950s-1980s)**: Rule-based pattern matching
+**Classic Era (1950s-2010s)**: Rule-based systems → Hidden Markov Models
 
-- Limited vocabulary (~100 words)
+- Limited by manual feature engineering
+- Required careful tuning for each language/domain
 
-- Speaker-dependent
+**Deep Learning Era (2010s-2020)**: RNNs → Attention → Transformers
 
-**2nd Generation (1980s-2010s)**: Hidden Markov Models (HMMs)
+- Neural networks learn features automatically
+- Transformers (2017) enabled parallel processing and better context
+- Much better accuracy, but still data-hungry
 
-- Better accuracy
+**Modern Era (2020s-Present)**: Self-Supervised + Multimodal
 
-- Still struggled with noise and accents
+- **Self-supervised pre-training**: Models learn from unlabeled audio
+  - wav2vec 2.0, HuBERT, Whisper
+  - Millions of hours of audio without transcriptions
+- **Transfer learning**: Leverage pre-trained audio encoders + language models
+- **Multimodal architectures**: Connect audio directly to text generation
 
-**3rd Generation (2010s-2020s)**: Deep Learning Era
+**This is what Tiny Audio uses!** We combine:
 
-- **RNNs and LSTMs** (2012-2015): Sequential processing of audio
-  - Recurrent Neural Networks and Long Short-Term Memory networks
-  - Better at capturing temporal dependencies than HMMs
+- Pre-trained audio encoder (HuBERT or Whisper)
+- Pre-trained language model (Qwen3-8B or SmolLM3-3B)
+- Small trainable bridge (projector) to connect them
 
-- **Attention Mechanisms** (2014-2017): Model learns what to focus on
-  - Attention Is All You Need (2017) introduces the Transformer architecture
-  - Enables parallelization and better long-range dependencies
+______________________________________________________________________
 
-- **RNN-Transducer (RNN-T)** (2012-2019): Streaming ASR
-  - Combines RNNs with CTC-like alignment
-  - Enables real-time, low-latency transcription
-  - Used in production systems (Google Assistant, etc.)
-
-- **Transformers** (2017-2020): Replaced RNNs as the dominant architecture
-  - Self-attention for better context modeling
-  - Parallelizable training (much faster than RNNs)
-  - Foundation for modern ASR
-
-**4th Generation (2020s-Present)**: Self-Supervised Multimodal Transformers
-
-- **Self-supervised pre-training** on unlabeled audio (wav2vec 2.0, HuBERT)
-
-- **Transfer learning** from massive language models
-
-- **Multimodal architectures** connecting audio and text
-
-- **This is what Tiny Audio uses!**
-
----
-
-## 2. The Tiny Audio Architecture (10 min)
-
+## 3. The Tiny Audio Architecture (10 min)
 
 ### High-Level Overview
 
 Tiny Audio uses a three-component architecture:
 
-
-
 ```
 Audio File → Audio Encoder → Audio Projector → Language Model → Text
-            (HuBERT)         (SwiGLU MLP)      (Qwen-3 8B)
+            (HuBERT/Whisper)   (Linear MLP)     (Qwen3-8B/SmolLM3-3B)
 
 
 ```
 
-**Experiment Preview**: In this course, you'll experiment with:
-
-- Swapping encoders (HuBERT vs Wav2Vec2)
-
-- Adjusting projector dimensions
-
-- Using different language models
-
-- Testing on various audio types
+**Experiment Preview**: Throughout the course, you'll be able to experiment with switching these components to customize your model.
 
 Let's understand each component:
 
-
-### Component 1: Audio Encoder (HuBERT-XLarge)
+### Component 1: Audio Encoder (HuBERT or Whisper)
 
 **Purpose**: Convert raw audio waveforms into meaningful feature representations
 
@@ -139,39 +131,45 @@ Let's understand each component:
 
 - Each vector captures phonetic and acoustic information
 
-**Key insight**: HuBERT is **pre-trained** on thousands of hours of unlabeled speech, so it already "understands" human speech patterns before we even start training!
+**Default Encoder: HuBERT-XLarge**
+
+- Pre-trained on 60K hours of LibriLight (self-supervised learning)
+- 1.3 billion parameters (frozen during our training with optional LoRA adapters)
+- Excellent for English speech recognition
+
+**Alternative: Whisper**
+
+- Pre-trained on 680K hours of multilingual data
+- 1.5 billion parameters
+- Better for multilingual tasks
 
 **Analogy**: An expert musician who can listen to any piece of music and instantly transcribe the notes, rhythm, and instrumentation, without ever seeing the sheet music.
 
-**Size**: 1.3 billion parameters (frozen during our training)
-
-
-### Component 2: Audio Projector (~138M parameters)
+### Component 2: Audio Projector (~13M parameters)
 
 **Purpose**: Bridge the gap between the audio and language worlds.
 
 **What it does**
 
-- Takes HuBERT's audio embeddings
+- Takes encoder's audio embeddings (1280-dim from HuBERT or Whisper)
 
 - Downsamples by 5x (reduces sequence length for efficiency)
 
-- Transforms to match the language model's input format
+- Transforms to match the language model's input format (2048-dim for Qwen3-8B, 1536-dim for SmolLM3-3B)
 
-**Architecture**: SwiGLU MLP (we'll dive deeper in Class 3)
+**Architecture**: Simple yet effective linear projection (we'll dive deeper in Class 3)
 
-- Pre-normalization layer
+- Pre-normalization layer (RMSNorm)
 
-- Gated projection (allows selective information flow)
+- Single linear projection with dropout for regularization
 
-- Post-normalization layer
+- Post-normalization layer (RMSNorm)
 
-**Key insight**: This is the **largest trainable component** - all ~138M parameters learn during training.
+**Key insight**: This is the **largest trainable component** - the projector is fully trained from scratch (no pre-training).
 
 **Analogy**: A skilled diplomat who can fluently translate between two very different cultures, ensuring the meaning and nuance are preserved.
 
-
-### Component 3: Language Model Decoder (Qwen-3 8B)
+### Component 3: Language Model Decoder (Qwen3-8B or SmolLM3-3B)
 
 **Purpose**: Generate a coherent and grammatically correct text transcription.
 
@@ -179,26 +177,39 @@ Let's understand each component:
 
 - Receives audio embeddings (via projector)
 
-- Uses its vast linguistic knowledge to predict the text
+- Uses its linguistic knowledge to predict the text
 
 - Handles grammar, spelling, and punctuation
 
-**Key insight**: Qwen-3 is also **pre-trained** on a massive amount of text, so it already has a deep understanding of language before it ever "hears" any audio.
+**Default Decoder: Qwen3-8B**
 
-**Size**: 8 billion parameters (we use LoRA to adapt efficiently)
+- 8 billion parameters
+- Strong multilingual capabilities
+- We use LoRA (rank 8) to efficiently adapt (~4M trainable params)
+
+**Alternative: SmolLM3-3B**
+
+- 3 billion parameters
+- Smaller, faster, good for resource-constrained environments
+- Also uses LoRA for efficient adaptation
 
 **Analogy**: A master storyteller who can take a sequence of events (the audio features) and weave them into a compelling narrative (the final transcription).
 
-
 ### Why This Architecture?
 
-**Efficiency**: We train ~146M parameters instead of 9.3+ billion (1.6% of total model)
+**Efficiency**: We train ~21M parameters instead of 9.3+ billion (~0.2% of total model)
 
-- Projector: ~138M (fully trained)
+- Projector: ~13M (fully trained)
 
-- Encoder LoRA: ~4M (adapter weights, r=16)
+- Encoder LoRA: ~4M (adapter weights, r=16) - OPTIONAL, can be disabled
 
-- Decoder LoRA: ~4M (adapter weights, r=8)
+- Decoder LoRA: ~4M (adapter weights, r=8) - OPTIONAL, can be disabled
+
+**Flexibility**: You can train in different modes:
+
+- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~21M params)
+- **Projector + Decoder LoRA**: Frozen encoder, trainable projector and decoder adapters (~17M params)
+- **Projector Only**: Frozen encoder and decoder, only projector learns (~13M params)
 
 **Speed**: Training completes in ~24 hours on a single GPU
 
@@ -206,43 +217,7 @@ Let's understand each component:
 
 **Quality**: Leverages pre-trained knowledge from both audio and language domains
 
-**A Note on Architectural Choices:**
-
-The Tiny Audio architecture is a **dense transformer-based** model. It's crucial to start with a **proven, stable baseline**. While other exciting architectures like Mixture-of-Experts (MoE) and Hybrids (combining transformers with other architectures like SSMs) exist, they introduce complexity that isn't necessary for our goal.
-
-Recent research has shown that **instruct-tuned models** perform significantly better for speech recognition tasks than their base counterparts. This is why we use Qwen-3 8B Instruct rather than the base model - the instruction-following capabilities help the model better understand the task of transcribing audio to text.
-
-- **Dense models** are well-understood, stable to train, and perform exceptionally well, especially for a focused task like ours.
-
-- **MoE and Hybrid models** are powerful but can be more complex to train and tune. They are often used for massive, general-purpose models, but for our specific use case, a dense model is the most direct path to a high-quality, custom ASR model.
-
-By starting with a solid, well-understood architecture, we can focus on the nuances of audio processing, data, and training, which is where we'll see the biggest improvements.
-
-
-### Rules of Engagement
-
-A disciplined, empirical approach to model training is crucial. As we go through this course, we'll follow a few key "rules of engagement":
-
-1.  **Systematic Beats Intuitive**: Don't just guess what will work. We'll use systematic experiments (ablations) to validate our choices.
-2.  **Change One Thing at a Time**: When we run experiments, we'll only change one variable at a time. This is the only way to know for sure what's responsible for any improvements (or regressions!).
-3.  **Validate Every Change**: Every modification, no matter how small, should be tested. We'll rely on evaluation metrics, not just gut feelings, to guide our decisions.
-
-Adopting this mindset will not only lead to a better final model but will also teach you the disciplined process that professionals use to build world-class models.
-
----
-
-## 3. Course Goals (5 min)
-
-By the end of this 6-class course, each student will:
-
-1. **Train** their own customized ASR model
-2. **Evaluate** it on standard benchmarks
-3. **Push** it to their own HuggingFace account
-4. **Add** their results to the community leaderboard
-
-This isn't just learning - you'll have a real, working, deployed model with your name on it!
-
----
+______________________________________________________________________
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
@@ -256,31 +231,51 @@ In the next 40 minutes, you will:
 
 - **Exercise 3**: Inspect the model configuration
 
-- **Exercise 4**: Count trainable parameters
-
 By the end, you'll have a working setup and understand the complete model architecture!
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 1: Environment Setup (15 min)
-
 
 ### Goal
 
 Get a working development environment with all dependencies installed.
 
-
 ### Your Task
 
 Set up the Tiny Audio development environment.
 
-
 ### Instructions
 
-**Step 1: Check Prerequisites**
+**Step 1: Create Required Accounts**
+
+Before we begin, you'll need accounts on three platforms (if you don't have them already):
+
+**GitHub** (for version control and accessing the code):
+
+- Visit <https://github.com/signup>
+- Create a free account
+- Verify your email address
+
+**Hugging Face** (for downloading and sharing models):
+
+- Visit <https://huggingface.co/join>
+- Create a free account
+- Go to Settings → Access Tokens and create a new token with "read" permissions
+- Save this token somewhere safe - you'll need it later
+
+**Weights & Biases** (for tracking training experiments):
+
+- Visit <https://wandb.ai/signup>
+- Create a free account
+- After logging in, go to <https://wandb.ai/authorize> to get your API key
+- Save this API key - you'll need it when you start training
+
+**Note**: You can skip W&B for now if you want to get started quickly - it's only required for training (Class 4), not for running inference.
+
+**Step 2: Check Prerequisites**
 
 Open your terminal and verify:
-
 
 ```bash
 python --version  # Should be 3.10 or newer
@@ -289,8 +284,7 @@ git --version     # Should show git version
 
 ```
 
-**Step 2: Clone the Repository**
-
+**Step 3: Clone the Repository**
 
 ```bash
 git clone https://github.com/alexkroman/tiny-audio.git
@@ -299,32 +293,41 @@ cd tiny-audio
 
 ```
 
-**Step 3: Install Poetry (if needed)**
+**Step 4: Install Poetry (if needed)**
 
-Poetry manages dependencies and virtual environments:
+Poetry manages dependencies and virtual environments.
 
+**Option A: Using Homebrew (macOS)**
+
+If you don't have Homebrew, install it first:
 
 ```bash
-# macOS/Linux
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Then, install Poetry with Homebrew:
+
+```bash
+brew install poetry
+```
+
+**Option B: Using the official installer (Linux, Windows)**
+
+```bash
+# Linux
 curl -sSL https://install.python-poetry.org | python3 -
 
 # Windows (PowerShell)
 (Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing).Content | py -
-
-
 ```
 
 Add Poetry to your PATH if prompted, then verify:
 
-
 ```bash
 poetry --version
-
-
 ```
 
-**Step 4: Install Dependencies**
-
+**Step 5: Install Dependencies**
 
 ```bash
 poetry install
@@ -346,444 +349,161 @@ This will:
 
 - If PyTorch installation fails, visit [pytorch.org](https://pytorch.org) for platform-specific instructions
 
-**Step 5: Verify Installation**
-
+**Step 6: Download Samples and Verify Installation**
 
 ```bash
-poetry run python scripts/verify_setup.py
 
+poetry run python scripts/download_samples.py
+
+poetry run python scripts/verify_setup.py
 
 ```
 
 This will check:
+
 - Python version (3.10+)
+
 - All required packages
+
 - Sample audio files
+
 - Model configuration
 
 You should see: `✅ All checks passed! You're ready to start the course.`
 
+______________________________________________________________________
 
-### Success Checkpoint
-
-- [ ] Python 3.10+ installed
-- [ ] All required packages installed
-- [ ] Verification script shows all checks passed
-
-If you hit any issues, check the error messages from the verification script for guidance!
-
----
-
-## Workshop Exercise 2: Run Your First Inference (15 min)
-
+## Workshop Exercise 2: Launch the Demo and Run Evaluation (15 min)
 
 ### Goal
 
-Transcribe an audio file using the pre-trained Tiny Audio model and experiment with different inputs.
-
+Experience the pre-trained Tiny Audio model through an interactive web interface and evaluate its performance on a benchmark dataset.
 
 ### Your Task
 
-Run inference on an audio file, see the transcription output, and experiment with model behavior.
-
+Launch the Gradio demo interface and run a quantitative evaluation on the LoquaciousSet benchmark.
 
 ### Instructions
 
-**Step 1: Get an Audio File**
+**Step 1: Launch the Gradio Demo**
 
-You need an audio file to transcribe. Choose one option:
-
-**Option A: Use your own**
-
-- Any WAV, MP3, or FLAC file works
-
-- Speech works best (podcasts, meetings, voice memos)
-
-**Option B: Record your own**
-
-- Use your phone or computer
-
-- Record yourself saying: "Hello, this is a test of the Tiny Audio speech recognition system."
-
-- Save as `test.wav`
-
-**Option C: Download a sample**
-
+Start the interactive web interface:
 
 ```bash
-# Download a LibriSpeech test sample
-wget https://www.openslr.org/resources/12/test-clean.tar.gz
-tar -xzf test-clean.tar.gz
-# Now you have many .flac files in test-clean/
-
-
-```
-
-**Step 2: Create inference script**
-
-Create a file called `test_inference.py` in the `tiny-audio/` directory:
-
-Create a file called `test_inference.py`:
-
-
-```python
-from transformers import pipeline
-
-# Load the pre-trained Tiny Audio model
-print("Loading model...")
-pipe = pipeline(
-    "automatic-speech-recognition",
-    model="mazesmazes/tiny-audio",
-    trust_remote_code=True
-)
-
-print("✓ Model loaded!")
-
-# Transcribe an audio file
-# Replace with your own audio file path
-audio_path = "path/to/your/audio.wav"
-
-print(f"Transcribing {audio_path}...")
-result = pipe(audio_path)
-
-print("\nTranscription:")
-print(result["text"])
-
-
-```
-
-**Step 3: Update the audio path**
-
-Edit `test_inference.py` and change this line:
-
-
-```python
-audio_path = "path/to/your/audio.wav"
-
-
-```
-
-To point to your actual audio file, for example:
-
-
-```python
-audio_path = "test.wav"
-# or
-audio_path = "test-clean/1089/134686/1089-134686-0000.flac"
-
-
-```
-
-**Step 4: Run inference**
-
-
-```bash
-poetry run python test_inference.py
-
-
+poetry run python demo/gradio/app.py --model mazesmazes/tiny-audio --port 7860
 ```
 
 **What's happening:**
 
 1. Model downloads from HuggingFace Hub (~4GB, first time only)
-2. Audio file is loaded and resampled to 16kHz
-3. Audio passes through: Encoder → Projector → Decoder
-4. Text transcription is returned
+1. Gradio interface starts on <http://localhost:7860>
+1. You can now interact with the model through your web browser
 
-**Expected output:**
+**Step 2: Try the Demo**
 
+Open your browser to <http://localhost:7860> and experiment with:
 
+- **Recording audio**: Click the microphone button to record yourself speaking
+- **Uploading files**: Upload WAV, MP3, or other audio files
+- **Different tasks**: Try "transcribe", "describe", "emotion", or create custom prompts
+- **Text mode**: Test the language model capabilities without audio
 
-```
-Loading model...
-✓ Model loaded!
-Transcribing audio.wav...
+Try recording yourself saying: "Hello, this is a test of the Tiny Audio speech recognition system."
 
-Transcription:
-Hello, this is a test of the Tiny Audio speech recognition system.
+**Note**: You might notice some mistakes - that's normal! Our model achieves ~12% Word Error Rate, meaning it gets about 88% of words correct.
 
+**Step 3: Run Quantitative Evaluation**
 
+Stop the demo (press Ctrl+C in the terminal where it's running), then evaluate the model on 100 samples from LoquaciousSet:
+
+```bash
+poetry run python scripts/eval.py mazesmazes/tiny-audio \
+    --dataset loquacious \
+    --max-samples 100 \
+    --split test \
+    --config medium
 ```
 
 **What's happening:**
 
-1. Model downloads from HuggingFace Hub (~4GB, first time only - be patient!)
-2. Audio is loaded and resampled to 16kHz
-3. Audio passes through: Encoder → Projector → Decoder
-4. Text transcription is returned
+1. Downloads LoquaciousSet test split (streaming, so only downloads what's needed)
+1. Runs inference on 100 randomly shuffled samples
+1. Computes Word Error Rate (WER) using Whisper's text normalization
+1. Shows per-sample results and cumulative statistics
+1. Saves detailed results to `outputs/eval_loquacious_mazesmazes_tiny-audio/`
 
 **Expected output:**
 
-
-
 ```
-Loading model...
-✓ Model loaded!
-Transcribing test.wav...
+Sample 1: WER = 8.33%, Time = 1.23s
+  Ref:  The quick brown fox jumps over the lazy dog
+  Pred: The quick brown fox jumps over the lazy dog
 
-Transcription:
-Hello, this is a test of the Tiny Audio speech recognition system.
+Sample 2: WER = 15.00%, Time = 1.45s
+  Ref:  She sells seashells by the seashore
+  Pred: She sells sea shells by the sea shore
 
+...
 
-```
-
-
-### Success Checkpoint
-
-- [ ] I successfully ran the script
-
-- [ ] I saw a transcription output
-
-- [ ] The transcription is mostly accurate (doesn't have to be perfect!)
-
-**Note**: You might notice some mistakes - that's normal! Our model achieves ~12% Word Error Rate, meaning it gets about 88% of words correct.
-
----
-
-## Understanding Generation Parameters (5 min)
-
-Before we experiment, let's understand how text generation works and what parameters we can control.
-
-### How ASR Generation Works
-
-The language model generates text **one token at a time** (auto-regressively):
-
-1. Receives audio embeddings from the projector
-2. Predicts the most likely next token
-3. Adds that token to the sequence
-4. Repeats until it generates an end-of-sequence token
-
-**Key insight**: At each step, the model has a probability distribution over all possible next tokens. Generation parameters control how we sample from this distribution.
-
-### Important Generation Parameters
-
-**1. `max_new_tokens` (default: 128)**
-- Maximum number of tokens to generate
-- **Too low**: Transcription gets cut off mid-sentence
-- **Too high**: Slower inference, may generate extra text
-- **Rule of thumb**: ~1 token per 0.4 seconds of audio
-
-**2. `num_beams` (default: 1)**
-- Controls beam search width
-- **1**: Greedy decoding (fastest, picks most likely token each step)
-- **3-5**: Beam search (explores multiple paths, often more accurate)
-- **Trade-off**: Higher beams = slower but potentially better quality
-
-**3. `temperature` (default: 1.0, only used with sampling)**
-- Controls randomness in token selection
-- **< 1.0**: More deterministic (conservative, repetitive)
-- **= 1.0**: Balanced (use model's actual probabilities)
-- **> 1.0**: More random (creative but less accurate)
-- **For ASR**: Usually keep at 1.0 or use greedy decoding
-
-**4. `do_sample` (default: False)**
-- **False**: Use deterministic decoding (greedy or beam search)
-- **True**: Sample from probability distribution (adds randomness)
-- **For ASR**: Usually False (we want accurate transcription, not creativity)
-
-**5. `chunk_length_s` (default: 30)**
-- How many seconds of audio to process at once
-- **Shorter (15-20s)**: Lower memory, more chunks to process
-- **Longer (30s)**: More context, fewer chunks
-- **Trade-off**: Memory usage vs. processing overhead
-
-**6. `stride_length_s` (default: (5, 5))**
-- Overlap between chunks as tuple (left_overlap, right_overlap) in seconds
-- Helps smooth transitions between chunks
-- Default (5, 5) means 5 seconds overlap on each side
-
-### Quick Reference Table
-
-| Parameter | Default | When to Change | Effect |
-|-----------|---------|----------------|---------|
-| `num_beams` | 1 | Want better quality | Slower, more accurate |
-| `chunk_length_s` | 30 | Long audio or low memory | Memory usage |
-| `max_new_tokens` | 128 | Very long audio | Prevents cutoff |
-| `do_sample` | False | Experimenting only | Adds randomness |
-| `temperature` | 1.0 | With sampling only | Controls randomness |
-| `stride_length_s` | (5, 5) | Custom chunking | Overlap between chunks |
-
----
-
-### Experimentation Time
-
-Now let's experiment with these parameters and see how they affect transcription!
-
-Create a new file `experiment_generation.py`:
-
-```python
-from transformers import pipeline
-import time
-
-# Load model once
-print("Loading model...")
-pipe = pipeline(
-    "automatic-speech-recognition",
-    model="mazesmazes/tiny-audio",
-    trust_remote_code=True
-)
-print("✓ Model loaded!\n")
-
-# Your audio file
-audio_path = "test.wav"  # Change to your file
-
-print("=" * 70)
-print("GENERATION PARAMETER EXPERIMENTS")
-print("=" * 70)
-
-# Experiment 1: Greedy vs Beam Search
-print("\n📊 Experiment 1: Greedy vs Beam Search")
-print("-" * 70)
-
-configs = [
-    {"name": "Greedy (num_beams=1)", "params": {"num_beams": 1}},
-    {"name": "Beam Search (num_beams=3)", "params": {"num_beams": 3}},
-    {"name": "Beam Search (num_beams=5)", "params": {"num_beams": 5}},
-]
-
-for config in configs:
-    start = time.time()
-    result = pipe(audio_path, **config["params"])
-    duration = time.time() - start
-
-    print(f"\n{config['name']}:")
-    print(f"  Time: {duration:.2f}s")
-    print(f"  Text: {result['text'][:100]}...")
-
-# Experiment 2: Different Chunk Lengths
-print("\n\n📊 Experiment 2: Chunk Length Impact")
-print("-" * 70)
-
-chunk_configs = [
-    {"name": "Short chunks (15s)", "chunk_length_s": 15, "stride_length_s": (2, 2)},
-    {"name": "Medium chunks (20s)", "chunk_length_s": 20, "stride_length_s": (3, 3)},
-    {"name": "Long chunks (30s)", "chunk_length_s": 30, "stride_length_s": (5, 5)},
-]
-
-for config in chunk_configs:
-    start = time.time()
-    result = pipe(audio_path,
-                  chunk_length_s=config["chunk_length_s"],
-                  stride_length_s=config["stride_length_s"])
-    duration = time.time() - start
-
-    print(f"\n{config['name']}:")
-    print(f"  Time: {duration:.2f}s")
-    print(f"  Text: {result['text'][:100]}...")
-
-# Experiment 3: Sampling vs Deterministic
-print("\n\n📊 Experiment 3: Sampling vs Deterministic")
-print("-" * 70)
-
-# Run deterministic multiple times (should be identical)
-print("\nDeterministic (do_sample=False) - running 3 times:")
-for i in range(3):
-    result = pipe(audio_path, do_sample=False, max_new_tokens=50)
-    print(f"  Run {i+1}: {result['text'][:60]}...")
-
-# Run with sampling (may vary slightly)
-print("\nWith sampling (do_sample=True, temperature=0.8) - running 3 times:")
-for i in range(3):
-    result = pipe(audio_path, do_sample=True, temperature=0.8, max_new_tokens=50)
-    print(f"  Run {i+1}: {result['text'][:60]}...")
-
-# Experiment 4: Temperature Effects (with sampling)
-print("\n\n📊 Experiment 4: Temperature Effects")
-print("-" * 70)
-
-temps = [0.5, 1.0, 1.5]
-for temp in temps:
-    result = pipe(audio_path, do_sample=True, temperature=temp, max_new_tokens=50)
-    print(f"\nTemperature {temp}:")
-    print(f"  {result['text'][:80]}...")
-
-print("\n" + "=" * 70)
-print("✅ Experiments complete!")
-print("=" * 70)
+================================================================================
+CHECKPOINT @ 100 samples:
+  Corpus WER: 12.45%
+  Avg Time/Sample: 1.35s
+================================================================================
 ```
 
-**Run the experiments:**
+**Step 4: Inspect the Results**
+
+Check the detailed results file:
 
 ```bash
-poetry run python experiment_generation.py
+cat outputs/eval_loquacious_mazesmazes_tiny-audio/results.txt
 ```
 
-**What to observe:**
+This file contains:
 
-1. **Beam Search vs Greedy**:
-   - Does beam search produce different (better?) text?
-   - How much slower is it?
-   - Is the quality improvement worth the speed cost?
+- Overall WER and average response time
+- Per-sample predictions vs ground truth
+- Individual WER scores for each sample
 
-2. **Chunk Length**:
-   - How does chunk length affect processing time?
-   - Do you notice any quality differences at chunk boundaries?
-   - Which is best for your use case?
+______________________________________________________________________
 
-3. **Sampling vs Deterministic**:
-   - Are deterministic outputs truly identical?
-   - How much does sampling vary?
-   - Why might you want sampling (or not)?
+## Workshop Exercise 3: Exploring the Code (10 min)
 
-4. **Temperature**:
-   - How does temperature affect output?
-   - Does higher temperature make transcription worse for ASR?
-   - When might you want temperature > 1.0?
+### Goal
 
-**Additional Quick Experiments**:
+Familiarize yourself with the project structure and key files.
 
-```python
-# Test with different audio formats
-formats = ["test.wav", "test.mp3", "test.flac"]
-for audio_file in formats:
-    result = pipe(audio_file)
-    print(f"{audio_file}: {result['text'][:50]}...")
+### Your Task
 
-# Test with very short audio
-short_result = pipe(audio_path, max_new_tokens=10)
-print(f"Truncated (10 tokens): {short_result['text']}")
+Explore the codebase and locate the main components of the Tiny Audio architecture.
 
-# Test edge cases
-edge_cases = [
-    ("silent.wav", "Silent audio"),
-    ("very_short.wav", "< 1 second audio"),
-    ("long_podcast.mp3", "Long audio (5+ minutes)"),
-]
+### Instructions
 
-for audio, description in edge_cases:
-    try:
-        result = pipe(audio)
-        print(f"{description}: ✓ Success - {len(result['text'])} chars")
-    except Exception as e:
-        print(f"{description}: ✗ Error - {e}")
-```
+1. **Open the project in your code editor** (e.g., VS Code).
+1. **Inspect the `src/` directory**:
+   - `asr_modeling.py`: This is where the core model architecture is defined. Can you find the `ASRModel` class?
+   - `asr_pipeline.py`: This file defines the custom ASR pipeline used by transformers.
+   - `train.py`: The main script for training the model. We'll use this in a later class.
+1. **Look at the `configs/` directory**:
+   - `experiments/`: This directory contains configuration files for different training experiments.
+   - `model/`: Here you can find the configuration for different model architectures.
+1. **Check the `demo/gradio/` directory**:
+   - `app.py`: The Gradio demo interface you just launched.
+1. **Explore the `scripts/` directory**:
+   - `verify_setup.py`: The script you ran earlier to check your environment.
+   - `eval.py`: The evaluation script you used to benchmark the model.
+   - `transcribe.py`: A command-line tool for quick audio transcription.
 
----
+## Key Takeaways
 
-# CLASS SUMMARY
+- ASR is a challenging but solvable problem with modern deep learning.
+- The Tiny Audio architecture is a powerful and efficient way to build a custom ASR model.
+- You have a working development environment and can run inference on your own audio files.
 
-## What We Covered Today
-
-**Lecture (20 min):**
-
-- What ASR is and why it matters
-
-- The three-component Tiny Audio architecture
-
-- Course goals: train, evaluate, publish
-
-**Workshop (40 min):**
-
-- Set up development environment
-
-- Ran first inference
-
-- Explored model behavior on different audio
-
----
+______________________________________________________________________
 
 ## Further Reading (Optional)
-
 
 ### Foundational Papers
 
@@ -793,22 +513,20 @@ for audio, description in edge_cases:
 
 - **Attention**: [Attention Is All You Need](https://arxiv.org/abs/1706.03762) (foundational)
 
-
-### Documentation
+### Documentation & Tutorials
 
 - [HuggingFace Transformers](https://huggingface.co/docs/transformers/index)
 
 - [PyTorch Tutorials](https://pytorch.org/tutorials/)
 
-- [Wav2Vec2 Guide](https://huggingface.co/docs/transformers/model_doc/wav2vec2)
+- [The Illustrated Transformer](http://jalammar.github.io/illustrated-transformer/) by Jay Alammar
 
+- [The Illustrated Word2vec](http://jalammar.github.io/illustrated-word2vec/) by Jay Alammar
 
 ### Videos
 
 - [But what is a neural network?](https://www.youtube.com/watch?v=aircAruvnKk) by 3Blue1Brown
 
-- [Illustrated Transformer](http://jalammar.github.io/illustrated-transformer/) by Jay Alammar
+- [Transformers, explained](https://www.youtube.com/watch?v=TQQlZhbC5ps) by AI Coffee Break with Letitia
 
 [Previous: Course Overview](./0-course-overview.md) | [Next: Class 2: Audio Processing and Encoders](./2-audio-processing-and-encoders.md)
-
-**Questions or stuck?** Open an issue on GitHub or check the discussions!

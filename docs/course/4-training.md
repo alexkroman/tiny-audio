@@ -18,7 +18,7 @@ By the end of this class, you will:
 
 - Understand key training hyperparameters
 
----
+______________________________________________________________________
 
 # PART A: LECTURE (20 minutes)
 
@@ -36,20 +36,19 @@ Before we dive into the specifics of LoRA and Hydra, let's talk about what it me
 
 This chapter will guide you through the first steps of this marathon: preparing for and starting your training run.
 
----
+______________________________________________________________________
 
 ## 2. Why Parameter-Efficient Training? (5 min)
-
 
 ### The Full Fine-Tuning Problem
 
 **Traditional approach**: Update all model parameters
 
-- HuBERT encoder: 1.3B params
+- HuBERT/Whisper encoder: 1.3-1.5B params
 
-- Qwen-3 8B decoder: 8B params
+- Qwen3-8B/SmolLM3-3B decoder: 3-8B params
 
-- **Total**: 9.3B+ parameters to train
+- **Total**: 4.3-9.5B+ parameters to train
 
 **Problems**:
 
@@ -63,7 +62,6 @@ This chapter will guide you through the first steps of this marathon: preparing 
 
 - Hard to reproduce
 
-
 ### The Solution: Parameter-Efficient Fine-Tuning (PEFT)
 
 **Key insight**: You don't need to update all parameters!
@@ -71,8 +69,15 @@ This chapter will guide you through the first steps of this marathon: preparing 
 Instead, we:
 
 1. **Freeze** most parameters (keep pre-trained knowledge)
-2. **Add small adapters** that learn the specific task
-3. **Train only adapters** (~1.5% of total params)
+1. **Train projector fully** (~13M params, bridges audio and text)
+1. **Add small LoRA adapters** (optional, for encoder and/or decoder)
+1. **Train only trainable components** (~0.2% of total params with full PEFT)
+
+**Training Modes**:
+
+- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~21M params)
+- **Projector + Decoder**: Frozen encoder, trainable projector + decoder LoRA (~17M params)
+- **Projector Only**: Frozen encoder and decoder, only projector trains (~13M params)
 
 **Results**:
 
@@ -84,12 +89,13 @@ Instead, we:
 
 - Better generalization
 
-- Easy to share (only save adapter weights)
+- Easy to share (only save adapter weights + projector)
 
----
+- Flexible configuration (enable/disable LoRA components)
+
+______________________________________________________________________
 
 ## 2. Understanding LoRA (10 min)
-
 
 ### What is LoRA?
 
@@ -97,61 +103,33 @@ Instead, we:
 
 **Core idea**: Large weight matrices can be approximated by low-rank decompositions.
 
+### The Math (Intuitive)
 
-### The Math (Simplified)
-
-Normal training updates weight matrix W:
-
-
+Instead of updating a full weight matrix W (millions of params):
 
 ```
-W_new = W_old + ΔW
-
-
+Normal: W_new = W_old + ΔW   (update all 4.2M parameters)
+LoRA:   W_new = W_old + B×A  (update only 32K parameters!)
 ```
 
-LoRA approximates ΔW with two small matrices:
+**The Key Insight**: Most updates are low-rank - they don't need millions of parameters.
 
+**Example**: For a 2048×2048 weight matrix with rank r=8:
 
+- Original: 2048 × 2048 = **4.2M parameters**
+- LoRA: (2048×8) + (8×2048) = **32K parameters** (0.76%!)
 
-```
-ΔW ≈ B × A
-
-
-```
-
-Where:
-
-- W is large (e.g., 2048 × 2048 = 4.2M params)
-
-- B is tall and thin (2048 × 8 = 16K params)
-
-- A is short and wide (8 × 2048 = 16K params)
-
-- **Total**: 32K params instead of 4.2M! (0.76%)
-
-**Rank (r)**: The middle dimension (8 in this example)
-
-- Lower rank = fewer parameters, less capacity
-
-- Higher rank = more parameters, more capacity
-
-**Quick Experiment**: Calculate parameter savings for different ranks:
-
-```python
-# Try ranks 1, 4, 8, 16, 32, 64
-for rank in [1, 4, 8, 16, 32, 64]:
-    lora_params = 2 * 2048 * rank  # B + A matrices
-    original = 2048 * 2048
-    savings = 100 * (1 - lora_params/original)
-    print(f"Rank {rank:2d}: {lora_params:,} params ({savings:.1f}% savings)")
-
+**Visual intuition:**
 
 ```
+[2048 × 2048]  =  [2048 × 8]  ×  [8 × 2048]
+   4.2M params      16K          16K
+   Full update      Matrix B     Matrix A
+```
 
+The "rank" (r=8) is how much information we allow the update to carry.
 
 ### How LoRA Works in Practice
-
 
 ```python
 # Original forward pass
@@ -180,24 +158,23 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Same inference cost as original model
 
-
 ### LoRA Hyperparameters
 
 **Rank (r)**:
 
 - Controls adapter capacity
 
-- Encoder: r=8 (conservative)
+- Encoder: r=0 (disabled, frozen) or r=16 (when enabled)
 
-- Decoder: r=64 (more capacity for language task)
+- Decoder: r=0 (disabled, frozen) or r=8 (when enabled)
 
 **Alpha (lora_alpha)**:
 
 - Scaling factor: `scale = alpha / r`
 
-- Encoder: alpha=8 (scale=1.0)
+- Encoder: alpha=16 (scale=1.0 when r=16)
 
-- Decoder: alpha=32 (scale=0.5)
+- Decoder: alpha=8 (scale=1.0 when r=8)
 
 - Controls magnitude of adapter contribution
 
@@ -205,9 +182,9 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Which layers get adapters
 
-- Encoder: q_proj, k_proj (query and key in attention)
+- Encoder: `attention.q_proj`, `attention.k_proj` (query and key in HuBERT attention)
 
-- Decoder: q_proj, v_proj (query and value in attention)
+- Decoder: `q_proj`, `v_proj` (query and value in decoder attention)
 
 - More modules = more parameters but more capacity
 
@@ -215,28 +192,27 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Regularization for adapters
 
-- We use 0.0 (no dropout)
+- Encoder: 0.05 (light dropout)
 
-- Pre-trained models already well-regularized
+- Decoder: 0.05 (light dropout)
 
+- Helps prevent overfitting
 
 ### Why These Specific Configurations?
 
-**Encoder (r=8, small)**:
+**Encoder LoRA (r=16 when enabled, or r=0 disabled)**:
 
+- **r=0 (disabled)**: Fastest training, relies on pre-trained features
+- **r=16 (enabled)**: Light adaptation for task-specific features
 - Already well pre-trained on speech
+- ~4M parameters when enabled
 
-- Just needs small adjustments
+**Decoder LoRA (r=8 when enabled, or r=0 disabled)**:
 
-- ~2M parameters
-
-**Decoder (r=64, larger)**:
-
-- Bigger adaptation needed (text → speech-aware text)
-
-- More capacity for language generation
-
-- ~15M parameters
+- **r=0 (disabled)**: Frozen decoder, only projector adapts
+- **r=8 (enabled)**: Adaptation for speech-aware text generation
+- More conservative rank than encoder
+- ~4M parameters when enabled
 
 **Projector (no LoRA)**:
 
@@ -244,12 +220,24 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Train fully from scratch
 
-- ~122M parameters
+- ~13M parameters
 
----
+**Configuration Examples**:
+
+```bash
+# Full PEFT (projector + encoder LoRA + decoder LoRA)
+poetry run python src/train.py encoder_lora.r=16 peft.r=8
+
+# Projector + Decoder LoRA only (frozen encoder)
+poetry run python src/train.py encoder_lora.r=0 peft.r=8
+
+# Projector only (fastest, both models frozen)
+poetry run python src/train.py encoder_lora.r=0 peft.r=0
+```
+
+______________________________________________________________________
 
 ## 3. Training Configuration with Hydra (5 min)
-
 
 ### What is Hydra?
 
@@ -263,33 +251,35 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Clean, maintainable configs
 
-
 ### Tiny Audio Config Structure
-
-
 
 ```
 configs/hydra/
-├── config.yaml              # Main config (ties everything together)
+├── config.yaml                    # Main config (ties everything together)
 ├── model/
-│   ├── default.yaml         # Model architecture
-│   └── hubert_xlarge.yaml   # Encoder variant
+│   ├── whisper_turbo.yaml        # Default: Whisper Turbo encoder
+│   ├── large.yaml                # HuBERT-XLarge encoder
+│   └── hubert_large.yaml         # HuBERT-Large encoder
 ├── data/
-│   └── loquacious.yaml      # Dataset config
+│   ├── loquacious_clean.yaml     # Clean LoquaciousSet
+│   ├── loquacious_large.yaml     # Large LoquaciousSet
+│   └── multi_task_complete.yaml  # Multi-task dataset
 ├── training/
-│   ├── default.yaml         # Training hyperparameters
-│   └── production.yaml      # Production settings
+│   ├── base.yaml                 # Base training hyperparameters
+│   ├── production.yaml           # Production settings
+│   ├── mac.yaml                  # Mac-specific settings
+│   └── mac_override.yaml         # Mac overrides
 ├── peft/
-│   └── lora.yaml           # Decoder LoRA config
+│   └── default.yaml              # Decoder LoRA config
 ├── encoder_lora/
-│   └── r8.yaml             # Encoder LoRA config
+│   └── default.yaml              # Encoder LoRA config
 └── experiments/
-    ├── stage1.yaml         # Full training preset
-    └── mac_minimal.yaml    # Local testing preset
+    ├── transcribe_hubert.yaml    # HuBERT transcription
+    ├── transcribe_whisper.yaml   # Whisper transcription
+    └── multi_task.yaml           # Multi-task training
 
 
 ```
-
 
 ### Key Training Hyperparameters
 
@@ -306,8 +296,9 @@ These are the most important knobs to turn when training a model. Understanding 
 **Learning Rate Schedule**: `cosine`
 
 - **What it is**: A plan for changing the learning rate over time. We don't use a fixed learning rate throughout the entire training. Instead, we use a schedule that includes:
-    - **Warmup**: We start with a very low learning rate and gradually increase it to the peak value (`1e-4`) over the first `500` steps. This prevents the model from making large, destabilizing updates at the beginning of training.
-    - **Decay**: After the warmup, we gradually decrease the learning rate, following a cosine curve. This allows the model to settle into a good minimum.
+
+  - **Warmup**: We start with a very low learning rate and gradually increase it to the peak value (`1e-4`) over the first `500` steps. This prevents the model from making large, destabilizing updates at the beginning of training.
+  - **Decay**: After the warmup, we gradually decrease the learning rate, following a cosine curve. This allows the model to settle into a good minimum.
 
 - **Why this is important**: A good learning rate schedule is crucial for stable and efficient training.
 
@@ -331,7 +322,6 @@ These are the most important knobs to turn when training a model. Understanding 
 
 - **Why?**: It dramatically reduces memory usage and speeds up training on modern GPUs (like the A40 and H100) with minimal impact on accuracy.
 
-
 ### Pre-flight Checklist
 
 Before launching a long training run, it's a good practice to go through a pre-flight checklist:
@@ -343,7 +333,6 @@ Before launching a long training run, it's a good practice to go through a pre-f
 - **[ ] Checkpoint & Auto-resume**: Is your training script set up to save checkpoints periodically and resume from the latest one if it gets interrupted? (The `transformers` Trainer does this for us automatically!).
 
 - **[ ] Logging**: Are you logging all the important metrics (loss, learning rate, etc.) to a tool like Weights & Biases? (We'll set this up in the workshop).
-
 
 ### A Glimpse into Scaling Laws
 
@@ -361,7 +350,7 @@ These laws allow researchers to make informed decisions about how to allocate th
 
 While we won't be deriving our own scaling laws in this course, it's a fascinating area of research that drives many of the decisions behind the models we use every day.
 
----
+______________________________________________________________________
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
@@ -381,25 +370,21 @@ In the next 40 minutes, you will:
 
 By the end, you'll have a model training in the cloud and understand how to optimize it!
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 1: Explore Training Configs (10 min)
-
 
 ### Goal
 
 Understand the training configuration files.
 
-
 ### Your Task
 
 Read and understand the configuration structure.
 
-
 ### Instructions
 
 **Step 1: Examine the main config**
-
 
 ```bash
 cat configs/hydra/config.yaml
@@ -415,11 +400,15 @@ Look for:
 
 - How components are composed
 
-**Step 2: Check the experiment config**
+**Step 2: Check the experiment configs**
 
+Available experiment configurations:
+- `transcribe_whisper.yaml` - Whisper Turbo encoder (default, fastest)
+- `transcribe_hubert.yaml` - HuBERT encoder (alternative)
+- `multi_task.yaml` - Multi-task training (transcription + other tasks)
 
 ```bash
-cat configs/hydra/experiments/stage1.yaml
+cat configs/hydra/experiments/transcribe_whisper.yaml
 
 
 ```
@@ -434,38 +423,37 @@ This shows the full production training setup:
 
 - Training hyperparameters
 
-**Step 3: Compare with minimal config**
-
+**Step 3: View alternative encoder configuration**
 
 ```bash
-cat configs/hydra/experiments/mac_minimal.yaml
+cat configs/hydra/experiments/transcribe_hubert.yaml
 
 
 ```
 
-This is for quick local testing:
+This uses HuBERT instead of Whisper:
 
-- Small dataset samples
+- Different encoder (facebook/hubert-xlarge-ls960-ft)
 
-- Fewer steps
+- Same training procedure
 
-- Same architecture
+- Same architecture otherwise
 
 **Step 4: Create your own experiment config**
 
 Create `configs/hydra/experiments/my_experiment.yaml`:
 
-
 ```yaml
 # @package _global_
 
-# Inherit from stage1 but with modifications
+# Custom experiment configuration
+# Based on transcribe_whisper but with modifications
 defaults:
-  - /model: default
-  - /data: loquacious
+  - /model: whisper_turbo
+  - /data: loquacious_large
   - /training: production
-  - /peft: lora
-  - /encoder_lora: r8
+  - /peft: default
+  - /encoder_lora: default
 
 # Custom modifications
 training:
@@ -489,7 +477,6 @@ model:
 
 ```
 
-
 ### Success Checkpoint
 
 - [ ] Examined config.yaml
@@ -500,26 +487,21 @@ model:
 
 - [ ] Ready to customize training settings
 
-
----
+______________________________________________________________________
 
 ## Workshop Exercise 2: Local Test Run (15 min)
-
 
 ### Goal
 
 Run a quick training test on your local machine.
 
-
 ### Your Task
 
 Start a minimal training run to verify everything works.
 
-
 ### Instructions
 
 **Step 1: Check available compute**
-
 
 ```bash
 # Check if you have a GPU
@@ -533,10 +515,14 @@ python -c "import torch; print(f'MPS available: {torch.backends.mps.is_available
 
 **Step 2: Run minimal test**
 
-
 ```bash
-# This will train for just 20 steps (~5-10 minutes)
-poetry run python src/train.py +experiments=mac_minimal
+# Quick local test with manual overrides (10 steps)
+poetry run python src/train.py \
+  training.max_steps=10 \
+  data.max_train_samples=50 \
+  training.per_device_train_batch_size=2 \
+  encoder_lora.r=0 \
+  peft.r=0
 
 
 ```
@@ -544,42 +530,37 @@ poetry run python src/train.py +experiments=mac_minimal
 **What happens:**
 
 1. Downloads/loads dataset samples
-2. Initializes model with LoRA adapters
-3. Trains for 20 steps
-4. Saves checkpoint
+1. Initializes model (encoder + projector + decoder)
+1. Trains projector only (LoRA disabled for speed)
+1. Trains for 10 steps
+1. Saves checkpoint
 
 **Expected output:**
 
-
-
 ```
 Loading model...
-✓ Loaded encoder (HuBERT-XLarge + LoRA r=8)
-✓ Loaded decoder (Qwen-3 8B + LoRA r=8)
-✓ Loaded projector (122M params)
+✓ Loaded encoder (Whisper Turbo, frozen)
+✓ Loaded projector (~13M params, trainable)
+✓ Loaded decoder (SmolLM3-3B, frozen)
 
 Loading dataset...
-✓ Train samples: 100
-✓ Eval samples: 50
+✓ Train samples: 50
 
 Training...
-Step 1/20 | Loss: 12.3456
-Step 5/20 | Loss: 8.2345
-Step 10/20 | Loss: 5.1234
-...
-Step 20/20 | Loss: 3.4567
+Step 1/10 | Loss: 8.3456
+Step 5/10 | Loss: 5.2345
+Step 10/10 | Loss: 3.4567
 
 ✓ Training complete!
-✓ Saved checkpoint to outputs/mac_minimal/
+✓ Saved checkpoint to outputs/[timestamp]/
 
 
 ```
 
 **Step 3: Check the output**
 
-
 ```bash
-ls outputs/mac_minimal/
+ls outputs/*/  # Check most recent output
 
 
 ```
@@ -588,12 +569,13 @@ You should see:
 
 - `config.json` - Model configuration
 
-- `model.safetensors` - Trained weights (projector + LoRA)
+- `projector.safetensors` - Projector weights (always present)
 
-- `training_args.bin` - Training settings
+- `encoder.safetensors` - Encoder LoRA (only if encoder_lora.r > 0)
+
+- `decoder.safetensors` - Decoder LoRA (only if peft.r > 0)
 
 - `trainer_state.json` - Training state
-
 
 ### Success Checkpoint
 
@@ -607,13 +589,11 @@ You should see:
 
 **Note**: This is a minimal test! The model won't be good yet - we need full training.
 
-
 ### Training Experiments
 
 **Experiment 1: Monitor loss curves**
 
 Create a script to visualize training progress:
-
 
 ```python
 # monitor_training.py
@@ -651,27 +631,27 @@ if len(losses) > 5:
 
 **Experiment 2: Test different datasets**
 
-
 ```bash
-# Try with different data configs
+# Try with minimal config for quick testing (no experiment file needed)
 poetry run python src/train.py \
-  +experiments=mac_minimal \
   data.max_train_samples=50 \
   training.max_steps=10 \
-  training.run_name="tiny-test"
+  training.run_name="tiny-test" \
+  encoder_lora.r=0 \
+  peft.r=0
 
 # Compare with more data
 poetry run python src/train.py \
-  +experiments=mac_minimal \
   data.max_train_samples=200 \
   training.max_steps=40 \
-  training.run_name="medium-test"
+  training.run_name="medium-test" \
+  encoder_lora.r=0 \
+  peft.r=0
 
 
 ```
 
 **Experiment 3: Learning rate warmup test**
-
 
 ```python
 # Test different warmup strategies
@@ -690,20 +670,17 @@ for warmup_steps, name in warmup_configs:
 
 ```
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 3: Set Up Cloud Training (15 min)
-
 
 ### Goal
 
 Prepare for full-scale training on cloud GPU.
 
-
 ### Your Task
 
 Set up a cloud GPU and prepare to train.
-
 
 ### Instructions
 
@@ -729,7 +706,6 @@ Set up a cloud GPU and prepare to train.
 
 **Step 3: Connect via SSH**
 
-
 ```bash
 # Get SSH command from RunPod dashboard (looks like this)
 ssh root@<pod-id>.runpod.io -p 22115 -i ~/.ssh/id_ed25519
@@ -738,7 +714,6 @@ ssh root@<pod-id>.runpod.io -p 22115 -i ~/.ssh/id_ed25519
 ```
 
 **Step 4: Set up environment on pod**
-
 
 ```bash
 # Once connected to pod
@@ -755,21 +730,24 @@ export HF_TOKEN='your_token_here'  # Get from https://huggingface.co/settings/to
 
 **Step 5: Start training**
 
-
 ```bash
-# Full production training
-poetry run python src/train.py +experiments=stage1
+# Full production training with HuBERT
+poetry run python src/train.py +experiments=transcribe_hubert
+
+# Or with Whisper encoder
+poetry run python src/train.py +experiments=transcribe_whisper
 
 
 ```
 
 **Step 6: Monitor (optional)**
 
-
 ```bash
 # In a separate terminal, watch logs
 ssh root@<pod-id>.runpod.io -p 22115 -i ~/.ssh/id_ed25519
-tail -f tiny-audio/outputs/stage1/trainer_log.txt
+
+# Monitor the most recent training run
+tail -f tiny-audio/outputs/*/trainer_log.txt
 
 
 ```
@@ -778,16 +756,17 @@ tail -f tiny-audio/outputs/stage1/trainer_log.txt
 
 If you have NVIDIA RTX 3090/4090 or better:
 
-
 ```bash
 # Make sure CUDA is available
 nvidia-smi
 
-# Set up W&B for monitoring
+# Set up W&B for monitoring (optional)
 export WANDB_API_KEY='your_key'  # From https://wandb.ai/settings
 
-# Start training
-poetry run python src/train.py +experiments=stage1
+# Start training (choose your encoder)
+poetry run python src/train.py +experiments=transcribe_whisper
+# OR
+poetry run python src/train.py +experiments=transcribe_hubert
 
 
 ```
@@ -797,10 +776,9 @@ poetry run python src/train.py +experiments=stage1
 Good for testing but may disconnect:
 
 1. Go to [colab.research.google.com](https://colab.research.google.com)
-2. Upload notebook with training code
-3. Use GPU runtime
-4. Run training cells
-
+1. Upload notebook with training code
+1. Use GPU runtime
+1. Run training cells
 
 ### Success Checkpoint
 
@@ -814,13 +792,12 @@ Good for testing but may disconnect:
 
 **Important**: Training takes ~24 hours. Don't close the connection! Use `tmux` or `screen` to keep it running:
 
-
 ```bash
 # Start a persistent session
 tmux new -s training
 
-# Run training
-poetry run python src/train.py +experiments=stage1
+# Run training (choose your encoder)
+poetry run python src/train.py +experiments=transcribe_whisper
 
 # Detach: Ctrl+B, then D
 # Re-attach later: tmux attach -t training
@@ -828,7 +805,7 @@ poetry run python src/train.py +experiments=stage1
 
 ```
 
----
+______________________________________________________________________
 
 # CLASS SUMMARY
 
@@ -852,10 +829,9 @@ poetry run python src/train.py +experiments=stage1
 
 - Set up cloud GPU infrastructure
 
----
+______________________________________________________________________
 
 ## Further Reading (Optional)
-
 
 ### Papers
 
@@ -865,7 +841,6 @@ poetry run python src/train.py +experiments=stage1
 
 - [Parameter-Efficient Transfer Learning](https://arxiv.org/abs/1902.00751)
 
-
 ### Tools
 
 - [Hydra documentation](https://hydra.cc/)
@@ -873,7 +848,6 @@ poetry run python src/train.py +experiments=stage1
 - [Weights & Biases](https://wandb.ai/)
 
 - [RunPod guides](https://docs.runpod.io/)
-
 
 ### Code
 

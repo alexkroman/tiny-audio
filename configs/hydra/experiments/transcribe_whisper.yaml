@@ -1,0 +1,94 @@
+# @package _global_
+
+# Multi-task training configuration - All tasks combined
+# Includes: transcription, continuation, description, and emotion recognition
+# Based on stage1 configuration with multi-task data
+defaults:
+  - override /model: large
+  - override /data: loquacious_large
+  - override /training: production
+
+model:
+  # Load the pretrained model from Hub (this loads the projector weights)
+  # pretrained_model_path: "mazesmazes/tiny-audio"
+
+  decoder_model_name: HuggingFaceTB/SmolLM3-3B
+  encoder_model_name: openai/whisper-large-v3-turbo
+
+  # Projector configuration
+  audio_downsample_rate: 5
+  projector_dropout: 0.05  # Reduced for simpler linear projector (no longer needs hidden_dim)
+
+# Encoder LoRA Configuration
+encoder_lora:
+  r: 0 # Disable LoRA (same as stage1)
+  lora_alpha: 16  # Scaling factor (alpha/r = 1.0)
+  target_modules: [q_proj, k_proj]  # HuBERT attention projections
+  lora_dropout: 0.05
+  bias: none
+
+# Decoder LoRA Configuration
+peft:
+  peft_method: lora  # Enable LoRA fine-tuning on decoder
+  r: 0  # Disable LORA (same as stage1)
+  lora_alpha: 8
+  target_modules: ["q_proj", "v_proj"]
+  bias: none  # No bias training
+  task_type: CAUSAL_LM  # Causal language modeling
+  lora_dropout: 0.05
+  inference_mode: false  # Training mode
+
+training:
+  # Hub configuration
+  push_to_hub: true
+  hub_model_id: "mazesmazes/tiny-audio"
+  hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
+  hub_private_repo: false
+
+  # CPU optimization for 9 vCPUs
+  dataloader_num_workers: 1  # Limited by dataset.num_shards=1
+  dataloader_prefetch_factor: 4  # Higher prefetch to compensate for single worker
+
+  per_device_train_batch_size: 14
+  per_device_eval_batch_size: 14
+  gradient_accumulation_steps: 2
+  eval_accumulation_steps: 2
+
+  learning_rate: 1.0e-4
+
+  warmup_steps: 1000  # Increased for LoRA stability (2% of 50k steps)
+  lr_scheduler_type: "cosine_with_min_lr"
+  lr_scheduler_kwargs: {"min_lr_rate": 0.1}
+
+  # Optimization
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+
+  # Memory optimization
+  torch_compile: false  # Disabled for faster startup
+  # torch_compile_mode: "default"  # Faster compilation than reduce-overhead
+  # torch_compile_dynamic: true  # Enable dynamic shapes for variable sequence lengths
+  # torch_compile_fullgraph: false  # Allow graph breaks for flexibility
+  torch_compile_config:
+    # Advanced torch.compile settings
+    cache_size_limit: 128  # Allow layer-wise compilation + shape variants (default: 8)
+    compile_threads: 8  # Parallel compilation threads (faster initial compile)
+    capture_scalar_outputs: true  # Reduce graph breaks from .item() calls
+    allow_unspec_int_on_nn_module: true  # Reduce recompilation from layer indices
+  
+  gradient_checkpointing: false
+
+  # Training duration - 50000 steps as requested
+  max_steps: 50000
+
+  # Reproducibility
+  seed: 42
+  ignore_data_skip: true
+
+data:
+  mask_time_prob: 0.15
+
+# Early stopping configuration
+early_stopping:
+  patience: null
+  threshold: 0.0

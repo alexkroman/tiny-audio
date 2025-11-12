@@ -18,7 +18,7 @@ By the end of this class, you will:
 
 - Explore the encoder's outputs hands-on
 
----
+______________________________________________________________________
 
 # PART A: LECTURE (20 minutes)
 
@@ -29,20 +29,20 @@ Today we're answering a fundamental question: **How does a computer "hear" and u
 The journey from sound waves to meaningful embeddings involves three critical steps:
 
 1. **Digitization**: Converting continuous sound waves into discrete numbers
-2. **Normalization**: Cleaning and standardizing the audio data
-3. **Encoding**: Transforming raw audio into rich, semantic representations
+1. **Normalization**: Cleaning and standardizing the audio data
+1. **Encoding**: Transforming raw audio into rich, semantic representations
 
 Think of it like preparing ingredients for cooking:
+
 - **Raw ingredients** (sound waves) → **Cleaned and prepped** (normalized audio) → **Cooked dish** (embeddings)
 
 Each step is crucial. Skip normalization, and your model learns from noisy, inconsistent data. Use a weak encoder, and you lose the semantic richness needed for accurate transcription.
 
 **The goal**: Turn messy, real-world audio into clean, dense representations that a language model can transcribe.
 
----
+______________________________________________________________________
 
 ## 2. From Sound Waves to Numbers (5 min)
-
 
 ### What is Sound?
 
@@ -55,7 +55,6 @@ Sound = vibrations traveling through air as pressure waves
 - **Frequency**: Pitch (oscillation speed)
 
 - **Duration**: How long
-
 
 ### Digitizing Audio
 
@@ -91,7 +90,7 @@ Computers need numbers, not waves. We use **sampling**:
 
 - Compare transcription accuracy
 
----
+______________________________________________________________________
 
 ## 3. Feature Extraction: Preparing Audio for Models (5 min)
 
@@ -100,8 +99,8 @@ Computers need numbers, not waves. We use **sampling**:
 Raw waveforms create three problems for training:
 
 1. **Inconsistent scale**: One file's amplitude ranges [-0.1, 0.1], another's [-1.0, 1.0]
-2. **Varying sample rates**: 8kHz phone audio mixed with 44.1kHz CD quality
-3. **Different lengths**: 2-second clips vs 10-minute recordings in the same batch
+1. **Varying sample rates**: 8kHz phone audio mixed with 44.1kHz CD quality
+1. **Different lengths**: 2-second clips vs 10-minute recordings in the same batch
 
 Without preprocessing, the model wastes capacity learning to handle these variations instead of learning to transcribe speech.
 
@@ -110,13 +109,16 @@ Without preprocessing, the model wastes capacity learning to handle these variat
 This preprocessing pipeline standardizes all audio:
 
 **Step 1: Resampling**
+
 - Convert any sample rate → 16 kHz
 - Ensures consistent time resolution
 
 **Step 2: Z-Normalization**
+
 ```python
 normalized = (audio - mean) / std
 ```
+
 - Centers audio around 0 (zero mean)
 - Scales to unit variance (std ≈ 1)
 - Makes all files comparable in amplitude
@@ -126,11 +128,13 @@ normalized = (audio - mean) / std
 Training is much faster when we process multiple audio files simultaneously (batching). But GPUs require all items in a batch to be the same length.
 
 *The problem*: Audio files have different durations
+
 - File A: 2.5 seconds = 40,000 samples
 - File B: 1.3 seconds = 20,800 samples
 - File C: 3.2 seconds = 51,200 samples
 
 *The solution*: Padding
+
 - Find the longest file in the batch (File C: 51,200 samples)
 - Pad shorter files with zeros to match
 - File A: [audio data... + 11,200 zeros]
@@ -148,11 +152,13 @@ The model learns to ignore padded regions using an **attention mask** that marks
 PyTorch (our deep learning framework) operates on **tensors**, not NumPy arrays.
 
 *What's a tensor?*
+
 - A multi-dimensional array optimized for GPU computation
 - Similar to NumPy arrays but with automatic differentiation (gradients)
 - Can be moved to GPU for massive parallelization
 
 *The conversion*:
+
 ```python
 # Before: NumPy array (CPU-only)
 audio_numpy = np.array([0.1, 0.2, 0.3, ...])  # shape: (48000,)
@@ -165,6 +171,7 @@ audio_tensor = audio_tensor.to('cuda')  # Now on GPU
 ```
 
 *Why this matters*:
+
 - **Speed**: GPU operations are 10-100x faster than CPU
 - **Gradients**: Automatic computation of derivatives for training
 - **Compatibility**: All PyTorch models expect tensor inputs
@@ -175,10 +182,9 @@ After this step, our audio is ready to be consumed by the HuBERT model.
 
 **Result**: Clean, consistent, model-ready audio!
 
----
+______________________________________________________________________
 
 ## 4. The HuBERT Encoder: From Audio to Meaning (10 min)
-
 
 ### What is HuBERT?
 
@@ -188,21 +194,33 @@ HuBERT solves a critical problem: **How do you learn rich audio representations 
 
 **The Innovation**: Self-supervised learning on unlabeled audio
 
-HuBERT was pre-trained on 60,000 hours of unlabeled speech from LibriLight - that's nearly 7 years of continuous audio! During pre-training, it learned to predict masked audio segments, similar to how BERT predicts masked words in text.
+Tiny Audio uses HuBERT-XLarge by default - pre-trained on 60,000 hours of unlabeled speech from LibriLight. That's nearly 7 years of continuous audio! During pre-training, it learned to predict masked audio segments, similar to how BERT predicts masked words in text.
 
 **What makes this powerful**:
+
 - No transcriptions needed (unlabeled data is abundant)
 - Learns universal speech patterns (phonemes, prosody, speaker characteristics)
 - Transfers to any language or domain
+- Optional LoRA fine-tuning for task-specific adaptation
+
+**Why we use HuBERT as default**:
+
+- Excellent performance on English speech
+- Proven track record in ASR tasks
+- Efficient with LoRA adaptation (optional)
+- 1.3 billion parameters
+
+**Alternative: Whisper Encoder**:
+Tiny Audio also supports OpenAI's Whisper encoder (openai/whisper-large-v3):
+
+- Pre-trained on 680K hours of multilingual, weakly-supervised data
+- 1.5 billion parameters
+- Better for multilingual tasks
+- Can be swapped by changing the encoder config
 
 **Analogy**: Like a child learning language by listening for years before speaking. They internalize patterns, rhythms, and sounds without explicit grammar lessons.
 
-**Why we use pre-trained HuBERT**: It already "understands" speech. We just need to fine-tune it for our specific transcription task.
-
-
 ### Architecture
-
-
 
 ```
 Audio waveform (16 kHz)
@@ -218,22 +236,24 @@ Audio features (~50 Hz)
 
 ```
 
-
 ### What HuBERT Learned
 
 During 60,000 hours of self-supervised pre-training, HuBERT developed internal representations of:
 
 **Phonetic Knowledge**:
+
 - Phonemes (/t/, /d/, /k/, etc.) - the atomic units of speech
 - Phoneme boundaries and transitions
 - Contextual pronunciation variations
 
 **Acoustic Understanding**:
+
 - Speaker characteristics (gender, age, accent)
 - Environmental acoustics (room reverb, background noise)
 - Channel effects (microphone quality, compression)
 
 **Prosodic Patterns**:
+
 - Rhythm and timing
 - Stress and emphasis
 - Intonation and pitch patterns
@@ -241,7 +261,6 @@ During 60,000 hours of self-supervised pre-training, HuBERT developed internal r
 **Why this matters**: Training from scratch would require labeled data for all these patterns. HuBERT learned them "for free" from unlabeled audio, saving us millions of dollars and months of annotation work.
 
 **This is why pre-trained encoders are game-changers** - we inherit this knowledge and focus our training budget on the transcription task.
-
 
 ### Time Compression: From Samples to Semantics
 
@@ -257,8 +276,8 @@ Instead of storing raw air pressure measurements 16,000 times per second, we cre
 **Why compress?**
 
 1. **Computational efficiency**: Language models can't process 16,000 tokens per second of audio
-2. **Semantic grouping**: ~20ms is roughly one phoneme - the right granularity for speech
-3. **Information density**: Embeddings encode patterns, not just raw amplitudes
+1. **Semantic grouping**: ~20ms is roughly one phoneme - the right granularity for speech
+1. **Information density**: Embeddings encode patterns, not just raw amplitudes
 
 HuBERT performs dramatic temporal compression while increasing semantic density:
 
@@ -271,28 +290,35 @@ HuBERT performs dramatic temporal compression while increasing semantic density:
 ```
 
 **The transformation**:
+
 - **Input**: 48,000 numbers representing air pressure over time
 - **Output**: 149 vectors, each capturing ~20ms of speech meaning
 - **Compression ratio**: ~320x in time dimension
 - **Information density**: ↑↑↑ (much more meaningful)
 
 **Why compression matters**:
+
 1. **Efficiency**: Decoder processes 149 frames instead of 48,000 samples
-2. **Context**: Each frame summarizes 20ms of audio context
-3. **Semantics**: Embeddings encode meaning, not just waveform shape
+1. **Context**: Each frame summarizes 20ms of audio context
+1. **Semantics**: Embeddings encode meaning, not just waveform shape
 
 **Think of it this way**: Instead of describing every brush stroke in a painting (raw samples), we describe what the painting depicts (embeddings). Fewer words, more meaning.
 
-
-### LoRA Adaptation: Efficient Fine-Tuning
+### LoRA Adaptation: Optional Efficient Fine-Tuning
 
 **The Challenge**: HuBERT has 1.3 billion parameters. Full fine-tuning would:
+
 - Require massive GPU memory (40GB+)
 - Take weeks to train
 - Cost hundreds of dollars
 - Risk destroying the pre-trained knowledge (catastrophic forgetting)
 
-**The Solution**: LoRA (Low-Rank Adaptation)
+**The Solution**: LoRA (Low-Rank Adaptation) - OPTIONAL
+
+**Important**: Encoder LoRA is **optional** in Tiny Audio. You can train with:
+
+1. **Frozen encoder**: No LoRA (encoder_lora.r=0), fastest training
+1. **With LoRA**: Small adapters (encoder_lora.r=16), more adaptation capacity
 
 **What is LoRA?**
 
@@ -301,47 +327,66 @@ LoRA is a technique that lets us adapt a large pre-trained model without modifyi
 **How LoRA Works**:
 
 In a transformer, attention layers compute queries (Q) and keys (K) using weight matrices:
+
 ```
 Q = input × W_q    (where W_q is a 1280×1280 matrix = 1.6M parameters)
 K = input × W_k    (where W_k is a 1280×1280 matrix = 1.6M parameters)
 ```
 
 Instead of updating W_q and W_k directly, LoRA adds small adapter matrices:
+
 ```
 Q = input × (W_q + ΔW_q)    where ΔW_q = A × B
 ```
 
 The magic: ΔW is factored into two small matrices:
+
 - **A**: 1280 × 16 (rank r=16)
 - **B**: 16 × 1280
 
 Total parameters in ΔW: (1280 × 16) + (16 × 1280) = 40,960 parameters
 
 **The Savings**:
+
 - **Original**: 1,638,400 parameters per projection (1280²)
 - **LoRA**: 40,960 parameters per projection
 - **Reduction**: 40x fewer parameters!
 
-**In Tiny Audio**:
+**In Tiny Audio (when enabled)**:
 
 - **Base model**: Frozen (1.3B params) - never updated during training
 - **LoRA adapters**: Trainable (~4M params, r=16)
-  - Applied to `q_proj` and `k_proj` (query and key projections) in all 24 attention layers
+  - Applied to `attention.q_proj` and `attention.k_proj` (query and key projections) in HuBERT attention layers
   - Each layer gets two small adapter matrices
-- **Result**: We train only 0.3% of the encoder's parameters!
+- **Result**: When enabled, we train only ~0.3% of the encoder's parameters!
 
-**What is "rank" (r=16)?**
+**Configuration Options**:
+
+```bash
+# Disable encoder LoRA (frozen encoder, fastest)
+encoder_lora.r=0
+
+# Enable with rank 16 (default when using LoRA)
+encoder_lora.r=16
+
+# More adaptation capacity
+encoder_lora.r=32
+```
+
+**What is "rank" (r)?**
 
 The rank controls the adapter size:
-- **Low rank (r=4-8)**: Fewer parameters, faster training, less adaptation capacity
-- **Medium rank (r=16-32)**: Good balance for most tasks
-- **High rank (r=64-128)**: More parameters, stronger adaptation, slower training
 
-We use **r=16** for the encoder because HuBERT's pre-trained representations are already excellent - we only need light adaptation for our specific dataset.
+- **r=0**: Disabled, frozen encoder
+- **r=8-16**: Light adaptation, good for most tasks
+- **r=32-64**: Stronger adaptation, more parameters
+
+The default **r=16** provides good balance when encoder adaptation is needed.
 
 **What are q_proj and k_proj?**
 
 In transformer attention:
+
 - **q_proj** (query projection): Transforms input into "what am I looking for?"
 - **k_proj** (key projection): Transforms input into "what information do I have?"
 - Together they compute attention scores: which parts of the audio to focus on
@@ -349,14 +394,16 @@ In transformer attention:
 We adapt these because they control *what* the model pays attention to - crucial for ASR where we need to focus on speech-relevant features.
 
 **Why this works**:
+
 1. **Preserves knowledge**: The original 1.3B weights stay frozen, keeping learned speech patterns
-2. **Task-specific adaptation**: LoRA learns adjustments for our transcription task
-3. **Efficient**: 0.3% of parameters means 40x less memory and much faster training
-4. **Modular**: Can save/load different LoRA adapters for different tasks
+1. **Task-specific adaptation**: LoRA learns adjustments for our transcription task
+1. **Efficient**: 0.3% of parameters means 40x less memory and much faster training
+1. **Modular**: Can save/load different LoRA adapters for different tasks
+1. **Optional**: Can disable entirely and rely on projector + decoder adaptation
 
 **Analogy**: Imagine HuBERT is a master chef with 1.3 billion skills. Instead of retraining the chef entirely (expensive, risky), we give them a small recipe card (LoRA adapter) with adjustments: "add a pinch more salt here, cook 2 minutes longer there." The chef's core skills remain intact, but the output is customized for your taste.
 
----
+______________________________________________________________________
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
@@ -366,27 +413,129 @@ We adapt these because they control *what* the model pays attention to - crucial
 
 In the next 40 minutes, you will:
 
-- **Swap the encoder** (HuBERT → Whisper) and understand the power of modular architecture
+- **Exercise 1 (20 min)**: Explore and visualize audio embeddings from HuBERT
+- **Exercise 2 (20 min)**: Swap the encoder to Whisper and compare results
 
-By the end, you'll experience firsthand how to experiment with different components and understand the trade-offs between different encoders!
+By the end, you'll understand how different encoders affect model performance and learn hands-on how to experiment with modular architectures!
 
----
+______________________________________________________________________
 
-## Workshop Exercise: Swap the Encoder (40 min)
+## Workshop Exercise 1: Explore Audio Embeddings (20 min)
 
 ### Goal
 
-Learn how to experiment with different audio encoders by swapping HuBERT for Whisper's encoder.
-
-### Why This Matters
-
-One of the most powerful aspects of modular architectures is the ability to swap components. The encoder is the "ear" of your ASR system - different encoders have different strengths:
-- **HuBERT**: Self-supervised on 60K hours, excellent general-purpose representations
-- **Whisper**: Trained on 680K hours of weakly-supervised multilingual data, strong multilingual capabilities
+Understand what audio encoders actually output by visualizing and analyzing embeddings.
 
 ### Your Task
 
-Modify the Tiny Audio configuration to use OpenAI's Whisper encoder instead of HuBERT.
+Extract and visualize embeddings from HuBERT to see how audio is represented.
+
+### Instructions
+
+**Step 1: Extract embeddings from an audio file**
+
+Create `explore_embeddings.py`:
+
+```python
+import torch
+from transformers import Wav2Vec2FeatureExtractor, HubertModel
+import numpy as np
+
+# Load audio (using sample from Exercise 1)
+from datasets import load_dataset
+dataset = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
+audio = dataset[0]["audio"]
+
+# Load HuBERT model
+feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-xlarge-ls960-ft")
+model = HubertModel.from_pretrained("facebook/hubert-xlarge-ls960-ft")
+
+# Extract features
+inputs = feature_extractor(audio["array"], sampling_rate=16000, return_tensors="pt")
+with torch.no_grad():
+    outputs = model(**inputs)
+    embeddings = outputs.last_hidden_state
+
+print(f"Audio duration: {len(audio['array']) / 16000:.2f} seconds")
+print(f"Embedding shape: {embeddings.shape}")
+print(f"  Batch size: {embeddings.shape[0]}")
+print(f"  Time steps: {embeddings.shape[1]}")
+print(f"  Embedding dim: {embeddings.shape[2]}")
+print(f"\nEmbedding statistics:")
+print(f"  Mean: {embeddings.mean():.4f}")
+print(f"  Std: {embeddings.std():.4f}")
+print(f"  Min: {embeddings.min():.4f}")
+print(f"  Max: {embeddings.max():.4f}")
+```
+
+Run it:
+
+```bash
+poetry run python explore_embeddings.py
+```
+
+**Expected output:**
+
+```
+Audio duration: 5.56 seconds
+Embedding shape: torch.Size([1, 174, 1280])
+  Batch size: 1
+  Time steps: 174
+  Embedding dim: 1280
+
+Embedding statistics:
+  Mean: 0.0234
+  Std: 0.8765
+  Min: -3.4567
+  Max: 4.1234
+```
+
+**Key insight**: ~5 seconds of audio → 174 time steps → ~32ms per frame!
+
+**Step 2: Visualize embeddings (optional)**
+
+If you have matplotlib installed, add this to visualize:
+
+```python
+import matplotlib.pyplot as plt
+
+# Visualize first 50 dimensions over time
+plt.figure(figsize=(12, 6))
+plt.imshow(embeddings[0, :, :50].T, aspect='auto', cmap='viridis')
+plt.colorbar(label='Activation')
+plt.xlabel('Time steps')
+plt.ylabel('Embedding dimensions (first 50)')
+plt.title('HuBERT Audio Embeddings')
+plt.tight_layout()
+plt.savefig('embeddings_heatmap.png')
+print("\nSaved visualization to embeddings_heatmap.png")
+```
+
+### Success Checkpoint
+
+- [ ] Successfully extracted embeddings
+- [ ] Understand shape: [batch, time_steps, 1280]
+- [ ] See the temporal structure (174 frames from 5.6s audio)
+- [ ] (Optional) Visualized embedding patterns
+
+______________________________________________________________________
+
+## Workshop Exercise 2: Swap the Encoder (20 min)
+
+### Goal
+
+Experiment with swapping encoders by comparing HuBERT vs Whisper performance.
+
+### Why This Matters
+
+Different encoders have different strengths:
+
+- **HuBERT**: Self-supervised on 60K hours, excellent for English
+- **Whisper**: Trained on 680K hours multilingual data, better for multiple languages
+
+### Your Task
+
+Compare inference with Whisper encoder to see the difference.
 
 ### Instructions
 
@@ -459,11 +608,13 @@ print(f"Drop-in replacement possible!")
 When you swap encoders, consider:
 
 **What stays the same:**
+
 - Projector architecture (it just transforms 1280-dim → 2048-dim)
-- Decoder (Qwen-3 8B + LoRA)
+- Decoder (Qwen3-8B or SmolLM3-3B + LoRA)
 - Training procedure
 
 **What changes:**
+
 - Audio representations (different "listening" capabilities)
 - Multilingual support (Whisper handles 100+ languages)
 - Pre-training domain (Whisper saw more diverse data)
@@ -492,6 +643,7 @@ poetry run python src/train.py +experiments=whisper_encoder
 ```
 
 **What to expect:**
+
 - **Initialization**: Projector reinitialized (encoder dim matches)
 - **Training**: Encoder LoRA adapts Whisper instead of HuBERT
 - **Performance**: May be better on multilingual data, similar on English
@@ -499,16 +651,19 @@ poetry run python src/train.py +experiments=whisper_encoder
 ### Discussion Questions
 
 1. **When would you choose Whisper over HuBERT?**
+
    - Multilingual ASR required
    - Training data matches Whisper's domain (YouTube, podcasts)
    - Want stronger baseline (more pre-training data)
 
-2. **What if encoder dimensions don't match?**
+1. **What if encoder dimensions don't match?**
+
    - Projector input dimension must match encoder output
    - Would need to adjust `encoder_dim` in config
    - Example: Wav2Vec2-base outputs 768-dim (not 1280-dim)
 
-3. **Can you mix and match any encoder/decoder?**
+1. **Can you mix and match any encoder/decoder?**
+
    - Yes! As long as dimensions are compatible
    - Projector bridges the gap
    - This is the power of modular architecture
@@ -516,13 +671,14 @@ poetry run python src/train.py +experiments=whisper_encoder
 ### Key Insight
 
 The beauty of the encoder-projector-decoder architecture is **modularity**. You can:
+
 - Swap encoders (HuBERT → Whisper → Wav2Vec2)
 - Swap decoders (Qwen → Llama → Mistral)
 - Adjust projector (SwiGLU → simple MLP)
 
 Each component is independent. Experiment freely!
 
----
+______________________________________________________________________
 
 # CLASS SUMMARY
 
@@ -546,17 +702,15 @@ Each component is independent. Experiment freely!
 
 - Understanding modular architecture and component trade-offs
 
----
+______________________________________________________________________
 
 ## Further Reading (Optional)
-
 
 ### Papers
 
 - [HuBERT: Self-Supervised Speech Representation Learning](https://arxiv.org/abs/2106.07447)
 
 - [Wav2Vec 2.0](https://arxiv.org/abs/2006.11477)
-
 
 ### Tutorials
 

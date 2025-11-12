@@ -5,7 +5,7 @@ Check what's available in a HuggingFace Hub model repository.
 
 import argparse
 
-from huggingface_hub import HfApi, list_repo_files
+from huggingface_hub import list_repo_files
 
 
 def check_hub_model(repo_id: str):
@@ -15,7 +15,6 @@ def check_hub_model(repo_id: str):
 
     try:
         # List all files in the repo
-        api = HfApi()
         files = list_repo_files(repo_id)
 
         # Categorize files

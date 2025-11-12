@@ -18,7 +18,7 @@ By the end of this class, you will:
 
 - Know strategies to improve performance
 
----
+______________________________________________________________________
 
 # PART A: LECTURE (20 minutes)
 
@@ -36,10 +36,9 @@ Before we dive into the specifics of Word Error Rate (WER), let's talk about how
 
 Throughout this chapter, we'll focus on WER as our primary metric, but always keep in mind that it's just one piece of the puzzle.
 
----
+______________________________________________________________________
 
 ## 2. Understanding Word Error Rate (5 min)
-
 
 ### What is WER?
 
@@ -49,8 +48,6 @@ The standard metric for evaluating ASR systems.
 
 **Formula:**
 
-
-
 ```
 WER = (Substitutions + Insertions + Deletions) / Total Words
 
@@ -58,8 +55,6 @@ WER = (Substitutions + Insertions + Deletions) / Total Words
 ```
 
 **Example:**
-
-
 
 ```
 Reference:  "the quick brown fox jumps"     (5 words)
@@ -76,12 +71,9 @@ WER = 2 / 5 = 0.40 = 40%
 
 ```
 
-
 ### Types of Errors
 
 **Substitution (S)**: Wrong word
-
-
 
 ```
 Ref: "the cat sat"
@@ -93,8 +85,6 @@ Hyp: "the dog sat"
 
 **Insertion (I)**: Extra word
 
-
-
 ```
 Ref: "hello world"
 Hyp: "hello big world"
@@ -105,8 +95,6 @@ Hyp: "hello big world"
 
 **Deletion (D)**: Missing word
 
-
-
 ```
 Ref: "hello world"
 Hyp: "hello"
@@ -114,7 +102,6 @@ Hyp: "hello"
 
 
 ```
-
 
 ### What's a Good WER?
 
@@ -177,7 +164,6 @@ for ref, hyp in test_cases:
 
 ```
 
-
 ### Beyond WER
 
 **Character Error Rate (CER)**: Similar but for characters
@@ -196,10 +182,9 @@ for ref, hyp in test_cases:
 
 - Makes comparison fairer
 
----
+______________________________________________________________________
 
 ## 2. The Evaluation Pipeline (5 min)
-
 
 ### LoquaciousSet Benchmark
 
@@ -223,10 +208,7 @@ for ref, hyp in test_cases:
 
 - Same data used for training (different split)
 
-
 ### Evaluation Process
-
-
 
 ```
 1. Load trained model
@@ -241,7 +223,6 @@ for ref, hyp in test_cases:
 
 ```
 
-
 ### Text Normalization
 
 Both reference and hypothesis are normalized:
@@ -249,13 +230,13 @@ Both reference and hypothesis are normalized:
 **Steps:**
 
 1. Remove `<inaudible>` tags
-2. Remove disfluencies ("uh", "um")
-3. Apply Whisper normalization
+1. Remove disfluencies ("uh", "um")
+1. Apply Whisper normalization
    - Lowercase
    - Remove punctuation
    - Expand contractions
    - Standardize numbers
-4. Apply truecasing
+1. Apply truecasing
 
 **Why normalize?**
 
@@ -265,7 +246,7 @@ Both reference and hypothesis are normalized:
 
 - Fair comparison across different text formats
 
----
+______________________________________________________________________
 
 ## 3. Proactive Stability Measures (5 min)
 
@@ -279,19 +260,17 @@ The best way to deal with training instabilities is to prevent them from happeni
 
 While we won't be implementing these techniques in this course, it's important to know that they exist and are part of the standard toolkit for large-scale training.
 
----
+______________________________________________________________________
 
 ## 4. Debugging Common Issues (10 min)
 
 Training instabilities, often seen as "spikes" in the loss curve, are a common part of the training marathon. Here's a more systematic way to think about them.
-
 
 ### Recoverable vs. Non-recoverable Spikes
 
 - **Recoverable Spikes**: The loss jumps up but then returns to its previous trajectory. These are common and usually not a cause for alarm. They are often caused by a few "bad" batches of data.
 
 - **Non-recoverable Spikes**: The loss jumps up and stays there, or even continues to increase. This is a sign of a more serious problem, and it usually requires intervention.
-
 
 ### Common Culprits
 
@@ -301,15 +280,13 @@ Training instabilities, often seen as "spikes" in the loss curve, are a common p
 
 - **Data-Parameter Interactions**: Sometimes, a specific batch of data will interact with the model's weights in an unfortunate way, leading to a spike. This is often hard to predict.
 
-
 ### Damage Control
 
 When you encounter a non-recoverable spike, here are a few things you can try:
 
-1.  **Rewind and Skip**: The most common solution is to go back to a checkpoint from before the spike and restart the training, skipping the problematic batch of data.
-2.  **Reduce the Learning Rate**: If the instability persists, you may need to reduce the learning rate. You can do this by modifying the `learning_rate` parameter in your Hydra config and restarting the training.
-3.  **Tighten Gradient Clipping**: Gradient clipping prevents the gradients from becoming too large. If you're seeing a lot of instability, you can try reducing the `max_grad_norm` parameter in your Hydra config.
-
+1. **Rewind and Skip**: The most common solution is to go back to a checkpoint from before the spike and restart the training, skipping the problematic batch of data.
+1. **Reduce the Learning Rate**: If the instability persists, you may need to reduce the learning rate. You can do this by modifying the `learning_rate` parameter in your Hydra config and restarting the training.
+1. **Tighten Gradient Clipping**: Gradient clipping prevents the gradients from becoming too large. If you're seeing a lot of instability, you can try reducing the `max_grad_norm` parameter in your Hydra config.
 
 ### Specific Scenarios
 
@@ -337,7 +314,7 @@ When you encounter a non-recoverable spike, here are a few things you can try:
 
 - **Solutions**: Reduce the `per_device_train_batch_size` and increase `gradient_accumulation_steps` to maintain the same effective batch size. You can also enable `gradient_checkpointing`.
 
----
+______________________________________________________________________
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
@@ -357,20 +334,17 @@ In the next 40 minutes, you will:
 
 By the end, you'll know exactly how well your model performs and how to improve it!
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 1: Evaluate Your Model (15 min)
-
 
 ### Goal
 
 Calculate WER for your trained model.
 
-
 ### Your Task
 
 Run evaluation on test set and get your WER score.
-
 
 ### Instructions
 
@@ -378,36 +352,44 @@ Run evaluation on test set and get your WER score.
 
 Check that your model training finished:
 
-
 ```bash
-ls outputs/stage1/  # or outputs/my_experiment/
+# List output directories (they're timestamped)
+ls outputs/
+
+# Check the contents of your training output
+ls outputs/[your-timestamp-dir]/
 
 
 ```
 
 You should see:
 
-- `config.json`
+- `config.json` - Model configuration
 
-- `model.safetensors`
+- `projector.safetensors` - Projector weights (always present)
 
-- `trainer_state.json`
+- `encoder.safetensors` - Encoder LoRA (if enabled)
+
+- `decoder.safetensors` - Decoder LoRA (if enabled)
+
+- `trainer_state.json` - Training state
 
 **Step 2: Run evaluation**
 
-
 ```bash
-# Evaluate on 100 samples (quick test)
-poetry run eval outputs/stage1 --max-samples 100
+# Evaluate on 100 samples (quick test) - replace with your actual output directory
+poetry run eval outputs/[your-timestamp-dir] --max-samples 100
+
+# Or evaluate the baseline model
+poetry run eval mazesmazes/tiny-audio --max-samples 100
 
 # Full evaluation (takes ~30 min)
-poetry run eval outputs/stage1
+poetry run eval outputs/[your-timestamp-dir]
 
 
 ```
 
 **Alternative: Evaluate from HuggingFace Hub**
-
 
 ```bash
 # If you already pushed your model
@@ -419,14 +401,12 @@ poetry run eval your-username/your-model-name --max-samples 100
 **What happens:**
 
 1. Loads your trained model
-2. Loads LoquaciousSet test samples
-3. Runs inference on each
-4. Calculates WER
-5. Saves detailed results
+1. Loads LoquaciousSet test samples
+1. Runs inference on each
+1. Calculates WER
+1. Saves detailed results
 
 **Expected output:**
-
-
 
 ```
 Loading model from outputs/stage1...
@@ -457,7 +437,6 @@ Results saved to: outputs/eval_<timestamp>/results.txt
 
 **Step 3: Examine detailed results**
 
-
 ```bash
 # Look at the detailed results file
 cat outputs/eval_*/results.txt | head -50
@@ -466,8 +445,6 @@ cat outputs/eval_*/results.txt | head -50
 ```
 
 You'll see line-by-line comparisons:
-
-
 
 ```
 Sample 1:
@@ -485,7 +462,6 @@ WER: 0.0%
 
 ```
 
-
 ### Success Checkpoint
 
 - [ ] Evaluation ran successfully
@@ -496,13 +472,11 @@ WER: 0.0%
 
 - [ ] Saved results file for later
 
-**Your WER**: ___________% (write it down!)
-
+**Your WER**: \_\_\_\_\_\_\_\_\_\_\_% (write it down!)
 
 ### Evaluation Experiments
 
 **Experiment 1: Test on different audio types**
-
 
 ```bash
 # Create test samples with different characteristics
@@ -519,7 +493,6 @@ poetry run eval outputs/stage1 --test-type fast --max-samples 50
 ```
 
 **Experiment 2: Compare with baseline models**
-
 
 ```python
 # compare_models.py
@@ -551,7 +524,6 @@ plt.savefig("model_comparison.png")
 
 **Experiment 3: Test different decoding strategies**
 
-
 ```python
 # Test beam search vs greedy
 decoding_strategies = [
@@ -568,27 +540,23 @@ for strategy in decoding_strategies:
 
 ```
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 2: Analyze Error Patterns (15 min)
-
 
 ### Goal
 
 Understand what types of errors your model makes.
 
-
 ### Your Task
 
 Analyze common error patterns to identify improvement opportunities.
-
 
 ### Instructions
 
 **Step 1: Create error analysis script**
 
 Create `analyze_errors.py`:
-
 
 ```python
 import re
@@ -646,7 +614,6 @@ print(f"✓ Found {len(error_counts)} unique error types")
 
 **Step 2: Run analysis**
 
-
 ```bash
 poetry run python analyze_errors.py
 
@@ -654,8 +621,6 @@ poetry run python analyze_errors.py
 ```
 
 **Expected output:**
-
-
 
 ```
 ============================================================
@@ -684,7 +649,6 @@ Look for patterns:
 
 - **Domain-specific**: Technical terms, names
 
-
 ### Success Checkpoint
 
 - [ ] Ran error analysis
@@ -698,14 +662,12 @@ Look for patterns:
 **Common patterns I found:**
 
 1. \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
-2. \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
-3. \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
-
+1. \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
+1. \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
 
 ### Advanced Error Analysis Experiments
 
 **Experiment 1: Confusion matrix for common words**
-
 
 ```python
 # Create confusion matrix for top words
@@ -739,7 +701,6 @@ print("✓ Saved confusion matrix")
 
 **Experiment 2: Error rate by audio length**
 
-
 ```python
 # Analyze if longer audio has higher error rates
 length_buckets = {"short": [], "medium": [], "long": []}
@@ -764,7 +725,6 @@ for bucket, wers in length_buckets.items():
 ```
 
 **Experiment 3: Test error correction strategies**
-
 
 ```python
 # Simple post-processing to fix common errors
@@ -797,25 +757,21 @@ print(f"Post-processing improved {improved_count} samples")
 
 ```
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 3: Compare with Baseline (10 min)
-
 
 ### Goal
 
 See how your model compares to the pre-trained baseline.
 
-
 ### Your Task
 
 Evaluate the baseline model and compare results.
 
-
 ### Instructions
 
 **Step 1: Evaluate baseline**
-
 
 ```bash
 # Evaluate pre-trained model
@@ -827,7 +783,6 @@ poetry run eval mazesmazes/tiny-audio --max-samples 100
 **Step 2: Create comparison script**
 
 Create `compare_models.py`:
-
 
 ```python
 # Your model WER
@@ -865,13 +820,11 @@ else:
 
 **Step 3: Run comparison**
 
-
 ```bash
 poetry run python compare_models.py
 
 
 ```
-
 
 ### Success Checkpoint
 
@@ -883,7 +836,7 @@ poetry run python compare_models.py
 
 - [ ] Have improvement ideas if needed
 
----
+______________________________________________________________________
 
 # CLASS SUMMARY
 
@@ -907,10 +860,9 @@ poetry run python compare_models.py
 
 - Compared with baseline model
 
----
+______________________________________________________________________
 
 ## Further Reading (Optional)
-
 
 ### Papers
 
@@ -918,13 +870,11 @@ poetry run python compare_models.py
 
 - [Text Normalization for ASR](https://arxiv.org/abs/2109.12791)
 
-
 ### Tools
 
 - [JiWER library](https://github.com/jitsi/jiwer) - WER calculation
 
 - [Whisper normalization](https://github.com/openai/whisper/blob/main/whisper/normalizers/)
-
 
 ### Datasets
 

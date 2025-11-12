@@ -29,7 +29,9 @@ def parse_results_file(file_path: Path) -> tuple[dict, list[dict]]:
     Returns:
         tuple: (metadata dict, list of sample dicts)
     """
-    with open(file_path) as f:
+    from pathlib import Path
+
+    with Path(file_path).open() as f:
         content = f.read()
 
     # Extract metadata (first section)
@@ -106,7 +108,7 @@ def format_output(
     sorted_samples = sorted(filtered_samples, key=lambda x: x["wer"], reverse=True)
 
     # Output each filtered sample
-    for i, sample in enumerate(sorted_samples, 1):
+    for sample in sorted_samples:
         output_lines.append(
             f"Sample {sample['sample_num']} - WER: {sample['wer']:.2f}%, Time: {sample['time']:.2f}s"
         )
@@ -190,7 +192,7 @@ Examples:
     # Write or print
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        with open(args.output, "w") as f:
+        with args.output.open("w") as f:
             f.write(output)
         print(f"Filtered results saved to: {args.output}")
         print(f"Found {len(filtered_samples)} samples with WER > {args.wer_threshold}%")

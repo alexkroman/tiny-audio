@@ -22,7 +22,7 @@ By the end of this class, you will:
 
 - Have a fully deployed, publicly accessible ASR system!
 
----
+______________________________________________________________________
 
 # PART A: LECTURE (15 minutes)
 
@@ -42,10 +42,9 @@ Before we get into the technical details of deployment, let's talk about why it'
 
 In this chapter, you'll learn how to share your work in a way that is professional, responsible, and valuable to the community.
 
----
+______________________________________________________________________
 
 ## 2. HuggingFace Hub & Deployment Options (5 min)
-
 
 ### What is HuggingFace Hub?
 
@@ -61,7 +60,6 @@ In this chapter, you'll learn how to share your work in a way that is profession
 
 - Industry standard for ML deployment
 
-
 ### Why Host on Hub?
 
 **Benefits:**
@@ -76,10 +74,7 @@ In this chapter, you'll learn how to share your work in a way that is profession
 
 - **Portfolio piece**: Show off your work!
 
-
 ### Model Repository Structure
-
-
 
 ```
 your-username/your-model-name/
@@ -95,14 +90,13 @@ your-username/your-model-name/
 
 ```
 
-
 ### Deployment Options Overview
 
 Once your model is on the Hub, you have **three deployment options**:
 
 1. **Direct usage via transformers** - Users download and run locally (free)
-2. **Inference Endpoints** - Serverless API for production (pay-per-use, scales to zero)
-3. **Spaces (Gradio demo)** - Interactive web UI for demos (free tier available)
+1. **Inference Endpoints** - Serverless API for production (pay-per-use, scales to zero)
+1. **Spaces (Gradio demo)** - Interactive web UI for demos (free tier available)
 
 **Quick Experiment**: Compare deployment options:
 
@@ -124,15 +118,13 @@ for name, specs in options.items():
 
 You need a **HuggingFace token** with "write" permissions to push models and create deployments.
 
----
+______________________________________________________________________
 
 ## 3. Writing a Model Card: Your Contribution to the Community (3 min)
-
 
 ### What is a Model Card?
 
 A model card is more than just documentation; it's your primary contribution to the community. It's where you explain not just *what* your model does, but *how* it was built, *why* you made certain decisions, and *what* you learned along the way. A good model card makes your work useful and accessible to others.
-
 
 ### Why it Matters
 
@@ -142,20 +134,18 @@ A model card is more than just documentation; it's your primary contribution to 
 
 - **Usability**: It provides clear instructions on how to use your model, making it more valuable to the community.
 
-
 ### Model Card Structure
 
 As we'll see in the workshop, a good model card includes:
 
-1.  **Model Description**: What is it, and what is its architecture?
-2.  **Training Details**: What data did you use? What were your hyperparameters?
-3.  **Performance**: How well does it work? What are its limitations?
-4.  **Usage**: How can others use it?
+1. **Model Description**: What is it, and what is its architecture?
+1. **Training Details**: What data did you use? What were your hyperparameters?
+1. **Performance**: How well does it work? What are its limitations?
+1. **Usage**: How can others use it?
 
----
+______________________________________________________________________
 
 ## 4. Testing and Validation (3 min)
-
 
 ### Pre-Deployment Checklist
 
@@ -171,16 +161,14 @@ Before pushing to Hub:
 
 - [ ] HuggingFace token ready
 
-
 ### Post-Deployment Testing
 
 After pushing:
 
 1. **Load from Hub**: Verify model downloads correctly
-2. **Test inference**: Run transcription on sample audio
-3. **Check model card**: Renders properly on Hub
-4. **Test pipeline**: Use transformers pipeline integration
-
+1. **Test inference**: Run transcription on sample audio
+1. **Check model card**: Renders properly on Hub
+1. **Test pipeline**: Use transformers pipeline integration
 
 ### Common Deployment Issues
 
@@ -190,7 +178,7 @@ After pushing:
 
 - Verify config.json is valid
 
-- Ensure asr_*.py files are present
+- Ensure asr\_\*.py files are present
 
 **Problem**: Inference errors
 
@@ -200,10 +188,9 @@ After pushing:
 
 - Verify audio format support
 
----
+______________________________________________________________________
 
 ## 5. Community Contribution (4 min)
-
 
 ### The Leaderboard
 
@@ -231,7 +218,6 @@ After pushing:
 
 - Training date
 
-
 ### Beyond the Leaderboard: Sharing Your Story
 
 The story behind a model is often as valuable as the model itself. The failures, the dead ends, and the unexpected discoveries are all part of the learning process. We encourage you to share not just your final results, but also your journey.
@@ -248,7 +234,7 @@ The story behind a model is often as valuable as the model itself. The failures,
 
 By sharing your story, you help us all learn and grow together.
 
----
+______________________________________________________________________
 
 # PART B: HANDS-ON WORKSHOP (45 minutes)
 
@@ -258,15 +244,13 @@ By sharing your story, you help us all learn and grow together.
 
 In the next 45 minutes, you will:
 
-- **Exercise 1**: Setup and push model to Hub with experiments (10 min)
+- **Exercise 1**: Setup and push model to Hub (12 min)
 
-- **Exercise 2**: Create model card and test variations (8 min)
+- **Exercise 2**: Create model card (10 min)
 
-- **Exercise 3**: Deploy and experiment with configurations (12 min)
+- **Exercise 3**: Deploy demo to Hugging Face Spaces (15 min)
 
-- **Exercise 4**: Test, benchmark, and optimize deployment (10 min)
-
-- **Bonus**: Advanced deployment experiments (5 min)
+- **Exercise 4**: Test and add to leaderboard (8 min)
 
 By the end, you'll have:
 
@@ -280,20 +264,17 @@ By the end, you'll have:
 
 **Note**: We'll experiment with different deployment configurations throughout!
 
----
+______________________________________________________________________
 
-## Workshop Exercise 1: Setup and Push to Hub (10 min)
-
+## Workshop Exercise 1: Setup and Push to Hub (12 min)
 
 ### Goal
 
 Set up HuggingFace account and push your model to the Hub.
 
-
 ### Your Task
 
 Create account, get token, verify model files, and upload to Hub.
-
 
 ### Instructions
 
@@ -323,7 +304,6 @@ Create account, get token, verify model files, and upload to Hub.
 
 **Step 3: Install huggingface_hub**
 
-
 ```bash
 poetry add huggingface_hub
 
@@ -331,7 +311,6 @@ poetry add huggingface_hub
 ```
 
 **Step 4: Login to HuggingFace**
-
 
 ```bash
 poetry run huggingface-cli login
@@ -356,7 +335,6 @@ Pick a good name for your model:
 **Step 6: Create push script**
 
 Create `push_to_hub.py`:
-
 
 ```python
 import argparse
@@ -399,7 +377,6 @@ if __name__ == "__main__":
 
 **Step 7: Push to Hub**
 
-
 ```bash
 poetry run python push_to_hub.py outputs/stage1 your-username/your-model-name
 
@@ -409,13 +386,13 @@ poetry run python push_to_hub.py outputs/stage1 your-username/your-model-name
 **What happens:**
 
 1. Loads your trained model
-2. Creates repository on Hub (if doesn't exist)
-3. Uploads all necessary files:
+1. Creates repository on Hub (if doesn't exist)
+1. Uploads all necessary files:
    - Model weights
    - Configs
    - Tokenizer files
-   - Code files (asr_*.py)
-4. Creates initial README
+   - Code files (asr\_\*.py)
+1. Creates initial README
 
 **Step 8: Verify upload**
 
@@ -429,7 +406,6 @@ You should see:
 
 - Model card (needs editing!)
 
-
 ### Success Checkpoint
 
 - [ ] HuggingFace account created
@@ -442,11 +418,9 @@ You should see:
 
 - [ ] All files present
 
-
 ### Upload Experiments
 
 **Experiment 1: Test different upload strategies**
-
 
 ```python
 # Compare upload methods
@@ -467,7 +441,6 @@ for method in methods:
 ```
 
 **Experiment 2: Model size optimization**
-
 
 ```python
 # Check model sizes
@@ -493,20 +466,17 @@ print(f"Total: {total_size:.2f} MB")
 
 ```
 
----
+______________________________________________________________________
 
-## Workshop Exercise 2: Create Model Card (8 min)
-
+## Workshop Exercise 2: Create Model Card (10 min)
 
 ### Goal
 
 Write professional documentation for your model.
 
-
 ### Your Task
 
 Edit the README.md on HuggingFace to create a model card.
-
 
 ### Instructions
 
@@ -520,8 +490,7 @@ Navigate to: `https://huggingface.co/your-username/your-model-name`
 
 Use this template (customize with your info):
 
-
-```markdown
+````markdown
 ---
 language: en
 license: mit
@@ -554,13 +523,13 @@ pipeline_tag: automatic-speech-recognition
 
 This is a speech recognition model trained using the Tiny Audio framework. It combines:
 
-- **Audio Encoder**: HuBERT-XLarge (1.3B params) with LoRA adapters (r=8, ~2M trainable)
+- **Audio Encoder**: HuBERT-XLarge (1.3B params) with optional LoRA adapters (r=16, ~4M trainable)
 
-- **Audio Projector**: SwiGLU MLP (~122M params, fully trainable)
+- **Audio Projector**: Linear MLP (~13M params, fully trainable)
 
-- **Text Decoder**: Qwen-3 8B3-3B (3B params) with LoRA adapters (r=64, ~15M trainable)
+- **Text Decoder**: Qwen3-8B (8B params) or SmolLM3-3B (3B params) with optional LoRA adapters (r=8, ~4M trainable)
 
-**Total**: 139M trainable parameters out of 4.3B total (3.2%)
+**Total trainable (Full PEFT)**: ~21M parameters (projector + encoder LoRA + decoder LoRA)
 
 ## Training Details
 
@@ -602,7 +571,7 @@ result = pipe("path/to/audio.wav")
 print(result["text"])
 
 
-```
+````
 
 ## Limitations
 
@@ -617,7 +586,6 @@ print(result["text"])
 ## Citation
 
 Trained as part of the Tiny Audio course:
-
 
 ```bibtex
 @software{your-name-2025-tiny-audio,
@@ -639,13 +607,11 @@ Based on:
 
 - HuBERT (Facebook AI)
 
-- Qwen-3 8B3 (HuggingFace)
+- Qwen3-8B (Alibaba) or SmolLM3-3B (HuggingFace)
 
 - LoquaciousSet (SpeechBrain)
 
-
-
-```
+````
 
 **Step 4: Customize your model card**
 
@@ -678,7 +644,7 @@ Click "Commit changes to main"
 
 ---
 
-## Workshop Exercise 3: Deploy Demo to Hugging Face Spaces (12 min)
+## Workshop Exercise 3: Deploy Demo to Hugging Face Spaces (15 min)
 
 **Goal**: Create a public web demo for your model using Hugging Face Spaces.
 
@@ -710,18 +676,17 @@ Clone the demo files from the tiny-audio repository:
 ```bash
 # Copy demo files to a temporary directory
 mkdir ~/my-tiny-audio-demo
-cp demo/app.py ~/my-tiny-audio-demo/
-cp demo/requirements.txt ~/my-tiny-audio-demo/
-cp demo/README.md ~/my-tiny-audio-demo/
+cp demo/gradio/app.py ~/my-tiny-audio-demo/
+cp demo/gradio/requirements.txt ~/my-tiny-audio-demo/
+cp demo/gradio/README.md ~/my-tiny-audio-demo/
 cd ~/my-tiny-audio-demo
 
 
-```
+````
 
 **Step 3: Customize for your model**
 
 Edit `app.py` to use your model:
-
 
 ```python
 # Find this line (around line 17):
@@ -748,8 +713,6 @@ Edit `README.md` to update:
 
 The file should only need:
 
-
-
 ```
 gradio  # Gradio automatically handles model loading via HF Inference API
 
@@ -759,7 +722,6 @@ gradio  # Gradio automatically handles model loading via HF Inference API
 That's it! Gradio's `gr.load()` function automatically loads your model from the Hub.
 
 **Step 5: Initialize git and push to Space**
-
 
 ```bash
 # Initialize git repo
@@ -800,7 +762,6 @@ git push -u origin main
 
 - Verify transcription appears correctly
 
-
 ### How It Works
 
 Gradio's `gr.load()` automatically:
@@ -815,11 +776,9 @@ Gradio's `gr.load()` automatically:
 
 - All with just one line of code!
 
-
 ### Customization Ideas (Optional)
 
 **Add examples:**
-
 
 ```python
 examples = [
@@ -841,7 +800,6 @@ return gr.Interface(
 
 **Add model info:**
 
-
 ```python
 description = f"""
 Upload an audio file or record directly to transcribe speech to text.
@@ -856,13 +814,11 @@ Upload an audio file or record directly to transcribe speech to text.
 
 **Add microphone input:**
 
-
 ```python
 inputs=gr.Audio(sources=["upload", "microphone"], type="filepath"),
 
 
 ```
-
 
 ### Success Checkpoint
 
@@ -874,11 +830,9 @@ inputs=gr.Audio(sources=["upload", "microphone"], type="filepath"),
 
 - [ ] Model automatically loaded via Gradio's HF Inference API
 
-
 ### Deployment Experiments
 
 **Experiment 1: Benchmark inference speed**
-
 
 ```python
 # benchmark_deployment.py
@@ -909,7 +863,6 @@ def test_inference_speed(model_id, audio_file):
 
 **Experiment 2: Test different audio formats**
 
-
 ```python
 # Test format support
 formats = ["wav", "mp3", "flac", "ogg", "m4a"]
@@ -926,7 +879,6 @@ for fmt in formats:
 
 **Experiment 3: Compare deployment options**
 
-
 ```python
 # Compare latencies
 deployments = {
@@ -942,25 +894,23 @@ for name, test_func in deployments.items():
 
 ```
 
----
+______________________________________________________________________
 
-## Workshop Exercise 4: Test and Add to Leaderboard (10 min)
-
+## Workshop Exercise 4: Test and Add to Leaderboard (8 min)
 
 ### Goal
+
 Test your deployed model and add results to the community leaderboard.
 
-
 ### Your Task
-Verify model works and submit PR with your results.
 
+Verify model works and submit PR with your results.
 
 ### Instructions
 
 **Step 1: Test deployed model**
 
 Create `test_deployed.py`:
-
 
 ```python
 import argparse
@@ -1000,7 +950,6 @@ if __name__ == "__main__":
 
 **Step 2: Run test**
 
-
 ```bash
 poetry run python test_deployed.py your-username/your-model-name test.wav
 
@@ -1018,7 +967,6 @@ poetry run python test_deployed.py your-username/your-model-name test.wav
 **Step 4: Add your entry to the leaderboard**
 
 Edit `README.md` in your fork, find the Leaderboard section:
-
 
 ```markdown
 | Rank | Contributor | WER | Model | Date |
@@ -1041,7 +989,6 @@ Add your row with:
 
 **Step 5: Create Pull Request**
 
-
 ```bash
 git add README.md
 git commit -m "Add my model to leaderboard: XX.XX% WER"
@@ -1060,7 +1007,6 @@ Then on GitHub:
 
 - Submit!
 
-
 ### Success Checkpoint
 
 - [ ] Model tested from Hub
@@ -1071,7 +1017,7 @@ Then on GitHub:
 
 - [ ] Pull request submitted
 
----
+______________________________________________________________________
 
 # CLASS SUMMARY & COURSE COMPLETION
 
@@ -1111,11 +1057,9 @@ Then on GitHub:
 
 ## Course Journey Complete! 🎉
 
-
 ### What You've Accomplished
 
 Over 6 classes, you've:
-
 
 ✅ **Class 1**: Set up environment and ran first inference
 
@@ -1147,52 +1091,55 @@ Over 6 classes, you've:
 
 **Fill in your achievements:**
 
-- Model name: ______________________________
+- Model name: \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
 
-- HuggingFace URL: _________________________
+- HuggingFace URL: \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
 
-- WER Score: ________%
+- WER Score: \_\_\_\_\_\_\_\_%
 
-- Training cost: $______
+- Training cost: $\_\_\_\_\_\_
 
-- Leaderboard rank: _______
+- Leaderboard rank: \_\_\_\_\_\_\_
 
 ## Next Steps
-
 
 ### Continue Improving
 
 **Systematic Experimentation Plan:**
 
 1. **Architecture Experiments:**
+
    - Test encoder swaps (Wav2Vec2 vs HuBERT vs Whisper encoder)
    - Try different decoder sizes (1B, 3B, 7B, 13B)
    - Experiment with projector architectures (MLP vs Transformer)
 
-2. **Training Experiments:**
+1. **Training Experiments:**
+
    - LoRA rank ablations (r=1 to r=256)
    - Learning rate schedules (cosine vs linear vs constant)
    - Batch size studies (effective batch 8 to 256)
    - Dataset mixing strategies
 
-3. **Optimization Experiments:**
+1. **Optimization Experiments:**
+
    - Quantization (int8, int4 with GPTQ/AWQ)
    - Distillation to smaller models
    - Pruning experiments
    - Flash Attention integration
 
-4. **Domain Adaptation:**
+1. **Domain Adaptation:**
+
    - Medical transcription
    - Legal proceedings
    - Podcast/meeting transcription
    - Multi-speaker scenarios
 
-5. **Production Experiments:**
+1. **Production Experiments:**
+
    - Streaming inference
    - Batch processing optimization
    - Multi-GPU serving
    - Edge deployment (mobile, browser)
-
 
 ### Share Your Work
 
@@ -1205,7 +1152,6 @@ Over 6 classes, you've:
 - Contribute to the codebase
 
 - Present at meetups/conferences
-
 
 ### Advanced Projects
 
@@ -1225,7 +1171,6 @@ Over 6 classes, you've:
 
 ## Resources for Continued Learning
 
-
 ### Papers to Read
 
 - [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
@@ -1233,7 +1178,6 @@ Over 6 classes, you've:
 - [LoRA: Low-Rank Adaptation](https://arxiv.org/abs/2106.09685)
 
 - [Whisper: Robust Speech Recognition](https://arxiv.org/abs/2212.04356)
-
 
 ### Communities
 
@@ -1245,7 +1189,6 @@ Over 6 classes, you've:
 
 - Twitter: Follow #TinyAudio
 
-
 ### Tools to Explore
 
 - [PEFT library](https://github.com/huggingface/peft)
@@ -1254,7 +1197,7 @@ Over 6 classes, you've:
 
 - [Unsloth](https://github.com/unslothai/unsloth)
 
----
+______________________________________________________________________
 
 ## Congratulations! 🎊
 
@@ -1296,30 +1239,30 @@ Thank you for taking this course. We can't wait to see what you build next!
 
 **Keep building, keep learning, keep shipping! 🚀**
 
----
+______________________________________________________________________
 
 ## Certificate of Completion
 
 **This certifies that**
 
-**_______________________________**
+**\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_**
 *(your name)*
 
 **has successfully completed the Tiny Audio course**
 
 - Trained a speech recognition model
 
-- Achieved **_____**% WER
+- Achieved **\_\_\_\_\_**% WER
 
 - Published to HuggingFace Hub
 
 - Contributed to the community
 
-**Date**: _____________
+**Date**: \_\_\_\_\_\_\_\_\_\_\_\_\_
 
 **Model**: [your-username/your-model-name](https://huggingface.co/your-username/your-model-name)
 
----
+______________________________________________________________________
 
 [Previous: Class 5: Evaluation and Debugging](./5-evaluation-and-debugging.md)
 

@@ -44,19 +44,14 @@ class EndpointHandler:
                 "flash_attention_2" if self._is_flash_attn_available() else "sdpa"
             )
 
-        # Load model (this loads the model, tokenizer, and feature extractor from checkpoint)
+        # Load model (this loads the model, tokenizer, and feature extractor)
         self.model = ASRModel.from_pretrained(path, **model_kwargs)
 
-        # Use the tokenizer and feature extractor that were loaded with the model
-        # This ensures they match the fine-tuned checkpoint
-        feature_extractor = self.model.feature_extractor
-        tokenizer = self.model.tokenizer
-
-        # Instantiate custom pipeline
+        # Instantiate custom pipeline - it will get feature_extractor and tokenizer from model
         self.pipe = ASRPipeline(
             model=self.model,
-            feature_extractor=feature_extractor,
-            tokenizer=tokenizer,
+            feature_extractor=self.model.feature_extractor,
+            tokenizer=self.model.tokenizer,
             device=self.device,
         )
 
@@ -64,7 +59,6 @@ class EndpointHandler:
         # Enable by default for significant speedup (20-40%)
         if torch.cuda.is_available() and os.getenv("ENABLE_TORCH_COMPILE", "1") == "1":
             compile_mode = os.getenv("TORCH_COMPILE_MODE", "reduce-overhead")
-            print(f"⚡ Enabling torch.compile (mode={compile_mode})")
             self.model = torch.compile(self.model, mode=compile_mode)
             # Update the pipeline with the compiled model
             self.pipe.model = self.model
@@ -81,7 +75,6 @@ class EndpointHandler:
 
     def _warmup(self):
         """Warmup to trigger model compilation and allocate GPU memory."""
-        print("Warming up model...")
         try:
             # Create dummy audio (1 second at config sample rate)
             sample_rate = self.pipe.model.config.audio_sample_rate
@@ -90,7 +83,9 @@ class EndpointHandler:
             # The pipeline now handles GPU optimization internally
             with torch.inference_mode():
                 warmup_tokens = self.pipe.model.config.inference_warmup_tokens
-                _ = self.pipe({"raw": dummy_audio, "sampling_rate": sample_rate}, max_new_tokens=warmup_tokens)
+                _ = self.pipe(
+                    {"raw": dummy_audio, "sampling_rate": sample_rate}, max_new_tokens=warmup_tokens
+                )
 
             # Force CUDA synchronization to ensure kernels are compiled
             if torch.cuda.is_available():
@@ -98,7 +93,6 @@ class EndpointHandler:
                 # Clear cache after warmup to free memory
                 torch.cuda.empty_cache()
 
-            print("Model warmup complete!")
         except Exception as e:
             print(f"Warmup skipped due to: {e}")
 

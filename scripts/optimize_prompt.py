@@ -147,7 +147,9 @@ def run_evaluation(prompt: str, run_number: int) -> dict:
 
 def main():
     """Main execution function."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    from datetime import timezone
+
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
     results_file = f"prompt_optimization_results_{timestamp}.json"
 
     all_results = []
@@ -169,7 +171,9 @@ def main():
             print(f"✗ Failed: {result['error']}")
 
         # Save intermediate results
-        with open(results_file, "w") as f:
+        from pathlib import Path
+
+        with Path(results_file).open("w") as f:
             json.dump(all_results, f, indent=2)
 
     # Analyze results

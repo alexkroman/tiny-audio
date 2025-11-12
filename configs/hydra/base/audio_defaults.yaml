@@ -1,0 +1,19 @@
+# Base audio processing defaults
+# These can be overridden in specific configs
+
+# Audio processing
+sample_rate: 16000
+
+# SpecAugment parameters (applied by model during training)
+specaugment:
+  mask_time_prob: 0.05  # 5% probability (wav2vec2 default)
+  mask_time_length: 10
+  mask_feature_prob: 0.0  # Usually disabled for waveforms
+  mask_feature_length: 10
+
+# Dataset processing
+dataset:
+  cache_dir: ${hydra:runtime.cwd}/datasets_cache
+  max_train_samples: null
+  max_eval_samples: 1000
+  use_streaming: true

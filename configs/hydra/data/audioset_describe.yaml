@@ -1,14 +1,13 @@
-# LoquaciousSet dataset configuration
+# AudioSet Strong dataset configuration for description task
 datasets:
-  - path: speechbrain/LoquaciousSet
-    name: large  # Config name for LoquaciousSet
-    audio_column: wav    # LoquaciousSet uses 'wav' instead of 'audio'
-    text_column: text    # LoquaciousSet uses 'text' column
-    task: transcribe    # Explicitly set the task type
+  - path: CLAPv2/audioset_strong
+    audio_column: audio  # Already named 'audio', no renaming needed
+    text_column: text  # Use the simplified text descriptions
+    task: describe  # Mark this as a description task
     train_splits:
       - train
     eval_splits:
-      - dev
+      - validation
 
 # Audio processing
 sample_rate: 16000
@@ -22,5 +21,5 @@ mask_feature_length: 10
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
-max_eval_samples: 10000
+max_eval_samples: 500  # Validation set is small (512 samples)
 use_streaming: true  # Enable streaming mode for faster startup

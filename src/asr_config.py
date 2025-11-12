@@ -1,3 +1,5 @@
+from typing import Optional
+
 import transformers
 
 
@@ -12,33 +14,34 @@ class ASRConfig(transformers.PretrainedConfig):
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
         audio_downsample_rate: int = 5,
-        num_beams: int = None,
+        num_beams: Optional[int] = None,
         system_prompt: str = "/no_think /system_override",
         user_prompt: str = "Transcribe: <audio>",
-        encoder_dim: int = None,
-        llm_dim: int = None,
+        encoder_dim: Optional[int] = None,
+        llm_dim: Optional[int] = None,
         projector_hidden_dim: int = 8192,
         # Audio processing constants
         audio_sample_rate: int = 16000,
         # Projector initialization constants
         projector_init_std: float = 0.02,
+        projector_dropout: float = 0.05,
         # LoRA default parameters
         lora_default_dropout: float = 0.0,
         # Inference parameters
         inference_diversity_penalty: float = 0.5,
         inference_warmup_tokens: int = 10,
         # Generation parameters
-        max_new_tokens: int = None,
-        min_new_tokens: int = None,
-        do_sample: bool = None,
-        temperature: float = None,
-        top_k: int = None,
-        top_p: float = None,
-        repetition_penalty: float = None,
-        length_penalty: float = None,
-        no_repeat_ngram_size: int = None,
-        early_stopping: bool = None,
-        use_cache: bool = None,
+        max_new_tokens: Optional[int] = None,
+        min_new_tokens: Optional[int] = None,
+        do_sample: Optional[bool] = None,
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repetition_penalty: Optional[float] = None,
+        length_penalty: Optional[float] = None,
+        no_repeat_ngram_size: Optional[int] = None,
+        early_stopping: Optional[bool] = None,
+        use_cache: Optional[bool] = None,
         **kwargs,
     ):
         # Set default values for generation params if not present in kwargs
@@ -48,15 +51,24 @@ class ASRConfig(transformers.PretrainedConfig):
             "max_new_tokens": 128,
             "min_new_tokens": 1,
             "do_sample": False,
-            "temperature": 0.0,
-            "top_k": 0,
-            "top_p": 0.8,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,
-            "early_stopping": True,
-            "use_cache": False,  # Always False - this architecture uses inputs_embeds which breaks caching
+            "use_cache": True,  # Now enabled - we pre-expand audio tokens for consistent sequence length
         }
+
+        # Only add sampling parameters if do_sample=True
+        do_sample_value = kwargs.get("do_sample", generation_defaults["do_sample"])
+        if do_sample_value:
+            generation_defaults["temperature"] = 0.7
+            generation_defaults["top_k"] = 50
+            generation_defaults["top_p"] = 0.9
+
+        # Only add early_stopping if using beam search
+        num_beams_value = kwargs.get("num_beams", generation_defaults["num_beams"])
+        if num_beams_value > 1:
+            generation_defaults["early_stopping"] = True
+
         for param_name, default_value in generation_defaults.items():
             if param_name not in kwargs:
                 kwargs[param_name] = default_value
@@ -73,6 +85,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_hidden_dim = projector_hidden_dim
         self.audio_sample_rate = audio_sample_rate
         self.projector_init_std = projector_init_std
+        self.projector_dropout = projector_dropout
         self.lora_default_dropout = lora_default_dropout
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
@@ -140,6 +153,7 @@ class ASRConfig(transformers.PretrainedConfig):
         output["num_beams"] = self.num_beams
         output["audio_sample_rate"] = self.audio_sample_rate
         output["projector_init_std"] = self.projector_init_std
+        output["projector_dropout"] = self.projector_dropout
         output["lora_default_dropout"] = self.lora_default_dropout
         output["inference_diversity_penalty"] = self.inference_diversity_penalty
         output["inference_warmup_tokens"] = self.inference_warmup_tokens
@@ -156,3 +170,8 @@ class ASRConfig(transformers.PretrainedConfig):
         output["use_cache"] = self.use_cache
 
         return output
+
+
+# Register the config with transformers
+# This is needed for AutoConfig.from_pretrained to work
+transformers.AutoConfig.register("asr_model", ASRConfig)
