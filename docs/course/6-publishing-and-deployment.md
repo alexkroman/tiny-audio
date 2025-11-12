@@ -525,11 +525,11 @@ This is a speech recognition model trained using the Tiny Audio framework. It co
 
 - **Audio Encoder**: HuBERT-XLarge (1.3B params) with optional LoRA adapters (r=16, ~4M trainable)
 
-- **Audio Projector**: Linear MLP (~13-138M params, fully trainable)
+- **Audio Projector**: Linear MLP (~13M params, fully trainable)
 
 - **Text Decoder**: Qwen3-8B (8B params) or SmolLM3-3B (3B params) with optional LoRA adapters (r=8, ~4M trainable)
 
-**Total trainable (Full PEFT)**: ~150M parameters (projector + encoder LoRA + decoder LoRA)
+**Total trainable (Full PEFT)**: ~21M parameters (projector + encoder LoRA + decoder LoRA)
 
 ## Training Details
 

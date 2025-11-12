@@ -10,7 +10,7 @@ By the end of this course, you will:
 
 - Train your own model using parameter-efficient techniques (LoRA on encoder and/or decoder)
 
-- Work with ~150M trainable parameters instead of 9.3+ billion (flexibility to enable/disable LoRA)
+- Work with ~21M trainable parameters instead of 9.3+ billion (flexibility to enable/disable LoRA)
 
 - Publish your model to HuggingFace Hub
 
@@ -119,46 +119,6 @@ By completing this course, you will be able to:
 1. **Deploy** models to production-ready environments
 1. **Publish** models and contribute to open-source ML communities
 
-## Course Philosophy
-
-This course emphasizes:
-
-- **Hands-on learning**: You'll write and modify real code
-
-- **Understanding over memorization**: We explain the "why" behind every concept
-
-- **Experimentation first**: Every concept is reinforced through active experimentation
-
-- **Minimal complexity**: ~1200 lines of hackable code
-
-- **Real results**: Your model will actually work and be deployable
-
-- **Community contribution**: Share your results and learn from others
-
-### Learning Through Experimentation
-
-Throughout this course, you'll be encouraged to experiment constantly:
-
-- **Component swapping**: Try different encoders, decoders, and configurations
-
-- **Hyperparameter tuning**: Discover how changes affect model performance
-
-- **Dataset exploration**: Test your models on various audio sources
-
-- **Architecture modifications**: Understand the impact of design choices
-
-- **Performance optimization**: Balance accuracy, speed, and resource usage
-
-### The Training Compass: Why → What → How
-
-Before we dive into the technical details, it's important to think strategically about our project. A valuable framework for this is the "Training Compass":
-
-1. **Why are we building this?** What is our goal? Are we trying to achieve state-of-the-art performance, build a model for a specific niche, or simply learn?
-1. **What should we build?** Based on our "why," what kind of model should we build? What are the architectural choices and data considerations?
-1. **How will we build it?** What are the practical steps, tools, and techniques we'll use to train, evaluate, and deploy our model?
-
-Throughout this course, we'll return to this compass to guide our decisions.
-
 ## Prerequisites
 
 ### Required Knowledge
@@ -197,42 +157,6 @@ Don't worry if you're missing some prerequisites! The course is designed to teac
 
 - 20GB free disk space
 
-## Getting Started
-
-**For the fastest path to a working environment, see the [5-Minute Quick Start Guide](../../README.md#quick-start) in the main README.**
-
-1. **Clone the repository**
-
-   ```bash
-   git clone https://github.com/alexkroman/tiny-audio.git
-   cd tiny-audio
-
-
-   ```
-
-````
-
-2. **Install dependencies**
-
-   ```bash
-   poetry install
-   
-
-````
-
-3. **Download sample audio files**
-
-   ```bash
-   poetry run download-samples
-
-
-   ```
-
-```
-
-4. **Start with Class 1**
-   - [Class 1: Introduction and Setup](./1-introduction-and-setup.md)
-
 ## Course Materials
 
 Each class includes:
@@ -262,4 +186,3 @@ This course and all materials are released under the MIT License.
 ---
 
 [Next: Class 1: Introduction and Setup](./1-introduction-and-setup.md)
-```

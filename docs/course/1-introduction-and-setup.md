@@ -56,12 +56,14 @@ Humans communicate primarily through speech, but computers understand text. ASR 
 Speech recognition is hard because it must handle two distinct types of variability:
 
 **Acoustic Variability** (handled by audio encoders):
+
 1. **Speaker differences**: Accents, pitch, speaking rate, gender, age
 1. **Environmental noise**: Background sounds, echo, interference
 1. **Recording quality**: Microphone quality, compression, sample rate
 1. **Pronunciation variations**: Casual vs formal speech, mumbling, emphasis
 
 **Linguistic Variability** (handled by language model decoders):
+
 1. **Homophone ambiguity**: "I scream" vs "ice cream" sound identical
 1. **Context dependency**: "read" (present) vs "read" (past) require sentence context
 1. **Domain knowledge**: Technical terms, proper nouns, specialized vocabulary
@@ -143,7 +145,7 @@ Let's understand each component:
 
 **Analogy**: An expert musician who can listen to any piece of music and instantly transcribe the notes, rhythm, and instrumentation, without ever seeing the sheet music.
 
-### Component 2: Audio Projector (~13-138M parameters)
+### Component 2: Audio Projector (~13M parameters)
 
 **Purpose**: Bridge the gap between the audio and language worlds.
 
@@ -195,9 +197,9 @@ Let's understand each component:
 
 ### Why This Architecture?
 
-**Efficiency**: We train ~150M parameters instead of 9.3+ billion (~1.6% of total model)
+**Efficiency**: We train ~21M parameters instead of 9.3+ billion (~0.2% of total model)
 
-- Projector: ~138M (fully trained, size varies based on encoder/decoder choice)
+- Projector: ~13M (fully trained)
 
 - Encoder LoRA: ~4M (adapter weights, r=16) - OPTIONAL, can be disabled
 
@@ -205,9 +207,9 @@ Let's understand each component:
 
 **Flexibility**: You can train in different modes:
 
-- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~146M params)
-- **Projector + Decoder LoRA**: Frozen encoder, trainable projector and decoder adapters (~142M params)
-- **Projector Only**: Frozen encoder and decoder, only projector learns (~138M params)
+- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~21M params)
+- **Projector + Decoder LoRA**: Frozen encoder, trainable projector and decoder adapters (~17M params)
+- **Projector Only**: Frozen encoder and decoder, only projector learns (~13M params)
 
 **Speed**: Training completes in ~24 hours on a single GPU
 
@@ -250,20 +252,23 @@ Set up the Tiny Audio development environment.
 Before we begin, you'll need accounts on three platforms (if you don't have them already):
 
 **GitHub** (for version control and accessing the code):
-- Visit https://github.com/signup
+
+- Visit <https://github.com/signup>
 - Create a free account
 - Verify your email address
 
 **Hugging Face** (for downloading and sharing models):
-- Visit https://huggingface.co/join
+
+- Visit <https://huggingface.co/join>
 - Create a free account
 - Go to Settings → Access Tokens and create a new token with "read" permissions
 - Save this token somewhere safe - you'll need it later
 
 **Weights & Biases** (for tracking training experiments):
-- Visit https://wandb.ai/signup
+
+- Visit <https://wandb.ai/signup>
 - Create a free account
-- After logging in, go to https://wandb.ai/authorize to get your API key
+- After logging in, go to <https://wandb.ai/authorize> to get your API key
 - Save this API key - you'll need it when you start training
 
 **Note**: You can skip W&B for now if you want to get started quickly - it's only required for training (Class 4), not for running inference.
@@ -391,12 +396,12 @@ poetry run python demo/gradio/app.py --model mazesmazes/tiny-audio --port 7860
 **What's happening:**
 
 1. Model downloads from HuggingFace Hub (~4GB, first time only)
-1. Gradio interface starts on http://localhost:7860
+1. Gradio interface starts on <http://localhost:7860>
 1. You can now interact with the model through your web browser
 
 **Step 2: Try the Demo**
 
-Open your browser to http://localhost:7860 and experiment with:
+Open your browser to <http://localhost:7860> and experiment with:
 
 - **Recording audio**: Click the microphone button to record yourself speaking
 - **Uploading files**: Upload WAV, MP3, or other audio files

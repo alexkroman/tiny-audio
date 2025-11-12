@@ -69,15 +69,15 @@ ______________________________________________________________________
 Instead, we:
 
 1. **Freeze** most parameters (keep pre-trained knowledge)
-1. **Train projector fully** (~13-138M params, bridges audio and text)
+1. **Train projector fully** (~13M params, bridges audio and text)
 1. **Add small LoRA adapters** (optional, for encoder and/or decoder)
-1. **Train only trainable components** (~1.6% of total params with full PEFT)
+1. **Train only trainable components** (~0.2% of total params with full PEFT)
 
 **Training Modes**:
 
-- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~150M params)
-- **Projector + Decoder**: Frozen encoder, trainable projector + decoder LoRA (~142M params)
-- **Projector Only**: Frozen encoder and decoder, only projector trains (~138M params)
+- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~21M params)
+- **Projector + Decoder**: Frozen encoder, trainable projector + decoder LoRA (~17M params)
+- **Projector Only**: Frozen encoder and decoder, only projector trains (~13M params)
 
 **Results**:
 
@@ -220,7 +220,7 @@ output = linear_layer(input) + lora_B(lora_A(input))
 
 - Train fully from scratch
 
-- ~13M parameters (simple linear) to ~138M parameters (varies by encoder/decoder dimensions)
+- ~13M parameters
 
 **Configuration Examples**:
 
