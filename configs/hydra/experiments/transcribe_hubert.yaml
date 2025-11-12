@@ -17,7 +17,7 @@ model:
 
   # Projector configuration
   audio_downsample_rate: 5
-  projector_hidden_dim: 4096
+  projector_hidden_dim: 2048
 
 # Encoder LoRA Configuration
 encoder_lora:
@@ -45,8 +45,8 @@ training:
   hub_strategy: "checkpoint"
   hub_private_repo: false
 
-  per_device_train_batch_size: 15
-  per_device_eval_batch_size: 15
+  per_device_train_batch_size: 14
+  per_device_eval_batch_size: 14
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
 

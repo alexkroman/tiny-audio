@@ -10,14 +10,15 @@ defaults:
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
-  pretrained_model_path: "mazesmazes/tiny-audio"
+  # pretrained_model_path: "mazesmazes/tiny-audio"
 
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
 
   # Projector configuration
   audio_downsample_rate: 5
-  projector_hidden_dim: 4096
+  projector_hidden_dim: 2048
+  projector_dropout: 0.1  # Increased from default 0.05 to match prior art (LLaVA, VL adapters)
 
 # Encoder LoRA Configuration
 encoder_lora:
@@ -45,8 +46,8 @@ training:
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
-  per_device_train_batch_size: 15
-  per_device_eval_batch_size: 15
+  per_device_train_batch_size: 14
+  per_device_eval_batch_size: 14
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
 
@@ -57,7 +58,7 @@ training:
   lr_scheduler_kwargs: {"min_lr_rate": 0.1}
 
   # Optimization
-  weight_decay: 0.01
+  weight_decay: 0.1
   max_grad_norm: 1.0
 
   # Memory optimization
@@ -68,11 +69,11 @@ training:
   max_steps: 50000
 
   # Reproducibility
-  seed: 43
+  seed: 42
   ignore_data_skip: true
 
 data:
-  mask_time_prob: 0.05
+  mask_time_prob: 0.15
 
 # Early stopping configuration
 early_stopping:

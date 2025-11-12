@@ -55,7 +55,7 @@ class AudioProjector(nn.Module):
         self.act_fn = ACT2FN["silu"]
 
         # Dropout for regularization (configurable, defaults to 0.05)
-        dropout_rate = getattr(config, "projector_dropout", 0.05)
+        dropout_rate = getattr(config, "projector_dropout", 0.1)
         self.dropout = nn.Dropout(dropout_rate)
 
         # Post-norm: normalize output to match LLM's expected embedding distribution
