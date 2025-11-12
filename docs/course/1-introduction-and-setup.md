@@ -20,7 +20,20 @@ ______________________________________________________________________
 
 # PART A: LECTURE (20 minutes)
 
-## 1. What is Automatic Speech Recognition? (5 min)
+## 1. Course Goals (5 min)
+
+By the end of this 6-class course, each student will:
+
+1. **Train** their own customized ASR model
+1. **Evaluate** it on standard benchmarks
+1. **Push** it to their own HuggingFace account
+1. **Add** their results to the community leaderboard
+
+This isn't just learning - you'll have a real, working, deployed model with your name on it!
+
+______________________________________________________________________
+
+## 2. What is Automatic Speech Recognition? (5 min)
 
 ### The Problem
 
@@ -40,12 +53,21 @@ Humans communicate primarily through speech, but computers understand text. ASR 
 
 ### The Challenge
 
-Speech recognition is hard because:
+Speech recognition is hard because it must handle two distinct types of variability:
 
-1. **Audio variability**: Different accents, speaking speeds, background noise
-1. **Ambiguity**: "I scream" vs "ice cream" sound identical
-1. **Context dependency**: Understanding requires linguistic knowledge
-1. **Real-time constraints**: Users expect instant responses
+**Acoustic Variability** (handled by audio encoders):
+1. **Speaker differences**: Accents, pitch, speaking rate, gender, age
+1. **Environmental noise**: Background sounds, echo, interference
+1. **Recording quality**: Microphone quality, compression, sample rate
+1. **Pronunciation variations**: Casual vs formal speech, mumbling, emphasis
+
+**Linguistic Variability** (handled by language model decoders):
+1. **Homophone ambiguity**: "I scream" vs "ice cream" sound identical
+1. **Context dependency**: "read" (present) vs "read" (past) require sentence context
+1. **Domain knowledge**: Technical terms, proper nouns, specialized vocabulary
+1. **Grammar and punctuation**: Determining sentence boundaries and structure
+
+This two-part challenge is why modern ASR systems use **specialized components** for each type of variability - audio encoders for acoustic processing and language models for linguistic understanding. You'll see this design pattern in the Tiny Audio architecture!
 
 ### How Modern ASR Works
 
@@ -78,7 +100,7 @@ Modern ASR has evolved dramatically:
 
 ______________________________________________________________________
 
-## 2. The Tiny Audio Architecture (10 min)
+## 3. The Tiny Audio Architecture (10 min)
 
 ### High-Level Overview
 
@@ -192,29 +214,6 @@ Let's understand each component:
 **Cost**: ~$12 for a full training run
 
 **Quality**: Leverages pre-trained knowledge from both audio and language domains
-
-**A Note on Architectural Choices:**
-
-The Tiny Audio architecture is a **dense transformer-based** model. It's crucial to start with a **proven, stable baseline**. While other exciting architectures like Mixture-of-Experts (MoE) and Hybrids (combining transformers with other architectures like SSMs) exist, they introduce complexity that isn't necessary for our goal.
-
-- **Dense models** are well-understood, stable to train, and perform exceptionally well, especially for a focused task like ours.
-
-- **MoE and Hybrid models** are powerful but can be more complex to train and tune. They are often used for massive, general-purpose models, but for our specific use case, a dense model is the most direct path to a high-quality, custom ASR model.
-
-By starting with a solid, well-understood architecture, we can focus on the nuances of audio processing, data, and training, which is where we'll see the biggest improvements.
-
-______________________________________________________________________
-
-## 3. Course Goals (5 min)
-
-By the end of this 6-class course, each student will:
-
-1. **Train** their own customized ASR model
-1. **Evaluate** it on standard benchmarks
-1. **Push** it to their own HuggingFace account
-1. **Add** their results to the community leaderboard
-
-This isn't just learning - you'll have a real, working, deployed model with your name on it!
 
 ______________________________________________________________________
 
@@ -526,5 +525,3 @@ ______________________________________________________________________
 - [Transformers, explained](https://www.youtube.com/watch?v=TQQlZhbC5ps) by AI Coffee Break with Letitia
 
 [Previous: Course Overview](./0-course-overview.md) | [Next: Class 2: Audio Processing and Encoders](./2-audio-processing-and-encoders.md)
-
-**Questions or stuck?** Open an issue on GitHub or check the discussions!
