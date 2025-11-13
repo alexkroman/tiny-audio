@@ -338,9 +338,11 @@ This will take ~5-10 minutes.
 Run these two scripts from the `tiny-audio` directory:
 
 ```bash
-poetry run python scripts/download_samples.py
+poetry run python scripts/download_samples.py  # Optional, takes a few minutes
 poetry run python scripts/verify_setup.py
 ```
+
+**Note**: The `download_samples.py` script is optional if you already have your own audio files handy (e.g., .wav or .mp3 files). It downloads sample audio files from LibriSpeech for testing and will take a few minutes to complete.
 
 The verify script will check your Python version, packages, and sample files. You should see: `✅ All checks passed! You're ready to start the course.`
 

@@ -31,8 +31,6 @@ def check_packages():
     packages = [
         "torch",
         "transformers",
-        "librosa",
-        "matplotlib",
         "accelerate",
         "peft",
         "datasets",
