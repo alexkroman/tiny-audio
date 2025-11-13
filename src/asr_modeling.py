@@ -13,6 +13,7 @@ from transformers import (
     Wav2Vec2FeatureExtractor,
     WhisperFeatureExtractor,
 )
+from transformers.models.wav2vec2.modeling_wav2vec2 import _compute_mask_indices
 from transformers.generation.utils import (
     GenerateBeamDecoderOnlyOutput,
     GenerateBeamEncoderDecoderOutput,
@@ -600,6 +601,48 @@ class ASRModel(PreTrainedModel):
         """Delegate to decoder for proper HF Trainer integration."""
         self.decoder.set_output_embeddings(value)
 
+    def _mask_input_features(
+        self,
+        input_features: torch.FloatTensor,
+        attention_mask: Optional[torch.LongTensor] = None,
+    ) -> torch.FloatTensor:
+        """
+        Masks extracted features along time axis and/or along feature axis according to SpecAugment.
+        Follows Whisper's implementation exactly.
+        """
+        # `config.apply_spec_augment` can set masking to False
+        if not getattr(self.encoder.config, "apply_spec_augment", True):
+            return input_features
+
+        # generate indices & apply SpecAugment along time axis
+        batch_size, hidden_size, sequence_length = input_features.size()
+
+        if self.encoder.config.mask_time_prob > 0 and self.training:
+            # generate indices & apply SpecAugment along time axis
+            mask_time_indices = _compute_mask_indices(
+                (batch_size, sequence_length),
+                mask_prob=self.encoder.config.mask_time_prob,
+                mask_length=self.encoder.config.mask_time_length,
+                attention_mask=attention_mask,
+                min_masks=getattr(self.encoder.config, "mask_time_min_masks", 2),
+            )
+            mask_time_indices = torch.tensor(mask_time_indices, device=input_features.device, dtype=torch.bool)
+            mask_time_indices = mask_time_indices[:, None].expand(-1, hidden_size, -1)
+            input_features[mask_time_indices] = 0
+
+        if self.encoder.config.mask_feature_prob > 0 and self.training:
+            # generate indices & apply SpecAugment along feature axis
+            mask_feature_indices = _compute_mask_indices(
+                (batch_size, hidden_size),
+                mask_prob=self.encoder.config.mask_feature_prob,
+                mask_length=self.encoder.config.mask_feature_length,
+                min_masks=getattr(self.encoder.config, "mask_feature_min_masks", 0),
+            )
+            mask_feature_indices = torch.tensor(mask_feature_indices, device=input_features.device, dtype=torch.bool)
+            input_features[mask_feature_indices] = 0
+
+        return input_features
+
     def _encode_audio(
         self,
         input_values: torch.Tensor,
@@ -609,6 +652,13 @@ class ASRModel(PreTrainedModel):
         encoder_device = next(self.encoder.parameters()).device
         encoder_dtype = next(self.encoder.parameters()).dtype
         input_values = input_values.to(device=encoder_device, dtype=encoder_dtype)
+
+        # Apply SpecAugment if Whisper encoder (masking happens on input_features)
+        is_whisper = "whisper" in self.config.audio_model_id.lower() or (
+            hasattr(self.encoder.config, "model_type") and "whisper" in self.encoder.config.model_type.lower()
+        )
+        if is_whisper and self.training:
+            input_values = self._mask_input_features(input_values, attention_mask=audio_attention_mask)
 
         # Only pass explicit valid arguments to encoder
         # Never use **kwargs to prevent torch.compile from injecting decoder args like input_ids

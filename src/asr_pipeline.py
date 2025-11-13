@@ -154,9 +154,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if task == "transcribe":
             # For transcribe task, use greedy decoding for accuracy
             generate_kwargs.setdefault("do_sample", False)
-            generate_kwargs.setdefault("no_repeat_ngram_size", 3)
-            generate_kwargs.setdefault("repetition_penalty", 1.2)
-            generate_kwargs.setdefault("max_new_tokens", 140)
         elif task == "emotion":
             # For emotion task, use sampling for varied responses
             generate_kwargs.setdefault("do_sample", True)

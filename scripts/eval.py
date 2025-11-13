@@ -543,7 +543,7 @@ def main():
         audio_field = "audio"
         text_field = "text"
         print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
-        dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
+        dataset = load_dataset(dataset_name, dataset_config, split="dev", streaming=True)
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 
