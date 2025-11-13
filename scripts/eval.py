@@ -419,7 +419,7 @@ def main():
         "--dataset",
         type=str,
         default="loquacious",
-        choices=["loquacious", "earnings22"],
+        choices=["loquacious", "earnings22", "ami", "gigaspeech"],
         help="Dataset to evaluate on (default: loquacious)",
     )
     parser.add_argument(
@@ -529,6 +529,21 @@ def main():
         text_field = "transcription"
         print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
         dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
+    elif args.dataset == "ami":
+        dataset_name = "TakalaWang/AMI_ASR"
+        dataset_config = None  # No config needed for AMI
+        audio_field = "audio"
+        text_field = "text"
+        print(f"Loading {dataset_name} dataset (split: {args.split})...")
+        dataset = load_dataset(dataset_name, split=args.split, streaming=True)
+    elif args.dataset == "gigaspeech":
+        dataset_name = "fixie-ai/gigaspeech"
+        # Use xl-empty-audio-removed config by default, or user-specified config
+        dataset_config = args.config if args.config != "medium" else "dev"
+        audio_field = "audio"
+        text_field = "text"
+        print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
+        dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 
@@ -574,11 +589,15 @@ def main():
     wer_percent = wer * 100
     results_file = args.output_dir / "results.txt"
 
+    # Build dataset description
+    if dataset_config:
+        dataset_desc = f"{dataset_name} (config: {dataset_config}, split: {args.split})"
+    else:
+        dataset_desc = f"{dataset_name} (split: {args.split})"
+
     with results_file.open("w") as f:
         f.write(f"Model: {model_name}\n")
-        f.write(
-            f"Dataset: speechbrain/LoquaciousSet (config: {args.config}, split: {args.split})\n"
-        )
+        f.write(f"Dataset: {dataset_desc}\n")
         f.write(f"Samples: {num_samples}\n")
         f.write(f"WER: {wer_percent:.2f}%\n")
         f.write(f"Avg Response Time: {avg_time:.2f}s\n\n")
@@ -599,7 +618,7 @@ def main():
     print("Evaluation Results")
     print("=" * 80)
     print(f"Model: {model_name}")
-    print(f"Dataset: speechbrain/LoquaciousSet (config: {args.config}, split: {args.split})")
+    print(f"Dataset: {dataset_desc}")
     print(f"Samples: {num_samples}")
     print(f"WER: {wer_percent:.2f}%")
     print(f"Avg Response Time: {avg_time:.2f}s")
