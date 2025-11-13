@@ -17,7 +17,7 @@ model:
 
   # Projector configuration
   audio_downsample_rate: 5
-  projector_dropout: 0.05  # Reduced for simpler linear projector (no longer needs hidden_dim)
+  projector_dropout: 0.1
 
 # Encoder LoRA Configuration
 encoder_lora:
@@ -50,7 +50,7 @@ training:
   dataloader_prefetch_factor: 4  # Higher prefetch to compensate for single worker
 
   per_device_train_batch_size: 14
-  per_device_eval_batch_size: 14
+  per_device_eval_batch_size: 28
   gradient_accumulation_steps: 2
   eval_accumulation_steps: 2
 
@@ -82,11 +82,11 @@ training:
   max_steps: 50000
 
   # Reproducibility
-  seed: 42
+  seed: 52
   ignore_data_skip: true
 
 data:
-  mask_time_prob: 0.15
+  mask_time_prob: 0.1
 
 # Early stopping configuration
 early_stopping:
