@@ -41,21 +41,13 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
         device=device,
     )
 
-    def process_audio(audio, task, text_input, custom_prompt):
+    def process_audio(audio, task, text_input):
         """Process audio file or text input with selected task."""
         if task == "text":
             if not text_input or not text_input.strip():
                 return "Please provide text input for text task"
             # Use text-only mode
             result = pipe(None, task="text", text_input=text_input)
-            return result["text"]
-        if task == "custom":
-            if audio is None:
-                return "Please provide audio input"
-            if not custom_prompt or not custom_prompt.strip():
-                return "Please provide a custom prompt"
-            # Use custom prompt with user_prompt parameter
-            result = pipe(audio, user_prompt=f"{custom_prompt.strip()}: <audio>")
             return result["text"]
         if audio is None:
             return "Please provide audio input"
@@ -66,13 +58,10 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
     def update_inputs(task):
         """Update input visibility based on selected task."""
         if task == "text":
-            # Show text input, hide audio and custom prompt
-            return gr.update(visible=False), gr.update(visible=True), gr.update(visible=False)
-        if task == "custom":
-            # Show audio and custom prompt, hide text input
-            return gr.update(visible=True), gr.update(visible=False), gr.update(visible=True)
-        # Show audio, hide text input and custom prompt
-        return gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)
+            # Show text input, hide audio
+            return gr.update(visible=False), gr.update(visible=True)
+        # Show audio, hide text input
+        return gr.update(visible=True), gr.update(visible=False)
 
     # Create Gradio interface with task selection
     with gr.Blocks(title="Tiny Audio") as demo:
@@ -80,16 +69,10 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
 
         with gr.Row(), gr.Column():
             task_selector = gr.Dropdown(
-                choices=["transcribe", "describe", "emotion", "custom", "text"],
+                choices=["transcribe", "text"],
                 value="transcribe",
                 label="Task",
                 info="Select the task to perform",
-            )
-            custom_prompt = gr.Textbox(
-                label="Custom Prompt",
-                placeholder="Enter your custom prompt (e.g., 'Classify', 'Summarize', 'Translate to Spanish')...",
-                lines=2,
-                visible=False,
             )
 
         with gr.Row():
@@ -113,12 +96,12 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
         task_selector.change(
             fn=update_inputs,
             inputs=[task_selector],
-            outputs=[audio_input, text_input, custom_prompt],
+            outputs=[audio_input, text_input],
         )
 
         process_btn.click(
             fn=process_audio,
-            inputs=[audio_input, task_selector, text_input, custom_prompt],
+            inputs=[audio_input, task_selector, text_input],
             outputs=output_text,
         )
 

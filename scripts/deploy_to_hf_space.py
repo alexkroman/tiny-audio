@@ -42,7 +42,7 @@ def run_command(
 def deploy_to_space(
     space_url: str = "https://huggingface.co/spaces/mazesmazes/tiny-audio",
     force: bool = False,
-    demo_dir: Path = Path("demo"),
+    demo_dir: Path = Path("demo/gradio"),
 ) -> None:
     """Deploy demo files to a Hugging Face Space.
 
@@ -177,7 +177,10 @@ Examples:
     )
 
     parser.add_argument(
-        "--demo-dir", type=Path, default=Path("demo"), help="Path to demo directory (default: demo)"
+        "--demo-dir",
+        type=Path,
+        default=Path("demo/gradio"),
+        help="Path to demo directory (default: demo/gradio)",
     )
 
     args = parser.parse_args()

@@ -286,14 +286,9 @@ Examples:
     # Determine model path
     model_path = args.model
     if model_path is None:
-        print("🔍 No model specified, searching for latest saved model...")
-        model_path = find_latest_model()
-        if model_path:
-            print(f"   Found model: {model_path}")
-        else:
-            print("⚠️  No saved models found in outputs/")
-            print("   Defaulting to HuggingFace Hub model: mazesmazes/tiny-audio")
-            model_path = "mazesmazes/tiny-audio"
+        print("🔍 No model specified, using default HuggingFace Hub model...")
+        model_path = "mazesmazes/tiny-audio"
+        print(f"   Using model: {model_path}")
 
     # Run the test
     test_handler(
