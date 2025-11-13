@@ -200,6 +200,19 @@ poetry run eval your-username/your-model-name
 poetry run eval mazesmazes/tiny-audio --max-samples 100
 ```
 
+## Training Curves
+
+Watch the model learn in real-time. Training loss decreases steadily while evaluation loss shows strong generalization:
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/alexkroman/tiny-audio/main/public/train_loss.png" alt="Training Loss" width="45%" />
+  <img src="https://raw.githubusercontent.com/alexkroman/tiny-audio/main/public/eval_loss.png" alt="Evaluation Loss" width="45%" />
+</div>
+
+*Left: Training loss over 50k steps. Right: Evaluation loss showing consistent improvement without overfitting.*
+
+All training runs are logged to [Weights & Biases](https://wandb.ai) for detailed monitoring and experiment tracking.
+
 ## What makes this repo different?
 
 Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable, hackable codebase** designed to train an ASR model start to end and produce a working model you can actually use and learn from.

@@ -11,6 +11,7 @@ import truecase
 from datasets import (
     Audio,
     Dataset,
+    Features,
     IterableDataset,
     Value,
     interleave_datasets,
@@ -75,24 +76,45 @@ class DatasetLoader:
         # Get task for this dataset
         task = dataset_cfg.get("task", "transcribe")
 
-        # Add task by creating a new IterableDataset from a generator that yields the task.
-        # This is done to explicitly set the features of the new dataset, which prevents
-        # interleave_datasets from trying to infer them and failing on the audio column.
-        def add_task_generator(dataset, task_value):
+        # Get original features before any modifications
+        original_features = ds.info.features if hasattr(ds, 'info') and ds.info else None
+
+        # Remove extra columns that might cause feature conflicts
+        # Keep only: audio, text
+        columns_to_keep = {"audio", "text"}
+        current_columns = ds.column_names if hasattr(ds, 'column_names') and ds.column_names else []
+        columns_to_remove = [col for col in current_columns if col not in columns_to_keep]
+
+        if columns_to_remove:
+            ds = ds.remove_columns(columns_to_remove)
+
+        # Add task using a simple wrapper generator
+        def add_task_gen(dataset, task_val):
             for example in dataset:
-                example["task"] = task_value
+                example["task"] = task_val
                 yield example
 
-        original_features = ds.info.features
-        new_features = original_features.copy()
-        if "task" not in new_features:
+        # Build new features dict from original, adding task
+        if original_features:
+            new_features = {k: v for k, v in original_features.items() if k in columns_to_keep}
             new_features["task"] = Value("string")
+            new_features = Features(new_features)
+        else:
+            # Fallback if no features available
+            new_features = Features({
+                "audio": Audio(sampling_rate=self.sample_rate),
+                "text": Value("string"),
+                "task": Value("string"),
+            })
 
-        return IterableDataset.from_generator(
-            add_task_generator,
+        # Create new dataset with explicit features
+        ds_with_task = IterableDataset.from_generator(
+            add_task_gen,
+            gen_kwargs={"dataset": ds, "task_val": task},
             features=new_features,
-            gen_kwargs={"dataset": ds, "task_value": task},
         )
+
+        return ds_with_task
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -170,6 +192,16 @@ class DataCollator(DataCollatorForSeq2Seq):
 
     def _preprocess_text(self, text: str) -> str:
         """Preprocess text before Whisper normalization (matches eval script)."""
+        # Handle None or empty text
+        if text is None or not isinstance(text, str):
+            return ""
+
+        # Replace GigaSpeech punctuation tags with actual punctuation
+        text = re.sub(r"<PERIOD>", ".", text)
+        text = re.sub(r"<COMMA>", ",", text)
+        text = re.sub(r"<QUESTIONMARK>", "?", text)
+        text = re.sub(r"<EXCLAMATIONPOINT>", "!", text)
+
         # Remove <inaudible> tags
         text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
         # Remove disfluencies (uh, um)
@@ -184,8 +216,21 @@ class DataCollator(DataCollatorForSeq2Seq):
         # Wav2Vec2FeatureExtractor does z-normalization → mean=0, std=1
         # No additional normalization needed here!
         audio_samples = audio_decoder.get_all_samples()
-        audio_array = audio_samples.data
-        return audio_array.squeeze().numpy()
+        audio_array = audio_samples.data.numpy()
+
+        # Ensure mono audio: squeeze all dimensions, then handle multi-channel
+        audio_array = audio_array.squeeze()
+
+        # If still multi-dimensional (stereo/multi-channel), convert to mono by averaging
+        if audio_array.ndim > 1:
+            audio_array = audio_array.mean(axis=0)
+
+        # Ensure 1D array
+        if audio_array.ndim == 0:
+            # Single sample - expand to 1D
+            audio_array = audio_array.reshape(1)
+
+        return audio_array
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_arrays = [self._extract_audio(f["audio"]) for f in features]
@@ -411,7 +456,6 @@ def main(cfg: DictConfig) -> None:
             cfg.model.pretrained_model_path,
             config=asr_config,
         )
-        print("✓ Loaded pretrained model (projector + LoRA weights if present)")
 
         # Apply fresh LoRA if needed (when loading base model without LoRA)
         if (
