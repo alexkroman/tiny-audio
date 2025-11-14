@@ -20,7 +20,6 @@ from transformers.generation.utils import (
     GenerateDecoderOnlyOutput,
     GenerateEncoderDecoderOutput,
 )
-from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 try:
     from .asr_config import ASRConfig
@@ -29,42 +28,40 @@ except ImportError:
 
 
 class AudioProjector(nn.Module):
-    """Simple linear audio projector for acoustic-to-semantic alignment.
-
-    Uses a single linear layer to project stacked encoder features to LLM space.
-    Simpler architecture (13M params vs 40M) helps prevent overfitting while
-    maintaining alignment capacity.
-    """
 
     def __init__(self, config):
         super().__init__()
-        self.k = config.encoder_projector_ds_rate
-        in_dim = config.encoder_dim * self.k
+        in_dim = config.encoder_dim
         out_dim = config.llm_dim
 
-        self.ln_pre = LlamaRMSNorm(in_dim)
+        # Whisper already does 2x (conv stride), this adds another 2x = 4x total
+        pool_stride = getattr(config, "projector_pool_stride", 2)
+        self.avg_pooler = nn.AvgPool1d(pool_stride, stride=pool_stride) if pool_stride > 1 else None
+
         self.proj = nn.Linear(in_dim, out_dim, bias=False)
 
         dropout_rate = getattr(config, "projector_dropout", 0.05)
         self.dropout = nn.Dropout(dropout_rate)
-        self.ln_post = LlamaRMSNorm(out_dim)
 
+        # Xavier init for stable gradient flow
         with torch.no_grad():
             nn.init.xavier_normal_(self.proj.weight, gain=1.0)
 
     def forward(self, x):
+        # x: [batch, seq_len, dim] - already normalized by Whisper's LayerNorm
         batch_size, seq_len, dim = x.size()
 
-        remainder = seq_len % self.k
-        if remainder:
-            pad_len = self.k - remainder
-            x = F.pad(x, (0, 0, 0, pad_len))
+        # Optional: Apply average pooling for temporal downsampling
+        if self.avg_pooler is not None:
+            x = x.permute(0, 2, 1)  # [batch, dim, seq_len]
+            x = self.avg_pooler(x)   # [batch, dim, seq_len//pool_stride]
+            x = x.permute(0, 2, 1)  # [batch, seq_len//pool_stride, dim]
 
-        x = x.contiguous().view(batch_size, -1, dim * self.k)
-        x = self.ln_pre(x)
+        # Project to LLM dimension
         x = self.proj(x)
-        x = self.dropout(x)
-        return self.ln_post(x)
+
+        # Regularization (LLM's first layer will normalize before attention)
+        return self.dropout(x)
 
 
 class ASRModel(PreTrainedModel):
@@ -242,21 +239,6 @@ class ASRModel(PreTrainedModel):
         self.decoder = self._create_decoder(config, peft_config)
         self.generation_config = self.decoder.generation_config
 
-        self.generation_config.num_beams = config.num_beams
-        self.generation_config.max_new_tokens = config.max_new_tokens
-        self.generation_config.min_new_tokens = config.min_new_tokens
-        self.generation_config.do_sample = config.do_sample
-        self.generation_config.use_cache = config.use_cache
-
-        if config.do_sample:
-            self.generation_config.top_k = config.top_k
-            self.generation_config.top_p = config.top_p
-            self.generation_config.temperature = config.temperature
-        else:
-            self.generation_config.top_k = None
-            self.generation_config.top_p = None
-            self.generation_config.temperature = None
-
         self._init_tokenizer()
 
         from types import SimpleNamespace
@@ -281,10 +263,10 @@ class ASRModel(PreTrainedModel):
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
         projector_config = SimpleNamespace(
-            encoder_projector_ds_rate=config.audio_downsample_rate,
             encoder_dim=encoder_dim,
             llm_dim=llm_dim,
-            projector_hidden_dim=config.projector_hidden_dim,
+            projector_pool_stride=getattr(config, "projector_pool_stride", 2),
+            projector_dropout=getattr(config, "projector_dropout", 0.05),
         )
         self.projector = AudioProjector(projector_config)
 
@@ -651,7 +633,8 @@ class ASRModel(PreTrainedModel):
         # Ensure input is on encoder's device and has the right dtype
         encoder_device = next(self.encoder.parameters()).device
         encoder_dtype = next(self.encoder.parameters()).dtype
-        input_values = input_values.to(device=encoder_device, dtype=encoder_dtype)
+        # Clone to prevent user tensor reuse contamination
+        input_values = input_values.clone().to(device=encoder_device, dtype=encoder_dtype)
 
         # Apply SpecAugment if Whisper encoder (masking happens on input_features)
         is_whisper = "whisper" in self.config.audio_model_id.lower() or (
@@ -685,25 +668,28 @@ class ASRModel(PreTrainedModel):
 
         return audio_embeds
 
-    def _expand_audio_tokens(self, input_ids: torch.Tensor, num_audio_tokens: int) -> torch.Tensor:
-        """Expand single <audio> token into N copies to match projected audio length.
+    def _get_audio_expansion_details(
+        self, input_ids: torch.Tensor, num_audio_tokens: int
+    ) -> dict:
+        """Calculate the positions and masks needed to expand audio tokens.
 
-        Pre-expands audio tokens in input_ids so we can use simple masked_scatter
-        instead of complex concatenation. This enables KV caching and torch.compile.
-
-        Uses fully vectorized cumsum approach for maximum performance.
+        This helper consolidates the common cumsum logic used by both
+        _expand_audio_tokens and _expand_for_audio_tokens.
 
         Args:
             input_ids: Token IDs with single <audio> token per sample
-            num_audio_tokens: Number of tokens to expand each <audio> into
+            num_audio_tokens: Number of tokens each audio token expands to
 
         Returns:
-            Expanded input_ids where each <audio> is replaced with N copies
+            Dictionary containing:
+            - new_seq_len: The total sequence length after expansion
+            - new_start_positions: [batch, old_seq_len] tensor mapping old indices to new
+            - audio_mask: [batch, old_seq_len] boolean mask for audio token positions
         """
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
 
-        # Find audio token positions (vectorized)
+        # Find audio token positions
         audio_mask = input_ids == self.audio_token_id
 
         # Validate: each sample must have exactly one audio token
@@ -716,25 +702,50 @@ class ASRModel(PreTrainedModel):
             if multiple:
                 raise ValueError("Some samples have multiple audio tokens")
 
-        # Vectorized expansion using cumsum approach
         # Create placeholder tensor: 1 for normal tokens, num_audio_tokens for audio token
-        # token_counts[i] = how many expanded tokens position i produces
         token_counts = torch.where(audio_mask, num_audio_tokens, 1)
 
         # Cumsum - 1 gives us the ENDING position of each token's expansion
-        # We need starting positions, so we'll compute differently
-        # cumsum[i] tells us: how many total tokens up to and including position i
         cumsum_counts = torch.cumsum(token_counts, dim=1)
 
         # The starting position of token i is cumsum[i-1]
-        # For i=0, starting position is 0
         new_start_positions = torch.cat(
-            [torch.zeros(batch_size, 1, dtype=torch.long, device=device), cumsum_counts[:, :-1]],
+            [
+                torch.zeros(batch_size, 1, dtype=torch.long, device=device),
+                cumsum_counts[:, :-1],
+            ],
             dim=1,
         )
 
         # Calculate new sequence length
         new_seq_len = seq_len - 1 + num_audio_tokens
+
+        return {
+            "new_seq_len": new_seq_len,
+            "new_start_positions": new_start_positions,
+            "audio_mask": audio_mask,
+        }
+
+    def _expand_audio_tokens(self, input_ids: torch.Tensor, num_audio_tokens: int) -> torch.Tensor:
+        """Expand single <audio> token into N copies to match projected audio length.
+
+        Pre-expands audio tokens in input_ids so we can use simple masked_scatter
+        instead of complex concatenation. This enables KV caching and torch.compile.
+
+        Args:
+            input_ids: Token IDs with single <audio> token per sample
+            num_audio_tokens: Number of tokens to expand each <audio> into
+
+        Returns:
+            Expanded input_ids where each <audio> is replaced with N copies
+        """
+        batch_size, seq_len = input_ids.shape
+        device = input_ids.device
+
+        details = self._get_audio_expansion_details(input_ids, num_audio_tokens)
+        new_seq_len = details["new_seq_len"]
+        new_start_positions = details["new_start_positions"]
+        audio_mask = details["audio_mask"]
 
         # Create output tensor (filled with pad token initially)
         expanded = torch.full(
@@ -761,15 +772,9 @@ class ASRModel(PreTrainedModel):
         ]
 
         # Create indices for all audio token positions
-        audio_token_indices = torch.arange(num_audio_tokens, device=device).unsqueeze(
-            0
-        )  # [1, num_audio_tokens]
-        audio_new_start_expanded = audio_new_start.unsqueeze(1)  # [batch_size, 1]
-        audio_positions_expanded = (
-            audio_new_start_expanded + audio_token_indices
-        )  # [batch_size, num_audio_tokens]
+        audio_token_indices = torch.arange(num_audio_tokens, device=device).unsqueeze(0)
+        audio_positions_expanded = audio_new_start.unsqueeze(1) + audio_token_indices
 
-        # Fill all audio token positions (vectorized)
         batch_idx_expanded = (
             torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_audio_tokens)
         )
@@ -786,10 +791,8 @@ class ASRModel(PreTrainedModel):
     ) -> torch.Tensor:
         """Expand attention mask or labels to match audio token expansion.
 
-        Vectorized expansion that matches _expand_audio_tokens logic.
-
         Args:
-            input_ids: Original input_ids (before expansion)
+            input_ids: Original input_ids (used only for mapping)
             tensor_to_expand: Tensor to expand (attention_mask or labels)
             num_audio_tokens: Number of tokens each audio token expands to
             fill_value: Value to fill for audio token positions (1 for attn, -100 for labels)
@@ -800,21 +803,10 @@ class ASRModel(PreTrainedModel):
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
 
-        # Find audio token positions
-        audio_mask = input_ids == self.audio_token_id
-
-        # Create token counts for cumsum
-        token_counts = torch.where(audio_mask, num_audio_tokens, 1)
-
-        # Cumsum to get ending positions, then compute starting positions
-        cumsum_counts = torch.cumsum(token_counts, dim=1)
-        new_start_positions = torch.cat(
-            [torch.zeros(batch_size, 1, dtype=torch.long, device=device), cumsum_counts[:, :-1]],
-            dim=1,
-        )
-
-        # Calculate new sequence length
-        new_seq_len = seq_len - 1 + num_audio_tokens
+        details = self._get_audio_expansion_details(input_ids, num_audio_tokens)
+        new_seq_len = details["new_seq_len"]
+        new_start_positions = details["new_start_positions"]
+        audio_mask = details["audio_mask"]
 
         # Create output tensor
         expanded = torch.full(
@@ -1118,8 +1110,6 @@ class ASRModel(PreTrainedModel):
             self.config.audio_config.num_mel_bins = self.encoder.config.num_mel_bins
 
         self.config.save_pretrained(save_dir)
-        if hasattr(self, "generation_config") and self.generation_config is not None:
-            self.generation_config.save_pretrained(save_dir)
 
         encoder_state = {
             name: param.data

@@ -119,6 +119,7 @@ class DatasetLoader:
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
         train_weights = []
+        val_weights = []
 
         for d_cfg in self.config.datasets:
             train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
@@ -133,12 +134,14 @@ class DatasetLoader:
                     train_datasets.append(self._prepare_split(split_cfg, train_split))
                     val_datasets.append(self._prepare_split(split_cfg, eval_split))
                     train_weights.append(sampling_weight)
+                    val_weights.append(sampling_weight)
             else:
                 for train_split in train_splits:
                     train_datasets.append(self._prepare_split(d_cfg, train_split))
                     train_weights.append(sampling_weight)
                 for eval_split in eval_splits:
                     val_datasets.append(self._prepare_split(d_cfg, eval_split))
+                    val_weights.append(sampling_weight)
 
         # Use sampling weights if provided and we have multiple datasets
         if len(train_datasets) > 1:
@@ -151,8 +154,13 @@ class DatasetLoader:
 
         if not val_datasets:
             val_ds = None
+        elif len(val_datasets) > 1:
+            # Use same sampling weights as training for validation
+            total_weight = sum(val_weights[: len(val_datasets)])
+            probabilities = [w / total_weight for w in val_weights[: len(val_datasets)]]
+            val_ds = interleave_datasets(val_datasets, probabilities=probabilities)
         else:
-            val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
+            val_ds = val_datasets[0]
 
         # Shuffle training data for better generalization
         # Buffer size of 1000 balances memory usage and randomness
@@ -432,7 +440,6 @@ def main(cfg: DictConfig) -> None:
         system_prompt=cfg.model.system_prompt,
         encoder_dim=encoder_config.hidden_size,
         llm_dim=decoder_config.hidden_size,
-        projector_hidden_dim=cfg.model.get("projector_hidden_dim", 2048),
         projector_dropout=cfg.model.get("projector_dropout", 0.05),
         mask_time_prob=cfg.data.get("mask_time_prob", 0.05),
         mask_time_length=cfg.data.get("mask_time_length", 10),

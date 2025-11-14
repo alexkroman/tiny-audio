@@ -1,0 +1,62 @@
+# Combined dataset configuration with equal mix of three ASR datasets
+datasets:
+  # LoquaciousSet - 33%
+  - path: speechbrain/LoquaciousSet
+    name: large
+    audio_column: wav
+    text_column: text
+    task: transcribe
+    train_splits:
+      - train
+    eval_splits:
+      - dev
+    sampling_weight: 0.6
+
+  # Common Voice 17.0 - 33%
+  - path: fixie-ai/common_voice_17_0
+    name: en
+    audio_column: audio
+    text_column: sentence
+    task: transcribe
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+    sampling_weight: 0.20
+
+  # GigaSpeech - 33% (training only - xl-empty-audio-removed has no dev split)
+  - path: fixie-ai/gigaspeech
+    name: xl-empty-audio-removed  # XL subset with empty audio removed
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits:
+      - train
+    eval_splits: []  # No eval split in xl-empty-audio-removed
+    sampling_weight: 0.20  # Slightly higher to ensure weights sum to 1.0
+
+  # GigaSpeech Dev - evaluation only
+  - path: fixie-ai/gigaspeech
+    name: dev  # Dev subset for evaluation
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: []  # Not used for training
+    eval_splits:
+      - dev
+    sampling_weight: 0.20  # Not sampled during training
+
+# Audio processing
+sample_rate: 16000
+
+# SpecAugment parameters (wav2vec2-style masking)
+mask_time_prob: 0.05
+mask_time_length: 10
+mask_feature_prob: 0.0
+mask_feature_length: 10
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+max_train_samples: null
+max_eval_samples: 5000  # Keep eval manageable
+use_streaming: true

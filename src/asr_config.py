@@ -13,18 +13,18 @@ class ASRConfig(transformers.PretrainedConfig):
         text_model_id: str = "Qwen/Qwen3-8B",
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
-        audio_downsample_rate: int = 5,
+        audio_downsample_rate: int = 5,  # Deprecated: use projector_pool_stride instead
         num_beams: Optional[int] = None,
         system_prompt: str = "/no_think /system_override",
         user_prompt: str = "Transcribe: <audio>",
         encoder_dim: Optional[int] = None,
         llm_dim: Optional[int] = None,
-        projector_hidden_dim: int = 8192,
         # Audio processing constants
         audio_sample_rate: int = 16000,
         # Projector initialization constants
         projector_init_std: float = 0.02,
         projector_dropout: float = 0.05,
+        projector_pool_stride: int = 2,  # AvgPool1d stride (2 = 4x total with Whisper, 1 = no pooling)
         # LoRA default parameters
         lora_default_dropout: float = 0.0,
         # Inference parameters
@@ -51,8 +51,7 @@ class ASRConfig(transformers.PretrainedConfig):
             "max_new_tokens": 128,
             "min_new_tokens": 1,
             "do_sample": False,
-            "repetition_penalty": 1.0,
-            "length_penalty": 1.0,
+            "repetition_penalty": 1.1,
             "no_repeat_ngram_size": 0,
             "use_cache": True,  # Now enabled - we pre-expand audio tokens for consistent sequence length
         }
@@ -60,9 +59,9 @@ class ASRConfig(transformers.PretrainedConfig):
         # Only add sampling parameters if do_sample=True
         do_sample_value = kwargs.get("do_sample", generation_defaults["do_sample"])
         if do_sample_value:
-            generation_defaults["temperature"] = 0.7
-            generation_defaults["top_k"] = 50
-            generation_defaults["top_p"] = 0.9
+            generation_defaults["temperature"] = 1.0
+            generation_defaults["top_k"] = 0
+            generation_defaults["top_p"] = 0.8
 
         # Only add early_stopping if using beam search
         num_beams_value = kwargs.get("num_beams", generation_defaults["num_beams"])
@@ -82,10 +81,10 @@ class ASRConfig(transformers.PretrainedConfig):
         self.user_prompt = user_prompt
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
-        self.projector_hidden_dim = projector_hidden_dim
         self.audio_sample_rate = audio_sample_rate
         self.projector_init_std = projector_init_std
         self.projector_dropout = projector_dropout
+        self.projector_pool_stride = projector_pool_stride
         self.lora_default_dropout = lora_default_dropout
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
@@ -146,8 +145,8 @@ class ASRConfig(transformers.PretrainedConfig):
         # Explicitly ensure these fields are saved
         output["encoder_dim"] = self.encoder_dim
         output["llm_dim"] = self.llm_dim
-        output["projector_hidden_dim"] = self.projector_hidden_dim
         output["audio_downsample_rate"] = self.audio_downsample_rate
+        output["projector_pool_stride"] = self.projector_pool_stride
         output["system_prompt"] = self.system_prompt
         output["user_prompt"] = self.user_prompt
         output["num_beams"] = self.num_beams

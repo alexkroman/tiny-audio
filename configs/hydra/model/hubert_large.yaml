@@ -3,7 +3,6 @@ encoder_model_name: facebook/hubert-xlarge-ls960-ft
 decoder_model_name: HuggingFaceTB/SmolLM3-3B
 
 # Projector configuration
-projector_hidden_dim: 8192
 audio_downsample_rate: 5
 
 # Model runtime settings

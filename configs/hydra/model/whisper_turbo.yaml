@@ -3,7 +3,6 @@ encoder_model_name: openai/whisper-large-v3-turbo
 decoder_model_name: HuggingFaceTB/SmolLM3-3B
 
 # Projector configuration
-projector_hidden_dim: 4096
 audio_downsample_rate: 5
 
 # Model runtime settings

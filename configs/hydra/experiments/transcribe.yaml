@@ -5,7 +5,7 @@
 # Based on stage1 configuration with multi-task data
 defaults:
   - override /model: large
-  - override /data: loquacious_large
+  - override /data: combined
   - override /training: production
 
 model:
@@ -16,8 +16,7 @@ model:
   encoder_model_name: openai/whisper-large-v3-turbo
 
   # Projector configuration
-  audio_downsample_rate: 5
-  projector_dropout: 0.1
+  projector_dropout: 0.05
 
 # Encoder LoRA Configuration
 encoder_lora:
@@ -41,7 +40,7 @@ peft:
 training:
   # Hub configuration
   push_to_hub: true
-  hub_model_id: "mazesmazes/tiny-audio"
+  hub_model_id: "mazesmazes/tiny-audio-2"
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
@@ -49,10 +48,10 @@ training:
   dataloader_num_workers: 1  # Limited by dataset.num_shards=1
   dataloader_prefetch_factor: 4  # Higher prefetch to compensate for single worker
 
-  per_device_train_batch_size: 14
-  per_device_eval_batch_size: 28
-  gradient_accumulation_steps: 2
-  eval_accumulation_steps: 2
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 3
+  eval_accumulation_steps: 3
 
   learning_rate: 1.0e-4
 
@@ -61,7 +60,7 @@ training:
   lr_scheduler_kwargs: {"min_lr_rate": 0.1}
 
   # Optimization
-  weight_decay: 0.1
+  weight_decay: 0.01
   max_grad_norm: 1.0
 
   # Memory optimization
@@ -86,7 +85,7 @@ training:
   ignore_data_skip: true
 
 data:
-  mask_time_prob: 0.1
+  mask_time_prob: 0.05
 
 # Early stopping configuration
 early_stopping:
