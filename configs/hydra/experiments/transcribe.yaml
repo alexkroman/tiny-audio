@@ -5,18 +5,19 @@
 # Based on stage1 configuration with multi-task data
 defaults:
   - override /model: large
-  - override /data: combined
+  - override /data: loquacious_medium
   - override /training: production
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
-  # pretrained_model_path: "mazesmazes/tiny-audio"
+  # pretrained_model_path: "mazesmazes/tiny-audio-2"
 
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
 
   # Projector configuration
-  projector_dropout: 0.05
+  projector_dropout: 0.1
+  label_smoothing: 0.1  # Custom label smoothing applied after audio token expansion
 
 # Encoder LoRA Configuration
 encoder_lora:
@@ -40,15 +41,15 @@ peft:
 training:
   # Hub configuration
   push_to_hub: true
-  hub_model_id: "mazesmazes/tiny-audio-2"
+  hub_model_id: "mazesmazes/tiny-audio"
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
   # CPU optimization for 9 vCPUs
   dataloader_num_workers: 1  # Limited by dataset.num_shards=1
-  dataloader_prefetch_factor: 4  # Higher prefetch to compensate for single worker
+  dataloader_prefetch_factor: 3  # Higher prefetch to compensate for single worker
 
-  per_device_train_batch_size: 8
+  per_device_train_batch_size: 7
   per_device_eval_batch_size: 16
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
@@ -62,6 +63,8 @@ training:
   # Optimization
   weight_decay: 0.01
   max_grad_norm: 1.0
+  # Note: label_smoothing_factor would cause HF Trainer error with expanded audio tokens
+  # Instead, we use custom label smoothing in the model's forward method
 
   # Memory optimization
   torch_compile: false  # Disabled for faster startup
@@ -85,7 +88,10 @@ training:
   ignore_data_skip: true
 
 data:
-  mask_time_prob: 0.05
+  # Aggressive SpecAugment for frozen encoder/decoder with small trainable projector
+  # ~65% of time steps will be part of a mask (common for Wav2Vec2 training from scratch)
+  mask_time_prob: 0.65
+  mask_time_length: 10
 
 # Early stopping configuration
 early_stopping:

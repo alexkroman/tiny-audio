@@ -13,6 +13,8 @@ from transformers import (
     Wav2Vec2FeatureExtractor,
     WhisperFeatureExtractor,
 )
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.wav2vec2.modeling_wav2vec2 import _compute_mask_indices
 from transformers.generation.utils import (
     GenerateBeamDecoderOnlyOutput,
@@ -27,41 +29,88 @@ except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
 
 
-class AudioProjector(nn.Module):
+class SwiGLU(nn.Module):
+    """
+    SwiGLU activation MLP - based on LlamaMLP but with flexible output dimension.
 
+    This implements the same gated activation pattern as transformers.models.llama.modeling_llama.LlamaMLP,
+    but allows for different input/output dimensions (needed for cross-modal projection).
+
+    Structure: w1 (gate), w2 (up), w3 (down) with w3(silu(w1) * w2)
+    """
+    def __init__(self, in_features, hidden_features, out_features, bias=False):
+        super().__init__()
+        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        x_gate = self.act(self.w1(x))
+        x_val = self.w2(x)
+        x = x_gate * x_val
+        x = self.w3(x)
+        return x
+
+
+class AudioProjector(nn.Module):
+    """
+    AudioProjector using a SwiGLU MLP with LlamaRMSNorm.
+    """
     def __init__(self, config):
         super().__init__()
         in_dim = config.encoder_dim
         out_dim = config.llm_dim
+        hidden_dim = getattr(config, "projector_hidden_dim", in_dim * 4)
+        dropout_rate = getattr(config, "projector_dropout", 0.1)
 
-        # Whisper already does 2x (conv stride), this adds another 2x = 4x total
+        # Get LlamaRMSNorm epsilon from config, or use default
+        llama_eps = getattr(config, "rms_norm_eps", 1e-6)
+
+        # 1. Pooling
         pool_stride = getattr(config, "projector_pool_stride", 2)
         self.avg_pooler = nn.AvgPool1d(pool_stride, stride=pool_stride) if pool_stride > 1 else None
 
-        self.proj = nn.Linear(in_dim, out_dim, bias=False)
+        # 2. SwiGLU MLP
+        self.proj = SwiGLU(in_dim, hidden_dim, out_dim)
 
-        dropout_rate = getattr(config, "projector_dropout", 0.05)
+        # 3. Dropout
         self.dropout = nn.Dropout(dropout_rate)
 
-        # Xavier init for stable gradient flow
+        # 4. LlamaRMSNorm
+        # Replaced nn.LayerNorm with LlamaRMSNorm
+        self.norm = LlamaRMSNorm(out_dim, eps=llama_eps)
+
+        # Initialize weights following LLaMA-style initialization for SwiGLU
+        # Uses smaller std to account for the multiplicative gating
         with torch.no_grad():
-            nn.init.xavier_normal_(self.proj.weight, gain=1.0)
+            # Standard deviation from config or default (0.02 is common for transformers)
+            std = getattr(config, "projector_init_std", 0.02)
+
+            # Initialize gate and up projections
+            nn.init.normal_(self.proj.w1.weight, mean=0.0, std=std)
+            nn.init.normal_(self.proj.w2.weight, mean=0.0, std=std)
+
+            # Initialize down projection with scaling to preserve variance after SwiGLU
+            # The 1/sqrt(2) factor accounts for the multiplicative interaction
+            nn.init.normal_(self.proj.w3.weight, mean=0.0, std=std / (2 ** 0.5))
 
     def forward(self, x):
-        # x: [batch, seq_len, dim] - already normalized by Whisper's LayerNorm
-        batch_size, seq_len, dim = x.size()
+        # x: [batch, seq_len, dim]
 
-        # Optional: Apply average pooling for temporal downsampling
         if self.avg_pooler is not None:
             x = x.permute(0, 2, 1)  # [batch, dim, seq_len]
             x = self.avg_pooler(x)   # [batch, dim, seq_len//pool_stride]
             x = x.permute(0, 2, 1)  # [batch, seq_len//pool_stride, dim]
 
-        # Project to LLM dimension
+        # Pass through MLP
         x = self.proj(x)
 
-        # Regularization (LLM's first layer will normalize before attention)
-        return self.dropout(x)
+        # Apply regularization and LlamaRMSNorm
+        x = self.dropout(x)
+        x = self.norm(x)
+
+        return x
 
 
 class ASRModel(PreTrainedModel):
@@ -209,6 +258,7 @@ class ASRModel(PreTrainedModel):
         self.system_prompt = config.system_prompt
         self.peft_config = peft_config
         self.encoder_lora_config = encoder_lora_config
+        self.label_smoothing = getattr(config, "label_smoothing", 0.0)
 
         self.encoder = self._create_encoder(config, encoder_lora_config)
 
@@ -267,6 +317,9 @@ class ASRModel(PreTrainedModel):
             llm_dim=llm_dim,
             projector_pool_stride=getattr(config, "projector_pool_stride", 2),
             projector_dropout=getattr(config, "projector_dropout", 0.05),
+            projector_hidden_dim=getattr(config, "projector_hidden_dim"),
+            projector_init_std=getattr(config, "projector_init_std", 0.02),
+            rms_norm_eps=getattr(config, "rms_norm_eps", 1e-6),
         )
         self.projector = AudioProjector(projector_config)
 
@@ -920,13 +973,54 @@ class ASRModel(PreTrainedModel):
             full_attention_mask = attention_mask
             use_cache = kwargs.pop("use_cache", None)
 
-        return self.decoder(
-            inputs_embeds=inputs_embeds,
-            attention_mask=full_attention_mask,
-            labels=labels,
-            use_cache=use_cache if use_cache is not None else False,
-            **kwargs,
-        )
+        # Custom label smoothing implementation for expanded audio tokens
+        if self.label_smoothing > 0 and labels is not None and self.training:
+            # Remove labels from kwargs to prevent decoder from computing loss
+            kwargs.pop("labels", None)
+
+            # Get model outputs without computing loss (DO NOT pass labels)
+            outputs = self.decoder(
+                inputs_embeds=inputs_embeds,
+                attention_mask=full_attention_mask,
+                labels=None,  # Explicitly pass None to prevent decoder from computing loss
+                use_cache=use_cache if use_cache is not None else False,
+                **kwargs,
+            )
+
+            # Compute loss with label smoothing on the expanded dimensions
+            logits = outputs.logits
+
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            # Flatten the tokens
+            loss_fct = nn.CrossEntropyLoss(
+                ignore_index=-100,
+                label_smoothing=self.label_smoothing,
+                reduction='mean'  # Explicitly set to mean (default)
+            )
+            shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+            shift_labels = shift_labels.view(-1)
+            loss = loss_fct(shift_logits, shift_labels)
+
+            # Create a new output object with loss (some output objects are immutable)
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=outputs.logits,
+                past_key_values=outputs.past_key_values if hasattr(outputs, 'past_key_values') else None,
+                hidden_states=outputs.hidden_states if hasattr(outputs, 'hidden_states') else None,
+                attentions=outputs.attentions if hasattr(outputs, 'attentions') else None,
+            )
+        else:
+            # Standard forward pass with built-in loss computation
+            return self.decoder(
+                inputs_embeds=inputs_embeds,
+                attention_mask=full_attention_mask,
+                labels=labels,
+                use_cache=use_cache if use_cache is not None else False,
+                **kwargs,
+            )
 
     @torch.no_grad()
     def _generate_text_only(

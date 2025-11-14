@@ -25,6 +25,9 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_init_std: float = 0.02,
         projector_dropout: float = 0.05,
         projector_pool_stride: int = 2,  # AvgPool1d stride (2 = 4x total with Whisper, 1 = no pooling)
+        projector_hidden_dim: Optional[int] = None,  # SwiGLU hidden dimension (defaults to encoder_dim * 4)
+        rms_norm_eps: float = 1e-6,  # Epsilon for LlamaRMSNorm in projector
+        label_smoothing: float = 0.0,  # Label smoothing (0.0 = disabled, needs custom impl for audio expansion)
         # LoRA default parameters
         lora_default_dropout: float = 0.0,
         # Inference parameters
@@ -49,9 +52,9 @@ class ASRConfig(transformers.PretrainedConfig):
         generation_defaults = {
             "num_beams": 1,
             "max_new_tokens": 128,
-            "min_new_tokens": 1,
+            "min_new_tokens": 0,
             "do_sample": False,
-            "repetition_penalty": 1.1,
+            "repetition_penalty": 1.0,
             "no_repeat_ngram_size": 0,
             "use_cache": True,  # Now enabled - we pre-expand audio tokens for consistent sequence length
         }
@@ -85,6 +88,9 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_init_std = projector_init_std
         self.projector_dropout = projector_dropout
         self.projector_pool_stride = projector_pool_stride
+        self.projector_hidden_dim = projector_hidden_dim
+        self.rms_norm_eps = rms_norm_eps
+        self.label_smoothing = label_smoothing
         self.lora_default_dropout = lora_default_dropout
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
@@ -147,6 +153,9 @@ class ASRConfig(transformers.PretrainedConfig):
         output["llm_dim"] = self.llm_dim
         output["audio_downsample_rate"] = self.audio_downsample_rate
         output["projector_pool_stride"] = self.projector_pool_stride
+        output["projector_hidden_dim"] = self.projector_hidden_dim
+        output["rms_norm_eps"] = self.rms_norm_eps
+        output["label_smoothing"] = self.label_smoothing
         output["system_prompt"] = self.system_prompt
         output["user_prompt"] = self.user_prompt
         output["num_beams"] = self.num_beams

@@ -441,6 +441,8 @@ def main(cfg: DictConfig) -> None:
         encoder_dim=encoder_config.hidden_size,
         llm_dim=decoder_config.hidden_size,
         projector_dropout=cfg.model.get("projector_dropout", 0.05),
+        projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
+        label_smoothing=cfg.model.get("label_smoothing", 0.0),
         mask_time_prob=cfg.data.get("mask_time_prob", 0.05),
         mask_time_length=cfg.data.get("mask_time_length", 10),
     )

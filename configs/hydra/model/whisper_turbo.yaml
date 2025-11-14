@@ -4,6 +4,7 @@ decoder_model_name: HuggingFaceTB/SmolLM3-3B
 
 # Projector configuration
 audio_downsample_rate: 5
+projector_hidden_dim: 5120  # 4x encoder_dim for SwiGLU (1280 * 4)
 
 # Model runtime settings
 model_dtype: float32
