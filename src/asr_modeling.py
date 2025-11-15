@@ -59,30 +59,18 @@ class AudioProjector(nn.Module):
     """
     def __init__(self, config):
         super().__init__()
-        in_dim = config.encoder_dim
+        self.k = getattr(config, "projector_pool_stride", 2)  # Downsampling rate
+        in_dim = config.encoder_dim * self.k  # Input is k frames concatenated
         out_dim = config.llm_dim
-        hidden_dim = getattr(config, "projector_hidden_dim", in_dim * 4)
+        hidden_dim = config.projector_hidden_dim
+        if hidden_dim is None:
+            hidden_dim = config.encoder_dim * 4  # Default: 4x encoder dim for SwiGLU
         dropout_rate = getattr(config, "projector_dropout", 0.1)
 
-        # 1. Learnable downsampling with Conv1d
-        pool_stride = getattr(config, "projector_pool_stride", 2)
-        if pool_stride > 1:
-            # Conv1d for learnable downsampling (instead of fixed averaging)
-            self.conv1d = nn.Conv1d(
-                in_channels=in_dim,
-                out_channels=in_dim,
-                kernel_size=pool_stride,
-                stride=pool_stride,
-                padding=0,
-                bias=False
-            )
-        else:
-            self.conv1d = None
-
-        # 2. SwiGLU MLP
+        # SwiGLU MLP (now takes concatenated frames as input)
         self.proj = SwiGLU(in_dim, hidden_dim, out_dim)
 
-        # 3. Dropout
+        # Dropout for regularization
         self.dropout = nn.Dropout(dropout_rate)
 
         # Initialize weights following LLaMA-style initialization for SwiGLU
@@ -90,10 +78,6 @@ class AudioProjector(nn.Module):
         with torch.no_grad():
             # Standard deviation from config or default (0.02 is common for transformers)
             std = getattr(config, "projector_init_std", 0.02)
-
-            # Initialize Conv1d for downsampling if present
-            if self.conv1d is not None:
-                nn.init.normal_(self.conv1d.weight, mean=0.0, std=std)
 
             # Initialize gate and up projections
             nn.init.normal_(self.proj.w1.weight, mean=0.0, std=std)
@@ -105,14 +89,25 @@ class AudioProjector(nn.Module):
 
     def forward(self, x):
         # x: [batch, seq_len, dim]
+        batch_size, seq_len, dim = x.size()
 
-        # Apply learnable downsampling with Conv1d
-        if self.conv1d is not None:
-            x = x.permute(0, 2, 1)  # [batch, dim, seq_len]
-            x = self.conv1d(x)      # [batch, dim, seq_len//pool_stride]
-            x = x.permute(0, 2, 1)  # [batch, seq_len//pool_stride, dim]
+        # Ensure input dtype matches the projector weights
+        # This is crucial for MPS devices where encoder may output bfloat16
+        # but projector weights might be in float32 when loaded from checkpoint
+        target_dtype = self.proj.w1.weight.dtype
+        if x.dtype != target_dtype:
+            x = x.to(target_dtype)
 
-        # Pass through MLP
+        # Pad the sequence to be divisible by k instead of truncating
+        remainder = seq_len % self.k
+        if remainder:
+            pad_len = self.k - remainder
+            x = F.pad(x, (0, 0, 0, pad_len))
+
+        # Reshape for temporal compression - concatenate k consecutive frames
+        x = x.contiguous().view(batch_size, -1, dim * self.k)
+
+        # Apply SwiGLU block
         x = self.proj(x)
 
         # Apply dropout for regularization
@@ -229,6 +224,10 @@ class ASRModel(PreTrainedModel):
             sum(v.numel() for v in projector_state.values())
             model.projector.load_state_dict(projector_state, strict=True, assign=True)
 
+            # Convert projector to target dtype after loading weights
+            target_dtype = getattr(torch, config.model_dtype)
+            model.projector = model.projector.to(dtype=target_dtype)
+
             if encoder_lora_config:
                 if not encoder_state:
                     raise FileNotFoundError(
@@ -325,10 +324,14 @@ class ASRModel(PreTrainedModel):
             llm_dim=llm_dim,
             projector_pool_stride=getattr(config, "projector_pool_stride", 2),
             projector_dropout=getattr(config, "projector_dropout", 0.05),
-            projector_hidden_dim=getattr(config, "projector_hidden_dim"),
+            projector_hidden_dim=getattr(config, "projector_hidden_dim", None),
             projector_init_std=getattr(config, "projector_init_std", 0.02),
         )
         self.projector = AudioProjector(projector_config)
+
+        # Convert projector to the same dtype as encoder/decoder
+        target_dtype = getattr(torch, config.model_dtype)
+        self.projector = self.projector.to(dtype=target_dtype)
 
         self._no_split_modules = self.decoder._no_split_modules
 
