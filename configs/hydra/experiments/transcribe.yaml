@@ -10,7 +10,7 @@ defaults:
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
-  pretrained_model_path: "mazesmazes/tiny-audio"
+  # pretrained_model_path: "mazesmazes/tiny-audio"
 
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
@@ -56,7 +56,7 @@ training:
 
   learning_rate: 1.0e-4
 
-  warmup_steps: 100  # Increased for LoRA stability (2% of 50k steps)
+  warmup_steps: 1000  # Increased for LoRA stability (2% of 50k steps)
   lr_scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs: {"min_lr_rate": 0.1}
 
