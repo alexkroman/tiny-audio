@@ -55,7 +55,7 @@ class SwiGLU(nn.Module):
 
 class AudioProjector(nn.Module):
     """
-    AudioProjector using a SwiGLU MLP with LlamaRMSNorm.
+    AudioProjector using a SwiGLU MLP.
     """
     def __init__(self, config):
         super().__init__()
@@ -64,12 +64,20 @@ class AudioProjector(nn.Module):
         hidden_dim = getattr(config, "projector_hidden_dim", in_dim * 4)
         dropout_rate = getattr(config, "projector_dropout", 0.1)
 
-        # Get LlamaRMSNorm epsilon from config, or use default
-        llama_eps = getattr(config, "rms_norm_eps", 1e-6)
-
-        # 1. Pooling
+        # 1. Learnable downsampling with Conv1d
         pool_stride = getattr(config, "projector_pool_stride", 2)
-        self.avg_pooler = nn.AvgPool1d(pool_stride, stride=pool_stride) if pool_stride > 1 else None
+        if pool_stride > 1:
+            # Conv1d for learnable downsampling (instead of fixed averaging)
+            self.conv1d = nn.Conv1d(
+                in_channels=in_dim,
+                out_channels=in_dim,
+                kernel_size=pool_stride,
+                stride=pool_stride,
+                padding=0,
+                bias=False
+            )
+        else:
+            self.conv1d = None
 
         # 2. SwiGLU MLP
         self.proj = SwiGLU(in_dim, hidden_dim, out_dim)
@@ -77,15 +85,15 @@ class AudioProjector(nn.Module):
         # 3. Dropout
         self.dropout = nn.Dropout(dropout_rate)
 
-        # 4. LlamaRMSNorm
-        # Replaced nn.LayerNorm with LlamaRMSNorm
-        self.norm = LlamaRMSNorm(out_dim, eps=llama_eps)
-
         # Initialize weights following LLaMA-style initialization for SwiGLU
         # Uses smaller std to account for the multiplicative gating
         with torch.no_grad():
             # Standard deviation from config or default (0.02 is common for transformers)
             std = getattr(config, "projector_init_std", 0.02)
+
+            # Initialize Conv1d for downsampling if present
+            if self.conv1d is not None:
+                nn.init.normal_(self.conv1d.weight, mean=0.0, std=std)
 
             # Initialize gate and up projections
             nn.init.normal_(self.proj.w1.weight, mean=0.0, std=std)
@@ -98,17 +106,17 @@ class AudioProjector(nn.Module):
     def forward(self, x):
         # x: [batch, seq_len, dim]
 
-        if self.avg_pooler is not None:
+        # Apply learnable downsampling with Conv1d
+        if self.conv1d is not None:
             x = x.permute(0, 2, 1)  # [batch, dim, seq_len]
-            x = self.avg_pooler(x)   # [batch, dim, seq_len//pool_stride]
+            x = self.conv1d(x)      # [batch, dim, seq_len//pool_stride]
             x = x.permute(0, 2, 1)  # [batch, seq_len//pool_stride, dim]
 
         # Pass through MLP
         x = self.proj(x)
 
-        # Apply regularization and LlamaRMSNorm
+        # Apply dropout for regularization
         x = self.dropout(x)
-        x = self.norm(x)
 
         return x
 
@@ -319,7 +327,6 @@ class ASRModel(PreTrainedModel):
             projector_dropout=getattr(config, "projector_dropout", 0.05),
             projector_hidden_dim=getattr(config, "projector_hidden_dim"),
             projector_init_std=getattr(config, "projector_init_std", 0.02),
-            rms_norm_eps=getattr(config, "rms_norm_eps", 1e-6),
         )
         self.projector = AudioProjector(projector_config)
 
@@ -908,6 +915,7 @@ class ASRModel(PreTrainedModel):
         input_features: Optional[torch.Tensor] = None,  # For Whisper
         labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        num_items_in_batch: Optional[int] = None,  # HF Trainer provides this for gradient accumulation
         **kwargs,
     ):
         audio_inputs = input_values if input_values is not None else input_features
@@ -995,13 +1003,16 @@ class ASRModel(PreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
 
             # Flatten the tokens
+            shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+            shift_labels = shift_labels.view(-1)
+
+            # Compute loss with mean reduction
+            # The Trainer handles gradient accumulation properly when we accept num_items_in_batch
             loss_fct = nn.CrossEntropyLoss(
                 ignore_index=-100,
                 label_smoothing=self.label_smoothing,
-                reduction='mean'  # Explicitly set to mean (default)
+                reduction='mean'
             )
-            shift_logits = shift_logits.view(-1, shift_logits.size(-1))
-            shift_labels = shift_labels.view(-1)
             loss = loss_fct(shift_logits, shift_labels)
 
             # Create a new output object with loss (some output objects are immutable)
