@@ -28,7 +28,7 @@ training:
   dataloader_num_workers: 1  # Limited by dataset.num_shards=1
   dataloader_prefetch_factor: 3  # Higher prefetch to compensate for single worker
 
-  per_device_train_batch_size: 9
+  per_device_train_batch_size: 8
   per_device_eval_batch_size: 32
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
@@ -57,7 +57,7 @@ training:
   gradient_checkpointing: false
 
   # Training duration - 50000 steps as requested
-  max_steps: 35000
+  max_steps: 40000
 
   # Reproducibility
   seed: 42

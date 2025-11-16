@@ -24,7 +24,9 @@ class ASRConfig(transformers.PretrainedConfig):
         # Projector initialization constants
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 2,  # AvgPool1d stride (2 = 4x total with Whisper, 1 = no pooling)
-        projector_hidden_dim: Optional[int] = None,  # SwiGLU hidden dimension (defaults to encoder_dim * 4)
+        projector_hidden_dim: Optional[
+            int
+        ] = None,  # SwiGLU hidden dimension (defaults to encoder_dim * 4)
         # Inference parameters
         inference_diversity_penalty: float = 0.5,
         inference_warmup_tokens: int = 10,
@@ -42,8 +44,7 @@ class ASRConfig(transformers.PretrainedConfig):
         use_cache: Optional[bool] = None,
         **kwargs,
     ):
-        # Set default values for generation params if not present in kwargs
-        # This allows config.json values to take precedence when loading from pretrained
+        # Set default generation parameters
         generation_defaults = {
             "num_beams": 1,
             "max_new_tokens": 128,
@@ -51,24 +52,17 @@ class ASRConfig(transformers.PretrainedConfig):
             "do_sample": False,
             "repetition_penalty": 1.0,
             "no_repeat_ngram_size": 0,
-            "use_cache": True,  # Now enabled - we pre-expand audio tokens for consistent sequence length
+            "use_cache": True,
         }
 
-        # Only add sampling parameters if do_sample=True
-        do_sample_value = kwargs.get("do_sample", generation_defaults["do_sample"])
-        if do_sample_value:
-            generation_defaults["temperature"] = 1.0
-            generation_defaults["top_k"] = 0
-            generation_defaults["top_p"] = 0.8
-
-        # Only add early_stopping if using beam search
-        num_beams_value = kwargs.get("num_beams", generation_defaults["num_beams"])
-        if num_beams_value > 1:
+        # Conditional defaults based on other parameters
+        if kwargs.get("do_sample", generation_defaults["do_sample"]):
+            generation_defaults.update({"temperature": 1.0, "top_k": 0, "top_p": 0.8})
+        if kwargs.get("num_beams", generation_defaults["num_beams"]) > 1:
             generation_defaults["early_stopping"] = True
 
-        for param_name, default_value in generation_defaults.items():
-            if param_name not in kwargs:
-                kwargs[param_name] = default_value
+        # Apply defaults (config.json values take precedence)
+        kwargs = {**generation_defaults, **kwargs}
 
         self.audio_model_id = audio_model_id
         self.text_model_id = text_model_id

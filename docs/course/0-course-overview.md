@@ -183,6 +183,6 @@ Each class includes:
 
 This course and all materials are released under the MIT License.
 
----
+______________________________________________________________________
 
 [Next: Class 1: Introduction and Setup](./1-introduction-and-setup.md)

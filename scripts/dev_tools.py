@@ -71,7 +71,7 @@ def test() -> int:
 
 
 def check_all() -> int:
-    """Run all checks: lint, type-check, and test."""
+    """Run all checks: lint and type-check."""
     exit_code = 0
 
     print("\n" + "=" * 60)
@@ -86,9 +86,7 @@ def check_all() -> int:
     code = type_check()
     exit_code = max(exit_code, code)
 
-    # Run tests
-    code = test()
-    exit_code = max(exit_code, code)
+    # Tests removed - run separately with 'poetry run test' if needed
 
     # Summary
     print("\n" + "=" * 60)

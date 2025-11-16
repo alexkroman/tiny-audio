@@ -11,9 +11,7 @@ from transformers import (
     AutoTokenizer,
     PreTrainedModel,
     Wav2Vec2FeatureExtractor,
-    WhisperFeatureExtractor,
 )
-from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.generation.utils import (
     GenerateBeamDecoderOnlyOutput,
     GenerateBeamEncoderDecoderOutput,
@@ -36,6 +34,7 @@ class SwiGLU(nn.Module):
 
     Structure: w1 (gate), w2 (up), w3 (down) with w3(silu(w1) * w2)
     """
+
     def __init__(self, in_features, hidden_features, out_features, bias=False):
         super().__init__()
         self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
@@ -47,14 +46,14 @@ class SwiGLU(nn.Module):
         x_gate = self.act(self.w1(x))
         x_val = self.w2(x)
         x = x_gate * x_val
-        x = self.w3(x)
-        return x
+        return self.w3(x)
 
 
 class AudioProjector(nn.Module):
     """
     AudioProjector using a SwiGLU MLP.
     """
+
     def __init__(self, config):
         super().__init__()
         self.k = getattr(config, "projector_pool_stride", 2)  # Downsampling rate
@@ -79,7 +78,7 @@ class AudioProjector(nn.Module):
 
             # Initialize down projection with scaling to preserve variance after SwiGLU
             # The 1/sqrt(2) factor accounts for the multiplicative interaction
-            nn.init.normal_(self.proj.w3.weight, mean=0.0, std=std / (2 ** 0.5))
+            nn.init.normal_(self.proj.w3.weight, mean=0.0, std=std / (2**0.5))
 
     def forward(self, x):
         # x: [batch, seq_len, dim]
@@ -102,9 +101,7 @@ class AudioProjector(nn.Module):
         x = x.contiguous().view(batch_size, -1, dim * self.k)
 
         # Apply SwiGLU block
-        x = self.proj(x)
-
-        return x
+        return self.proj(x)
 
 
 class ASRModel(PreTrainedModel):
@@ -125,10 +122,23 @@ class ASRModel(PreTrainedModel):
         "emotion": "Emotion: <audio>",
     }
 
+    @staticmethod
+    def _create_feature_extractor(audio_model_id: str):
+        """Factory method to create the appropriate feature extractor."""
+        is_whisper = "whisper" in audio_model_id.lower()
+        if is_whisper:
+            from transformers import WhisperConfig, WhisperFeatureExtractor
+
+            encoder_config = WhisperConfig.from_pretrained(audio_model_id)
+            num_mel_bins = encoder_config.num_mel_bins
+            return WhisperFeatureExtractor.from_pretrained(
+                audio_model_id,
+                feature_size=num_mel_bins,
+            )
+        return Wav2Vec2FeatureExtractor.from_pretrained(audio_model_id)
+
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        import json
-
         from safetensors.torch import load_file
         from transformers.utils.hub import cached_file
 
@@ -136,21 +146,8 @@ class ASRModel(PreTrainedModel):
         if config is None:
             config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
-        # IMPORTANT: Load feature extractor from audio model for correct mel bin configuration
-        is_whisper = "whisper" in config.audio_model_id.lower()
-        if is_whisper:
-            from transformers import WhisperConfig
-
-            encoder_config = WhisperConfig.from_pretrained(config.audio_model_id)
-            num_mel_bins = encoder_config.num_mel_bins
-            kwargs["feature_extractor"] = WhisperFeatureExtractor.from_pretrained(
-                config.audio_model_id,
-                feature_size=num_mel_bins,
-            )
-        else:
-            kwargs["feature_extractor"] = Wav2Vec2FeatureExtractor.from_pretrained(
-                config.audio_model_id
-            )
+        # Load feature extractor from audio model
+        kwargs["feature_extractor"] = cls._create_feature_extractor(config.audio_model_id)
 
         cls._is_loading_from_pretrained = True
         cls._pretrained_model_path = pretrained_model_name_or_path
@@ -239,16 +236,7 @@ class ASRModel(PreTrainedModel):
         if feature_extractor is not None:
             self.feature_extractor = feature_extractor
         else:
-            if is_whisper:
-                num_mel_bins = self.encoder.config.num_mel_bins
-                self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
-                    config.audio_model_id,
-                    feature_size=num_mel_bins,  # Override feature_size to match model's mel bins
-                )
-            else:
-                self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
-                    config.audio_model_id
-                )
+            self.feature_extractor = self._create_feature_extractor(config.audio_model_id)
 
         self.decoder = self._create_decoder(config)
         self.generation_config = self.decoder.generation_config
@@ -506,7 +494,6 @@ class ASRModel(PreTrainedModel):
         """Delegate to decoder for proper HF Trainer integration."""
         self.decoder.set_output_embeddings(value)
 
-
     def _encode_audio(
         self,
         input_values: torch.Tensor,
@@ -517,11 +504,6 @@ class ASRModel(PreTrainedModel):
         encoder_dtype = next(self.encoder.parameters()).dtype
         # Clone to prevent user tensor reuse contamination
         input_values = input_values.clone().to(device=encoder_device, dtype=encoder_dtype)
-
-        # Apply SpecAugment if Whisper encoder (masking happens on input_features)
-        is_whisper = "whisper" in self.config.audio_model_id.lower() or (
-            hasattr(self.encoder.config, "model_type") and "whisper" in self.encoder.config.model_type.lower()
-        )
 
         # Only pass explicit valid arguments to encoder
         # Never use **kwargs to prevent torch.compile from injecting decoder args like input_ids
@@ -542,9 +524,7 @@ class ASRModel(PreTrainedModel):
 
         return audio_embeds
 
-    def _get_audio_expansion_details(
-        self, input_ids: torch.Tensor, num_audio_tokens: int
-    ) -> dict:
+    def _get_audio_expansion_details(self, input_ids: torch.Tensor, num_audio_tokens: int) -> dict:
         """Calculate the positions and masks needed to expand audio tokens.
 
         This helper consolidates the common cumsum logic used by both
@@ -600,76 +580,22 @@ class ASRModel(PreTrainedModel):
             "audio_mask": audio_mask,
         }
 
-    def _expand_audio_tokens(self, input_ids: torch.Tensor, num_audio_tokens: int) -> torch.Tensor:
-        """Expand single <audio> token into N copies to match projected audio length.
-
-        Pre-expands audio tokens in input_ids so we can use simple masked_scatter
-        instead of complex concatenation. This enables KV caching and torch.compile.
+    def _expand_tensor_for_audio(
+        self,
+        input_ids: torch.Tensor,
+        tensor_to_expand: Optional[torch.Tensor],
+        num_audio_tokens: int,
+        fill_value: Optional[Union[int, float]] = None,
+        audio_fill_value: Optional[Union[int, float]] = None,
+    ) -> torch.Tensor:
+        """Generic method to expand any tensor to match audio token expansion.
 
         Args:
             input_ids: Token IDs with single <audio> token per sample
-            num_audio_tokens: Number of tokens to expand each <audio> into
-
-        Returns:
-            Expanded input_ids where each <audio> is replaced with N copies
-        """
-        batch_size, seq_len = input_ids.shape
-        device = input_ids.device
-
-        details = self._get_audio_expansion_details(input_ids, num_audio_tokens)
-        new_seq_len = details["new_seq_len"]
-        new_start_positions = details["new_start_positions"]
-        audio_mask = details["audio_mask"]
-
-        # Create output tensor (filled with pad token initially)
-        expanded = torch.full(
-            (batch_size, new_seq_len),
-            self.tokenizer.pad_token_id,
-            dtype=input_ids.dtype,
-            device=device,
-        )
-
-        # Scatter non-audio tokens to their new positions
-        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, seq_len)
-        non_audio_mask = ~audio_mask
-
-        # Place non-audio tokens (they only occupy 1 position each)
-        expanded[batch_indices[non_audio_mask], new_start_positions[non_audio_mask]] = input_ids[
-            non_audio_mask
-        ]
-
-        # Fill audio token positions using vectorized indexing
-        # Find where audio token starts in the expanded sequence
-        audio_positions = audio_mask.int().argmax(dim=1)  # [batch_size]
-        audio_new_start = new_start_positions[
-            torch.arange(batch_size, device=device), audio_positions
-        ]
-
-        # Create indices for all audio token positions
-        audio_token_indices = torch.arange(num_audio_tokens, device=device).unsqueeze(0)
-        audio_positions_expanded = audio_new_start.unsqueeze(1) + audio_token_indices
-
-        batch_idx_expanded = (
-            torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_audio_tokens)
-        )
-        expanded[batch_idx_expanded, audio_positions_expanded] = self.audio_token_id
-
-        return expanded
-
-    def _expand_for_audio_tokens(
-        self,
-        input_ids: torch.Tensor,
-        tensor_to_expand: torch.Tensor,
-        num_audio_tokens: int,
-        fill_value: Union[int, float],
-    ) -> torch.Tensor:
-        """Expand attention mask or labels to match audio token expansion.
-
-        Args:
-            input_ids: Original input_ids (used only for mapping)
-            tensor_to_expand: Tensor to expand (attention_mask or labels)
+            tensor_to_expand: Tensor to expand (input_ids, attention_mask, labels) or None
             num_audio_tokens: Number of tokens each audio token expands to
-            fill_value: Value to fill for audio token positions (1 for attn, -100 for labels)
+            fill_value: Default fill value for new tensor
+            audio_fill_value: Value to use for audio token positions (if different from fill_value)
 
         Returns:
             Expanded tensor matching the expanded sequence length
@@ -682,24 +608,64 @@ class ASRModel(PreTrainedModel):
         new_start_positions = details["new_start_positions"]
         audio_mask = details["audio_mask"]
 
+        # Determine the tensor we're actually expanding
+        if tensor_to_expand is None:
+            # Expanding input_ids themselves
+            tensor_to_expand = input_ids
+            fill_value = fill_value or self.tokenizer.pad_token_id
+            audio_fill_value = audio_fill_value or self.audio_token_id
+        else:
+            # Expanding other tensors (attention_mask, labels)
+            if fill_value is None:
+                raise ValueError("fill_value must be provided when expanding non-input_ids tensors")
+            if audio_fill_value is None:
+                audio_fill_value = fill_value
+
         # Create output tensor
         expanded = torch.full(
-            (batch_size, new_seq_len), fill_value, dtype=tensor_to_expand.dtype, device=device
+            (batch_size, new_seq_len),
+            fill_value,
+            dtype=tensor_to_expand.dtype,
+            device=device,
         )
 
         # Scatter non-audio positions to their new positions
         batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, seq_len)
         non_audio_mask = ~audio_mask
-
-        # Place non-audio values
         expanded[batch_indices[non_audio_mask], new_start_positions[non_audio_mask]] = (
             tensor_to_expand[non_audio_mask]
         )
 
-        # Audio token positions are already filled with fill_value
-        # No need to explicitly set them again
+        # Fill audio positions if different from default fill
+        if audio_fill_value != fill_value:
+            audio_positions = audio_mask.int().argmax(dim=1)
+            audio_new_start = new_start_positions[
+                torch.arange(batch_size, device=device), audio_positions
+            ]
+            audio_token_indices = torch.arange(num_audio_tokens, device=device).unsqueeze(0)
+            audio_positions_expanded = audio_new_start.unsqueeze(1) + audio_token_indices
+            batch_idx_expanded = (
+                torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_audio_tokens)
+            )
+            expanded[batch_idx_expanded, audio_positions_expanded] = audio_fill_value
 
         return expanded
+
+    def _expand_audio_tokens(self, input_ids: torch.Tensor, num_audio_tokens: int) -> torch.Tensor:
+        """Convenience method for expanding input_ids."""
+        return self._expand_tensor_for_audio(input_ids, None, num_audio_tokens)
+
+    def _expand_for_audio_tokens(
+        self,
+        input_ids: torch.Tensor,
+        tensor_to_expand: torch.Tensor,
+        num_audio_tokens: int,
+        fill_value: Union[int, float],
+    ) -> torch.Tensor:
+        """Convenience method for expanding attention_mask or labels."""
+        return self._expand_tensor_for_audio(
+            input_ids, tensor_to_expand, num_audio_tokens, fill_value
+        )
 
     def _prepare_audio_inputs_embeds(
         self, expanded_input_ids: torch.Tensor, audio_embeds: torch.Tensor
@@ -729,7 +695,9 @@ class ASRModel(PreTrainedModel):
         input_features: Optional[torch.Tensor] = None,  # For Whisper
         labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        num_items_in_batch: Optional[int] = None,  # HF Trainer provides this for gradient accumulation
+        num_items_in_batch: Optional[
+            int
+        ] = None,  # HF Trainer provides this for gradient accumulation
         **kwargs,
     ):
         audio_inputs = input_values if input_values is not None else input_features
@@ -804,7 +772,6 @@ class ASRModel(PreTrainedModel):
             **kwargs,
         )
 
-
     @torch.no_grad()
     def generate(
         self,
@@ -833,9 +800,10 @@ class ASRModel(PreTrainedModel):
             system_prompt = self.system_prompt
 
         if user_prompt is None:
-            user_prompt = self.TASK_PROMPTS.get(
-                task, self.config.user_prompt or "Transcribe: <audio>"
-            ) or "Transcribe: <audio>"
+            user_prompt = (
+                self.TASK_PROMPTS.get(task, self.config.user_prompt or "Transcribe: <audio>")
+                or "Transcribe: <audio>"
+            )
 
         messages = []
         if system_prompt:
@@ -876,28 +844,24 @@ class ASRModel(PreTrainedModel):
         attention_mask = torch.ones(batch_size, total_seq_len, dtype=torch.long, device=device)
 
         # Apply generation defaults from config
-        generate_kwargs.setdefault("max_new_tokens", self.config.max_new_tokens)
-        generate_kwargs.setdefault("min_new_tokens", self.config.min_new_tokens)
-        generate_kwargs.setdefault("num_beams", self.config.num_beams)
-        generate_kwargs.setdefault("do_sample", self.config.do_sample)
+        config_params = [
+            "max_new_tokens",
+            "min_new_tokens",
+            "num_beams",
+            "do_sample",
+            "temperature",
+            "top_k",
+            "top_p",
+            "repetition_penalty",
+            "length_penalty",
+            "no_repeat_ngram_size",
+            "early_stopping",
+        ]
+        for param in config_params:
+            if hasattr(self.config, param) and getattr(self.config, param) is not None:
+                generate_kwargs.setdefault(param, getattr(self.config, param))
 
-        # Only set sampling params if they exist in config (depends on do_sample)
-        if hasattr(self.config, "temperature"):
-            generate_kwargs.setdefault("temperature", self.config.temperature)
-        if hasattr(self.config, "top_k"):
-            generate_kwargs.setdefault("top_k", self.config.top_k)
-        if hasattr(self.config, "top_p"):
-            generate_kwargs.setdefault("top_p", self.config.top_p)
-
-        generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
-        generate_kwargs.setdefault("length_penalty", self.config.length_penalty)
-        generate_kwargs.setdefault("no_repeat_ngram_size", self.config.no_repeat_ngram_size)
-
-        # Only set early_stopping if it exists in config (depends on num_beams)
-        if hasattr(self.config, "early_stopping"):
-            generate_kwargs.setdefault("early_stopping", self.config.early_stopping)
-
-        # Enable cache now that we use inputs_embeds consistently
+        # Add special token defaults
         generate_kwargs.setdefault("use_cache", True)
         generate_kwargs.setdefault(
             "eos_token_id", self.tokenizer.convert_tokens_to_ids("<|im_end|>")
@@ -909,7 +873,6 @@ class ASRModel(PreTrainedModel):
         )
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
-        import json
         import shutil
         from pathlib import Path as PathlibPath
 

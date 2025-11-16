@@ -403,6 +403,7 @@ Look for:
 **Step 2: Check the experiment configs**
 
 Available experiment configurations:
+
 - `transcribe_whisper.yaml` - Whisper Turbo encoder (default, fastest)
 - `transcribe_hubert.yaml` - HuBERT encoder (alternative)
 - `multi_task.yaml` - Multi-task training (transcription + other tasks)
