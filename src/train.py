@@ -481,8 +481,6 @@ def main(cfg: DictConfig) -> None:
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
         callbacks.append(PushToHubCallback())
 
-    # processor = model.get_processor()
-
     # Convert config to dict and remove non-TrainingArguments fields
     training_args = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_args, dict), "training_args must be a dict"
@@ -505,7 +503,6 @@ def main(cfg: DictConfig) -> None:
         torch._inductor.config.compile_threads = compile_threads
 
     # Handle torch.compile settings (TrainingArguments doesn't support all options)
-    training_args.get("torch_compile", False)
     training_args.pop("torch_compile_dynamic", False)
     training_args.pop("torch_compile_backend", "inductor")
     training_args.pop("torch_compile_mode", None)

@@ -25,7 +25,6 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 2,  # AvgPool1d stride (2 = 4x total with Whisper, 1 = no pooling)
         projector_hidden_dim: Optional[int] = None,  # SwiGLU hidden dimension (defaults to encoder_dim * 4)
-        rms_norm_eps: float = 1e-6,  # Epsilon for LlamaRMSNorm in projector
         # Inference parameters
         inference_diversity_penalty: float = 0.5,
         inference_warmup_tokens: int = 10,
@@ -84,7 +83,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
-        self.rms_norm_eps = rms_norm_eps
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
         if "audio_config" not in kwargs:
@@ -136,38 +134,6 @@ class ASRConfig(transformers.PretrainedConfig):
         }
         self.architectures = ["ASRModel"]
         self.pipeline_tag = "automatic-speech-recognition"
-
-    def to_dict(self):
-        """Override to ensure all critical fields are serialized."""
-        output = super().to_dict()
-
-        # Explicitly ensure these fields are saved
-        output["encoder_dim"] = self.encoder_dim
-        output["llm_dim"] = self.llm_dim
-        output["audio_downsample_rate"] = self.audio_downsample_rate
-        output["projector_pool_stride"] = self.projector_pool_stride
-        output["projector_hidden_dim"] = self.projector_hidden_dim
-        output["rms_norm_eps"] = self.rms_norm_eps
-        output["system_prompt"] = self.system_prompt
-        output["user_prompt"] = self.user_prompt
-        output["num_beams"] = self.num_beams
-        output["audio_sample_rate"] = self.audio_sample_rate
-        output["projector_init_std"] = self.projector_init_std
-        output["inference_diversity_penalty"] = self.inference_diversity_penalty
-        output["inference_warmup_tokens"] = self.inference_warmup_tokens
-        output["max_new_tokens"] = self.max_new_tokens
-        output["min_new_tokens"] = self.min_new_tokens
-        output["do_sample"] = self.do_sample
-        output["temperature"] = self.temperature
-        output["top_k"] = self.top_k
-        output["top_p"] = self.top_p
-        output["repetition_penalty"] = self.repetition_penalty
-        output["length_penalty"] = self.length_penalty
-        output["no_repeat_ngram_size"] = self.no_repeat_ngram_size
-        output["early_stopping"] = self.early_stopping
-        output["use_cache"] = self.use_cache
-
-        return output
 
 
 # Register the config with transformers

@@ -59,9 +59,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         from collections.abc import Iterator
 
         if isinstance(model_inputs, Iterator):
-            # Convert iterator to list to count chunks
+            # Convert iterator to list to process chunks
             chunks = list(model_inputs)
-            len(chunks)
 
             all_outputs = []
             for _chunk_num, chunk in enumerate(chunks, start=1):

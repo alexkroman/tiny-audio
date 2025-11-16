@@ -14,6 +14,12 @@ from transformers import (
     WhisperFeatureExtractor,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.generation.utils import (
+    GenerateBeamDecoderOnlyOutput,
+    GenerateBeamEncoderDecoderOutput,
+    GenerateDecoderOnlyOutput,
+    GenerateEncoderDecoderOutput,
+)
 
 try:
     from .asr_config import ASRConfig
@@ -193,7 +199,6 @@ class ASRModel(PreTrainedModel):
                     f"projector.safetensors not found in {pretrained_model_name_or_path}. "
                     "The repository may not have been trained yet."
                 )
-            sum(v.numel() for v in projector_state.values())
             model.projector.load_state_dict(projector_state, strict=True, assign=True)
 
             # Convert projector to target dtype after loading weights
@@ -326,13 +331,8 @@ class ASRModel(PreTrainedModel):
         if is_whisper or is_wav2vec2:
             encoder.config.apply_spec_augment = False
 
-        encoder.requires_grad_(False)
-
         # Wrap encoder forward to handle Whisper's input_features vs input_values
         original_forward = encoder.forward
-        is_whisper = "whisper" in config.audio_model_id.lower() or (
-            hasattr(encoder.config, "model_type") and "whisper" in encoder.config.model_type.lower()
-        )
         input_key = "input_features" if is_whisper else "input_values"
 
         def safe_encoder_forward(self_encoder, input_values=None, **kwargs):
@@ -345,8 +345,7 @@ class ASRModel(PreTrainedModel):
         encoder.forward = types.MethodType(safe_encoder_forward, encoder)
 
         # Freeze all encoder parameters (no fine-tuning without LoRA)
-        for param in encoder.parameters():
-            param.requires_grad = False
+        encoder.requires_grad_(False)
 
         return encoder
 
