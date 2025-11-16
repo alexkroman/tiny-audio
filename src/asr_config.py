@@ -23,13 +23,9 @@ class ASRConfig(transformers.PretrainedConfig):
         audio_sample_rate: int = 16000,
         # Projector initialization constants
         projector_init_std: float = 0.02,
-        projector_dropout: float = 0.05,
         projector_pool_stride: int = 2,  # AvgPool1d stride (2 = 4x total with Whisper, 1 = no pooling)
         projector_hidden_dim: Optional[int] = None,  # SwiGLU hidden dimension (defaults to encoder_dim * 4)
         rms_norm_eps: float = 1e-6,  # Epsilon for LlamaRMSNorm in projector
-        label_smoothing: float = 0.0,  # Label smoothing (0.0 = disabled, needs custom impl for audio expansion)
-        # LoRA default parameters
-        lora_default_dropout: float = 0.0,
         # Inference parameters
         inference_diversity_penalty: float = 0.5,
         inference_warmup_tokens: int = 10,
@@ -86,12 +82,9 @@ class ASRConfig(transformers.PretrainedConfig):
         self.llm_dim = llm_dim
         self.audio_sample_rate = audio_sample_rate
         self.projector_init_std = projector_init_std
-        self.projector_dropout = projector_dropout
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
         self.rms_norm_eps = rms_norm_eps
-        self.label_smoothing = label_smoothing
-        self.lora_default_dropout = lora_default_dropout
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
         if "audio_config" not in kwargs:
@@ -155,14 +148,11 @@ class ASRConfig(transformers.PretrainedConfig):
         output["projector_pool_stride"] = self.projector_pool_stride
         output["projector_hidden_dim"] = self.projector_hidden_dim
         output["rms_norm_eps"] = self.rms_norm_eps
-        output["label_smoothing"] = self.label_smoothing
         output["system_prompt"] = self.system_prompt
         output["user_prompt"] = self.user_prompt
         output["num_beams"] = self.num_beams
         output["audio_sample_rate"] = self.audio_sample_rate
         output["projector_init_std"] = self.projector_init_std
-        output["projector_dropout"] = self.projector_dropout
-        output["lora_default_dropout"] = self.lora_default_dropout
         output["inference_diversity_penalty"] = self.inference_diversity_penalty
         output["inference_warmup_tokens"] = self.inference_warmup_tokens
         output["max_new_tokens"] = self.max_new_tokens

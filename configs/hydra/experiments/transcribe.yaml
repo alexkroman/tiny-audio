@@ -15,28 +15,7 @@ model:
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
 
-  # Projector configuration
-  projector_dropout: 0.1
-  label_smoothing: 0.1  # Custom label smoothing applied after audio token expansion
-
-# Encoder LoRA Configuration
-encoder_lora:
-  r: 0 # Disable LoRA (same as stage1)
-  lora_alpha: 16  # Scaling factor (alpha/r = 1.0)
-  target_modules: [q_proj, k_proj]  # HuBERT attention projections
-  lora_dropout: 0.05
-  bias: none
-
-# Decoder LoRA Configuration
-peft:
-  peft_method: lora  # Enable LoRA fine-tuning on decoder
-  r: 0  # Disable LORA (same as stage1)
-  lora_alpha: 8
-  target_modules: ["q_proj", "v_proj"]
-  bias: none  # No bias training
-  task_type: CAUSAL_LM  # Causal language modeling
-  lora_dropout: 0.05
-  inference_mode: false  # Training mode
+  # Projector configuration (dropout removed)
 
 training:
   # Hub configuration
@@ -63,8 +42,6 @@ training:
   # Optimization
   weight_decay: 0.01
   max_grad_norm: 1.0
-  # Note: label_smoothing_factor would cause HF Trainer error with expanded audio tokens
-  # Instead, we use custom label smoothing in the model's forward method
 
   # Memory optimization
   torch_compile: false  # Disabled for faster startup

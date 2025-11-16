@@ -3,8 +3,6 @@ defaults:
   - model: whisper_turbo  # Model architecture
   - data: loquacious_clean  # Dataset
   - training: mac_override  # Training settings
-  - optional encoder_lora: default  # Optional encoder LoRA
-  - optional peft: default  # Optional decoder LoRA/PEFT
   - _self_
 
 # Hydra configuration

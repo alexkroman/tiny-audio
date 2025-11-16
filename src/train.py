@@ -440,60 +440,18 @@ def main(cfg: DictConfig) -> None:
         system_prompt=cfg.model.system_prompt,
         encoder_dim=encoder_config.hidden_size,
         llm_dim=decoder_config.hidden_size,
-        projector_dropout=cfg.model.get("projector_dropout", 0.05),
         projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
-        label_smoothing=cfg.model.get("label_smoothing", 0.0),
-        mask_time_prob=cfg.data.get("mask_time_prob", 0.05),
-        mask_time_length=cfg.data.get("mask_time_length", 10),
     )
-
-    # Extract PEFT configs if present
-    peft_config = None
-    if "peft" in cfg and cfg.peft.get("peft_method"):
-        peft_config = OmegaConf.to_container(cfg.peft, resolve=True)
-
-    encoder_lora_config = None
-    if "encoder_lora" in cfg and cfg.encoder_lora.get("r", 0) > 0:
-        encoder_lora_config = OmegaConf.to_container(cfg.encoder_lora, resolve=True)
 
     # Load from pretrained if specified, otherwise create new model
     if cfg.model.get("pretrained_model_path"):
         print(f"Loading pretrained model from: {cfg.model.pretrained_model_path}")
-        # from_pretrained will automatically load LoRA weights if they exist in the checkpoint
-        # It reads encoder_lora_config.json and decoder_lora_config.json from the Hub
         model = ASRModel.from_pretrained(
             cfg.model.pretrained_model_path,
             config=asr_config,
         )
-
-        # Apply fresh LoRA if needed (when loading base model without LoRA)
-        if (
-            encoder_lora_config
-            and encoder_lora_config.get("r", 0) > 0
-            and not any("lora" in n.lower() for n, _ in model.encoder.named_parameters())
-        ):
-            from peft import TaskType
-
-            model.encoder = model._apply_lora(
-                model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
-            )
-            model.encoder_lora_config = encoder_lora_config
-
-        if (
-            peft_config
-            and peft_config.get("peft_method") == "lora"
-            and not any("lora" in n.lower() for n, _ in model.decoder.named_parameters())
-        ):
-            from peft import TaskType
-
-            model.decoder = model._apply_lora(
-                model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder"
-            )
-            model.peft_config = peft_config
     else:
-        model = ASRModel(
-            asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config
-        )
+        model = ASRModel(asr_config)
 
     # Disable cache during training (required for gradient checkpointing)
     model.config.use_cache = False
