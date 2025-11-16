@@ -10,7 +10,7 @@ defaults:
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
-  # pretrained_model_path: "mazesmazes/tiny-audio"
+  pretrained_model_path: "mazesmazes/tiny-audio"
 
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
@@ -84,13 +84,11 @@ training:
   max_steps: 50000
 
   # Reproducibility
-  seed: 52
+  seed: 53
   ignore_data_skip: false
 
 data:
-  # Aggressive SpecAugment for frozen encoder/decoder with small trainable projector
-  # ~65% of time steps will be part of a mask (common for Wav2Vec2 training from scratch)
-  mask_time_prob: 0.65
+  mask_time_prob: 0.10
   mask_time_length: 10
 
 # Early stopping configuration
