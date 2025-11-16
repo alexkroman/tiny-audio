@@ -226,7 +226,6 @@ class DataCollator(DataCollatorForSeq2Seq):
         audio_arrays = [self._extract_audio(f["audio"]) for f in features]
 
         # Extract audio features with attention mask
-        # SpecAugment is applied automatically by the encoder model during training
         # For Whisper: padding="max_length" pads to 3000 frames (30 seconds)
         # For Wav2Vec2: padding=True pads to longest in batch
         padding_strategy = "max_length" if self.is_whisper else True
@@ -435,7 +434,6 @@ def main(cfg: DictConfig) -> None:
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
     # Create data collator for both training and evaluation
-    # SpecAugment is now handled automatically by the model (enabled in train(), disabled in eval())
     data_collator = DataCollator(
         tokenizer=model.tokenizer,
         feature_extractor=model.feature_extractor,

@@ -15,8 +15,6 @@ model:
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
 
-  # Projector configuration (dropout removed)
-
 training:
   # Hub configuration
   push_to_hub: true
@@ -35,7 +33,7 @@ training:
 
   learning_rate: 1.0e-4
 
-  warmup_steps: 1000  # Increased for LoRA stability (2% of 50k steps)
+  warmup_steps: 1000  # 2.5% of 40k steps
   lr_scheduler_type: "cosine"
 
   # Optimization
@@ -62,10 +60,6 @@ training:
   # Reproducibility
   seed: 42
   ignore_data_skip: false
-
-data:
-  mask_time_prob: 0.10
-  mask_time_length: 10
 
 # Early stopping configuration
 early_stopping:

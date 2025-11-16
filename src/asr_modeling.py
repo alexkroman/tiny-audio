@@ -203,7 +203,6 @@ class ASRModel(PreTrainedModel):
             model.projector = model.projector.to(dtype=target_dtype)
 
             # Note: encoder.safetensors and decoder.safetensors are no longer used
-            # since we removed LoRA support
 
             device = kwargs.get("device")
             if device is not None:
@@ -316,9 +315,6 @@ class ASRModel(PreTrainedModel):
             and "wav2vec2" in encoder.config.model_type.lower()
         )
 
-        if is_whisper or is_wav2vec2:
-            encoder.config.apply_spec_augment = False
-
         # Wrap encoder forward to handle Whisper's input_features vs input_values
         original_forward = encoder.forward
         input_key = "input_features" if is_whisper else "input_values"
@@ -332,7 +328,7 @@ class ASRModel(PreTrainedModel):
 
         encoder.forward = types.MethodType(safe_encoder_forward, encoder)
 
-        # Freeze all encoder parameters (no fine-tuning without LoRA)
+        # Freeze all encoder parameters
         encoder.requires_grad_(False)
 
         return encoder
@@ -364,7 +360,7 @@ class ASRModel(PreTrainedModel):
         # Cache can be enabled/disabled via config.use_cache
         decoder.config.use_cache = config.use_cache
 
-        # Freeze all decoder parameters (no fine-tuning without LoRA)
+        # Freeze all decoder parameters (only projector is trainable)
         decoder.requires_grad_(False)
 
         return decoder
