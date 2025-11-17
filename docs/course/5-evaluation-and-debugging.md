@@ -300,13 +300,13 @@ When you encounter a non-recoverable spike, here are a few things you can try:
 
 - **Symptoms**: Training loss goes down, but validation loss goes up.
 
-- **Solutions**: Add more data, or increase regularization (e.g., by adding LoRA dropout).
+- **Solutions**: Add more data, or increase regularization (e.g., by adding dropout or weight decay).
 
 **Problem 3: Model outputs gibberish**
 
 - **Symptoms**: Transcriptions are nonsense or repetitive.
 
-- **Solutions**: This could be a sign that the projector is not learning correctly. You could try increasing the LoRA rank of the decoder or lowering the learning rate.
+- **Solutions**: This could be a sign that the projector is not learning correctly. You could try adjusting the projector's learning rate or hidden dimension.
 
 **Problem 4: Out of memory**
 
@@ -366,11 +366,7 @@ You should see:
 
 - `config.json` - Model configuration
 
-- `projector.safetensors` - Projector weights (always present)
-
-- `encoder.safetensors` - Encoder LoRA (if enabled)
-
-- `decoder.safetensors` - Decoder LoRA (if enabled)
+- `projector.safetensors` - Projector weights (the only trained component)
 
 - `trainer_state.json` - Training state
 
@@ -812,7 +808,7 @@ else:
     print("  Tips for improvement:")
     print("  • Train longer (more steps)")
     print("  • Use more data")
-    print("  • Increase LoRA rank")
+    print("  • Adjust projector hidden dimension")
     print("  • Tune learning rate")
 
 

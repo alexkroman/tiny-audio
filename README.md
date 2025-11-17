@@ -8,7 +8,7 @@
 
 This isn't just another ASR model. This is a launchpad. A minimal, hackable, and deeply understandable codebase that empowers you to build, train, and deploy your own speech recognition system from scratch. In a single day, on a single GPU, for the price of a few coffees.
 
-Tiny Audio combines the power of massive pretrained models like HuBERT and Qwen-3 8B with the efficiency of LoRA, allowing you to create a high-quality, custom ASR model that is truly yours.
+Tiny Audio combines the power of massive pretrained models like HuBERT and SmolLM3-3B with an efficient projector-only training approach, allowing you to create a high-quality, custom ASR model that is truly yours.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
@@ -40,7 +40,7 @@ This repository is also a free, 6-hour course designed to teach you the art and 
 In just six hours, you will:
 
 - **Understand the Architecture:** Go deep on the encoder-projector-decoder model that powers modern ASR.
-- **Master PEFT:** Learn the theory and practice of parameter-efficient fine-tuning with LoRA.
+- **Master Efficient Training:** Learn how to train just the projector while leveraging frozen pretrained models.
 - **Train Your Own Model:** Get your hands dirty and train a model from scratch on a real-world dataset.
 - **Deploy and Share:** Push your model to the Hugging Face Hub, write a professional model card, and share your work with the world.
 
@@ -66,49 +66,44 @@ poetry run python src/train.py +experiments=stage1
 
 Tiny Audio is built on a simple, powerful idea: combine the best pretrained models for audio and language, and efficiently teach them to work together.
 
-1. **The Ear (Audio Encoder):** We start with `facebook/hubert-xlarge-ls960-ft`, a massive model that has already learned to understand the nuances of human speech. We use LoRA to fine-tune it, teaching it to focus on the specific sounds of our dataset.
-1. **The Bridge (Audio Projector):** This is a small, trainable neural network that acts as a translator, converting the audio features from the encoder into a format the language model can understand.
-1. **The Brain (Language Model):** We use `Qwen/Qwen-3 8B`, a powerful language model that already knows how to generate coherent text. We use LoRA to teach it to generate transcriptions instead of just general-purpose text.
+1. **The Ear (Audio Encoder):** We start with `facebook/hubert-xlarge-ls960-ft`, a massive model that has already learned to understand the nuances of human speech. We keep this frozen, leveraging its pretrained knowledge.
+1. **The Bridge (Audio Projector):** This is a small, trainable SwiGLU MLP with temporal compression that acts as a translator, converting the audio features from the encoder into a format the language model can understand. This is the only component we train.
+1. **The Brain (Language Model):** We use `HuggingFaceTB/SmolLM3-3B`, a powerful yet efficient language model that already knows how to generate coherent text. We keep this frozen as well, relying on its language understanding capabilities.
 
-By freezing the vast majority of the parameters in the encoder and decoder and only training the small LoRA adapters and the projector, we can achieve incredible efficiency without sacrificing performance.
+By keeping both the encoder and decoder completely frozen and only training the projector (~13M parameters), we achieve incredible efficiency without sacrificing performance.
 
 ### Key Concepts Explained
 
-**What is LoRA?** Low-Rank Adaptation adds small trainable "adapter" matrices to frozen model weights. Instead of updating a 2048×2048 weight matrix (4.2M params), LoRA uses two small matrices: 2048×8 and 8×2048 (32K params). This is 0.76% the size but captures most of the adaptation needed!
+**What is the Audio Projector?** A SwiGLU MLP with temporal compression that bridges the audio encoder and language model. It concatenates k=2 consecutive audio frames (reducing sequence length by 2x) and uses three linear layers with SwiGLU activation to transform from audio space (1280-dim) to language model space (3072-dim for SmolLM3-3B).
 
 **What is SwiGLU?** Swish Gated Linear Unit - a modern activation function that gates information flow. Used in Llama and other state-of-the-art models. Formula: `SwiGLU(x) = Swish(Wx) ⊗ (Vx)` where `Swish(x) = x × sigmoid(x)`.
 
-**What is RMSNorm?** Root Mean Square Normalization - a simpler, faster alternative to LayerNorm that just normalizes by the RMS value: `x / sqrt(mean(x²))`. Used in modern transformers like Llama.
+**What is Temporal Compression?** Instead of processing every audio frame, we concatenate k=2 consecutive frames before projection. This reduces the sequence length by 2x while preserving temporal information, making the model more efficient.
 
 **Why 16kHz audio?** This sample rate captures human speech frequency range (85-255 Hz fundamental + harmonics up to ~8kHz) while being computationally efficient. Industry standard for ASR.
 
-**Why 5x downsampling?** Reduces computational cost in the decoder while maintaining ~100ms temporal resolution per frame - detailed enough for accurate transcription.
+**Why projector-only training?** The encoder and decoder are already excellent at their tasks from pretraining. We only need to teach them how to communicate, which the projector accomplishes with just ~13M parameters (vs 4.3B total).
 
-### LoRA Configuration
+### Projector Architecture
 
-**Encoder LoRA:**
+The Audio Projector is the key innovation that makes Tiny Audio efficient:
 
-- Rank: 16
-- Alpha: 16 (scaling factor)
-- Target modules: q_proj, k_proj in HuBERT attention layers
-- Adds ~4M trainable parameters (3,932,160)
+**Architecture Details:**
+- **Input**: HuBERT embeddings (1280-dim) concatenated from k=2 frames → 2560-dim
+- **Hidden layer**: 5120-dim (2x encoder dim)
+- **Output**: 3072-dim (SmolLM3-3B embedding size)
+- **Activation**: SwiGLU (same as Llama/Mistral MLPs)
+- **Parameters**: ~13M total
 
-**Decoder LoRA:**
+**Why projector-only training works:**
 
-- Rank: 8
-- Alpha: 32 (scaling factor = 4.0)
-- Target modules: q_proj, v_proj in Qwen-3 attention layers
-- Adds ~4M trainable parameters (3,833,856)
-
-Why use parameter-efficient training with LoRA on both encoder and decoder? Because:
-
-- **You train ~146M parameters** instead of 9.3+ billion (projector: ~138M + encoder LoRA: ~4M + decoder LoRA: ~4M)
-- **Training is fast** (~24 hours on A40) thanks to reduced gradient computations
+- **You train only 13M parameters** instead of 4.3+ billion (0.3% of total)
+- **Training is fast** (~24 hours on A40) with no gradient computation for frozen models
 - **It's cheap** (~$12 for a full run)
 - **You leverage pretrained knowledge** from both audio and language domains
-- **Memory efficient** - runs on a single A40 40GB with LoRA adapters
-- **LoRA enables targeted adaptation** of both encoder and decoder without full fine-tuning
-- **Flexible configuration** - easily adjust LoRA rank, target modules, and alpha for both models
+- **Memory efficient** - runs on a single A40 40GB GPU
+- **Simple and stable** - no complex adapter configurations or hyperparameter tuning
+- **Modular design** - easily swap encoder or decoder models without retraining everything
 
 ## Training details
 

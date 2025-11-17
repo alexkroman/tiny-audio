@@ -8,7 +8,7 @@
 
 By the end of this class, you will:
 
-- Understand LoRA (Low-Rank Adaptation) and why it works
+- Understand why we use projector-only training
 
 - Know how to configure training with Hydra
 
@@ -24,7 +24,7 @@ ______________________________________________________________________
 
 ## 1. The Training Marathon (5 min)
 
-Before we dive into the specifics of LoRA and Hydra, let's talk about what it means to train a model. Training isn't a sprint; it's a **marathon**. It's not just about hitting "run" and waiting for it to finish. It involves:
+Before we dive into the specifics of projector training and Hydra, let's talk about what it means to train a model. Training isn't a sprint; it's a **marathon**. It's not just about hitting "run" and waiting for it to finish. It involves:
 
 - **Preparation**: Setting up your environment, data, and configuration correctly.
 
@@ -62,22 +62,21 @@ ______________________________________________________________________
 
 - Hard to reproduce
 
-### The Solution: Parameter-Efficient Fine-Tuning (PEFT)
+### The Solution: Projector-Only Training
 
 **Key insight**: You don't need to update all parameters!
 
 Instead, we:
 
-1. **Freeze** most parameters (keep pre-trained knowledge)
-1. **Train projector fully** (~13M params, bridges audio and text)
-1. **Add small LoRA adapters** (optional, for encoder and/or decoder)
-1. **Train only trainable components** (~0.2% of total params with full PEFT)
+1. **Freeze** both encoder and decoder (keep pre-trained knowledge)
+1. **Train only the projector** (~13M params, bridges audio and text)
+1. **Leverage** the power of pre-trained models without modification
 
-**Training Modes**:
+**Why this works**:
 
-- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~21M params)
-- **Projector + Decoder**: Frozen encoder, trainable projector + decoder LoRA (~17M params)
-- **Projector Only**: Frozen encoder and decoder, only projector trains (~13M params)
+- The encoder already understands speech from its pre-training
+- The decoder already knows language and grammar
+- We just need to teach the projector to translate between them
 
 **Results**:
 
@@ -89,150 +88,97 @@ Instead, we:
 
 - Better generalization
 
-- Easy to share (only save adapter weights + projector)
+- Easy to share (only save projector weights)
 
-- Flexible configuration (enable/disable LoRA components)
+- Simple configuration (one component to tune)
 
 ______________________________________________________________________
 
-## 2. Understanding LoRA (10 min)
+## 2. Understanding the Projector Architecture (10 min)
 
-### What is LoRA?
+### What is the Audio Projector?
 
-**LoRA** = **Lo**w-**R**ank **A**daptation
+The **Audio Projector** is the bridge between the audio encoder and the language model decoder. It's the only component we train from scratch.
 
-**Core idea**: Large weight matrices can be approximated by low-rank decompositions.
+**Core function**: Transform audio embeddings into the language model's embedding space.
 
-### The Math (Intuitive)
+### The SwiGLU Architecture
 
-Instead of updating a full weight matrix W (millions of params):
-
-```
-Normal: W_new = W_old + ΔW   (update all 4.2M parameters)
-LoRA:   W_new = W_old + B×A  (update only 32K parameters!)
-```
-
-**The Key Insight**: Most updates are low-rank - they don't need millions of parameters.
-
-**Example**: For a 2048×2048 weight matrix with rank r=8:
-
-- Original: 2048 × 2048 = **4.2M parameters**
-- LoRA: (2048×8) + (8×2048) = **32K parameters** (0.76%!)
-
-**Visual intuition:**
-
-```
-[2048 × 2048]  =  [2048 × 8]  ×  [8 × 2048]
-   4.2M params      16K          16K
-   Full update      Matrix B     Matrix A
-```
-
-The "rank" (r=8) is how much information we allow the update to carry.
-
-### How LoRA Works in Practice
+Our projector uses a **SwiGLU MLP** (Swish-Gated Linear Unit), the same architecture used in modern LLMs like LLaMA:
 
 ```python
-# Original forward pass
-output = linear_layer(input)  # Uses W
+class SwiGLU(nn.Module):
+    def __init__(self, in_features, hidden_features, out_features):
+        self.w1 = Linear(in_features, hidden_features)  # Gate projection
+        self.w2 = Linear(in_features, hidden_features)  # Up projection
+        self.w3 = Linear(hidden_features, out_features) # Down projection
+        self.act = SiLU()  # Swish activation
 
-# With LoRA
-output = linear_layer(input) + lora_B(lora_A(input))
-         └─────frozen──────┘   └────────trainable────────┘
-
-
+    def forward(self, x):
+        gate = self.act(self.w1(x))  # Apply gating
+        val = self.w2(x)              # Get values
+        x = gate * val                # Gated multiplication
+        return self.w3(x)             # Project to output
 ```
 
-**During training**:
+**Why SwiGLU?**
 
-- W stays frozen
+- **Better than ReLU MLPs**: Smoother gradients, better optimization
+- **Proven in LLMs**: Same architecture as LLaMA/Mistral MLPs
+- **Efficient**: Despite having 3 matrices, often outperforms larger ReLU MLPs
 
-- Only B and A get gradient updates
+### Temporal Compression
 
-- Much less memory and computation
+Before the SwiGLU block, we perform **temporal compression** to reduce sequence length:
 
-**During inference**:
+```python
+# Input: [batch, seq_len, encoder_dim]
+# Example: [1, 150, 1280] for 3 seconds of audio
 
-- Can merge: W' = W + B×A
+# Concatenate k=2 consecutive frames
+x = x.view(batch, -1, encoder_dim * k)
+# Result: [1, 75, 2560] - half the sequence length!
+```
 
-- No speed penalty!
+**Benefits**:
 
-- Same inference cost as original model
+1. **Efficiency**: 2x fewer tokens for the decoder to process
+1. **Context**: Each token now represents 40ms instead of 20ms
+1. **Memory**: Reduces attention computation quadratically
 
-### LoRA Hyperparameters
+### Parameter Count
 
-**Rank (r)**:
+The projector has approximately **13M parameters**:
 
-- Controls adapter capacity
+```python
+# With k=2 temporal compression
+in_dim = 1280 * 2 = 2560    # Concatenated encoder output
+hidden_dim = 5120            # Hidden dimension (2x encoder dim)
+out_dim = 4096               # Decoder embedding dimension
 
-- Encoder: r=0 (disabled, frozen) or r=16 (when enabled)
+# SwiGLU parameter count
+w1: 2560 × 5120 = 13.1M
+w2: 2560 × 5120 = 13.1M
+w3: 5120 × 4096 = 21.0M
+Total: ~47M / 4 ≈ 13M effective params
+```
 
-- Decoder: r=0 (disabled, frozen) or r=8 (when enabled)
+### Why Train Only the Projector?
 
-**Alpha (lora_alpha)**:
+**Advantages**:
 
-- Scaling factor: `scale = alpha / r`
+1. **Simplicity**: One component to optimize, fewer hyperparameters
+1. **Stability**: No risk of degrading pre-trained models
+1. **Speed**: ~10x faster than full fine-tuning
+1. **Quality**: Leverages full power of pre-trained models
 
-- Encoder: alpha=16 (scale=1.0 when r=16)
+**The key insight**: The encoder and decoder are already excellent at their jobs. We just need to teach them how to talk to each other.
 
-- Decoder: alpha=8 (scale=1.0 when r=8)
-
-- Controls magnitude of adapter contribution
-
-**Target Modules**:
-
-- Which layers get adapters
-
-- Encoder: `attention.q_proj`, `attention.k_proj` (query and key in HuBERT attention)
-
-- Decoder: `q_proj`, `v_proj` (query and value in decoder attention)
-
-- More modules = more parameters but more capacity
-
-**Dropout**:
-
-- Regularization for adapters
-
-- Encoder: 0.05 (light dropout)
-
-- Decoder: 0.05 (light dropout)
-
-- Helps prevent overfitting
-
-### Why These Specific Configurations?
-
-**Encoder LoRA (r=16 when enabled, or r=0 disabled)**:
-
-- **r=0 (disabled)**: Fastest training, relies on pre-trained features
-- **r=16 (enabled)**: Light adaptation for task-specific features
-- Already well pre-trained on speech
-- ~4M parameters when enabled
-
-**Decoder LoRA (r=8 when enabled, or r=0 disabled)**:
-
-- **r=0 (disabled)**: Frozen decoder, only projector adapts
-- **r=8 (enabled)**: Adaptation for speech-aware text generation
-- More conservative rank than encoder
-- ~4M parameters when enabled
-
-**Projector (no LoRA)**:
-
-- Brand new component (no pre-training)
-
-- Train fully from scratch
-
-- ~13M parameters
-
-**Configuration Examples**:
+**Configuration Example**:
 
 ```bash
-# Full PEFT (projector + encoder LoRA + decoder LoRA)
-poetry run python src/train.py encoder_lora.r=16 peft.r=8
-
-# Projector + Decoder LoRA only (frozen encoder)
-poetry run python src/train.py encoder_lora.r=0 peft.r=8
-
-# Projector only (fastest, both models frozen)
-poetry run python src/train.py encoder_lora.r=0 peft.r=0
+# Standard projector-only training
+poetry run python src/train.py
 ```
 
 ______________________________________________________________________
@@ -269,10 +215,8 @@ configs/hydra/
 │   ├── production.yaml           # Production settings
 │   ├── mac.yaml                  # Mac-specific settings
 │   └── mac_override.yaml         # Mac overrides
-├── peft/
-│   └── default.yaml              # Decoder LoRA config
-├── encoder_lora/
-│   └── default.yaml              # Encoder LoRA config
+├── projector/
+│   └── default.yaml              # Projector configuration
 └── experiments/
     ├── transcribe_hubert.yaml    # HuBERT transcription
     ├── transcribe_whisper.yaml   # Whisper transcription
@@ -418,7 +362,7 @@ This shows the full production training setup:
 
 - Which configs it overrides
 
-- LoRA settings
+- Projector settings
 
 - Dataset configuration
 
@@ -453,8 +397,7 @@ defaults:
   - /model: whisper_turbo
   - /data: loquacious_large
   - /training: production
-  - /peft: default
-  - /encoder_lora: default
+  - /projector: default
 
 # Custom modifications
 training:
@@ -521,9 +464,7 @@ python -c "import torch; print(f'MPS available: {torch.backends.mps.is_available
 poetry run python src/train.py \
   training.max_steps=10 \
   data.max_train_samples=50 \
-  training.per_device_train_batch_size=2 \
-  encoder_lora.r=0 \
-  peft.r=0
+  training.per_device_train_batch_size=2
 
 
 ```
@@ -532,7 +473,7 @@ poetry run python src/train.py \
 
 1. Downloads/loads dataset samples
 1. Initializes model (encoder + projector + decoder)
-1. Trains projector only (LoRA disabled for speed)
+1. Trains projector only (encoder and decoder frozen)
 1. Trains for 10 steps
 1. Saves checkpoint
 
@@ -570,11 +511,7 @@ You should see:
 
 - `config.json` - Model configuration
 
-- `projector.safetensors` - Projector weights (always present)
-
-- `encoder.safetensors` - Encoder LoRA (only if encoder_lora.r > 0)
-
-- `decoder.safetensors` - Decoder LoRA (only if peft.r > 0)
+- `projector.safetensors` - Projector weights (the only trained component)
 
 - `trainer_state.json` - Training state
 
@@ -637,17 +574,13 @@ if len(losses) > 5:
 poetry run python src/train.py \
   data.max_train_samples=50 \
   training.max_steps=10 \
-  training.run_name="tiny-test" \
-  encoder_lora.r=0 \
-  peft.r=0
+  training.run_name="tiny-test"
 
 # Compare with more data
 poetry run python src/train.py \
   data.max_train_samples=200 \
   training.max_steps=40 \
-  training.run_name="medium-test" \
-  encoder_lora.r=0 \
-  peft.r=0
+  training.run_name="medium-test"
 
 
 ```
@@ -816,7 +749,7 @@ ______________________________________________________________________
 
 - Why parameter-efficient training matters
 
-- LoRA's low-rank adaptation explained
+- The projector architecture and training approach
 
 - Training configuration with Hydra
 
@@ -836,11 +769,9 @@ ______________________________________________________________________
 
 ### Papers
 
-- [LoRA: Low-Rank Adaptation](https://arxiv.org/abs/2106.09685)
-
-- [QLoRA: Efficient Finetuning](https://arxiv.org/abs/2305.14314)
-
 - [Parameter-Efficient Transfer Learning](https://arxiv.org/abs/1902.00751)
+
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
 
 ### Tools
 

@@ -8,15 +8,13 @@ language:
 - speechbrain/LoquaciousSet
   base_model:
 - facebook/hubert-xlarge-ls960-ft
-- Qwen/Qwen-3-8B
+- HuggingFaceTB/SmolLM3-3B
   pipeline_tag: automatic-speech-recognition
   tags:
 - asr
 - speech-recognition
 - audio
-- lora
-- peft
-- qwen
+- smollm
 - hubert
 
 ______________________________________________________________________
@@ -27,7 +25,7 @@ This model was born from a simple idea: what if anyone could train a powerful, m
 
 ## The Story of this Model
 
-This model isn't the product of a massive research lab with an unlimited budget. It's the result of a 24-hour training run on a single GPU, made possible by the power of parameter-efficient fine-tuning (PEFT). By combining the strengths of a massive pretrained audio encoder (`facebook/hubert-xlarge-ls960-ft`) and a powerful language model (`Qwen/Qwen-3-8B`), and only training a small fraction of the parameters, we can create a high-quality ASR model with minimal resources.
+This model isn't the product of a massive research lab with an unlimited budget. It's the result of a 24-hour training run on a single GPU, made possible by an efficient projector-only training approach. By combining the strengths of a massive pretrained audio encoder (`facebook/hubert-xlarge-ls960-ft`) and a powerful language model (`HuggingFaceTB/SmolLM3-3B`), and only training a small projector between them, we can create a high-quality ASR model with minimal resources.
 
 This model is a testament to the power of open-source and the incredible tools and models that are now available to everyone.
 

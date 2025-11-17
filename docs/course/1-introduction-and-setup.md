@@ -147,7 +147,7 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 - 1.3 billion parameters.
 
-- These are frozen (not trained) in our course, though we can optionally add LoRA adapters.
+- These are frozen (not trained) in our course for efficiency.
 
 **Analogy**: An expert musician who can listen to any piece of music and instantly transcribe the notes, rhythm, and instrumentation, without needing the sheet music.
 
@@ -185,27 +185,27 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 - 8 billion parameters.
 
-- We use LoRA (Low-Rank Adaptation) to efficiently adapt this huge model (~4M trainable params) without training all 8 billion parameters.
+- We keep this frozen during training and only train the projector that feeds into it.
 
 **Analogy**: A master storyteller who takes a sequence of key events (the audio features) and weaves them into a compelling, complete narrative (the final transcription).
 
 ### Why This Architecture?
 
-**Efficiency**: We only train ~21M parameters instead of the full 9.3+ billion (~0.2% of the total).
+**Efficiency**: We only train ~13M parameters instead of the full 9.3+ billion (~0.14% of the total).
 
 - Projector: ~13M (fully trained)
 
-- Encoder LoRA: ~4M (optional adapter weights)
+- Encoder: Frozen (no training)
 
-- Decoder LoRA: ~4M (optional adapter weights)
+- Decoder: Frozen (no training)
 
-**Flexibility**: You can train in different modes:
+**Simplicity**: By focusing on just the projector, training is:
 
-- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~21M params)
+- **Straightforward**: No complex adapter configurations
 
-- **Projector + Decoder LoRA**: Frozen encoder, trainable projector & decoder adapters (~17M params)
+- **Stable**: Fewer hyperparameters to tune
 
-- **Projector Only**: Frozen encoder & decoder, only projector learns (~13M params)
+- **Fast**: Less computational overhead
 
 **Fast Training**: A full run completes in ~24 hours on a single GPU.
 
@@ -505,8 +505,6 @@ ______________________________________________________________________
 ### Foundational Papers
 
 - **HuBERT**: [Self-Supervised Speech Representation Learning](https://arxiv.org/abs/2106.07447)
-
-- **LoRA**: [Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685)
 
 - **Attention**: [Attention Is All You Need](https://arxiv.org/abs/1706.03762) (The paper that introduced Transformers)
 

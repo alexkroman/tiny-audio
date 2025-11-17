@@ -68,14 +68,14 @@ Tiny Audio supports multiple decoder options - powerful language models that gen
 - 8 billion parameters
 - Excellent multilingual capabilities
 - Strong text generation quality
-- Efficient with LoRA fine-tuning (rank 8)
+- Used frozen in our training pipeline
 
 **Alternative: SmolLM3-3B**
 
 - 3 billion parameters
 - Smaller and faster
 - Good for resource-constrained environments
-- Also supports LoRA fine-tuning
+- Also used frozen during training
 
 Both are open source and well-documented
 
@@ -458,27 +458,20 @@ print("  • Qwen-3 8B balances size, performance, and efficiency")
 
 # Memory estimation
 print("\n" + "="*80)
-print("MEMORY REQUIREMENTS (LoRA fine-tuning)")
+print("MEMORY REQUIREMENTS (Projector-Only Training)")
 print("="*80)
 
-for decoder in decoders[:3]:  # Top 3 models
-    # LoRA memory estimate
-    lora_rank = 64
-    num_layers = 32
-    hidden = decoder["hidden_dim"]
+# With frozen encoder and decoder, we only train the projector
+proj_params = 13e6  # Projector parameters
 
-    # LoRA params (Q,K,V,O projections)
-    lora_params = 4 * 2 * hidden * lora_rank * num_layers
+# Memory estimate (params + gradients + optimizer states)
+memory_gb = (proj_params * 4 * 3) / 1e9  # 4 bytes, 3x for Adam
 
-    # Total trainable
-    proj_params = 122e6  # Fixed projector
-    encoder_lora = 2e6  # Fixed encoder LoRA
-    total_trainable = proj_params + encoder_lora + lora_params
-
-    # Memory estimate (params + gradients + optimizer states)
-    memory_gb = (total_trainable * 4 * 3) / 1e9  # 4 bytes, 3x for Adam
-
-    print(f"{decoder['name']:<20} ~{memory_gb:.1f} GB training memory")
+print(f"Projector-only training: ~{memory_gb:.1f} GB training memory")
+print("Plus frozen model weights in memory:")
+print("  - Encoder (HuBERT): ~5.2 GB")
+print("  - Decoder (Qwen3-8B): ~16 GB")
+print("Total GPU memory needed: ~22-24 GB")
 
 
 ```
