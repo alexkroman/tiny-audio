@@ -59,7 +59,7 @@ training:
 
   # Reproducibility
   seed: 42
-  ignore_data_skip: false
+  ignore_data_skip: true
 
 # Early stopping configuration
 early_stopping:
