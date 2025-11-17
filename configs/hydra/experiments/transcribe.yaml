@@ -5,7 +5,7 @@
 # Based on stage1 configuration with multi-task data
 defaults:
   - override /model: large
-  - override /data: multi_task_complete
+  - override /data: loquacious_medium
   - override /training: production
 
 model:
@@ -15,10 +15,6 @@ model:
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
 
-  # Projector configuration
-  audio_downsample_rate: 5
-  projector_dropout: 0.05  # Linear projector uses simpler architecture with light dropout
-
 training:
   # Hub configuration
   push_to_hub: true
@@ -26,34 +22,44 @@ training:
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
-  per_device_train_batch_size: 14
-  per_device_eval_batch_size: 14
+  # CPU optimization for 9 vCPUs
+  dataloader_num_workers: 1  # Limited by dataset.num_shards=1
+  dataloader_prefetch_factor: 3  # Higher prefetch to compensate for single worker
+
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 32
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
 
   learning_rate: 1.0e-4
 
-  warmup_steps: 1000  # Increased for LoRA stability (2% of 50k steps)
-  lr_scheduler_type: "cosine_with_min_lr"
-  lr_scheduler_kwargs: {"min_lr_rate": 0.1}
+  warmup_steps: 1000  # 2.5% of 40k steps
+  lr_scheduler_type: "cosine"
 
   # Optimization
   weight_decay: 0.01
   max_grad_norm: 1.0
 
   # Memory optimization
-  torch_compile: false  # Disabled - causes issues with encoder LoRA
+  torch_compile: false  # Disabled for faster startup
+  # torch_compile_mode: "default"  # Faster compilation than reduce-overhead
+  # torch_compile_dynamic: true  # Enable dynamic shapes for variable sequence lengths
+  # torch_compile_fullgraph: false  # Allow graph breaks for flexibility
+  torch_compile_config:
+    # Advanced torch.compile settings
+    cache_size_limit: 128  # Allow layer-wise compilation + shape variants (default: 8)
+    compile_threads: 8  # Parallel compilation threads (faster initial compile)
+    capture_scalar_outputs: true  # Reduce graph breaks from .item() calls
+    allow_unspec_int_on_nn_module: true  # Reduce recompilation from layer indices
+  
   gradient_checkpointing: false
 
   # Training duration - 50000 steps as requested
-  max_steps: 50000
+  max_steps: 40000
 
   # Reproducibility
   seed: 42
   ignore_data_skip: true
-
-data:
-  mask_time_prob: 0.05
 
 # Early stopping configuration
 early_stopping:

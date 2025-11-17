@@ -56,19 +56,15 @@ class DatasetLoader:
             cache_dir=self.cache_dir,
         )
 
-        text_column = dataset_cfg.get("text_column", "text")
-        if text_column != "text" and text_column in ds.column_names:
-            # If "text" already exists in the dataset, remove it first
-            if "text" in ds.column_names:
-                ds = ds.remove_columns(["text"])
-            ds = ds.rename_column(text_column, "text")
-
-        audio_column = dataset_cfg.get("audio_column", "audio")
-        if audio_column != "audio" and audio_column in ds.column_names:
-            # If "audio" already exists in the dataset, remove it first
-            if "audio" in ds.column_names:
-                ds = ds.remove_columns(["audio"])
-            ds = ds.rename_column(audio_column, "audio")
+        # Normalize column names
+        for target_col, source_col in [
+            ("text", dataset_cfg.get("text_column", "text")),
+            ("audio", dataset_cfg.get("audio_column", "audio")),
+        ]:
+            if source_col != target_col and source_col in ds.column_names:
+                if target_col in ds.column_names:
+                    ds = ds.remove_columns([target_col])
+                ds = ds.rename_column(source_col, target_col)
 
         # Cast audio column to correct format
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
@@ -77,12 +73,12 @@ class DatasetLoader:
         task = dataset_cfg.get("task", "transcribe")
 
         # Get original features before any modifications
-        original_features = ds.info.features if hasattr(ds, 'info') and ds.info else None
+        original_features = ds.info.features if hasattr(ds, "info") and ds.info else None
 
         # Remove extra columns that might cause feature conflicts
         # Keep only: audio, text
         columns_to_keep = {"audio", "text"}
-        current_columns = ds.column_names if hasattr(ds, 'column_names') and ds.column_names else []
+        current_columns = ds.column_names if hasattr(ds, "column_names") and ds.column_names else []
         columns_to_remove = [col for col in current_columns if col not in columns_to_keep]
 
         if columns_to_remove:
@@ -101,66 +97,68 @@ class DatasetLoader:
             new_features = Features(new_features)
         else:
             # Fallback if no features available
-            new_features = Features({
-                "audio": Audio(sampling_rate=self.sample_rate),
-                "text": Value("string"),
-                "task": Value("string"),
-            })
+            new_features = Features(
+                {
+                    "audio": Audio(sampling_rate=self.sample_rate),
+                    "text": Value("string"),
+                    "task": Value("string"),
+                }
+            )
 
         # Create new dataset with explicit features
-        ds_with_task = IterableDataset.from_generator(
+        return IterableDataset.from_generator(
             add_task_gen,
             gen_kwargs={"dataset": ds, "task_val": task},
             features=new_features,
         )
 
-        return ds_with_task
-
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
-        train_weights = []
+        train_weights, val_weights = [], []
 
         for d_cfg in self.config.datasets:
             train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
             eval_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
-            sampling_weight = d_cfg.get("sampling_weight", 1.0)  # Default equal weight
+            weight = d_cfg.get("sampling_weight", 1.0)
 
+            # Process configs if present, otherwise use direct splits
+            configs_to_process = []
             if "configs" in d_cfg:
-                configs = d_cfg.configs
-                for config, train_split, eval_split in zip(configs, train_splits, eval_splits):
-                    split_cfg = OmegaConf.create(d_cfg)
-                    split_cfg.name = config
-                    train_datasets.append(self._prepare_split(split_cfg, train_split))
-                    val_datasets.append(self._prepare_split(split_cfg, eval_split))
-                    train_weights.append(sampling_weight)
+                for config, train, eval in zip(d_cfg.configs, train_splits, eval_splits):
+                    cfg = OmegaConf.create(d_cfg)
+                    cfg.name = config
+                    configs_to_process.append((cfg, train, eval))
             else:
-                for train_split in train_splits:
-                    train_datasets.append(self._prepare_split(d_cfg, train_split))
-                    train_weights.append(sampling_weight)
-                for eval_split in eval_splits:
-                    val_datasets.append(self._prepare_split(d_cfg, eval_split))
+                configs_to_process = [
+                    (d_cfg, train, eval) for train in train_splits for eval in eval_splits
+                ]
 
-        # Use sampling weights if provided and we have multiple datasets
-        if len(train_datasets) > 1:
-            # Normalize weights
-            total_weight = sum(train_weights[: len(train_datasets)])
-            probabilities = [w / total_weight for w in train_weights[: len(train_datasets)]]
-            train_ds = interleave_datasets(train_datasets, probabilities=probabilities)
-        else:
-            train_ds = train_datasets[0]
+            for cfg, train_split, eval_split in configs_to_process:
+                train_datasets.append(self._prepare_split(cfg, train_split))
+                train_weights.append(weight)
+                if eval_split:
+                    val_datasets.append(self._prepare_split(cfg, eval_split))
+                    val_weights.append(weight)
 
-        if not val_datasets:
-            val_ds = None
-        else:
-            val_ds = interleave_datasets(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
+        # Helper to combine datasets with weights
+        def combine_datasets(datasets, weights):
+            if not datasets:
+                return None
+            if len(datasets) == 1:
+                return datasets[0]
+            # Normalize weights and interleave
+            probs = [w / sum(weights) for w in weights]
+            return interleave_datasets(datasets, probabilities=probs)
 
-        # Shuffle training data for better generalization
-        # Buffer size of 1000 balances memory usage and randomness
-        train_ds = train_ds.shuffle(seed=self.seed, buffer_size=1000)
+        train_ds = combine_datasets(train_datasets, train_weights)
+        val_ds = combine_datasets(val_datasets, val_weights)
 
-        if self.config.max_train_samples:
-            train_ds = train_ds.take(self.config.max_train_samples)
-        if self.config.max_eval_samples:
+        # Shuffle and limit datasets
+        if train_ds:
+            train_ds = train_ds.shuffle(seed=self.seed, buffer_size=1000)
+            if self.config.max_train_samples:
+                train_ds = train_ds.take(self.config.max_train_samples)
+        if val_ds and self.config.max_eval_samples:
             val_ds = val_ds.take(self.config.max_eval_samples)
 
         return train_ds, val_ds
@@ -192,42 +190,34 @@ class DataCollator(DataCollatorForSeq2Seq):
 
     def _preprocess_text(self, text: str) -> str:
         """Preprocess text before Whisper normalization (matches eval script)."""
-        # Handle None or empty text
-        if text is None or not isinstance(text, str):
+        if not isinstance(text, str) or text is None:
             return ""
 
-        # Replace GigaSpeech punctuation tags with actual punctuation
-        text = re.sub(r"<PERIOD>", ".", text)
-        text = re.sub(r"<COMMA>", ",", text)
-        text = re.sub(r"<QUESTIONMARK>", "?", text)
-        text = re.sub(r"<EXCLAMATIONPOINT>", "!", text)
-
-        # Remove <inaudible> tags
-        text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
-        # Remove disfluencies (uh, um)
-        return re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
+        # Apply all text replacements
+        replacements = {
+            r"<PERIOD>": ".",
+            r"<COMMA>": ",",
+            r"<QUESTIONMARK>": "?",
+            r"<EXCLAMATIONPOINT>": "!",
+            r"<inaudible>": "",
+            r"\b(uh|um)\b": "",
+        }
+        for pattern, replacement in replacements.items():
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        return text
 
     def _normalize_text(self, text: str) -> str:
         """Apply Whisper normalization (matches eval script)."""
         return self.text_normalizer.normalize(self._preprocess_text(text))
 
     def _extract_audio(self, audio_decoder) -> Any:
-        # Note: Audio() does peak normalization → [-1, 1]
-        # Wav2Vec2FeatureExtractor does z-normalization → mean=0, std=1
-        # No additional normalization needed here!
-        audio_samples = audio_decoder.get_all_samples()
-        audio_array = audio_samples.data.numpy()
+        """Extract and normalize audio to mono."""
+        audio_array = audio_decoder.get_all_samples().data.numpy().squeeze()
 
-        # Ensure mono audio: squeeze all dimensions, then handle multi-channel
-        audio_array = audio_array.squeeze()
-
-        # If still multi-dimensional (stereo/multi-channel), convert to mono by averaging
+        # Convert to mono if multi-channel
         if audio_array.ndim > 1:
             audio_array = audio_array.mean(axis=0)
-
-        # Ensure 1D array
-        if audio_array.ndim == 0:
-            # Single sample - expand to 1D
+        elif audio_array.ndim == 0:
             audio_array = audio_array.reshape(1)
 
         return audio_array
@@ -236,7 +226,6 @@ class DataCollator(DataCollatorForSeq2Seq):
         audio_arrays = [self._extract_audio(f["audio"]) for f in features]
 
         # Extract audio features with attention mask
-        # SpecAugment is applied automatically by the encoder model during training
         # For Whisper: padding="max_length" pads to 3000 frames (30 seconds)
         # For Wav2Vec2: padding=True pads to longest in batch
         padding_strategy = "max_length" if self.is_whisper else True
@@ -289,56 +278,50 @@ class DataCollator(DataCollatorForSeq2Seq):
                 enable_thinking=False,
             )
 
-            # Create labels - only train on the actual transcription text, not thinking tags
-            labels = [-100] * len(tokens)  # Start with everything masked
+            # Create labels - only train on the actual transcription text
+            labels = [-100] * len(tokens)
 
-            # Get special token IDs
-            im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
-            think_end_id = self.tokenizer.convert_tokens_to_ids("</think>")
+            # Helper to skip whitespace tokens
+            def skip_whitespace(idx, token_list):
+                while (
+                    idx < len(token_list)
+                    and self.tokenizer.decode([int(token_list[idx])]).strip() == ""
+                ):
+                    idx += 1
+                return idx
 
-            # Find where </think> ends (if present) - the actual transcription starts after it
+            # Find content boundaries
+            special_tokens = {
+                "im_end": self.tokenizer.convert_tokens_to_ids("<|im_end|>"),
+                "think_end": self.tokenizer.convert_tokens_to_ids("</think>"),
+                "im_start": self.tokenizer.convert_tokens_to_ids("<|im_start|>"),
+                "assistant": self.tokenizer.convert_tokens_to_ids("assistant"),
+            }
+
+            # Find content start
             content_start = -1
-            for i in range(len(tokens)):
-                if tokens[i] == think_end_id:
-                    # Skip the </think> token and any newlines after it
-                    content_start = i + 1
-                    # Skip newlines
-                    while (
-                        content_start < len(tokens)
-                        and self.tokenizer.decode([int(tokens[content_start])]).strip() == ""
+            # Check for thinking tag end
+            if special_tokens["think_end"] in tokens:
+                idx = tokens.index(special_tokens["think_end"])
+                content_start = skip_whitespace(idx + 1, tokens)
+            else:
+                # Look for assistant marker
+                for i in range(len(tokens) - 2):
+                    if (
+                        tokens[i] == special_tokens["im_start"]
+                        and tokens[i + 1] == special_tokens["assistant"]
                     ):
-                        content_start += 1
-                    break
-
-            # If no thinking tags found, look for assistant content directly
-            if content_start == -1:
-                im_start_id = self.tokenizer.convert_tokens_to_ids("<|im_start|>")
-                assistant_id = self.tokenizer.convert_tokens_to_ids("assistant")
-                for i in range(len(tokens) - 2):  # -2 to safely check i+1 and i+2
-                    if tokens[i] == im_start_id and tokens[i + 1] == assistant_id:
-                        # Start after <|im_start|> and assistant
-                        # Now, find the actual content start by skipping newlines
-                        content_start = i + 2
-                        while (
-                            content_start < len(tokens)
-                            and self.tokenizer.decode([int(tokens[content_start])]).strip() == ""
-                        ):
-                            content_start += 1
+                        content_start = skip_whitespace(i + 2, tokens)
                         break
 
-            # Find the closing <|im_end|> for the assistant message
+            # Find content end (im_end token)
             content_end = -1
-            if content_start > 0:
-                for i in range(content_start, len(tokens)):
-                    if tokens[i] == im_end_id:
-                        content_end = i
-                        break
+            if content_start > 0 and special_tokens["im_end"] in tokens[content_start:]:
+                content_end = tokens[content_start:].index(special_tokens["im_end"]) + content_start
 
-            # Unmask the actual transcription text AND the EOS token
+            # Unmask the actual transcription including EOS token
             if content_start > 0 and content_end > 0:
-                # Include the <|im_end|> token in the loss so model learns to stop
-                for i in range(content_start, content_end + 1):  # +1 to include EOS
-                    labels[i] = tokens[i]
+                labels[content_start : content_end + 1] = tokens[content_start : content_end + 1]
 
             text_features.append(
                 {
@@ -432,59 +415,18 @@ def main(cfg: DictConfig) -> None:
         system_prompt=cfg.model.system_prompt,
         encoder_dim=encoder_config.hidden_size,
         llm_dim=decoder_config.hidden_size,
-        projector_hidden_dim=cfg.model.get("projector_hidden_dim", 2048),
-        projector_dropout=cfg.model.get("projector_dropout", 0.05),
-        mask_time_prob=cfg.data.get("mask_time_prob", 0.05),
-        mask_time_length=cfg.data.get("mask_time_length", 10),
+        projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
     )
-
-    # Extract PEFT configs if present
-    peft_config = None
-    if "peft" in cfg and cfg.peft.get("peft_method"):
-        peft_config = OmegaConf.to_container(cfg.peft, resolve=True)
-
-    encoder_lora_config = None
-    if "encoder_lora" in cfg and cfg.encoder_lora.get("r", 0) > 0:
-        encoder_lora_config = OmegaConf.to_container(cfg.encoder_lora, resolve=True)
 
     # Load from pretrained if specified, otherwise create new model
     if cfg.model.get("pretrained_model_path"):
         print(f"Loading pretrained model from: {cfg.model.pretrained_model_path}")
-        # from_pretrained will automatically load LoRA weights if they exist in the checkpoint
-        # It reads encoder_lora_config.json and decoder_lora_config.json from the Hub
         model = ASRModel.from_pretrained(
             cfg.model.pretrained_model_path,
             config=asr_config,
         )
-
-        # Apply fresh LoRA if needed (when loading base model without LoRA)
-        if (
-            encoder_lora_config
-            and encoder_lora_config.get("r", 0) > 0
-            and not any("lora" in n.lower() for n, _ in model.encoder.named_parameters())
-        ):
-            from peft import TaskType
-
-            model.encoder = model._apply_lora(
-                model.encoder, encoder_lora_config, TaskType.FEATURE_EXTRACTION, "encoder"
-            )
-            model.encoder_lora_config = encoder_lora_config
-
-        if (
-            peft_config
-            and peft_config.get("peft_method") == "lora"
-            and not any("lora" in n.lower() for n, _ in model.decoder.named_parameters())
-        ):
-            from peft import TaskType
-
-            model.decoder = model._apply_lora(
-                model.decoder, peft_config, TaskType.CAUSAL_LM, "decoder"
-            )
-            model.peft_config = peft_config
     else:
-        model = ASRModel(
-            asr_config, peft_config=peft_config, encoder_lora_config=encoder_lora_config
-        )
+        model = ASRModel(asr_config)
 
     # Disable cache during training (required for gradient checkpointing)
     model.config.use_cache = False
@@ -492,7 +434,6 @@ def main(cfg: DictConfig) -> None:
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
     # Create data collator for both training and evaluation
-    # SpecAugment is now handled automatically by the model (enabled in train(), disabled in eval())
     data_collator = DataCollator(
         tokenizer=model.tokenizer,
         feature_extractor=model.feature_extractor,
@@ -514,38 +455,32 @@ def main(cfg: DictConfig) -> None:
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
         callbacks.append(PushToHubCallback())
 
-    # processor = model.get_processor()
-
     # Convert config to dict and remove non-TrainingArguments fields
     training_args = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_args, dict), "training_args must be a dict"
 
-    # Apply torch.compile config before creating TrainingArguments
-    if training_args.get("torch_compile_config"):
-        compile_config = training_args.pop("torch_compile_config")
-        # Configure torch._dynamo settings
-        cache_limit = compile_config.get("cache_size_limit", 64)
-        torch._dynamo.config.cache_size_limit = cache_limit
+    # Apply torch.compile config if present
+    if compile_config := training_args.pop("torch_compile_config", None):
+        # Configure torch compilation settings
+        torch._dynamo.config.cache_size_limit = compile_config.get("cache_size_limit", 64)
         torch._dynamo.config.capture_scalar_outputs = compile_config.get(
             "capture_scalar_outputs", True
         )
         torch._dynamo.config.allow_unspec_int_on_nn_module = compile_config.get(
             "allow_unspec_int_on_nn_module", True
         )
+        torch._inductor.config.compile_threads = compile_config.get("compile_threads", 4)
 
-        # Enable parallel compilation for faster initial compile
-        compile_threads = compile_config.get("compile_threads", 4)
-        torch._inductor.config.compile_threads = compile_threads
-
-    # Handle torch.compile settings (TrainingArguments doesn't support all options)
-    training_args.get("torch_compile", False)
-    training_args.pop("torch_compile_dynamic", False)
-    training_args.pop("torch_compile_backend", "inductor")
-    training_args.pop("torch_compile_mode", None)
-    training_args.pop("torch_compile_fullgraph", False)
-
-    # Remove other custom fields that aren't TrainingArguments parameters
-    for key in ["model_dtype", "attn_implementation"]:
+    # Remove non-TrainingArguments fields
+    non_training_args = [
+        "torch_compile_dynamic",
+        "torch_compile_backend",
+        "torch_compile_mode",
+        "torch_compile_fullgraph",
+        "model_dtype",
+        "attn_implementation",
+    ]
+    for key in non_training_args:
         training_args.pop(key, None)
 
     trainer = Trainer(

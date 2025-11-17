@@ -79,12 +79,10 @@ ______________________________________________________________________
 ```
 your-username/your-model-name/
 ├── config.json                  # Model architecture config
-├── model.safetensors           # Trained weights (projector + LoRA)
+├── model.safetensors           # Trained weights (projector only)
 ├── tokenizer_config.json       # Text tokenizer settings
 ├── preprocessor_config.json    # Audio preprocessing settings
 ├── README.md                   # Model card (documentation)
-├── encoder_lora_config.json    # Encoder LoRA config
-├── decoder_lora_config.json    # Decoder LoRA config
 └── asr_*.py                    # Model code files
 
 
@@ -523,13 +521,13 @@ pipeline_tag: automatic-speech-recognition
 
 This is a speech recognition model trained using the Tiny Audio framework. It combines:
 
-- **Audio Encoder**: HuBERT-XLarge (1.3B params) with optional LoRA adapters (r=16, ~4M trainable)
+- **Audio Encoder**: HuBERT-XLarge (1.3B params, frozen)
 
-- **Audio Projector**: Linear MLP (~13M params, fully trainable)
+- **Audio Projector**: SwiGLU MLP with temporal compression (~13M params, fully trainable)
 
-- **Text Decoder**: Qwen3-8B (8B params) or SmolLM3-3B (3B params) with optional LoRA adapters (r=8, ~4M trainable)
+- **Text Decoder**: Qwen3-8B (8B params) or SmolLM3-3B (3B params, frozen)
 
-**Total trainable (Full PEFT)**: ~21M parameters (projector + encoder LoRA + decoder LoRA)
+**Total trainable**: ~13M parameters (projector only)
 
 ## Training Details
 
@@ -806,7 +804,7 @@ Upload an audio file or record directly to transcribe speech to text.
 
 **Model**: [{model_path}](https://huggingface.co/{model_path})
 **WER**: XX.XX% on LoquaciousSet test set
-**Training**: Efficient fine-tuning with LoRA (3.2% trainable params)
+**Training**: Projector-only training (0.14% trainable params)
 """
 
 
@@ -1067,7 +1065,7 @@ Over 6 classes, you've:
 
 ✅ **Class 3**: Learned about projectors and language models
 
-✅ **Class 4**: Configured and ran training with LoRA
+✅ **Class 4**: Configured and ran projector-only training
 
 ✅ **Class 5**: Evaluated model and analyzed errors
 
@@ -1115,7 +1113,7 @@ Over 6 classes, you've:
 
 1. **Training Experiments:**
 
-   - LoRA rank ablations (r=1 to r=256)
+   - Projector hidden dimension ablations (1024 to 8192)
    - Learning rate schedules (cosine vs linear vs constant)
    - Batch size studies (effective batch 8 to 256)
    - Dataset mixing strategies
@@ -1175,9 +1173,9 @@ Over 6 classes, you've:
 
 - [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
 
-- [LoRA: Low-Rank Adaptation](https://arxiv.org/abs/2106.09685)
-
 - [Whisper: Robust Speech Recognition](https://arxiv.org/abs/2212.04356)
+
+- [HuBERT: Self-Supervised Speech Representation Learning](https://arxiv.org/abs/2106.07447)
 
 ### Communities
 

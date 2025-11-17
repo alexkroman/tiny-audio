@@ -3,8 +3,8 @@ encoder_model_name: openai/whisper-large-v3-turbo
 decoder_model_name: HuggingFaceTB/SmolLM3-3B
 
 # Projector configuration
-projector_hidden_dim: 4096
 audio_downsample_rate: 5
+projector_hidden_dim: 5120  # 4x encoder_dim for SwiGLU (1280 * 4)
 
 # Model runtime settings
 model_dtype: float32

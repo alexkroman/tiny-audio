@@ -16,7 +16,7 @@ By the end of this class, you will be able to:
 
 - Successfully run inference (get a transcription) on an audio file.
 
----
+______________________________________________________________________
 
 # PART A: LECTURE (20 minutes)
 
@@ -26,15 +26,15 @@ By the end of this 6-class course, each student will:
 
 1. **Train** their own customized ASR model.
 
-2. **Evaluate** it on standard benchmarks.
+1. **Evaluate** it on standard benchmarks.
 
-3. **Push** it to their own Hugging Face account.
+1. **Push** it to their own Hugging Face account.
 
-4. **Add** their results to the community leaderboard.
+1. **Add** their results to the community leaderboard.
 
 This isn't just theory—you'll build a real, working model and deploy it with your name on it!
 
----
+______________________________________________________________________
 
 ## 2. What is Automatic Speech Recognition? (5 min)
 
@@ -62,21 +62,21 @@ Speech recognition is difficult because it must handle two distinct types of var
 
 1. **Speaker differences**: Accents, pitch, speaking rate, gender, age.
 
-2. **Environmental noise**: Background sounds, echo, interference.
+1. **Environmental noise**: Background sounds, echo, interference.
 
-3. **Recording quality**: Microphone type, compression, sample rate.
+1. **Recording quality**: Microphone type, compression, sample rate.
 
-4. **Pronunciation variations**: Casual vs. formal speech, mumbling, emphasis.
+1. **Pronunciation variations**: Casual vs. formal speech, mumbling, emphasis.
 
 **Linguistic Variability (Handled by the Language Model Decoder)**
 
 1. **Homophone ambiguity**: "I scream" vs. "ice cream" sound identical.
 
-2. **Context dependency**: "read" (present) vs. "read" (past) requires sentence context.
+1. **Context dependency**: "read" (present) vs. "read" (past) requires sentence context.
 
-3. **Domain knowledge**: Technical terms, proper nouns, specialized vocabulary.
+1. **Domain knowledge**: Technical terms, proper nouns, specialized vocabulary.
 
-4. **Grammar & punctuation**: Determining sentence boundaries and structure.
+1. **Grammar & punctuation**: Determining sentence boundaries and structure.
 
 This two-part challenge is why modern ASR systems use **specialized components** for each task. You'll see this exact design pattern in the Tiny Audio architecture.
 
@@ -114,7 +114,7 @@ ASR has evolved dramatically:
 
 - A small, trainable **Projector** (a bridge) to connect them.
 
----
+______________________________________________________________________
 
 ## 3. The Tiny Audio Architecture (10 min)
 
@@ -147,7 +147,7 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 - 1.3 billion parameters.
 
-- These are frozen (not trained) in our course, though we can optionally add LoRA adapters.
+- These are frozen (not trained) in our course for efficiency.
 
 **Analogy**: An expert musician who can listen to any piece of music and instantly transcribe the notes, rhythm, and instrumentation, without needing the sheet music.
 
@@ -185,27 +185,27 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 - 8 billion parameters.
 
-- We use LoRA (Low-Rank Adaptation) to efficiently adapt this huge model (~4M trainable params) without training all 8 billion parameters.
+- We keep this frozen during training and only train the projector that feeds into it.
 
 **Analogy**: A master storyteller who takes a sequence of key events (the audio features) and weaves them into a compelling, complete narrative (the final transcription).
 
 ### Why This Architecture?
 
-**Efficiency**: We only train ~21M parameters instead of the full 9.3+ billion (~0.2% of the total).
+**Efficiency**: We only train ~13M parameters instead of the full 9.3+ billion (~0.14% of the total).
 
 - Projector: ~13M (fully trained)
 
-- Encoder LoRA: ~4M (optional adapter weights)
+- Encoder: Frozen (no training)
 
-- Decoder LoRA: ~4M (optional adapter weights)
+- Decoder: Frozen (no training)
 
-**Flexibility**: You can train in different modes:
+**Simplicity**: By focusing on just the projector, training is:
 
-- **Full PEFT**: Projector + Encoder LoRA + Decoder LoRA (~21M params)
+- **Straightforward**: No complex adapter configurations
 
-- **Projector + Decoder LoRA**: Frozen encoder, trainable projector & decoder adapters (~17M params)
+- **Stable**: Fewer hyperparameters to tune
 
-- **Projector Only**: Frozen encoder & decoder, only projector learns (~13M params)
+- **Fast**: Less computational overhead
 
 **Fast Training**: A full run completes in ~24 hours on a single GPU.
 
@@ -213,7 +213,7 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 **High Quality**: Leverages the "wisdom" of two massive pre-trained models.
 
----
+______________________________________________________________________
 
 # PART B: HANDS-ON WORKSHOP (40 minutes)
 
@@ -229,7 +229,7 @@ In the next 40 minutes, you will:
 
 By the end, you'll have a working setup and a clear map of the project's code.
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 1: Environment Setup (15 min)
 
@@ -338,13 +338,15 @@ This will take ~5-10 minutes.
 Run these two scripts from the `tiny-audio` directory:
 
 ```bash
-poetry run python scripts/download_samples.py
+poetry run python scripts/download_samples.py  # Optional, takes a few minutes
 poetry run python scripts/verify_setup.py
 ```
 
+**Note**: The `download_samples.py` script is optional if you already have your own audio files handy (e.g., .wav or .mp3 files). It downloads sample audio files from LibriSpeech for testing and will take a few minutes to complete.
+
 The verify script will check your Python version, packages, and sample files. You should see: `✅ All checks passed! You're ready to start the course.`
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 2: Run Inference & Evaluation (15 min)
 
@@ -370,7 +372,7 @@ poetry run python demo/gradio/app.py --model mazesmazes/tiny-audio --port 7860
 
 1. Downloads the `mazesmazes/tiny-audio` model from Hugging Face (~4GB, first time only).
 
-2. Starts the Gradio web server on <http://localhost:7860>.
+1. Starts the Gradio web server on <http://localhost:7860>.
 
 **Step 2: Try the Demo**
 
@@ -404,11 +406,11 @@ poetry run python scripts/eval.py mazesmazes/tiny-audio \
 
 1. Streams the `loquacious` dataset test split.
 
-2. Runs inference on 100 random samples.
+1. Runs inference on 100 random samples.
 
-3. Computes the Word Error Rate (WER), a standard ASR metric.
+1. Computes the Word Error Rate (WER), a standard ASR metric.
 
-4. Shows per-sample results and saves a detailed log.
+1. Shows per-sample results and saves a detailed log.
 
 **Expected output:**
 
@@ -444,7 +446,7 @@ type outputs\eval_loquacious_mazesmazes_tiny-audio\results.txt
 
 This file contains the overall WER, average time, and per-sample predictions.
 
----
+______________________________________________________________________
 
 ## Workshop Exercise 3: Exploring the Code (10 min)
 
@@ -460,7 +462,7 @@ Open the project in your code editor and locate the main components.
 
 1. Open the `tiny-audio` folder in your code editor (e.g., VS Code).
 
-2. **Inspect the `src/` directory**: This is the main source code.
+1. **Inspect the `src/` directory**: This is the main source code.
 
    - `asr_modeling.py`: Defines the core model. Look for the `ASRModel` class, which brings the 3-part architecture together.
 
@@ -468,17 +470,17 @@ Open the project in your code editor and locate the main components.
 
    - `train.py`: The main script for training, which we'll use in Class 4.
 
-3. **Look at the `configs/` directory**: This holds all configuration files.
+1. **Look at the `configs/` directory**: This holds all configuration files.
 
    - `experiments/`: YAML files defining different training experiments (datasets, hyperparameters, etc.).
 
    - `model/`: YAML files defining the components to use (which encoder, projector, and decoder).
 
-4. **Check the `demo/gradio/` directory**:
+1. **Check the `demo/gradio/` directory**:
 
    - `app.py`: The code for the Gradio demo you just launched.
 
-5. **Explore the `scripts/` directory**:
+1. **Explore the `scripts/` directory**:
 
    - `verify_setup.py`: The setup-check script you ran.
 
@@ -486,7 +488,7 @@ Open the project in your code editor and locate the main components.
 
    - `transcribe.py`: A simple command-line tool for transcribing a single file.
 
----
+______________________________________________________________________
 
 ## 💡 Key Takeaways
 
@@ -496,15 +498,13 @@ Open the project in your code editor and locate the main components.
 
 - You now have a working development environment and can run inference on your own audio files.
 
----
+______________________________________________________________________
 
 ## Further Reading (Optional)
 
 ### Foundational Papers
 
 - **HuBERT**: [Self-Supervised Speech Representation Learning](https://arxiv.org/abs/2106.07447)
-
-- **LoRA**: [Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685)
 
 - **Attention**: [Attention Is All You Need](https://arxiv.org/abs/1706.03762) (The paper that introduced Transformers)
 
@@ -522,6 +522,6 @@ Open the project in your code editor and locate the main components.
 
 - [Transformers, explained](https://www.youtube.com/watch?v=TQQlZhbC5ps) by AI Coffee Break with Letitia
 
----
+______________________________________________________________________
 
 [Previous: Course Overview](./0-course-overview.md) | [Next: Class 2: Audio Processing and Encoders](./2-audio-processing-and-encoders.md)

@@ -43,7 +43,6 @@ def main():
             "asr_modeling.py",
             "asr_processing.py",
             "asr_pipeline.py",
-            "voice_agent_pipeline.py",  # Voice agent pipeline (ASR + TTS)
             "handler.py",  # For Inference Endpoints
         ]
         for filename in custom_files:

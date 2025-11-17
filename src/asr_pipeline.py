@@ -59,9 +59,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         from collections.abc import Iterator
 
         if isinstance(model_inputs, Iterator):
-            # Convert iterator to list to count chunks
+            # Convert iterator to list to process chunks
             chunks = list(model_inputs)
-            len(chunks)
 
             all_outputs = []
             for _chunk_num, chunk in enumerate(chunks, start=1):
@@ -143,60 +142,46 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         return super().preprocess(inputs, **preprocess_params)
 
     def _forward(self, model_inputs, **generate_kwargs):
-        is_last = True
-        input_values = None
-        input_features = None
-
-        # Extract task from generate_kwargs if present
+        # Extract task and set sampling parameters
         task = generate_kwargs.pop("task", None)
 
-        # Set sampling parameters based on task
-        if task == "transcribe":
-            # For transcribe task, use greedy decoding for accuracy
-            generate_kwargs.setdefault("do_sample", False)
-        elif task == "emotion":
-            # For emotion task, use sampling for varied responses
-            generate_kwargs.setdefault("do_sample", True)
-            generate_kwargs.setdefault("temperature", 0.7)
-        elif task == "describe":
-            # For describe task, allow some creativity
-            generate_kwargs.setdefault("do_sample", True)
-            generate_kwargs.setdefault("temperature", 0.7)
-        elif task == "continue":
-            # For continue task (if still used), use sampling for creative responses
-            generate_kwargs.setdefault("do_sample", True)
-            generate_kwargs.setdefault("temperature", 1.0)
+        # Task-specific sampling parameters
+        task_params: Dict[str, Dict[str, Any]] = {
+            "transcribe": {"do_sample": False},
+            "emotion": {"do_sample": True, "temperature": 0.7},
+            "describe": {"do_sample": True, "temperature": 0.7},
+            "continue": {"do_sample": True, "temperature": 1.0},
+        }
 
+        if task in task_params:
+            for key, value in task_params[task].items():
+                generate_kwargs.setdefault(key, value)
+
+        # Extract audio inputs from various formats
+        is_last = True
+        audio_inputs = None
+        is_whisper = False  # Track if this is Whisper input
+
+        # Normalize model_inputs to dict format
         if isinstance(model_inputs, torch.Tensor):
-            input_values = model_inputs
-        elif isinstance(model_inputs, list):
-            if len(model_inputs) > 0:
-                first_item = model_inputs[0]
-                if isinstance(first_item, dict):
-                    if "is_last" in first_item:
-                        is_last = first_item.pop("is_last")
-                    if "stride" in first_item:
-                        first_item.pop("stride")
-                    # Check for both input_values (Wav2Vec2) and input_features (Whisper)
-                    input_values = first_item.get("input_values")
-                    input_features = first_item.get("input_features")
-                elif isinstance(first_item, torch.Tensor):
-                    input_values = first_item
-            else:
-                raise ValueError("Received empty list in _forward")
-        elif isinstance(model_inputs, dict):
-            if "is_last" in model_inputs:
-                is_last = model_inputs.pop("is_last")
-            if "stride" in model_inputs:
-                model_inputs.pop("stride")
-            # Check for both input_values (Wav2Vec2) and input_features (Whisper)
-            input_values = model_inputs.get("input_values")
-            input_features = model_inputs.get("input_features")
-        else:
-            input_values = model_inputs
+            audio_inputs = model_inputs
+        elif isinstance(model_inputs, (list, tuple)) and model_inputs:
+            model_inputs = (
+                model_inputs[0]
+                if isinstance(model_inputs[0], dict)
+                else {"input_values": model_inputs[0]}
+            )
 
-        # Use whichever is available (input_features for Whisper, input_values for others)
-        audio_inputs = input_features if input_features is not None else input_values
+        if isinstance(model_inputs, dict):
+            # Pop metadata fields
+            is_last = model_inputs.pop("is_last", True)
+            model_inputs.pop("stride", None)
+            # Get audio input (Whisper uses input_features, others use input_values)
+            if "input_features" in model_inputs:
+                audio_inputs = model_inputs["input_features"]
+                is_whisper = True
+            else:
+                audio_inputs = model_inputs.get("input_values")
 
         if audio_inputs is None:
             raise ValueError(
@@ -213,7 +198,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         generate_kwargs.setdefault("max_new_tokens", self.model.config.max_new_tokens)
 
         # Pass the appropriate input type to generate
-        if input_features is not None:
+        if is_whisper:
             # Whisper model - use input_features
             generated_ids = self.model.generate(
                 input_features=audio_inputs,

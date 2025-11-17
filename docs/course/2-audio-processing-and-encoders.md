@@ -201,13 +201,13 @@ Tiny Audio uses HuBERT-XLarge by default - pre-trained on 60,000 hours of unlabe
 - No transcriptions needed (unlabeled data is abundant)
 - Learns universal speech patterns (phonemes, prosody, speaker characteristics)
 - Transfers to any language or domain
-- Optional LoRA fine-tuning for task-specific adaptation
+- Can be used frozen without any fine-tuning
 
 **Why we use HuBERT as default**:
 
 - Excellent performance on English speech
 - Proven track record in ASR tasks
-- Efficient with LoRA adaptation (optional)
+- Works well when frozen (no training needed)
 - 1.3 billion parameters
 
 **Alternative: Whisper Encoder**:
@@ -304,7 +304,7 @@ HuBERT performs dramatic temporal compression while increasing semantic density:
 
 **Think of it this way**: Instead of describing every brush stroke in a painting (raw samples), we describe what the painting depicts (embeddings). Fewer words, more meaning.
 
-### LoRA Adaptation: Optional Efficient Fine-Tuning
+### Why We Keep the Encoder Frozen
 
 **The Challenge**: HuBERT has 1.3 billion parameters. Full fine-tuning would:
 
@@ -313,95 +313,20 @@ HuBERT performs dramatic temporal compression while increasing semantic density:
 - Cost hundreds of dollars
 - Risk destroying the pre-trained knowledge (catastrophic forgetting)
 
-**The Solution**: LoRA (Low-Rank Adaptation) - OPTIONAL
+**The Solution**: Frozen Encoder with Trainable Projector
 
-**Important**: Encoder LoRA is **optional** in Tiny Audio. You can train with:
+Instead of fine-tuning the massive encoder, we keep it completely frozen and only train the projector that transforms its outputs. This approach:
 
-1. **Frozen encoder**: No LoRA (encoder_lora.r=0), fastest training
-1. **With LoRA**: Small adapters (encoder_lora.r=16), more adaptation capacity
-
-**What is LoRA?**
-
-LoRA is a technique that lets us adapt a large pre-trained model without modifying its weights. Instead of updating the original 1.3B parameters, we add small "adapter" matrices that learn the adjustments.
-
-**How LoRA Works**:
-
-In a transformer, attention layers compute queries (Q) and keys (K) using weight matrices:
-
-```
-Q = input × W_q    (where W_q is a 1280×1280 matrix = 1.6M parameters)
-K = input × W_k    (where W_k is a 1280×1280 matrix = 1.6M parameters)
-```
-
-Instead of updating W_q and W_k directly, LoRA adds small adapter matrices:
-
-```
-Q = input × (W_q + ΔW_q)    where ΔW_q = A × B
-```
-
-The magic: ΔW is factored into two small matrices:
-
-- **A**: 1280 × 16 (rank r=16)
-- **B**: 16 × 1280
-
-Total parameters in ΔW: (1280 × 16) + (16 × 1280) = 40,960 parameters
-
-**The Savings**:
-
-- **Original**: 1,638,400 parameters per projection (1280²)
-- **LoRA**: 40,960 parameters per projection
-- **Reduction**: 40x fewer parameters!
-
-**In Tiny Audio (when enabled)**:
-
-- **Base model**: Frozen (1.3B params) - never updated during training
-- **LoRA adapters**: Trainable (~4M params, r=16)
-  - Applied to `attention.q_proj` and `attention.k_proj` (query and key projections) in HuBERT attention layers
-  - Each layer gets two small adapter matrices
-- **Result**: When enabled, we train only ~0.3% of the encoder's parameters!
-
-**Configuration Options**:
-
-```bash
-# Disable encoder LoRA (frozen encoder, fastest)
-encoder_lora.r=0
-
-# Enable with rank 16 (default when using LoRA)
-encoder_lora.r=16
-
-# More adaptation capacity
-encoder_lora.r=32
-```
-
-**What is "rank" (r)?**
-
-The rank controls the adapter size:
-
-- **r=0**: Disabled, frozen encoder
-- **r=8-16**: Light adaptation, good for most tasks
-- **r=32-64**: Stronger adaptation, more parameters
-
-The default **r=16** provides good balance when encoder adaptation is needed.
-
-**What are q_proj and k_proj?**
-
-In transformer attention:
-
-- **q_proj** (query projection): Transforms input into "what am I looking for?"
-- **k_proj** (key projection): Transforms input into "what information do I have?"
-- Together they compute attention scores: which parts of the audio to focus on
-
-We adapt these because they control *what* the model pays attention to - crucial for ASR where we need to focus on speech-relevant features.
+1. **Preserves knowledge**: The original 1.3B parameters contain years of learned speech patterns
+1. **Saves resources**: No gradient computation or optimizer states for 1.3B params
+1. **Speeds training**: Dramatically faster forward and backward passes
+1. **Prevents overfitting**: Can't accidentally destroy the pre-trained representations
 
 **Why this works**:
 
-1. **Preserves knowledge**: The original 1.3B weights stay frozen, keeping learned speech patterns
-1. **Task-specific adaptation**: LoRA learns adjustments for our transcription task
-1. **Efficient**: 0.3% of parameters means 40x less memory and much faster training
-1. **Modular**: Can save/load different LoRA adapters for different tasks
-1. **Optional**: Can disable entirely and rely on projector + decoder adaptation
+The encoder already produces excellent speech representations from its extensive pre-training. The projector's job is simply to translate these representations into the language model's embedding space - a much simpler task that doesn't require modifying the encoder itself.
 
-**Analogy**: Imagine HuBERT is a master chef with 1.3 billion skills. Instead of retraining the chef entirely (expensive, risky), we give them a small recipe card (LoRA adapter) with adjustments: "add a pinch more salt here, cook 2 minutes longer there." The chef's core skills remain intact, but the output is customized for your taste.
+**Analogy**: Imagine HuBERT is a master translator who speaks hundreds of languages fluently. Instead of teaching them a new language from scratch, we just give them a simple translation guide (the projector) to convert their understanding into the specific format our language model expects.
 
 ______________________________________________________________________
 

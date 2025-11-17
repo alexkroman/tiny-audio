@@ -8,9 +8,9 @@ By the end of this course, you will:
 
 - Understand the architecture of modern multimodal ASR systems (encoder-projector-decoder)
 
-- Train your own model using parameter-efficient techniques (LoRA on encoder and/or decoder)
+- Train your own model efficiently by keeping the large models frozen and only training the projector
 
-- Work with ~21M trainable parameters instead of 9.3+ billion (flexibility to enable/disable LoRA)
+- Work with ~13M trainable parameters (just the projector) instead of 9.3+ billion
 
 - Publish your model to HuggingFace Hub
 
@@ -71,13 +71,13 @@ By the end of this course, you will:
 
 - Why parameter-efficient training?
 
-- Understanding LoRA (Low-Rank Adaptation)
+- Understanding the projector-only training approach
 
 - Configuring training with Hydra
 
 - Starting your first training run
 
-- **Experiments**: Adjust LoRA rank, test learning rates, experiment with batch sizes, try different datasets
+- **Experiments**: Test learning rates, experiment with batch sizes, try different datasets
 
 ### [Class 5: Evaluation and Debugging](./5-evaluation-and-debugging.md) (1 hour)
 
@@ -113,7 +113,7 @@ By completing this course, you will be able to:
 
 1. **Explain** how multimodal ASR systems work end-to-end
 1. **Implement** custom audio-language model architectures
-1. **Apply** parameter-efficient training techniques like LoRA
+1. **Apply** efficient training techniques with frozen encoders/decoders
 1. **Train** a speech recognition model on real datasets
 1. **Evaluate** model performance using industry-standard metrics
 1. **Deploy** models to production-ready environments
@@ -183,6 +183,6 @@ Each class includes:
 
 This course and all materials are released under the MIT License.
 
----
+______________________________________________________________________
 
 [Next: Class 1: Introduction and Setup](./1-introduction-and-setup.md)

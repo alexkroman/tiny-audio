@@ -13,20 +13,20 @@ class ASRConfig(transformers.PretrainedConfig):
         text_model_id: str = "Qwen/Qwen3-8B",
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
-        audio_downsample_rate: int = 5,
+        audio_downsample_rate: int = 5,  # Deprecated: use projector_pool_stride instead
         num_beams: Optional[int] = None,
         system_prompt: str = "/no_think /system_override",
         user_prompt: str = "Transcribe: <audio>",
         encoder_dim: Optional[int] = None,
         llm_dim: Optional[int] = None,
-        projector_hidden_dim: int = 8192,
         # Audio processing constants
         audio_sample_rate: int = 16000,
         # Projector initialization constants
         projector_init_std: float = 0.02,
-        projector_dropout: float = 0.05,
-        # LoRA default parameters
-        lora_default_dropout: float = 0.0,
+        projector_pool_stride: int = 2,  # AvgPool1d stride (2 = 4x total with Whisper, 1 = no pooling)
+        projector_hidden_dim: Optional[
+            int
+        ] = None,  # SwiGLU hidden dimension (defaults to encoder_dim * 4)
         # Inference parameters
         inference_diversity_penalty: float = 0.5,
         inference_warmup_tokens: int = 10,
@@ -44,34 +44,25 @@ class ASRConfig(transformers.PretrainedConfig):
         use_cache: Optional[bool] = None,
         **kwargs,
     ):
-        # Set default values for generation params if not present in kwargs
-        # This allows config.json values to take precedence when loading from pretrained
+        # Set default generation parameters
         generation_defaults = {
             "num_beams": 1,
             "max_new_tokens": 128,
-            "min_new_tokens": 1,
+            "min_new_tokens": 0,
             "do_sample": False,
             "repetition_penalty": 1.0,
-            "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,
-            "use_cache": True,  # Now enabled - we pre-expand audio tokens for consistent sequence length
+            "use_cache": True,
         }
 
-        # Only add sampling parameters if do_sample=True
-        do_sample_value = kwargs.get("do_sample", generation_defaults["do_sample"])
-        if do_sample_value:
-            generation_defaults["temperature"] = 0.7
-            generation_defaults["top_k"] = 50
-            generation_defaults["top_p"] = 0.9
-
-        # Only add early_stopping if using beam search
-        num_beams_value = kwargs.get("num_beams", generation_defaults["num_beams"])
-        if num_beams_value > 1:
+        # Conditional defaults based on other parameters
+        if kwargs.get("do_sample", generation_defaults["do_sample"]):
+            generation_defaults.update({"temperature": 1.0, "top_k": 0, "top_p": 0.8})
+        if kwargs.get("num_beams", generation_defaults["num_beams"]) > 1:
             generation_defaults["early_stopping"] = True
 
-        for param_name, default_value in generation_defaults.items():
-            if param_name not in kwargs:
-                kwargs[param_name] = default_value
+        # Apply defaults (config.json values take precedence)
+        kwargs = {**generation_defaults, **kwargs}
 
         self.audio_model_id = audio_model_id
         self.text_model_id = text_model_id
@@ -82,11 +73,10 @@ class ASRConfig(transformers.PretrainedConfig):
         self.user_prompt = user_prompt
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
-        self.projector_hidden_dim = projector_hidden_dim
         self.audio_sample_rate = audio_sample_rate
         self.projector_init_std = projector_init_std
-        self.projector_dropout = projector_dropout
-        self.lora_default_dropout = lora_default_dropout
+        self.projector_pool_stride = projector_pool_stride
+        self.projector_hidden_dim = projector_hidden_dim
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
         if "audio_config" not in kwargs:
@@ -138,38 +128,6 @@ class ASRConfig(transformers.PretrainedConfig):
         }
         self.architectures = ["ASRModel"]
         self.pipeline_tag = "automatic-speech-recognition"
-
-    def to_dict(self):
-        """Override to ensure all critical fields are serialized."""
-        output = super().to_dict()
-
-        # Explicitly ensure these fields are saved
-        output["encoder_dim"] = self.encoder_dim
-        output["llm_dim"] = self.llm_dim
-        output["projector_hidden_dim"] = self.projector_hidden_dim
-        output["audio_downsample_rate"] = self.audio_downsample_rate
-        output["system_prompt"] = self.system_prompt
-        output["user_prompt"] = self.user_prompt
-        output["num_beams"] = self.num_beams
-        output["audio_sample_rate"] = self.audio_sample_rate
-        output["projector_init_std"] = self.projector_init_std
-        output["projector_dropout"] = self.projector_dropout
-        output["lora_default_dropout"] = self.lora_default_dropout
-        output["inference_diversity_penalty"] = self.inference_diversity_penalty
-        output["inference_warmup_tokens"] = self.inference_warmup_tokens
-        output["max_new_tokens"] = self.max_new_tokens
-        output["min_new_tokens"] = self.min_new_tokens
-        output["do_sample"] = self.do_sample
-        output["temperature"] = self.temperature
-        output["top_k"] = self.top_k
-        output["top_p"] = self.top_p
-        output["repetition_penalty"] = self.repetition_penalty
-        output["length_penalty"] = self.length_penalty
-        output["no_repeat_ngram_size"] = self.no_repeat_ngram_size
-        output["early_stopping"] = self.early_stopping
-        output["use_cache"] = self.use_cache
-
-        return output
 
 
 # Register the config with transformers

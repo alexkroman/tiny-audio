@@ -3,8 +3,8 @@ encoder_model_name: facebook/hubert-xlarge-ls960-ft
 decoder_model_name: HuggingFaceTB/SmolLM3-3B
 
 # Projector configuration
-projector_hidden_dim: 8192
 audio_downsample_rate: 5
+projector_hidden_dim: 5120  # 4x encoder_dim for SwiGLU (1280 * 4)
 
 # Model runtime settings
 model_dtype: float32
