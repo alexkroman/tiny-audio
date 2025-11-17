@@ -1,23 +1,20 @@
-______________________________________________________________________
-
+---
 license: mit
 language:
-
 - en
-  datasets:
+datasets:
 - speechbrain/LoquaciousSet
-  base_model:
+base_model:
 - facebook/hubert-xlarge-ls960-ft
 - HuggingFaceTB/SmolLM3-3B
-  pipeline_tag: automatic-speech-recognition
-  tags:
+pipeline_tag: automatic-speech-recognition
+tags:
 - asr
 - speech-recognition
 - audio
 - smollm
 - hubert
-
-______________________________________________________________________
+---
 
 # Tiny Audio Model Card
 
