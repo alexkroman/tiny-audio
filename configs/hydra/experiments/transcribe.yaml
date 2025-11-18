@@ -16,6 +16,9 @@ model:
   encoder_model_name: openai/whisper-large-v3-turbo
 
 training:
+  # Resume from checkpoint
+  # resume_from_checkpoint: "/workspace/outputs/2025-11-18/23-23-48/outputs/production_model/checkpoint-10"
+
   # Hub configuration
   push_to_hub: true
   hub_model_id: "mazesmazes/tiny-audio"

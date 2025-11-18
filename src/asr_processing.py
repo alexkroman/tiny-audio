@@ -20,15 +20,12 @@ class ASRProcessor(ProcessorMixin):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
-        config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        from transformers import AutoFeatureExtractor
 
-        # Use the ASRModel factory method for consistent feature extractor creation
-        try:
-            from .asr_modeling import ASRModel
-        except ImportError:
-            from asr_modeling import ASRModel  # type: ignore[no-redef]
-
-        feature_extractor = ASRModel._create_feature_extractor(config.audio_model_id)
+        # Load feature extractor and tokenizer from saved model directory
+        feature_extractor = AutoFeatureExtractor.from_pretrained(
+            pretrained_model_name_or_path, **kwargs
+        )
 
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=True, **kwargs

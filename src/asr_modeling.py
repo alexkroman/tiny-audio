@@ -121,7 +121,6 @@ class ASRModel(PreTrainedModel):
     main_input_name = "input_values"
     _supports_flash_attn_2 = True
     supports_gradient_checkpointing = True
-    _keys_to_ignore_on_save = ["encoder", "decoder.base_model"]
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
 
@@ -150,70 +149,56 @@ class ASRModel(PreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        from safetensors.torch import load_file
-        from transformers.utils.hub import cached_file
+        from transformers import AutoFeatureExtractor
 
         config = kwargs.pop("config", None)
         if config is None:
             config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
-        # Load feature extractor from audio model
-        kwargs["feature_extractor"] = cls._create_feature_extractor(config.audio_model_id)
+        # Load feature extractor from saved model directory
+        kwargs["feature_extractor"] = AutoFeatureExtractor.from_pretrained(
+            pretrained_model_name_or_path, **kwargs
+        )
 
         cls._is_loading_from_pretrained = True
         cls._pretrained_model_path = pretrained_model_name_or_path
 
-        subfolder = kwargs.get("subfolder")
-        revision = kwargs.get("revision")
-        cache_kwargs = {}
-        if subfolder:
-            cache_kwargs["subfolder"] = subfolder
-        if revision:
-            cache_kwargs["revision"] = revision
-
         try:
+            from safetensors.torch import load_file
+            from transformers.utils.hub import cached_file
 
-            def load_cached_file(filename, load_fn=None):
-                """Load a file from the model directory.
+            # Create model instance (loads encoder/decoder fresh from HF)
+            model = cls(config, **kwargs)
 
-                Args:
-                    filename: Name of file to load
-                    load_fn: Function to apply to loaded path (default: load_file for safetensors)
-                """
+            # Manually load model.safetensors to avoid corrupted generation_config.json
+            subfolder = kwargs.get("subfolder")
+            revision = kwargs.get("revision")
+            cache_kwargs = {}
+            if subfolder:
+                cache_kwargs["subfolder"] = subfolder
+            if revision:
+                cache_kwargs["revision"] = revision
 
-                if load_fn is None:
-                    load_fn = load_file
+            model_file = cached_file(
+                pretrained_model_name_or_path,
+                "model.safetensors",
+                _raise_exceptions_for_missing_entries=False,
+                **cache_kwargs,
+            )
 
-                try:
-                    file_path = cached_file(
-                        pretrained_model_name_or_path,
-                        filename,
-                        _raise_exceptions_for_missing_entries=False,
-                        **cache_kwargs,
-                    )
-                    if file_path:
-                        return load_fn(file_path)
-                except Exception:
-                    pass
-
-                return None
-
-            model = cls(config)
-
-            projector_state = load_cached_file("projector.safetensors")
-
-            if not projector_state:
+            if not model_file:
                 raise FileNotFoundError(
-                    f"projector.safetensors not found in {pretrained_model_name_or_path}. "
+                    f"model.safetensors not found in {pretrained_model_name_or_path}. "
                     "The repository may not have been trained yet."
                 )
-            model.projector.load_state_dict(projector_state, strict=True, assign=True)
+
+            # Load trainable state (projector weights with "projector." prefix)
+            state_dict = load_file(model_file)
+            model.load_state_dict(state_dict, strict=False, assign=True)
 
             # Convert projector to target dtype after loading weights
             target_dtype = getattr(torch, config.model_dtype)
             model.projector = model.projector.to(dtype=target_dtype)
-
-            # Note: encoder.safetensors and decoder.safetensors are no longer used
 
             device = kwargs.get("device")
             if device is not None:
@@ -456,16 +441,10 @@ class ASRModel(PreTrainedModel):
         return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
 
     def state_dict(self, *args, **kwargs):
-        """Save trainable parameters in separate component files.
+        """Return only trainable parameters (projector weights).
 
-        We save:
-        - projector.safetensors: projector weights
-
-        This eliminates key-matching complexity and makes loading more reliable.
+        Called by HuggingFace Trainer to save model.safetensors in checkpoints.
         """
-        # Note: HuggingFace Trainer calls this method and expects a single dict.
-        # We'll return the combined state dict here, but save_pretrained() will
-        # split into separate files.
         return self._get_trainable_state_dict()
 
     def _get_trainable_state_dict(self):
@@ -624,6 +603,9 @@ class ASRModel(PreTrainedModel):
                 raise ValueError("fill_value must be provided when expanding non-input_ids tensors")
             if audio_fill_value is None:
                 audio_fill_value = fill_value
+
+        # At this point tensor_to_expand is guaranteed to be a Tensor
+        assert tensor_to_expand is not None
 
         # Create output tensor
         expanded = torch.full(
@@ -890,8 +872,6 @@ class ASRModel(PreTrainedModel):
         import shutil
         from pathlib import Path as PathlibPath
 
-        from safetensors.torch import save_file
-
         save_dir = PathlibPath(save_directory)
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -902,12 +882,19 @@ class ASRModel(PreTrainedModel):
         if hasattr(self.encoder.config, "num_mel_bins"):
             self.config.audio_config.num_mel_bins = self.encoder.config.num_mel_bins
 
-        self.config.save_pretrained(save_dir)
+        # Temporarily remove non-serializable attributes before calling parent save
+        feature_extractor = self.feature_extractor
+        tokenizer = self.tokenizer
+        del self.feature_extractor
+        del self.tokenizer
 
-        # Only save projector since encoder and decoder are frozen
-        projector_state = self.projector.state_dict()
-        if projector_state:
-            save_file(projector_state, save_dir / "projector.safetensors")
+        try:
+            # Use parent class to save config and model.safetensors
+            super().save_pretrained(save_dir, **kwargs)
+        finally:
+            # Restore attributes
+            self.feature_extractor = feature_extractor
+            self.tokenizer = tokenizer
 
         self.tokenizer.save_pretrained(save_dir)
 

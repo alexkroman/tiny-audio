@@ -27,6 +27,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         else:
             # Fallback to whisper-tiny tokenizer for its normalize() method only
             from transformers import WhisperTokenizer
+
             self.text_normalizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
 
     def __call__(self, inputs, **kwargs):
