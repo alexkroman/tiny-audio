@@ -29,7 +29,7 @@ class ASRConfig(transformers.PretrainedConfig):
         ] = None,  # SwiGLU hidden dimension (defaults to encoder_dim * 4)
         projector_dropout: float = 0.1,  # Dropout rate for projector layers
         # Inference parameters
-        inference_diversity_penalty: float = 0.5,
+        inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
         # Generation parameters
         max_new_tokens: Optional[int] = None,
@@ -55,12 +55,6 @@ class ASRConfig(transformers.PretrainedConfig):
             "no_repeat_ngram_size": 0,
             "use_cache": True,
         }
-
-        # Conditional defaults based on other parameters
-        if kwargs.get("do_sample", generation_defaults["do_sample"]):
-            generation_defaults.update({"temperature": 1.0, "top_k": 0, "top_p": 0.8})
-        if kwargs.get("num_beams", generation_defaults["num_beams"]) > 1:
-            generation_defaults["early_stopping"] = True
 
         # Apply defaults (config.json values take precedence)
         kwargs = {**generation_defaults, **kwargs}
