@@ -89,6 +89,7 @@ By keeping both the encoder and decoder completely frozen and only training the 
 The Audio Projector is the key innovation that makes Tiny Audio efficient:
 
 **Architecture Details:**
+
 - **Input**: HuBERT embeddings (1280-dim) concatenated from k=2 frames → 2560-dim
 - **Hidden layer**: 5120-dim (2x encoder dim)
 - **Output**: 3072-dim (SmolLM3-3B embedding size)

@@ -9,8 +9,8 @@ class ASRConfig(transformers.PretrainedConfig):
 
     def __init__(
         self,
-        audio_model_id: str = "facebook/hubert-large-ls960-ft",
-        text_model_id: str = "Qwen/Qwen3-8B",
+        audio_model_id: str = "openai/whisper-large-v3-turbo",
+        text_model_id: str = "HuggingFaceTB/SmolLM3-3B",
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
         audio_downsample_rate: int = 5,  # Deprecated: use projector_pool_stride instead
@@ -27,6 +27,7 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_hidden_dim: Optional[
             int
         ] = None,  # SwiGLU hidden dimension (defaults to encoder_dim * 4)
+        projector_dropout: float = 0.1,  # Dropout rate for projector layers
         # Inference parameters
         inference_diversity_penalty: float = 0.5,
         inference_warmup_tokens: int = 10,
@@ -48,9 +49,9 @@ class ASRConfig(transformers.PretrainedConfig):
         generation_defaults = {
             "num_beams": 1,
             "max_new_tokens": 128,
-            "min_new_tokens": 0,
+            "min_new_tokens": 1,
             "do_sample": False,
-            "repetition_penalty": 1.0,
+            "repetition_penalty": 1.05,
             "no_repeat_ngram_size": 0,
             "use_cache": True,
         }
@@ -77,6 +78,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
+        self.projector_dropout = projector_dropout
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
         if "audio_config" not in kwargs:

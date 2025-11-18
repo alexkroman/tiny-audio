@@ -10,7 +10,7 @@ defaults:
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
-  # pretrained_model_path: "mazesmazes/tiny-audio"
+  pretrained_model_path: "mazesmazes/tiny-audio"
 
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
@@ -33,11 +33,11 @@ training:
 
   learning_rate: 1.0e-4
 
-  warmup_steps: 1000  # 2.5% of 40k steps
+  warmup_steps: 100  # 2.5% of 40k steps
   lr_scheduler_type: "cosine"
 
   # Optimization
-  weight_decay: 0.01
+  weight_decay: 0.1
   max_grad_norm: 1.0
 
   # Memory optimization
@@ -55,10 +55,10 @@ training:
   gradient_checkpointing: false
 
   # Training duration - 50000 steps as requested
-  max_steps: 40000
+  max_steps: 10000
 
   # Reproducibility
-  seed: 42
+  seed: 123
   ignore_data_skip: true
 
 # Early stopping configuration

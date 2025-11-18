@@ -35,23 +35,25 @@ class SwiGLU(nn.Module):
     Structure: w1 (gate), w2 (up), w3 (down) with w3(silu(w1) * w2)
     """
 
-    def __init__(self, in_features, hidden_features, out_features, bias=False):
+    def __init__(self, in_features, hidden_features, out_features, bias=False, dropout=0.0):
         super().__init__()
         self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
         self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
         self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
         self.act = nn.SiLU()
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         x_gate = self.act(self.w1(x))
         x_val = self.w2(x)
         x = x_gate * x_val
+        x = self.dropout(x)  # Apply dropout after the gating operation
         return self.w3(x)
 
 
 class AudioProjector(nn.Module):
     """
-    AudioProjector using a SwiGLU MLP.
+    AudioProjector using a SwiGLU MLP with dropout.
     """
 
     def __init__(self, config):
@@ -63,8 +65,14 @@ class AudioProjector(nn.Module):
         if hidden_dim is None:
             hidden_dim = config.encoder_dim * 4  # Default: 4x encoder dim for SwiGLU
 
-        # SwiGLU MLP (now takes concatenated frames as input)
-        self.proj = SwiGLU(in_dim, hidden_dim, out_dim)
+        # Get dropout rate from config
+        dropout_rate = getattr(config, "projector_dropout", 0.1)
+
+        # SwiGLU MLP (now takes concatenated frames as input) with dropout
+        self.proj = SwiGLU(in_dim, hidden_dim, out_dim, dropout=dropout_rate)
+
+        # Optional output dropout layer for additional regularization
+        self.output_dropout = nn.Dropout(dropout_rate)
 
         # Initialize weights following LLaMA-style initialization for SwiGLU
         # Uses smaller std to account for the multiplicative gating
@@ -101,7 +109,10 @@ class AudioProjector(nn.Module):
         x = x.contiguous().view(batch_size, -1, dim * self.k)
 
         # Apply SwiGLU block
-        return self.proj(x)
+        x = self.proj(x)
+
+        # Apply output dropout for additional regularization
+        return self.output_dropout(x)
 
 
 class ASRModel(PreTrainedModel):
@@ -269,6 +280,7 @@ class ASRModel(PreTrainedModel):
             projector_pool_stride=getattr(config, "projector_pool_stride", 2),
             projector_hidden_dim=getattr(config, "projector_hidden_dim", None),
             projector_init_std=getattr(config, "projector_init_std", 0.02),
+            projector_dropout=getattr(config, "projector_dropout", 0.1),
         )
         self.projector = AudioProjector(projector_config)
 
@@ -309,10 +321,6 @@ class ASRModel(PreTrainedModel):
 
         is_whisper = "whisper" in config.audio_model_id.lower() or (
             hasattr(encoder.config, "model_type") and "whisper" in encoder.config.model_type.lower()
-        )
-        is_wav2vec2 = (
-            hasattr(encoder.config, "model_type")
-            and "wav2vec2" in encoder.config.model_type.lower()
         )
 
         # Wrap encoder forward to handle Whisper's input_features vs input_values
@@ -864,9 +872,19 @@ class ASRModel(PreTrainedModel):
         )
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
 
-        return self.decoder.generate(
-            inputs_embeds=inputs_embeds, attention_mask=attention_mask, **generate_kwargs
+        # Track the prompt length to extract only newly generated tokens
+        prompt_length = expanded_prompt_ids.shape[1]
+
+        # Generate the full sequence
+        generated_ids = self.decoder.generate(
+            input_ids=expanded_prompt_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            **generate_kwargs,
         )
+
+        # Return only the newly generated tokens (exclude the prompt)
+        return generated_ids[:, prompt_length:]
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
         import shutil
