@@ -33,6 +33,10 @@ lr_scheduler_kwargs:
 max_steps: 50000
 seed: 42
 
+# Model runtime settings
+model_dtype: float32
+attn_implementation: eager
+
 # Required by HF Trainer
 remove_unused_columns: false
 label_names:
