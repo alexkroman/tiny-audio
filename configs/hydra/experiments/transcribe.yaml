@@ -16,6 +16,9 @@ model:
   encoder_model_name: openai/whisper-large-v3-turbo
 
 training:
+  # Resume from checkpoint
+  # resume_from_checkpoint: "/workspace/outputs/2025-11-18/23-23-48/outputs/production_model/checkpoint-10"
+
   # Hub configuration
   push_to_hub: true
   hub_model_id: "mazesmazes/tiny-audio"
@@ -24,7 +27,7 @@ training:
 
   # CPU optimization for 9 vCPUs
   dataloader_num_workers: 1  # Limited by dataset.num_shards=1
-  dataloader_prefetch_factor: 3  # Higher prefetch to compensate for single worker
+  dataloader_prefetch_factor: 2  # Higher prefetch to compensate for single worker
 
   per_device_train_batch_size: 8
   per_device_eval_batch_size: 32
@@ -37,7 +40,7 @@ training:
   lr_scheduler_type: "cosine"
 
   # Optimization
-  weight_decay: 0.01
+  weight_decay: 0.0
   max_grad_norm: 1.0
 
   # Memory optimization
@@ -55,10 +58,10 @@ training:
   gradient_checkpointing: false
 
   # Training duration - 50000 steps as requested
-  max_steps: 40000
+  max_steps: 20000
 
   # Reproducibility
-  seed: 42
+  seed: 123
   ignore_data_skip: true
 
 # Early stopping configuration

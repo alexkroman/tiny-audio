@@ -492,7 +492,10 @@ def main(cfg: DictConfig) -> None:
         callbacks=callbacks,
     )
 
-    trainer.train()
+    # Check for checkpoint resumption
+    resume_from_checkpoint = cfg.training.get("resume_from_checkpoint", None)
+
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.save_model()
 
     # Push final model to hub if configured

@@ -2,6 +2,7 @@ from typing import Any, Dict
 
 import torch
 import transformers
+from truecase import get_true_case
 
 try:
     from .asr_modeling import ASRModel
@@ -19,6 +20,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         super().__init__(
             model=model, feature_extractor=feature_extractor, tokenizer=tokenizer, **kwargs
         )
+
+        # Initialize text normalizer (same as train.py)
+        if hasattr(tokenizer, "normalize"):
+            self.text_normalizer = tokenizer
+        else:
+            # Fallback to whisper-tiny tokenizer for its normalize() method only
+            from transformers import WhisperTokenizer
+
+            self.text_normalizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
 
     def __call__(self, inputs, **kwargs):
         generate_kwargs = {}
@@ -87,6 +97,13 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             # Decode the merged tokens with skip_special_tokens
             text = self.tokenizer.decode(all_tokens, skip_special_tokens=True)
             text = text.strip()
+
+            # Apply Whisper normalization (matches training)
+            text = self.text_normalizer.normalize(text)
+
+            # Apply truecasing for proper capitalization
+            text = get_true_case(text)
+
             return {"text": text}
 
         model_outputs = self._forward(model_inputs, **generate_kwargs)
@@ -267,5 +284,11 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         text = self.tokenizer.decode(tokens, skip_special_tokens=True)
         text = text.strip()
+
+        # Apply Whisper normalization (matches training)
+        text = self.text_normalizer.normalize(text)
+
+        # Apply truecasing for proper capitalization
+        text = get_true_case(text)
 
         return {"text": text}

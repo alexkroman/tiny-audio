@@ -9,8 +9,8 @@ class ASRConfig(transformers.PretrainedConfig):
 
     def __init__(
         self,
-        audio_model_id: str = "facebook/hubert-large-ls960-ft",
-        text_model_id: str = "Qwen/Qwen3-8B",
+        audio_model_id: str = "openai/whisper-large-v3-turbo",
+        text_model_id: str = "HuggingFaceTB/SmolLM3-3B",
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
         audio_downsample_rate: int = 5,  # Deprecated: use projector_pool_stride instead
@@ -19,18 +19,13 @@ class ASRConfig(transformers.PretrainedConfig):
         user_prompt: str = "Transcribe: <audio>",
         encoder_dim: Optional[int] = None,
         llm_dim: Optional[int] = None,
-        # Audio processing constants
         audio_sample_rate: int = 16000,
-        # Projector initialization constants
         projector_init_std: float = 0.02,
-        projector_pool_stride: int = 2,  # AvgPool1d stride (2 = 4x total with Whisper, 1 = no pooling)
-        projector_hidden_dim: Optional[
-            int
-        ] = None,  # SwiGLU hidden dimension (defaults to encoder_dim * 4)
-        # Inference parameters
-        inference_diversity_penalty: float = 0.5,
+        projector_pool_stride: int = 2,
+        projector_hidden_dim: Optional[int] = None,
+        projector_dropout: float = 0.0,  # Dropout rate for projector layers
+        inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
-        # Generation parameters
         max_new_tokens: Optional[int] = None,
         min_new_tokens: Optional[int] = None,
         do_sample: Optional[bool] = None,
@@ -48,18 +43,12 @@ class ASRConfig(transformers.PretrainedConfig):
         generation_defaults = {
             "num_beams": 1,
             "max_new_tokens": 128,
-            "min_new_tokens": 0,
+            "min_new_tokens": 1,
             "do_sample": False,
-            "repetition_penalty": 1.0,
+            "repetition_penalty": 1.05,
             "no_repeat_ngram_size": 0,
             "use_cache": True,
         }
-
-        # Conditional defaults based on other parameters
-        if kwargs.get("do_sample", generation_defaults["do_sample"]):
-            generation_defaults.update({"temperature": 1.0, "top_k": 0, "top_p": 0.8})
-        if kwargs.get("num_beams", generation_defaults["num_beams"]) > 1:
-            generation_defaults["early_stopping"] = True
 
         # Apply defaults (config.json values take precedence)
         kwargs = {**generation_defaults, **kwargs}
@@ -77,6 +66,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
+        self.projector_dropout = projector_dropout
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
         if "audio_config" not in kwargs:
@@ -91,7 +81,6 @@ class ASRConfig(transformers.PretrainedConfig):
         else:
             self.text_config = kwargs.pop("text_config")
 
-        # Ensure configs are PretrainedConfig objects (in case loaded from dict)
         if isinstance(self.text_config, dict):
             # Reconstruct config from dict using the model_type stored in the dict
             model_type = self.text_config.get("model_type")
@@ -130,6 +119,4 @@ class ASRConfig(transformers.PretrainedConfig):
         self.pipeline_tag = "automatic-speech-recognition"
 
 
-# Register the config with transformers
-# This is needed for AutoConfig.from_pretrained to work
 transformers.AutoConfig.register("asr_model", ASRConfig)
