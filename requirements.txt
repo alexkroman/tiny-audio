@@ -3,3 +3,4 @@
 
 # Transformers - main library for model loading and inference
 transformers>=4.57.0
+truecase
