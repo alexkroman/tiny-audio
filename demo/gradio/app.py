@@ -41,67 +41,31 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio"):
         device=device,
     )
 
-    def process_audio(audio, task, text_input):
-        """Process audio file or text input with selected task."""
-        if task == "text":
-            if not text_input or not text_input.strip():
-                return "Please provide text input for text task"
-            # Use text-only mode
-            result = pipe(None, task="text", text_input=text_input)
-            return result["text"]
+    def process_audio(audio):
+        """Process audio file for transcription."""
         if audio is None:
             return "Please provide audio input"
-        # Pass the task parameter to the pipeline
-        result = pipe(audio, task=task)
+        # Transcribe the audio
+        result = pipe(audio)
         return result["text"]
 
-    def update_inputs(task):
-        """Update input visibility based on selected task."""
-        if task == "text":
-            # Show text input, hide audio
-            return gr.update(visible=False), gr.update(visible=True)
-        # Show audio, hide text input
-        return gr.update(visible=True), gr.update(visible=False)
-
-    # Create Gradio interface with task selection
+    # Create Gradio interface
     with gr.Blocks(title="Tiny Audio") as demo:
         gr.Markdown("# Tiny Audio")
 
-        with gr.Row(), gr.Column():
-            task_selector = gr.Dropdown(
-                choices=["transcribe", "text"],
-                value="transcribe",
-                label="Task",
-                info="Select the task to perform",
-            )
-
-        with gr.Row():
-            audio_input = gr.Audio(
-                sources=["microphone", "upload"],
-                type="filepath",
-                label="Audio Input (Record from microphone or upload file)",
-                visible=True,
-            )
-            text_input = gr.Textbox(
-                label="Text Input (for text task)",
-                placeholder="Enter text to process...",
-                lines=3,
-                visible=False,
-            )
+        audio_input = gr.Audio(
+            sources=["microphone", "upload"],
+            type="filepath",
+            label="Audio Input (Record from microphone or upload file)",
+        )
 
         output_text = gr.Textbox(label="Output")
         process_btn = gr.Button("Process")
 
         # Wire up events
-        task_selector.change(
-            fn=update_inputs,
-            inputs=[task_selector],
-            outputs=[audio_input, text_input],
-        )
-
         process_btn.click(
             fn=process_audio,
-            inputs=[audio_input, task_selector, text_input],
+            inputs=[audio_input],
             outputs=output_text,
         )
 

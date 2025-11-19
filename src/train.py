@@ -84,11 +84,32 @@ class DatasetLoader:
         if columns_to_remove:
             ds = ds.remove_columns(columns_to_remove)
 
-        # Add task using a simple wrapper generator
+        # Add task using a simple wrapper generator with error handling
         def add_task_gen(dataset, task_val):
-            for example in dataset:
-                example["task"] = task_val
-                yield example
+            for idx, example in enumerate(dataset):
+                try:
+                    # Access the audio field to trigger decoding and catch errors early
+                    if "audio" in example and example["audio"] is not None:
+                        # Try to access the audio array to force decoding
+                        _ = example["audio"]["array"]
+
+                    example["task"] = task_val
+                    yield example
+                except (RuntimeError, OSError, ValueError) as e:
+                    error_msg = str(e)
+                    if any(phrase in error_msg for phrase in [
+                        "Resource temporarily unavailable",
+                        "Failed to open",
+                        "Invalid data",
+                        "Could not find codec"
+                    ]):
+                        print(f"Warning: Skipping example {idx} due to audio decoding error: {error_msg[:100]}")
+                        continue
+                    else:
+                        raise
+                except Exception as e:
+                    print(f"Warning: Skipping example {idx} due to unexpected error: {type(e).__name__}: {str(e)[:100]}")
+                    continue
 
         # Build new features dict from original, adding task
         if original_features:
