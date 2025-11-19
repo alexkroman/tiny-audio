@@ -26,7 +26,6 @@ except ImportError:
 
 
 class SwiGLU(nn.Module):
-
     def __init__(self, in_features, hidden_features, out_features, bias=False, dropout=0.0):
         super().__init__()
         self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
@@ -44,7 +43,6 @@ class SwiGLU(nn.Module):
 
 
 class AudioProjector(nn.Module):
-
     def __init__(self, config):
         super().__init__()
         self.k = getattr(config, "projector_pool_stride", 2)  # Downsampling rate

@@ -101,7 +101,7 @@ class EndpointHandler:
         if inputs is None:
             raise ValueError("Missing 'inputs' in request data")
 
-        params = data.get("parameters", {})# 
+        params = data.get("parameters", {})
         max_new_tokens = params.get("max_new_tokens", 200)
         num_beams = params.get("num_beams", 1)
         do_sample = params.get("do_sample", False)

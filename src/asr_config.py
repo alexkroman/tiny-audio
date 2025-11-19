@@ -21,10 +21,8 @@ class ASRConfig(transformers.PretrainedConfig):
         llm_dim: Optional[int] = None,
         audio_sample_rate: int = 16000,
         projector_init_std: float = 0.02,
-        projector_pool_stride: int = 2, 
-        projector_hidden_dim: Optional[
-            int
-        ] = None,
+        projector_pool_stride: int = 2,
+        projector_hidden_dim: Optional[int] = None,
         projector_dropout: float = 0.0,  # Dropout rate for projector layers
         inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
@@ -119,5 +117,6 @@ class ASRConfig(transformers.PretrainedConfig):
         }
         self.architectures = ["ASRModel"]
         self.pipeline_tag = "automatic-speech-recognition"
+
 
 transformers.AutoConfig.register("asr_model", ASRConfig)
