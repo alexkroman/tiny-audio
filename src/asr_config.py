@@ -19,19 +19,15 @@ class ASRConfig(transformers.PretrainedConfig):
         user_prompt: str = "Transcribe: <audio>",
         encoder_dim: Optional[int] = None,
         llm_dim: Optional[int] = None,
-        # Audio processing constants
         audio_sample_rate: int = 16000,
-        # Projector initialization constants
         projector_init_std: float = 0.02,
-        projector_pool_stride: int = 2,  # AvgPool1d stride (2 = 4x total with Whisper, 1 = no pooling)
+        projector_pool_stride: int = 2, 
         projector_hidden_dim: Optional[
             int
-        ] = None,  # SwiGLU hidden dimension (defaults to encoder_dim * 4)
-        projector_dropout: float = 0.1,  # Dropout rate for projector layers
-        # Inference parameters
+        ] = None,
+        projector_dropout: float = 0.0,  # Dropout rate for projector layers
         inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
-        # Generation parameters
         max_new_tokens: Optional[int] = None,
         min_new_tokens: Optional[int] = None,
         do_sample: Optional[bool] = None,
@@ -87,7 +83,6 @@ class ASRConfig(transformers.PretrainedConfig):
         else:
             self.text_config = kwargs.pop("text_config")
 
-        # Ensure configs are PretrainedConfig objects (in case loaded from dict)
         if isinstance(self.text_config, dict):
             # Reconstruct config from dict using the model_type stored in the dict
             model_type = self.text_config.get("model_type")
@@ -125,7 +120,4 @@ class ASRConfig(transformers.PretrainedConfig):
         self.architectures = ["ASRModel"]
         self.pipeline_tag = "automatic-speech-recognition"
 
-
-# Register the config with transformers
-# This is needed for AutoConfig.from_pretrained to work
 transformers.AutoConfig.register("asr_model", ASRConfig)

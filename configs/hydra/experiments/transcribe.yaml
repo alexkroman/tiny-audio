@@ -40,7 +40,7 @@ training:
   lr_scheduler_type: "cosine"
 
   # Optimization
-  weight_decay: 0.1
+  weight_decay: 0.0
   max_grad_norm: 1.0
 
   # Memory optimization

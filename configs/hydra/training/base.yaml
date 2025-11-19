@@ -21,8 +21,8 @@ greater_is_better: false
 push_to_hub: false
 
 # Optimizer
-learning_rate: 1.0e-4
-weight_decay: 0.01
+learning_rate: 1.0e-5
+weight_decay: 0.0
 max_grad_norm: 1.0
 warmup_steps: 1000
 lr_scheduler_type: cosine_with_min_lr

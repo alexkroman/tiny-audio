@@ -97,48 +97,21 @@ class EndpointHandler:
             print(f"Warmup skipped due to: {e}")
 
     def __call__(self, data: Dict[str, Any]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
-        """Process audio transcription request.
-
-        Supports both single and batch inputs for efficient concurrent processing.
-        The endpoint infrastructure can batch multiple concurrent requests automatically.
-        """
         inputs = data.get("inputs")
         if inputs is None:
             raise ValueError("Missing 'inputs' in request data")
 
-        # Get generation parameters (matching SLAM-ASR paper defaults)
-        params = data.get("parameters", {})
-        max_new_tokens = params.get("max_new_tokens", 200)  # Longer transcripts
-
-        # Beam search for better quality (5 beams for higher quality)
-        # Use num_beams=1 for faster inference at cost of ~2-3% WER increase
-        num_beams = params.get("num_beams", 5)
-
+        params = data.get("parameters", {})# 
+        max_new_tokens = params.get("max_new_tokens", 200)
+        num_beams = params.get("num_beams", 1)
         do_sample = params.get("do_sample", False)
-
-        # Length penalty encourages appropriate transcript length
-        # >1.0 = prefer longer outputs, <1.0 = prefer shorter
-        # Slight positive bias helps avoid truncated transcripts
-        length_penalty = params.get("length_penalty", 1.1)
-
-        # Repetition penalty to prevent loops (1.1-1.2 is good for ASR)
-        repetition_penalty = params.get("repetition_penalty", 1.15)
-
-        # Alternative: use no_repeat_ngram_size to prevent exact n-gram repetition
-        no_repeat_ngram_size = params.get("no_repeat_ngram_size", 3)
-
-        # Early stopping for beam search: stop when all beams end
-        # "never" = generate full max_new_tokens (more accurate but slower)
-        # True = stop when all beams reach EOS (faster)
+        length_penalty = params.get("length_penalty", 1.0)
+        repetition_penalty = params.get("repetition_penalty", 1.0)
+        no_repeat_ngram_size = params.get("no_repeat_ngram_size", 0)
         early_stopping = params.get("early_stopping", True)
-
-        # Diversity penalty encourages different beams (helps with rare words)
-        # 0.0 = no diversity, 0.5-1.0 = good diversity
         default_diversity = self.pipe.model.config.inference_diversity_penalty
         diversity_penalty = params.get("diversity_penalty", default_diversity)
 
-        # The pipeline's __call__ method handles both single and batch inputs
-        # as well as automatic chunking for long audio files
         return self.pipe(
             inputs,
             max_new_tokens=max_new_tokens,
