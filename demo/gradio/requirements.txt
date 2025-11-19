@@ -5,3 +5,4 @@ torch
 torchaudio
 torchcodec
 peft
+truecase
