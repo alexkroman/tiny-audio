@@ -26,14 +26,6 @@ except ImportError:
 
 
 class SwiGLU(nn.Module):
-    """
-    SwiGLU activation MLP - based on LlamaMLP but with flexible output dimension.
-
-    This implements the same gated activation pattern as transformers.models.llama.modeling_llama.LlamaMLP,
-    but allows for different input/output dimensions (needed for cross-modal projection).
-
-    Structure: w1 (gate), w2 (up), w3 (down) with w3(silu(w1) * w2)
-    """
 
     def __init__(self, in_features, hidden_features, out_features, bias=False, dropout=0.0):
         super().__init__()
@@ -52,9 +44,6 @@ class SwiGLU(nn.Module):
 
 
 class AudioProjector(nn.Module):
-    """
-    AudioProjector using a SwiGLU MLP with dropout and RMSNorm.
-    """
 
     def __init__(self, config):
         super().__init__()
@@ -68,6 +57,7 @@ class AudioProjector(nn.Module):
         dropout_rate = getattr(config, "projector_dropout", 0.0)
 
         from transformers.models.llama.modeling_llama import LlamaRMSNorm
+
         self.ln_pre = LlamaRMSNorm(in_dim, eps=1e-6)
         self.proj = SwiGLU(in_dim, hidden_dim, out_dim, dropout=dropout_rate)
         self.ln_post = LlamaRMSNorm(out_dim, eps=1e-6)
@@ -75,9 +65,11 @@ class AudioProjector(nn.Module):
 
         with torch.no_grad():
             std = getattr(config, "projector_init_std", 0.02)
+            self.ln_pre.weight.data.fill_(1.0)
+            self.ln_post.weight.data.fill_(1.0)
             nn.init.normal_(self.proj.w1.weight, mean=0.0, std=std)
             nn.init.normal_(self.proj.w2.weight, mean=0.0, std=std)
-            nn.init.normal_(self.proj.w3.weight, mean=0.0, std=std / (2**0.5))
+            nn.init.normal_(self.proj.w3.weight, mean=0.0, std=std)
 
     def forward(self, x):
         batch_size, seq_len, dim = x.size()
@@ -420,11 +412,8 @@ class ASRModel(PreTrainedModel):
     def _get_audio_expansion_details(self, input_ids: torch.Tensor, num_audio_tokens: int) -> dict:
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
-
-        # Find audio token positions
         audio_mask = input_ids == self.audio_token_id
 
-        # Validate: each sample must have exactly one audio token
         audio_counts = audio_mask.sum(dim=1)
         if not (audio_counts == 1).all():
             missing = (audio_counts == 0).any()
