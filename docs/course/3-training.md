@@ -1,4 +1,4 @@
-# Class 4: Training
+# Class 3: Training
 
 **Duration**: 1 hour (20 min lecture + 40 min hands-on)
 
@@ -787,6 +787,6 @@ ______________________________________________________________________
 
 - [Training script](../../src/train.py)
 
-[Previous: Class 3: Language Models and Projectors](./3-language-models-and-projectors.md) | [Next: Class 5: Evaluation and Debugging](./5-evaluation-and-debugging.md)
+[Previous: Class 2: The End-to-End ASR Architecture](./2-end-to-end-architecture.md) | [Next: Class 4: Evaluation and Debugging](./4-evaluation-and-debugging.md)
 
 **See you next time!**

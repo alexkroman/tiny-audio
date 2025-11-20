@@ -524,4 +524,4 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-[Previous: Course Overview](./0-course-overview.md) | [Next: Class 2: Audio Processing and Encoders](./2-audio-processing-and-encoders.md)
+[Previous: Course Overview](./0-course-overview.md) | [Next: Class 2: The End-to-End ASR Architecture](./2-end-to-end-architecture.md)

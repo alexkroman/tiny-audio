@@ -1,4 +1,4 @@
-# Class 5: Evaluation and Debugging
+# Class 4: Evaluation and Debugging
 
 **Duration**: 1 hour (20 min lecture + 40 min hands-on)
 
@@ -880,6 +880,6 @@ ______________________________________________________________________
 
 - [Common Voice](https://commonvoice.mozilla.org/)
 
-[Previous: Class 4: Training](./4-training.md) | [Next: Class 6: Publishing and Deployment](./6-publishing-and-deployment.md)
+[Previous: Class 3: Training](./3-training.md) | [Next: Class 5: Publishing and Deployment](./5-publishing-and-deployment.md)
 
 **This is it - your model will be live and public!**

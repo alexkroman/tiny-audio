@@ -1,4 +1,4 @@
-# Class 6: Publishing and Deployment
+# Class 5: Publishing and Deployment
 
 **Duration**: 1 hour (15 min lecture + 45 min hands-on)
 
@@ -1262,6 +1262,6 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-[Previous: Class 5: Evaluation and Debugging](./5-evaluation-and-debugging.md)
+[Previous: Class 4: Evaluation and Debugging](./4-evaluation-and-debugging.md)
 
 *Course materials available at: <https://github.com/alexkroman/tiny-audio>*
