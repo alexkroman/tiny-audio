@@ -42,35 +42,50 @@ Before a model can "hear" audio, we must convert it into a standardized numerica
 
 ### Digitization
 
-We first digitize the audio by **sampling** it 16,000 times per second (16 kHz). This rate is the standard for speech recognition as it captures the full range of human speech.
+Speech starts as vibrations in the air. A microphone captures these vibrations **16,000 times per second** (16 kHz sampling rate). This is the standard for speech recognition because it captures all the frequencies in human speech.
 
 ### Feature Extraction
 
-Raw audio samples are too high-dimensional. We extract more meaningful features by converting the audio into a **log-mel spectrogram**. This is a visual representation of how the frequencies in the audio change over time, much like a musical score. This spectrogram is the actual input to our encoder.
+We convert the audio into a **log-mel spectrogram** - think of it like a musical score that shows different frequencies over time. Like a heat map, it shows:
+- **Bottom rows**: Deep voice tones
+- **Middle rows**: Vowel sounds (a, e, i, o, u)
+- **Top rows**: High consonants like 's' and 'f'
+
+This spectrogram is what the encoder actually sees.
 
 ______________________________________________________________________
 
 ## 3. Step 2: The Whisper Audio Encoder
 
-The **encoder's** job is to take the spectrogram and create a rich, contextualized representation of the speech.
+The **encoder's** job is to "listen" to the spectrogram and understand what was said.
 
-- **What it is**: We use the **OpenAI Whisper encoder**, a massive, pre-trained model that has learned the nuances of human speech from 680,000 hours of diverse audio.
-- **What it outputs**: A sequence of embeddings (vectors), where each embedding represents a small chunk of audio (~20-30ms).
-- **Time Compression**: The encoder significantly compresses the temporal dimension. For example, 3 seconds of audio (48,000 samples) might become just ~150 embedding vectors. This makes the downstream processing much more efficient.
-- **Frozen**: We keep the encoder **frozen**. We don't train it. This preserves its powerful, pre-trained knowledge and saves massive amounts of computational resources.
+- **What it is**: We use the **OpenAI Whisper encoder**, a massive, pre-trained model that learned from 680,000 hours of diverse audio.
+- **What it detects**: Each moment in the audio gets analyzed for:
+  - Individual speech sounds (like "t", "s", "ah")
+  - Whether sounds are voiced or whispered
+  - Pitch and rhythm patterns
+  - Speaker characteristics (accent, gender, age)
+- **Time Compression**: The encoder compresses time. For example, 3 seconds of audio (48,000 samples) becomes just ~150 vectors, making everything much faster.
+- **Frozen**: We keep the encoder **frozen** (don't train it). This preserves its powerful knowledge and saves massive computational resources.
 
-At the end of this stage, we have a sequence of high-dimensional vectors (1280 dimensions) that represent the *meaning* of the audio.
+At this stage, we have vectors (1280 dimensions each) that capture what was heard. **Important**: "to," "too," and "two" all look the same because they sound the same! The encoder knows the sound but not yet the spelling.
 
 ______________________________________________________________________
 
 ## 4. Step 3: The Projector - Bridging the Modality Gap
 
-Now we face the **modality gap**. The audio encoder outputs embeddings in one "language" (1280 dimensions), but the text decoder expects embeddings in a different "language" (e.g., 1536 dimensions for SmolLM3).
+Now we face the **modality gap**. The encoder speaks "audio language" (1280 dimensions), but the text decoder speaks "text language" (1536 dimensions for SmolLM3).
 
-The **AudioProjector** is the bridge. It's a small, trainable neural network with two key jobs:
+The **AudioProjector** is the bridge - it translates "what was heard" into "how to write it." It's a small neural network with two key jobs:
 
-1. **Dimension Transformation**: It projects the 1280-dimensional audio embeddings into the 1536-dimensional space the language model expects.
-1. **Temporal Downsampling**: It stacks frames together to further reduce the sequence length (typically by a factor of 5), making the decoder's job much easier and faster.
+1. **Dimension Transformation**: Changes from 1280-dimensional audio vectors to 1536-dimensional text vectors.
+2. **Temporal Downsampling**: Stacks frames together (typically by 5x), making everything faster.
+
+The projector learns to solve problems that sound alone can't answer:
+- **"to" vs "too" vs "two"** - Same sound, different spelling based on meaning
+- **"their" vs "there" vs "they're"** - Context determines which one
+- **Question marks** - Rising tone at the end → add "?"
+- **Capitalization** - "apple" (fruit) vs "Apple" (company)
 
 The projector is the **only major component we train from scratch**. It learns to be a perfect translator between the audio and text worlds.
 
@@ -80,9 +95,9 @@ ______________________________________________________________________
 
 The final piece is the **decoder**, a large language model (LLM) like **SmolLM3**.
 
-- **What it does**: It receives the sequence of translated embeddings from the projector and generates the final text transcription, one token (word or sub-word) at a time.
-- **How it works**: It's an auto-regressive, decoder-only model. Given the audio representation and the words it has already generated, it predicts the most likely next word.
-- **Frozen**: Like the encoder, the decoder is also **frozen**. We use its powerful, pre-trained language capabilities without the need for expensive fine-tuning.
+- **What it does**: Takes the translated embeddings from the projector and writes the final text transcription, one word (or sub-word piece) at a time.
+- **How it works**: Given the audio and the words it has already written, it predicts the most likely next word. Like autocomplete, but for transcription.
+- **Frozen**: Like the encoder, the decoder is also **frozen**. We use its powerful, pre-trained language capabilities without expensive fine-tuning.
 
 ### The Complete Picture: A Team of Specialists
 
@@ -115,8 +130,8 @@ The script for this workshop, `trace_data.py`, is located in the `docs/course/ex
 Take a moment to open `docs/course/examples/trace_data.py` and look through the code. You'll see it performs the following steps:
 1.  Loads a sample audio file.
 2.  Processes it through the feature extractor, encoder, and projector.
-3.  Serializes the data (waveform, spectrogram, embeddings) into a JSON format.
-4.  Generates a self-contained HTML file (`data_trace.html`) that uses the Observable JS runtime to create interactive visualizations of the data.
+3.  Creates visualizations using matplotlib showing the data at each stage.
+4.  Generates a self-contained HTML file (`data_trace.html`) with embedded images and clear explanations of what's happening at each step.
 
 **Step 2: Run the script**
 
@@ -130,16 +145,17 @@ poetry run python docs/course/examples/trace_data.py
 
 After running the script, open the newly created `data_trace.html` file in your web browser.
 
-This interactive report visually documents the entire journey of your audio data:
+This report shows you exactly how speech becomes text, step by step:
 
-1.  **Raw Audio Waveform**: The starting point—a simple 1D representation of sound pressure over time.
-2.  **Log-Mel Spectrogram**: You'll see how the audio is converted into a 2D representation that the encoder can understand, showing frequency changes over time.
-3.  **Encoder Output**: This visualization shows the rich, high-dimensional embeddings produced by the Whisper encoder. Notice the shape and statistics—this is the "language" of the audio world.
-4.  **Projector Output**: Here you can clearly see the "modality gap" being bridged.
-    *   **Shape Change**: The dimensions of the embeddings are transformed to match what the language model expects.
-    *   **Visual Difference**: The pattern of activations is completely different, showing that the projector has successfully "translated" the audio representation into a text-like one.
+1.  **Sound Waves**: The starting point—ups and downs showing how loud the sound is at each moment.
+2.  **Spectrogram**: A heat map showing frequencies over time. You'll see vowels in the middle rows and consonants in the top rows. The purple area on the right is just padding.
+3.  **Encoder Output**: What the AI "understands" about the audio. Brighter colors mean the AI detected something important. At this stage, "to," "too," and "two" still look the same because they sound the same.
+4.  **Projector Output**: Now the AI is thinking in text, not sound. You'll see:
+    *   The pattern looks completely different - sound has been translated to text concepts
+    *   The "nearest tokens" section shows a jumble of words, proving the projector is working
+    *   It's now ready to figure out spelling, punctuation, and capitalization
 
-By reviewing this report, you've witnessed the crucial role of each component in transforming sound into a format ready for text generation.
+**Key insight**: The projector is the bridge that makes this all work. It learns to answer questions like "which 'to/too/two' should I write?" based on context.
 
 ______________________________________________________________________
 
