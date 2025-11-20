@@ -32,6 +32,10 @@ def format_markdown() -> int:
     project_root = get_project_root()
     md_files = list(project_root.glob("*.md")) + list(project_root.glob("docs/**/*.md"))
 
+    # Exclude files that should not be formatted (e.g., MODEL_CARD.md with YAML front matter)
+    excluded_files = {"model_card.md", "MODEL_CARD.md"}
+    md_files = [f for f in md_files if f.name not in excluded_files]
+
     if not md_files:
         print("No markdown files found to format")
         return 0
@@ -61,8 +65,16 @@ def format_code() -> int:
 
 
 def type_check() -> int:
-    """Run mypy type checker."""
-    return run_command(["mypy", "src"], "Running MyPy Type Checker")
+    """Run mypy and pyright type checkers."""
+    exit_code = 0
+
+    # Run mypy
+    code = run_command(["mypy", "src"], "Running MyPy Type Checker")
+    exit_code = max(exit_code, code)
+
+    # Run pyright
+    code = run_command(["pyright", "src"], "Running Pyright Type Checker")
+    return max(exit_code, code)
 
 
 def test() -> int:

@@ -1,4 +1,4 @@
-# Class 4: Training
+# Class 3: Training
 
 **Duration**: 1 hour (20 min lecture + 40 min hands-on)
 
@@ -46,9 +46,9 @@ ______________________________________________________________________
 
 - HuBERT/Whisper encoder: 1.3-1.5B params
 
-- Qwen3-8B/SmolLM3-3B decoder: 3-8B params
+- SmolLM3 decoder: 3B params
 
-- **Total**: 4.3-9.5B+ parameters to train
+- **Total**: ~4.3B parameters to train
 
 **Problems**:
 
@@ -483,7 +483,7 @@ poetry run python src/train.py \
 Loading model...
 ✓ Loaded encoder (Whisper Turbo, frozen)
 ✓ Loaded projector (~13M params, trainable)
-✓ Loaded decoder (SmolLM3-3B, frozen)
+✓ Loaded decoder (SmolLM3, frozen)
 
 Loading dataset...
 ✓ Train samples: 50
@@ -787,6 +787,6 @@ ______________________________________________________________________
 
 - [Training script](../../src/train.py)
 
-[Previous: Class 3: Language Models and Projectors](./3-language-models-and-projectors.md) | [Next: Class 5: Evaluation and Debugging](./5-evaluation-and-debugging.md)
+[Previous: Class 2: The End-to-End ASR Architecture](./2-end-to-end-architecture.md)
 
 **See you next time!**

@@ -16,19 +16,25 @@ except ImportError:
 
 class EndpointHandler:
     def __init__(self, path: str = ""):
-        # Set environment variables for PyTorch/CUDA (must be before imports/operations)
         import os
 
-        # Enable expandable segments to reduce fragmentation
+        import nltk
+
+        nltk.download("punkt_tab", quiet=True)
+
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-        # Enable TF32 for faster matmul on A40/A100
+        # Enable TF32 for faster matmul on Ampere+ GPUs (A100, etc.)
+        # Also beneficial for T4 (Turing) which supports TensorFloat-32
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
         # Set device and dtype
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+
+        # Use float16 for better T4 compatibility (bfloat16 not well supported on T4)
+        # T4 has excellent float16 performance with tensor cores
+        self.dtype = torch.float16 if self.device == "cuda" else torch.float32
 
         # Enable CUDA optimizations
         if torch.cuda.is_available():
@@ -56,14 +62,14 @@ class EndpointHandler:
         )
 
         # Apply torch.compile if enabled (after model is loaded by pipeline)
-        # Enable by default for significant speedup (20-40%)
+        # Use "default" mode for T4 - better compatibility than "reduce-overhead"
+        # "reduce-overhead" is better for A100+ but can be slower on older GPUs
         if torch.cuda.is_available() and os.getenv("ENABLE_TORCH_COMPILE", "1") == "1":
-            compile_mode = os.getenv("TORCH_COMPILE_MODE", "reduce-overhead")
+            compile_mode = os.getenv("TORCH_COMPILE_MODE", "default")
             self.model = torch.compile(self.model, mode=compile_mode)
-            # Update the pipeline with the compiled model
             self.pipe.model = self.model
 
-        # Warmup the model
+        # Warmup the model to trigger compilation and optimize kernels
         if torch.cuda.is_available():
             self._warmup()
 
@@ -80,11 +86,12 @@ class EndpointHandler:
             sample_rate = self.pipe.model.config.audio_sample_rate
             dummy_audio = torch.randn(sample_rate, dtype=torch.float32)
 
-            # The pipeline now handles GPU optimization internally
+            # Run inference to trigger torch.compile and kernel optimization
             with torch.inference_mode():
                 warmup_tokens = self.pipe.model.config.inference_warmup_tokens
                 _ = self.pipe(
-                    {"raw": dummy_audio, "sampling_rate": sample_rate}, max_new_tokens=warmup_tokens
+                    {"raw": dummy_audio, "sampling_rate": sample_rate},
+                    max_new_tokens=warmup_tokens,
                 )
 
             # Force CUDA synchronization to ensure kernels are compiled
@@ -102,11 +109,11 @@ class EndpointHandler:
             raise ValueError("Missing 'inputs' in request data")
 
         params = data.get("parameters", {})
-        max_new_tokens = params.get("max_new_tokens", 200)
+        max_new_tokens = params.get("max_new_tokens", 128)
         num_beams = params.get("num_beams", 1)
         do_sample = params.get("do_sample", False)
         length_penalty = params.get("length_penalty", 1.0)
-        repetition_penalty = params.get("repetition_penalty", 1.0)
+        repetition_penalty = params.get("repetition_penalty", 1.05)
         no_repeat_ngram_size = params.get("no_repeat_ngram_size", 0)
         early_stopping = params.get("early_stopping", True)
         default_diversity = self.pipe.model.config.inference_diversity_penalty

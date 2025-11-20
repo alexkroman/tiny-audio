@@ -46,6 +46,7 @@ class ASRConfig(transformers.PretrainedConfig):
             "min_new_tokens": 1,
             "do_sample": False,
             "repetition_penalty": 1.05,
+            "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,
             "use_cache": True,
         }
