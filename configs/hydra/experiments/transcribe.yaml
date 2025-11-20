@@ -30,16 +30,19 @@ training:
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
 
-  learning_rate: 1.0e-3
+  learning_rate: 1.0e-4
 
-  warmup_steps: 1000  # 2.5% of 40k steps
-  lr_scheduler_type: "cosine"
 
-  # Optimization
-  weight_decay: 0.0
+  lr_scheduler_type: "warmup_stable_decay"
+  warmup_steps: 1000
+  lr_scheduler_kwargs:
+    num_decay_steps: 1000
+
+  # Optimization - Stage 1: Aggressive alignment learning
+  weight_decay: 1e-5
   max_grad_norm: 5.0
-  projector_dropout: 0.0
-  use_specaugment: false
+  projector_dropout: 0.05
+  use_specaugment: true
   label_smoothing: 0.1
 
   # Memory optimization
@@ -57,7 +60,7 @@ training:
   gradient_checkpointing: false
 
   # Training duration - 50000 steps as requested
-  max_steps: 10000
+  max_steps: 20000
 
   # Reproducibility
   seed: 42

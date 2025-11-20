@@ -67,7 +67,7 @@ class AudioProjector(nn.Module):
         from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
         # 1. Pre-Norm (Epsilon aligned to Llama-3)
-        self.ln_pre = LlamaRMSNorm(in_dim, eps=1e-5)
+        self.ln_pre = LlamaRMSNorm(in_dim, eps=1e-6)
 
         # 2. SwiGLU
         self.proj = SwiGLU(in_dim, hidden_dim, out_dim, dropout_rate=dropout_rate)
@@ -79,7 +79,7 @@ class AudioProjector(nn.Module):
             self.residual_proj = nn.Identity()
 
         # 4. Interface Guardrail
-        self.ln_post = LlamaRMSNorm(out_dim, eps=1e-5)
+        self.ln_post = LlamaRMSNorm(out_dim, eps=1e-6)
 
         # 5. Output Scale
         # Init at 1.0 is safer than 2.0. Let the gradients drive it up if needed.
@@ -113,13 +113,12 @@ class AudioProjector(nn.Module):
 
         batch_size, seq_len, dim = x.size()
 
-        # Pooling/Stacking with REPLICATION padding
         remainder = seq_len % self.k
         if remainder:
             pad_len = self.k - remainder
             # mode='replicate' prevents "silence artifacts" at the end
             x = x.transpose(1, 2) # Pad expects [B, C, T]
-            x = F.pad(x, (0, pad_len), mode='replicate') 
+            x = F.pad(x, (0, pad_len), mode='constant') 
             x = x.transpose(1, 2)
 
         x = x.contiguous().view(batch_size, -1, dim * self.k)
