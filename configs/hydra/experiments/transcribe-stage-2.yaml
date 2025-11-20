@@ -30,16 +30,16 @@ training:
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
 
-  learning_rate: 1.0e-3
+  learning_rate: 2.0e-5
 
   warmup_steps: 1000  # 2.5% of 40k steps
   lr_scheduler_type: "cosine"
 
   # Optimization
-  weight_decay: 0.0
+  weight_decay: 1e-5
   max_grad_norm: 5.0
-  projector_dropout: 0.0
-  use_specaugment: false
+  projector_dropout: 0.05
+  use_specaugment: true
   label_smoothing: 0.1
 
   # Memory optimization
@@ -60,7 +60,7 @@ training:
   max_steps: 10000
 
   # Reproducibility
-  seed: 42
+  seed: 123
   ignore_data_skip: true
 
 # Early stopping configuration

@@ -26,68 +26,119 @@ except ImportError:
 
 
 class SwiGLU(nn.Module):
-    def __init__(self, in_features, hidden_features, out_features, bias=False, dropout=0.0):
+    def __init__(self, in_features, hidden_features, out_features, bias=False, dropout_rate=0.05):
         super().__init__()
-        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
-        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
-        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
+        # SwiGLU: (Swish(xW_gate) * xW_val) W_out
+        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)  # Gate
+        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)  # Value
+        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)  # Output
         self.act = nn.SiLU()
-        self.dropout = nn.Dropout(dropout)
+
+        # 2025 Optimization: Low dropout for Audio to preserve phonemes
+        # Applied to input rather than gated output for better regularization
+        self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x):
+        # Apply dropout to input (more effective for gated networks)
+        x = self.dropout(x)
+
+        # The gating mechanism
         x_gate = self.act(self.w1(x))
         x_val = self.w2(x)
+
+        # Element-wise multiplication (The "Gating")
         x = x_gate * x_val
-        x = self.dropout(x)
-        return self.w3(x)
+
+        # Final projection
+        x = self.w3(x)
+        return x
 
 
 class AudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.k = getattr(config, "projector_pool_stride", 2)  # Downsampling rate
+        self.k = getattr(config, "projector_pool_stride", 5)
         in_dim = config.encoder_dim * self.k
         out_dim = config.llm_dim
-        hidden_dim = config.projector_hidden_dim
-        if hidden_dim is None:
-            hidden_dim = config.encoder_dim * 4
-
-        dropout_rate = getattr(config, "projector_dropout", 0.0)
+        hidden_dim = config.llm_dim
+        dropout_rate = getattr(config, "projector_dropout", 0.05)
+        self.noise_scale = getattr(config, "projector_input_noise", 0.01)
 
         from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
-        self.ln_pre = LlamaRMSNorm(in_dim, eps=1e-6)
-        self.proj = SwiGLU(in_dim, hidden_dim, out_dim, dropout=dropout_rate)
-        self.ln_post = LlamaRMSNorm(out_dim, eps=1e-6)
-        self.output_dropout = nn.Dropout(dropout_rate)
+        # 1. Pre-Norm (Epsilon aligned to Llama-3)
+        self.ln_pre = LlamaRMSNorm(in_dim, eps=1e-5)
 
+        # 2. SwiGLU
+        self.proj = SwiGLU(in_dim, hidden_dim, out_dim, dropout_rate=dropout_rate)
+
+        # 3. Residual Connection
+        if in_dim != out_dim:
+            self.residual_proj = nn.Linear(in_dim, out_dim, bias=False)
+        else:
+            self.residual_proj = nn.Identity()
+
+        # 4. Interface Guardrail
+        self.ln_post = LlamaRMSNorm(out_dim, eps=1e-5)
+
+        # 5. Output Scale
+        # Init at 1.0 is safer than 2.0. Let the gradients drive it up if needed.
+        self.output_scale = nn.Parameter(torch.ones([]) * 1.0)
+
+        # --- OPTIMIZED INITIALIZATION ---
         with torch.no_grad():
             std = getattr(config, "projector_init_std", 0.02)
+            
+            # Norms start as identity
             self.ln_pre.weight.data.fill_(1.0)
             self.ln_post.weight.data.fill_(1.0)
-            nn.init.normal_(self.proj.w1.weight, mean=0.0, std=std)
-            nn.init.normal_(self.proj.w2.weight, mean=0.0, std=std)
-            nn.init.normal_(self.proj.w3.weight, mean=0.0, std=std)
+            
+            # SwiGLU (The "Correction") starts small
+            nn.init.trunc_normal_(self.proj.w1.weight, std=std)
+            nn.init.trunc_normal_(self.proj.w2.weight, std=std)
+            nn.init.trunc_normal_(self.proj.w3.weight, std=std)
+            
+            # Residual (The "Shortcut") starts STRONG
+            # This ensures signal flows through even if SwiGLU is random
+            if isinstance(self.residual_proj, nn.Linear):
+                # Orthogonal ensures the matrix rotates/maps features without shrinking them
+                nn.init.orthogonal_(self.residual_proj.weight)
+                # Scale slightly to account for the change in width (3840 -> 4096)
+                self.residual_proj.weight.data.mul_(0.5) # Conservative starting gain
 
     def forward(self, x):
+        if self.training and self.noise_scale > 0:
+            noise = torch.randn_like(x) * self.noise_scale
+            x = x + noise
+
         batch_size, seq_len, dim = x.size()
 
-        target_dtype = self.proj.w1.weight.dtype
-        if x.dtype != target_dtype:
-            x = x.to(target_dtype)
-
+        # Pooling/Stacking with REPLICATION padding
         remainder = seq_len % self.k
         if remainder:
             pad_len = self.k - remainder
-            x = F.pad(x, (0, 0, 0, pad_len))
+            # mode='replicate' prevents "silence artifacts" at the end
+            x = x.transpose(1, 2) # Pad expects [B, C, T]
+            x = F.pad(x, (0, pad_len), mode='replicate') 
+            x = x.transpose(1, 2)
 
         x = x.contiguous().view(batch_size, -1, dim * self.k)
+
+        # Residual Path
+        residual = self.residual_proj(x)
+        
+        # Main Path
         x = self.ln_pre(x)
         x = self.proj(x)
+        
+        # Injection
+        x = x + residual
+
+        # Final Norm & Scale
         x = self.ln_post(x)
+        x = x * self.output_scale
 
-        return self.output_dropout(x)
-
+        return x
 
 class ASRModel(PreTrainedModel):
     config_class = ASRConfig
@@ -107,7 +158,7 @@ class ASRModel(PreTrainedModel):
     }
 
     @staticmethod
-    def _create_feature_extractor(audio_model_id: str):
+    def _create_feature_extractor(audio_model_id: str, training_mode: bool = False):
         """Factory method to create the appropriate feature extractor."""
         is_whisper = "whisper" in audio_model_id.lower()
         if is_whisper:
@@ -115,9 +166,21 @@ class ASRModel(PreTrainedModel):
 
             encoder_config = WhisperConfig.from_pretrained(audio_model_id)
             num_mel_bins = encoder_config.num_mel_bins
+
+            # Add SpecAugment parameters for training
             return WhisperFeatureExtractor.from_pretrained(
                 audio_model_id,
                 feature_size=num_mel_bins,
+                # SpecAugment parameters - optimized for adapter training
+                apply_spec_augment=training_mode,  # Only during training
+                # Reduced Freq Mask (Standard is ~27)
+                mask_feature_prob=0.05,       # Low prob of masking features
+                mask_feature_length=15,       # Narrower frequency bands (15 vs 27)
+                mask_feature_min_masks=0,     # Allow 0 masks
+                # Reduced Time Mask (Standard is ~80-100)
+                mask_time_prob=0.05,          # Low prob of masking time
+                mask_time_length=20,          # Shorter time masks (200ms vs 800ms)
+                mask_time_min_masks=1,        # At least 1 mask if triggered
             )
         return Wav2Vec2FeatureExtractor.from_pretrained(audio_model_id)
 
@@ -201,7 +264,11 @@ class ASRModel(PreTrainedModel):
         if feature_extractor is not None:
             self.feature_extractor = feature_extractor
         else:
-            self.feature_extractor = self._create_feature_extractor(config.audio_model_id)
+            # Enable SpecAugment during training (can be controlled via config)
+            training_mode = getattr(config, "use_specaugment", False)
+            self.feature_extractor = self._create_feature_extractor(
+                config.audio_model_id, training_mode=training_mode
+            )
 
         self.decoder = self._create_decoder(config)
         self.generation_config = self.decoder.generation_config
@@ -228,18 +295,23 @@ class ASRModel(PreTrainedModel):
             else:
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
+        # Pass config directly to AudioProjector, let it handle defaults
         projector_config = SimpleNamespace(
             encoder_dim=encoder_dim,
             llm_dim=llm_dim,
-            projector_pool_stride=getattr(config, "projector_pool_stride", 2),
-            projector_hidden_dim=getattr(config, "projector_hidden_dim", None),
-            projector_init_std=getattr(config, "projector_init_std", 0.02),
-            projector_dropout=getattr(config, "projector_dropout", 0.0),
+            **{k: v for k, v in vars(config).items() if k.startswith('projector_')}
         )
         self.projector = AudioProjector(projector_config)
 
         target_dtype = getattr(torch, config.model_dtype)
         self.projector = self.projector.to(dtype=target_dtype)
+
+        # Create loss function with label smoothing
+        self.label_smoothing = getattr(config, "label_smoothing", 0.1)
+        self.loss_fct = nn.CrossEntropyLoss(
+            ignore_index=-100,
+            label_smoothing=self.label_smoothing
+        )
 
         self._no_split_modules = self.decoder._no_split_modules
 
@@ -581,13 +653,42 @@ class ASRModel(PreTrainedModel):
             full_attention_mask = attention_mask
             use_cache = kwargs.pop("use_cache", None)
 
-        return self.decoder(
+        # Get decoder outputs
+        outputs = self.decoder(
             inputs_embeds=inputs_embeds,
             attention_mask=full_attention_mask,
-            labels=labels,
+            labels=None,  # Never let decoder compute loss, we'll do it ourselves
             use_cache=use_cache if use_cache is not None else False,
             **kwargs,
         )
+
+        # Compute loss if labels provided
+        if labels is not None:
+            # Apply label smoothing only during training
+            if self.training:
+                loss = self.loss_fct(
+                    outputs.logits.view(-1, outputs.logits.size(-1)),
+                    labels.view(-1)
+                )
+            else:
+                # No label smoothing for validation - get true loss
+                val_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                loss = val_loss_fct(
+                    outputs.logits.view(-1, outputs.logits.size(-1)),
+                    labels.view(-1)
+                )
+
+            # Create new output with loss (outputs might be immutable)
+            from transformers.modeling_outputs import CausalLMOutputWithPast
+            outputs = CausalLMOutputWithPast(
+                loss=loss,
+                logits=outputs.logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
+
+        return outputs
 
     @torch.no_grad()
     def generate(

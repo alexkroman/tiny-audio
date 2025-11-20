@@ -416,6 +416,8 @@ def main(cfg: DictConfig) -> None:
         encoder_dim=encoder_config.hidden_size,
         llm_dim=decoder_config.hidden_size,
         projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
+        use_specaugment=cfg.training.get("use_specaugment", False),
+        label_smoothing=cfg.training.get("label_smoothing", 0.1),
     )
 
     # Load from pretrained if specified, otherwise create new model
@@ -471,7 +473,7 @@ def main(cfg: DictConfig) -> None:
         )
         torch._inductor.config.compile_threads = compile_config.get("compile_threads", 4)
 
-    # Remove non-TrainingArguments fields
+    # Remove non-TrainingArguments fields (model/projector configs)
     non_training_args = [
         "torch_compile_dynamic",
         "torch_compile_backend",
@@ -479,8 +481,13 @@ def main(cfg: DictConfig) -> None:
         "torch_compile_fullgraph",
         "model_dtype",
         "attn_implementation",
+        "use_specaugment",
+        "label_smoothing",
     ]
-    for key in non_training_args:
+
+    # Also remove any projector-specific configs
+    projector_keys = [k for k in training_args.keys() if k.startswith("projector_")]
+    for key in non_training_args + projector_keys:
         training_args.pop(key, None)
 
     trainer = Trainer(
