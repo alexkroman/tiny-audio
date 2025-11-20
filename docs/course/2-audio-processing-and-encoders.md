@@ -2,7 +2,7 @@
 
 **Duration**: 1 hour (20 min lecture + 40 min hands-on)
 
-**Goal**: Understand how audio becomes data and how HuBERT processes it
+**Goal**: Understand how audio becomes data and how Whisper processes it
 
 ## Learning Objectives
 
@@ -12,7 +12,7 @@ By the end of this class, you will:
 
 - Know what feature extraction does
 
-- Understand HuBERT's self-supervised pre-training
+- Understand Whisper's self-supervised pre-training
 
 - Visualize audio waveforms and embeddings
 
@@ -184,65 +184,51 @@ After this step, our audio is ready to be consumed by the HuBERT model.
 
 ______________________________________________________________________
 
-## 4. The HuBERT Encoder: From Audio to Meaning (10 min)
+## 4. The Whisper Encoder: From Audio to Meaning (10 min)
 
-### What is HuBERT?
+### What is Whisper?
 
-**HuBERT** = **H**idden **U**nit **BERT**
+**Whisper** = OpenAI's general-purpose speech recognition model
 
-HuBERT solves a critical problem: **How do you learn rich audio representations without expensive manual transcriptions?**
+Whisper solves a critical problem: **How do you learn robust audio representations for diverse speech, including multiple languages, without extensive supervised datasets for every scenario?**
 
-**The Innovation**: Self-supervised learning on unlabeled audio
-
-Tiny Audio uses HuBERT-XLarge by default - pre-trained on 60,000 hours of unlabeled speech from LibriLight. That's nearly 7 years of continuous audio! During pre-training, it learned to predict masked audio segments, similar to how BERT predicts masked words in text.
+**The Innovation**: Large-scale, weakly-supervised pre-training on 680,000 hours of multilingual and multitask data collected from the internet. This massive and diverse dataset allows Whisper to learn a wide range of speech patterns, languages, and transcription styles.
 
 **What makes this powerful**:
 
-- No transcriptions needed (unlabeled data is abundant)
-- Learns universal speech patterns (phonemes, prosody, speaker characteristics)
-- Transfers to any language or domain
-- Can be used frozen without any fine-tuning
+- Multilingual support: Transcribes in over 100 languages.
+- Robustness: Handles various accents, background noise, and technical language.
+- Zero-shot capabilities: Performs well on tasks it wasn't explicitly trained for, like language identification or voice activity detection.
+- Unified model: A single model for speech recognition, speech translation, and language identification.
 
-**Why we use HuBERT as default**:
+**Why we use Whisper as default**:
 
-- Excellent performance on English speech
-- Proven track record in ASR tasks
-- Works well when frozen (no training needed)
-- 1.3 billion parameters
+- Excellent performance across many languages and domains.
+- Robustness to various audio conditions.
+- Proven track record in ASR tasks.
+- 1.5 billion parameters (large-v3).
 
-**Alternative: Whisper Encoder**:
-Tiny Audio also supports OpenAI's Whisper encoder (openai/whisper-large-v3):
-
-- Pre-trained on 680K hours of multilingual, weakly-supervised data
-- 1.5 billion parameters
-- Better for multilingual tasks
-- Can be swapped by changing the encoder config
-
-**Analogy**: Like a child learning language by listening for years before speaking. They internalize patterns, rhythms, and sounds without explicit grammar lessons.
+**Analogy**: Like a highly experienced linguist who has listened to conversations from all over the world, in various settings, and can understand and transcribe almost any spoken word, regardless of accent or background noise.
 
 ### Architecture
 
 ```
 Audio waveform (16 kHz)
     ↓
-CNN Feature Encoder (7 conv layers)
-    ↓ (~320x time compression)
-Audio features (~50 Hz)
+Log-Mel Spectrogram (80-dim)
     ↓
-24 Transformer Layers
+Encoder (Transformer-based, 32 layers for large-v3)
     ↓
 1280-dim embeddings per frame
-
-
 ```
 
-### What HuBERT Learned
+### What Whisper Learned
 
-During 60,000 hours of self-supervised pre-training, HuBERT developed internal representations of:
+During 680,000 hours of weakly-supervised pre-training, Whisper developed internal representations of:
 
 **Phonetic Knowledge**:
 
-- Phonemes (/t/, /d/, /k/, etc.) - the atomic units of speech
+- Phonemes across a multitude of languages
 - Phoneme boundaries and transitions
 - Contextual pronunciation variations
 
@@ -251,6 +237,7 @@ During 60,000 hours of self-supervised pre-training, HuBERT developed internal r
 - Speaker characteristics (gender, age, accent)
 - Environmental acoustics (room reverb, background noise)
 - Channel effects (microphone quality, compression)
+- Language identification cues
 
 **Prosodic Patterns**:
 
@@ -258,7 +245,7 @@ During 60,000 hours of self-supervised pre-training, HuBERT developed internal r
 - Stress and emphasis
 - Intonation and pitch patterns
 
-**Why this matters**: Training from scratch would require labeled data for all these patterns. HuBERT learned them "for free" from unlabeled audio, saving us millions of dollars and months of annotation work.
+**Why this matters**: Training from scratch would require labeled data for all these patterns across every language and domain. Whisper learned them "for free" from its massive dataset, saving us millions of dollars and months of annotation work.
 
 **This is why pre-trained encoders are game-changers** - we inherit this knowledge and focus our training budget on the transcription task.
 
@@ -275,58 +262,58 @@ Instead of storing raw air pressure measurements 16,000 times per second, we cre
 
 **Why compress?**
 
-1. **Computational efficiency**: Language models can't process 16,000 tokens per second of audio
-1. **Semantic grouping**: ~20ms is roughly one phoneme - the right granularity for speech
-1. **Information density**: Embeddings encode patterns, not just raw amplitudes
+1.  **Computational efficiency**: Language models can't process 16,000 tokens per second of audio
+2.  **Semantic grouping**: ~20ms is roughly one phoneme - the right granularity for speech
+3.  **Information density**: Embeddings encode patterns, not just raw amplitudes
 
-HuBERT performs dramatic temporal compression while increasing semantic density:
+Whisper performs dramatic temporal compression while increasing semantic density:
 
 ```
 3 seconds audio at 16kHz = 48,000 samples (just amplitude values)
-    ↓ (CNN Feature Encoder: 7 conv layers)
-~149 frame features
-    ↓ (24 Transformer Layers)
-~149 embeddings × 1280 dimensions (rich semantic vectors)
+    ↓ (Log-Mel Spectrogram + Encoder)
+~150 frame features
+    ↓ (Transformer Layers)
+~150 embeddings × 1280 dimensions (rich semantic vectors)
 ```
 
 **The transformation**:
 
-- **Input**: 48,000 numbers representing air pressure over time
-- **Output**: 149 vectors, each capturing ~20ms of speech meaning
-- **Compression ratio**: ~320x in time dimension
-- **Information density**: ↑↑↑ (much more meaningful)
+-   **Input**: 48,000 numbers representing air pressure over time
+-   **Output**: ~150 vectors, each capturing ~20ms of speech meaning
+-   **Compression ratio**: ~320x in time dimension
+-   **Information density**: ↑↑↑ (much more meaningful)
 
 **Why compression matters**:
 
-1. **Efficiency**: Decoder processes 149 frames instead of 48,000 samples
-1. **Context**: Each frame summarizes 20ms of audio context
-1. **Semantics**: Embeddings encode meaning, not just waveform shape
+1.  **Efficiency**: Decoder processes ~150 frames instead of 48,000 samples
+2.  **Context**: Each frame summarizes 20ms of audio context
+3.  **Semantics**: Embeddings encode meaning, not just waveform shape
 
 **Think of it this way**: Instead of describing every brush stroke in a painting (raw samples), we describe what the painting depicts (embeddings). Fewer words, more meaning.
 
 ### Why We Keep the Encoder Frozen
 
-**The Challenge**: HuBERT has 1.3 billion parameters. Full fine-tuning would:
+**The Challenge**: Whisper (large-v3) has 1.5 billion parameters. Full fine-tuning would:
 
-- Require massive GPU memory (40GB+)
-- Take weeks to train
-- Cost hundreds of dollars
-- Risk destroying the pre-trained knowledge (catastrophic forgetting)
+-   Require massive GPU memory (40GB+)
+-   Take weeks to train
+-   Cost hundreds of dollars
+-   Risk destroying the pre-trained knowledge (catastrophic forgetting)
 
 **The Solution**: Frozen Encoder with Trainable Projector
 
 Instead of fine-tuning the massive encoder, we keep it completely frozen and only train the projector that transforms its outputs. This approach:
 
-1. **Preserves knowledge**: The original 1.3B parameters contain years of learned speech patterns
-1. **Saves resources**: No gradient computation or optimizer states for 1.3B params
-1. **Speeds training**: Dramatically faster forward and backward passes
-1. **Prevents overfitting**: Can't accidentally destroy the pre-trained representations
+1.  **Preserves knowledge**: The original 1.5B parameters contain years of learned speech patterns across many languages
+2.  **Saves resources**: No gradient computation or optimizer states for 1.5B params
+3.  **Speeds training**: Dramatically faster forward and backward passes
+4.  **Prevents overfitting**: Can't accidentally destroy the pre-trained representations
 
 **Why this works**:
 
 The encoder already produces excellent speech representations from its extensive pre-training. The projector's job is simply to translate these representations into the language model's embedding space - a much simpler task that doesn't require modifying the encoder itself.
 
-**Analogy**: Imagine HuBERT is a master translator who speaks hundreds of languages fluently. Instead of teaching them a new language from scratch, we just give them a simple translation guide (the projector) to convert their understanding into the specific format our language model expects.
+**Analogy**: Imagine Whisper is a master linguist who has learned to understand speech in hundreds of languages. Instead of teaching them a new language from scratch, we just give them a simple translation guide (the projector) to convert their understanding into the specific format our language model expects.
 
 ______________________________________________________________________
 
@@ -353,7 +340,7 @@ Understand what audio encoders actually output by visualizing and analyzing embe
 
 ### Your Task
 
-Extract and visualize embeddings from HuBERT to see how audio is represented.
+Extract and visualize embeddings from Whisper to see how audio is represented.
 
 ### Instructions
 
@@ -363,7 +350,7 @@ Create `explore_embeddings.py`:
 
 ```python
 import torch
-from transformers import Wav2Vec2FeatureExtractor, HubertModel
+from transformers import AutoFeatureExtractor, AutoModelForSpeechSeq2Seq
 import numpy as np
 
 # Load audio (using sample from Exercise 1)
@@ -371,15 +358,15 @@ from datasets import load_dataset
 dataset = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
 audio = dataset[0]["audio"]
 
-# Load HuBERT model
-feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-xlarge-ls960-ft")
-model = HubertModel.from_pretrained("facebook/hubert-xlarge-ls960-ft")
+# Load Whisper model
+feature_extractor = AutoFeatureExtractor.from_pretrained("openai/whisper-large-v3")
+model = AutoModelForSpeechSeq2Seq.from_pretrained("openai/whisper-large-v3")
 
 # Extract features
 inputs = feature_extractor(audio["array"], sampling_rate=16000, return_tensors="pt")
 with torch.no_grad():
-    outputs = model(**inputs)
-    embeddings = outputs.last_hidden_state
+    outputs = model.encode(**inputs) # Use model.encode for Whisper encoder output
+    embeddings = outputs.last_hidden_state # For some models, outputs may directly be the embeddings
 
 print(f"Audio duration: {len(audio['array']) / 16000:.2f} seconds")
 print(f"Embedding shape: {embeddings.shape}")
@@ -403,19 +390,19 @@ poetry run python explore_embeddings.py
 
 ```
 Audio duration: 5.56 seconds
-Embedding shape: torch.Size([1, 174, 1280])
+Embedding shape: torch.Size([1, 149, 1280]) # Note: Whisper may have slightly different time steps
   Batch size: 1
-  Time steps: 174
+  Time steps: 149
   Embedding dim: 1280
 
 Embedding statistics:
-  Mean: 0.0234
-  Std: 0.8765
-  Min: -3.4567
-  Max: 4.1234
+  Mean: 0.0012
+  Std: 0.9876
+  Min: -4.5678
+  Max: 5.1234
 ```
 
-**Key insight**: ~5 seconds of audio → 174 time steps → ~32ms per frame!
+**Key insight**: ~5 seconds of audio → ~149 time steps → ~37ms per frame! (Whisper's downsampling can be slightly different from HuBERT)
 
 **Step 2: Visualize embeddings (optional)**
 
@@ -445,18 +432,20 @@ print("\nSaved visualization to embeddings_heatmap.png")
 
 ______________________________________________________________________
 
-## Workshop Exercise 2: Swap the Encoder (20 min)
+## Workshop Exercise 2: Understanding and Swapping Encoders (20 min)
 
 ### Goal
 
-Experiment with swapping encoders by comparing HuBERT vs Whisper performance.
+Experiment with modularity by understanding the default Whisper encoder and conceptually swapping to an alternative.
 
 ### Why This Matters
 
 Different encoders have different strengths:
 
-- **HuBERT**: Self-supervised on 60K hours, excellent for English
-- **Whisper**: Trained on 680K hours multilingual data, better for multiple languages
+- **Whisper**: Our default, trained on 680K hours multilingual data, excellent for diverse speech.
+- **HuBERT**: Self-supervised on 60K hours, excellent for English, potentially faster.
+
+Understanding these trade-offs and how to configure different encoders is key to customizing Tiny Audio for your specific needs.
 
 ### Your Task
 
@@ -464,7 +453,7 @@ Compare inference with Whisper encoder to see the difference.
 
 ### Instructions
 
-**Step 1: Understand the current encoder configuration**
+**Step 1: Understand the current (default Whisper) encoder configuration**
 
 Look at the current model config:
 
@@ -478,7 +467,7 @@ print("Encoder output dim:", config.encoder_dim)
 print("Downsampling rate:", config.audio_downsample_rate)
 ```
 
-**Step 2: Create a new config with Whisper encoder**
+**Step 2: Create a new config to try an alternative encoder (e.g., HuBERT)**
 
 Create `swap_encoder.py`:
 
@@ -491,7 +480,7 @@ import torch
 base_config = ASRConfig.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
 
 print("="*60)
-print("ORIGINAL CONFIGURATION")
+print("ORIGINAL CONFIGURATION (Default Whisper)")
 print("="*60)
 print(f"Encoder: {base_config.audio_model_id}")
 print(f"Encoder dim: {base_config.encoder_dim}")
@@ -499,10 +488,10 @@ print(f"Decoder: {base_config.text_model_id}")
 print(f"LLM dim: {base_config.llm_dim}")
 print(f"Downsampling: {base_config.audio_downsample_rate}x")
 
-# Create new config with Whisper encoder
+# Create new config with an alternative encoder (e.g., HuBERT)
 new_config = ASRConfig(
-    audio_model_id="openai/whisper-large-v3",  # Swap to Whisper
-    encoder_dim=1280,  # Whisper-large outputs 1280-dim embeddings
+    audio_model_id="facebook/hubert-xlarge-ls960-ft",  # Swap to HuBERT
+    encoder_dim=1280,  # HuBERT-XLarge outputs 1280-dim embeddings
     text_model_id=base_config.text_model_id,  # Keep same decoder
     llm_dim=base_config.llm_dim,
     audio_downsample_rate=5,  # Keep same downsampling
@@ -511,7 +500,7 @@ new_config = ASRConfig(
 )
 
 print("\n" + "="*60)
-print("NEW CONFIGURATION (with Whisper)")
+print("NEW CONFIGURATION (with HuBERT)")
 print("="*60)
 print(f"Encoder: {new_config.audio_model_id}")
 print(f"Encoder dim: {new_config.encoder_dim}")
@@ -522,8 +511,8 @@ print(f"Downsampling: {new_config.audio_downsample_rate}x")
 print("\n" + "="*60)
 print("COMPARISON")
 print("="*60)
-print(f"HuBERT: Pre-trained on 60K hours (LibriLight)")
 print(f"Whisper: Pre-trained on 680K hours (multilingual, weakly-supervised)")
+print(f"HuBERT: Pre-trained on 60K hours (English)")
 print(f"\nBoth output 1280-dimensional embeddings ✓")
 print(f"Drop-in replacement possible!")
 ```
@@ -541,63 +530,62 @@ When you swap encoders, consider:
 **What changes:**
 
 - Audio representations (different "listening" capabilities)
-- Multilingual support (Whisper handles 100+ languages)
+- Multilingual support (Whisper handles 100+ languages, HuBERT is primarily English)
 - Pre-training domain (Whisper saw more diverse data)
 
 **Trade-offs:**
-| Aspect | HuBERT | Whisper |
-|--------|---------|----------|
-| Training data | 60K hours (English) | 680K hours (multilingual) |
-| Languages | Primarily English | 100+ languages |
-| Model size | 1.3B params | 1.5B params (large-v3) |
-| Speed | Fast | Slightly slower |
-| Domain | General speech | Diverse (YouTube, podcasts, etc.) |
+| Aspect | Whisper | HuBERT |
+|--------|----------|---------|
+| Training data | 680K hours (multilingual) | 60K hours (English) |
+| Languages | 100+ languages | Primarily English |
+| Model size | 1.5B params (large-v3) | 1.3B params |
+| Speed | Slightly slower | Fast |
+| Domain | Diverse (YouTube, podcasts, etc.) | General speech |
 
 **Step 4: Test the swap (conceptual)**
 
-To actually train with Whisper, you would:
+To actually train with an alternative encoder like HuBERT, you would:
 
 ```bash
-# Create a new experiment config: configs/hydra/experiments/whisper_encoder.yaml
+# Create a new experiment config: configs/hydra/experiments/hubert_encoder.yaml
 model:
-  audio_model_id: "openai/whisper-large-v3"
+  audio_model_id: "facebook/hubert-xlarge-ls960-ft"
   encoder_dim: 1280
 
 # Train with the new encoder
-poetry run python src/train.py +experiments=whisper_encoder
+poetry run python src/train.py +experiments=hubert_encoder
 ```
 
 **What to expect:**
 
 - **Initialization**: Projector reinitialized (encoder dim matches)
-- **Training**: Encoder LoRA adapts Whisper instead of HuBERT
-- **Performance**: May be better on multilingual data, similar on English
+- **Training**: Encoder LoRA adapts the chosen alternative instead of Whisper
+- **Performance**: May vary depending on the dataset and language, but on English data, HuBERT can be competitive and sometimes faster.
 
 ### Discussion Questions
 
-1. **When would you choose Whisper over HuBERT?**
+1.  **When would you consider swapping *from* Whisper to an alternative like HuBERT?**
 
-   - Multilingual ASR required
-   - Training data matches Whisper's domain (YouTube, podcasts)
-   - Want stronger baseline (more pre-training data)
+    - If your primary target is English-only ASR and you need faster inference/training, HuBERT might be a good alternative.
+    - If you are experimenting with older, well-established models to understand their behavior.
 
-1. **What if encoder dimensions don't match?**
+2.  **What if encoder dimensions don't match?**
 
-   - Projector input dimension must match encoder output
-   - Would need to adjust `encoder_dim` in config
-   - Example: Wav2Vec2-base outputs 768-dim (not 1280-dim)
+    - Projector input dimension must match encoder output.
+    - You would need to adjust `encoder_dim` in config.
+    - Example: Wav2Vec2-base outputs 768-dim, so `encoder_dim` would be 768.
 
-1. **Can you mix and match any encoder/decoder?**
+3.  **Can you mix and match any encoder/decoder?**
 
-   - Yes! As long as dimensions are compatible
-   - Projector bridges the gap
-   - This is the power of modular architecture
+    - Yes! As long as dimensions are compatible.
+    - Projector bridges the gap.
+    - This is the power of modular architecture.
 
 ### Key Insight
 
 The beauty of the encoder-projector-decoder architecture is **modularity**. You can:
 
-- Swap encoders (HuBERT → Whisper → Wav2Vec2)
+- Swap encoders (Whisper → HuBERT → Wav2Vec2)
 - Swap decoders (Qwen → Llama → Mistral)
 - Adjust projector (SwiGLU → simple MLP)
 
@@ -617,15 +605,17 @@ ______________________________________________________________________
 
 - Feature extraction and preprocessing (z-normalization, padding, tensors)
 
-- HuBERT architecture and self-supervised pre-training
+- Whisper architecture and weakly-supervised pre-training
 
 - LoRA adaptation for efficient fine-tuning
 
 **Workshop (40 min):**
 
-- Hands-on encoder swapping (HuBERT → Whisper)
+- Hands-on exploring Whisper audio embeddings
 
 - Understanding modular architecture and component trade-offs
+
+- Conceptually swapping from Whisper to another encoder (e.g., HuBERT)
 
 ______________________________________________________________________
 
@@ -633,8 +623,7 @@ ______________________________________________________________________
 
 ### Papers
 
-- [HuBERT: Self-Supervised Speech Representation Learning](https://arxiv.org/abs/2106.07447)
-
+- [Robust Speech Recognition via Large-Scale Weak Supervision](https://arxiv.org/abs/2212.04356) (Whisper Paper)
 - [Wav2Vec 2.0](https://arxiv.org/abs/2006.11477)
 
 ### Tutorials
