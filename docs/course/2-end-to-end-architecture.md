@@ -121,36 +121,48 @@ from src.asr_modeling import ASRModel
 print("Loading audio sample...")
 dataset = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
 audio_sample = dataset[0]["audio"]
-# Convert to a batch of one
-audio_input = torch.tensor(audio_sample["array"]).unsqueeze(0)
 sampling_rate = audio_sample["sampling_rate"]
-print(f"✓ Audio loaded. Shape: {audio_input.shape}, Rate: {sampling_rate} Hz")
+print(f"✓ Audio loaded. Rate: {sampling_rate} Hz")
 
 # --- 2. Load the full ASR model ---
 print("\nLoading ASR model (this may take a moment)...")
 config = ASRConfig.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
 model = ASRModel(config)
+
+# Ensure all model components are on the same device
+# (especially important for MPS on Apple Silicon)
+encoder_device = next(model.encoder.parameters()).device
+model.projector = model.projector.to(encoder_device)
+
 model.eval() # Set model to evaluation mode
-print("✓ Model loaded.")
+print(f"✓ Model loaded to '{encoder_device}' device.")
 
 # --- 3. Process through the Encoder ---
 print("\nStep 1: Passing audio through the Whisper Encoder...")
 with torch.no_grad():
-    # The `encode` method runs both pre-processing and the encoder
-    encoder_output = model.encode(audio_input, sampling_rate)
+    # 1. Pre-process with the feature extractor
+    features = model.feature_extractor(audio_sample["array"], sampling_rate=sampling_rate, return_tensors="pt")
+    input_features = features.input_features
+
+    # 2. Ensure input is on the correct device and dtype
+    encoder_dtype = next(model.encoder.parameters()).dtype
+    input_features = input_features.to(device=encoder_device, dtype=encoder_dtype)
+
+    # 3. Pass features through the encoder
+    encoder_output = model.encoder(input_features).last_hidden_state
 
 print(f"✓ Encoder output shape: {encoder_output.shape}")
-print("   - Batch size: 1")
-print(f"   - Time steps: {encoder_outpu t.shape[1]} (Each step is ~30ms of audio)")
+print(f"   - Batch size: 1")
+print(f"   - Time steps: {encoder_output.shape[1]} (Each step is ~30ms of audio)")
 print(f"   - Embedding dimension: {encoder_output.shape[2]} (A rich representation of the audio)")
 
 # --- 4. Process through the Projector ---
 print("\nStep 2: Passing encoder embeddings through the Projector...")
 with torch.no_grad():
-    projector_output = model.audio_projector(encoder_output)
+    projector_output = model.projector(encoder_output)
 
 print(f"✓ Projector output shape: {projector_output.shape}")
-print(f"   - Time steps: {projector_output.shape[1]} (Downsampled by {config.audio_downsample_rate}x)")
+print(f"   - Time steps: {projector_output.shape[1]} (Downsampled by {config.projector_pool_stride}x)")
 print(f"   - Embedding dimension: {projector_output.shape[2]} (Projected from {config.encoder_dim} to {config.llm_dim})")
 print("This output is now ready for the Language Model Decoder!")
 
@@ -159,7 +171,8 @@ print("\nStep 3: Generating visualizations...")
 # Function to plot embeddings
 def plot_embeddings(tensor, title, filename):
     plt.figure(figsize=(15, 5))
-    plt.imshow(tensor.squeeze(0).T, aspect='auto', origin='lower', cmap='viridis')
+    # Move tensor to CPU and convert to float for plotting
+    plt.imshow(tensor.squeeze(0).cpu().float().T, aspect='auto', origin='lower', cmap='viridis')
     plt.colorbar(label="Activation")
     plt.xlabel("Time Steps")
     plt.ylabel("Embedding Dimension")
@@ -187,7 +200,7 @@ After running the script, you will have two image files: `encoder_output.png` an
 
 2.  **Open `projector_output.png`**: This is what the audio looks like after being "translated" for the language model.
     *   **Fewer Time Steps**: Compare the x-axis to the first plot. It's much shorter, showing the effect of temporal downsampling. This makes it much more efficient for the LLM to process.
-    *   **Different Dimension**: The y-axis now represents the dimensionality of the *language model* (1536), not the audio encoder.
+    *   **Different Dimension**: The y-axis now represents the dimensionality of the *language model* (e.g., 2048), not the audio encoder.
     *   **Different Pattern**: The visual pattern of activations will be completely different, clearly showing the transformation that occurred.
 
 This exercise makes the abstract "modality gap" visible. You've witnessed the crucial role of the projector in bridging the gap between the world of sound and the world of language.
