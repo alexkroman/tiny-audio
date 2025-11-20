@@ -11,7 +11,7 @@ By the end of this class, you will:
 - Understand how audio is digitized and pre-processed.
 - Know the role of the Whisper audio encoder.
 - Understand why a projector is needed to bridge the "modality gap".
-- Know the role of the language model decoder (e.g., Qwen).
+- Know the role of the language model decoder (e.g., SmolLM3).
 - Visualize the entire data flow from audio samples to text tokens.
 
 ______________________________________________________________________
@@ -25,7 +25,7 @@ Today we're looking at the entire journey from a sound wave to a final text tran
 Here's a high-level overview:
 
 ```
-[Audio Wave] -> [Pre-processing] -> [Whisper Encoder] -> [Projector] -> [Qwen Decoder] -> [Text]
+[Audio Wave] -> [Pre-processing] -> [Whisper Encoder] -> [Projector] -> [SmolLM3 Decoder] -> [Text]
 ```
 
 - **Encoder**: "Listens" to the audio and creates a rich numerical representation.
@@ -63,7 +63,7 @@ At the end of this stage, we have a sequence of high-dimensional vectors (1280 d
 
 ## 4. Step 3: The Projector - Bridging the Modality Gap
 
-Now we face the **modality gap**. The audio encoder outputs embeddings in one "language" (1280 dimensions), but the text decoder expects embeddings in a different "language" (e.g., 2048 dimensions for Qwen).
+Now we face the **modality gap**. The audio encoder outputs embeddings in one "language" (1280 dimensions), but the text decoder expects embeddings in a different "language" (e.g., 1536 dimensions for SmolLM3).
 
 The **AudioProjector** is the bridge. It's a small, trainable neural network with two key jobs:
 
@@ -76,7 +76,7 @@ The projector is the **only major component we train from scratch**. It learns t
 
 ## 5. Step 4: The Language Model Decoder
 
-The final piece is the **decoder**, a large language model (LLM) like **Qwen**.
+The final piece is the **decoder**, a large language model (LLM) like **SmolLM3**.
 
 - **What it does**: It receives the sequence of translated embeddings from the projector and generates the final text transcription, one token (word or sub-word) at a time.
 - **How it works**: It's an auto-regressive, decoder-only model. Given the audio representation and the words it has already generated, it predicts the most likely next word.
@@ -88,7 +88,7 @@ Think of the architecture as a team:
 
 1.  **The Listener (Whisper Encoder)**: A world-class expert who listens to any audio and writes down detailed notes in a technical shorthand.
 2.  **The Translator (Projector)**: A specialist who translates the listener's technical notes into the native language of the writer. This is the team member we hire and train.
-3.  **The Writer (Qwen Decoder)**: A master author who can take the translated notes and write a perfectly fluent and coherent sentence.
+3.  **The Writer (SmolLM3 Decoder)**: A master author who can take the translated notes and write a perfectly fluent and coherent sentence.
 
 By using pre-trained, frozen specialists for listening and writing, we only need to train the translator. This makes building a powerful ASR system incredibly efficient.
 
@@ -172,9 +172,9 @@ PART 1: The ASRConfig - Our Architectural Blueprint
    - This is our 'Listener'. It defines which pre-trained audio model to use.
    - Encoder output dimension: 1280
 
-2. Text Decoder ID   -> Qwen/Qwen2-7B-Instruct
+2. Text Decoder ID   -> HuggingFaceTB/SmolLM3-3B
    - This is our 'Writer'. It defines which pre-trained language model to use.
-   - LLM input dimension: 3584
+   - LLM input dimension: 1536
 
 3. Projector Config
    - Downsample Rate: 5x
@@ -196,7 +196,7 @@ ASRModel class contains the three main components:
    )
 
 3. model.text_decoder:
-   Qwen2ForCausalLM
+   SmolLM3ForCausalLM
 
 This single `ASRModel` object orchestrates the entire pipeline from audio to text.
 ```
@@ -212,6 +212,6 @@ ______________________________________________________________________
 ### Papers
 
 - [Robust Speech Recognition via Large-Scale Weak Supervision](https://arxiv.org/abs/2212.04356) (Whisper Paper)
-- [Qwen Technical Report](https://arxiv.org/abs/2309.16609)
+
 
 [Previous: Class 1: Introduction and Setup](./1-introduction-and-setup.md) | [Next: Class 3: Training](./4-training.md)

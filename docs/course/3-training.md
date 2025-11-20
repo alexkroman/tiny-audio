@@ -46,9 +46,9 @@ ______________________________________________________________________
 
 - HuBERT/Whisper encoder: 1.3-1.5B params
 
-- Qwen3-8B/SmolLM3-3B decoder: 3-8B params
+- SmolLM3 decoder: 3B params
 
-- **Total**: 4.3-9.5B+ parameters to train
+- **Total**: ~4.3B parameters to train
 
 **Problems**:
 
@@ -483,7 +483,7 @@ poetry run python src/train.py \
 Loading model...
 ✓ Loaded encoder (Whisper Turbo, frozen)
 ✓ Loaded projector (~13M params, trainable)
-✓ Loaded decoder (SmolLM3-3B, frozen)
+✓ Loaded decoder (SmolLM3, frozen)
 
 Loading dataset...
 ✓ Train samples: 50

@@ -525,7 +525,7 @@ This is a speech recognition model trained using the Tiny Audio framework. It co
 
 - **Audio Projector**: SwiGLU MLP with temporal compression (~13M params, fully trainable)
 
-- **Text Decoder**: Qwen3-8B (8B params) or SmolLM3-3B (3B params, frozen)
+- **Text Decoder**: SmolLM3 (3B params, frozen)
 
 **Total trainable**: ~13M parameters (projector only)
 
@@ -605,7 +605,7 @@ Based on:
 
 - HuBERT (Facebook AI)
 
-- Qwen3-8B (Alibaba) or SmolLM3-3B (HuggingFace)
+- SmolLM3 (HuggingFace)
 
 - LoquaciousSet (SpeechBrain)
 
@@ -1061,15 +1061,13 @@ Over 6 classes, you've:
 
 ✅ **Class 1**: Set up environment and ran first inference
 
-✅ **Class 2**: Understood audio processing and encoders
+✅ **Class 2**: Understood end-to-end architecture
 
-✅ **Class 3**: Learned about projectors and language models
+✅ **Class 3**: Configured and ran projector-only training
 
-✅ **Class 4**: Configured and ran projector-only training
+✅ **Class 4**: Evaluated model and analyzed errors
 
-✅ **Class 5**: Evaluated model and analyzed errors
-
-✅ **Class 6**: Deployed model and joined the community
+✅ **Class 5**: Deployed model and joined the community
 
 **You now have:**
 

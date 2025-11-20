@@ -19,7 +19,7 @@ By the end of this course, you will:
 **Time Commitment**: 6 hours (6 one-hour sessions)
 **Cost**: ~$12 for GPU training (or free with local GPU), plus optional deployment costs
 **Prerequisites**: Basic Python knowledge, some ML familiarity helpful but not required
-**Model Architecture**: HuBERT/Whisper encoder + Linear projector + Qwen3-8B/SmolLM3-3B decoder
+**Model Architecture**: Whisper encoder + Linear projector + SmolLM3 decoder
 
 **Format**: Can be used for:
 
@@ -59,7 +59,7 @@ By the end of this course, you will:
 
 - What are language models?
 
-- The Qwen3-8B or SmolLM3-3B decoder
+- The SmolLM3 decoder
 
 - Bridging audio and text: the AudioProjector
 

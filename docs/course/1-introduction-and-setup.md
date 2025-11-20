@@ -110,7 +110,7 @@ ASR has evolved dramatically:
 
 - A pre-trained **Audio Encoder** (HuBERT or Whisper).
 
-- A pre-trained **Language Model** (Qwen3-8B or SmolLM3-3B).
+- A pre-trained **Language Model** (SmolLM3).
 
 - A small, trainable **Projector** (a bridge) to connect them.
 
@@ -124,7 +124,7 @@ Tiny Audio uses a simple three-component architecture:
 
 ```
 Audio File → Audio Encoder → Audio Projector → Language Model → Text
-            (HuBERT/Whisper)   (Simple MLP)     (Qwen3-8B/SmolLM3-3B)
+            (HuBERT/Whisper)   (Simple MLP)     (SmolLM3)
 ```
 
 **Experiment Preview**: Throughout the course, you'll experiment with switching these components to customize your model.
@@ -161,7 +161,7 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 - Downsamples by 5x (reduces the sequence length for better efficiency).
 
-- Transforms (projects) these features to match the dimensions the language model expects (e.g., 2048-dimension for Qwen3-8B).
+- Transforms (projects) these features to match the dimensions the language model expects (e.g., 1536-dimension for SmolLM3).
 
 **Architecture**: A simple Multi-Layer Perceptron (MLP). We'll dive deeper in Class 3.
 
@@ -169,7 +169,7 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 **Analogy**: A skilled diplomat who fluently translates between two very different cultures (the "audio world" and the "language world"), ensuring meaning is preserved.
 
-### Component 3: Language Model Decoder (e.g., Qwen3-8B)
+### Component 3: Language Model Decoder (e.g., SmolLM3)
 
 **Purpose**: Take the translated audio features and generate a coherent, grammatically correct text transcription.
 
@@ -181,9 +181,9 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 - Handles spelling, punctuation, and sentence structure.
 
-**Default (Qwen3-8B):**
+**Default (SmolLM3):**
 
-- 8 billion parameters.
+- 3 billion parameters.
 
 - We keep this frozen during training and only train the projector that feeds into it.
 
@@ -191,7 +191,7 @@ Audio File → Audio Encoder → Audio Projector → Language Model → Text
 
 ### Why This Architecture?
 
-**Efficiency**: We only train ~13M parameters instead of the full 9.3+ billion (~0.14% of the total).
+**Efficiency**: We only train ~13M parameters instead of the full ~4.3 billion (~0.3% of the total).
 
 - Projector: ~13M (fully trained)
 
