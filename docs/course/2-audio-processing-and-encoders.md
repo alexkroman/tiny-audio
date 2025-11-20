@@ -562,24 +562,7 @@ poetry run python src/train.py +experiments=hubert_encoder
 - **Training**: Encoder LoRA adapts the chosen alternative instead of Whisper
 - **Performance**: May vary depending on the dataset and language, but on English data, HuBERT can be competitive and sometimes faster.
 
-### Discussion Questions
 
-1.  **When would you consider swapping *from* Whisper to an alternative like HuBERT?**
-
-    - If your primary target is English-only ASR and you need faster inference/training, HuBERT might be a good alternative.
-    - If you are experimenting with older, well-established models to understand their behavior.
-
-2.  **What if encoder dimensions don't match?**
-
-    - Projector input dimension must match encoder output.
-    - You would need to adjust `encoder_dim` in config.
-    - Example: Wav2Vec2-base outputs 768-dim, so `encoder_dim` would be 768.
-
-3.  **Can you mix and match any encoder/decoder?**
-
-    - Yes! As long as dimensions are compatible.
-    - Projector bridges the gap.
-    - This is the power of modular architecture.
 
 ### Key Insight
 
@@ -595,27 +578,7 @@ ______________________________________________________________________
 
 # CLASS SUMMARY
 
-## What We Covered Today
 
-**Lecture (20 min):**
-
-- The audio processing pipeline (digitization, normalization, encoding)
-
-- How sound becomes numbers (sampling at 16kHz)
-
-- Feature extraction and preprocessing (z-normalization, padding, tensors)
-
-- Whisper architecture and weakly-supervised pre-training
-
-- LoRA adaptation for efficient fine-tuning
-
-**Workshop (40 min):**
-
-- Hands-on exploring Whisper audio embeddings
-
-- Understanding modular architecture and component trade-offs
-
-- Conceptually swapping from Whisper to another encoder (e.g., HuBERT)
 
 ______________________________________________________________________
 
