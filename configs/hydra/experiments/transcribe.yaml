@@ -17,7 +17,7 @@ model:
 
 training:
   # Resume from checkpoint
-  # resume_from_checkpoint: "/workspace/outputs/2025-11-18/23-23-48/outputs/production_model/checkpoint-10"
+  # resume_from_checkpoint: "/workspace/outputs/2025-11-19/17-38-30/outputs/production_model/checkpoint-14000"
 
   # Hub configuration
   push_to_hub: true
