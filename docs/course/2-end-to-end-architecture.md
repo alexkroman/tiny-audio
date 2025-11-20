@@ -67,7 +67,7 @@ Now we face the **modality gap**. The audio encoder outputs embeddings in one "l
 
 The **AudioProjector** is the bridge. It's a small, trainable neural network with two key jobs:
 
-1.  **Dimension Transformation**: It projects the 1280-dimensional audio embeddings into the 2048-dimensional space the language model expects.
+1.  **Dimension Transformation**: It projects the 1280-dimensional audio embeddings into the 1536-dimensional space the language model expects.
 2.  **Temporal Downsampling**: It stacks frames together to further reduce the sequence length (typically by a factor of 5), making the decoder's job much easier and faster.
 
 The projector is the **only major component we train from scratch**. It learns to be a perfect translator between the audio and text worlds.
@@ -98,112 +98,99 @@ ______________________________________________________________________
 
 ## Goal
 
-Explore the complete Tiny Audio architecture through its configuration and model structure.
+Visually trace a single audio sample as it gets transformed by each part of the ASR pipeline, making the abstract concepts of "embeddings" and the "modality gap" tangible.
 
 ### Your Task
 
-Inspect the `ASRConfig` and `ASRModel` to see how the components we discussed are defined and connected.
+You will process a single audio file step-by-step through the encoder and projector, visualizing the output at each stage to see how the data's shape and meaning change.
 
 ### Instructions
 
-**Step 1: Create `explore_architecture.py`**
+**Step 1: Create `trace_data.py`**
 
-This script will load the configuration and the model from the Hugging Face Hub and print out their key components.
+This script will load a sample audio file, pass it through the encoder and projector, and generate plots to visualize the transformations.
 
 ```python
+import torch
+import matplotlib.pyplot as plt
+from datasets import load_dataset
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
 
-# --- Part 1: Inspecting the Configuration ---
-print("="*60)
-print("PART 1: The ASRConfig - Our Architectural Blueprint")
-print("="*60)
+# --- 1. Load a single audio sample ---
+print("Loading audio sample...")
+dataset = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
+audio_sample = dataset[0]["audio"]
+# Convert to a batch of one
+audio_input = torch.tensor(audio_sample["array"]).unsqueeze(0)
+sampling_rate = audio_sample["sampling_rate"]
+print(f"✓ Audio loaded. Shape: {audio_input.shape}, Rate: {sampling_rate} Hz")
 
-# Load the configuration from the Hub
-# This object stores all the high-level architectural choices.
+# --- 2. Load the full ASR model ---
+print("\nLoading ASR model (this may take a moment)...")
 config = ASRConfig.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
-
-print(f"1. Audio Encoder ID  -> {config.audio_model_id}")
-print(f"   - This is our 'Listener'. It defines which pre-trained audio model to use.")
-print(f"   - Encoder output dimension: {config.encoder_dim}\n")
-
-print(f"2. Text Decoder ID   -> {config.text_model_id}")
-print(f"   - This is our 'Writer'. It defines which pre-trained language model to use.")
-print(f"   - LLM input dimension: {config.llm_dim}\n")
-
-print(f"3. Projector Config")
-print(f"   - Downsample Rate: {config.audio_downsample_rate}x")
-print(f"   - This defines how many audio frames are stacked by the 'Translator'.\n")
-
-
-# --- Part 2: Inspecting the Model ---
-print("="*60)
-print("PART 2: The ASRModel - The Full Pipeline")
-print("="*60)
-
-# Initialize the model from the configuration.
-# This will download the weights for the encoder and decoder if not cached.
-# Note: This may take a moment and requires significant memory.
 model = ASRModel(config)
+model.eval() # Set model to evaluation mode
+print("✓ Model loaded.")
 
-print("ASRModel class contains the three main components:\n")
-print(f"1. model.audio_encoder:\n   {model.audio_encoder.__class__.__name__}\n")
-print(f"2. model.audio_projector:\n   {model.audio_projector}\n")
-print(f"3. model.text_decoder:\n   {model.text_decoder.__class__.__name__}\n")
+# --- 3. Process through the Encoder ---
+print("\nStep 1: Passing audio through the Whisper Encoder...")
+with torch.no_grad():
+    # The `encode` method runs both pre-processing and the encoder
+    encoder_output = model.encode(audio_input, sampling_rate)
 
-print("This single `ASRModel` object orchestrates the entire pipeline from audio to text.")
+print(f"✓ Encoder output shape: {encoder_output.shape}")
+print("   - Batch size: 1")
+print(f"   - Time steps: {encoder_outpu t.shape[1]} (Each step is ~30ms of audio)")
+print(f"   - Embedding dimension: {encoder_output.shape[2]} (A rich representation of the audio)")
+
+# --- 4. Process through the Projector ---
+print("\nStep 2: Passing encoder embeddings through the Projector...")
+with torch.no_grad():
+    projector_output = model.audio_projector(encoder_output)
+
+print(f"✓ Projector output shape: {projector_output.shape}")
+print(f"   - Time steps: {projector_output.shape[1]} (Downsampled by {config.audio_downsample_rate}x)")
+print(f"   - Embedding dimension: {projector_output.shape[2]} (Projected from {config.encoder_dim} to {config.llm_dim})")
+print("This output is now ready for the Language Model Decoder!")
+
+# --- 5. Visualization ---
+print("\nStep 3: Generating visualizations...")
+# Function to plot embeddings
+def plot_embeddings(tensor, title, filename):
+    plt.figure(figsize=(15, 5))
+    plt.imshow(tensor.squeeze(0).T, aspect='auto', origin='lower', cmap='viridis')
+    plt.colorbar(label="Activation")
+    plt.xlabel("Time Steps")
+    plt.ylabel("Embedding Dimension")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(filename)
+    print(f"✓ Saved '{filename}'")
+
+# Plot encoder and projector outputs
+plot_embeddings(encoder_output, "Whisper Encoder Output (Audio Embeddings)", "encoder_output.png")
+plot_embeddings(projector_output, "Projector Output (Text-like Embeddings)", "projector_output.png")
 ```
 
 **Step 2: Run the script**
 
 ```bash
-poetry run python explore_architecture.py
+poetry run python trace_data.py
 ```
 
-### Expected Output
+### Analysis and Key Insights
 
-You will see a printout that clearly maps the concepts from the lecture to the actual configuration and model components.
+After running the script, you will have two image files: `encoder_output.png` and `projector_output.png`.
 
-```
-============================================================
-PART 1: The ASRConfig - Our Architectural Blueprint
-============================================================
-1. Audio Encoder ID  -> openai/whisper-large-v3
-   - This is our 'Listener'. It defines which pre-trained audio model to use.
-   - Encoder output dimension: 1280
+1.  **Open `encoder_output.png`**: This is what the audio "looks like" to the Whisper encoder. You'll see a detailed, high-dimensional representation. Notice the number of time steps on the x-axis and the 1280 dimensions on the y-axis.
 
-2. Text Decoder ID   -> HuggingFaceTB/SmolLM3-3B
-   - This is our 'Writer'. It defines which pre-trained language model to use.
-   - LLM input dimension: 1536
+2.  **Open `projector_output.png`**: This is what the audio looks like after being "translated" for the language model.
+    *   **Fewer Time Steps**: Compare the x-axis to the first plot. It's much shorter, showing the effect of temporal downsampling. This makes it much more efficient for the LLM to process.
+    *   **Different Dimension**: The y-axis now represents the dimensionality of the *language model* (1536), not the audio encoder.
+    *   **Different Pattern**: The visual pattern of activations will be completely different, clearly showing the transformation that occurred.
 
-3. Projector Config
-   - Downsample Rate: 5x
-   - This defines how many audio frames are stacked by the 'Translator'.
-
-============================================================
-PART 2: The ASRModel - The Full Pipeline
-============================================================
-ASRModel class contains the three main components:
-
-1. model.audio_encoder:
-   WhisperModel
-
-2. model.audio_projector:
-   AudioProjector(
-     (ln_pre): RMSNorm()
-     (proj): Linear(in_features=6400, out_features=3584, bias=True)
-     (ln_post): RMSNorm()
-   )
-
-3. model.text_decoder:
-   SmolLM3ForCausalLM
-
-This single `ASRModel` object orchestrates the entire pipeline from audio to text.
-```
-
-### Key Insight
-
-The beauty of this architecture is its **modularity**. You can easily swap out the encoder or decoder just by changing the model ID in the configuration. The projector is the flexible glue that allows these powerful, pre-existing components to work together on a new task.
+This exercise makes the abstract "modality gap" visible. You've witnessed the crucial role of the projector in bridging the gap between the world of sound and the world of language.
 
 ______________________________________________________________________
 
@@ -213,5 +200,4 @@ ______________________________________________________________________
 
 - [Robust Speech Recognition via Large-Scale Weak Supervision](https://arxiv.org/abs/2212.04356) (Whisper Paper)
 
-
-[Previous: Class 1: Introduction and Setup](./1-introduction-and-setup.md) | [Next: Class 3: Training](./4-training.md)
+[Previous: Class 1: Introduction and Setup](./1-introduction-and-setup.md) | [Next: Class 3: Training](./3-training.md)

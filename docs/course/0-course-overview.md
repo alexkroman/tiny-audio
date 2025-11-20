@@ -16,7 +16,7 @@ By the end of this course, you will:
 
 - Add your results to the community leaderboard
 
-**Time Commitment**: 6 hours (6 one-hour sessions)
+**Time Commitment**: 4 hours (4 one-hour sessions)
 **Cost**: ~$12 for GPU training (or free with local GPU), plus optional deployment costs
 **Prerequisites**: Basic Python knowledge, some ML familiarity helpful but not required
 **Model Architecture**: Whisper encoder + Linear projector + SmolLM3 decoder
@@ -34,78 +34,28 @@ By the end of this course, you will:
 ### [Class 1: Introduction and Setup](./1-introduction-and-setup.md) (1 hour)
 
 - What is automatic speech recognition?
-
 - Understanding the Tiny Audio architecture
-
 - Setting up your development environment
-
 - Running your first inference
 
-- **Experiments**: Test different audio samples, explore model outputs, adjust confidence thresholds
+### [Class 2: The End-to-End ASR Architecture](./2-end-to-end-architecture.md) (1 hour)
 
-### [Class 2: Audio Processing and Encoders](./2-audio-processing-and-encoders.md) (1 hour)
+- How audio is transformed into embeddings by the encoder.
+- Why a projector is needed to bridge the "modality gap".
+- How a language model decoder generates text.
+- Visualizing the data flow from audio to text.
 
-- How audio becomes data
+### [Class 3: Training](./3-training.md) (1 hour)
 
-- Feature extraction with Wav2Vec2
+- Why we use parameter-efficient, projector-only training.
+- How to configure a training run with Hydra.
+- How to launch and monitor training on a cloud GPU.
 
-- Understanding the HuBERT encoder
+### [Class 4: Evaluation and Deployment](./4-evaluation-and-deployment.md) (1 hour)
 
-- Exploring audio embeddings
-
-- **Experiments**: Compare Wav2Vec2 vs HuBERT, test different audio preprocessing, visualize embeddings
-
-### [Class 3: Language Models and Projectors](./3-language-models-and-projectors.md) (1 hour)
-
-- What are language models?
-
-- The SmolLM3 decoder
-
-- Bridging audio and text: the AudioProjector
-
-- Linear projector architecture explained
-
-- **Experiments**: Try different decoder models, modify projection dimensions, test activation functions
-
-### [Class 4: Training](./4-training.md) (1 hour)
-
-- Why parameter-efficient training?
-
-- Understanding the projector-only training approach
-
-- Configuring training with Hydra
-
-- Starting your first training run
-
-- **Experiments**: Test learning rates, experiment with batch sizes, try different datasets
-
-### [Class 5: Evaluation and Debugging](./5-evaluation-and-debugging.md) (1 hour)
-
-- Understanding Word Error Rate (WER)
-
-- Evaluating your model
-
-- Debugging common issues
-
-- Improving model performance
-
-- **Experiments**: Compare metrics across datasets, test data augmentation, analyze error patterns
-
-### [Class 6: Publishing and Deployment](./6-publishing-and-deployment.md) (1 hour)
-
-- Pushing to HuggingFace Hub
-
-- Creating a professional model card
-
-- Deploying to HuggingFace Inference Endpoints (production APIs)
-
-- Creating interactive demos on HuggingFace Spaces
-
-- Testing with multiple interfaces (transformers, API, web UI)
-
-- Adding your results to the leaderboard
-
-- **Experiments**: Test different deployment configurations, benchmark inference speeds, compare serving options
+- How to evaluate your model's performance with Word Error Rate (WER).
+- How to push your trained model to the Hugging Face Hub.
+- How to create and deploy a live, interactive web demo.
 
 ## Learning Goals
 

@@ -787,6 +787,6 @@ ______________________________________________________________________
 
 - [Training script](../../src/train.py)
 
-[Previous: Class 2: The End-to-End ASR Architecture](./2-end-to-end-architecture.md) | [Next: Class 4: Evaluation and Debugging](./4-evaluation-and-debugging.md)
+[Previous: Class 2: The End-to-End ASR Architecture](./2-end-to-end-architecture.md)
 
 **See you next time!**
