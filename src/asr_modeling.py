@@ -273,6 +273,16 @@ class ASRModel(PreTrainedModel):
         self.decoder = self._create_decoder(config)
         self.generation_config = self.decoder.generation_config
 
+        # Sync generation config with ASRConfig defaults
+        config_params = [
+            "max_new_tokens", "min_new_tokens", "num_beams", "do_sample",
+            "temperature", "top_k", "top_p", "repetition_penalty",
+            "length_penalty", "no_repeat_ngram_size", "early_stopping", "use_cache"
+        ]
+        for param in config_params:
+            if hasattr(config, param) and getattr(config, param) is not None:
+                setattr(self.generation_config, param, getattr(config, param))
+
         self._init_tokenizer()
 
         from types import SimpleNamespace
