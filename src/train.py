@@ -97,18 +97,25 @@ class DatasetLoader:
                     yield example
                 except (RuntimeError, OSError, ValueError) as e:
                     error_msg = str(e)
-                    if any(phrase in error_msg for phrase in [
-                        "Resource temporarily unavailable",
-                        "Failed to open",
-                        "Invalid data",
-                        "Could not find codec"
-                    ]):
-                        print(f"Warning: Skipping example {idx} due to audio decoding error: {error_msg[:100]}")
+                    if any(
+                        phrase in error_msg
+                        for phrase in [
+                            "Resource temporarily unavailable",
+                            "Failed to open",
+                            "Invalid data",
+                            "Could not find codec",
+                        ]
+                    ):
+                        print(
+                            f"Warning: Skipping example {idx} due to audio decoding error: {error_msg[:100]}"
+                        )
                         continue
                     else:
                         raise
                 except Exception as e:
-                    print(f"Warning: Skipping example {idx} due to unexpected error: {type(e).__name__}: {str(e)[:100]}")
+                    print(
+                        f"Warning: Skipping example {idx} due to unexpected error: {type(e).__name__}: {str(e)[:100]}"
+                    )
                     continue
 
         # Build new features dict from original, adding task

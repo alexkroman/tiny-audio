@@ -73,10 +73,10 @@ class EndpointHandler:
         if torch.cuda.is_available():
             self._warmup()
 
-
     def _is_flash_attn_available(self):
         """Check if flash attention is available."""
         import importlib.util
+
         return importlib.util.find_spec("flash_attn") is not None
 
     def _warmup(self):
