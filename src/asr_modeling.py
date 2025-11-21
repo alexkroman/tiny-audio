@@ -10,6 +10,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
+    TextIteratorStreamer,
     Wav2Vec2FeatureExtractor,
 )
 from transformers.generation.utils import (
@@ -116,7 +117,6 @@ class AudioProjector(nn.Module):
         remainder = seq_len % self.k
         if remainder:
             pad_len = self.k - remainder
-            # mode='replicate' prevents "silence artifacts" at the end
             x = x.transpose(1, 2) # Pad expects [B, C, T]
             x = F.pad(x, (0, pad_len), mode='constant') 
             x = x.transpose(1, 2)
