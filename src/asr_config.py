@@ -11,7 +11,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self,
         audio_model_id: str = "openai/whisper-large-v3-turbo",
         text_model_id: str = "HuggingFaceTB/SmolLM3-3B",
-        attn_implementation: str = "sdpa",
+        attn_implementation: str = "flash_attention_2",
         model_dtype: str = "bfloat16",
         num_beams: Optional[int] = None,
         system_prompt: str = "/no_think /system_override",
