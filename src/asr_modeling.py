@@ -30,10 +30,9 @@ class SwiGLU(nn.Module):
     def __init__(self, in_features, hidden_features, out_features, bias=False, dropout_rate=0.05):
         super().__init__()
         # SwiGLU: (Swish(xW_gate) * xW_val) W_out
-        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)  # Gate
-        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)  # Value
-        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)  # Output
-        self.act = nn.SiLU()
+        # Memory optimization: Combined layer for W1 (Gate) and W2 (Value) helps parallelism
+        self.w12 = nn.Linear(in_features, 2 * hidden_features, bias=bias)
+        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
 
         # 2025 Optimization: Low dropout for Audio to preserve phonemes
         # Applied to input rather than gated output for better regularization
@@ -43,12 +42,15 @@ class SwiGLU(nn.Module):
         # Apply dropout to input (more effective for gated networks)
         x = self.dropout(x)
 
-        # The gating mechanism
-        x_gate = self.act(self.w1(x))
-        x_val = self.w2(x)
+        # Fusing the two projections allows PyTorch to use optimized kernels
+        w12_out = self.w12(x)
 
-        # Element-wise multiplication (The "Gating")
-        x = x_gate * x_val
+        # Split into gate and value
+        # chunk is a view, so no extra memory allocation
+        x_gate, x_val = w12_out.chunk(2, dim=-1)
+
+        # F.silu is the Swish activation
+        x = F.silu(x_gate) * x_val
 
         # Final projection
         x = self.w3(x)
@@ -95,8 +97,7 @@ class AudioProjector(nn.Module):
             self.ln_post.weight.data.fill_(1.0)
             
             # SwiGLU (The "Correction") starts small
-            nn.init.trunc_normal_(self.proj.w1.weight, std=std)
-            nn.init.trunc_normal_(self.proj.w2.weight, std=std)
+            nn.init.trunc_normal_(self.proj.w12.weight, std=std)
             nn.init.trunc_normal_(self.proj.w3.weight, std=std)
             
             # Residual (The "Shortcut") starts STRONG
@@ -471,8 +472,16 @@ class ASRModel(PreTrainedModel):
         audio_attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         encoder_device = next(self.encoder.parameters()).device
-        encoder_dtype = next(self.encoder.parameters()).dtype
-        input_values = input_values.clone().to(device=encoder_device, dtype=encoder_dtype)
+
+        # Optimization: Only move/cast if strictly necessary
+        if input_values.device != encoder_device:
+            input_values = input_values.to(encoder_device)
+
+        # Whisper/Wav2Vec2 might expect float, but encoder is half.
+        # Check to prevent double casting
+        target_dtype = next(self.encoder.parameters()).dtype
+        if input_values.dtype != target_dtype:
+            input_values = input_values.to(dtype=target_dtype)
 
         with torch.no_grad():
             audio_features = self.encoder(

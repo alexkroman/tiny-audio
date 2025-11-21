@@ -113,9 +113,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if isinstance(inputs, list):
             raise ValueError("Lists should not reach preprocess - bug in __call__")
 
-        # Set default chunking to 30 seconds with 5 second overlap
-        preprocess_params.setdefault("chunk_length_s", 30)
-        preprocess_params.setdefault("stride_length_s", (5, 5))
+        # Disable chunking by default - process audio as-is without padding
+        # Users can override by passing chunk_length_s explicitly
+        preprocess_params.setdefault("chunk_length_s", 0)
 
         # Handle different formats from datasets
         if isinstance(inputs, dict):
