@@ -411,7 +411,6 @@ def main(cfg: DictConfig) -> None:
         audio_model_id=cfg.model.encoder_model_name,
         attn_implementation=cfg.training.attn_implementation,
         model_dtype=cfg.training.model_dtype,
-        audio_downsample_rate=cfg.model.audio_downsample_rate,
         system_prompt=cfg.model.system_prompt,
         encoder_dim=encoder_config.hidden_size,
         llm_dim=decoder_config.hidden_size,

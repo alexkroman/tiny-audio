@@ -57,6 +57,7 @@ assemblyai = "*"
 typer = ">=0.19.2"
 truecase = "*"
 nltk = "*"
+bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"

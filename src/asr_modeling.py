@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Optional, Union
+import math
 
 import torch
 import torch.nn as nn
@@ -25,88 +26,76 @@ try:
 except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
 
-
 class SwiGLU(nn.Module):
     def __init__(self, in_features, hidden_features, out_features, bias=False, dropout_rate=0.05):
         super().__init__()
         # SwiGLU: (Swish(xW_gate) * xW_val) W_out
-        # Memory optimization: Combined layer for W1 (Gate) and W2 (Value) helps parallelism
         self.w12 = nn.Linear(in_features, 2 * hidden_features, bias=bias)
         self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
-
-        # 2025 Optimization: Low dropout for Audio to preserve phonemes
-        # Applied to input rather than gated output for better regularization
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x):
-        # Apply dropout to input (more effective for gated networks)
-        x = self.dropout(x)
-
-        # Fusing the two projections allows PyTorch to use optimized kernels
         w12_out = self.w12(x)
-
-        # Split into gate and value
-        # chunk is a view, so no extra memory allocation
         x_gate, x_val = w12_out.chunk(2, dim=-1)
-
-        # F.silu is the Swish activation
         x = F.silu(x_gate) * x_val
-
-        # Final projection
         x = self.w3(x)
+        x = self.dropout(x)
         return x
 
 
-class AudioProjector(nn.Module):
+class MoEAudioProjector(nn.Module):
+    """
+    SOTA 2025 MoE Projector Architecture.
+    Fixed: Flattening logic to prevent CUDA Index-Out-Of-Bounds errors.
+    """
     def __init__(self, config):
         super().__init__()
-        self.k = getattr(config, "projector_pool_stride", 5)
+        self.k = getattr(config, "projector_pool_stride", 2)
+
+        # 1. Config: Fine-Grained Experts
+        self.num_routed_experts = getattr(config, "num_experts", 8)
+        self.top_k = getattr(config, "moe_top_k", 4)
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+
         in_dim = config.encoder_dim * self.k
         out_dim = config.llm_dim
-        hidden_dim = config.llm_dim
+
+        routed_hidden_dim = getattr(config, "projector_hidden_dim", 1024)
+        shared_hidden_dim = out_dim // 2
+
         dropout_rate = getattr(config, "projector_dropout", 0.05)
-        self.noise_scale = getattr(config, "projector_input_noise", 0.01)
+        self.noise_scale = getattr(config, "projector_input_noise", 0.02)
 
-        from transformers.models.llama.modeling_llama import LlamaRMSNorm
+        try:
+            from transformers.models.llama.modeling_llama import LlamaRMSNorm
+            self.norm_layer = LlamaRMSNorm
+        except ImportError:
+            self.norm_layer = nn.LayerNorm
 
-        # 1. Pre-Norm (Epsilon aligned to Llama-3)
-        self.ln_pre = LlamaRMSNorm(in_dim, eps=1e-6)
+        self.ln_pre = self.norm_layer(in_dim, eps=1e-6)
+        self.router = nn.Linear(in_dim, self.num_routed_experts, bias=False)
 
-        # 2. SwiGLU
-        self.proj = SwiGLU(in_dim, hidden_dim, out_dim, dropout_rate=dropout_rate)
+        self.shared_expert = SwiGLU(in_dim, shared_hidden_dim, out_dim, dropout_rate=dropout_rate)
+        self.routed_experts = nn.ModuleList([
+            SwiGLU(in_dim, routed_hidden_dim, out_dim, dropout_rate=dropout_rate)
+            for _ in range(self.num_routed_experts)
+        ])
 
-        # 3. Residual Connection
-        if in_dim != out_dim:
-            self.residual_proj = nn.Linear(in_dim, out_dim, bias=False)
-        else:
-            self.residual_proj = nn.Identity()
+        self.ln_post = self.norm_layer(out_dim, eps=1e-6)
+        self.last_aux_loss = 0.0
 
-        # 4. Interface Guardrail
-        self.ln_post = LlamaRMSNorm(out_dim, eps=1e-6)
-
-        # 5. Output Scale
-        # Init at 1.0 is safer than 2.0. Let the gradients drive it up if needed.
-        self.output_scale = nn.Parameter(torch.ones([]) * 1.0)
-
-        # --- OPTIMIZED INITIALIZATION ---
+        # --- INITIALIZATION ---
         with torch.no_grad():
             std = getattr(config, "projector_init_std", 0.02)
-            
-            # Norms start as identity
+            nn.init.normal_(self.router.weight, mean=0, std=0.02)
             self.ln_pre.weight.data.fill_(1.0)
             self.ln_post.weight.data.fill_(1.0)
             
-            # SwiGLU (The "Correction") starts small
-            nn.init.trunc_normal_(self.proj.w12.weight, std=std)
-            nn.init.trunc_normal_(self.proj.w3.weight, std=std)
-            
-            # Residual (The "Shortcut") starts STRONG
-            # This ensures signal flows through even if SwiGLU is random
-            if isinstance(self.residual_proj, nn.Linear):
-                # Orthogonal ensures the matrix rotates/maps features without shrinking them
-                nn.init.orthogonal_(self.residual_proj.weight)
-                # Scale slightly to account for the change in width (3840 -> 4096)
-                self.residual_proj.weight.data.mul_(0.5) # Conservative starting gain
+            nn.init.trunc_normal_(self.shared_expert.w12.weight, std=std)
+            nn.init.trunc_normal_(self.shared_expert.w3.weight, std=std)
+            for expert in self.routed_experts:
+                nn.init.trunc_normal_(expert.w12.weight, std=std)
+                nn.init.trunc_normal_(expert.w3.weight, std=std)
 
     def forward(self, x):
         if self.training and self.noise_scale > 0:
@@ -115,31 +104,100 @@ class AudioProjector(nn.Module):
 
         batch_size, seq_len, dim = x.size()
 
+        # 1. Stride/Pooling
         remainder = seq_len % self.k
         if remainder:
             pad_len = self.k - remainder
-            x = x.transpose(1, 2) # Pad expects [B, C, T]
-            x = F.pad(x, (0, pad_len), mode='constant') 
-            x = x.transpose(1, 2)
+            x = F.pad(x, (0, 0, 0, pad_len), mode='constant', value=0.0)
 
+        # 🚨 FIX: Reshape to [Batch, New_Seq, Dim*k] FIRST...
         x = x.contiguous().view(batch_size, -1, dim * self.k)
-
-        # Residual Path
-        residual = self.residual_proj(x)
         
-        # Main Path
-        x = self.ln_pre(x)
-        x = self.proj(x)
+        # ...THEN flatten to [Total_Tokens, Dim*k] for the Router/Experts
+        # This was the missing step causing index out of bounds
+        # We keep (Batch, Seq) dimensions in a variable to restore later
+        new_seq_len = x.shape[1]
+        x = x.view(-1, dim * self.k) # Flatten: [B*S, D]
+        total_tokens = x.shape[0]
         
-        # Injection
-        x = x + residual
+        # 2. Pre-Norm
+        norm_x = self.ln_pre(x)
 
-        # Final Norm & Scale
-        x = self.ln_post(x)
-        x = x * self.output_scale
+        # --- SHARED PATH ---
+        shared_out = self.shared_expert(norm_x)
 
-        return x
+        # --- ROUTED PATH ---
+        # Keep in bfloat16 for flash-attn compatibility
+        router_logits = self.router(norm_x)
 
+        routing_weights = F.softmax(router_logits.float(), dim=-1).to(x.dtype)
+        
+        if self.training:
+            self.last_aux_loss = self._compute_load_balancing_loss(routing_weights)
+        
+        top_k_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+
+        # Re-Normalize & Scale
+        top_k_weights = top_k_weights / (top_k_weights.sum(dim=-1, keepdim=True) + 1e-20)
+        top_k_weights = top_k_weights * self.routed_scaling_factor
+        top_k_weights = top_k_weights.to(x.dtype) 
+
+        # Expert Computation
+        routed_out = torch.zeros(
+            total_tokens, self.routed_experts[0].w3.out_features,
+            device=x.device, dtype=x.dtype
+        )
+
+        for i, expert in enumerate(self.routed_experts):
+            expert_mask = (selected_experts == i)
+            
+            if not expert_mask.any():
+                continue
+
+            # Get indices
+            flat_mask_indices = expert_mask.view(-1).nonzero()
+            
+            # SAFETY CHECK: Prevent empty tensor crash on A40
+            if flat_mask_indices.numel() == 0:
+                continue
+
+            # Token indices are now valid because norm_x is flattened [B*S, D]
+            token_indices = flat_mask_indices.squeeze(-1).div(self.top_k, rounding_mode='floor')
+            
+            # Gather inputs
+            expert_input = norm_x[token_indices]
+            
+            # Explicit Dimension Check
+            if expert_input.size(0) == 0:
+                continue
+
+            # Forward Pass
+            expert_output = expert(expert_input)
+            
+            # Apply Weights
+            flat_weights = top_k_weights.view(-1)[flat_mask_indices.squeeze(-1)]
+            weighted_output = expert_output * flat_weights.unsqueeze(-1)
+            
+            # Scatter Add
+            routed_out.index_add_(0, token_indices, weighted_output)
+
+        # Combine
+        final_out = self.ln_post(shared_out + routed_out)
+        
+        # 🚨 RESTORE SHAPE: [Total_Tokens, Dim] -> [Batch, Seq, Dim]
+        final_out = final_out.view(batch_size, new_seq_len, final_out.shape[-1])
+
+        # Output Clamping
+        if self.training:
+            final_out = torch.clamp(final_out, min=-30.0, max=30.0)
+
+        return final_out
+
+    def _compute_load_balancing_loss(self, routing_weights):
+        expert_importance = routing_weights.sum(dim=0)
+        loss = torch.sum(expert_importance * expert_importance) / (routing_weights.shape[0] ** 2)
+        return loss * self.num_routed_experts
+    
 class ASRModel(PreTrainedModel):
     config_class = ASRConfig
     base_model_prefix = "model"
@@ -149,7 +207,6 @@ class ASRModel(PreTrainedModel):
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
 
-    # Task to prompt mapping for generation
     TASK_PROMPTS = {
         "transcribe": "Transcribe: <audio>",
         "continue": "Continue: <audio>",
@@ -159,7 +216,6 @@ class ASRModel(PreTrainedModel):
 
     @staticmethod
     def _create_feature_extractor(audio_model_id: str, training_mode: bool = False):
-        """Factory method to create the appropriate feature extractor."""
         is_whisper = "whisper" in audio_model_id.lower()
         if is_whisper:
             from transformers import WhisperConfig, WhisperFeatureExtractor
@@ -167,20 +223,17 @@ class ASRModel(PreTrainedModel):
             encoder_config = WhisperConfig.from_pretrained(audio_model_id)
             num_mel_bins = encoder_config.num_mel_bins
 
-            # Add SpecAugment parameters for training
             return WhisperFeatureExtractor.from_pretrained(
                 audio_model_id,
                 feature_size=num_mel_bins,
-                # SpecAugment parameters - optimized for adapter training
-                apply_spec_augment=training_mode,  # Only during training
-                # Reduced Freq Mask (Standard is ~27)
-                mask_feature_prob=0.05,       # Low prob of masking features
-                mask_feature_length=15,       # Narrower frequency bands (15 vs 27)
-                mask_feature_min_masks=0,     # Allow 0 masks
-                # Reduced Time Mask (Standard is ~80-100)
-                mask_time_prob=0.05,          # Low prob of masking time
-                mask_time_length=20,          # Shorter time masks (200ms vs 800ms)
-                mask_time_min_masks=1,        # At least 1 mask if triggered
+                apply_spec_augment=training_mode,
+                # Optimized SpecAugment for frozen-backbone training (keep minimal)
+                mask_feature_prob=0.05,       
+                mask_feature_length=15,       
+                mask_feature_min_masks=0,     
+                mask_time_prob=0.05,          
+                mask_time_length=20,          
+                mask_time_min_masks=1,        
             )
         return Wav2Vec2FeatureExtractor.from_pretrained(audio_model_id)
 
@@ -192,7 +245,6 @@ class ASRModel(PreTrainedModel):
         if config is None:
             config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
-        # Load feature extractor from saved model directory
         kwargs["feature_extractor"] = AutoFeatureExtractor.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
@@ -224,7 +276,6 @@ class ASRModel(PreTrainedModel):
             if not model_file:
                 raise FileNotFoundError(
                     f"model.safetensors not found in {pretrained_model_name_or_path}. "
-                    "The repository may not have been trained yet."
                 )
 
             state_dict = load_file(model_file)
@@ -246,9 +297,9 @@ class ASRModel(PreTrainedModel):
         super().__init__(config)
 
         feature_extractor = kwargs.pop("feature_extractor", None)
-
         self.system_prompt = config.system_prompt
 
+        # --- OPTIMIZED ENCODER CREATION ---
         self.encoder = self._create_encoder(config)
 
         is_whisper = "whisper" in config.audio_model_id.lower() or (
@@ -264,16 +315,15 @@ class ASRModel(PreTrainedModel):
         if feature_extractor is not None:
             self.feature_extractor = feature_extractor
         else:
-            # Enable SpecAugment during training (can be controlled via config)
             training_mode = getattr(config, "use_specaugment", False)
             self.feature_extractor = self._create_feature_extractor(
                 config.audio_model_id, training_mode=training_mode
             )
 
+        # --- OPTIMIZED DECODER CREATION ---
         self.decoder = self._create_decoder(config)
         self.generation_config = self.decoder.generation_config
 
-        # Sync generation config with ASRConfig defaults
         config_params = [
             "max_new_tokens", "min_new_tokens", "num_beams", "do_sample",
             "temperature", "top_k", "top_p", "repetition_penalty",
@@ -305,18 +355,22 @@ class ASRModel(PreTrainedModel):
             else:
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
-        # Pass config directly to AudioProjector, let it handle defaults
+        # Pass config to MoE Projector
         projector_config = SimpleNamespace(
             encoder_dim=encoder_dim,
             llm_dim=llm_dim,
-            **{k: v for k, v in vars(config).items() if k.startswith('projector_')}
+            **{k: v for k, v in vars(config).items() if k.startswith('projector_')},
+            # Include MoE specific configs from root config if available
+            num_experts=getattr(config, "num_experts", 8),
+            moe_top_k=getattr(config, "moe_top_k", 2)
         )
-        self.projector = AudioProjector(projector_config)
+        
+        # --- SWITCHED TO MoE PROJECTOR ---
+        self.projector = MoEAudioProjector(projector_config)
 
         target_dtype = getattr(torch, config.model_dtype)
         self.projector = self.projector.to(dtype=target_dtype)
 
-        # Create loss function with label smoothing
         self.label_smoothing = getattr(config, "label_smoothing", 0.1)
         self.loss_fct = nn.CrossEntropyLoss(
             ignore_index=-100,
@@ -329,6 +383,7 @@ class ASRModel(PreTrainedModel):
     def _create_encoder(cls, config: ASRConfig):
         target_dtype = getattr(torch, config.model_dtype)
 
+        # Use Flash Attention 2 for encoder (same as decoder)
         encoder_kwargs = {
             "attn_implementation": config.attn_implementation,
             "dtype": target_dtype,
@@ -339,7 +394,6 @@ class ASRModel(PreTrainedModel):
 
         if "whisper" in config.audio_model_id.lower():
             from transformers import WhisperModel
-
             full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
             encoder = full_model.encoder
             del full_model
@@ -358,9 +412,9 @@ class ASRModel(PreTrainedModel):
             return original_forward(**{input_key: input_values}, **kwargs)
 
         import types
-
         encoder.forward = types.MethodType(safe_encoder_forward, encoder)
         encoder.requires_grad_(False)
+        encoder.eval()  # Set to eval mode to prevent any training behavior
 
         return encoder
 
@@ -369,14 +423,44 @@ class ASRModel(PreTrainedModel):
         target_dtype = getattr(torch, config.model_dtype)
 
         decoder_kwargs = {
-            "attn_implementation": config.attn_implementation,
-            "dtype": target_dtype,
+            # Optimization: Use Flash Attention 2 for the LLM if available
+            # This significantly speeds up generation and training
+            "attn_implementation": "flash_attention_2",
             "trust_remote_code": True,
+            "low_cpu_mem_usage": True,
         }
 
+        # Optimization: 4-Bit Quantization Support
+        if getattr(config, "use_4bit_quantization", False):
+            try:
+                from transformers import BitsAndBytesConfig
+                compute_dtype = getattr(torch, getattr(config, "bnb_4bit_compute_dtype", "bfloat16"))
+                
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=compute_dtype,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                )
+                decoder_kwargs["quantization_config"] = quantization_config
+            except ImportError:
+                print("BitsAndBytes not found, falling back to full precision.")
+                decoder_kwargs["dtype"] = target_dtype
+        else:
+            decoder_kwargs["dtype"] = target_dtype
+
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
+        
+        # If quantized, we need to prepare it for training (even if frozen, to allow gradients to pass)
+        if getattr(config, "use_4bit_quantization", False):
+            from peft import prepare_model_for_kbit_training
+            decoder = prepare_model_for_kbit_training(
+                decoder, use_gradient_checkpointing=False 
+            )
+
         decoder.config.use_cache = config.use_cache
         decoder.requires_grad_(False)
+        decoder.eval()  # Set to eval mode to prevent any training behavior
 
         return decoder
 
@@ -421,7 +505,6 @@ class ASRModel(PreTrainedModel):
             self.decoder.resize_token_embeddings(expected_size, mean_resizing=False)
 
         self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<audio>")
-
         self.tokenizer.padding_side = "right"
 
         for cfg in [self.config.text_config, self.decoder.config, self.generation_config]:
@@ -438,7 +521,7 @@ class ASRModel(PreTrainedModel):
         try:
             from .asr_processing import ASRProcessor
         except ImportError:
-            from asr_processing import ASRProcessor  # type: ignore[no-redef]
+            from asr_processing import ASRProcessor 
 
         return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
 
@@ -447,11 +530,9 @@ class ASRModel(PreTrainedModel):
 
     def _get_trainable_state_dict(self):
         state = {}
-
         projector_state = self.projector.state_dict()
         for name, tensor in projector_state.items():
             state[f"projector.{name}"] = tensor
-
         return state
 
     def get_input_embeddings(self):
@@ -473,13 +554,11 @@ class ASRModel(PreTrainedModel):
     ) -> torch.Tensor:
         encoder_device = next(self.encoder.parameters()).device
 
-        # Optimization: Only move/cast if strictly necessary
         if input_values.device != encoder_device:
-            input_values = input_values.to(encoder_device)
+            input_values = input_values.to(encoder_device, non_blocking=True)
 
-        # Whisper/Wav2Vec2 might expect float, but encoder is half.
-        # Check to prevent double casting
-        target_dtype = next(self.encoder.parameters()).dtype
+        # Robust casting check
+        target_dtype = self.encoder.dtype if hasattr(self.encoder, "dtype") else next(self.encoder.parameters()).dtype
         if input_values.dtype != target_dtype:
             input_values = input_values.to(dtype=target_dtype)
 
@@ -520,7 +599,6 @@ class ASRModel(PreTrainedModel):
             ],
             dim=1,
         )
-
         new_seq_len = seq_len - 1 + num_audio_tokens
 
         return {
@@ -611,48 +689,35 @@ class ASRModel(PreTrainedModel):
         self,
         input_ids: Optional[torch.Tensor] = None,
         input_values: Optional[torch.Tensor] = None,
-        input_features: Optional[torch.Tensor] = None,  # For Whisper
+        input_features: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        num_items_in_batch: Optional[
-            int
-        ] = None,  # HF Trainer provides this for gradient accumulation
+        num_items_in_batch: Optional[int] = None,
         **kwargs,
     ):
         audio_inputs = input_values if input_values is not None else input_features
         if audio_inputs is not None:
             if input_ids is None:
-                raise ValueError(
-                    "forward() requires both audio inputs and input_ids (for training). "
-                    "For inference, use the generate() method instead, or use the pipeline "
-                    "which will automatically call generate()."
-                )
+                raise ValueError("forward() requires both audio inputs and input_ids.")
 
             audio_attention_mask = kwargs.pop("audio_attention_mask", None)
-
             kwargs.pop("past_key_values", None)
             use_cache = kwargs.pop("use_cache", None)
 
+            # 1. Encode Audio (This runs the MoE Projector and updates last_aux_loss)
             audio_embeds = self._encode_audio(
-                input_values=audio_inputs,  # Will be mapped to input_features for Whisper by safe_encoder_forward
+                input_values=audio_inputs,
                 audio_attention_mask=audio_attention_mask,
             )
 
             if self.audio_token_id is None:
                 raise ValueError(f"Audio token not properly initialized: {self.audio_token_id}")
 
-            vocab_size = self.decoder.get_input_embeddings().weight.shape[0]
-            if self.audio_token_id >= vocab_size:
-                raise ValueError(
-                    f"Audio token ID out of range. ID: {self.audio_token_id}, Vocab size: {vocab_size}"
-                )
-
             if not (input_ids == self.audio_token_id).any():
                 raise ValueError("Audio token <audio> must be present in input")
 
             num_audio_tokens = audio_embeds.shape[1]
             expanded_input_ids = self._expand_audio_tokens(input_ids, num_audio_tokens)
-
             inputs_embeds = self._prepare_audio_inputs_embeds(expanded_input_ids, audio_embeds)
 
             if attention_mask is not None:
@@ -671,36 +736,45 @@ class ASRModel(PreTrainedModel):
             full_attention_mask = attention_mask
             use_cache = kwargs.pop("use_cache", None)
 
-        # Get decoder outputs
+        # 2. Run Decoder (LLM)
         outputs = self.decoder(
             inputs_embeds=inputs_embeds,
             attention_mask=full_attention_mask,
-            labels=None,  # Never let decoder compute loss, we'll do it ourselves
+            labels=None, 
             use_cache=use_cache if use_cache is not None else False,
             **kwargs,
         )
 
-        # Compute loss if labels provided
+        # 3. Calculate Losses
         if labels is not None:
-            # Apply label smoothing only during training
-            if self.training:
-                loss = self.loss_fct(
-                    outputs.logits.view(-1, outputs.logits.size(-1)),
-                    labels.view(-1)
-                )
-            else:
-                # No label smoothing for validation - get true loss
-                val_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-                loss = val_loss_fct(
-                    outputs.logits.view(-1, outputs.logits.size(-1)),
-                    labels.view(-1)
-                )
+            logits = outputs.logits
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+            flat_labels = shift_labels.view(-1)
+            
+            # A. Main Task Loss (Next Token Prediction)
+            loss = self.loss_fct(flat_logits, flat_labels)
 
-            # Create new output with loss (outputs might be immutable)
+            # B. MoE Load Balancing Loss (CRITICAL UPDATE) -------------------
+            # Check if the projector stored an aux loss during this forward pass
+            if hasattr(self.projector, "last_aux_loss"):
+                # We use a coefficient of 0.01 (Standard for Qwen/DeepSeek)
+                # This ensures the router learns to balance without distracting
+                # the model from the main ASR task.
+                aux_loss = self.projector.last_aux_loss
+                
+                # Ensure aux_loss is on the same device to prevent DDP errors
+                if aux_loss.device != loss.device:
+                    aux_loss = aux_loss.to(loss.device)
+                    
+                loss += 0.01 * aux_loss
+            # ----------------------------------------------------------------
+
             from transformers.modeling_outputs import CausalLMOutputWithPast
             outputs = CausalLMOutputWithPast(
                 loss=loss,
-                logits=outputs.logits,
+                logits=logits,
                 past_key_values=outputs.past_key_values,
                 hidden_states=outputs.hidden_states,
                 attentions=outputs.attentions,
@@ -712,7 +786,7 @@ class ASRModel(PreTrainedModel):
     def generate(
         self,
         input_values: Optional[torch.Tensor] = None,
-        input_features: Optional[torch.Tensor] = None,  # For Whisper
+        input_features: Optional[torch.Tensor] = None,
         system_prompt: Optional[str] = None,
         user_prompt: Optional[str] = None,
         task: Optional[str] = None,
@@ -773,18 +847,11 @@ class ASRModel(PreTrainedModel):
         inputs_embeds = self._prepare_audio_inputs_embeds(expanded_prompt_ids, audio_embeds)
         total_seq_len = inputs_embeds.shape[1]
         attention_mask = torch.ones(batch_size, total_seq_len, dtype=torch.long, device=device)
+        
         config_params = [
-            "max_new_tokens",
-            "min_new_tokens",
-            "num_beams",
-            "do_sample",
-            "temperature",
-            "top_k",
-            "top_p",
-            "repetition_penalty",
-            "length_penalty",
-            "no_repeat_ngram_size",
-            "early_stopping",
+            "max_new_tokens", "min_new_tokens", "num_beams", "do_sample",
+            "temperature", "top_k", "top_p", "repetition_penalty",
+            "length_penalty", "no_repeat_ngram_size", "early_stopping",
         ]
         for param in config_params:
             if hasattr(self.config, param) and getattr(self.config, param) is not None:
@@ -834,20 +901,18 @@ class ASRModel(PreTrainedModel):
         self.tokenizer.save_pretrained(save_dir)
 
         if hasattr(self.encoder.config, "num_mel_bins"):
-            # For Whisper models, explicitly set the correct feature_size before saving
             num_mel_bins = self.encoder.config.num_mel_bins
             self.feature_extractor.feature_size = num_mel_bins
-            self.feature_extractor.num_mel_bins = num_mel_bins  # Explicitly set num_mel_bins
+            self.feature_extractor.num_mel_bins = num_mel_bins
             if hasattr(self.feature_extractor, "n_mels"):
                 self.feature_extractor.n_mels = num_mel_bins
-            self.feature_extractor.nb_max_frames = 3000  # Whisper's max frames
+            self.feature_extractor.nb_max_frames = 3000
 
         self.get_processor().save_pretrained(save_dir)
 
         src_dir = PathlibPath(__file__).parent
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
-
 
 AutoConfig.register("asr_model", ASRConfig)
 AutoModel.register(ASRConfig, ASRModel)

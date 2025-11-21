@@ -25,13 +25,12 @@ training:
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 32
-  gradient_accumulation_steps: 3
-  eval_accumulation_steps: 3
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 6
+  eval_accumulation_steps: 6
 
-  learning_rate: 1.0e-4
-
+  learning_rate: 1.0e-3
 
   lr_scheduler_type: "warmup_stable_decay"
   warmup_steps: 1000
@@ -46,12 +45,12 @@ training:
   label_smoothing: 0.1
 
   # Memory optimization
-  torch_compile: true  # Disabled for faster startup
-  torch_compile_dynamic: true  # Enable dynamic shapes for variable sequence lengths
-  torch_compile_fullgraph: false  # Allow graph breaks for flexibility
-  torch_compile_config:
-    capture_scalar_outputs: true  # Reduce graph breaks from .item() calls
-    allow_unspec_int_on_nn_module: true  # Reduce recompilation from layer indices
+  torch_compile: false  # Disabled for faster startup
+  # torch_compile_dynamic: true  # Enable dynamic shapes for variable sequence lengths
+  # torch_compile_fullgraph: false  # Allow graph breaks for flexibility
+  # torch_compile_config:
+  #  capture_scalar_outputs: true  # Reduce graph breaks from .item() calls
+  #  allow_unspec_int_on_nn_module: true  # Reduce recompilation from layer indices
   
   gradient_checkpointing: false
 

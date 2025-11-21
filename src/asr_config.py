@@ -13,7 +13,6 @@ class ASRConfig(transformers.PretrainedConfig):
         text_model_id: str = "HuggingFaceTB/SmolLM3-3B",
         attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
-        audio_downsample_rate: int = 5,  # Deprecated: use projector_pool_stride instead
         num_beams: Optional[int] = None,
         system_prompt: str = "/no_think /system_override",
         user_prompt: str = "Transcribe: <audio>",
@@ -23,9 +22,14 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 2,
         projector_hidden_dim: Optional[int] = None,
-        projector_dropout: float = 0.0,  # Dropout rate for projector layers
+        projector_dropout: float = 0.05,  # Dropout rate for projector layers
+        projector_input_noise: float = 0.02,  # Input noise for projector
         inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
+        use_4bit_quantization: bool = True,  # Enable 4-bit quantization
+        bnb_4bit_compute_dtype: str = "bfloat16",  # Compute dtype for 4-bit
+        bnb_4bit_quant_type: str = "nf4",  # Quantization type: nf4 or fp4
+        bnb_4bit_use_double_quant: bool = True,  # Use double quantization
         max_new_tokens: Optional[int] = None,
         min_new_tokens: Optional[int] = None,
         do_sample: Optional[bool] = None,
@@ -58,7 +62,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.text_model_id = text_model_id
         self.attn_implementation = attn_implementation
         self.model_dtype = model_dtype
-        self.audio_downsample_rate = audio_downsample_rate
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
         self.encoder_dim = encoder_dim
@@ -68,8 +71,13 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_dropout = projector_dropout
+        self.projector_input_noise = projector_input_noise
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
+        self.use_4bit_quantization = use_4bit_quantization
+        self.bnb_4bit_compute_dtype = bnb_4bit_compute_dtype
+        self.bnb_4bit_quant_type = bnb_4bit_quant_type
+        self.bnb_4bit_use_double_quant = bnb_4bit_use_double_quant
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
         else:
