@@ -41,7 +41,7 @@ torch_compile: true
 
 # Model dtype - use bfloat16 for production with flash attention
 model_dtype: bfloat16
-attn_implementation: flash_attention_2
+attn_implementation: sdpa
 
 # Streaming compatibility settings
 dataloader_num_workers: 1  # Must be 0 to avoid torchcodec resource exhaustion with streaming

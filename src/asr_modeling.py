@@ -60,7 +60,7 @@ class MoEAudioProjector(nn.Module):
         in_dim = config.encoder_dim * self.k
         out_dim = config.llm_dim
 
-        routed_hidden_dim = getattr(config, "projector_hidden_dim", 1024)
+        routed_hidden_dim = getattr(config, "projector_hidden_dim", None) or 1024
         shared_hidden_dim = out_dim // 2
 
         dropout_rate = getattr(config, "projector_dropout", 0.05)
@@ -98,28 +98,26 @@ class MoEAudioProjector(nn.Module):
                 nn.init.trunc_normal_(expert.w3.weight, std=std)
 
     def forward(self, x):
-        if self.training and self.noise_scale > 0:
-            noise = torch.randn_like(x) * self.noise_scale
-            x = x + noise
+        # Conditional noise addition using torch.where instead of if statement
+        noise = torch.randn_like(x) * self.noise_scale
+        training_mask = torch.tensor(self.training and self.noise_scale > 0, device=x.device)
+        x = torch.where(training_mask, x + noise, x)
 
         batch_size, seq_len, dim = x.size()
 
-        # 1. Stride/Pooling
+        # 1. Stride/Pooling - use modulo and padding without conditionals
         remainder = seq_len % self.k
-        if remainder:
-            pad_len = self.k - remainder
-            x = F.pad(x, (0, 0, 0, pad_len), mode='constant', value=0.0)
+        pad_len = (self.k - remainder) % self.k  # Will be 0 if no remainder
+        x = F.pad(x, (0, 0, 0, pad_len), mode='constant', value=0.0)
 
-        # 🚨 FIX: Reshape to [Batch, New_Seq, Dim*k] FIRST...
+        # Reshape to [Batch, New_Seq, Dim*k] FIRST
         x = x.contiguous().view(batch_size, -1, dim * self.k)
-        
-        # ...THEN flatten to [Total_Tokens, Dim*k] for the Router/Experts
-        # This was the missing step causing index out of bounds
-        # We keep (Batch, Seq) dimensions in a variable to restore later
+
+        # Flatten to [Total_Tokens, Dim*k] for the Router/Experts
         new_seq_len = x.shape[1]
-        x = x.view(-1, dim * self.k) # Flatten: [B*S, D]
+        x = x.view(-1, dim * self.k)
         total_tokens = x.shape[0]
-        
+
         # 2. Pre-Norm
         norm_x = self.ln_pre(x)
 
@@ -127,22 +125,19 @@ class MoEAudioProjector(nn.Module):
         shared_out = self.shared_expert(norm_x)
 
         # --- ROUTED PATH ---
-        # Keep in bfloat16 for flash-attn compatibility
         router_logits = self.router(norm_x)
+        routing_weights = F.softmax(router_logits, dim=-1)
 
-        routing_weights = F.softmax(router_logits.float(), dim=-1).to(x.dtype)
-        
-        if self.training:
-            self.last_aux_loss = self._compute_load_balancing_loss(routing_weights)
-        
+        # Compute aux loss
+        aux_loss = self._compute_load_balancing_loss(routing_weights)
+
         top_k_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
 
         # Re-Normalize & Scale
         top_k_weights = top_k_weights / (top_k_weights.sum(dim=-1, keepdim=True) + 1e-20)
         top_k_weights = top_k_weights * self.routed_scaling_factor
-        top_k_weights = top_k_weights.to(x.dtype) 
 
-        # Expert Computation
+        # Expert Computation - no data-dependent control flow
         routed_out = torch.zeros(
             total_tokens, self.routed_experts[0].w3.out_features,
             device=x.device, dtype=x.dtype
@@ -150,48 +145,34 @@ class MoEAudioProjector(nn.Module):
 
         for i, expert in enumerate(self.routed_experts):
             expert_mask = (selected_experts == i)
-            
-            if not expert_mask.any():
-                continue
 
-            # Get indices
-            flat_mask_indices = expert_mask.view(-1).nonzero()
-            
-            # SAFETY CHECK: Prevent empty tensor crash on A40
-            if flat_mask_indices.numel() == 0:
-                continue
-
-            # Token indices are now valid because norm_x is flattened [B*S, D]
+            # Get indices - always run, even if empty
+            flat_mask_indices = expert_mask.view(-1).nonzero(as_tuple=False)
             token_indices = flat_mask_indices.squeeze(-1).div(self.top_k, rounding_mode='floor')
-            
-            # Gather inputs
-            expert_input = norm_x[token_indices]
-            
-            # Explicit Dimension Check
-            if expert_input.size(0) == 0:
-                continue
 
-            # Forward Pass
+            # Gather inputs - torch handles 0-length tensors gracefully
+            expert_input = norm_x[token_indices]
+
+            # Forward Pass - works with 0-length tensors
             expert_output = expert(expert_input)
-            
+
             # Apply Weights
             flat_weights = top_k_weights.view(-1)[flat_mask_indices.squeeze(-1)]
             weighted_output = expert_output * flat_weights.unsqueeze(-1)
-            
-            # Scatter Add
+
+            # Scatter Add - no-op if token_indices is empty
             routed_out.index_add_(0, token_indices, weighted_output)
 
         # Combine
         final_out = self.ln_post(shared_out + routed_out)
-        
-        # 🚨 RESTORE SHAPE: [Total_Tokens, Dim] -> [Batch, Seq, Dim]
+
+        # RESTORE SHAPE: [Total_Tokens, Dim] -> [Batch, Seq, Dim]
         final_out = final_out.view(batch_size, new_seq_len, final_out.shape[-1])
 
-        # Output Clamping
-        if self.training:
-            final_out = torch.clamp(final_out, min=-30.0, max=30.0)
+        # Output Clamping using torch.clamp (always applied, no conditional)
+        final_out = torch.clamp(final_out, min=-30.0, max=30.0)
 
-        return final_out
+        return final_out, aux_loss
 
     def _compute_load_balancing_loss(self, routing_weights):
         expert_importance = routing_weights.sum(dim=0)
@@ -281,9 +262,7 @@ class ASRModel(PreTrainedModel):
             state_dict = load_file(model_file)
             model.load_state_dict(state_dict, strict=False, assign=True)
 
-            target_dtype = getattr(torch, config.model_dtype)
-            model.projector = model.projector.to(dtype=target_dtype)
-
+            # Let Accelerate handle dtype and device management
             device = kwargs.get("device")
             if device is not None:
                 model = model.to(device)
@@ -335,6 +314,11 @@ class ASRModel(PreTrainedModel):
 
         self._init_tokenizer()
 
+        # Store encoder type for forward pass
+        self.is_whisper_encoder = "whisper" in config.audio_model_id.lower() or (
+            hasattr(self.encoder.config, "model_type") and "whisper" in self.encoder.config.model_type.lower()
+        )
+
         from types import SimpleNamespace
 
         encoder_dim = config.encoder_dim
@@ -368,8 +352,7 @@ class ASRModel(PreTrainedModel):
         # --- SWITCHED TO MoE PROJECTOR ---
         self.projector = MoEAudioProjector(projector_config)
 
-        target_dtype = getattr(torch, config.model_dtype)
-        self.projector = self.projector.to(dtype=target_dtype)
+        # Let Accelerate handle dtype management
 
         self.label_smoothing = getattr(config, "label_smoothing", 0.1)
         self.loss_fct = nn.CrossEntropyLoss(
@@ -400,21 +383,7 @@ class ASRModel(PreTrainedModel):
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
-        is_whisper = "whisper" in config.audio_model_id.lower() or (
-            hasattr(encoder.config, "model_type") and "whisper" in encoder.config.model_type.lower()
-        )
-
-        original_forward = encoder.forward
-        input_key = "input_features" if is_whisper else "input_values"
-
-        def safe_encoder_forward(self_encoder, input_values=None, **kwargs):
-            kwargs.pop("input_ids", None)
-            return original_forward(**{input_key: input_values}, **kwargs)
-
-        import types
-        encoder.forward = types.MethodType(safe_encoder_forward, encoder)
         encoder.requires_grad_(False)
-        encoder.eval()  # Set to eval mode to prevent any training behavior
 
         return encoder
 
@@ -423,44 +392,16 @@ class ASRModel(PreTrainedModel):
         target_dtype = getattr(torch, config.model_dtype)
 
         decoder_kwargs = {
-            # Optimization: Use Flash Attention 2 for the LLM if available
-            # This significantly speeds up generation and training
-            "attn_implementation": "flash_attention_2",
+            "attn_implementation": config.attn_implementation,
             "trust_remote_code": True,
             "low_cpu_mem_usage": True,
+            "dtype": target_dtype,
         }
 
-        # Optimization: 4-Bit Quantization Support
-        if getattr(config, "use_4bit_quantization", False):
-            try:
-                from transformers import BitsAndBytesConfig
-                compute_dtype = getattr(torch, getattr(config, "bnb_4bit_compute_dtype", "bfloat16"))
-                
-                quantization_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=compute_dtype,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_use_double_quant=True,
-                )
-                decoder_kwargs["quantization_config"] = quantization_config
-            except ImportError:
-                print("BitsAndBytes not found, falling back to full precision.")
-                decoder_kwargs["dtype"] = target_dtype
-        else:
-            decoder_kwargs["dtype"] = target_dtype
-
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
-        
-        # If quantized, we need to prepare it for training (even if frozen, to allow gradients to pass)
-        if getattr(config, "use_4bit_quantization", False):
-            from peft import prepare_model_for_kbit_training
-            decoder = prepare_model_for_kbit_training(
-                decoder, use_gradient_checkpointing=False 
-            )
 
         decoder.config.use_cache = config.use_cache
         decoder.requires_grad_(False)
-        decoder.eval()  # Set to eval mode to prevent any training behavior
 
         return decoder
 
@@ -551,44 +492,33 @@ class ASRModel(PreTrainedModel):
         self,
         input_values: torch.Tensor,
         audio_attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        encoder_device = next(self.encoder.parameters()).device
-
-        if input_values.device != encoder_device:
-            input_values = input_values.to(encoder_device, non_blocking=True)
-
-        # Robust casting check
-        target_dtype = self.encoder.dtype if hasattr(self.encoder, "dtype") else next(self.encoder.parameters()).dtype
-        if input_values.dtype != target_dtype:
-            input_values = input_values.to(dtype=target_dtype)
-
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Only disable gradients for encoder, not projector
         with torch.no_grad():
-            audio_features = self.encoder(
-                input_values=input_values,
-                attention_mask=audio_attention_mask,
-            ).last_hidden_state
+            # Call encoder with appropriate input key
+            if self.is_whisper_encoder:
+                audio_features = self.encoder(
+                    input_features=input_values,
+                    attention_mask=audio_attention_mask,
+                ).last_hidden_state
+            else:
+                audio_features = self.encoder(
+                    input_values=input_values,
+                    attention_mask=audio_attention_mask,
+                ).last_hidden_state
 
-        audio_embeds = self.projector(audio_features)
+        # Projector runs with gradients enabled
+        audio_embeds, aux_loss = self.projector(audio_features)
 
-        decoder_dtype = next(self.decoder.parameters()).dtype
-        if audio_embeds.dtype != decoder_dtype:
-            audio_embeds = audio_embeds.to(dtype=decoder_dtype)
-
-        return audio_embeds
+        return audio_embeds, aux_loss
 
     def _get_audio_expansion_details(self, input_ids: torch.Tensor, num_audio_tokens: int) -> dict:
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
         audio_mask = input_ids == self.audio_token_id
 
-        audio_counts = audio_mask.sum(dim=1)
-        if not (audio_counts == 1).all():
-            missing = (audio_counts == 0).any()
-            multiple = (audio_counts > 1).any()
-            if missing:
-                raise ValueError("Some samples are missing audio token")
-            if multiple:
-                raise ValueError("Some samples have multiple audio tokens")
+        # Remove data-dependent assertions for torch.compile compatibility
+        # Assume inputs are valid (validation should happen before compilation)
 
         token_counts = torch.where(audio_mask, num_audio_tokens, 1)
         cumsum_counts = torch.cumsum(token_counts, dim=1)
@@ -612,8 +542,8 @@ class ASRModel(PreTrainedModel):
         input_ids: torch.Tensor,
         tensor_to_expand: Optional[torch.Tensor],
         num_audio_tokens: int,
-        fill_value: Optional[Union[int, float]] = None,
-        audio_fill_value: Optional[Union[int, float]] = None,
+        fill_value: Union[int, float] = -100,  # Default to common label ignore value
+        audio_fill_value: Union[int, float] = -100,
     ) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
@@ -623,17 +553,13 @@ class ASRModel(PreTrainedModel):
         new_start_positions = details["new_start_positions"]
         audio_mask = details["audio_mask"]
 
-        if tensor_to_expand is None:
+        # Handle None tensor_to_expand case
+        is_expanding_input_ids = tensor_to_expand is None
+        if is_expanding_input_ids:
             tensor_to_expand = input_ids
-            fill_value = fill_value or self.tokenizer.pad_token_id
-            audio_fill_value = audio_fill_value or self.audio_token_id
-        else:
-            if fill_value is None:
-                raise ValueError("fill_value must be provided when expanding non-input_ids tensors")
-            if audio_fill_value is None:
-                audio_fill_value = fill_value
-
-        assert tensor_to_expand is not None
+            # Use pad_token_id for input_ids expansion
+            fill_value = self.tokenizer.pad_token_id
+            audio_fill_value = self.audio_token_id
 
         expanded = torch.full(
             (batch_size, new_seq_len),
@@ -648,16 +574,20 @@ class ASRModel(PreTrainedModel):
             tensor_to_expand[non_audio_mask]
         )
 
-        if audio_fill_value != fill_value:
-            audio_positions = audio_mask.int().argmax(dim=1)
-            audio_new_start = new_start_positions[
-                torch.arange(batch_size, device=device), audio_positions
-            ]
-            audio_token_indices = torch.arange(num_audio_tokens, device=device).unsqueeze(0)
-            audio_positions_expanded = audio_new_start.unsqueeze(1) + audio_token_indices
-            batch_idx_expanded = (
-                torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_audio_tokens)
-            )
+        # Always compute audio positions, use torch.where to conditionally apply
+        audio_positions = audio_mask.int().argmax(dim=1)
+        audio_new_start = new_start_positions[
+            torch.arange(batch_size, device=device), audio_positions
+        ]
+        audio_token_indices = torch.arange(num_audio_tokens, device=device).unsqueeze(0)
+        audio_positions_expanded = audio_new_start.unsqueeze(1) + audio_token_indices
+        batch_idx_expanded = (
+            torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_audio_tokens)
+        )
+
+        # Use scatter instead of conditional indexing
+        needs_audio_fill = audio_fill_value != fill_value
+        if needs_audio_fill:
             expanded[batch_idx_expanded, audio_positions_expanded] = audio_fill_value
 
         return expanded
@@ -682,6 +612,8 @@ class ASRModel(PreTrainedModel):
         inputs_embeds = self.decoder.get_input_embeddings()(expanded_input_ids)
         special_audio_mask = (expanded_input_ids == self.audio_token_id).unsqueeze(-1)
         special_audio_mask = special_audio_mask.expand_as(inputs_embeds)
+        # Ensure audio_embeds matches the dtype of inputs_embeds
+        audio_embeds = audio_embeds.to(inputs_embeds.dtype)
         audio_embeds_flat = audio_embeds.reshape(-1, audio_embeds.shape[-1])
         return inputs_embeds.masked_scatter(special_audio_mask, audio_embeds_flat)
 
@@ -704,17 +636,14 @@ class ASRModel(PreTrainedModel):
             kwargs.pop("past_key_values", None)
             use_cache = kwargs.pop("use_cache", None)
 
-            # 1. Encode Audio (This runs the MoE Projector and updates last_aux_loss)
-            audio_embeds = self._encode_audio(
+            # 1. Encode Audio (This runs the MoE Projector and returns aux_loss)
+            audio_embeds, aux_loss = self._encode_audio(
                 input_values=audio_inputs,
                 audio_attention_mask=audio_attention_mask,
             )
 
-            if self.audio_token_id is None:
-                raise ValueError(f"Audio token not properly initialized: {self.audio_token_id}")
-
-            if not (input_ids == self.audio_token_id).any():
-                raise ValueError("Audio token <audio> must be present in input")
+            # Remove data-dependent assertions for torch.compile compatibility
+            # Validation should happen before compilation
 
             num_audio_tokens = audio_embeds.shape[1]
             expanded_input_ids = self._expand_audio_tokens(input_ids, num_audio_tokens)
@@ -756,20 +685,13 @@ class ASRModel(PreTrainedModel):
             # A. Main Task Loss (Next Token Prediction)
             loss = self.loss_fct(flat_logits, flat_labels)
 
-            # B. MoE Load Balancing Loss (CRITICAL UPDATE) -------------------
-            # Check if the projector stored an aux loss during this forward pass
-            if hasattr(self.projector, "last_aux_loss"):
-                # We use a coefficient of 0.01 (Standard for Qwen/DeepSeek)
-                # This ensures the router learns to balance without distracting
-                # the model from the main ASR task.
-                aux_loss = self.projector.last_aux_loss
-                
-                # Ensure aux_loss is on the same device to prevent DDP errors
-                if aux_loss.device != loss.device:
-                    aux_loss = aux_loss.to(loss.device)
-                    
-                loss += 0.01 * aux_loss
-            # ----------------------------------------------------------------
+            # B. MoE Load Balancing Loss
+            # Use explicit aux_loss returned from projector (torch.compile compatible)
+            # We use a coefficient of 0.01 (Standard for Qwen/DeepSeek)
+            # This ensures the router learns to balance without distracting
+            # the model from the main ASR task.
+            if audio_inputs is not None:
+                loss = loss + 0.01 * aux_loss
 
             from transformers.modeling_outputs import CausalLMOutputWithPast
             outputs = CausalLMOutputWithPast(

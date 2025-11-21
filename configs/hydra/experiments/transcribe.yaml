@@ -25,10 +25,10 @@ training:
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
-  per_device_train_batch_size: 4
-  per_device_eval_batch_size: 8
-  gradient_accumulation_steps: 6
-  eval_accumulation_steps: 6
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 4
+  eval_accumulation_steps: 4
 
   learning_rate: 1.0e-3
 
@@ -46,9 +46,13 @@ training:
 
   # Memory optimization
   torch_compile: false  # Disabled for faster startup
+  # torch_compile_mode: "default"
   # torch_compile_dynamic: true  # Enable dynamic shapes for variable sequence lengths
   # torch_compile_fullgraph: false  # Allow graph breaks for flexibility
-  # torch_compile_config:
+  #torch_compile_config:
+  #  triton.cudagraphs: false
+  #  shape_padding: true
+  #  epilogue_fusion: true
   #  capture_scalar_outputs: true  # Reduce graph breaks from .item() calls
   #  allow_unspec_int_on_nn_module: true  # Reduce recompilation from layer indices
   
