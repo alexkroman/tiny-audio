@@ -157,10 +157,6 @@ def evaluate_huggingface(
         try:
             sample_count = 0
             for i, sample in enumerate(dataset):
-                # Skip TEDLIUM segments marked to be ignored during scoring
-                if sample[text_field] == "ignore_time_segment_in_scoring":
-                    continue
-
                 sample_count += 1
 
                 # Get WAV bytes for API
@@ -256,10 +252,6 @@ def evaluate_huggingface(
 
         sample_count = 0
         for i, sample in enumerate(dataset):
-            # Skip TEDLIUM segments marked to be ignored during scoring
-            if sample[text_field] == "ignore_time_segment_in_scoring":
-                continue
-
             sample_count += 1
 
             try:
@@ -375,10 +367,6 @@ def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_
 
     sample_count = 0
     for i, sample in enumerate(dataset):
-        # Skip TEDLIUM segments marked to be ignored during scoring
-        if sample[text_field] == "ignore_time_segment_in_scoring":
-            continue
-
         sample_count += 1
 
         # Get WAV bytes for API
@@ -440,7 +428,7 @@ def main():
         "--dataset",
         type=str,
         default="loquacious",
-        choices=["loquacious", "earnings22", "ami", "gigaspeech", "tedlium"],
+        choices=["loquacious", "earnings22", "ami", "gigaspeech"],
         help="Dataset to evaluate on (default: loquacious)",
     )
     parser.add_argument(
@@ -565,13 +553,6 @@ def main():
         text_field = "text"
         print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
         dataset = load_dataset(dataset_name, dataset_config, split="dev", streaming=True)
-    elif args.dataset == "tedlium":
-        dataset_name = "sanchit-gandhi/tedlium-data"
-        dataset_config = args.config if args.config != "medium" else "default"
-        audio_field = "audio"
-        text_field = "text"
-        print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
-        dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 

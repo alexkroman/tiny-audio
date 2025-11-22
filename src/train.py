@@ -242,10 +242,6 @@ class DataCollator(DataCollatorForSeq2Seq):
         for f in features:
             text = f["text"].strip() if isinstance(f["text"], str) else f["text"]
 
-            # Skip TEDLIUM segments marked to be ignored during scoring
-            if text == "ignore_time_segment_in_scoring":
-                return None
-
             # Apply Whisper normalization (matches eval script preprocessing)
             text = self._normalize_text(text)
 

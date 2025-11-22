@@ -36,9 +36,9 @@ training:
   warmup_steps: 1000  # Critical for MoE start
 
   # Optimization - Stage 1: Aggressive alignment learning
-  weight_decay: 1e-5
-  max_grad_norm: 5.0
-  projector_dropout: 0.05
+  weight_decay: 0.05
+  max_grad_norm: 1.0
+  projector_dropout: 0.1
   use_specaugment: true
   label_smoothing: 0.1
 
