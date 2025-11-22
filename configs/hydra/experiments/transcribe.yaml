@@ -32,10 +32,8 @@ training:
 
   learning_rate: 1.0e-3
 
-  lr_scheduler_type: "warmup_stable_decay"
-  warmup_steps: 1000
-  lr_scheduler_kwargs:
-    num_decay_steps: 1000
+  lr_scheduler_type: "cosine"
+  warmup_steps: 1000  # Critical for MoE start
 
   # Optimization - Stage 1: Aggressive alignment learning
   weight_decay: 1e-5
