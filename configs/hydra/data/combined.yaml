@@ -22,7 +22,7 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.20
+    sampling_weight: 0.10
 
   # Earnings22
   - path: sanchit-gandhi/earnings22_robust_split
