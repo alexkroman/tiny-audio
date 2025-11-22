@@ -12,6 +12,7 @@ Analyzes a trained MoE projector checkpoint to diagnose training issues:
 Usage:
     python scripts/analyze_moe.py path/to/model.safetensors
     python scripts/analyze_moe.py outputs/checkpoint-1000/model.safetensors
+    python scripts/analyze_moe.py mazesmazes/tiny-audio  # Download from HF Hub
 """
 
 import torch
@@ -20,6 +21,7 @@ from safetensors.torch import load_file
 import numpy as np
 import sys
 import os
+from pathlib import Path
 
 
 def compute_effective_rank(matrix):
@@ -49,9 +51,49 @@ def compute_effective_rank(matrix):
         return 0.0, 0.0
 
 
+def resolve_model_path(path_or_repo):
+    """
+    Resolves a path to a model file, downloading from HF Hub if needed.
+
+    Args:
+        path_or_repo: Either a local file path or HF repo ID (e.g., 'mazesmazes/tiny-audio')
+
+    Returns:
+        Path to the model.safetensors file
+    """
+    # Check if it's a local file that exists
+    if os.path.exists(path_or_repo):
+        return path_or_repo
+
+    # Check if it looks like a HF repo ID (contains / and doesn't end with .safetensors)
+    if "/" in path_or_repo and not path_or_repo.endswith(".safetensors"):
+        try:
+            from huggingface_hub import hf_hub_download
+            print(f"📥 Downloading model from Hugging Face Hub: {path_or_repo}")
+
+            # Try to download model.safetensors
+            model_file = hf_hub_download(
+                repo_id=path_or_repo,
+                filename="model.safetensors",
+                repo_type="model"
+            )
+            print(f"✅ Downloaded to: {model_file}")
+            return model_file
+        except Exception as e:
+            print(f"❌ Failed to download from Hub: {e}")
+            print(f"   Trying to load as local path...")
+            return path_or_repo
+
+    # Return as-is (will fail later if doesn't exist)
+    return path_or_repo
+
+
 def analyze_checkpoint(file_path):
     print(f"\n🔬 STARTING FORENSIC ANALYSIS: {file_path}")
     print("=" * 60)
+
+    # Resolve the path (download from Hub if needed)
+    file_path = resolve_model_path(file_path)
 
     if not os.path.exists(file_path):
         print(f"❌ Error: File not found at {file_path}")
@@ -79,9 +121,8 @@ def analyze_checkpoint(file_path):
 
     print(f"📊 Found {len(projector_weights)} projector parameters.")
 
-    # --- CHECK 1: WEIGHT MOVEMENT (Did it learn?) ---
+    # --- CHECK 1: TRAINING HEARTBEAT (Weight Movement) ---
     print("\n[1] TRAINING HEARTBEAT (Weight Movement)")
-    # We know init std was 0.02. Did it broaden?
 
     shared_w12 = next(
         (v for k, v in projector_weights.items() if "shared_expert.w12" in k), None
@@ -91,15 +132,24 @@ def analyze_checkpoint(file_path):
         mean = shared_w12.mean().item()
         kurtosis = torch.mean((shared_w12 - mean) ** 4) / (std**4)
 
-        print(f"   Shared Expert Std: {std:.5f} (Target > 0.02)")
-        print(f"   Shared Expert Kurtosis: {kurtosis:.2f} (Higher = Specialized)")
+        print(f"   Shared Expert Std: {std:.5f}")
+        print(f"   Shared Expert Kurtosis: {kurtosis:.2f}")
 
-        if std <= 0.02001:
-            print(
-                "   ⚠️  WARNING: Weights are remarkably close to init. Learning Rate might be too low."
-            )
+        if std < 0.005:
+            print("   ❌ RED ZONE: Signal vanishing. Learning rate too low or frozen.")
+        elif 0.012 <= std <= 0.018:
+            print("   ✅ GREEN ZONE: Healthy weight variance.")
         else:
-            print("   ✅  PASS: Weights have drifted from initialization.")
+            print("   ⚠️  Within acceptable range.")
+
+        if kurtosis < 2.0:
+            print("   ❌ RED ZONE: Weights too uniform. No specialization.")
+        elif kurtosis > 20.0:
+            print("   ❌ RED ZONE: Extreme sparsity. Most weights dead.")
+        elif 4.0 <= kurtosis <= 8.0:
+            print("   ✅ GREEN ZONE: Healthy sparsification.")
+        elif 2.0 <= kurtosis < 4.0:
+            print("   ⚠️  Early training. Expect kurtosis to rise.")
     else:
         print("   ⚠️  Shared expert not found in keys.")
 
@@ -130,25 +180,17 @@ def analyze_checkpoint(file_path):
     # --- CHECK 3: EXPERT COLLAPSE (Cosine Similarity) ---
     print("\n[3] EXPERT DIVERSITY CHECK (Are experts different?)")
 
-    # Collect all routed expert w12 weights
+    experts_w12 = next(
+        (v for k, v in projector_weights.items() if "experts_w12" in k), None
+    )
+
     routed_w12s = []
-    expert_indices = []
-    for k, v in projector_weights.items():
-        if "routed_experts" in k and "w12.weight" in k:
-            # Extract index from string "routed_experts.5.w12..."
-            parts = k.split(".")
-            try:
-                idx = int(parts[parts.index("routed_experts") + 1])
-                expert_indices.append(idx)
-                routed_w12s.append(v.float())  # float32 for sim calc
-            except:
-                continue
+    if experts_w12 is not None:
+        num_experts = experts_w12.shape[0]
+        for i in range(num_experts):
+            routed_w12s.append(experts_w12[i].float())
 
     if len(routed_w12s) > 1:
-        # Sort by index
-        zipped = sorted(zip(expert_indices, routed_w12s))
-        routed_w12s = [z[1] for z in zipped]
-
         # Stack: [Num_Experts, Features]
         stack = torch.stack(routed_w12s).view(len(routed_w12s), -1)
 
@@ -167,17 +209,37 @@ def analyze_checkpoint(file_path):
         min_sim = off_diag.min().item()
 
         print(f"   Analyzed {len(routed_w12s)} Experts.")
-        print(f"   Average Similarity: {avg_sim:.4f} (Lower is better)")
+        print(f"   Average Similarity: {avg_sim:.4f}")
         print(f"   Max Similarity:     {max_sim:.4f}")
 
-        if avg_sim > 0.9:
-            print("   ❌ CRITICAL: EXPERT COLLAPSE. All experts are identical.")
-        elif avg_sim > 0.5:
-            print(
-                "   ⚠️  WARNING: Experts are highly correlated. Aux Loss might be too low."
-            )
+        if avg_sim > 0.50:
+            print("   ❌ RED ZONE: Expert collapse. Router failing.")
+        elif avg_sim <= 0.20:
+            print("   ✅ GREEN ZONE: Experts are diverse and specialized.")
         else:
-            print("   ✅  PASS: Experts are specializing (divergent weights).")
+            print("   ⚠️  Experts partially specialized. Monitor closely.")
+
+        # Calculate Kurtosis for each expert
+        expert_kurtosis = []
+        for w in routed_w12s:
+            std = w.std().item()
+            mean = w.mean().item()
+            k = torch.mean((w - mean) ** 4) / (std**4)
+            expert_kurtosis.append(k.item())
+
+        if len(expert_kurtosis) > 0:
+            avg_k = sum(expert_kurtosis) / len(expert_kurtosis)
+            min_k = min(expert_kurtosis)
+            max_k = max(expert_kurtosis)
+
+            print(f"   Expert Kurtosis Range: {min_k:.2f} - {max_k:.2f} (Avg: {avg_k:.2f})")
+
+            if max_k > 50.0:
+                print("   ⚠️  WARNING: Some experts are extremely sparse (dying?).")
+            elif max_k - min_k < 1.0:
+                print("   ⚠️  WARNING: All experts look structurally identical.")
+            else:
+                print("   ✅  PASS: Experts show structural diversity.")
 
     else:
         print("   ⚠️  Not enough experts found to compare.")
@@ -192,19 +254,14 @@ def analyze_checkpoint(file_path):
         ratio = routed_mag / shared_mag
         print(f"   Shared Magnitude: {shared_mag:.5f}")
         print(f"   Routed Magnitude: {routed_mag:.5f}")
-        print(f"   Ratio (Routed/Shared): {ratio:.2f}")
+        print(f"   Balance Ratio (Routed/Shared): {ratio:.2f}")
 
-        if ratio < 0.5:
-            print(
-                "   ⚠️  WARNING: Shared expert is dominating. Routed experts might be starving."
-            )
-            print("       -> Consider increasing 'routed_scaling_factor'.")
-        elif ratio > 2.0:
-            print(
-                "   ⚠️  WARNING: Routed experts are dominating. Shared expert is passive."
-            )
+        if ratio < 0.2 or ratio > 5.0:
+            print("   ❌ RED ZONE: Severe imbalance. One pathway dominates.")
+        elif 0.8 <= ratio <= 1.5:
+            print("   ✅ GREEN ZONE: Balanced partnership.")
         else:
-            print("   ✅  PASS: Balanced contribution.")
+            print("   ⚠️  Moderate imbalance. Monitor for divergence.")
 
     # --- CHECK 5: SPECTRAL ANALYSIS (Effective Rank) ---
     print("\n[5] SPECTRUM ANALYSIS (Information Capacity)")
@@ -220,25 +277,32 @@ def analyze_checkpoint(file_path):
             f"   Shared Expert Effective Rank: {e_rank:.1f} / {full_rank} ({utilization:.1f}%)"
         )
 
-        if utilization < 5.0:
-            print(
-                "   ❌ CRITICAL: Dimensional Collapse. The model is ignoring 95% of feature space."
-            )
-        elif utilization < 20.0:
-            print(
-                "   ⚠️  WARNING: Low Rank. The model might be underfitting complex features."
-            )
+        if utilization < 10.0:
+            print("   ❌ RED ZONE: Dimensional collapse. Model ignoring most features.")
+        elif 40.0 <= utilization <= 60.0:
+            print("   ✅ GREEN ZONE: Healthy compression. Efficient feature usage.")
+        elif utilization > 80.0:
+            print("   ⚠️  Early training. Expect rank to drop as model optimizes.")
         else:
-            print("   ✅  PASS: High Effective Rank. Dense information encoding.")
+            print("   ⚠️  Within acceptable range.")
 
     if len(routed_w12s) > 0:
-        # Check random routed expert
-        e_rank_r, _ = compute_effective_rank(routed_w12s[0])
-        full_rank_r = min(routed_w12s[0].shape)
-        utilization_r = (e_rank_r / full_rank_r) * 100
-        print(
-            f"   Routed Expert 0 Effective Rank: {e_rank_r:.1f} / {full_rank_r} ({utilization_r:.1f}%)"
-        )
+        for i, expert_w12 in enumerate(routed_w12s):
+            e_rank_r, _ = compute_effective_rank(expert_w12)
+            full_rank_r = min(expert_w12.shape)
+            utilization_r = (e_rank_r / full_rank_r) * 100
+            print(
+                f"   Routed Expert {i} Effective Rank: {e_rank_r:.1f} / {full_rank_r} ({utilization_r:.1f}%)"
+            )
+
+            if utilization_r < 10.0:
+                print(f"      ❌ RED ZONE: Expert {i} collapsed.")
+            elif 40.0 <= utilization_r <= 60.0:
+                print(f"      ✅ GREEN ZONE: Expert {i} healthy compression.")
+            elif utilization_r > 80.0:
+                print(f"      ⚠️  Early training phase for expert {i}.")
+            else:
+                print(f"      ⚠️  Acceptable range for expert {i}.")
 
     print("\n" + "=" * 60)
     print("ANALYSIS COMPLETE")
@@ -246,9 +310,13 @@ def analyze_checkpoint(file_path):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python scripts/analyze_moe.py <path_to_model.safetensors>")
-        print("\nExample:")
+        print("Usage: python scripts/analyze_moe.py <path_or_repo_id>")
+        print("\nExamples:")
+        print("  # Local checkpoint")
         print("  python scripts/analyze_moe.py outputs/checkpoint-1000/model.safetensors")
+        print()
+        print("  # Download from Hugging Face Hub")
+        print("  python scripts/analyze_moe.py mazesmazes/tiny-audio")
         sys.exit(1)
     else:
         analyze_checkpoint(sys.argv[1])

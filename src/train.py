@@ -242,6 +242,10 @@ class DataCollator(DataCollatorForSeq2Seq):
         for f in features:
             text = f["text"].strip() if isinstance(f["text"], str) else f["text"]
 
+            # Skip TEDLIUM segments marked to be ignored during scoring
+            if text == "ignore_time_segment_in_scoring":
+                return None
+
             # Apply Whisper normalization (matches eval script preprocessing)
             text = self._normalize_text(text)
 
@@ -258,13 +262,13 @@ class DataCollator(DataCollatorForSeq2Seq):
 
             # Use default single prompt per task
             if task == "continue":
-                instruction = "Continue: <audio>"
+                instruction = "Continue:"
             elif task == "describe":
-                instruction = "Describe: <audio>"
+                instruction = "Describe:"
             elif task == "emotion":
-                instruction = "Emotion: <audio>"
+                instruction = "Emotion:"
             else:  # Default to transcribe
-                instruction = "Transcribe: <audio>"
+                instruction = "Transcribe:"
 
             messages.append({"role": "user", "content": instruction})
             messages.append({"role": "assistant", "content": text})

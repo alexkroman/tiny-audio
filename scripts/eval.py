@@ -155,7 +155,14 @@ def evaluate_huggingface(
         temp_dir = tempfile.mkdtemp()
 
         try:
+            sample_count = 0
             for i, sample in enumerate(dataset):
+                # Skip TEDLIUM segments marked to be ignored during scoring
+                if sample[text_field] == "ignore_time_segment_in_scoring":
+                    continue
+
+                sample_count += 1
+
                 # Get WAV bytes for API
                 wav_bytes = prepare_wav_bytes(sample[audio_field])
 
@@ -181,7 +188,7 @@ def evaluate_huggingface(
                 except Exception as e:
                     import traceback
 
-                    print(f"Error processing sample {i + 1}:")
+                    print(f"Error processing sample {sample_count}:")
                     print(f"  Exception type: {type(e).__name__}")
                     print(f"  Error message: {str(e)}")
                     print("  Full traceback:")
@@ -202,19 +209,19 @@ def evaluate_huggingface(
                 sample_wer = wer(norm_ref, norm_pred) * 100
                 per_sample_wers.append(sample_wer)
 
-                print(f"Sample {i + 1}: WER = {sample_wer:.2f}%, Time = {per_sample_times[i]:.2f}s")
+                print(f"Sample {sample_count}: WER = {sample_wer:.2f}%, Time = {per_sample_times[-1]:.2f}s")
                 print(f"  Ref:  {sample[text_field]}")
                 print(f"  Pred: {prediction}")
 
                 # Print cumulative WER every 100 samples
-                if (i + 1) % 100 == 0:
+                if sample_count % 100 == 0:
                     # Compute corpus-level WER (same as final metric)
                     normalized_preds = [normalize_text(p) for p in predictions]
                     normalized_refs = [normalize_text(r) for r in references]
                     corpus_wer = wer(normalized_refs, normalized_preds) * 100
                     avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
                     print(f"\n{'=' * 80}")
-                    print(f"CHECKPOINT @ {i + 1} samples:")
+                    print(f"CHECKPOINT @ {sample_count} samples:")
                     print(f"  Corpus WER: {corpus_wer:.2f}%")
                     print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
                     print(f"{'=' * 80}\n")
@@ -247,7 +254,14 @@ def evaluate_huggingface(
             device=device,
         )
 
+        sample_count = 0
         for i, sample in enumerate(dataset):
+            # Skip TEDLIUM segments marked to be ignored during scoring
+            if sample[text_field] == "ignore_time_segment_in_scoring":
+                continue
+
+            sample_count += 1
+
             try:
                 # Pass audio directly to our custom pipeline
                 start_time = time.time()
@@ -270,7 +284,7 @@ def evaluate_huggingface(
             except Exception as e:
                 import traceback
 
-                print(f"Error processing sample {i + 1}:")
+                print(f"Error processing sample {sample_count}:")
                 print(f"  Exception type: {type(e).__name__}")
                 print(f"  Error message: {str(e)}")
                 print("  Full traceback:")
@@ -287,19 +301,19 @@ def evaluate_huggingface(
             sample_wer = wer(norm_ref, norm_pred) * 100
             per_sample_wers.append(sample_wer)
 
-            print(f"Sample {i + 1}: WER = {sample_wer:.2f}%, Time = {per_sample_times[i]:.2f}s")
+            print(f"Sample {sample_count}: WER = {sample_wer:.2f}%, Time = {per_sample_times[-1]:.2f}s")
             print(f"  Ref:  {sample[text_field]}")
             print(f"  Pred: {prediction}")
 
             # Print cumulative WER every 100 samples
-            if (i + 1) % 100 == 0:
+            if sample_count % 100 == 0:
                 # Compute corpus-level WER (same as final metric)
                 normalized_preds = [normalize_text(p) for p in predictions]
                 normalized_refs = [normalize_text(r) for r in references]
                 corpus_wer = wer(normalized_refs, normalized_preds) * 100
                 avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
                 print(f"\n{'=' * 80}")
-                print(f"CHECKPOINT @ {i + 1} samples:")
+                print(f"CHECKPOINT @ {sample_count} samples:")
                 print(f"  Corpus WER: {corpus_wer:.2f}%")
                 print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
                 print(f"{'=' * 80}\n")
@@ -359,7 +373,14 @@ def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_
     def normalize_text(text: str) -> str:
         return whisper_tokenizer.normalize(preprocess_text(text))
 
+    sample_count = 0
     for i, sample in enumerate(dataset):
+        # Skip TEDLIUM segments marked to be ignored during scoring
+        if sample[text_field] == "ignore_time_segment_in_scoring":
+            continue
+
+        sample_count += 1
+
         # Get WAV bytes for API
         wav_bytes = prepare_wav_bytes(sample[audio_field])
 
@@ -370,7 +391,7 @@ def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_
             per_sample_times.append(inference_time)
             prediction = transcript.text if transcript.text else ""
         except Exception as e:
-            print(f"Error processing sample {i + 1}: {e}")
+            print(f"Error processing sample {sample_count}: {e}")
             prediction = ""
             per_sample_times.append(0.0)
 
@@ -383,19 +404,19 @@ def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_
         sample_wer = wer(norm_ref, norm_pred) * 100
         per_sample_wers.append(sample_wer)
 
-        print(f"Sample {i + 1}: WER = {sample_wer:.2f}%, Time = {per_sample_times[i]:.2f}s")
+        print(f"Sample {sample_count}: WER = {sample_wer:.2f}%, Time = {per_sample_times[-1]:.2f}s")
         print(f"  Ref:  {sample[text_field]}")
         print(f"  Pred: {prediction}")
 
         # Print cumulative WER every 100 samples
-        if (i + 1) % 100 == 0:
+        if sample_count % 100 == 0:
             # Compute corpus-level WER (same as final metric)
             normalized_preds = [normalize_text(p) for p in predictions]
             normalized_refs = [normalize_text(r) for r in references]
             corpus_wer = wer(normalized_refs, normalized_preds) * 100
             avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
             print(f"\n{'=' * 80}")
-            print(f"CHECKPOINT @ {i + 1} samples:")
+            print(f"CHECKPOINT @ {sample_count} samples:")
             print(f"  Corpus WER: {corpus_wer:.2f}%")
             print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
             print(f"{'=' * 80}\n")
@@ -419,7 +440,7 @@ def main():
         "--dataset",
         type=str,
         default="loquacious",
-        choices=["loquacious", "earnings22", "ami", "gigaspeech"],
+        choices=["loquacious", "earnings22", "ami", "gigaspeech", "tedlium"],
         help="Dataset to evaluate on (default: loquacious)",
     )
     parser.add_argument(
@@ -522,11 +543,11 @@ def main():
         print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
         dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
     elif args.dataset == "earnings22":
-        dataset_name = "distil-whisper/earnings22"
-        # Use chunked config by default for earnings22, or user-specified config
-        dataset_config = args.config if args.config != "medium" else "chunked"
+        dataset_name = "sanchit-gandhi/earnings22_robust_split"
+        # Use default config for earnings22_robust_split
+        dataset_config = args.config if args.config != "medium" else "default"
         audio_field = "audio"
-        text_field = "transcription"
+        text_field = "sentence"  # earnings22_robust_split uses "sentence" field
         print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
         dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
     elif args.dataset == "ami":
@@ -544,6 +565,13 @@ def main():
         text_field = "text"
         print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
         dataset = load_dataset(dataset_name, dataset_config, split="dev", streaming=True)
+    elif args.dataset == "tedlium":
+        dataset_name = "sanchit-gandhi/tedlium-data"
+        dataset_config = args.config if args.config != "medium" else "default"
+        audio_field = "audio"
+        text_field = "text"
+        print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
+        dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 

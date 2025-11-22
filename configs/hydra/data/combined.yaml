@@ -1,8 +1,8 @@
-# Combined dataset configuration with equal mix of three ASR datasets
+# Combined dataset configuration with five ASR datasets
 datasets:
-  # LoquaciousSet - 33%
+  # LoquaciousSet
   - path: speechbrain/LoquaciousSet
-    name: large
+    name: medium
     audio_column: wav
     text_column: text
     task: transcribe
@@ -10,13 +10,13 @@ datasets:
       - train
     eval_splits:
       - dev
-    sampling_weight: 0.6
+    sampling_weight: 0.50
 
-  # Common Voice 17.0 - 33%
-  - path: fixie-ai/common_voice_17_0
-    name: en
+  # GigaSpeech
+  - path: fixie-ai/gigaspeech
+    name: xl
     audio_column: audio
-    text_column: sentence
+    text_column: text
     task: transcribe
     train_splits:
       - train
@@ -24,27 +24,41 @@ datasets:
       - validation
     sampling_weight: 0.20
 
-  # GigaSpeech - 33% (training only - xl-empty-audio-removed has no dev split)
-  - path: fixie-ai/gigaspeech
-    name: xl-empty-audio-removed  # XL subset with empty audio removed
+  # Earnings22
+  - path: sanchit-gandhi/earnings22_robust_split
+    name: default
+    audio_column: audio
+    text_column: sentence
+    task: transcribe
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+    sampling_weight: 0.10
+
+  # AMI ASR
+  - path: TakalaWang/AMI_ASR
+    name: null
     audio_column: audio
     text_column: text
     task: transcribe
     train_splits:
       - train
-    eval_splits: []  # No eval split in xl-empty-audio-removed
-    sampling_weight: 0.20  # Slightly higher to ensure weights sum to 1.0
+    eval_splits:
+      - validation
+    sampling_weight: 0.10
 
-  # GigaSpeech Dev - evaluation only
-  - path: fixie-ai/gigaspeech
-    name: dev  # Dev subset for evaluation
+  # TEDLIUM
+  - path: sanchit-gandhi/tedlium-data
+    name: default
     audio_column: audio
     text_column: text
     task: transcribe
-    train_splits: []  # Not used for training
+    train_splits:
+      - train
     eval_splits:
-      - dev
-    sampling_weight: 0.20  # Not sampled during training
+      - validation
+    sampling_weight: 0.10
 
 # Audio processing
 sample_rate: 16000

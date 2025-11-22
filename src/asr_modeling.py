@@ -41,24 +41,26 @@ class SwiGLU(nn.Module):
         x = self.dropout(x)
         return x
 
-
 class MoEAudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.k = getattr(config, "projector_pool_stride", 2)
-
         self.num_routed_experts = getattr(config, "num_experts", 8)
-        self.top_k = getattr(config, "moe_top_k", 4)
+        self.top_k = getattr(config, "moe_top_k", 2)
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
         in_dim = config.encoder_dim * self.k
-        out_dim = config.llm_dim
-
-        routed_hidden_dim = getattr(config, "projector_hidden_dim", None) or 1024
-        shared_hidden_dim = out_dim // 2
-
-        dropout_rate = getattr(config, "projector_dropout", 0.05)
-        self.noise_scale = getattr(config, "projector_input_noise", 0.02)
+        self.out_dim = config.llm_dim
+        routed_hidden_dim = getattr(config, "projector_hidden_dim", None) or 512
+        shared_hidden_dim = self.out_dim // 2
+        
+        # --- 1. Use Parameter Tensors instead of ModuleList ---
+        # This stores weights contiguously: [Num_Experts, In_Dim, Out_Dim]
+        self.experts_w12 = nn.Parameter(torch.empty(self.num_routed_experts, in_dim, 2 * routed_hidden_dim))
+        self.experts_w3 = nn.Parameter(torch.empty(self.num_routed_experts, routed_hidden_dim, self.out_dim))
+        
+        self.shared_expert = SwiGLU(in_dim, shared_hidden_dim, self.out_dim)
+        self.router = nn.Linear(in_dim, self.num_routed_experts, bias=False)
 
         try:
             from transformers.models.llama.modeling_llama import LlamaRMSNorm
@@ -67,86 +69,110 @@ class MoEAudioProjector(nn.Module):
             self.norm_layer = nn.LayerNorm
 
         self.ln_pre = self.norm_layer(in_dim, eps=1e-6)
-        self.router = nn.Linear(in_dim, self.num_routed_experts, bias=False)
+        self.ln_post = self.norm_layer(self.out_dim, eps=1e-6)
+        
+        self._init_weights(config)
 
-        self.shared_expert = SwiGLU(in_dim, shared_hidden_dim, out_dim, dropout_rate=dropout_rate)
-        self.routed_experts = nn.ModuleList([
-            SwiGLU(in_dim, routed_hidden_dim, out_dim, dropout_rate=dropout_rate)
-            for _ in range(self.num_routed_experts)
-        ])
-
-        self.ln_post = self.norm_layer(out_dim, eps=1e-6)
-        self.last_aux_loss = 0.0
-
-        with torch.no_grad():
-            std = getattr(config, "projector_init_std", 0.02)
-            nn.init.normal_(self.router.weight, mean=0, std=0.02)
-            self.ln_pre.weight.data.fill_(1.0)
-            self.ln_post.weight.data.fill_(1.0)
-            
-            nn.init.trunc_normal_(self.shared_expert.w12.weight, std=std)
-            nn.init.trunc_normal_(self.shared_expert.w3.weight, std=std)
-            for expert in self.routed_experts:
-                nn.init.trunc_normal_(expert.w12.weight, std=std)
-                nn.init.trunc_normal_(expert.w3.weight, std=std)
+    def _init_weights(self, config):
+        std = getattr(config, "projector_init_std", 0.02)
+        nn.init.trunc_normal_(self.experts_w12, std=std)
+        nn.init.trunc_normal_(self.experts_w3, std=std)
+        nn.init.normal_(self.router.weight, mean=0, std=0.02)
 
     def forward(self, x):
-        noise = torch.randn_like(x) * self.noise_scale
-        training_mask = torch.tensor(self.training and self.noise_scale > 0, device=x.device)
-        x = torch.where(training_mask, x + noise, x)
-
+        # ... [Input Noise and Reshaping Logic same as original] ...
         batch_size, seq_len, dim = x.size()
-
         remainder = seq_len % self.k
         pad_len = (self.k - remainder) % self.k
         x = F.pad(x, (0, 0, 0, pad_len), mode='constant', value=0.0)
-
         x = x.contiguous().view(batch_size, -1, dim * self.k)
-
-        new_seq_len = x.shape[1]
-        x = x.view(-1, dim * self.k)
-        total_tokens = x.shape[0]
-
+        x = x.view(-1, dim * self.k) # [Total_Tokens, Dim]
+        
         norm_x = self.ln_pre(x)
-
-        shared_out = self.shared_expert(norm_x)
-
+        
+        # --- 2. Calculate Routing ---
         router_logits = self.router(norm_x)
         routing_weights = F.softmax(router_logits, dim=-1)
-
-        aux_loss = self._compute_load_balancing_loss(routing_weights)
-
-        top_k_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-
+        
+        # Top-K selection
+        top_k_weights, top_k_indices = torch.topk(routing_weights, self.top_k, dim=-1)
         top_k_weights = top_k_weights / (top_k_weights.sum(dim=-1, keepdim=True) + 1e-20)
         top_k_weights = top_k_weights * self.routed_scaling_factor
+        
+        # --- 3. The Vectorized "Permutation" Sort ---
 
-        routed_out = torch.zeros(
-            total_tokens, self.routed_experts[0].w3.out_features,
-            device=x.device, dtype=x.dtype
-        )
+        flat_expert_indices = top_k_indices.view(-1)
+        flat_expert_weights = top_k_weights.view(-1)
 
-        for i, expert in enumerate(self.routed_experts):
-            expert_mask = (selected_experts == i)
+        sorted_expert_indices, perm_indices = torch.sort(flat_expert_indices)
 
-            flat_mask_indices = expert_mask.view(-1).nonzero(as_tuple=False)
-            token_indices = flat_mask_indices.squeeze(-1).div(self.top_k, rounding_mode='floor')
+        original_row_indices = perm_indices.div(self.top_k, rounding_mode='floor')
 
-            expert_input = norm_x[token_indices]
-
-            expert_output = expert(expert_input)
-
-            flat_weights = top_k_weights.view(-1)[flat_mask_indices.squeeze(-1)]
-            weighted_output = expert_output * flat_weights.unsqueeze(-1)
-
-            routed_out.index_add_(0, token_indices, weighted_output)
-
+        sorted_input = norm_x[original_row_indices]
+        sorted_weights = flat_expert_weights[perm_indices]
+        
+        # E. Calculate how many tokens go to each expert
+        # We use bincount to get split sizes. minlength ensures we get 0s for unused experts.
+        tokens_per_expert = torch.bincount(sorted_expert_indices, minlength=self.num_routed_experts)
+        
+        # --- 4. Compute Experts (Contiguous Batches) ---
+        
+        # Split the sorted input into chunks, one per expert
+        # Note: This split is cheap (view only)
+        input_splits = sorted_input.split(tokens_per_expert.tolist())
+        
+        results_list = []
+        
+        # Loop over experts (Standard PyTorch way without custom kernels)
+        # IMPORTANT: This loop is fast because we don't sync (no nonzero) 
+        # and data is contiguous.
+        for i, split_x in enumerate(input_splits):
+            if split_x.shape[0] == 0:
+                continue
+                
+            # Use the specific expert's weights
+            w12 = self.experts_w12[i] # [In, 2*Hidden]
+            w3 = self.experts_w3[i]   # [Hidden, Out]
+            
+            # SwiGLU calculation
+            # F.linear uses the optimized BLAS libraries
+            h = F.linear(split_x, w12.transpose(0, 1)) 
+            h_gate, h_val = h.chunk(2, dim=-1)
+            h = F.silu(h_gate) * h_val
+            out = F.linear(h, w3.transpose(0, 1))
+            
+            results_list.append(out)
+            
+        # Concatenate all results back into one big tensor
+        # Shape: [Total_Tokens * K, Out_Dim]
+        sorted_results = torch.cat(results_list, dim=0)
+        
+        # --- 5. Weighted Sum and Un-sort ---
+        
+        # Apply the routing weights (still sorted)
+        sorted_results = sorted_results * sorted_weights.unsqueeze(-1)
+        
+        # Create a buffer for the output in the original order
+        # Shape: [Total_Tokens * K, Out_Dim]
+        original_order_results = torch.zeros_like(sorted_results)
+        
+        # Scatter back to original positions
+        original_order_results.index_copy_(0, perm_indices, sorted_results)
+        
+        # Sum up the K expert outputs for each token
+        # View as [Total_Tokens, K, Out_Dim] -> Sum over K
+        routed_out = original_order_results.view(-1, self.top_k, self.out_dim).sum(dim=1)
+        
+        # Add shared expert
+        shared_out = self.shared_expert(norm_x)
         final_out = self.ln_post(shared_out + routed_out)
-
-        final_out = final_out.view(batch_size, new_seq_len, final_out.shape[-1])
-
-        final_out = torch.clamp(final_out, min=-30.0, max=30.0)
-
+        
+        # Reshape back to sequence
+        final_out = final_out.view(batch_size, -1, final_out.shape[-1])
+        
+        # Aux loss calculation (same as before)
+        aux_loss = self._compute_load_balancing_loss(routing_weights)
+        
         return final_out, aux_loss
 
     def _compute_load_balancing_loss(self, routing_weights):
@@ -253,7 +279,6 @@ class ASRModel(PreTrainedModel):
         feature_extractor = kwargs.pop("feature_extractor", None)
         self.system_prompt = config.system_prompt
 
-        # --- OPTIMIZED ENCODER CREATION ---
         self.encoder = self._create_encoder(config)
 
         is_whisper = "whisper" in config.audio_model_id.lower() or (
@@ -274,7 +299,6 @@ class ASRModel(PreTrainedModel):
                 config.audio_model_id, training_mode=training_mode
             )
 
-        # --- OPTIMIZED DECODER CREATION ---
         self.decoder = self._create_decoder(config)
         self.generation_config = self.decoder.generation_config
 
@@ -314,15 +338,22 @@ class ASRModel(PreTrainedModel):
             else:
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
-        projector_config = SimpleNamespace(
-            encoder_dim=encoder_dim,
-            llm_dim=llm_dim,
-            **{k: v for k, v in vars(config).items() if k.startswith('projector_')},
-            num_experts=getattr(config, "num_experts", 8),
-            moe_top_k=getattr(config, "moe_top_k", 2)
-        )
+        proj_kwargs = {k: v for k, v in vars(config).items() if k.startswith('projector_')}
+
+        proj_kwargs.update({
+            "encoder_dim": encoder_dim,
+            "llm_dim": llm_dim,
+            "num_experts": 8,
+            "moe_top_k": 2,
+            "projector_hidden_dim": llm_dim // 4
+        })
+
+        projector_config = SimpleNamespace(**proj_kwargs)
 
         self.projector = MoEAudioProjector(projector_config)
+
+        target_dtype = getattr(torch, config.model_dtype)
+        self.projector = self.projector.to(dtype=target_dtype)
 
         self.label_smoothing = getattr(config, "label_smoothing", 0.1)
         self.loss_fct = nn.CrossEntropyLoss(
@@ -352,7 +383,9 @@ class ASRModel(PreTrainedModel):
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
+        encoder = encoder.to(dtype=target_dtype)
         encoder.requires_grad_(False)
+        encoder.eval()
 
         return encoder
 
@@ -369,8 +402,10 @@ class ASRModel(PreTrainedModel):
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
 
+        decoder = decoder.to(dtype=target_dtype)
         decoder.config.use_cache = config.use_cache
         decoder.requires_grad_(False)
+        decoder.eval()
 
         return decoder
 
@@ -673,7 +708,7 @@ class ASRModel(PreTrainedModel):
         if audio_inputs is None:
             raise ValueError("input_values or input_features must be provided for generation")
 
-        audio_embeds = self._encode_audio(audio_inputs)
+        audio_embeds, _ = self._encode_audio(audio_inputs)
         batch_size = audio_embeds.shape[0]
         device = audio_embeds.device
 

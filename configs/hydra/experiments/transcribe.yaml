@@ -5,12 +5,12 @@
 # Based on stage1 configuration with multi-task data
 defaults:
   - override /model: large
-  - override /data: loquacious_medium
+  - override /data: combined
   - override /training: production
 
 model:
   # Load the pretrained model from Hub (this loads the projector weights)
-  # pretrained_model_path: "mazesmazes/tiny-audio"
+  # pretrained_model_path: "mazesmazes/tiny-audio-next"
 
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
@@ -25,8 +25,8 @@ training:
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 16
+  per_device_train_batch_size: 6
+  per_device_eval_batch_size: 12
   gradient_accumulation_steps: 4
   eval_accumulation_steps: 4
 
@@ -49,12 +49,9 @@ training:
   # torch_compile_mode: "default"
   # torch_compile_dynamic: true  # Enable dynamic shapes for variable sequence lengths
   # torch_compile_fullgraph: false  # Allow graph breaks for flexibility
-  #torch_compile_config:
-  #  triton.cudagraphs: false
-  #  shape_padding: true
-  #  epilogue_fusion: true
-  #  capture_scalar_outputs: true  # Reduce graph breaks from .item() calls
-  #  allow_unspec_int_on_nn_module: true  # Reduce recompilation from layer indices
+  # torch_compile_config:
+    #capture_scalar_outputs: true  # Reduce graph breaks from .item() calls
+    # allow_unspec_int_on_nn_module: true  # Reduce recompilation from layer indices
   
   gradient_checkpointing: false
 
@@ -62,7 +59,7 @@ training:
   max_steps: 20000
 
   # Reproducibility
-  seed: 42
+  seed: 43
   ignore_data_skip: true
 
 # Early stopping configuration
