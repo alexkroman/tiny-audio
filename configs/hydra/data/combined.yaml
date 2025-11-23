@@ -1,4 +1,4 @@
-# Combined dataset configuration with five ASR datasets
+# Combined dataset configuration with five ASR datasets (including TEDLIUM)
 datasets:
   # LoquaciousSet
   - path: speechbrain/LoquaciousSet
@@ -10,7 +10,7 @@ datasets:
       - train
     eval_splits:
       - dev
-    sampling_weight: 0.60
+    sampling_weight: 0.50
 
   # GigaSpeech
   - path: fixie-ai/gigaspeech
@@ -22,7 +22,7 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.20
+    sampling_weight: 0.10
 
   # Earnings22
   - path: sanchit-gandhi/earnings22_robust_split
@@ -39,6 +39,18 @@ datasets:
   # AMI ASR
   - path: TakalaWang/AMI_ASR
     name: null
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+    sampling_weight: 0.10
+
+  # TEDLIUM
+  - path: sanchit-gandhi/tedlium-data
+    name: default
     audio_column: audio
     text_column: text
     task: transcribe

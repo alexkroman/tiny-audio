@@ -87,6 +87,23 @@ class DatasetLoader:
         # Add task using a simple wrapper generator
         def add_task_gen(dataset, task_val):
             for example in dataset:
+                # Skip samples with invalid/empty audio
+                try:
+                    audio_decoder = example.get("audio")
+                    if audio_decoder is None:
+                        continue
+                    # Test if audio can be decoded
+                    _ = audio_decoder.get_all_samples()
+                except (RuntimeError, Exception):
+                    # Skip samples that fail to decode
+                    continue
+
+                # Skip TEDLIUM segments marked to be ignored
+                text = example.get("text", "")
+                if isinstance(text, str):
+                    if text.strip() == "ignore_time_segment_in_scoring":
+                        continue
+
                 example["task"] = task_val
                 yield example
 
@@ -200,10 +217,14 @@ class DataCollator(DataCollatorForSeq2Seq):
             r"<QUESTIONMARK>": "?",
             r"<EXCLAMATIONPOINT>": "!",
             r"<inaudible>": "",
-            r"\b(uh|um)\b": "",
+            r"\b(uh|um|ah)\b": "",
         }
         for pattern, replacement in replacements.items():
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+
+        # Strip any remaining HTML-like tags
+        text = re.sub(r'<[^>]+>', '', text)
+
         return text
 
     def _normalize_text(self, text: str) -> str:

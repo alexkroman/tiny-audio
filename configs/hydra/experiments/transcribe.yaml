@@ -30,15 +30,18 @@ training:
   gradient_accumulation_steps: 4
   eval_accumulation_steps: 4
 
+  adam_beta1: 0.9
+  adam_beta2: 0.98
+
   learning_rate: 1.0e-3
 
   lr_scheduler_type: "cosine"
   warmup_steps: 1000  # Critical for MoE start
 
   # Optimization - Stage 1: Aggressive alignment learning
-  weight_decay: 0.05
+  weight_decay: 0.01
   max_grad_norm: 1.0
-  projector_dropout: 0.1
+  projector_dropout: 0.05
   use_specaugment: true
   label_smoothing: 0.1
 
@@ -57,7 +60,7 @@ training:
   max_steps: 20000
 
   # Reproducibility
-  seed: 43
+  seed: 42
   ignore_data_skip: true
 
 # Early stopping configuration

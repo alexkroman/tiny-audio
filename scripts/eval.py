@@ -428,7 +428,7 @@ def main():
         "--dataset",
         type=str,
         default="loquacious",
-        choices=["loquacious", "earnings22", "ami", "gigaspeech"],
+        choices=["loquacious", "earnings22", "ami", "gigaspeech", "tedlium"],
         help="Dataset to evaluate on (default: loquacious)",
     )
     parser.add_argument(
@@ -553,6 +553,13 @@ def main():
         text_field = "text"
         print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
         dataset = load_dataset(dataset_name, dataset_config, split="dev", streaming=True)
+    elif args.dataset == "tedlium":
+        dataset_name = "sanchit-gandhi/tedlium-data"
+        dataset_config = args.config if args.config != "medium" else "default"
+        audio_field = "audio"
+        text_field = "text"
+        print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
+        dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 

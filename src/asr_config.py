@@ -80,6 +80,8 @@ class ASRConfig(transformers.PretrainedConfig):
         self.bnb_4bit_use_double_quant = bnb_4bit_use_double_quant
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
+            # Override dtype to match model_dtype
+            self.audio_config.dtype = model_dtype
         else:
             self.audio_config = kwargs.pop("audio_config")
 
@@ -87,6 +89,8 @@ class ASRConfig(transformers.PretrainedConfig):
             self.text_config = transformers.AutoConfig.from_pretrained(
                 text_model_id, trust_remote_code=True
             )
+            # Override dtype to match model_dtype
+            self.text_config.dtype = model_dtype
         else:
             self.text_config = kwargs.pop("text_config")
 
