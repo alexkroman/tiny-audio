@@ -130,7 +130,11 @@ class MoEAudioProjector(nn.Module):
 
         routing_probs = F.softmax(router_logits.float(), dim=-1)
         top_k_weights, top_k_indices = torch.topk(routing_probs, self.top_k, dim=-1)
-        
+
+        # Save routing decisions for monitoring/analysis
+        # Allows inspection of which experts are being used
+        self.last_routing_indices = top_k_indices.detach().cpu()
+
         # Normalize weights
         top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
         top_k_weights = top_k_weights.to(x.dtype)
