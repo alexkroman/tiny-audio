@@ -254,9 +254,182 @@ def test_routing(path_or_repo, batch_size=4, seq_len=150):
 
     print("-" * 65)
 
+def test_routing_advanced(model, batch_size=4, seq_len=150, encoder_dim=1024):
+    """
+    Run advanced routing diagnostics: determinism and gradient flow.
+
+    Args:
+        model: MoEAudioProjector instance
+        batch_size: Number of samples
+        seq_len: Sequence length
+        encoder_dim: Encoder dimension
+    """
+    print("\n" + "=" * 80)
+    print("ADVANCED MoE ROUTING DIAGNOSTICS")
+    print("=" * 80)
+
+    # Force model to float32 and enable gradients
+    model = model.float()
+    model.train()
+
+    # 1. ROUTING CONSISTENCY CHECK (Determinism)
+    print("\n[TEST A] ROUTING CONSISTENCY (Jitter Check)")
+    print("-" * 80)
+
+    dummy_input = torch.randn(batch_size, seq_len, encoder_dim)
+
+    # Temporarily disable jitter noise to test consistency
+    old_jitter = model.jitter_noise
+    model.jitter_noise = 0.0
+
+    # Capture routing from two runs
+    captured_data1 = {}
+    captured_data2 = {}
+
+    def make_instrumented_forward(capture_dict):
+        def forward(x):
+            batch_size, seq_len, dim = x.size()
+            remainder = seq_len % model.k
+            if remainder:
+                x = F.pad(x, (0, 0, 0, model.k - remainder))
+            x = x.view(batch_size, -1, dim * model.k)
+            x_flat = x.view(-1, dim * model.k)
+
+            norm_x = model.ln_pre(x_flat)
+            input_normed = model._safe_normalize(norm_x, dim=-1)
+            router_normed = model._safe_normalize(model.router_weights, dim=-1)
+            router_logits = F.linear(input_normed, router_normed) * model.router_scale
+
+            if model.training and model.jitter_noise > 0:
+                router_logits = router_logits + (torch.randn_like(router_logits) * model.jitter_noise)
+
+            routing_probs = F.softmax(router_logits.float(), dim=-1)
+            top_k_weights, top_k_indices = torch.topk(routing_probs, model.top_k, dim=-1)
+
+            capture_dict['indices'] = top_k_indices
+            capture_dict['probs'] = routing_probs
+
+            # Full forward for gradient test
+            top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
+            top_k_weights = top_k_weights.to(x.dtype)
+
+            shared_out = model.shared_expert(norm_x)
+            routed_out = torch.zeros_like(shared_out)
+
+            for k in range(model.top_k):
+                indices_k = top_k_indices[:, k]
+                weights_k = top_k_weights[:, k].unsqueeze(-1)
+                for expert_idx, expert in enumerate(model.experts):
+                    mask = (indices_k == expert_idx)
+                    if mask.any():
+                        routed_out[mask] += expert(norm_x[mask]) * weights_k[mask]
+
+            final_out = model.ln_post(shared_out + routed_out)
+            return final_out.view(batch_size, -1, model.out_dim), 0.0
+        return forward
+
+    # Run 1
+    model.forward = make_instrumented_forward(captured_data1)
+    with torch.no_grad():
+        out1, _ = model(dummy_input)
+
+    # Run 2 (Same Input)
+    model.forward = make_instrumented_forward(captured_data2)
+    with torch.no_grad():
+        out2, _ = model(dummy_input)
+
+    # Compare
+    diff = (out1 - out2).abs().sum().item()
+    if diff < 1e-5:
+        print("   ✅ Router is Deterministic (Stable).")
+    else:
+        print(f"   ⚠️  Router is Flipping! Diff: {diff:.5f}")
+        print("      (This causes 'forgetting'. Ensure jitter is off during inference).")
+
+    model.jitter_noise = old_jitter  # Restore jitter
+
+    # 2. DEAD GRADIENT CHECK (The "Zombie Expert" Detector)
+    print("\n[TEST B] GRADIENT FLOW (Backward Pass Simulation)")
+    print("-" * 80)
+
+    # Reset gradients
+    model.zero_grad()
+
+    # Forward Pass with gradients enabled
+    output, aux_loss = model(dummy_input)
+
+    # Create a fake loss to force backprop
+    target = torch.randn_like(output)
+    loss = F.mse_loss(output, target)
+
+    # Backward Pass
+    print("   📉 Running Backward Pass...")
+    loss.backward()
+
+    print("\n   Gradient Magnitude per Expert (w12 weights):")
+    print("-" * 80)
+
+    has_dead_experts = False
+    grad_mags = []
+
+    for i, expert in enumerate(model.experts):
+        # Check w12 gradients
+        if expert.w12.weight.grad is None:
+            print(f"Expert {i} | ❌ NO GRADIENT (Disconnected?)")
+            has_dead_experts = True
+            continue
+
+        grad_mag = expert.w12.weight.grad.abs().mean().item()
+        grad_mags.append(grad_mag)
+
+        # Check if gradient is dangerously low
+        status = "✅ Flowing"
+        if grad_mag < 1e-9:
+            status = "⚠️  Vanishing / Dead"
+            has_dead_experts = True
+        elif grad_mag > 1.0:
+            status = "🔥 Exploding"
+
+        # Draw Bar (Log scale)
+        bar_len = int(min(grad_mag * 10000, 40))
+        bar = "█" * bar_len
+        print(f"Expert {i} | {grad_mag:.8f} | {bar} {status}")
+
+    print("-" * 80)
+    if not has_dead_experts:
+        print("   ✅ ALL SYSTEMS GO: Every expert is learning.")
+    else:
+        print("   ❌ WARNING: Some experts are not receiving updates.")
+
+    # Check shared expert
+    if model.shared_expert.w12.weight.grad is not None:
+        shared_grad = model.shared_expert.w12.weight.grad.abs().mean().item()
+        print(f"\n   Shared Expert gradient: {shared_grad:.8f}")
+
+    print("\n" + "=" * 80)
+    print("DIAGNOSTICS COMPLETE")
+    print("=" * 80)
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python scripts/test_moe_routing.py <path_or_repo_id>")
-        print("Exampe: python scripts/test_moe_routing.py my-user/audio-moe-projector")
+        print("Usage: python scripts/test_moe_routing.py <path_or_repo_id> [--advanced]")
+        print("Example: python scripts/test_moe_routing.py my-user/audio-moe-projector")
+        print("\nOptions:")
+        print("  --advanced    Run advanced diagnostics (determinism & gradient flow)")
     else:
-        test_routing(sys.argv[1])
+        path_or_repo = sys.argv[1]
+        run_advanced = '--advanced' in sys.argv
+
+        # Basic routing test
+        test_routing(path_or_repo)
+
+        # Advanced tests if requested
+        if run_advanced:
+            checkpoint_path = resolve_model_path(path_or_repo)
+            if os.path.exists(checkpoint_path):
+                state_dict = load_file(checkpoint_path)
+                config = MockConfig()
+                config = auto_infer_config(state_dict, config)
+                model = MoEAudioProjector(config)
+                model.load_state_dict(state_dict, strict=False)
+                test_routing_advanced(model, encoder_dim=config.encoder_dim)

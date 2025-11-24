@@ -48,98 +48,67 @@ class MoEAudioProjector(nn.Module):
         self.k = getattr(config, "projector_pool_stride", 2)
         self.num_experts = getattr(config, "num_experts", 8)
         self.top_k = getattr(config, "moe_top_k", 2)
-        self.router_scale = 12.0  # Reduced from 20.0 for better exploration
-        self.jitter_noise = 0.01  # Router jitter for preventing expert collapse 
+        self.router_scale = 12.0
+        self.jitter_noise = 0.01 
 
         in_dim = config.encoder_dim * self.k
         self.out_dim = config.llm_dim
         expert_hidden = getattr(config, "projector_hidden_dim", 512)
 
-        # 1. RMSNorm with higher epsilon for BF16 stability
-        self.ln_pre = RMSNorm(in_dim, eps=1e-5) # Increased eps
+        self.ln_pre = RMSNorm(in_dim, eps=1e-5)
         self.ln_post = RMSNorm(self.out_dim, eps=1e-5)
-
-        # 2. Cosine Router
         self.router_weights = nn.Parameter(torch.randn(self.num_experts, in_dim) * 0.02)
 
-        # Experts (SwiGLU)
         self.shared_expert = SwiGLU(in_dim, expert_hidden, self.out_dim)
         self.experts = nn.ModuleList([
             SwiGLU(in_dim, expert_hidden, self.out_dim) for _ in range(self.num_experts)
         ])
 
-        # 3. Initialization (Standard Transformer)
         with torch.no_grad():
-            # Initialize w12 (Gate/Value) normally
             nn.init.normal_(self.shared_expert.w12.weight, std=0.02)
-            # Initialize w3 (Output) to standard transformer variance
-            # This matches the random initialization of the LLM's own embeddings
             nn.init.normal_(self.shared_expert.w3.weight, std=0.02)
 
             for expert in self.experts:
                 expert.w12.weight.copy_(self.shared_expert.w12.weight)
                 expert.w12.weight.add_(torch.randn_like(expert.w12.weight) * 0.002)
-                # Standard init for experts too
                 nn.init.normal_(expert.w3.weight, std=0.02)
 
     def _safe_normalize(self, x, dim=-1, eps=1e-4):
-        """
-        Manual normalization that is safe for bfloat16 and zero-vectors.
-        Standard F.normalize uses eps=1e-12 which underflows in bf16.
-        """
+        """Normalization safe for bfloat16 and zero-vectors."""
         norm = torch.linalg.vector_norm(x, dim=dim, keepdim=True, dtype=torch.float32)
-        # Avoid division by zero by clamping the norm
         norm = torch.clamp(norm, min=eps)
         return x / norm.type_as(x)
 
     def forward(self, x):
         batch_size, seq_len, dim = x.size()
-        
-        # Handle Pooling Stride
+
         remainder = seq_len % self.k
         if remainder:
             x = F.pad(x, (0, 0, 0, self.k - remainder))
-        
+
         x = x.view(batch_size, -1, dim * self.k)
         x_flat = x.view(-1, dim * self.k)
-        
-        # RMSNorm
         norm_x = self.ln_pre(x_flat)
 
-        # --- SHARED PATH ---
         shared_out = self.shared_expert(norm_x)
 
-        # --- SAFE ROUTING ---
-        # 1. Safe Normalize Inputs (Prevents 0/0 explosion on padding)
         input_normed = self._safe_normalize(norm_x, dim=-1)
-        
-        # 2. Safe Normalize Weights
         router_normed = self._safe_normalize(self.router_weights, dim=-1)
-        
-        # 3. Cosine Similarity
         router_logits = F.linear(input_normed, router_normed) * self.router_scale
 
-        # Add jitter noise during training to encourage exploration
-        # Prevents experts from collapsing to local minima
         if self.training and self.jitter_noise > 0:
             router_logits = router_logits + (torch.randn_like(router_logits) * self.jitter_noise)
 
-        # Router Z-Loss: Penalize large logits to stabilize training
-        # Prevents logit explosion common in MoE routers
         z_loss = torch.logsumexp(router_logits, dim=-1).pow(2).mean()
 
         routing_probs = F.softmax(router_logits.float(), dim=-1)
         top_k_weights, top_k_indices = torch.topk(routing_probs, self.top_k, dim=-1)
 
-        # Save routing decisions for monitoring/analysis
-        # Allows inspection of which experts are being used
         self.last_routing_indices = top_k_indices.detach().cpu()
 
-        # Normalize weights
         top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
         top_k_weights = top_k_weights.to(x.dtype)
 
-        # --- DISPATCH ---
         routed_out = torch.zeros_like(shared_out)
         for k in range(self.top_k):
             indices_k = top_k_indices[:, k]
@@ -147,20 +116,16 @@ class MoEAudioProjector(nn.Module):
             for expert_idx, expert in enumerate(self.experts):
                 mask = (indices_k == expert_idx)
                 if mask.any():
-                    # Important: Use original norm_x, not normed input
                     routed_out[mask] += expert(norm_x[mask]) * weights_k[mask]
 
-        # Aux Loss
         aux_loss = 0.0
         if self.training:
-             tokens_per_expert = torch.histc(
+            tokens_per_expert = torch.histc(
                 top_k_indices.float(), bins=self.num_experts, min=0, max=self.num_experts-1
             )
-             fraction_routed = tokens_per_expert / top_k_indices.numel()
-             prob_sum = routing_probs.mean(dim=0)
-             aux_loss = (fraction_routed * prob_sum).sum() * self.num_experts
-             # Add Router Z-Loss to prevent logit explosion
-             aux_loss = aux_loss + (0.001 * z_loss)
+            fraction_routed = tokens_per_expert / top_k_indices.numel()
+            prob_sum = routing_probs.mean(dim=0)
+            aux_loss = (fraction_routed * prob_sum).sum() * self.num_experts + (0.001 * z_loss)
 
         final_out = self.ln_post(shared_out + routed_out)
         return final_out.view(batch_size, -1, self.out_dim), aux_loss
@@ -194,12 +159,11 @@ class ASRModel(PreTrainedModel):
                 audio_model_id,
                 feature_size=num_mel_bins,
                 apply_spec_augment=training_mode,
-                # Optimized SpecAugment for frozen-backbone training (keep minimal)
-                mask_feature_prob=0.05,       
-                mask_feature_length=15,       
-                mask_feature_min_masks=0,     
-                mask_time_prob=0.05,          
-                mask_time_length=20,          
+                mask_feature_prob=0.05,
+                mask_feature_length=15,
+                mask_feature_min_masks=0,
+                mask_time_prob=0.05,
+                mask_time_length=20,
                 mask_time_min_masks=1,        
             )
         return Wav2Vec2FeatureExtractor.from_pretrained(audio_model_id)
@@ -496,12 +460,9 @@ class ASRModel(PreTrainedModel):
 
         audio_embeds, aux_loss = self.projector(audio_features)
 
-        # Handle mask pooling via interpolation to guarantee shape match
         pooled_audio_mask = None
         if audio_attention_mask is not None:
-            # [Batch, Time] -> [Batch, 1, Time]
             mask_float = audio_attention_mask.unsqueeze(1).float()
-            # Interpolate to [Batch, 1, Target_Time]
             pooled_mask = F.interpolate(
                 mask_float,
                 size=audio_embeds.shape[1],
@@ -584,10 +545,7 @@ class ASRModel(PreTrainedModel):
             torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_audio_tokens)
         )
 
-        # Handle both scalar and tensor audio_fill_value
         if isinstance(audio_fill_value, torch.Tensor):
-            # audio_fill_value is a tensor with shape [batch_size, num_audio_tokens]
-            # Broadcast it to the audio positions
             expanded[batch_idx_expanded, audio_positions_expanded] = audio_fill_value
         else:
             needs_audio_fill = audio_fill_value != fill_value
@@ -619,7 +577,6 @@ class ASRModel(PreTrainedModel):
         inputs_embeds = self.decoder.get_input_embeddings()(expanded_input_ids)
         special_audio_mask = (expanded_input_ids == self.audio_token_id).unsqueeze(-1)
         special_audio_mask = special_audio_mask.expand_as(inputs_embeds)
-        # Ensure audio_embeds matches the dtype of inputs_embeds
         audio_embeds = audio_embeds.to(inputs_embeds.dtype)
         audio_embeds_flat = audio_embeds.reshape(-1, audio_embeds.shape[-1])
         return inputs_embeds.masked_scatter(special_audio_mask, audio_embeds_flat)
@@ -654,7 +611,6 @@ class ASRModel(PreTrainedModel):
             inputs_embeds = self._prepare_audio_inputs_embeds(expanded_input_ids, audio_embeds)
 
             if attention_mask is not None:
-                # Use pooled audio mask instead of hardcoded 1
                 full_attention_mask = self._expand_for_audio_tokens(
                     input_ids, attention_mask, num_audio_tokens, fill_value=1, audio_fill_value=pooled_audio_mask
                 )
@@ -670,62 +626,15 @@ class ASRModel(PreTrainedModel):
             full_attention_mask = attention_mask
             use_cache = kwargs.pop("use_cache", None)
 
-        # 2. Run Decoder (LLM)
         outputs = self.decoder(
             inputs_embeds=inputs_embeds,
             attention_mask=full_attention_mask,
-            labels=None, 
+            labels=None,
             use_cache=use_cache if use_cache is not None else False,
             **kwargs,
         )
-
-        # 3. Calculate Losses
         if labels is not None:
             logits = outputs.logits
-
-            # DEBUG: Data alignment check (first batch only)
-            if self.training and not hasattr(self, '_debug_printed'):
-                self._debug_printed = True
-                debug_input = expanded_input_ids[0] if audio_inputs is not None else input_ids[0]
-                debug_label = labels[0]
-
-                print("\n" + "="*80)
-                print("DATA ALIGNMENT CHECK")
-                print("="*80)
-                print(f"Input shape: {debug_input.shape}, Label shape: {debug_label.shape}")
-
-                # Decode first 50 tokens of input
-                input_sample = debug_input[:50]
-                print(f"\nINPUT (first 50 tokens):")
-                print(self.tokenizer.decode(input_sample, skip_special_tokens=False))
-
-                # Decode non-masked labels
-                valid_label_ids = debug_label[debug_label != -100][:50]
-                print(f"\nLABEL (first 50 non-masked tokens, total non-masked: {(debug_label != -100).sum()}):")
-                if len(valid_label_ids) > 0:
-                    print(self.tokenizer.decode(valid_label_ids, skip_special_tokens=False))
-                else:
-                    print("<all masked>")
-
-                # Show where audio tokens are
-                if audio_inputs is not None:
-                    audio_positions = (debug_input == self.audio_token_id).nonzero(as_tuple=True)[0]
-                    print(f"\nAudio token positions: {audio_positions[:10].tolist()}... (showing first 10)")
-                    print(f"Total audio tokens: {(debug_input == self.audio_token_id).sum()}")
-
-                # INPUT TAIL CHECK - Verify text at the end
-                print("\n--- INPUT TAIL CHECK ---")
-                last_50_tokens = debug_input[-50:]
-                print(f"Raw IDs (Last 10): {last_50_tokens[-10:].tolist()}")
-                print(f"Decoded (Last 50): {self.tokenizer.decode(last_50_tokens, skip_special_tokens=False)}")
-
-                # Compare against full target text
-                all_valid_label_ids = debug_label[debug_label != -100]
-                print(f"Target Text (full): {self.tokenizer.decode(all_valid_label_ids, skip_special_tokens=False)}")
-                print("------------------------")
-
-                print("="*80 + "\n")
-
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
@@ -815,10 +724,7 @@ class ASRModel(PreTrainedModel):
         expanded_prompt_ids = self._expand_audio_tokens(prompt_ids, num_audio_tokens)
         inputs_embeds = self._prepare_audio_inputs_embeds(expanded_prompt_ids, audio_embeds)
 
-        # Create attention mask for text tokens (all valid)
         text_attention_mask = torch.ones_like(prompt_ids)
-
-        # Expand to include audio tokens with pooled audio mask
         attention_mask = self._expand_for_audio_tokens(
             prompt_ids,
             text_attention_mask,
@@ -855,25 +761,15 @@ class ASRModel(PreTrainedModel):
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
     ):
-        """
-        Prepare inputs for generation with KV cache support.
-
-        This is critical for efficient generation:
-        - Step 1: Process full audio embeddings + prompt
-        - Step 2+: Process only the new token using cached KV states
-        """
-        # If we have past_key_values (cache), we only want to process the LAST token
+        """Prepare inputs for generation with KV cache support."""
         if past_key_values:
             input_ids = input_ids[:, -1:]
 
-        # If inputs_embeds are passed (Step 1 of generation), use them
-        # Otherwise (Step 2+), use None so the model looks up the text embedding for input_ids
         if inputs_embeds is not None and past_key_values is None:
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
             model_inputs = {"input_ids": input_ids}
 
-        # Pass everything else through
         model_inputs.update({
             "past_key_values": past_key_values,
             "use_cache": kwargs.get("use_cache"),
