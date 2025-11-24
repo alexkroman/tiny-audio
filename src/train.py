@@ -279,13 +279,13 @@ class DataCollator(DataCollatorForSeq2Seq):
 
             # Use default single prompt per task
             if task == "continue":
-                instruction = "Continue:"
+                instruction = "Continue: <audio>"
             elif task == "describe":
-                instruction = "Describe:"
+                instruction = "Describe: <audio>"
             elif task == "emotion":
-                instruction = "Emotion:"
+                instruction = "Emotion: <audio>"
             else:  # Default to transcribe
-                instruction = "Transcribe:"
+                instruction = "Transcribe: <audio>"
 
             messages.append({"role": "user", "content": instruction})
             messages.append({"role": "assistant", "content": text})
@@ -295,7 +295,7 @@ class DataCollator(DataCollatorForSeq2Seq):
                 tokenize=True,
                 add_generation_prompt=False,
                 truncation=True,
-                max_length=256,
+                max_length=1024,
                 enable_thinking=False,
             )
 
