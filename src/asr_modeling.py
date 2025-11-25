@@ -25,6 +25,7 @@ try:
 except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
 
+
 class SwiGLU(nn.Module):
     def __init__(self, in_features, hidden_features, out_features, bias=False, dropout_rate=0.05):
         super().__init__()
@@ -37,6 +38,7 @@ class SwiGLU(nn.Module):
         x_gate, x_val = w12_out.chunk(2, dim=-1)
         x = F.silu(x_gate) * x_val
         return self.dropout(self.w3(x))
+
 
 class MoEAudioProjector(nn.Module):
     def __init__(self, config):
@@ -56,9 +58,9 @@ class MoEAudioProjector(nn.Module):
         self.router_weights = nn.Parameter(torch.randn(self.num_experts, in_dim) * 0.02)
 
         self.shared_expert = SwiGLU(in_dim, expert_hidden, self.out_dim)
-        self.experts = nn.ModuleList([
-            SwiGLU(in_dim, expert_hidden, self.out_dim) for _ in range(self.num_experts)
-        ])
+        self.experts = nn.ModuleList(
+            [SwiGLU(in_dim, expert_hidden, self.out_dim) for _ in range(self.num_experts)]
+        )
 
         with torch.no_grad():
             nn.init.normal_(self.shared_expert.w12.weight, std=0.02)
@@ -105,14 +107,14 @@ class MoEAudioProjector(nn.Module):
             indices_k = top_k_indices[:, k]
             weights_k = top_k_weights[:, k].unsqueeze(-1)
             for expert_idx, expert in enumerate(self.experts):
-                mask = (indices_k == expert_idx)
+                mask = indices_k == expert_idx
                 if mask.any():
                     routed_out[mask] += expert(norm_x[mask]) * weights_k[mask]
 
         aux_loss = 0.0
         if self.training:
             tokens_per_expert = torch.histc(
-                top_k_indices.float(), bins=self.num_experts, min=0, max=self.num_experts-1
+                top_k_indices.float(), bins=self.num_experts, min=0, max=self.num_experts - 1
             )
             fraction_routed = tokens_per_expert / top_k_indices.numel()
             prob_sum = routing_probs.mean(dim=0)
@@ -120,6 +122,7 @@ class MoEAudioProjector(nn.Module):
 
         final_out = self.ln_post(shared_out + routed_out)
         return final_out.view(batch_size, -1, self.out_dim), aux_loss
+
 
 class ASRModel(PreTrainedModel):
     config_class = ASRConfig
@@ -243,9 +246,18 @@ class ASRModel(PreTrainedModel):
         self.generation_config = self.decoder.generation_config
 
         config_params = [
-            "max_new_tokens", "min_new_tokens", "num_beams", "do_sample",
-            "temperature", "top_k", "top_p", "repetition_penalty",
-            "length_penalty", "no_repeat_ngram_size", "early_stopping", "use_cache"
+            "max_new_tokens",
+            "min_new_tokens",
+            "num_beams",
+            "do_sample",
+            "temperature",
+            "top_k",
+            "top_p",
+            "repetition_penalty",
+            "length_penalty",
+            "no_repeat_ngram_size",
+            "early_stopping",
+            "use_cache",
         ]
         for param in config_params:
             if hasattr(config, param) and getattr(config, param) is not None:
@@ -253,9 +265,9 @@ class ASRModel(PreTrainedModel):
 
         self._init_tokenizer()
 
-        # Store encoder type for forward pass
         self.is_whisper_encoder = "whisper" in config.audio_model_id.lower() or (
-            hasattr(self.encoder.config, "model_type") and "whisper" in self.encoder.config.model_type.lower()
+            hasattr(self.encoder.config, "model_type")
+            and "whisper" in self.encoder.config.model_type.lower()
         )
 
         from types import SimpleNamespace
@@ -278,15 +290,17 @@ class ASRModel(PreTrainedModel):
             else:
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
-        proj_kwargs = {k: v for k, v in vars(config).items() if k.startswith('projector_')}
+        proj_kwargs = {k: v for k, v in vars(config).items() if k.startswith("projector_")}
 
-        proj_kwargs.update({
-            "encoder_dim": encoder_dim,
-            "llm_dim": llm_dim,
-            "num_experts": 8,
-            "moe_top_k": 2,
-            "projector_hidden_dim": llm_dim // 4
-        })
+        proj_kwargs.update(
+            {
+                "encoder_dim": encoder_dim,
+                "llm_dim": llm_dim,
+                "num_experts": 8,
+                "moe_top_k": 2,
+                "projector_hidden_dim": llm_dim // 4,
+            }
+        )
 
         projector_config = SimpleNamespace(**proj_kwargs)
 
@@ -296,10 +310,7 @@ class ASRModel(PreTrainedModel):
         self.projector = self.projector.to(dtype=target_dtype)
 
         self.label_smoothing = getattr(config, "label_smoothing", 0.1)
-        self.loss_fct = nn.CrossEntropyLoss(
-            ignore_index=-100,
-            label_smoothing=self.label_smoothing
-        )
+        self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=self.label_smoothing)
 
         self._no_split_modules = self.decoder._no_split_modules
 
@@ -317,6 +328,7 @@ class ASRModel(PreTrainedModel):
 
         if "whisper" in config.audio_model_id.lower():
             from transformers import WhisperModel
+
             full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
             encoder = full_model.encoder
             del full_model
@@ -454,17 +466,11 @@ class ASRModel(PreTrainedModel):
         pooled_audio_mask = None
         if audio_attention_mask is not None:
             mask_float = audio_attention_mask.unsqueeze(1).float()
-            pooled_mask = F.interpolate(
-                mask_float,
-                size=audio_embeds.shape[1],
-                mode='nearest'
-            )
+            pooled_mask = F.interpolate(mask_float, size=audio_embeds.shape[1], mode="nearest")
             pooled_audio_mask = pooled_mask.squeeze(1).long()
         else:
             pooled_audio_mask = torch.ones(
-                audio_embeds.shape[:2],
-                device=audio_embeds.device,
-                dtype=torch.long
+                audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long
             )
 
         return audio_embeds, aux_loss, pooled_audio_mask
@@ -603,7 +609,11 @@ class ASRModel(PreTrainedModel):
 
             if attention_mask is not None:
                 full_attention_mask = self._expand_for_audio_tokens(
-                    input_ids, attention_mask, num_audio_tokens, fill_value=1, audio_fill_value=pooled_audio_mask
+                    input_ids,
+                    attention_mask,
+                    num_audio_tokens,
+                    fill_value=1,
+                    audio_fill_value=pooled_audio_mask,
                 )
             else:
                 full_attention_mask = None
@@ -637,6 +647,7 @@ class ASRModel(PreTrainedModel):
                 loss = loss + 0.01 * aux_loss
 
             from transformers.modeling_outputs import CausalLMOutputWithPast
+
             outputs = CausalLMOutputWithPast(
                 loss=loss,
                 logits=logits,
@@ -669,8 +680,7 @@ class ASRModel(PreTrainedModel):
             raise ValueError("input_values or input_features must be provided for generation")
 
         audio_embeds, _, pooled_audio_mask = self._encode_audio(
-            audio_inputs,
-            audio_attention_mask=audio_attention_mask
+            audio_inputs, audio_attention_mask=audio_attention_mask
         )
         batch_size = audio_embeds.shape[0]
         device = audio_embeds.device
@@ -721,13 +731,21 @@ class ASRModel(PreTrainedModel):
             text_attention_mask,
             num_audio_tokens,
             fill_value=1,
-            audio_fill_value=pooled_audio_mask
+            audio_fill_value=pooled_audio_mask,
         )
 
         config_params = [
-            "max_new_tokens", "min_new_tokens", "num_beams", "do_sample",
-            "temperature", "top_k", "top_p", "repetition_penalty",
-            "length_penalty", "no_repeat_ngram_size", "early_stopping",
+            "max_new_tokens",
+            "min_new_tokens",
+            "num_beams",
+            "do_sample",
+            "temperature",
+            "top_k",
+            "top_p",
+            "repetition_penalty",
+            "length_penalty",
+            "no_repeat_ngram_size",
+            "early_stopping",
         ]
         for param in config_params:
             if hasattr(self.config, param) and getattr(self.config, param) is not None:
@@ -761,11 +779,13 @@ class ASRModel(PreTrainedModel):
         else:
             model_inputs = {"input_ids": input_ids}
 
-        model_inputs.update({
-            "past_key_values": past_key_values,
-            "use_cache": kwargs.get("use_cache"),
-            "attention_mask": attention_mask,
-        })
+        model_inputs.update(
+            {
+                "past_key_values": past_key_values,
+                "use_cache": kwargs.get("use_cache"),
+                "attention_mask": attention_mask,
+            }
+        )
         return model_inputs
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
@@ -808,6 +828,7 @@ class ASRModel(PreTrainedModel):
         src_dir = PathlibPath(__file__).parent
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
+
 
 AutoConfig.register("asr_model", ASRConfig)
 AutoModel.register(ASRConfig, ASRModel)

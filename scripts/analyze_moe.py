@@ -26,6 +26,7 @@ from safetensors.torch import load_file
 
 # --- Helper Functions ---
 
+
 def draw_ascii_bar(values: List[float], labels: Optional[List[str]] = None, max_width: int = 40):
     """Draws a visual comparison bar chart."""
     if len(values) == 0:
@@ -46,6 +47,7 @@ def draw_ascii_bar(values: List[float], labels: Optional[List[str]] = None, max_
         label = f"{labels[i]:<4}" if labels else f"{i:<4}"
         print(f"{label} | {bar:<{max_width}} {val:.6f}")
     print("-" * 65)
+
 
 def compute_effective_rank(matrix: torch.Tensor) -> float:
     """
@@ -71,6 +73,7 @@ def compute_effective_rank(matrix: torch.Tensor) -> float:
     except Exception:
         return 0.0
 
+
 def check_integrity(name: str, tensor: torch.Tensor) -> bool:
     """Returns True if tensor is healthy, False if NaN/Inf."""
     if torch.isnan(tensor).any():
@@ -80,6 +83,7 @@ def check_integrity(name: str, tensor: torch.Tensor) -> bool:
         print(f"   ❌ CRITICAL FAILURE: Infinity detected in {name}")
         return False
     return True
+
 
 def resolve_model_path(path_or_repo: str) -> str:
     """Handles local paths or HuggingFace repo downloads."""
@@ -94,6 +98,7 @@ def resolve_model_path(path_or_repo: str) -> str:
     if "/" in path_or_repo and not path_or_repo.endswith(".safetensors"):
         try:
             from huggingface_hub import hf_hub_download
+
             print(f"📥 Downloading from Hub: {path_or_repo}")
             return hf_hub_download(repo_id=path_or_repo, filename="model.safetensors")
         except Exception as e:
@@ -101,7 +106,9 @@ def resolve_model_path(path_or_repo: str) -> str:
             return path_or_repo
     return path_or_repo
 
+
 # --- Main Analysis Logic ---
+
 
 def analyze_checkpoint(file_path: str):
     print("\n🔬 MOE FORENSIC ANALYSIS")
@@ -159,9 +166,9 @@ def analyze_checkpoint(file_path: str):
         if match:
             idx = int(match.group(1))
             if "w12" in k:
-                experts_map[idx]['w12'] = v
+                experts_map[idx]["w12"] = v
             elif "w3" in k:
-                experts_map[idx]['w3'] = v
+                experts_map[idx]["w3"] = v
 
     if not healthy:
         print("\n❌ ABORTING ANALYSIS: Model weights are corrupted (NaN/Inf).")
@@ -173,8 +180,8 @@ def analyze_checkpoint(file_path: str):
         return
 
     num_experts = len(sorted_indices)
-    routed_w12s = [experts_map[i]['w12'] for i in sorted_indices if 'w12' in experts_map[i]]
-    routed_w3s = [experts_map[i]['w3'] for i in sorted_indices if 'w3' in experts_map[i]]
+    routed_w12s = [experts_map[i]["w12"] for i in sorted_indices if "w12" in experts_map[i]]
+    routed_w3s = [experts_map[i]["w3"] for i in sorted_indices if "w3" in experts_map[i]]
 
     print(f"   Found {num_experts} Routed Experts + 1 Shared Expert.")
 
@@ -217,11 +224,11 @@ def analyze_checkpoint(file_path: str):
         print(f"   Max Similarity: {off_diag.max().item():.4f}")
 
         if avg_sim > 0.98:
-             print("   ❌ RED ZONE: Experts are identical clones.")
+            print("   ❌ RED ZONE: Experts are identical clones.")
         elif avg_sim > 0.80:
-             print("   ⚠️  YELLOW ZONE: Experts are highly correlated.")
+            print("   ⚠️  YELLOW ZONE: Experts are highly correlated.")
         else:
-             print("   ✅ GREEN ZONE: Experts are specializing.")
+            print("   ✅ GREEN ZONE: Experts are specializing.")
 
     # 4. INITIALIZATION / FADE-IN
     print("\n[3] INITIALIZATION / FADE-IN STATUS")
@@ -256,9 +263,12 @@ def analyze_checkpoint(file_path: str):
         avg_rank = np.mean(ranks)
         full_rank = min(routed_w12s[0].shape)
 
-        print(f"   Avg Routed Expert Rank: {avg_rank:.1f} / {full_rank} ({(avg_rank/full_rank)*100:.1f}%)")
+        print(
+            f"   Avg Routed Expert Rank: {avg_rank:.1f} / {full_rank} ({(avg_rank / full_rank) * 100:.1f}%)"
+        )
         print("\n   Rank per Expert:")
         draw_ascii_bar(ranks, labels=[str(i) for i in sorted_indices])
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

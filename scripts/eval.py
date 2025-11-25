@@ -156,7 +156,6 @@ def evaluate_huggingface(
 
         try:
             for sample_count, sample in enumerate(dataset, start=1):
-
                 # Get WAV bytes for API
                 wav_bytes = prepare_wav_bytes(sample[audio_field])
 
@@ -203,7 +202,9 @@ def evaluate_huggingface(
                 sample_wer = wer(norm_ref, norm_pred) * 100
                 per_sample_wers.append(sample_wer)
 
-                print(f"Sample {sample_count}: WER = {sample_wer:.2f}%, Time = {per_sample_times[-1]:.2f}s")
+                print(
+                    f"Sample {sample_count}: WER = {sample_wer:.2f}%, Time = {per_sample_times[-1]:.2f}s"
+                )
                 print(f"  Ref:  {sample[text_field]}")
                 print(f"  Pred: {prediction}")
 
@@ -288,7 +289,9 @@ def evaluate_huggingface(
             sample_wer = wer(norm_ref, norm_pred) * 100
             per_sample_wers.append(sample_wer)
 
-            print(f"Sample {sample_count}: WER = {sample_wer:.2f}%, Time = {per_sample_times[-1]:.2f}s")
+            print(
+                f"Sample {sample_count}: WER = {sample_wer:.2f}%, Time = {per_sample_times[-1]:.2f}s"
+            )
             print(f"  Ref:  {sample[text_field]}")
             print(f"  Pred: {prediction}")
 

@@ -12,6 +12,7 @@ from safetensors.torch import load_file
 #    (Paste your class here if not importing from another file)
 # ==============================================================================
 
+
 class SwiGLU(nn.Module):
     def __init__(self, in_features, hidden_features, out_features, bias=False, dropout_rate=0.05):
         super().__init__()
@@ -25,6 +26,7 @@ class SwiGLU(nn.Module):
         x = f.silu(x_gate) * x_val
         return self.dropout(self.w3(x))
 
+
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-5):
         super().__init__()
@@ -33,6 +35,7 @@ class RMSNorm(nn.Module):
 
     def forward(self, x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+
 
 class MoEAudioProjector(nn.Module):
     def __init__(self, config):
@@ -51,9 +54,9 @@ class MoEAudioProjector(nn.Module):
         self.ln_post = RMSNorm(self.out_dim, eps=1e-5)
         self.router_weights = nn.Parameter(torch.randn(self.num_experts, in_dim) * 0.02)
         self.shared_expert = SwiGLU(in_dim, expert_hidden, self.out_dim)
-        self.experts = nn.ModuleList([
-            SwiGLU(in_dim, expert_hidden, self.out_dim) for _ in range(self.num_experts)
-        ])
+        self.experts = nn.ModuleList(
+            [SwiGLU(in_dim, expert_hidden, self.out_dim) for _ in range(self.num_experts)]
+        )
 
     def _safe_normalize(self, x, dim=-1, eps=1e-4):
         norm = torch.linalg.vector_norm(x, dim=dim, keepdim=True, dtype=torch.float32)
@@ -64,9 +67,11 @@ class MoEAudioProjector(nn.Module):
         # Placeholder forward - we will monkey patch this during testing
         pass
 
+
 # ==============================================================================
 # 2. UTILITIES
 # ==============================================================================
+
 
 class MockConfig:
     def __init__(self):
@@ -77,6 +82,7 @@ class MockConfig:
         self.encoder_dim = 1024
         self.llm_dim = 4096
         self.projector_hidden_dim = 512
+
 
 def resolve_model_path(path_or_repo):
     """
@@ -106,7 +112,9 @@ def resolve_model_path(path_or_repo):
                 file_path = hf_hub_download(repo_id=path_or_repo, filename="model.safetensors")
             except Exception:
                 print("   ⚠️  'model.safetensors' not found, trying 'adapter_model.safetensors'...")
-                file_path = hf_hub_download(repo_id=path_or_repo, filename="adapter_model.safetensors")
+                file_path = hf_hub_download(
+                    repo_id=path_or_repo, filename="adapter_model.safetensors"
+                )
 
             print(f"   ✅ Downloaded to: {file_path}")
             return file_path
@@ -120,6 +128,7 @@ def resolve_model_path(path_or_repo):
 
     return path_or_repo
 
+
 def auto_infer_config(state_dict, config):
     """
     Updates MockConfig by inspecting the loaded weight shapes.
@@ -128,8 +137,8 @@ def auto_infer_config(state_dict, config):
     print("   🕵️  Auto-detecting model dimensions from weights...")
 
     # 1. Detect Num Experts & Input Dim from Router
-    if 'router_weights' in state_dict:
-        rw = state_dict['router_weights'] # [num_experts, in_dim]
+    if "router_weights" in state_dict:
+        rw = state_dict["router_weights"]  # [num_experts, in_dim]
         config.num_experts = rw.shape[0]
         actual_in_dim = rw.shape[1]
 
@@ -141,8 +150,8 @@ def auto_infer_config(state_dict, config):
         print(f"      - In Dim (Stride*{config.projector_pool_stride}): {actual_in_dim}")
 
     # 2. Detect LLM Dim from Shared Expert Output
-    if 'shared_expert.w3.weight' in state_dict:
-        w3 = state_dict['shared_expert.w3.weight'] # [out_dim, hidden]
+    if "shared_expert.w3.weight" in state_dict:
+        w3 = state_dict["shared_expert.w3.weight"]  # [out_dim, hidden]
         config.llm_dim = w3.shape[0]
         config.projector_hidden_dim = w3.shape[1]
         print(f"      - LLM Dim: {config.llm_dim}")
@@ -150,9 +159,11 @@ def auto_infer_config(state_dict, config):
 
     return config
 
+
 # ==============================================================================
 # 3. TEST LOGIC
 # ==============================================================================
+
 
 def test_routing(path_or_repo, batch_size=4, seq_len=150):
     print("\n🚀 STARTING LIVE ROUTING TEST")
@@ -206,8 +217,8 @@ def test_routing(path_or_repo, batch_size=4, seq_len=150):
         routing_probs = f.softmax(router_logits.float(), dim=-1)
         top_k_weights, top_k_indices = torch.topk(routing_probs, model.top_k, dim=-1)
 
-        captured_data['indices'] = top_k_indices
-        captured_data['probs'] = routing_probs
+        captured_data["indices"] = top_k_indices
+        captured_data["probs"] = routing_probs
         return None, None
 
     model.forward = instrumented_forward
@@ -220,12 +231,12 @@ def test_routing(path_or_repo, batch_size=4, seq_len=150):
         model(dummy_input)
 
     # 6. Analyze Results
-    if 'indices' not in captured_data:
+    if "indices" not in captured_data:
         print("   ❌ Failed to capture routing indices.")
         return
 
-    indices = captured_data['indices'].flatten()
-    probs = captured_data['probs']
+    indices = captured_data["indices"].flatten()
+    probs = captured_data["probs"]
 
     total_tokens = indices.numel()
     counts = torch.bincount(indices, minlength=config.num_experts)
@@ -254,6 +265,7 @@ def test_routing(path_or_repo, batch_size=4, seq_len=150):
         print(f"{i:<6} | {count:<8} | {pct:5.1f}%      | {bar} {status}")
 
     print("-" * 65)
+
 
 def test_routing_advanced(model, batch_size=4, seq_len=150, encoder_dim=1024):
     """
@@ -302,13 +314,15 @@ def test_routing_advanced(model, batch_size=4, seq_len=150, encoder_dim=1024):
             router_logits = f.linear(input_normed, router_normed) * model.router_scale
 
             if model.training and model.jitter_noise > 0:
-                router_logits = router_logits + (torch.randn_like(router_logits) * model.jitter_noise)
+                router_logits = router_logits + (
+                    torch.randn_like(router_logits) * model.jitter_noise
+                )
 
             routing_probs = f.softmax(router_logits.float(), dim=-1)
             top_k_weights, top_k_indices = torch.topk(routing_probs, model.top_k, dim=-1)
 
-            capture_dict['indices'] = top_k_indices
-            capture_dict['probs'] = routing_probs
+            capture_dict["indices"] = top_k_indices
+            capture_dict["probs"] = routing_probs
 
             # Full forward for gradient test
             top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
@@ -321,12 +335,13 @@ def test_routing_advanced(model, batch_size=4, seq_len=150, encoder_dim=1024):
                 indices_k = top_k_indices[:, k]
                 weights_k = top_k_weights[:, k].unsqueeze(-1)
                 for expert_idx, expert in enumerate(model.experts):
-                    mask = (indices_k == expert_idx)
+                    mask = indices_k == expert_idx
                     if mask.any():
                         routed_out[mask] += expert(norm_x[mask]) * weights_k[mask]
 
             final_out = model.ln_post(shared_out + routed_out)
             return final_out.view(batch_size, -1, model.out_dim), 0.0
+
         return forward
 
     # Run 1
@@ -411,6 +426,7 @@ def test_routing_advanced(model, batch_size=4, seq_len=150, encoder_dim=1024):
     print("DIAGNOSTICS COMPLETE")
     print("=" * 80)
 
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python scripts/test_moe_routing.py <path_or_repo_id> [--advanced]")
@@ -419,7 +435,7 @@ if __name__ == "__main__":
         print("  --advanced    Run advanced diagnostics (determinism & gradient flow)")
     else:
         path_or_repo = sys.argv[1]
-        run_advanced = '--advanced' in sys.argv
+        run_advanced = "--advanced" in sys.argv
 
         # Basic routing test
         test_routing(path_or_repo)

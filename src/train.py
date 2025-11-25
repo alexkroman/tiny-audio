@@ -222,7 +222,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
 
         # Strip any remaining HTML-like tags
-        return re.sub(r'<[^>]+>', '', text)
+        return re.sub(r"<[^>]+>", "", text)
 
     def _normalize_text(self, text: str) -> str:
         """Apply Whisper normalization (matches eval script)."""
