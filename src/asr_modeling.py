@@ -442,8 +442,6 @@ class ASRModel(PreTrainedModel):
             prompt_ids, audio_embeds, audio_mask=audio_mask
         )
 
-        prompt_length = inputs_embeds.shape[1]
-
         # Set generation defaults
         generate_kwargs.setdefault("max_new_tokens", getattr(self.config, "max_new_tokens", 128))
         generate_kwargs.setdefault("use_cache", True)
@@ -451,17 +449,19 @@ class ASRModel(PreTrainedModel):
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
 
         # Generate (type ignore needed as generate() has complex return type)
+        # Note: When using inputs_embeds, generate() returns only new tokens
+        # (no placeholder positions for input embeddings), so no stripping needed
         output = self.language_model.generate(  # type: ignore[operator]
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             **generate_kwargs,
         )
 
-        # Return only generated tokens (strip prompt)
+        # Return generated tokens directly - no stripping needed with inputs_embeds
         if isinstance(output, torch.Tensor):
-            return output[:, prompt_length:]
+            return output
         # Handle GenerateOutput types that have sequences attribute
-        return output.sequences[:, prompt_length:]
+        return output.sequences
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
         """Save model, tokenizer, and processor."""
