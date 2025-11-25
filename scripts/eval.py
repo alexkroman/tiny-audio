@@ -230,24 +230,11 @@ def evaluate_huggingface(
         from src.asr_modeling import ASRModel
         from src.asr_pipeline import ASRPipeline
 
-        # Determine device
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        # Load model - dtype and device handled automatically
+        model = ASRModel.from_pretrained(model_or_endpoint)
 
-        # Load model directly to device
-        model = ASRModel.from_pretrained(
-            model_or_endpoint,
-            dtype=torch.float16 if device == "cuda" else torch.float32,
-            device_map=None,
-            device=device,
-        )
-
-        # Create pipeline using local ASRPipeline class directly
-        pipe = ASRPipeline(
-            model=model,
-            tokenizer=model.tokenizer,
-            feature_extractor=model.feature_extractor,
-            device=device,
-        )
+        # Create pipeline
+        pipe = ASRPipeline(model=model)
 
         for sample_count, sample in enumerate(dataset, start=1):
             try:

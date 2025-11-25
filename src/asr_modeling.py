@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Optional, Union
 
 import torch
@@ -26,6 +25,8 @@ class ASRModel(PreTrainedModel):
     main_input_name = "input_features"
     _supports_flash_attn_2 = True
     supports_gradient_checkpointing = True
+    _is_loading_from_pretrained: bool = False
+    _pretrained_model_path: Optional[str] = None
 
     TASK_PROMPTS = {
         "transcribe": "Transcribe: <audio>",
@@ -33,6 +34,49 @@ class ASRModel(PreTrainedModel):
         "describe": "Describe: <audio>",
         "emotion": "Emotion: <audio>",
     }
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        """Load model from pretrained, handling device placement correctly."""
+        from safetensors.torch import load_file
+        from transformers import AutoFeatureExtractor
+        from transformers.utils.hub import cached_file
+
+        config = kwargs.pop("config", None)
+        if config is None:
+            config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+
+        # Set flag to avoid device_map="auto" in sub-model loaders
+        cls._is_loading_from_pretrained = True
+        cls._pretrained_model_path = pretrained_model_name_or_path
+
+        try:
+            model = cls(config, **kwargs)
+
+            # Load projector weights from safetensors
+            subfolder = kwargs.get("subfolder")
+            revision = kwargs.get("revision")
+            cache_kwargs = {}
+            if subfolder:
+                cache_kwargs["subfolder"] = subfolder
+            if revision:
+                cache_kwargs["revision"] = revision
+
+            model_file = cached_file(
+                pretrained_model_name_or_path,
+                "model.safetensors",
+                _raise_exceptions_for_missing_entries=False,
+                **cache_kwargs,
+            )
+
+            if model_file is not None:
+                state_dict = load_file(model_file)
+                model.load_state_dict(state_dict, strict=False)
+
+            return model
+        finally:
+            cls._is_loading_from_pretrained = False
+            cls._pretrained_model_path = None
 
     def __init__(self, config: ASRConfig, **kwargs):
         super().__init__(config)
@@ -69,13 +113,17 @@ class ASRModel(PreTrainedModel):
 
         return AutoFeatureExtractor.from_pretrained(config.audio_model_id)
 
-    def _load_audio_encoder(self, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
+    @classmethod
+    def _load_audio_encoder(cls, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
         """Load and freeze the audio encoder."""
         encoder_kwargs = {
             "attn_implementation": config.attn_implementation,
             "dtype": dtype,
-            "low_cpu_mem_usage": True,
         }
+        # Only use device_map="auto" when NOT loading from pretrained
+        # (avoids meta tensor conflicts during from_pretrained)
+        if not cls._is_loading_from_pretrained:
+            encoder_kwargs["device_map"] = "auto"
 
         if "whisper" in config.audio_model_id.lower():
             from transformers import WhisperModel
@@ -90,15 +138,20 @@ class ASRModel(PreTrainedModel):
         encoder.eval()
         return encoder
 
-    def _load_language_model(self, config: ASRConfig, dtype: torch.dtype) -> PreTrainedModel:
+    @classmethod
+    def _load_language_model(cls, config: ASRConfig, dtype: torch.dtype) -> PreTrainedModel:
         """Load and freeze the language model."""
-        decoder = AutoModelForCausalLM.from_pretrained(
-            config.text_model_id,
-            attn_implementation=config.attn_implementation,
-            dtype=dtype,
-            trust_remote_code=True,
-            low_cpu_mem_usage=True,
-        )
+        decoder_kwargs = {
+            "attn_implementation": config.attn_implementation,
+            "dtype": dtype,
+            "trust_remote_code": True,
+            "tie_word_embeddings": True,
+        }
+        # Only use device_map="auto" when NOT loading from pretrained
+        if not cls._is_loading_from_pretrained:
+            decoder_kwargs["device_map"] = "auto"
+
+        decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
         decoder.config.use_cache = getattr(config, "use_cache", True)
         decoder.requires_grad_(False)
         decoder.eval()
@@ -106,33 +159,20 @@ class ASRModel(PreTrainedModel):
 
     def _create_projector(self, config: ASRConfig, dtype: torch.dtype) -> MoEAudioProjector:
         """Create the trainable audio projector."""
-        # Auto-detect dimensions
-        encoder_dim = config.encoder_dim
-        if encoder_dim is None:
+        # Auto-detect dimensions if not specified
+        if config.encoder_dim is None:
             enc_cfg = self.audio_tower.config
-            encoder_dim = getattr(enc_cfg, "hidden_size", None) or getattr(enc_cfg, "d_model", None)
-            if encoder_dim is None:
+            config.encoder_dim = getattr(enc_cfg, "hidden_size", None) or getattr(enc_cfg, "d_model", None)
+            if config.encoder_dim is None:
                 raise ValueError("Could not auto-detect encoder_dim. Please specify in config.")
 
-        llm_dim = config.llm_dim
-        if llm_dim is None:
+        if config.llm_dim is None:
             dec_cfg = self.language_model.config
-            llm_dim = getattr(dec_cfg, "hidden_size", None) or getattr(dec_cfg, "d_model", None)
-            if llm_dim is None:
+            config.llm_dim = getattr(dec_cfg, "hidden_size", None) or getattr(dec_cfg, "d_model", None)
+            if config.llm_dim is None:
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
-        proj_config = SimpleNamespace(
-            encoder_dim=encoder_dim,
-            llm_dim=llm_dim,
-            num_experts=32,
-            moe_top_k=2,
-            projector_hidden_dim=llm_dim // 4,
-            shared_projector_hidden_dim=llm_dim // 2,
-            routed_scaling_factor=1.0,
-            projector_pool_stride=getattr(config, "projector_pool_stride", 2),
-        )
-
-        projector = MoEAudioProjector(proj_config)
+        projector = MoEAudioProjector(config)
         return projector.to(dtype=dtype)
 
     def _init_tokenizer(self, config: ASRConfig):

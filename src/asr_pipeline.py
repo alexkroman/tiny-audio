@@ -70,7 +70,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         for chunk in chunks:
             output = self._forward(chunk, **generate_kwargs)
-            tokens = output.get("tokens") or output.get("generated_ids")
+            tokens = output.get("tokens")
+            if tokens is None:
+                tokens = output.get("generated_ids")
             if tokens is not None:
                 if torch.is_tensor(tokens):
                     tokens = tokens.cpu()
