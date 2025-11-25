@@ -56,7 +56,6 @@ class MoEAudioProjector(nn.Module):
         self.z_loss_coef = getattr(config, "router_z_loss_coef", 1e-4)
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
-        # Buffer saves with checkpoint but doesn't update via optimizer
         self.expert_load: torch.Tensor
         self.register_buffer("expert_load", torch.ones(self.num_experts) / self.num_experts)
 
