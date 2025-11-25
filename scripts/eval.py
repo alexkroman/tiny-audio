@@ -155,15 +155,13 @@ def evaluate_huggingface(
         temp_dir = tempfile.mkdtemp()
 
         try:
-            sample_count = 0
-            for i, sample in enumerate(dataset):
-                sample_count += 1
+            for sample_count, sample in enumerate(dataset, start=1):
 
                 # Get WAV bytes for API
                 wav_bytes = prepare_wav_bytes(sample[audio_field])
 
                 # Write to temporary file with .wav extension
-                temp_path = Path(temp_dir) / f"temp_{i}.wav"
+                temp_path = Path(temp_dir) / f"temp_{sample_count}.wav"
                 temp_path.write_bytes(wav_bytes)
 
                 try:
@@ -250,10 +248,7 @@ def evaluate_huggingface(
             device=device,
         )
 
-        sample_count = 0
-        for i, sample in enumerate(dataset):
-            sample_count += 1
-
+        for sample_count, sample in enumerate(dataset, start=1):
             try:
                 # Pass audio directly to our custom pipeline
                 start_time = time.time()
@@ -365,10 +360,7 @@ def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_
     def normalize_text(text: str) -> str:
         return whisper_tokenizer.normalize(preprocess_text(text))
 
-    sample_count = 0
-    for i, sample in enumerate(dataset):
-        sample_count += 1
-
+    for sample_count, sample in enumerate(dataset, start=1):
         # Get WAV bytes for API
         wav_bytes = prepare_wav_bytes(sample[audio_field])
 

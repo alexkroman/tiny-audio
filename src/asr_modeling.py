@@ -1,6 +1,5 @@
 from pathlib import Path
 from typing import Optional, Union
-import math
 
 import torch
 import torch.nn as nn
@@ -11,16 +10,15 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
-    TextIteratorStreamer,
     Wav2Vec2FeatureExtractor,
 )
-from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 from transformers.generation.utils import (
     GenerateBeamDecoderOnlyOutput,
     GenerateBeamEncoderDecoderOutput,
     GenerateDecoderOnlyOutput,
     GenerateEncoderDecoderOutput,
 )
+from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 
 try:
     from .asr_config import ASRConfig
@@ -38,9 +36,7 @@ class SwiGLU(nn.Module):
         w12_out = self.w12(x)
         x_gate, x_val = w12_out.chunk(2, dim=-1)
         x = F.silu(x_gate) * x_val
-        x = self.w3(x)
-        x = self.dropout(x)
-        return x
+        return self.dropout(self.w3(x))
 
 class MoEAudioProjector(nn.Module):
     def __init__(self, config):
@@ -49,14 +45,14 @@ class MoEAudioProjector(nn.Module):
         self.num_experts = getattr(config, "num_experts", 8)
         self.top_k = getattr(config, "moe_top_k", 2)
         self.router_scale = 12.0
-        self.jitter_noise = 0.01 
+        self.jitter_noise = 0.01
 
         in_dim = config.encoder_dim * self.k
         self.out_dim = config.llm_dim
         expert_hidden = getattr(config, "projector_hidden_dim", 512)
 
-        self.ln_pre = RMSNorm(in_dim, eps=1e-5)
-        self.ln_post = RMSNorm(self.out_dim, eps=1e-5)
+        self.ln_pre = RMSNorm(in_dim, eps=1e-6)
+        self.ln_post = RMSNorm(self.out_dim, eps=1e-6)
         self.router_weights = nn.Parameter(torch.randn(self.num_experts, in_dim) * 0.02)
 
         self.shared_expert = SwiGLU(in_dim, expert_hidden, self.out_dim)
@@ -69,15 +65,9 @@ class MoEAudioProjector(nn.Module):
             nn.init.normal_(self.shared_expert.w3.weight, std=0.02)
 
             for expert in self.experts:
-                expert.w12.weight.copy_(self.shared_expert.w12.weight)
-                expert.w12.weight.add_(torch.randn_like(expert.w12.weight) * 0.002)
+                expert.w12.weight.copy_(self.shared_expert.w12.weight)  # type: ignore[operator]
+                expert.w12.weight.add_(torch.randn_like(expert.w12.weight) * 0.002)  # type: ignore[operator]
                 nn.init.normal_(expert.w3.weight, std=0.02)
-
-    def _safe_normalize(self, x, dim=-1, eps=1e-4):
-        """Normalization safe for bfloat16 and zero-vectors."""
-        norm = torch.linalg.vector_norm(x, dim=dim, keepdim=True, dtype=torch.float32)
-        norm = torch.clamp(norm, min=eps)
-        return x / norm.type_as(x)
 
     def forward(self, x):
         batch_size, seq_len, dim = x.size()
@@ -86,14 +76,14 @@ class MoEAudioProjector(nn.Module):
         if remainder:
             x = F.pad(x, (0, 0, 0, self.k - remainder))
 
-        x = x.view(batch_size, -1, dim * self.k)
+        x = x.contiguous().view(batch_size, -1, dim * self.k)
         x_flat = x.view(-1, dim * self.k)
         norm_x = self.ln_pre(x_flat)
 
         shared_out = self.shared_expert(norm_x)
 
-        input_normed = self._safe_normalize(norm_x, dim=-1)
-        router_normed = self._safe_normalize(self.router_weights, dim=-1)
+        input_normed = F.normalize(norm_x, dim=-1)
+        router_normed = F.normalize(self.router_weights, dim=-1)
         router_logits = F.linear(input_normed, router_normed) * self.router_scale
 
         if self.training and self.jitter_noise > 0:
@@ -104,12 +94,13 @@ class MoEAudioProjector(nn.Module):
         routing_probs = F.softmax(router_logits.float(), dim=-1)
         top_k_weights, top_k_indices = torch.topk(routing_probs, self.top_k, dim=-1)
 
-        self.last_routing_indices = top_k_indices.detach().cpu()
+        # self.last_routing_indices = top_k_indices.detach().cpu()
 
         top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
         top_k_weights = top_k_weights.to(x.dtype)
 
         routed_out = torch.zeros_like(shared_out)
+
         for k in range(self.top_k):
             indices_k = top_k_indices[:, k]
             weights_k = top_k_weights[:, k].unsqueeze(-1)
@@ -129,7 +120,7 @@ class MoEAudioProjector(nn.Module):
 
         final_out = self.ln_post(shared_out + routed_out)
         return final_out.view(batch_size, -1, self.out_dim), aux_loss
-    
+
 class ASRModel(PreTrainedModel):
     config_class = ASRConfig
     base_model_prefix = "model"
@@ -164,7 +155,7 @@ class ASRModel(PreTrainedModel):
                 mask_feature_min_masks=0,
                 mask_time_prob=0.05,
                 mask_time_length=20,
-                mask_time_min_masks=1,        
+                mask_time_min_masks=1,
             )
         return Wav2Vec2FeatureExtractor.from_pretrained(audio_model_id)
 
@@ -351,7 +342,7 @@ class ASRModel(PreTrainedModel):
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
 
-        decoder = decoder.to(dtype=target_dtype)
+        decoder = decoder.to(dtype=target_dtype)  # type: ignore[call-arg]
         decoder.config.use_cache = config.use_cache
         decoder.requires_grad_(False)
         decoder.eval()
@@ -413,11 +404,11 @@ class ASRModel(PreTrainedModel):
 
     def get_processor(self):
         try:
-            from .asr_processing import ASRProcessor
+            from .asr_processing import ASRProcessor as Processor
         except ImportError:
-            from asr_processing import ASRProcessor 
+            from asr_processing import ASRProcessor as Processor  # type: ignore[no-redef]
 
-        return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
+        return Processor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
 
     def state_dict(self, *args, **kwargs):
         return self._get_trainable_state_dict()
@@ -732,7 +723,7 @@ class ASRModel(PreTrainedModel):
             fill_value=1,
             audio_fill_value=pooled_audio_mask
         )
-        
+
         config_params = [
             "max_new_tokens", "min_new_tokens", "num_beams", "do_sample",
             "temperature", "top_k", "top_p", "repetition_penalty",

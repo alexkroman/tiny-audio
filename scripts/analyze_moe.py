@@ -13,15 +13,16 @@ Diagnoses:
 5. Spectral Health: Uses SVD to check for rank collapse (feature richness).
 """
 
-import sys
-import os
 import re
+import sys
+from collections import defaultdict
+from pathlib import Path
+from typing import List, Optional
+
 import numpy as np
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as f
 from safetensors.torch import load_file
-from collections import defaultdict
-from typing import Dict, List, Optional
 
 # --- Helper Functions ---
 
@@ -29,22 +30,19 @@ def draw_ascii_bar(values: List[float], labels: Optional[List[str]] = None, max_
     """Draws a visual comparison bar chart."""
     if len(values) == 0:
         return
-    
+
     values = np.array(values)
     min_val, max_val = values.min(), values.max()
     range_val = max_val - min_val if max_val != min_val else 1.0
-    
+
     print("-" * 65)
     for i, val in enumerate(values):
         # Normalize to 0-1 for width
-        if range_val > 0:
-            normalized = (val - min_val) / range_val
-        else:
-            normalized = 0.5 # If all values are identical
-            
+        normalized = (val - min_val) / range_val if range_val > 0 else 0.5
+
         width = int(normalized * max_width)
         bar = "█" * width
-        
+
         label = f"{labels[i]:<4}" if labels else f"{i:<4}"
         print(f"{label} | {bar:<{max_width}} {val:.6f}")
     print("-" * 65)
@@ -57,15 +55,15 @@ def compute_effective_rank(matrix: torch.Tensor) -> float:
     """
     if matrix.dim() > 2:
         matrix = matrix.view(matrix.size(0), -1)
-    
+
     # Move to float32 and CPU for SVD stability
     matrix = matrix.float().cpu()
-    
+
     try:
-        # We only need singular values (S)
-        S = torch.linalg.svdvals(matrix)
+        # We only need singular values (s)
+        s = torch.linalg.svdvals(matrix)
         # Normalize to treat as probabilities
-        p = S / S.sum()
+        p = s / s.sum()
         # Compute entropy
         entropy = -torch.sum(p * torch.log(p + 1e-10))
         # Effective rank = e^entropy
@@ -85,13 +83,14 @@ def check_integrity(name: str, tensor: torch.Tensor) -> bool:
 
 def resolve_model_path(path_or_repo: str) -> str:
     """Handles local paths or HuggingFace repo downloads."""
-    if os.path.exists(path_or_repo):
-        if os.path.isdir(path_or_repo):
-            candidate = os.path.join(path_or_repo, "model.safetensors")
-            if os.path.exists(candidate):
-                return candidate
+    path = Path(path_or_repo)
+    if path.exists():
+        if path.is_dir():
+            candidate = path / "model.safetensors"
+            if candidate.exists():
+                return str(candidate)
         return path_or_repo
-        
+
     if "/" in path_or_repo and not path_or_repo.endswith(".safetensors"):
         try:
             from huggingface_hub import hf_hub_download
@@ -105,12 +104,12 @@ def resolve_model_path(path_or_repo: str) -> str:
 # --- Main Analysis Logic ---
 
 def analyze_checkpoint(file_path: str):
-    print(f"\n🔬 MOE FORENSIC ANALYSIS")
+    print("\n🔬 MOE FORENSIC ANALYSIS")
     print(f"   Target: {file_path}")
     print("=" * 65)
 
     file_path = resolve_model_path(file_path)
-    if not os.path.exists(file_path):
+    if not Path(file_path).exists():
         print(f"❌ File not found: {file_path}")
         return
 
@@ -123,11 +122,11 @@ def analyze_checkpoint(file_path: str):
     # Filter for projector weights
     # We look for 'projector' keys first, fallback to generic if not found
     proj_weights = {k: v for k, v in tensors.items() if "projector" in k}
-    
+
     if not proj_weights:
         print("⚠️  No 'projector' prefix found. Searching for generic expert keys...")
         proj_weights = {k: v for k, v in tensors.items() if "experts" in k or "router" in k}
-    
+
     if not proj_weights:
         print("❌ No MoE parameters found in this checkpoint.")
         return
@@ -145,16 +144,16 @@ def analyze_checkpoint(file_path: str):
     for k, v in proj_weights.items():
         if not check_integrity(k, v):
             healthy = False
-        
+
         k_clean = k.lower()
-        
+
         if "shared_expert.w12" in k_clean:
             shared_w12 = v
         elif "shared_expert.w3" in k_clean:
             shared_w3 = v
         elif "router_weights" in k_clean:
             router_w = v
-        
+
         # Regex to find expert index (e.g., experts.0.w12)
         match = re.search(r"experts\.(\d+)\.", k)
         if match:
@@ -163,7 +162,7 @@ def analyze_checkpoint(file_path: str):
                 experts_map[idx]['w12'] = v
             elif "w3" in k:
                 experts_map[idx]['w3'] = v
-    
+
     if not healthy:
         print("\n❌ ABORTING ANALYSIS: Model weights are corrupted (NaN/Inf).")
         return
@@ -184,11 +183,11 @@ def analyze_checkpoint(file_path: str):
     if router_w is not None:
         r_std = router_w.std().item()
         r_norm = torch.linalg.norm(router_w).item()
-        
+
         print(f"   Router Weight Std:  {r_std:.5f}")
         print(f"   Router Weight Mean: {router_w.mean().item():.5f}")
         print(f"   Router Weight Norm: {r_norm:.5f}")
-        
+
         if r_std > 1.0:
             print("   ⚠️  High Variance: Router might be over-confident (Gradient Explosion).")
         elif r_std < 1e-4:
@@ -203,20 +202,20 @@ def analyze_checkpoint(file_path: str):
     if len(routed_w12s) > 1:
         # Stack and flatten: [Num_Experts, Total_Params]
         flat_experts = torch.stack([w.view(-1) for w in routed_w12s]).float()
-        norm_experts = F.normalize(flat_experts, p=2, dim=1)
-        
+        norm_experts = f.normalize(flat_experts, p=2, dim=1)
+
         # Cosine Similarity Matrix
         sim_matrix = torch.mm(norm_experts, norm_experts.t())
-        
+
         # Mask diagonal
         mask = ~torch.eye(num_experts, dtype=torch.bool, device=sim_matrix.device)
         off_diag = sim_matrix[mask]
-        
+
         avg_sim = off_diag.mean().item()
-        
+
         print(f"   Avg Similarity: {avg_sim:.4f} (Lower is better)")
         print(f"   Max Similarity: {off_diag.max().item():.4f}")
-        
+
         if avg_sim > 0.98:
              print("   ❌ RED ZONE: Experts are identical clones.")
         elif avg_sim > 0.80:
@@ -230,13 +229,13 @@ def analyze_checkpoint(file_path: str):
         shared_mag = shared_w3.abs().mean().item()
         expert_mags = [w.abs().mean().item() for w in routed_w3s]
         avg_routed_mag = np.mean(expert_mags)
-        
+
         print(f"   Shared W3 Mean Mag: {shared_mag:.6f}")
         print(f"   Routed W3 Mean Mag: {avg_routed_mag:.6f}")
-        
+
         print("\n   W3 Magnitude per Expert:")
         draw_ascii_bar(expert_mags, labels=[str(i) for i in sorted_indices])
-        
+
         # Heuristic check
         ratio = avg_routed_mag / (shared_mag + 1e-9)
         if ratio > 0.8 and ratio < 1.2:
@@ -251,12 +250,12 @@ def analyze_checkpoint(file_path: str):
         full_rank = min(shared_w12.shape)
         pct = (rank / full_rank) * 100
         print(f"   Shared Expert Rank: {rank:.1f} / {full_rank} ({pct:.1f}%)")
-    
+
     if len(routed_w12s) > 0:
         ranks = [compute_effective_rank(w) for w in routed_w12s]
         avg_rank = np.mean(ranks)
         full_rank = min(routed_w12s[0].shape)
-        
+
         print(f"   Avg Routed Expert Rank: {avg_rank:.1f} / {full_rank} ({(avg_rank/full_rank)*100:.1f}%)")
         print("\n   Rank per Expert:")
         draw_ascii_bar(ranks, labels=[str(i) for i in sorted_indices])

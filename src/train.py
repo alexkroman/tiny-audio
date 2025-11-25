@@ -100,9 +100,8 @@ class DatasetLoader:
 
                 # Skip TEDLIUM segments marked to be ignored
                 text = example.get("text", "")
-                if isinstance(text, str):
-                    if text.strip() == "ignore_time_segment_in_scoring":
-                        continue
+                if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
+                    continue
 
                 example["task"] = task_val
                 yield example
@@ -223,9 +222,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
 
         # Strip any remaining HTML-like tags
-        text = re.sub(r'<[^>]+>', '', text)
-
-        return text
+        return re.sub(r'<[^>]+>', '', text)
 
     def _normalize_text(self, text: str) -> str:
         """Apply Whisper normalization (matches eval script)."""
@@ -506,7 +503,7 @@ def main(cfg: DictConfig) -> None:
     ]
 
     # Also remove any projector-specific configs
-    projector_keys = [k for k in training_args.keys() if k.startswith("projector_")]
+    projector_keys = [k for k in training_args if k.startswith("projector_")]
     for key in non_training_args + projector_keys:
         training_args.pop(key, None)
 

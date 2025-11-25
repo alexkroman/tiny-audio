@@ -2,17 +2,14 @@
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.poetry]
+[project]
 name = "tiny-audio"
 version = "0.1.0"
 description = "Learn ASR by Building One - A minimal speech recognition model combining HuBERT with Qwen3-8B"
-authors = ["Alex Kroman <alex@alexkroman.com>"]
+authors = [{name = "Alex Kroman", email = "alex@alexkroman.com"}]
 license = "MIT"
 readme = "README.md"
 keywords = ["speech-recognition", "asr", "hubert", "qwen3", "transformers", "deep-learning", "education"]
-homepage = "https://github.com/alexkroman/tiny-audio"
-repository = "https://github.com/alexkroman/tiny-audio"
-documentation = "https://github.com/alexkroman/tiny-audio#readme"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -24,11 +21,42 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+requires-python = ">=3.10,<3.13"
+dynamic = ["dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/alexkroman/tiny-audio"
+Repository = "https://github.com/alexkroman/tiny-audio"
+Documentation = "https://github.com/alexkroman/tiny-audio#readme"
+"Bug Tracker" = "https://github.com/alexkroman/tiny-audio/issues"
+
+[project.scripts]
+# Course tools
+download-samples = "scripts.download_samples:download_samples"
+verify-setup = "scripts.verify_setup:main"
+
+# Model scripts (use: poetry run python src/train.py for training due to Hydra config paths)
+eval = "scripts.eval:main"
+push-to-hub = "scripts.push_to_hub:main"
+run-handler = "scripts.run_handler_local:main"
+
+# Deployment scripts
+deploy-hf = "scripts.deploy_to_hf_space:main"
+deploy-runpod = "scripts.deploy_runpod:main"
+remote-train = "scripts.start_remote_training:main"
+attach-remote = "scripts.attach_remote_session:main"
+
+# Development tools
+lint = "scripts.dev_tools:lint"
+format = "scripts.dev_tools:format_code"
+format-md = "scripts.dev_tools:format_markdown"
+type-check = "scripts.dev_tools:type_check"
+test = "scripts.dev_tools:test"
+check = "scripts.dev_tools:check_all"
+
+[tool.poetry]
 packages = [{include = "src"}]
 include = ["*.json", "*.yaml", "*.yml"]
-
-[tool.poetry.urls]
-"Bug Tracker" = "https://github.com/alexkroman/tiny-audio/issues"
 
 [[tool.poetry.source]]
 name = "pytorch-cu128"
@@ -66,31 +94,6 @@ ruff = ">=0.1.0"
 mypy = ">=1.5.0"
 pyright = ">=1.1.0"
 mdformat = ">=0.7.0"
-
-
-[tool.poetry.scripts]
-# Course tools
-download-samples = "scripts.download_samples:download_samples"
-verify-setup = "scripts.verify_setup:main"
-
-# Model scripts (use: poetry run python src/train.py for training due to Hydra config paths)
-eval = "scripts.eval:main"
-push-to-hub = "scripts.push_to_hub:main"
-run-handler = "scripts.run_handler_local:main"
-
-# Deployment scripts
-deploy-hf = "scripts.deploy_to_hf_space:main"
-deploy-runpod = "scripts.deploy_runpod:main"
-remote-train = "scripts.start_remote_training:main"
-attach-remote = "scripts.attach_remote_session:main"
-
-# Development tools
-lint = "scripts.dev_tools:lint"
-format = "scripts.dev_tools:format_code"
-format-md = "scripts.dev_tools:format_markdown"
-type-check = "scripts.dev_tools:type_check"
-test = "scripts.dev_tools:test"
-check = "scripts.dev_tools:check_all"
 
 [tool.black]
 line-length = 100
@@ -210,4 +213,3 @@ wrap = 100
 number = false
 # Exclude model_card.md to preserve YAML front matter
 exclude = ["model_card.md"]
-
