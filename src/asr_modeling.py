@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional, Union
 
 import torch
@@ -10,31 +11,21 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
-    Wav2Vec2FeatureExtractor,
 )
-from transformers.generation.utils import (
-    GenerateBeamDecoderOnlyOutput,
-    GenerateBeamEncoderDecoderOutput,
-    GenerateDecoderOnlyOutput,
-    GenerateEncoderDecoderOutput,
-)
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
-try:
-    from .asr_config import ASRConfig
-    from .asr_projector import MoEAudioProjector
-except ImportError:
-    from asr_config import ASRConfig  # type: ignore[no-redef]
-    from asr_projector import MoEAudioProjector  # type: ignore[no-redef]
+from .asr_config import ASRConfig
+from .asr_projector import MoEAudioProjector
 
 
 class ASRModel(PreTrainedModel):
+    """Audio-to-text model combining an audio encoder, projector, and language model."""
+
     config_class = ASRConfig
     base_model_prefix = "model"
-    main_input_name = "input_values"
+    main_input_name = "input_features"
     _supports_flash_attn_2 = True
     supports_gradient_checkpointing = True
-    _is_loading_from_pretrained: bool = False
-    _pretrained_model_path: Optional[str] = None
 
     TASK_PROMPTS = {
         "transcribe": "Transcribe: <audio>",
@@ -43,191 +34,48 @@ class ASRModel(PreTrainedModel):
         "emotion": "Emotion: <audio>",
     }
 
-    @staticmethod
-    def _create_feature_extractor(audio_model_id: str, training_mode: bool = False):
-        is_whisper = "whisper" in audio_model_id.lower()
-        if is_whisper:
-            from transformers import WhisperConfig, WhisperFeatureExtractor
-
-            encoder_config = WhisperConfig.from_pretrained(audio_model_id)
-            num_mel_bins = encoder_config.num_mel_bins
-
-            return WhisperFeatureExtractor.from_pretrained(
-                audio_model_id,
-                feature_size=num_mel_bins,
-                apply_spec_augment=training_mode,
-                mask_feature_prob=0.05,
-                mask_feature_length=15,
-                mask_feature_min_masks=0,
-                mask_time_prob=0.05,
-                mask_time_length=20,
-                mask_time_min_masks=1,
-            )
-        return Wav2Vec2FeatureExtractor.from_pretrained(audio_model_id)
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        from transformers import AutoFeatureExtractor
-
-        config = kwargs.pop("config", None)
-        if config is None:
-            config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
-
-        kwargs["feature_extractor"] = AutoFeatureExtractor.from_pretrained(
-            pretrained_model_name_or_path, **kwargs
-        )
-
-        cls._is_loading_from_pretrained = True
-        cls._pretrained_model_path = pretrained_model_name_or_path
-
-        try:
-            from safetensors.torch import load_file
-            from transformers.utils.hub import cached_file
-
-            model = cls(config, **kwargs)
-
-            subfolder = kwargs.get("subfolder")
-            revision = kwargs.get("revision")
-            cache_kwargs = {}
-            if subfolder:
-                cache_kwargs["subfolder"] = subfolder
-            if revision:
-                cache_kwargs["revision"] = revision
-
-            model_file = cached_file(
-                pretrained_model_name_or_path,
-                "model.safetensors",
-                _raise_exceptions_for_missing_entries=False,
-                **cache_kwargs,
-            )
-
-            if not model_file:
-                raise FileNotFoundError(
-                    f"model.safetensors not found in {pretrained_model_name_or_path}. "
-                )
-
-            state_dict = load_file(model_file)
-            model.load_state_dict(state_dict, strict=False, assign=True)
-
-            # Let Accelerate handle dtype and device management
-            device = kwargs.get("device")
-            if device is not None:
-                model = model.to(device)
-
-            return model
-        finally:
-            cls._is_loading_from_pretrained = False
-            del cls._pretrained_model_path
-
     def __init__(self, config: ASRConfig, **kwargs):
         super().__init__(config)
 
-        feature_extractor = kwargs.pop("feature_extractor", None)
         self.system_prompt = config.system_prompt
-
-        self.encoder = self._create_encoder(config)
-
-        is_whisper = "whisper" in config.audio_model_id.lower() or (
-            hasattr(self.encoder.config, "model_type")
-            and "whisper" in self.encoder.config.model_type.lower()
-        )
-
-        if is_whisper:
-            self.main_input_name = "input_features"
-        else:
-            self.main_input_name = "input_values"
-
-        if feature_extractor is not None:
-            self.feature_extractor = feature_extractor
-        else:
-            training_mode = getattr(config, "use_specaugment", False)
-            self.feature_extractor = self._create_feature_extractor(
-                config.audio_model_id, training_mode=training_mode
-            )
-
-        self.decoder = self._create_decoder(config)
-        self.generation_config = self.decoder.generation_config
-
-        config_params = [
-            "max_new_tokens",
-            "min_new_tokens",
-            "num_beams",
-            "do_sample",
-            "temperature",
-            "top_k",
-            "top_p",
-            "repetition_penalty",
-            "length_penalty",
-            "no_repeat_ngram_size",
-            "early_stopping",
-            "use_cache",
-        ]
-        for param in config_params:
-            if hasattr(config, param) and getattr(config, param) is not None:
-                setattr(self.generation_config, param, getattr(config, param))
-
-        self._init_tokenizer()
-
-        # Store encoder type for forward pass
-        self.is_whisper_encoder = "whisper" in config.audio_model_id.lower() or (
-            hasattr(self.encoder.config, "model_type")
-            and "whisper" in self.encoder.config.model_type.lower()
-        )
-
-        from types import SimpleNamespace
-
-        encoder_dim = config.encoder_dim
-        if encoder_dim is None:
-            if hasattr(self.encoder.config, "hidden_size"):
-                encoder_dim = self.encoder.config.hidden_size
-            elif hasattr(self.encoder.config, "d_model"):
-                encoder_dim = self.encoder.config.d_model
-            else:
-                raise ValueError("Could not auto-detect encoder_dim. Please specify in config.")
-
-        llm_dim = config.llm_dim
-        if llm_dim is None:
-            if hasattr(self.decoder.config, "hidden_size"):
-                llm_dim = self.decoder.config.hidden_size
-            elif hasattr(self.decoder.config, "d_model"):
-                llm_dim = self.decoder.config.d_model
-            else:
-                raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
-
-        proj_kwargs = {k: v for k, v in vars(config).items() if k.startswith("projector_")}
-
-        proj_kwargs.update(
-            {
-                "encoder_dim": encoder_dim,
-                "llm_dim": llm_dim,
-                "num_experts": 32,
-                "moe_top_k": 2,
-                "projector_hidden_dim": llm_dim // 4,  # Tiny "Expert Slices"
-                "shared_projector_hidden_dim": llm_dim // 2,  # Robust Shared Expert
-                "routed_scaling_factor": 1.0,
-            }
-        )
-
-        projector_config = SimpleNamespace(**proj_kwargs)
-        self.projector = MoEAudioProjector(projector_config)
         target_dtype = getattr(torch, config.model_dtype)
-        self.projector = self.projector.to(dtype=target_dtype)
+
+        # Audio encoder (frozen)
+        self.audio_tower = self._load_audio_encoder(config, target_dtype)
+
+        # Language model (frozen)
+        self.language_model = self._load_language_model(config, target_dtype)
+        self.generation_config = self.language_model.generation_config
+
+        # Initialize tokenizer and special tokens
+        self._init_tokenizer(config)
+
+        # Feature extractor for audio preprocessing
+        self.feature_extractor = self._create_feature_extractor(config)
+
+        # Audio projector (trainable)
+        self.projector = self._create_projector(config, target_dtype)
+
+        # Loss function
         self.label_smoothing = getattr(config, "label_smoothing", 0.1)
         self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=self.label_smoothing)
 
-        self._no_split_modules = self.decoder._no_split_modules
+        # For model parallelism
+        self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
-    @classmethod
-    def _create_encoder(cls, config: ASRConfig):
-        target_dtype = getattr(torch, config.model_dtype)
+    def _create_feature_extractor(self, config: ASRConfig):
+        """Create the appropriate feature extractor for the audio encoder."""
+        from transformers import AutoFeatureExtractor
 
+        return AutoFeatureExtractor.from_pretrained(config.audio_model_id)
+
+    def _load_audio_encoder(self, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
+        """Load and freeze the audio encoder."""
         encoder_kwargs = {
             "attn_implementation": config.attn_implementation,
-            "dtype": target_dtype,
+            "dtype": dtype,
             "low_cpu_mem_usage": True,
         }
-        if not cls._is_loading_from_pretrained:
-            encoder_kwargs["device_map"] = "auto"
 
         if "whisper" in config.audio_model_id.lower():
             from transformers import WhisperModel
@@ -238,248 +86,208 @@ class ASRModel(PreTrainedModel):
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
-        encoder = encoder.to(dtype=target_dtype)
         encoder.requires_grad_(False)
         encoder.eval()
-
         return encoder
 
-    @classmethod
-    def _create_decoder(cls, config: ASRConfig):
-        target_dtype = getattr(torch, config.model_dtype)
-
-        decoder_kwargs = {
-            "attn_implementation": config.attn_implementation,
-            "trust_remote_code": True,
-            "low_cpu_mem_usage": True,
-            "dtype": target_dtype,
-        }
-
-        decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
-        assert isinstance(decoder, PreTrainedModel)
-        decoder = decoder.to(dtype=target_dtype)
-        decoder.config.use_cache = config.use_cache
+    def _load_language_model(self, config: ASRConfig, dtype: torch.dtype) -> PreTrainedModel:
+        """Load and freeze the language model."""
+        decoder = AutoModelForCausalLM.from_pretrained(
+            config.text_model_id,
+            attn_implementation=config.attn_implementation,
+            dtype=dtype,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+        )
+        decoder.config.use_cache = getattr(config, "use_cache", True)
         decoder.requires_grad_(False)
         decoder.eval()
-
         return decoder
 
-    def _init_weights(self, module):
-        pass
+    def _create_projector(self, config: ASRConfig, dtype: torch.dtype) -> MoEAudioProjector:
+        """Create the trainable audio projector."""
+        # Auto-detect dimensions
+        encoder_dim = config.encoder_dim
+        if encoder_dim is None:
+            enc_cfg = self.audio_tower.config
+            encoder_dim = getattr(enc_cfg, "hidden_size", None) or getattr(enc_cfg, "d_model", None)
+            if encoder_dim is None:
+                raise ValueError("Could not auto-detect encoder_dim. Please specify in config.")
 
-    def can_generate(self) -> bool:
-        return True
+        llm_dim = config.llm_dim
+        if llm_dim is None:
+            dec_cfg = self.language_model.config
+            llm_dim = getattr(dec_cfg, "hidden_size", None) or getattr(dec_cfg, "d_model", None)
+            if llm_dim is None:
+                raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
-    @property
-    def _tied_weights_keys(self):
-        if hasattr(self.decoder, "_tied_weights_keys"):
-            return [f"decoder.{k}" for k in self.decoder._tied_weights_keys]
-        return []
-
-    def _init_tokenizer(self):
-        model_path = (
-            self.__class__._pretrained_model_path
-            if self._is_loading_from_pretrained
-            else self.config.text_model_id
+        proj_config = SimpleNamespace(
+            encoder_dim=encoder_dim,
+            llm_dim=llm_dim,
+            num_experts=32,
+            moe_top_k=2,
+            projector_hidden_dim=llm_dim // 4,
+            shared_projector_hidden_dim=llm_dim // 2,
+            routed_scaling_factor=1.0,
+            projector_pool_stride=getattr(config, "projector_pool_stride", 2),
         )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        projector = MoEAudioProjector(proj_config)
+        return projector.to(dtype=dtype)
 
+    def _init_tokenizer(self, config: ASRConfig):
+        """Initialize tokenizer with audio token."""
+        self.tokenizer = AutoTokenizer.from_pretrained(config.text_model_id, trust_remote_code=True)
+
+        # Set pad token
         if (
             self.tokenizer.pad_token is None
             or self.tokenizer.pad_token_id == self.tokenizer.eos_token_id
         ) and "<|finetune_right_pad_id|>" in self.tokenizer.get_vocab():
             self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
 
+        # Add audio token
         existing_special = self.tokenizer.additional_special_tokens or []
-
         if "<audio>" not in existing_special:
-            special_tokens = {"additional_special_tokens": existing_special + ["<audio>"]}
-            num_added_tokens = self.tokenizer.add_special_tokens(special_tokens)
-            if num_added_tokens > 0:
-                self.decoder.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
-
-        current_embed_size = self.decoder.get_input_embeddings().weight.shape[0]
-        expected_size = len(self.tokenizer)
-        if current_embed_size != expected_size:
-            self.decoder.resize_token_embeddings(expected_size, mean_resizing=False)
+            self.tokenizer.add_special_tokens(
+                {"additional_special_tokens": existing_special + ["<audio>"]}
+            )
+            self.language_model.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
 
         self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<audio>")
         self.tokenizer.padding_side = "right"
 
-        for cfg in [self.config.text_config, self.decoder.config, self.generation_config]:
-            if isinstance(cfg, dict):
-                cfg["pad_token_id"] = self.tokenizer.pad_token_id
-                cfg["eos_token_id"] = self.tokenizer.eos_token_id
-                cfg["bos_token_id"] = self.tokenizer.bos_token_id
-            else:
+        # Sync token IDs to configs
+        for cfg in [self.config.text_config, self.language_model.config, self.generation_config]:
+            if cfg is not None:
                 cfg.pad_token_id = self.tokenizer.pad_token_id
                 cfg.eos_token_id = self.tokenizer.eos_token_id
                 cfg.bos_token_id = self.tokenizer.bos_token_id
 
-    def get_processor(self):
-        try:
-            from .asr_processing import ASRProcessor as ASRProcessorClass
-        except ImportError:
-            from asr_processing import ASRProcessor as ASRProcessorClass  # type: ignore[no-redef]
+    def _init_weights(self, module):
+        """Weight initialization (projector weights are initialized in MoEAudioProjector)."""
+        pass
 
-        return ASRProcessorClass(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
-
-    def state_dict(self, *args, **kwargs):
-        return self._get_trainable_state_dict()
-
-    def _get_trainable_state_dict(self):
-        state = {}
-        projector_state = self.projector.state_dict()
-        for name, tensor in projector_state.items():
-            state[f"projector.{name}"] = tensor
-        return state
+    def can_generate(self) -> bool:
+        return True
 
     def get_input_embeddings(self):
-        return self.decoder.get_input_embeddings()
+        return self.language_model.get_input_embeddings()
 
     def set_input_embeddings(self, value):
-        self.decoder.set_input_embeddings(value)
+        self.language_model.set_input_embeddings(value)
 
     def get_output_embeddings(self):
-        return self.decoder.get_output_embeddings()
+        return self.language_model.get_output_embeddings()
 
     def set_output_embeddings(self, value):
-        self.decoder.set_output_embeddings(value)
+        self.language_model.set_output_embeddings(value)
+
+    def get_processor(self):
+        """Get the processor for this model."""
+        from .asr_processing import ASRProcessor
+
+        return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
+
+    def state_dict(self, *args, **kwargs):
+        """Only save trainable projector weights."""
+        return {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
 
     def _encode_audio(
         self,
-        input_values: torch.Tensor,
+        audio_features: torch.Tensor,
         audio_attention_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Encode audio and project to LLM embedding space."""
         with torch.no_grad():
-            if self.is_whisper_encoder:
-                audio_features = self.encoder(
-                    input_features=input_values,
-                    attention_mask=audio_attention_mask,
-                ).last_hidden_state
+            is_whisper = hasattr(self.audio_tower.config, "num_mel_bins")
+            if is_whisper:
+                encoder_out = self.audio_tower(
+                    input_features=audio_features, attention_mask=audio_attention_mask
+                )
             else:
-                audio_features = self.encoder(
-                    input_values=input_values,
-                    attention_mask=audio_attention_mask,
-                ).last_hidden_state
+                encoder_out = self.audio_tower(
+                    input_values=audio_features, attention_mask=audio_attention_mask
+                )
+            hidden_states = encoder_out.last_hidden_state
 
-        audio_embeds, aux_loss = self.projector(audio_features)
+        audio_embeds, aux_loss = self.projector(hidden_states)
 
-        pooled_audio_mask = None
+        # Create attention mask for projected audio
         if audio_attention_mask is not None:
             mask_float = audio_attention_mask.unsqueeze(1).float()
             pooled_mask = F.interpolate(mask_float, size=audio_embeds.shape[1], mode="nearest")
-            pooled_audio_mask = pooled_mask.squeeze(1).long()
+            audio_mask = pooled_mask.squeeze(1).long()
         else:
-            pooled_audio_mask = torch.ones(
-                audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long
-            )
+            audio_mask = torch.ones(audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long)
 
-        return audio_embeds, aux_loss, pooled_audio_mask
+        return audio_embeds, aux_loss, audio_mask
 
-    def _get_audio_expansion_details(self, input_ids: torch.Tensor, num_audio_tokens: int) -> dict:
+    def _merge_audio_features(
+        self,
+        input_ids: torch.Tensor,
+        audio_embeds: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        audio_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Merge audio embeddings into text embeddings at <audio> token positions.
+
+        Returns: (inputs_embeds, attention_mask, labels)
+        """
         batch_size, seq_len = input_ids.shape
+        num_audio_tokens = audio_embeds.shape[1]
         device = input_ids.device
-        audio_mask = input_ids == self.audio_token_id
 
-        token_counts = torch.where(audio_mask, num_audio_tokens, 1)
-        cumsum_counts = torch.cumsum(token_counts, dim=1)
-        new_start_positions = torch.cat(
-            [
-                torch.zeros(batch_size, 1, dtype=torch.long, device=device),
-                cumsum_counts[:, :-1],
-            ],
-            dim=1,
-        )
+        # Find audio token position in each sequence
+        audio_positions = (input_ids == self.audio_token_id).int().argmax(dim=1)
+
+        # Calculate new sequence length (replace 1 audio token with num_audio_tokens)
         new_seq_len = seq_len - 1 + num_audio_tokens
 
-        return {
-            "new_seq_len": new_seq_len,
-            "new_start_positions": new_start_positions,
-            "audio_mask": audio_mask,
-        }
+        # Get text embeddings
+        text_embeds = self.language_model.get_input_embeddings()(input_ids)
 
-    def _expand_tensor_for_audio(
-        self,
-        input_ids: torch.Tensor,
-        tensor_to_expand: Optional[torch.Tensor],
-        num_audio_tokens: int,
-        fill_value: Union[int, float] = -100,
-        audio_fill_value: Union[int, float, torch.Tensor] = -100,
-    ) -> torch.Tensor:
-        batch_size, seq_len = input_ids.shape
-        device = input_ids.device
-
-        details = self._get_audio_expansion_details(input_ids, num_audio_tokens)
-        new_seq_len = details["new_seq_len"]
-        new_start_positions = details["new_start_positions"]
-        audio_mask = details["audio_mask"]
-
-        is_expanding_input_ids = tensor_to_expand is None
-        if is_expanding_input_ids:
-            tensor_to_expand = input_ids
-            fill_value = self.tokenizer.pad_token_id
-            audio_fill_value = self.audio_token_id
-
-        expanded = torch.full(
-            (batch_size, new_seq_len),
-            fill_value,
-            dtype=tensor_to_expand.dtype,
-            device=device,
+        # Build merged embeddings
+        merged_embeds = torch.zeros(
+            batch_size, new_seq_len, text_embeds.shape[-1],
+            device=device, dtype=text_embeds.dtype
         )
+        merged_attention = torch.ones(batch_size, new_seq_len, device=device, dtype=torch.long)
+        merged_labels = None
+        if labels is not None:
+            merged_labels = torch.full(
+                (batch_size, new_seq_len), -100, device=device, dtype=labels.dtype
+            )
 
-        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, seq_len)
-        non_audio_mask = ~audio_mask
-        expanded[batch_indices[non_audio_mask], new_start_positions[non_audio_mask]] = (
-            tensor_to_expand[non_audio_mask]
-        )
+        for i in range(batch_size):
+            pos = audio_positions[i].item()
 
-        audio_positions = audio_mask.int().argmax(dim=1)
-        audio_new_start = new_start_positions[
-            torch.arange(batch_size, device=device), audio_positions
-        ]
-        audio_token_indices = torch.arange(num_audio_tokens, device=device).unsqueeze(0)
-        audio_positions_expanded = audio_new_start.unsqueeze(1) + audio_token_indices
-        batch_idx_expanded = (
-            torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_audio_tokens)
-        )
+            # Before audio token
+            if pos > 0:
+                merged_embeds[i, :pos] = text_embeds[i, :pos]
+                if attention_mask is not None:
+                    merged_attention[i, :pos] = attention_mask[i, :pos]
+                if merged_labels is not None and labels is not None:
+                    merged_labels[i, :pos] = labels[i, :pos]
 
-        if isinstance(audio_fill_value, torch.Tensor):
-            expanded[batch_idx_expanded, audio_positions_expanded] = audio_fill_value
-        else:
-            needs_audio_fill = audio_fill_value != fill_value
-            if needs_audio_fill:
-                expanded[batch_idx_expanded, audio_positions_expanded] = audio_fill_value
+            # Audio embeddings
+            audio_end = pos + num_audio_tokens
+            merged_embeds[i, pos:audio_end] = audio_embeds[i]
+            if audio_mask is not None:
+                merged_attention[i, pos:audio_end] = audio_mask[i]
 
-        return expanded
+            # After audio token
+            remaining = seq_len - pos - 1
+            if remaining > 0:
+                merged_embeds[i, audio_end:audio_end + remaining] = text_embeds[i, pos + 1:]
+                if attention_mask is not None:
+                    merged_attention[i, audio_end:audio_end + remaining] = attention_mask[i, pos + 1:]
+                if merged_labels is not None and labels is not None:
+                    merged_labels[i, audio_end:audio_end + remaining] = labels[i, pos + 1:]
 
-    def _expand_audio_tokens(self, input_ids: torch.Tensor, num_audio_tokens: int) -> torch.Tensor:
-        return self._expand_tensor_for_audio(input_ids, None, num_audio_tokens)
-
-    def _expand_for_audio_tokens(
-        self,
-        input_ids: torch.Tensor,
-        tensor_to_expand: torch.Tensor,
-        num_audio_tokens: int,
-        fill_value: Union[int, float],
-        audio_fill_value: Union[int, float, torch.Tensor] = None,
-    ) -> torch.Tensor:
-        if audio_fill_value is None:
-            audio_fill_value = fill_value
-        return self._expand_tensor_for_audio(
-            input_ids, tensor_to_expand, num_audio_tokens, fill_value, audio_fill_value
-        )
-
-    def _prepare_audio_inputs_embeds(
-        self, expanded_input_ids: torch.Tensor, audio_embeds: torch.Tensor
-    ) -> torch.Tensor:
-        inputs_embeds = self.decoder.get_input_embeddings()(expanded_input_ids)
-        special_audio_mask = (expanded_input_ids == self.audio_token_id).unsqueeze(-1)
-        special_audio_mask = special_audio_mask.expand_as(inputs_embeds)
-        audio_embeds = audio_embeds.to(inputs_embeds.dtype)
-        audio_embeds_flat = audio_embeds.reshape(-1, audio_embeds.shape[-1])
-        return inputs_embeds.masked_scatter(special_audio_mask, audio_embeds_flat)
+        return merged_embeds, merged_attention, merged_labels
 
     def forward(
         self,
@@ -488,79 +296,59 @@ class ASRModel(PreTrainedModel):
         input_features: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        num_items_in_batch: Optional[int] = None,
+        audio_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
-    ):
-        audio_inputs = input_values if input_values is not None else input_features
+    ) -> CausalLMOutputWithPast:
+        """Forward pass for training and inference."""
+        # Accept either input_values (wav2vec2) or input_features (whisper)
+        audio_inputs = input_features if input_features is not None else input_values
+
         if audio_inputs is not None:
             if input_ids is None:
-                raise ValueError("forward() requires both audio inputs and input_ids.")
+                raise ValueError("input_ids required when audio is provided")
 
-            audio_attention_mask = kwargs.pop("audio_attention_mask", None)
-            kwargs.pop("past_key_values", None)
-            use_cache = kwargs.pop("use_cache", None)
-
-            audio_embeds, aux_loss, pooled_audio_mask = self._encode_audio(
-                input_values=audio_inputs,
-                audio_attention_mask=audio_attention_mask,
+            # Encode audio
+            audio_embeds, aux_loss, audio_mask = self._encode_audio(
+                audio_inputs, audio_attention_mask
             )
 
-            num_audio_tokens = audio_embeds.shape[1]
-
-            expanded_input_ids = self._expand_audio_tokens(input_ids, num_audio_tokens)
-            inputs_embeds = self._prepare_audio_inputs_embeds(expanded_input_ids, audio_embeds)
-
-            if attention_mask is not None:
-                full_attention_mask = self._expand_for_audio_tokens(
-                    input_ids,
-                    attention_mask,
-                    num_audio_tokens,
-                    fill_value=1,
-                    audio_fill_value=pooled_audio_mask,
-                )
-            else:
-                full_attention_mask = None
-
-            if labels is not None:
-                labels = self._expand_for_audio_tokens(
-                    input_ids, labels, num_audio_tokens, fill_value=-100
-                )
+            # Merge audio with text
+            inputs_embeds, full_attention_mask, labels = self._merge_audio_features(
+                input_ids, audio_embeds, attention_mask, labels, audio_mask
+            )
         else:
-            inputs_embeds = self.decoder.get_input_embeddings()(input_ids)
+            # Text-only forward
+            inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
             full_attention_mask = attention_mask
-            use_cache = kwargs.pop("use_cache", None)
+            aux_loss = torch.tensor(0.0, device=input_ids.device)
 
-        outputs = self.decoder(
+        # Run through language model
+        outputs = self.language_model(
             inputs_embeds=inputs_embeds,
             attention_mask=full_attention_mask,
-            labels=None,
-            use_cache=use_cache if use_cache is not None else False,
+            use_cache=False,
             **kwargs,
         )
+
+        # Compute loss if labels provided
+        loss = None
         if labels is not None:
             logits = outputs.logits
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-            flat_labels = shift_labels.view(-1)
-
-            loss = self.loss_fct(flat_logits, flat_labels)
-
-            if audio_inputs is not None:
-                # Removed hardcoded 0.01 scaling. Projector handles coefficient scaling.
-                loss = loss + aux_loss
-
-            from transformers.modeling_outputs import CausalLMOutputWithPast
-
-            outputs = CausalLMOutputWithPast(
-                loss=loss,
-                logits=logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                attentions=outputs.attentions,
+            loss = self.loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1)
             )
+            loss = loss + aux_loss
 
-        return outputs
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=outputs.logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
     @torch.no_grad()
     def generate(
@@ -572,41 +360,26 @@ class ASRModel(PreTrainedModel):
         user_prompt: Optional[str] = None,
         task: Optional[str] = None,
         **generate_kwargs,
-    ) -> Union[
-        torch.Tensor,
-        GenerateDecoderOnlyOutput,
-        GenerateEncoderDecoderOutput,
-        GenerateBeamDecoderOnlyOutput,
-        GenerateBeamEncoderDecoderOutput,
-    ]:
-        audio_inputs = input_values if input_values is not None else input_features
+    ) -> torch.Tensor:
+        """Generate text from audio input."""
+        audio_inputs = input_features if input_features is not None else input_values
         if audio_inputs is None:
-            raise ValueError("input_values or input_features must be provided for generation")
+            raise ValueError("input_values or input_features required for generation")
 
-        audio_embeds, _, pooled_audio_mask = self._encode_audio(
-            audio_inputs, audio_attention_mask=audio_attention_mask
-        )
-        batch_size = audio_embeds.shape[0]
-        device = audio_embeds.device
+        device = audio_inputs.device
+        batch_size = audio_inputs.shape[0]
 
-        if system_prompt is None:
-            system_prompt = self.system_prompt
+        # Encode audio
+        audio_embeds, _, audio_mask = self._encode_audio(audio_inputs, audio_attention_mask)
 
-        if user_prompt is None:
-            user_prompt = (
-                self.TASK_PROMPTS.get(task, self.config.user_prompt or "Transcribe: <audio>")
-                or "Transcribe: <audio>"
-            )
+        # Build prompt
+        system_prompt = system_prompt or self.system_prompt
+        user_prompt = user_prompt or self.TASK_PROMPTS.get(task, self.config.user_prompt or "Transcribe: <audio>")
 
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append(
-            {
-                "role": "user",
-                "content": user_prompt,
-            }
-        )
+        messages.append({"role": "user", "content": user_prompt})
 
         prompt_ids = self.tokenizer.apply_chat_template(
             messages,
@@ -616,123 +389,74 @@ class ASRModel(PreTrainedModel):
             enable_thinking=False,
         ).to(device)
 
-        if len(prompt_ids.shape) == 1:
+        if prompt_ids.dim() == 1:
             prompt_ids = prompt_ids.unsqueeze(0)
-
         if prompt_ids.shape[0] == 1 and batch_size > 1:
             prompt_ids = prompt_ids.expand(batch_size, -1)
 
         if not (prompt_ids == self.audio_token_id).any():
             raise ValueError("Audio token <audio> not found in prompt")
 
-        num_audio_tokens = audio_embeds.shape[1]
-        expanded_prompt_ids = self._expand_audio_tokens(prompt_ids, num_audio_tokens)
-        inputs_embeds = self._prepare_audio_inputs_embeds(expanded_prompt_ids, audio_embeds)
-
-        text_attention_mask = torch.ones_like(prompt_ids)
-        attention_mask = self._expand_for_audio_tokens(
-            prompt_ids,
-            text_attention_mask,
-            num_audio_tokens,
-            fill_value=1,
-            audio_fill_value=pooled_audio_mask,
+        # Merge audio with prompt
+        inputs_embeds, attention_mask, _ = self._merge_audio_features(
+            prompt_ids, audio_embeds, audio_mask=audio_mask
         )
 
-        config_params = [
-            "max_new_tokens",
-            "min_new_tokens",
-            "num_beams",
-            "do_sample",
-            "temperature",
-            "top_k",
-            "top_p",
-            "repetition_penalty",
-            "length_penalty",
-            "no_repeat_ngram_size",
-            "early_stopping",
-        ]
-        for param in config_params:
-            if hasattr(self.config, param) and getattr(self.config, param) is not None:
-                generate_kwargs.setdefault(param, getattr(self.config, param))
+        prompt_length = inputs_embeds.shape[1]
 
+        # Set generation defaults
+        generate_kwargs.setdefault("max_new_tokens", getattr(self.config, "max_new_tokens", 128))
         generate_kwargs.setdefault("use_cache", True)
-        generate_kwargs.setdefault(
-            "eos_token_id", self.tokenizer.convert_tokens_to_ids("<|im_end|>")
-        )
+        generate_kwargs.setdefault("eos_token_id", self.tokenizer.convert_tokens_to_ids("<|im_end|>"))
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
-        prompt_length = expanded_prompt_ids.shape[1]
 
-        generated_ids = self.decoder.generate(
-            input_ids=expanded_prompt_ids,
+        # Generate (type ignore needed as generate() has complex return type)
+        output = self.language_model.generate(  # type: ignore[operator]
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             **generate_kwargs,
         )
 
-        return generated_ids[:, prompt_length:]
-
-    def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
-    ):
-        """Prepare inputs for generation with KV cache support."""
-        if past_key_values:
-            input_ids = input_ids[:, -1:]
-
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
-        else:
-            model_inputs = {"input_ids": input_ids}
-
-        model_inputs.update(
-            {
-                "past_key_values": past_key_values,
-                "use_cache": kwargs.get("use_cache"),
-                "attention_mask": attention_mask,
-            }
-        )
-        return model_inputs
+        # Return only generated tokens (strip prompt)
+        if isinstance(output, torch.Tensor):
+            return output[:, prompt_length:]
+        # Handle GenerateOutput types that have sequences attribute
+        return output.sequences[:, prompt_length:]
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
+        """Save model, tokenizer, and processor."""
         import shutil
         from pathlib import Path as PathlibPath
 
         save_dir = PathlibPath(save_directory)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        actual_vocab_size = self.decoder.config.vocab_size
-        self.config.vocab_size = actual_vocab_size
-        self.config.text_config.vocab_size = actual_vocab_size
+        # Update config with actual vocab size
+        self.config.vocab_size = self.language_model.config.vocab_size
+        self.config.text_config.vocab_size = self.language_model.config.vocab_size
 
-        if hasattr(self.encoder.config, "num_mel_bins"):
-            self.config.audio_config.num_mel_bins = self.encoder.config.num_mel_bins
+        if hasattr(self.audio_tower.config, "num_mel_bins"):
+            self.config.audio_config.num_mel_bins = self.audio_tower.config.num_mel_bins
 
-        feature_extractor = self.feature_extractor
+        # Save model (temporarily remove non-serializable attributes)
         tokenizer = self.tokenizer
-        del self.feature_extractor
         del self.tokenizer
 
         try:
             super().save_pretrained(save_dir, **kwargs)
         finally:
-            self.feature_extractor = feature_extractor
             self.tokenizer = tokenizer
 
+        # Save tokenizer and processor
         self.tokenizer.save_pretrained(save_dir)
-
-        if hasattr(self.encoder.config, "num_mel_bins"):
-            num_mel_bins = self.encoder.config.num_mel_bins
-            self.feature_extractor.feature_size = num_mel_bins
-            self.feature_extractor.num_mel_bins = num_mel_bins
-            if hasattr(self.feature_extractor, "n_mels"):
-                self.feature_extractor.n_mels = num_mel_bins
-            self.feature_extractor.nb_max_frames = 3000
-
         self.get_processor().save_pretrained(save_dir)
 
+        # Copy source files for auto-loading
         src_dir = PathlibPath(__file__).parent
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
 
 
+# Register with transformers Auto classes
 AutoConfig.register("asr_model", ASRConfig)
 AutoModel.register(ASRConfig, ASRModel)

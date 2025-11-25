@@ -46,13 +46,13 @@ training:
   label_smoothing: 0.1
 
   # Memory optimization
-  torch_compile: false  # Disabled for faster startup
-  # torch_compile_mode: "default"
-  # torch_compile_dynamic: true  # Enable dynamic shapes for variable sequence lengths
-  # torch_compile_fullgraph: false  # Allow graph breaks for flexibility
-  # torch_compile_config:
-    #capture_scalar_outputs: true  # Reduce graph breaks from .item() calls
-    # allow_unspec_int_on_nn_module: true  # Reduce recompilation from layer indices
+  torch_compile: true
+  torch_compile_mode: "default"
+  torch_compile_dynamic: true  # Enable dynamic shapes for variable sequence lengths
+  torch_compile_fullgraph: false  # Allow graph breaks for flexibility
+  torch_compile_config:
+    capture_scalar_outputs: true  # Reduce graph breaks from .item() calls
+    allow_unspec_int_on_nn_module: true  # Reduce recompilation from layer indices
   
   gradient_checkpointing: false
 

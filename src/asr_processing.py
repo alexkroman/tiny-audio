@@ -1,18 +1,17 @@
+import json
+from pathlib import Path
+
 import transformers
 from transformers import AutoTokenizer, ProcessorMixin
 
-# Handle both package and standalone imports
-try:
-    from .asr_config import ASRConfig
-except ImportError:
-    from asr_config import ASRConfig  # type: ignore[no-redef]
+from .asr_config import ASRConfig
 
 
 class ASRProcessor(ProcessorMixin):
     """Generic processor that can handle both Wav2Vec2 and Whisper feature extractors."""
 
-    feature_extractor_class = "AutoFeatureExtractor"
-    tokenizer_class = "AutoTokenizer"
+    feature_extractor_class: str = "AutoFeatureExtractor"
+    tokenizer_class: str = "AutoTokenizer"
 
     def __init__(self, feature_extractor, tokenizer):
         self.feature_extractor = feature_extractor
@@ -35,9 +34,6 @@ class ASRProcessor(ProcessorMixin):
 
     def save_pretrained(self, save_directory, **kwargs):
         """Override save_pretrained to avoid attribute errors from base class."""
-        import json
-        from pathlib import Path
-
         save_path = Path(save_directory)
         save_path.mkdir(parents=True, exist_ok=True)
 
