@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 
 class SimpleAdapter(nn.Module):
@@ -74,6 +75,42 @@ class MoEAudioProjector(nn.Module):
             ]
         )
 
+        # Normalization for stability (not in original MOSA but prevents FPE)
+        self.ln_post = LlamaRMSNorm(self.llm_dim, eps=1e-6)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights for stable training."""
+        std = 0.02
+        with torch.no_grad():
+            # Conv layers
+            for module in self.conv:
+                if isinstance(module, nn.Conv1d):
+                    nn.init.normal_(module.weight, mean=0.0, std=std)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+
+            # Router
+            for module in self.router:
+                if isinstance(module, nn.Linear):
+                    nn.init.normal_(module.weight, mean=0.0, std=std)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+
+            # Experts
+            for expert in self.experts:
+                nn.init.normal_(expert.fc1.weight, mean=0.0, std=std)
+                nn.init.normal_(expert.fc2.weight, mean=0.0, std=std)
+                if expert.fc1.bias is not None:
+                    nn.init.zeros_(expert.fc1.bias)
+                if expert.fc2.bias is not None:
+                    nn.init.zeros_(expert.fc2.bias)
+
+            # LayerNorm
+            self.ln_post.weight.data.fill_(1.0)
+
     def forward(self, x):
         """
         Args:
@@ -110,4 +147,4 @@ class MoEAudioProjector(nn.Module):
             expert_weight = routing_weights[:, :, i : i + 1]
             final_out = final_out + expert_out * expert_weight
 
-        return final_out
+        return self.ln_post(final_out)
