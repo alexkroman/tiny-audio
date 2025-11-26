@@ -78,7 +78,6 @@ class MoEAudioProjector(nn.Module):
 
         Returns:
             output: [batch_size, seq_len // 4, llm_dim] (3072)
-            aux_loss: 0.0 (MOSA uses no auxiliary losses)
         """
         batch_size, seq_len, _ = x.shape
 
@@ -106,7 +105,4 @@ class MoEAudioProjector(nn.Module):
             expert_weight = routing_weights[:, :, i : i + 1]
             final_out = final_out + expert_out * expert_weight
 
-        # MOSA: "we compute only the cross-entropy loss on transcriptions"
-        aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
-
-        return final_out, aux_loss
+        return final_out

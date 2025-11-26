@@ -15,6 +15,9 @@ model:
   decoder_model_name: HuggingFaceTB/SmolLM3-3B
   encoder_model_name: openai/whisper-large-v3-turbo
 
+  # Projector type: "moe" (Mixture of Experts) or "swiglu" (simple SwiGLU)
+  projector_type: moe
+
 training:
   # Resume from checkpoint
   # resume_from_checkpoint: "/workspace/outputs/2025-11-19/17-38-30/outputs/production_model/checkpoint-14000"

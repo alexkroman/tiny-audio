@@ -14,7 +14,8 @@ from transformers import (
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .asr_config import ASRConfig
-from .asr_projector import MoEAudioProjector
+from .moe_projector import MoEAudioProjector
+from .swiglu_projector import AudioProjector
 
 
 class ASRModel(PreTrainedModel):
@@ -160,7 +161,7 @@ class ASRModel(PreTrainedModel):
         decoder.eval()
         return decoder
 
-    def _create_projector(self, config: ASRConfig, dtype: torch.dtype) -> MoEAudioProjector:
+    def _create_projector(self, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
         """Create the trainable audio projector."""
         # Auto-detect dimensions if not specified
         if config.encoder_dim is None:
@@ -175,7 +176,13 @@ class ASRModel(PreTrainedModel):
             if config.llm_dim is None:
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
-        projector = MoEAudioProjector(config)
+        # Select projector type based on config
+        projector_type = getattr(config, "projector_type", "moe")
+        if projector_type == "swiglu":
+            projector = AudioProjector(config)
+        else:  # default to "moe"
+            projector = MoEAudioProjector(config)
+
         # Move projector to same device as language model (important when using quantization)
         device = next(self.language_model.parameters()).device
         return projector.to(device=device, dtype=dtype)
@@ -242,7 +249,7 @@ class ASRModel(PreTrainedModel):
         self,
         audio_features: torch.Tensor,
         audio_attention_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode audio and project to LLM embedding space."""
         with torch.no_grad():
             is_whisper = hasattr(self.audio_tower.config, "num_mel_bins")
@@ -256,7 +263,7 @@ class ASRModel(PreTrainedModel):
                 )
             hidden_states = encoder_out.last_hidden_state
 
-        audio_embeds, aux_loss = self.projector(hidden_states)
+        audio_embeds = self.projector(hidden_states)
 
         # Create attention mask for projected audio
         if audio_attention_mask is not None:
@@ -266,7 +273,7 @@ class ASRModel(PreTrainedModel):
         else:
             audio_mask = torch.ones(audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long)
 
-        return audio_embeds, aux_loss, audio_mask
+        return audio_embeds, audio_mask
 
     def _merge_audio_features(
         self,
@@ -353,7 +360,7 @@ class ASRModel(PreTrainedModel):
                 raise ValueError("input_ids required when audio is provided")
 
             # Encode audio
-            audio_embeds, aux_loss, audio_mask = self._encode_audio(
+            audio_embeds, audio_mask = self._encode_audio(
                 audio_inputs, audio_attention_mask
             )
 
@@ -365,7 +372,6 @@ class ASRModel(PreTrainedModel):
             # Text-only forward
             inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
             full_attention_mask = attention_mask
-            aux_loss = torch.tensor(0.0, device=input_ids.device)
 
         # Run through language model
         outputs = self.language_model(
@@ -385,7 +391,6 @@ class ASRModel(PreTrainedModel):
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1)
             )
-            loss = loss + aux_loss
 
         return CausalLMOutputWithPast(
             loss=loss,
@@ -415,7 +420,7 @@ class ASRModel(PreTrainedModel):
         batch_size = audio_inputs.shape[0]
 
         # Encode audio
-        audio_embeds, _, audio_mask = self._encode_audio(audio_inputs, audio_attention_mask)
+        audio_embeds, audio_mask = self._encode_audio(audio_inputs, audio_attention_mask)
 
         # Build prompt
         system_prompt = system_prompt or self.system_prompt
