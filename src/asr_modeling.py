@@ -104,8 +104,6 @@ class ASRModel(PreTrainedModel):
         self.label_smoothing = getattr(config, "label_smoothing", 0.1)
         self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=self.label_smoothing)
 
-        # Alignment loss coefficient
-        self.alignment_loss_coef = getattr(config, "alignment_loss_coef", 0.0)
 
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
@@ -336,51 +334,6 @@ class ASRModel(PreTrainedModel):
 
         return merged_embeds, merged_attention, merged_labels
 
-    def _compute_alignment_loss(
-        self,
-        audio_embeds: torch.Tensor,
-        labels: torch.Tensor,
-        audio_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Compute cosine similarity loss between audio and text embeddings.
-
-        Encourages projected audio embeddings to be close to the text embeddings
-        of the transcript, providing a direct supervision signal.
-
-        Args:
-            audio_embeds: Projected audio embeddings [B, T_audio, D]
-            labels: Token IDs of the transcript [B, T_text], -100 for masked positions
-            audio_mask: Optional mask for audio frames [B, T_audio]
-
-        Returns:
-            Alignment loss (1 - mean cosine similarity)
-        """
-        # Get text embeddings for non-masked label tokens
-        # Replace -100 with pad token for embedding lookup
-        valid_labels = labels.clone()
-        label_mask = labels != -100
-        valid_labels[~label_mask] = self.tokenizer.pad_token_id
-
-        with torch.no_grad():
-            text_embeds = self.language_model.get_input_embeddings()(valid_labels)
-
-        # Pool audio embeddings (mean over time, respecting mask)
-        if audio_mask is not None:
-            audio_mask_expanded = audio_mask.unsqueeze(-1).float()
-            audio_pooled = (audio_embeds * audio_mask_expanded).sum(dim=1)
-            audio_pooled = audio_pooled / (audio_mask_expanded.sum(dim=1) + 1e-8)
-        else:
-            audio_pooled = audio_embeds.mean(dim=1)  # [B, D]
-
-        # Pool text embeddings (mean over valid tokens)
-        label_mask_expanded = label_mask.unsqueeze(-1).float()
-        text_pooled = (text_embeds * label_mask_expanded).sum(dim=1)
-        text_pooled = text_pooled / (label_mask_expanded.sum(dim=1) + 1e-8)  # [B, D]
-
-        # Cosine similarity loss: 1 - similarity
-        return 1.0 - F.cosine_similarity(audio_pooled, text_pooled).mean()
-
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -395,10 +348,6 @@ class ASRModel(PreTrainedModel):
         # Accept either input_values (wav2vec2) or input_features (whisper)
         audio_inputs = input_features if input_features is not None else input_values
 
-        # Store original labels for alignment loss (before merging modifies them)
-        original_labels = labels
-        alignment_loss = torch.tensor(0.0, device=input_ids.device if input_ids is not None else "cpu")
-
         if audio_inputs is not None:
             if input_ids is None:
                 raise ValueError("input_ids required when audio is provided")
@@ -407,12 +356,6 @@ class ASRModel(PreTrainedModel):
             audio_embeds, aux_loss, audio_mask = self._encode_audio(
                 audio_inputs, audio_attention_mask
             )
-
-            # Compute alignment loss before merging (if enabled)
-            if self.training and self.alignment_loss_coef > 0 and original_labels is not None:
-                alignment_loss = self._compute_alignment_loss(
-                    audio_embeds, original_labels, audio_mask
-                )
 
             # Merge audio with text
             inputs_embeds, full_attention_mask, labels = self._merge_audio_features(
@@ -442,7 +385,7 @@ class ASRModel(PreTrainedModel):
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1)
             )
-            loss = loss + aux_loss + self.alignment_loss_coef * alignment_loss
+            loss = loss + aux_loss
 
         return CausalLMOutputWithPast(
             loss=loss,

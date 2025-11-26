@@ -1,125 +1,112 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
-from transformers.models.llama.modeling_llama import LlamaRMSNorm as RMSNorm
 
 
-class SwiGLU(nn.Module):
-    def __init__(self, in_features, hidden_features, out_features, bias=False, dropout_rate=0.05):
+class SimpleAdapter(nn.Module):
+    """
+    MOSA Section III-B:
+    "consists of two linear layers with a ReLU activation in between,
+    projecting the hidden dimension from 3072 to 4096 and back to 3072."
+    """
+
+    def __init__(self, in_features, hidden_features, out_features):
         super().__init__()
-        self.w12 = nn.Linear(in_features, 2 * hidden_features, bias=bias)
-        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
-        self.dropout = nn.Dropout(dropout_rate)
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_features, out_features)
 
     def forward(self, x):
-        input_dtype = x.dtype
-        w12_out = self.w12(x)
-        x_gate, x_val = w12_out.chunk(2, dim=-1)
-        x = F.silu(x_gate) * x_val
-        x = self.w3(x)
-        x = self.dropout(x)
-        return x.to(input_dtype)
+        return self.fc2(self.relu(self.fc1(x)))
 
 
 class MoEAudioProjector(nn.Module):
+    """
+    MOSA-style projector: Mixture of Simple Adapters.
+
+    From paper (arXiv:2508.18998):
+    - Dense mixture (softmax over ALL experts) instead of sparse Top-K
+    - Simple Linear->ReLU->Linear adapters (3072->4096->3072)
+    - No auxiliary losses - just cross-entropy on transcripts
+    - Conv downsampling: stride 4 total (two conv layers, stride 2 each)
+    """
+
     def __init__(self, config):
         super().__init__()
-        self.k = getattr(config, "projector_pool_stride", 2)
-        self.num_experts = getattr(config, "num_experts", 8)
-        self.top_k = getattr(config, "moe_top_k", 2)
 
-        self.router_scale = getattr(config, "router_scale", 16.0)
-        self.z_loss_coef = getattr(config, "router_z_loss_coef", 1e-4)
-        self.balance_loss_coef = getattr(config, "router_balance_loss_coef", 1e-2)
-        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+        # Dimensions from paper (same as ours):
+        # Whisper-large-v3 encoder_dim = 1280
+        # Phi-3-mini / SmolLM3-3B hidden_size = 3072
+        self.encoder_dim = config.encoder_dim  # 1280
+        self.llm_dim = config.llm_dim  # 3072
 
-        in_dim = config.encoder_dim * self.k
-        self.out_dim = config.llm_dim
+        # Number of experts: Base=4, Large=8
+        self.num_experts = getattr(config, "num_experts", 4)
 
-        routed_expert_hidden = getattr(config, "projector_hidden_dim", None) or 2048
-        shared_expert_hidden = getattr(config, "shared_projector_hidden_dim", None) or 2048
+        # Adapter hidden dim: paper uses 4096
+        adapter_hidden = getattr(config, "projector_hidden_dim", None) or 4096
 
-        self.ln_pre = RMSNorm(in_dim, eps=1e-6)
-        self.ln_post = RMSNorm(self.out_dim, eps=1e-6)
-
-        self.router_weights = nn.Parameter(torch.randn(self.num_experts, in_dim) * 0.02)
-
-        self.shared_expert = SwiGLU(in_dim, shared_expert_hidden, self.out_dim)
-
-        self.experts = nn.ModuleList(
-            [SwiGLU(in_dim, routed_expert_hidden, self.out_dim) for _ in range(self.num_experts)]
+        # --- Convolutional Subsampling (Section III-B) ---
+        # "two convolutional layers, each with a kernel size of 3 and a stride of 2"
+        # Maps encoder_dim (1280) -> llm_dim (3072), total stride=4
+        self.conv = nn.Sequential(
+            nn.Conv1d(self.encoder_dim, self.llm_dim, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(self.llm_dim, self.llm_dim, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
         )
 
-        with torch.no_grad():
-            nn.init.normal_(self.shared_expert.w12.weight, std=0.02)
-            nn.init.normal_(self.shared_expert.w3.weight, std=0.02)
-            for expert in self.experts:
-                nn.init.normal_(expert.w12.weight, std=0.02)
-                nn.init.normal_(expert.w3.weight, std=0.02)
+        # --- Router (Section III-B) ---
+        # Base: "two linear layers... mapping from 1280 to 512 and finally to 4"
+        router_hidden = 512
+        self.router = nn.Sequential(
+            nn.Linear(self.encoder_dim, router_hidden),
+            nn.ReLU(),
+            nn.Linear(router_hidden, self.num_experts),
+        )
+
+        # --- Experts / Adapters (Section III-B) ---
+        # "projecting the hidden dimension from 3072 to 4096 and back to 3072"
+        self.experts = nn.ModuleList(
+            [SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim) for _ in range(self.num_experts)]
+        )
 
     def forward(self, x):
-        batch_size, seq_len, dim = x.size()
+        """
+        Args:
+            x: [batch_size, seq_len, encoder_dim] from Whisper encoder (1280)
 
-        remainder = seq_len % self.k
-        if remainder:
-            x = F.pad(x, (0, 0, 0, self.k - remainder))
+        Returns:
+            output: [batch_size, seq_len // 4, llm_dim] (3072)
+            aux_loss: 0.0 (MOSA uses no auxiliary losses)
+        """
+        batch_size, seq_len, _ = x.shape
 
-        x = x.contiguous().view(batch_size, -1, dim * self.k)
-        x_flat = x.view(-1, dim * self.k)
+        # Pad to be divisible by stride (4)
+        pad_amt = (4 - (seq_len % 4)) % 4
+        if pad_amt > 0:
+            x = F.pad(x, (0, 0, 0, pad_amt))
+            seq_len = x.shape[1]
 
-        norm_x = self.ln_pre(x_flat)
-        shared_out = self.shared_expert(norm_x)
+        # 1. Convolutional Downsampling
+        # (B, T, C) -> (B, C, T) -> conv -> (B, C, T//4) -> (B, T//4, C)
+        h_conv = self.conv(x.permute(0, 2, 1)).permute(0, 2, 1)
 
-        input_normed = F.normalize(norm_x, dim=-1)
-        router_normed = F.normalize(self.router_weights, dim=-1)
-        router_logits = F.linear(input_normed, router_normed) * self.router_scale
-        routing_probs = torch.sigmoid(router_logits)
+        # 2. Router on high-res input, then downsample weights
+        router_logits = self.router(x)  # [B, T, num_experts]
+        # Average over stride window to match conv output
+        router_logits = router_logits.view(batch_size, seq_len // 4, 4, self.num_experts).mean(dim=2)
+        # Dense softmax
+        routing_weights = F.softmax(router_logits, dim=-1)  # [B, T//4, num_experts]
 
-        _, top_k_indices = torch.topk(routing_probs, self.top_k, dim=-1)
-        top_k_weights = torch.gather(routing_probs, -1, top_k_indices)
+        # 3. Weighted sum of expert outputs (Eq. 2: y = sum(w_i * E_i(x)))
+        final_out = torch.zeros_like(h_conv)
+        for i, expert in enumerate(self.experts):
+            expert_out = expert(h_conv)
+            expert_weight = routing_weights[:, :, i : i + 1]
+            final_out = final_out + expert_out * expert_weight
 
-        denominator = top_k_weights.sum(dim=-1, keepdim=True) + 1e-20
-        top_k_weights = top_k_weights / denominator
-        top_k_weights = top_k_weights * self.routed_scaling_factor
-        top_k_weights = top_k_weights.to(x.dtype)
-
+        # MOSA: "we compute only the cross-entropy loss on transcriptions"
         aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
-        if self.training:
-            # Z-loss: regularize router logit magnitudes
-            if self.z_loss_coef > 0:
-                z_loss = torch.logsumexp(router_logits, dim=-1).pow(2).mean()
-                aux_loss = aux_loss + z_loss * self.z_loss_coef
-
-            # Balance loss (Switch Transformer style): penalize uneven load
-            if self.balance_loss_coef > 0:
-                num_tokens = top_k_indices.numel()
-                expert_mask = F.one_hot(top_k_indices, self.num_experts).float()
-                tokens_per_expert = expert_mask.sum(dim=(0, 1))
-                load = tokens_per_expert / num_tokens
-
-                # Mean routing probability per expert
-                importance = routing_probs.mean(dim=0)
-
-                # Balance loss: num_experts * sum(load_i * importance_i)
-                balance_loss = self.num_experts * (load * importance).sum()
-                aux_loss = aux_loss + balance_loss * self.balance_loss_coef
-
-        routed_out = torch.zeros_like(shared_out)
-
-        for expert_idx, expert in enumerate(self.experts):
-            expert_mask_2d = top_k_indices == expert_idx
-
-            if not expert_mask_2d.any():
-                continue
-
-            batch_indices, k_indices = torch.where(expert_mask_2d)
-            expert_input = norm_x[batch_indices]
-            expert_output = expert(expert_input)
-
-            current_weights = top_k_weights[batch_indices, k_indices].unsqueeze(-1)
-            weighted_output = expert_output * current_weights
-            routed_out.index_add_(0, batch_indices, weighted_output)
-
-        final_out = self.ln_post(shared_out + routed_out)
-        return final_out.view(batch_size, -1, self.out_dim), aux_loss
+        return final_out, aux_loss
