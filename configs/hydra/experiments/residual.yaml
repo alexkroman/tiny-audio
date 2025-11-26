@@ -16,7 +16,7 @@ model:
   encoder_model_name: openai/whisper-large-v3-turbo
 
   # Projector type: "moe" (Mixture of Experts) or "swiglu" (simple SwiGLU)
-  projector_type: swiglu
+  projector_type: residual
 
 training:
   # Resume from checkpoint
@@ -24,7 +24,7 @@ training:
 
   # Hub configuration
   push_to_hub: true
-  hub_model_id: "mazesmazes/tiny-audio-swiglu"
+  hub_model_id: "mazesmazes/tiny-audio-residual"
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 

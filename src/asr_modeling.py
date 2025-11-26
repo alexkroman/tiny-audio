@@ -15,6 +15,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .asr_config import ASRConfig
 from .moe_projector import MoEAudioProjector
+from .residual_projector import ResidualAudioProjector
 from .swiglu_projector import AudioProjector
 
 
@@ -182,6 +183,8 @@ class ASRModel(PreTrainedModel):
         projector_type = getattr(config, "projector_type", "moe")
         if projector_type == "swiglu":
             projector = AudioProjector(config)
+        elif projector_type == "residual":
+            projector = ResidualAudioProjector(config)
         else:  # default to "moe"
             projector = MoEAudioProjector(config)
 

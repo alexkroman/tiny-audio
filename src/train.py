@@ -363,6 +363,8 @@ def main(cfg: DictConfig) -> None:
         model_dtype=cfg.training.model_dtype,
         system_prompt=cfg.model.system_prompt,
         projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
+        projector_type=cfg.model.get("projector_type", "moe"),
+        projector_num_layers=cfg.model.get("projector_num_layers", 2),
         use_specaugment=cfg.training.get("use_specaugment", False),
         label_smoothing=cfg.training.get("label_smoothing", 0.1),
     )

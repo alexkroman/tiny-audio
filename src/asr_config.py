@@ -22,7 +22,8 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 2,
         projector_hidden_dim: Optional[int] = None,
-        projector_type: str = "moe",  # "moe" or "swiglu"
+        projector_type: str = "moe",  # "moe", "swiglu", or "residual"
+        projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.05,  # Dropout rate for projector layers
         projector_input_noise: float = 0.02,  # Input noise for projector
         inference_diversity_penalty: float = 0.0,
@@ -68,6 +69,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
+        self.projector_num_layers = projector_num_layers
         self.projector_dropout = projector_dropout
         self.projector_input_noise = projector_input_noise
         self.inference_diversity_penalty = inference_diversity_penalty
