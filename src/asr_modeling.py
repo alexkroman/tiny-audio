@@ -40,7 +40,6 @@ class ASRModel(PreTrainedModel):
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         """Load model from pretrained, handling device placement correctly."""
         from safetensors.torch import load_file
-        from transformers import AutoFeatureExtractor
         from transformers.utils.hub import cached_file
 
         config = kwargs.pop("config", None)
@@ -105,7 +104,6 @@ class ASRModel(PreTrainedModel):
         self.label_smoothing = getattr(config, "label_smoothing", 0.1)
         self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=self.label_smoothing)
 
-
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
@@ -166,13 +164,17 @@ class ASRModel(PreTrainedModel):
         # Auto-detect dimensions if not specified
         if config.encoder_dim is None:
             enc_cfg = self.audio_tower.config
-            config.encoder_dim = getattr(enc_cfg, "hidden_size", None) or getattr(enc_cfg, "d_model", None)
+            config.encoder_dim = getattr(enc_cfg, "hidden_size", None) or getattr(
+                enc_cfg, "d_model", None
+            )
             if config.encoder_dim is None:
                 raise ValueError("Could not auto-detect encoder_dim. Please specify in config.")
 
         if config.llm_dim is None:
             dec_cfg = self.language_model.config
-            config.llm_dim = getattr(dec_cfg, "hidden_size", None) or getattr(dec_cfg, "d_model", None)
+            config.llm_dim = getattr(dec_cfg, "hidden_size", None) or getattr(
+                dec_cfg, "d_model", None
+            )
             if config.llm_dim is None:
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
@@ -271,7 +273,9 @@ class ASRModel(PreTrainedModel):
             pooled_mask = F.interpolate(mask_float, size=audio_embeds.shape[1], mode="nearest")
             audio_mask = pooled_mask.squeeze(1).long()
         else:
-            audio_mask = torch.ones(audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long)
+            audio_mask = torch.ones(
+                audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long
+            )
 
         return audio_embeds, audio_mask
 
@@ -303,8 +307,7 @@ class ASRModel(PreTrainedModel):
 
         # Build merged embeddings
         merged_embeds = torch.zeros(
-            batch_size, new_seq_len, text_embeds.shape[-1],
-            device=device, dtype=text_embeds.dtype
+            batch_size, new_seq_len, text_embeds.shape[-1], device=device, dtype=text_embeds.dtype
         )
         merged_attention = torch.ones(batch_size, new_seq_len, device=device, dtype=torch.long)
         merged_labels = None
@@ -333,11 +336,13 @@ class ASRModel(PreTrainedModel):
             # After audio token
             remaining = seq_len - pos - 1
             if remaining > 0:
-                merged_embeds[i, audio_end:audio_end + remaining] = text_embeds[i, pos + 1:]
+                merged_embeds[i, audio_end : audio_end + remaining] = text_embeds[i, pos + 1 :]
                 if attention_mask is not None:
-                    merged_attention[i, audio_end:audio_end + remaining] = attention_mask[i, pos + 1:]
+                    merged_attention[i, audio_end : audio_end + remaining] = attention_mask[
+                        i, pos + 1 :
+                    ]
                 if merged_labels is not None and labels is not None:
-                    merged_labels[i, audio_end:audio_end + remaining] = labels[i, pos + 1:]
+                    merged_labels[i, audio_end : audio_end + remaining] = labels[i, pos + 1 :]
 
         return merged_embeds, merged_attention, merged_labels
 
@@ -360,9 +365,7 @@ class ASRModel(PreTrainedModel):
                 raise ValueError("input_ids required when audio is provided")
 
             # Encode audio
-            audio_embeds, audio_mask = self._encode_audio(
-                audio_inputs, audio_attention_mask
-            )
+            audio_embeds, audio_mask = self._encode_audio(audio_inputs, audio_attention_mask)
 
             # Merge audio with text
             inputs_embeds, full_attention_mask, labels = self._merge_audio_features(
@@ -388,8 +391,7 @@ class ASRModel(PreTrainedModel):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             loss = self.loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1)
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
 
         return CausalLMOutputWithPast(
@@ -424,7 +426,9 @@ class ASRModel(PreTrainedModel):
 
         # Build prompt
         system_prompt = system_prompt or self.system_prompt
-        user_prompt = user_prompt or self.TASK_PROMPTS.get(task, self.config.user_prompt or "Transcribe: <audio>")
+        user_prompt = user_prompt or self.TASK_PROMPTS.get(
+            task, self.config.user_prompt or "Transcribe: <audio>"
+        )
 
         messages = []
         if system_prompt:
@@ -455,7 +459,9 @@ class ASRModel(PreTrainedModel):
         # Set generation defaults
         generate_kwargs.setdefault("max_new_tokens", getattr(self.config, "max_new_tokens", 128))
         generate_kwargs.setdefault("use_cache", True)
-        generate_kwargs.setdefault("eos_token_id", self.tokenizer.convert_tokens_to_ids("<|im_end|>"))
+        generate_kwargs.setdefault(
+            "eos_token_id", self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+        )
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
 
         # Generate (type ignore needed as generate() has complex return type)

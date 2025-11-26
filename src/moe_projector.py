@@ -68,7 +68,10 @@ class MoEAudioProjector(nn.Module):
         # --- Experts / Adapters (Section III-B) ---
         # "projecting the hidden dimension from 3072 to 4096 and back to 3072"
         self.experts = nn.ModuleList(
-            [SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim) for _ in range(self.num_experts)]
+            [
+                SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim)
+                for _ in range(self.num_experts)
+            ]
         )
 
     def forward(self, x):
@@ -94,7 +97,9 @@ class MoEAudioProjector(nn.Module):
         # 2. Router on high-res input, then downsample weights
         router_logits = self.router(x)  # [B, T, num_experts]
         # Average over stride window to match conv output
-        router_logits = router_logits.view(batch_size, seq_len // 4, 4, self.num_experts).mean(dim=2)
+        router_logits = router_logits.view(batch_size, seq_len // 4, 4, self.num_experts).mean(
+            dim=2
+        )
         # Dense softmax
         routing_weights = F.softmax(router_logits, dim=-1)  # [B, T//4, num_experts]
 

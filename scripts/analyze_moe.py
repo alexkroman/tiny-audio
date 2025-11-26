@@ -128,7 +128,9 @@ def analyze_checkpoint(file_path: str):
 
     if not proj_weights:
         print("⚠️  No 'projector' prefix found. Searching for generic keys...")
-        proj_weights = {k: v for k, v in tensors.items() if "experts" in k or "router" in k or "conv" in k}
+        proj_weights = {
+            k: v for k, v in tensors.items() if "experts" in k or "router" in k or "conv" in k
+        }
 
     if not proj_weights:
         print("❌ No MOSA parameters found in this checkpoint.")
@@ -175,7 +177,9 @@ def analyze_checkpoint(file_path: str):
     sorted_indices = sorted(experts_map.keys())
     num_experts = len(sorted_indices)
 
-    print(f"   Found: {len(conv_weights)} conv params, {len(router_weights)} router params, {num_experts} experts")
+    print(
+        f"   Found: {len(conv_weights)} conv params, {len(router_weights)} router params, {num_experts} experts"
+    )
 
     # 1. CONV MODULE DIAGNOSTICS
     print("\n" + "=" * 65)
@@ -188,7 +192,9 @@ def analyze_checkpoint(file_path: str):
                 mean = w.float().mean().item()
                 norm = torch.linalg.norm(w.float()).item()
                 print(f"   {name}:")
-                print(f"      Shape: {list(w.shape)}, Std: {std:.5f}, Mean: {mean:.5f}, Norm: {norm:.2f}")
+                print(
+                    f"      Shape: {list(w.shape)}, Std: {std:.5f}, Mean: {mean:.5f}, Norm: {norm:.2f}"
+                )
     else:
         print("   ❌ No conv weights found!")
 
@@ -203,13 +209,19 @@ def analyze_checkpoint(file_path: str):
                 mean = w.float().mean().item()
                 norm = torch.linalg.norm(w.float()).item()
                 print(f"   {name}:")
-                print(f"      Shape: {list(w.shape)}, Std: {std:.5f}, Mean: {mean:.5f}, Norm: {norm:.2f}")
+                print(
+                    f"      Shape: {list(w.shape)}, Std: {std:.5f}, Mean: {mean:.5f}, Norm: {norm:.2f}"
+                )
 
                 # For the final router layer (outputs num_experts), check per-expert norms
                 if w.shape[0] == num_experts:
                     expert_norms = torch.linalg.norm(w.float(), dim=1).cpu().numpy()
-                    print(f"\n   Per-Expert Router Output Norms:")
-                    draw_ascii_bar(expert_norms, labels=[f"E{i}" for i in range(len(expert_norms))], max_width=40)
+                    print("\n   Per-Expert Router Output Norms:")
+                    draw_ascii_bar(
+                        expert_norms,
+                        labels=[f"E{i}" for i in range(len(expert_norms))],
+                        max_width=40,
+                    )
 
                     norm_std = np.std(expert_norms)
                     norm_ratio = np.max(expert_norms) / (np.min(expert_norms) + 1e-9)
@@ -250,7 +262,7 @@ def analyze_checkpoint(file_path: str):
             max_sim = off_diag.max().item()
             min_sim = off_diag.min().item()
 
-            print(f"   FC1 Weight Similarity (cosine):")
+            print("   FC1 Weight Similarity (cosine):")
             print(f"      Avg: {avg_sim:.4f}, Max: {max_sim:.4f}, Min: {min_sim:.4f}")
 
             if avg_sim > 0.98:
@@ -263,14 +275,14 @@ def analyze_checkpoint(file_path: str):
                 print("   ✅ GREEN ZONE: Experts are highly specialized (diverse).")
 
             # Show pairwise similarities
-            print(f"\n   Pairwise Similarity Matrix:")
+            print("\n   Pairwise Similarity Matrix:")
             print("        ", end="")
             for i in sorted_indices:
                 print(f"  E{i}   ", end="")
             print()
             for i, idx_i in enumerate(sorted_indices):
                 print(f"   E{idx_i}  ", end="")
-                for j, idx_j in enumerate(sorted_indices):
+                for j, _idx_j in enumerate(sorted_indices):
                     sim = sim_matrix[i, j].item()
                     print(f" {sim:.3f} ", end="")
                 print()
@@ -291,11 +303,11 @@ def analyze_checkpoint(file_path: str):
             fc2_mags.append(experts_map[idx]["fc2.weight"].abs().mean().item())
 
     if fc1_mags:
-        print(f"   FC1 Weight Magnitudes:")
+        print("   FC1 Weight Magnitudes:")
         draw_ascii_bar(fc1_mags, labels=[f"E{i}" for i in sorted_indices], max_width=40)
 
     if fc2_mags:
-        print(f"   FC2 Weight Magnitudes:")
+        print("   FC2 Weight Magnitudes:")
         draw_ascii_bar(fc2_mags, labels=[f"E{i}" for i in sorted_indices], max_width=40)
 
     # Check for magnitude imbalance
@@ -322,8 +334,10 @@ def analyze_checkpoint(file_path: str):
             full_rank = min(experts_map[sorted_indices[0]]["fc1.weight"].shape)
             avg_rank = np.mean(ranks)
 
-            print(f"   FC1 Effective Rank (higher = more expressive):")
-            print(f"      Average: {avg_rank:.1f} / {full_rank} ({(avg_rank / full_rank) * 100:.1f}%)")
+            print("   FC1 Effective Rank (higher = more expressive):")
+            print(
+                f"      Average: {avg_rank:.1f} / {full_rank} ({(avg_rank / full_rank) * 100:.1f}%)"
+            )
             draw_ascii_bar(ranks, labels=[f"E{i}" for i in sorted_indices], denominator=full_rank)
 
             if avg_rank / full_rank < 0.3:

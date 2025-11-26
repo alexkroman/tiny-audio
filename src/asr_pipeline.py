@@ -38,10 +38,21 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     def __call__(self, inputs, **kwargs):
         generate_kwargs = {}
         generate_keys = [
-            "max_new_tokens", "num_beams", "do_sample", "length_penalty",
-            "repetition_penalty", "no_repeat_ngram_size", "early_stopping",
-            "num_beam_groups", "diversity_penalty", "top_k", "temperature",
-            "top_p", "user_prompt", "task", "text_input",
+            "max_new_tokens",
+            "num_beams",
+            "do_sample",
+            "length_penalty",
+            "repetition_penalty",
+            "no_repeat_ngram_size",
+            "early_stopping",
+            "num_beam_groups",
+            "diversity_penalty",
+            "top_k",
+            "temperature",
+            "top_p",
+            "user_prompt",
+            "task",
+            "text_input",
         ]
         for key in generate_keys:
             if key in kwargs:
@@ -103,7 +114,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         elif hasattr(inputs, "__array__") and not isinstance(inputs, (dict, bytes, str)):
             inputs = {"raw": inputs, "sampling_rate": self.model.config.audio_sample_rate}
         elif torch.is_tensor(inputs):
-            inputs = {"raw": inputs.cpu().numpy(), "sampling_rate": self.model.config.audio_sample_rate}
+            inputs = {
+                "raw": inputs.cpu().numpy(),
+                "sampling_rate": self.model.config.audio_sample_rate,
+            }
 
         return super().preprocess(inputs, **preprocess_params)
 
@@ -146,7 +160,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
 
         # Generation defaults
-        generate_kwargs.setdefault("eos_token_id", self.model.tokenizer.convert_tokens_to_ids("<|im_end|>"))
+        generate_kwargs.setdefault(
+            "eos_token_id", self.model.tokenizer.convert_tokens_to_ids("<|im_end|>")
+        )
         generate_kwargs.setdefault("max_new_tokens", self.model.config.max_new_tokens)
 
         # Generate
@@ -171,7 +187,11 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             return model_inputs.to(self.model.device), False
 
         if isinstance(model_inputs, (list, tuple)) and model_inputs:
-            model_inputs = model_inputs[0] if isinstance(model_inputs[0], dict) else {"input_values": model_inputs[0]}
+            model_inputs = (
+                model_inputs[0]
+                if isinstance(model_inputs[0], dict)
+                else {"input_values": model_inputs[0]}
+            )
 
         if isinstance(model_inputs, dict):
             model_inputs.pop("stride", None)
@@ -194,7 +214,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         return {"text": text}
 
-    def postprocess(self, model_outputs: dict[str, Any], return_timestamps=None, return_language=None) -> dict[str, str]:
+    def postprocess(
+        self, model_outputs: dict[str, Any], return_timestamps=None, return_language=None
+    ) -> dict[str, str]:
         if isinstance(model_outputs, list):
             for output in model_outputs:
                 for key, value in output.items():

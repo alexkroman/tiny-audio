@@ -82,11 +82,13 @@ class DatasetLoader:
             ds = ds.remove_columns(extra_cols)
 
         task = dataset_cfg.get("task", "transcribe")
-        features = Features({
-            "audio": Audio(sampling_rate=self.sample_rate),
-            "text": Value("string"),
-            "task": Value("string"),
-        })
+        features = Features(
+            {
+                "audio": Audio(sampling_rate=self.sample_rate),
+                "text": Value("string"),
+                "task": Value("string"),
+            }
+        )
 
         return IterableDataset.from_generator(
             self._add_task_generator,
@@ -175,7 +177,9 @@ class DataCollator(DataCollatorForSeq2Seq):
         r"\b(uh|um|ah)\b": "",
     }
 
-    def __init__(self, tokenizer: Any, feature_extractor: Any, sample_rate: int, system_prompt: str = None):
+    def __init__(
+        self, tokenizer: Any, feature_extractor: Any, sample_rate: int, system_prompt: str = None
+    ):
         super().__init__(tokenizer=tokenizer, padding=True)
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
@@ -184,7 +188,8 @@ class DataCollator(DataCollatorForSeq2Seq):
 
         # Text normalizer
         self.text_normalizer = (
-            tokenizer if hasattr(tokenizer, "normalize")
+            tokenizer
+            if hasattr(tokenizer, "normalize")
             else WhisperTokenizer.from_pretrained("openai/whisper-tiny")
         )
 
@@ -278,7 +283,7 @@ class DataCollator(DataCollatorForSeq2Seq):
             labels = [-100] * len(tokens)
             start, end = self._find_assistant_content_range(tokens)
             if start > 0 and end > 0:
-                labels[start:end + 1] = tokens[start:end + 1]
+                labels[start : end + 1] = tokens[start : end + 1]
 
             text_features.append({"input_ids": tokens, "labels": labels})
 
@@ -330,6 +335,7 @@ def get_valid_training_args(config: dict) -> dict:
 def main(cfg: DictConfig) -> None:
     # Reduce logging noise
     from transformers import logging as transformers_logging
+
     transformers_logging.set_verbosity_error()
     for logger in ["httpx", "httpcore", "datasets"]:
         logging.getLogger(logger).setLevel(logging.WARNING)
@@ -384,10 +390,12 @@ def main(cfg: DictConfig) -> None:
     # Setup callbacks
     callbacks = []
     if cfg.early_stopping.patience:
-        callbacks.append(EarlyStoppingCallback(
-            early_stopping_patience=cfg.early_stopping.patience,
-            early_stopping_threshold=cfg.early_stopping.threshold,
-        ))
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=cfg.early_stopping.patience,
+                early_stopping_threshold=cfg.early_stopping.threshold,
+            )
+        )
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
         callbacks.append(PushToHubCallback())
 
@@ -396,7 +404,9 @@ def main(cfg: DictConfig) -> None:
     assert isinstance(training_config, dict)
     if compile_config := training_config.pop("torch_compile_config", None):
         torch._dynamo.config.cache_size_limit = compile_config.get("cache_size_limit", 64)
-        torch._dynamo.config.capture_scalar_outputs = compile_config.get("capture_scalar_outputs", True)
+        torch._dynamo.config.capture_scalar_outputs = compile_config.get(
+            "capture_scalar_outputs", True
+        )
         torch._inductor.config.compile_threads = compile_config.get("compile_threads", 4)
 
     # Create trainer with only valid TrainingArguments
