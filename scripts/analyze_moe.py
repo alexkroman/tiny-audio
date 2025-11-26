@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-MoE Checkpoint Forensic Analysis Tool
+MOSA Checkpoint Forensic Analysis Tool
 
 Usage:
     python scripts/analyze_moe.py path/to/checkpoint/model.safetensors
 
-Diagnoses:
-1. Integrity: Checks for NaNs or Infinity values (common in BF16 training).
-2. Router Health: Checks if the router is biased or exploding.
-3. Diversity: Checks if experts are identical clones (bad) or specialized (good).
-4. Spectral Health: Uses SVD to check for rank collapse (feature richness).
+Analyzes MOSA-style projector (Mixture of Simple Adapters):
+1. Integrity: Checks for NaNs or Infinity values
+2. Router Health: Checks router weights and biases
+3. Conv Module: Analyzes convolutional downsampling layers
+4. Expert Diversity: Checks if adapters are specialized or clones
+5. Spectral Health: Uses SVD to check for rank collapse
 """
 
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as f
 from safetensors.torch import load_file
 
-# --- Helper Functions ---
-
 
 def draw_ascii_bar(
-    values: List[float],
-    labels: Optional[List[str]] = None,
+    values: list[float],
+    labels: Optional[list[str]] = None,
     max_width: int = 40,
     denominator: Optional[float] = None,
 ):
@@ -42,13 +41,11 @@ def draw_ascii_bar(
 
     print("-" * 75)
     for i, val in enumerate(values):
-        # Normalize to 0-1 for width
         normalized = (val - min_val) / range_val if range_val > 0 else 0.5
-
         width = int(normalized * max_width)
         bar = "█" * width
 
-        label = f"{labels[i]:<4}" if labels else f"{i:<4}"
+        label = f"{labels[i]:<6}" if labels else f"{i:<6}"
         if denominator is not None:
             pct = (val / denominator) * 100
             print(f"{label} | {bar:<{max_width}} {val:.1f} ({pct:.1f}%)")
@@ -66,17 +63,12 @@ def compute_effective_rank(matrix: torch.Tensor) -> float:
     if matrix.dim() > 2:
         matrix = matrix.view(matrix.size(0), -1)
 
-    # Move to float32 and CPU for SVD stability
     matrix = matrix.float().cpu()
 
     try:
-        # We only need singular values (s)
         s = torch.linalg.svdvals(matrix)
-        # Normalize to treat as probabilities
         p = s / s.sum()
-        # Compute entropy
         entropy = -torch.sum(p * torch.log(p + 1e-10))
-        # Effective rank = e^entropy
         return torch.exp(entropy).item()
     except Exception:
         return 0.0
@@ -115,11 +107,8 @@ def resolve_model_path(path_or_repo: str) -> str:
     return path_or_repo
 
 
-# --- Main Analysis Logic ---
-
-
 def analyze_checkpoint(file_path: str):
-    print("\n🔬 MOE FORENSIC ANALYSIS")
+    print("\n🔬 MOSA PROJECTOR FORENSIC ANALYSIS")
     print(f"   Target: {file_path}")
     print("=" * 65)
 
@@ -138,155 +127,218 @@ def analyze_checkpoint(file_path: str):
     proj_weights = {k: v for k, v in tensors.items() if "projector" in k}
 
     if not proj_weights:
-        print("⚠️  No 'projector' prefix found. Searching for generic expert keys...")
-        proj_weights = {k: v for k, v in tensors.items() if "experts" in k or "router" in k}
+        print("⚠️  No 'projector' prefix found. Searching for generic keys...")
+        proj_weights = {k: v for k, v in tensors.items() if "experts" in k or "router" in k or "conv" in k}
 
     if not proj_weights:
-        print("❌ No MoE parameters found in this checkpoint.")
+        print("❌ No MOSA parameters found in this checkpoint.")
         return
 
-    print(f"📊 Loaded {len(proj_weights)} MoE-related parameters.")
+    print(f"📊 Loaded {len(proj_weights)} projector parameters.\n")
 
-    # 1. ORGANIZE WEIGHTS
-    shared_w12 = None
-    shared_w3 = None
-    router_w = None
+    # Print all parameter names and shapes
+    print("   Parameters found:")
+    for k, v in sorted(proj_weights.items()):
+        print(f"      {k}: {list(v.shape)}")
+    print()
+
+    # Organize weights by component
+    conv_weights = {}
+    router_weights = {}
     experts_map = defaultdict(dict)
 
-    # Scan for NaNs while loading
     healthy = True
     for k, v in proj_weights.items():
         if not check_integrity(k, v):
             healthy = False
 
-        k_clean = k.lower()
+        # Conv layers
+        if "conv" in k.lower():
+            conv_weights[k] = v
 
-        if "shared_expert.w12" in k_clean:
-            shared_w12 = v
-        elif "shared_expert.w3" in k_clean:
-            shared_w3 = v
-        elif "router_weights" in k_clean:
-            router_w = v
+        # Router layers
+        if "router" in k.lower():
+            router_weights[k] = v
 
-        # Regex to find expert index (e.g., experts.0.w12)
-        match = re.search(r"experts\.(\d+)\.", k)
+        # Expert/Adapter layers
+        match = re.search(r"experts\.(\d+)\.(fc1|fc2)\.(weight|bias)", k)
         if match:
             idx = int(match.group(1))
-            if "w12" in k:
-                experts_map[idx]["w12"] = v
-            elif "w3" in k:
-                experts_map[idx]["w3"] = v
+            layer = match.group(2)
+            param = match.group(3)
+            experts_map[idx][f"{layer}.{param}"] = v
 
     if not healthy:
         print("\n❌ ABORTING ANALYSIS: Model weights are corrupted (NaN/Inf).")
         return
 
     sorted_indices = sorted(experts_map.keys())
-    if not sorted_indices:
-        print("❌ No routed experts found. Check variable naming convention.")
-        return
-
     num_experts = len(sorted_indices)
-    routed_w12s = [experts_map[i]["w12"] for i in sorted_indices if "w12" in experts_map[i]]
-    routed_w3s = [experts_map[i]["w3"] for i in sorted_indices if "w3" in experts_map[i]]
 
-    print(f"   Found {num_experts} Routed Experts + 1 Shared Expert.")
+    print(f"   Found: {len(conv_weights)} conv params, {len(router_weights)} router params, {num_experts} experts")
+
+    # 1. CONV MODULE DIAGNOSTICS
+    print("\n" + "=" * 65)
+    print("[1] CONV MODULE DIAGNOSTICS")
+    print("=" * 65)
+    if conv_weights:
+        for name, w in sorted(conv_weights.items()):
+            if "weight" in name:
+                std = w.float().std().item()
+                mean = w.float().mean().item()
+                norm = torch.linalg.norm(w.float()).item()
+                print(f"   {name}:")
+                print(f"      Shape: {list(w.shape)}, Std: {std:.5f}, Mean: {mean:.5f}, Norm: {norm:.2f}")
+    else:
+        print("   ❌ No conv weights found!")
 
     # 2. ROUTER DIAGNOSTICS
-    print("\n[1] ROUTER DIAGNOSTICS")
-    if router_w is not None:
-        r_std = router_w.float().std().item()
-        r_norm = torch.linalg.norm(router_w.float()).item()
+    print("\n" + "=" * 65)
+    print("[2] ROUTER DIAGNOSTICS")
+    print("=" * 65)
+    if router_weights:
+        for name, w in sorted(router_weights.items()):
+            if "weight" in name:
+                std = w.float().std().item()
+                mean = w.float().mean().item()
+                norm = torch.linalg.norm(w.float()).item()
+                print(f"   {name}:")
+                print(f"      Shape: {list(w.shape)}, Std: {std:.5f}, Mean: {mean:.5f}, Norm: {norm:.2f}")
 
-        print(f"   Router Weight Std:  {r_std:.5f}")
-        print(f"   Router Weight Mean: {router_w.float().mean().item():.5f}")
-        print(f"   Router Weight Norm: {r_norm:.5f}")
+                # For the final router layer (outputs num_experts), check per-expert norms
+                if w.shape[0] == num_experts:
+                    expert_norms = torch.linalg.norm(w.float(), dim=1).cpu().numpy()
+                    print(f"\n   Per-Expert Router Output Norms:")
+                    draw_ascii_bar(expert_norms, labels=[f"E{i}" for i in range(len(expert_norms))], max_width=40)
 
-        # Check per-expert router weight norms (for balance)
-        expert_norms = torch.linalg.norm(router_w.float(), dim=1).cpu().numpy()
-        print(f"\n   Per-Expert Router Norms (should be similar for balance):")
-        draw_ascii_bar(expert_norms, labels=[str(i) for i in range(len(expert_norms))], max_width=40)
+                    norm_std = np.std(expert_norms)
+                    norm_ratio = np.max(expert_norms) / (np.min(expert_norms) + 1e-9)
+                    print(f"   Norm Std Dev: {norm_std:.5f}, Max/Min Ratio: {norm_ratio:.2f}x")
 
-        norm_std = np.std(expert_norms)
-        norm_ratio = np.max(expert_norms) / (np.min(expert_norms) + 1e-9)
-        print(f"   Norm Std Dev: {norm_std:.5f}")
-        print(f"   Max/Min Ratio: {norm_ratio:.2f}x")
-
-        if r_std > 1.0:
-            print("   ⚠️  High Variance: Router might be over-confident (Gradient Explosion).")
-        elif r_std < 1e-4:
-            print("   ⚠️  Low Variance: Router gradients might be vanishing.")
-        elif norm_ratio > 3.0:
-            print("   ⚠️  Uneven router norms: Some experts may be favored.")
-        else:
-            print("   ✅ Router weights look healthy.")
+                    if norm_ratio > 3.0:
+                        print("   ⚠️  Uneven router norms: Some experts may be favored.")
+                    else:
+                        print("   ✅ Router output weights look balanced.")
     else:
-        print("   ❌ Router weights missing!")
+        print("   ❌ No router weights found!")
 
     # 3. EXPERT DIVERSITY
-    print("\n[2] EXPERT DIVERSITY (Input Weight W12)")
-    if len(routed_w12s) > 1:
-        # Stack and flatten: [Num_Experts, Total_Params]
-        flat_experts = torch.stack([w.view(-1) for w in routed_w12s]).float()
-        norm_experts = f.normalize(flat_experts, p=2, dim=1)
+    print("\n" + "=" * 65)
+    print("[3] EXPERT DIVERSITY (Adapter Specialization)")
+    print("=" * 65)
 
-        # Cosine Similarity Matrix
-        sim_matrix = torch.mm(norm_experts, norm_experts.t())
+    if num_experts > 1:
+        # Get fc1 weights for each expert
+        fc1_weights = []
+        for idx in sorted_indices:
+            if "fc1.weight" in experts_map[idx]:
+                fc1_weights.append(experts_map[idx]["fc1.weight"])
 
-        # Mask diagonal
-        mask = ~torch.eye(num_experts, dtype=torch.bool, device=sim_matrix.device)
-        off_diag = sim_matrix[mask]
+        if len(fc1_weights) > 1:
+            # Stack and flatten: [Num_Experts, Total_Params]
+            flat_experts = torch.stack([w.view(-1) for w in fc1_weights]).float()
+            norm_experts = f.normalize(flat_experts, p=2, dim=1)
 
-        avg_sim = off_diag.mean().item()
+            # Cosine Similarity Matrix
+            sim_matrix = torch.mm(norm_experts, norm_experts.t())
 
-        print(f"   Avg Similarity: {avg_sim:.4f} (Lower is better)")
-        print(f"   Max Similarity: {off_diag.max().item():.4f}")
+            # Mask diagonal
+            mask = ~torch.eye(num_experts, dtype=torch.bool, device=sim_matrix.device)
+            off_diag = sim_matrix[mask]
 
-        if avg_sim > 0.98:
-            print("   ❌ RED ZONE: Experts are identical clones.")
-        elif avg_sim > 0.80:
-            print("   ⚠️  YELLOW ZONE: Experts are highly correlated.")
+            avg_sim = off_diag.mean().item()
+            max_sim = off_diag.max().item()
+            min_sim = off_diag.min().item()
+
+            print(f"   FC1 Weight Similarity (cosine):")
+            print(f"      Avg: {avg_sim:.4f}, Max: {max_sim:.4f}, Min: {min_sim:.4f}")
+
+            if avg_sim > 0.98:
+                print("   ❌ RED ZONE: Experts are identical clones - no specialization!")
+            elif avg_sim > 0.80:
+                print("   ⚠️  YELLOW ZONE: Experts are highly correlated.")
+            elif avg_sim > 0.50:
+                print("   ✅ GREEN ZONE: Experts are moderately specialized.")
+            else:
+                print("   ✅ GREEN ZONE: Experts are highly specialized (diverse).")
+
+            # Show pairwise similarities
+            print(f"\n   Pairwise Similarity Matrix:")
+            print("        ", end="")
+            for i in sorted_indices:
+                print(f"  E{i}   ", end="")
+            print()
+            for i, idx_i in enumerate(sorted_indices):
+                print(f"   E{idx_i}  ", end="")
+                for j, idx_j in enumerate(sorted_indices):
+                    sim = sim_matrix[i, j].item()
+                    print(f" {sim:.3f} ", end="")
+                print()
+    else:
+        print("   ⚠️  Only 1 expert found - cannot compute diversity.")
+
+    # 4. EXPERT MAGNITUDE ANALYSIS
+    print("\n" + "=" * 65)
+    print("[4] EXPERT MAGNITUDE ANALYSIS")
+    print("=" * 65)
+
+    fc1_mags = []
+    fc2_mags = []
+    for idx in sorted_indices:
+        if "fc1.weight" in experts_map[idx]:
+            fc1_mags.append(experts_map[idx]["fc1.weight"].abs().mean().item())
+        if "fc2.weight" in experts_map[idx]:
+            fc2_mags.append(experts_map[idx]["fc2.weight"].abs().mean().item())
+
+    if fc1_mags:
+        print(f"   FC1 Weight Magnitudes:")
+        draw_ascii_bar(fc1_mags, labels=[f"E{i}" for i in sorted_indices], max_width=40)
+
+    if fc2_mags:
+        print(f"   FC2 Weight Magnitudes:")
+        draw_ascii_bar(fc2_mags, labels=[f"E{i}" for i in sorted_indices], max_width=40)
+
+    # Check for magnitude imbalance
+    if fc1_mags:
+        ratio = max(fc1_mags) / (min(fc1_mags) + 1e-9)
+        if ratio > 2.0:
+            print(f"   ⚠️  FC1 magnitude imbalance: {ratio:.2f}x between experts")
         else:
-            print("   ✅ GREEN ZONE: Experts are specializing.")
-
-    # 4. INITIALIZATION / FADE-IN STATUS
-    print("\n[3] INITIALIZATION / FADE-IN STATUS")
-    if shared_w3 is not None and len(routed_w3s) > 0:
-        shared_mag = shared_w3.abs().mean().item()
-        expert_mags = [w.abs().mean().item() for w in routed_w3s]
-        avg_routed_mag = np.mean(expert_mags)
-
-        print(f"   Shared W3 Mean Mag: {shared_mag:.6f}")
-        print(f"   Routed W3 Mean Mag: {avg_routed_mag:.6f}")
-
-        print("\n   W3 Magnitude per Expert:")
-        draw_ascii_bar(expert_mags, labels=[str(i) for i in sorted_indices])
-
-        # Heuristic check
-        ratio = avg_routed_mag / (shared_mag + 1e-9)
-        if ratio > 0.8 and ratio < 1.2:
-            print("   ✅ Standard Initialization detected (Balanced).")
-        else:
-            print(f"   ℹ️  Ratio: {ratio:.2f}x (Check if this matches your init strategy).")
+            print(f"   ✅ FC1 magnitudes balanced (ratio: {ratio:.2f}x)")
 
     # 5. SPECTRAL HEALTH
-    print("\n[4] SPECTRAL HEALTH (Effective Rank)")
-    if shared_w12 is not None:
-        rank = compute_effective_rank(shared_w12)
-        full_rank = min(shared_w12.shape)
-        pct = (rank / full_rank) * 100
-        print(f"   Shared Expert Rank: {rank:.1f} / {full_rank} ({pct:.1f}%)")
+    print("\n" + "=" * 65)
+    print("[5] SPECTRAL HEALTH (Effective Rank)")
+    print("=" * 65)
 
-    if len(routed_w12s) > 0:
-        ranks = [compute_effective_rank(w) for w in routed_w12s]
-        avg_rank = np.mean(ranks)
-        full_rank = min(routed_w12s[0].shape)
+    if num_experts > 0 and "fc1.weight" in experts_map[sorted_indices[0]]:
+        ranks = []
+        for idx in sorted_indices:
+            if "fc1.weight" in experts_map[idx]:
+                rank = compute_effective_rank(experts_map[idx]["fc1.weight"])
+                ranks.append(rank)
 
-        print(
-            f"   Avg Routed Expert Rank: {avg_rank:.1f} / {full_rank} ({(avg_rank / full_rank) * 100:.1f}%)"
-        )
-        print("\n   Rank per Expert:")
-        draw_ascii_bar(ranks, labels=[str(i) for i in sorted_indices], denominator=full_rank)
+        if ranks:
+            full_rank = min(experts_map[sorted_indices[0]]["fc1.weight"].shape)
+            avg_rank = np.mean(ranks)
+
+            print(f"   FC1 Effective Rank (higher = more expressive):")
+            print(f"      Average: {avg_rank:.1f} / {full_rank} ({(avg_rank / full_rank) * 100:.1f}%)")
+            draw_ascii_bar(ranks, labels=[f"E{i}" for i in sorted_indices], denominator=full_rank)
+
+            if avg_rank / full_rank < 0.3:
+                print("   ⚠️  Low effective rank - possible feature collapse.")
+            else:
+                print("   ✅ Healthy effective rank.")
+
+    # 6. SUMMARY
+    print("\n" + "=" * 65)
+    print("[SUMMARY]")
+    print("=" * 65)
+    total_params = sum(v.numel() for v in proj_weights.values())
+    print(f"   Total projector parameters: {total_params:,}")
+    print(f"   Number of experts: {num_experts}")
+    print(f"   Architecture: MOSA (Conv + Router + {num_experts}x SimpleAdapter)")
 
 
 if __name__ == "__main__":

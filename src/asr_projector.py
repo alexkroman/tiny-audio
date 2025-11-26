@@ -34,11 +34,11 @@ class MoEAudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        # Dimensions from paper (same as ours):
+        # Dimensions:
         # Whisper-large-v3 encoder_dim = 1280
-        # Phi-3-mini / SmolLM3-3B hidden_size = 3072
+        # SmolLM3-3B hidden_size = 2048
         self.encoder_dim = config.encoder_dim  # 1280
-        self.llm_dim = config.llm_dim  # 3072
+        self.llm_dim = config.llm_dim  # 2048
 
         # Number of experts: Base=4, Large=8
         self.num_experts = getattr(config, "num_experts", 4)
