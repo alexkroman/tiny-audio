@@ -11,9 +11,8 @@ class ASRConfig(transformers.PretrainedConfig):
         self,
         audio_model_id: str = "openai/whisper-large-v3-turbo",
         text_model_id: str = "HuggingFaceTB/SmolLM3-3B",
-        attn_implementation: str = "sdpa",
+        attn_implementation: str = "flash_attention_2",
         model_dtype: str = "bfloat16",
-        audio_downsample_rate: int = 5,  # Deprecated: use projector_pool_stride instead
         num_beams: Optional[int] = None,
         system_prompt: str = "/no_think /system_override",
         user_prompt: str = "Transcribe: <audio>",
@@ -23,7 +22,9 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 2,
         projector_hidden_dim: Optional[int] = None,
-        projector_dropout: float = 0.0,  # Dropout rate for projector layers
+        projector_type: str = "moe",  # "moe" or "swiglu"
+        projector_dropout: float = 0.05,  # Dropout rate for projector layers
+        projector_input_noise: float = 0.02,  # Input noise for projector
         inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
         max_new_tokens: Optional[int] = None,
@@ -45,7 +46,7 @@ class ASRConfig(transformers.PretrainedConfig):
             "max_new_tokens": 128,
             "min_new_tokens": 1,
             "do_sample": False,
-            "repetition_penalty": 1.05,
+            "repetition_penalty": 1.0,
             "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,
             "use_cache": True,
@@ -58,7 +59,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.text_model_id = text_model_id
         self.attn_implementation = attn_implementation
         self.model_dtype = model_dtype
-        self.audio_downsample_rate = audio_downsample_rate
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
         self.encoder_dim = encoder_dim
@@ -67,11 +67,15 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
+        self.projector_type = projector_type
         self.projector_dropout = projector_dropout
+        self.projector_input_noise = projector_input_noise
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
+            # Override dtype to match model_dtype
+            self.audio_config.dtype = model_dtype
         else:
             self.audio_config = kwargs.pop("audio_config")
 
@@ -79,6 +83,8 @@ class ASRConfig(transformers.PretrainedConfig):
             self.text_config = transformers.AutoConfig.from_pretrained(
                 text_model_id, trust_remote_code=True
             )
+            # Override dtype to match model_dtype
+            self.text_config.dtype = model_dtype
         else:
             self.text_config = kwargs.pop("text_config")
 

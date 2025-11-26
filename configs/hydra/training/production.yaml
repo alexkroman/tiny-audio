@@ -18,7 +18,7 @@ eval_steps: 1000
 
 # Saving
 save_strategy: steps
-save_steps: 1000
+save_steps: 500
 save_total_limit: 5
 load_best_model_at_end: false
 metric_for_best_model: eval_loss
@@ -36,7 +36,7 @@ fp16: false
 bf16: true
 tf32: true  # Enable TF32 for A40 (2x matmul speedup)
 max_grad_norm: 1.0  # Increased from 1.0 - less aggressive clipping for projector training
-torch_compile: true
+torch_compile: false
 # torch_compile_mode: reduce-overhead
 
 # Model dtype - use bfloat16 for production with flash attention
@@ -44,7 +44,7 @@ model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
 # Streaming compatibility settings
-dataloader_num_workers: 1  # Set to 0 to avoid torchcodec resource issues
+dataloader_num_workers: 1  # Must be 0 to avoid torchcodec resource exhaustion with streaming
 dataloader_persistent_workers: true  # Not needed with 0 workers
 dataloader_prefetch_factor: 2  # Not used with 0 workers 
 dataloader_pin_memory: true

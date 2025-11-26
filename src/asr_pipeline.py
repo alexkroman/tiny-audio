@@ -1,38 +1,43 @@
-from typing import Any, Dict
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 import torch
 import transformers
 from truecase import get_true_case
 
-try:
-    from .asr_modeling import ASRModel
-except ImportError:
-    from asr_modeling import ASRModel  # type: ignore[no-redef]
+from .asr_modeling import ASRModel
 
 
 class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
+    """ASR Pipeline for audio-to-text transcription."""
+
     model: ASRModel
 
     def __init__(self, model: ASRModel, **kwargs):
-        feature_extractor = kwargs.pop("feature_extractor", model.feature_extractor)
+        feature_extractor = kwargs.pop("feature_extractor", None)
         tokenizer = kwargs.pop("tokenizer", model.tokenizer)
+
+        # Get feature extractor from model's processor if not provided
+        if feature_extractor is None:
+            processor = model.get_processor()
+            feature_extractor = processor.feature_extractor
 
         super().__init__(
             model=model, feature_extractor=feature_extractor, tokenizer=tokenizer, **kwargs
         )
 
-        # Initialize text normalizer (same as train.py)
+        # Initialize text normalizer
         if hasattr(tokenizer, "normalize"):
             self.text_normalizer = tokenizer
         else:
-            # Fallback to whisper-tiny tokenizer for its normalize() method only
             from transformers import WhisperTokenizer
 
             self.text_normalizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
 
     def __call__(self, inputs, **kwargs):
         generate_kwargs = {}
-        for key in [
+        generate_keys = [
             "max_new_tokens",
             "num_beams",
             "do_sample",
@@ -48,7 +53,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             "user_prompt",
             "task",
             "text_input",
-        ]:
+        ]
+        for key in generate_keys:
             if key in kwargs:
                 generate_kwargs[key] = kwargs.pop(key)
 
@@ -57,96 +63,53 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if task == "text" or generate_kwargs.get("text_input"):
             return self._process_text_only(generate_kwargs)
 
+        # Handle list inputs
         if isinstance(inputs, list):
-            results = []
-            for single_input in inputs:
-                result = self.__call__(single_input, **kwargs, **generate_kwargs)
-                results.append(result)
-            return results
+            return [self.__call__(inp, **kwargs, **generate_kwargs) for inp in inputs]
 
         model_inputs = self.preprocess(inputs, **kwargs)
 
-        from collections.abc import Iterator
-
         if isinstance(model_inputs, Iterator):
-            # Convert iterator to list to process chunks
-            chunks = list(model_inputs)
-
-            all_outputs = []
-            for _chunk_num, chunk in enumerate(chunks, start=1):
-                chunk_output = self._forward(chunk, **generate_kwargs)
-                # Move tensors to CPU before adding to outputs
-                for key, value in chunk_output.items():
-                    if torch.is_tensor(value):
-                        chunk_output[key] = value.cpu()
-                all_outputs.append(chunk_output)
-
-            # Merge chunks and decode ourselves to ensure skip_special_tokens=True
-            all_tokens: list[int] = []
-            for output in all_outputs:
-                tokens = output.get("tokens")
-                if tokens is None:
-                    tokens = output.get("generated_ids")
-                if tokens is not None:
-                    if torch.is_tensor(tokens):
-                        tokens = tokens.cpu()
-                    if len(tokens.shape) > 1:
-                        tokens = tokens[0]
-                    all_tokens.extend(tokens.tolist() if torch.is_tensor(tokens) else tokens)
-
-            # Decode the merged tokens with skip_special_tokens
-            text = self.tokenizer.decode(all_tokens, skip_special_tokens=True)
-            text = text.strip()
-
-            # Apply Whisper normalization (matches training)
-            text = self.text_normalizer.normalize(text)
-
-            # Apply truecasing for proper capitalization
-            text = get_true_case(text)
-
-            return {"text": text}
+            return self._process_chunks(list(model_inputs), generate_kwargs)
 
         model_outputs = self._forward(model_inputs, **generate_kwargs)
         return self.postprocess(model_outputs)
 
+    def _process_chunks(self, chunks: list, generate_kwargs: dict) -> dict[str, str]:
+        """Process chunked audio and merge results."""
+        all_tokens: list[int] = []
+
+        for chunk in chunks:
+            output = self._forward(chunk, **generate_kwargs)
+            tokens = output.get("tokens")
+            if tokens is None:
+                tokens = output.get("generated_ids")
+            if tokens is not None:
+                if torch.is_tensor(tokens):
+                    tokens = tokens.cpu()
+                if len(tokens.shape) > 1:
+                    tokens = tokens[0]
+                all_tokens.extend(tokens.tolist() if torch.is_tensor(tokens) else tokens)
+
+        text = self.tokenizer.decode(all_tokens, skip_special_tokens=True).strip()
+        text = self.text_normalizer.normalize(text)
+        text = get_true_case(text)
+
+        return {"text": text}
+
     def preprocess(self, inputs, **preprocess_params):
         if isinstance(inputs, list):
-            raise ValueError("Lists should not reach preprocess - bug in __call__")
+            raise ValueError("Lists should not reach preprocess")
 
-        # Set default chunking to 30 seconds with 5 second overlap
-        preprocess_params.setdefault("chunk_length_s", 30)
-        preprocess_params.setdefault("stride_length_s", (5, 5))
+        preprocess_params.setdefault("chunk_length_s", 0)
 
-        # Handle different formats from datasets
+        # Normalize input formats
         if isinstance(inputs, dict):
             if "bytes" in inputs:
-                # Decode bytes to audio array using torchcodec
-                import tempfile
-
-                from torchcodec.decoders import AudioDecoder
-
-                wav_bytes = inputs["bytes"]
-                # Write to temp file for torchcodec to read
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                    f.write(wav_bytes)
-                    temp_path = f.name
-                try:
-                    decoder = AudioDecoder(temp_path)
-                    # Get all audio samples
-                    audio_result = decoder.get_all_samples()
-                    audio_tensor = audio_result.data
-                    sample_rate = audio_result.sample_rate
-                    inputs = {"raw": audio_tensor.squeeze().numpy(), "sampling_rate": sample_rate}
-                finally:
-                    from pathlib import Path
-
-                    Path(temp_path).unlink()
+                inputs = self._decode_audio_bytes(inputs["bytes"])
             elif "array" in inputs:
-                # Convert "array" key to "raw" key
                 inputs = {"raw": inputs["array"], "sampling_rate": inputs["sampling_rate"]}
-            # If it already has "raw" and "sampling_rate", it's good to go
         elif hasattr(inputs, "array") and hasattr(inputs, "sampling_rate"):
-            # Audio object with attributes (not dict)
             inputs = {"raw": inputs.array, "sampling_rate": inputs.sampling_rate}
         elif hasattr(inputs, "__array__") and not isinstance(inputs, (dict, bytes, str)):
             inputs = {"raw": inputs, "sampling_rate": self.model.config.audio_sample_rate}
@@ -158,31 +121,72 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         return super().preprocess(inputs, **preprocess_params)
 
-    def _forward(self, model_inputs, **generate_kwargs):
-        # Extract task and set sampling parameters
-        task = generate_kwargs.pop("task", None)
+    def _decode_audio_bytes(self, wav_bytes: bytes) -> dict[str, Any]:
+        """Decode audio bytes to array format."""
+        import tempfile
 
-        # Task-specific sampling parameters
-        task_params: Dict[str, Dict[str, Any]] = {
+        from torchcodec.decoders import AudioDecoder
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(wav_bytes)
+            temp_path = f.name
+
+        try:
+            decoder = AudioDecoder(temp_path)
+            audio_result = decoder.get_all_samples()
+            return {
+                "raw": audio_result.data.squeeze().numpy(),
+                "sampling_rate": audio_result.sample_rate,
+            }
+        finally:
+            Path(temp_path).unlink()
+
+    def _forward(self, model_inputs, **generate_kwargs) -> dict[str, Any]:
+        task: str | None = generate_kwargs.pop("task", None)
+
+        # Task-specific defaults
+        task_params: dict[str, dict[str, Any]] = {
             "transcribe": {"do_sample": False},
             "emotion": {"do_sample": True, "temperature": 0.7},
             "describe": {"do_sample": True, "temperature": 0.7},
             "continue": {"do_sample": True, "temperature": 1.0},
         }
-
-        if task in task_params:
+        if task is not None and task in task_params:
             for key, value in task_params[task].items():
                 generate_kwargs.setdefault(key, value)
 
-        # Extract audio inputs from various formats
-        is_last = True
-        audio_inputs = None
-        is_whisper = False  # Track if this is Whisper input
+        # Extract audio from model_inputs
+        audio_inputs, is_whisper = self._extract_audio(model_inputs)
+        is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
 
-        # Normalize model_inputs to dict format
+        # Generation defaults
+        generate_kwargs.setdefault(
+            "eos_token_id", self.model.tokenizer.convert_tokens_to_ids("<|im_end|>")
+        )
+        generate_kwargs.setdefault("max_new_tokens", self.model.config.max_new_tokens)
+
+        # Generate
+        if is_whisper:
+            generated_ids = self.model.generate(
+                input_features=audio_inputs,
+                task=task,
+                **generate_kwargs,
+            )
+        else:
+            generated_ids = self.model.generate(
+                input_values=audio_inputs,
+                task=task,
+                **generate_kwargs,
+            )
+
+        return {"tokens": generated_ids, "is_last": is_last}
+
+    def _extract_audio(self, model_inputs) -> tuple[torch.Tensor, bool]:
+        """Extract audio tensor from various input formats."""
         if isinstance(model_inputs, torch.Tensor):
-            audio_inputs = model_inputs
-        elif isinstance(model_inputs, (list, tuple)) and model_inputs:
+            return model_inputs.to(self.model.device), False
+
+        if isinstance(model_inputs, (list, tuple)) and model_inputs:
             model_inputs = (
                 model_inputs[0]
                 if isinstance(model_inputs[0], dict)
@@ -190,105 +194,49 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             )
 
         if isinstance(model_inputs, dict):
-            # Pop metadata fields
-            is_last = model_inputs.pop("is_last", True)
             model_inputs.pop("stride", None)
-            # Get audio input (Whisper uses input_features, others use input_values)
             if "input_features" in model_inputs:
-                audio_inputs = model_inputs["input_features"]
-                is_whisper = True
-            else:
-                audio_inputs = model_inputs.get("input_values")
+                return model_inputs["input_features"].to(self.model.device), True
+            if "input_values" in model_inputs:
+                return model_inputs["input_values"].to(self.model.device), False
 
-        if audio_inputs is None:
-            raise ValueError(
-                f"Could not extract input_values or input_features from {type(model_inputs)}"
-            )
+        raise ValueError(f"Could not extract audio from {type(model_inputs)}")
 
-        if isinstance(audio_inputs, torch.Tensor):
-            audio_inputs = audio_inputs.to(self.model.device)
-        else:
-            raise ValueError(f"audio inputs must be a tensor, got {type(audio_inputs)}")
-
-        im_end_id = self.model.tokenizer.convert_tokens_to_ids("<|im_end|>")
-        generate_kwargs.setdefault("eos_token_id", im_end_id)
-        generate_kwargs.setdefault("max_new_tokens", self.model.config.max_new_tokens)
-
-        # Pass the appropriate input type to generate
-        if is_whisper:
-            # Whisper model - use input_features
-            generated_ids = self.model.generate(
-                input_features=audio_inputs,
-                system_prompt=self.model.config.system_prompt,
-                task=task,
-                **generate_kwargs,
-            )
-        else:
-            # Wav2Vec2/HuBERT model - use input_values
-            generated_ids = self.model.generate(
-                input_values=audio_inputs,
-                system_prompt=self.model.config.system_prompt,
-                task=task,
-                **generate_kwargs,
-            )
-
-        return {"tokens": generated_ids, "is_last": is_last}
-
-    def _process_text_only(self, generate_kwargs):
-        """Process text-only input without audio encoding."""
+    def _process_text_only(self, generate_kwargs: dict) -> dict[str, str]:
+        """Process text-only input without audio."""
         text_input = generate_kwargs.pop("text_input", None)
         if text_input is None:
-            raise ValueError("text_input is required for text task")
+            raise ValueError("text_input required for text task")
 
-        # Remove task from generate_kwargs to avoid duplicate argument
         generate_kwargs.pop("task", None)
-
-        # Generate text using the model
         generated_ids = self.model.generate(task="text", text_input=text_input, **generate_kwargs)
+        text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 
-        # Decode the generated text
-        generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-
-        return {"text": generated_text}
+        return {"text": text}
 
     def postprocess(
-        self, model_outputs: Dict[str, Any], return_timestamps=None, return_language=None
-    ):
-        # Handle chunked outputs from iterator
+        self, model_outputs: dict[str, Any], return_timestamps=None, return_language=None
+    ) -> dict[str, str]:
         if isinstance(model_outputs, list):
-            # Move all tensors to CPU before calling parent postprocess
-            for output_dict in model_outputs:
-                for key, value in output_dict.items():
+            for output in model_outputs:
+                for key, value in output.items():
                     if torch.is_tensor(value):
-                        output_dict[key] = value.cpu()
+                        output[key] = value.cpu()
             return super().postprocess(model_outputs)
 
-        if "is_last" in model_outputs:
-            model_outputs.pop("is_last")
-
-        tokens = model_outputs.get("tokens")
-        if tokens is None:
-            tokens = model_outputs.get("generated_ids")
+        model_outputs.pop("is_last", None)
+        tokens = model_outputs.get("tokens") or model_outputs.get("generated_ids")
 
         if tokens is None:
-            raise ValueError(
-                f"Expected 'tokens' or 'generated_ids' in model_outputs, got: {model_outputs.keys()}"
-            )
+            raise ValueError(f"Expected 'tokens' or 'generated_ids', got: {model_outputs.keys()}")
 
-        # Move to CPU if on MPS or other device
         if torch.is_tensor(tokens) and tokens.device.type != "cpu":
             tokens = tokens.cpu()
-
         if len(tokens.shape) > 1:
             tokens = tokens[0]
 
-        text = self.tokenizer.decode(tokens, skip_special_tokens=True)
-        text = text.strip()
-
-        # Apply Whisper normalization (matches training)
+        text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
         text = self.text_normalizer.normalize(text)
-
-        # Apply truecasing for proper capitalization
         text = get_true_case(text)
 
         return {"text": text}

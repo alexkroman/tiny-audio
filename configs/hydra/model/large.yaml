@@ -2,9 +2,5 @@
 decoder_model_name: HuggingFaceTB/SmolLM3-3B
 encoder_model_name: facebook/hubert-xlarge-ls960-ft  # HuBERT encoder
 
-# Projector configuration per SLAM-ASR paper
-audio_downsample_rate: 5
-projector_hidden_dim: 5120  # 4x encoder_dim for SwiGLU (1280 * 4)
-
 # System prompt for transcription task
 system_prompt: "/no_think /system_override"

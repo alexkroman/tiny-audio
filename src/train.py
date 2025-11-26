@@ -2,7 +2,8 @@
 
 import logging
 import re
-from typing import Any, Dict, List
+from dataclasses import fields
+from typing import Any
 
 import hydra
 import nltk
@@ -31,114 +32,90 @@ import wandb
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
 
+# Shared task prompts (matches ASRModel.TASK_PROMPTS)
+TASK_PROMPTS = {
+    "transcribe": "Transcribe: <audio>",
+    "continue": "Continue: <audio>",
+    "describe": "Describe: <audio>",
+    "emotion": "Emotion: <audio>",
+}
+
 
 class DatasetLoader:
+    """Loads and prepares streaming datasets for training."""
+
     def __init__(self, config: DictConfig):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
-        self.seed = config.training.get("seed", 42)  # Get seed from training config
+        self.seed = config.training.get("seed", 42)
 
-    def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
-        # Get dataset path (required)
+    def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> IterableDataset:
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
             raise ValueError("Dataset path is required")
 
-        # Get optional name/config for datasets with multiple configurations
-        dataset_name = dataset_cfg.get("name", None)
-
         ds = load_dataset(
             dataset_path,
-            name=dataset_name,  # Can be None for datasets without configs
+            name=dataset_cfg.get("name"),
             split=split,
             streaming=True,
             cache_dir=self.cache_dir,
         )
 
         # Normalize column names
-        for target_col, source_col in [
-            ("text", dataset_cfg.get("text_column", "text")),
-            ("audio", dataset_cfg.get("audio_column", "audio")),
-        ]:
-            if source_col != target_col and source_col in ds.column_names:
-                if target_col in ds.column_names:
-                    ds = ds.remove_columns([target_col])
-                ds = ds.rename_column(source_col, target_col)
+        col_map = {
+            "text": dataset_cfg.get("text_column", "text"),
+            "audio": dataset_cfg.get("audio_column", "audio"),
+        }
+        for target, source in col_map.items():
+            if source != target and source in ds.column_names:
+                if target in ds.column_names:
+                    ds = ds.remove_columns([target])
+                ds = ds.rename_column(source, target)
 
-        # Cast audio column to correct format
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        # Get task for this dataset
+        # Remove extra columns, keep only audio and text
+        extra_cols = [c for c in (ds.column_names or []) if c not in {"audio", "text"}]
+        if extra_cols:
+            ds = ds.remove_columns(extra_cols)
+
         task = dataset_cfg.get("task", "transcribe")
-
-        # Get original features before any modifications
-        original_features = ds.info.features if hasattr(ds, "info") and ds.info else None
-
-        # Remove extra columns that might cause feature conflicts
-        # Keep only: audio, text
-        columns_to_keep = {"audio", "text"}
-        current_columns = ds.column_names if hasattr(ds, "column_names") and ds.column_names else []
-        columns_to_remove = [col for col in current_columns if col not in columns_to_keep]
-
-        if columns_to_remove:
-            ds = ds.remove_columns(columns_to_remove)
-
-        # Add task using a simple wrapper generator with error handling
-        def add_task_gen(dataset, task_val):
-            for idx, example in enumerate(dataset):
-                try:
-                    # Access the audio field to trigger decoding and catch errors early
-                    if "audio" in example and example["audio"] is not None:
-                        # Try to access the audio array to force decoding
-                        _ = example["audio"]["array"]
-
-                    example["task"] = task_val
-                    yield example
-                except (RuntimeError, OSError, ValueError) as e:
-                    error_msg = str(e)
-                    if any(
-                        phrase in error_msg
-                        for phrase in [
-                            "Resource temporarily unavailable",
-                            "Failed to open",
-                            "Invalid data",
-                            "Could not find codec",
-                        ]
-                    ):
-                        print(
-                            f"Warning: Skipping example {idx} due to audio decoding error: {error_msg[:100]}"
-                        )
-                        continue
-                    else:
-                        raise
-                except Exception as e:
-                    print(
-                        f"Warning: Skipping example {idx} due to unexpected error: {type(e).__name__}: {str(e)[:100]}"
-                    )
-                    continue
-
-        # Build new features dict from original, adding task
-        if original_features:
-            new_features = {k: v for k, v in original_features.items() if k in columns_to_keep}
-            new_features["task"] = Value("string")
-            new_features = Features(new_features)
-        else:
-            # Fallback if no features available
-            new_features = Features(
-                {
-                    "audio": Audio(sampling_rate=self.sample_rate),
-                    "text": Value("string"),
-                    "task": Value("string"),
-                }
-            )
-
-        # Create new dataset with explicit features
-        return IterableDataset.from_generator(
-            add_task_gen,
-            gen_kwargs={"dataset": ds, "task_val": task},
-            features=new_features,
+        features = Features(
+            {
+                "audio": Audio(sampling_rate=self.sample_rate),
+                "text": Value("string"),
+                "task": Value("string"),
+            }
         )
+
+        return IterableDataset.from_generator(
+            self._add_task_generator,
+            gen_kwargs={"dataset": ds, "task": task},
+            features=features,
+        )
+
+    @staticmethod
+    def _add_task_generator(dataset, task: str):
+        """Generator that adds task field and filters invalid samples."""
+        for example in dataset:
+            # Skip invalid audio
+            audio = example.get("audio")
+            if audio is None:
+                continue
+            try:
+                _ = audio.get_all_samples()
+            except Exception:
+                continue
+
+            # Skip TEDLIUM ignore markers
+            text = example.get("text", "")
+            if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
+                continue
+
+            example["task"] = task
+            yield example
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -149,39 +126,25 @@ class DatasetLoader:
             eval_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
             weight = d_cfg.get("sampling_weight", 1.0)
 
-            # Process configs if present, otherwise use direct splits
-            configs_to_process = []
+            # Handle multiple configs or direct splits
             if "configs" in d_cfg:
-                for config, train, eval in zip(d_cfg.configs, train_splits, eval_splits):
-                    cfg = OmegaConf.create(d_cfg)
-                    cfg.name = config
-                    configs_to_process.append((cfg, train, eval))
-            else:
-                configs_to_process = [
-                    (d_cfg, train, eval) for train in train_splits for eval in eval_splits
+                configs = [
+                    (OmegaConf.create({**d_cfg, "name": c}), t, e)
+                    for c, t, e in zip(d_cfg.configs, train_splits, eval_splits)
                 ]
+            else:
+                configs = [(d_cfg, t, e) for t in train_splits for e in eval_splits]
 
-            for cfg, train_split, eval_split in configs_to_process:
+            for cfg, train_split, eval_split in configs:
                 train_datasets.append(self._prepare_split(cfg, train_split))
                 train_weights.append(weight)
                 if eval_split:
                     val_datasets.append(self._prepare_split(cfg, eval_split))
                     val_weights.append(weight)
 
-        # Helper to combine datasets with weights
-        def combine_datasets(datasets, weights):
-            if not datasets:
-                return None
-            if len(datasets) == 1:
-                return datasets[0]
-            # Normalize weights and interleave
-            probs = [w / sum(weights) for w in weights]
-            return interleave_datasets(datasets, probabilities=probs)
+        train_ds = self._combine_datasets(train_datasets, train_weights)
+        val_ds = self._combine_datasets(val_datasets, val_weights)
 
-        train_ds = combine_datasets(train_datasets, train_weights)
-        val_ds = combine_datasets(val_datasets, val_weights)
-
-        # Shuffle and limit datasets
         if train_ds:
             train_ds = train_ds.shuffle(seed=self.seed, buffer_size=1000)
             if self.config.max_train_samples:
@@ -191,109 +154,119 @@ class DatasetLoader:
 
         return train_ds, val_ds
 
+    @staticmethod
+    def _combine_datasets(datasets: list, weights: list):
+        if not datasets:
+            return None
+        if len(datasets) == 1:
+            return datasets[0]
+        probs = [w / sum(weights) for w in weights]
+        return interleave_datasets(datasets, probabilities=probs)
+
 
 class DataCollator(DataCollatorForSeq2Seq):
+    """Collates audio and text data for training."""
+
+    # Text preprocessing patterns
+    TEXT_REPLACEMENTS = {
+        r"<PERIOD>": ".",
+        r"<COMMA>": ",",
+        r"<QUESTIONMARK>": "?",
+        r"<EXCLAMATIONPOINT>": "!",
+        r"<inaudible>": "",
+        r"\b(uh|um|ah)\b": "",
+    }
+
     def __init__(
-        self,
-        tokenizer: Any,
-        feature_extractor: Any,
-        sample_rate: int,
-        system_prompt: str = None,
+        self, tokenizer: Any, feature_extractor: Any, sample_rate: int, system_prompt: str = None
     ):
         super().__init__(tokenizer=tokenizer, padding=True)
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
-
-        # Check if this is a Whisper feature extractor
         self.is_whisper = feature_extractor.__class__.__name__ == "WhisperFeatureExtractor"
 
-        # Use tokenizer's normalize method if available, otherwise use WhisperTokenizer for normalization
-        # The Whisper normalizer is a standard text preprocessing utility
-        if hasattr(tokenizer, "normalize"):
-            self.text_normalizer = tokenizer
-        else:
-            # Fallback to whisper-tiny tokenizer for its normalize() method only
-            self.text_normalizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+        # Text normalizer
+        self.text_normalizer = (
+            tokenizer
+            if hasattr(tokenizer, "normalize")
+            else WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+        )
 
-    def _preprocess_text(self, text: str) -> str:
-        """Preprocess text before Whisper normalization (matches eval script)."""
-        if not isinstance(text, str) or text is None:
-            return ""
-
-        # Apply all text replacements
-        replacements = {
-            r"<PERIOD>": ".",
-            r"<COMMA>": ",",
-            r"<QUESTIONMARK>": "?",
-            r"<EXCLAMATIONPOINT>": "!",
-            r"<inaudible>": "",
-            r"\b(uh|um)\b": "",
-        }
-        for pattern, replacement in replacements.items():
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-        return text
+        # Cache special token IDs
+        self._im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        self._im_start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
+        self._assistant_id = tokenizer.convert_tokens_to_ids("assistant")
+        self._think_end_id = tokenizer.convert_tokens_to_ids("</think>")
 
     def _normalize_text(self, text: str) -> str:
-        """Apply Whisper normalization (matches eval script)."""
-        return self.text_normalizer.normalize(self._preprocess_text(text))
+        """Preprocess and normalize text."""
+        if not isinstance(text, str):
+            return ""
+        for pattern, repl in self.TEXT_REPLACEMENTS.items():
+            text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", "", text)  # Strip HTML-like tags
+        return self.text_normalizer.normalize(text)
 
-    def _extract_audio(self, audio_decoder) -> Any:
-        """Extract and normalize audio to mono."""
-        audio_array = audio_decoder.get_all_samples().data.numpy().squeeze()
+    def _find_assistant_content_range(self, tokens: list[int]) -> tuple[int, int]:
+        """Find the start and end indices of assistant content for label masking."""
+        # Try to find </think> tag first (for thinking models)
+        if self._think_end_id in tokens:
+            start = tokens.index(self._think_end_id) + 1
+        else:
+            # Find <|im_start|>assistant pattern
+            start = -1
+            for i in range(len(tokens) - 1):
+                if tokens[i] == self._im_start_id and tokens[i + 1] == self._assistant_id:
+                    start = i + 2
+                    break
 
-        # Convert to mono if multi-channel
-        if audio_array.ndim > 1:
-            audio_array = audio_array.mean(axis=0)
-        elif audio_array.ndim == 0:
-            audio_array = audio_array.reshape(1)
+        if start < 0:
+            return -1, -1
 
-        return audio_array
+        # Skip whitespace tokens
+        while start < len(tokens) and self.tokenizer.decode([tokens[start]]).strip() == "":
+            start += 1
 
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        audio_arrays = [self._extract_audio(f["audio"]) for f in features]
+        # Find <|im_end|> after content start
+        try:
+            end = tokens.index(self._im_end_id, start)
+        except ValueError:
+            return -1, -1
 
-        # Extract audio features with attention mask
-        # For Whisper: padding="max_length" pads to 3000 frames (30 seconds)
-        # For Wav2Vec2: padding=True pads to longest in batch
-        padding_strategy = "max_length" if self.is_whisper else True
+        return start, end
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        # Process audio
+        audio_arrays = []
+        for f in features:
+            audio = f["audio"].get_all_samples().data.numpy().squeeze()
+            if audio.ndim > 1:
+                audio = audio.mean(axis=0)
+            elif audio.ndim == 0:
+                audio = audio.reshape(1)
+            audio_arrays.append(audio)
 
         audio_features = self.feature_extractor(
             audio_arrays,
             sampling_rate=self.sample_rate,
-            padding=padding_strategy,
+            padding="max_length" if self.is_whisper else True,
             return_tensors="pt",
-            return_attention_mask=True,  # Required for both Whisper and Wav2Vec2
+            return_attention_mask=True,
         )
 
+        # Process text
         text_features = []
         for f in features:
-            text = f["text"].strip() if isinstance(f["text"], str) else f["text"]
-
-            # Apply Whisper normalization (matches eval script preprocessing)
-            text = self._normalize_text(text)
-
-            # Apply truecasing to restore proper capitalization
-            text = text.replace("<COMMA>", ",").replace("<PERIOD>", ".")
+            text = self._normalize_text(f.get("text", ""))
             text = truecase.get_true_case(text)
+
+            task = f.get("task", "transcribe")
+            instruction = TASK_PROMPTS.get(task, TASK_PROMPTS["transcribe"])
 
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
-
-            # Choose prompt based on task type
-            task = f.get("task", "transcribe")  # Get task field added by add_column
-
-            # Use default single prompt per task
-            if task == "continue":
-                instruction = "Continue: <audio>"
-            elif task == "describe":
-                instruction = "Describe: <audio>"
-            elif task == "emotion":
-                instruction = "Emotion: <audio>"
-            else:  # Default to transcribe
-                instruction = "Transcribe: <audio>"
-
             messages.append({"role": "user", "content": instruction})
             messages.append({"role": "assistant", "content": text})
 
@@ -302,70 +275,25 @@ class DataCollator(DataCollatorForSeq2Seq):
                 tokenize=True,
                 add_generation_prompt=False,
                 truncation=True,
-                max_length=256,
+                max_length=512,
                 enable_thinking=False,
             )
 
-            # Create labels - only train on the actual transcription text
+            # Create labels - mask everything except assistant content
             labels = [-100] * len(tokens)
+            start, end = self._find_assistant_content_range(tokens)
+            if start > 0 and end > 0:
+                labels[start : end + 1] = tokens[start : end + 1]
 
-            # Helper to skip whitespace tokens
-            def skip_whitespace(idx, token_list):
-                while (
-                    idx < len(token_list)
-                    and self.tokenizer.decode([int(token_list[idx])]).strip() == ""
-                ):
-                    idx += 1
-                return idx
-
-            # Find content boundaries
-            special_tokens = {
-                "im_end": self.tokenizer.convert_tokens_to_ids("<|im_end|>"),
-                "think_end": self.tokenizer.convert_tokens_to_ids("</think>"),
-                "im_start": self.tokenizer.convert_tokens_to_ids("<|im_start|>"),
-                "assistant": self.tokenizer.convert_tokens_to_ids("assistant"),
-            }
-
-            # Find content start
-            content_start = -1
-            # Check for thinking tag end
-            if special_tokens["think_end"] in tokens:
-                idx = tokens.index(special_tokens["think_end"])
-                content_start = skip_whitespace(idx + 1, tokens)
-            else:
-                # Look for assistant marker
-                for i in range(len(tokens) - 2):
-                    if (
-                        tokens[i] == special_tokens["im_start"]
-                        and tokens[i + 1] == special_tokens["assistant"]
-                    ):
-                        content_start = skip_whitespace(i + 2, tokens)
-                        break
-
-            # Find content end (im_end token)
-            content_end = -1
-            if content_start > 0 and special_tokens["im_end"] in tokens[content_start:]:
-                content_end = tokens[content_start:].index(special_tokens["im_end"]) + content_start
-
-            # Unmask the actual transcription including EOS token
-            if content_start > 0 and content_end > 0:
-                labels[content_start : content_end + 1] = tokens[content_start : content_end + 1]
-
-            text_features.append(
-                {
-                    "input_ids": tokens,
-                    "labels": labels,
-                }
-            )
+            text_features.append({"input_ids": tokens, "labels": labels})
 
         batch = super().__call__(text_features)
 
-        # Handle both Wav2Vec2 (input_values) and Whisper (input_features)
+        # Add audio to batch
         if "input_values" in audio_features:
             batch["input_values"] = audio_features.input_values
         elif "input_features" in audio_features:
             batch["input_features"] = audio_features.input_features
-
         if "attention_mask" in audio_features:
             batch["audio_attention_mask"] = audio_features.attention_mask
 
@@ -373,49 +301,50 @@ class DataCollator(DataCollatorForSeq2Seq):
 
 
 class PushToHubCallback(TrainerCallback):
-    """Custom callback to push model to hub root directory on every save."""
+    """Pushes model to Hub on every save."""
 
     def on_save(self, args, state, control, **kwargs):
-        """Called after a checkpoint is saved."""
-        if args.push_to_hub and args.hub_model_id:
-            # Get the model from kwargs
-            model = kwargs.get("model")
-            if model is not None:
-                print(f"\n📤 Pushing checkpoint (step {state.global_step}) to Hub root...")
-                try:
-                    # model.push_to_hub() will call model.save_pretrained() internally
-                    # which triggers your custom save logic (encoder, decoder, projector split)
-                    commit_message = f"Training in progress - step {state.global_step}"
-                    model.push_to_hub(
-                        repo_id=args.hub_model_id,
-                        commit_message=commit_message,
-                        private=args.hub_private_repo,
-                    )
-                    print(f"✅ Successfully pushed to {args.hub_model_id}")
-                except Exception as e:
-                    print(f"⚠️  Failed to push to hub: {e}")
+        if not (args.push_to_hub and args.hub_model_id):
+            return control
+
+        model = kwargs.get("model")
+        if model is None:
+            return control
+
+        print(f"\n📤 Pushing checkpoint (step {state.global_step}) to Hub...")
+        try:
+            model.push_to_hub(
+                repo_id=args.hub_model_id,
+                commit_message=f"Training in progress - step {state.global_step}",
+                private=args.hub_private_repo,
+            )
+            print(f"✅ Successfully pushed to {args.hub_model_id}")
+        except Exception as e:
+            print(f"⚠️  Failed to push to hub: {e}")
+
         return control
+
+
+def get_valid_training_args(config: dict) -> dict:
+    """Filter config to only valid TrainingArguments fields."""
+    valid_fields = {f.name for f in fields(TrainingArguments)}
+    return {k: v for k, v in config.items() if k in valid_fields}
 
 
 @hydra.main(version_base=None, config_path="../configs/hydra", config_name="config")
 def main(cfg: DictConfig) -> None:
-    # Use HuggingFace's logging utilities
+    # Reduce logging noise
     from transformers import logging as transformers_logging
 
-    transformers_logging.set_verbosity_error()  # Reduces transformer trainer logs
+    transformers_logging.set_verbosity_error()
+    for logger in ["httpx", "httpcore", "datasets"]:
+        logging.getLogger(logger).setLevel(logging.WARNING)
 
-    # Suppress HTTP and dataset loading logs
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("datasets").setLevel(logging.WARNING)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    nltk.download("punkt_tab", quiet=True)
 
-    # Download NLTK data for truecasing
-    nltk.download("punkt_tab")
-
-    # Log configuration if needed
-    if cfg.get("verbose", False):
+    if cfg.get("verbose"):
         print(OmegaConf.to_yaml(cfg))
 
     # Initialize wandb
@@ -426,42 +355,31 @@ def main(cfg: DictConfig) -> None:
             name=cfg.training.get("run_name"),
         )
 
-    # Get encoder and decoder dimensions
-    from transformers import AutoConfig as HFAutoConfig
-
-    encoder_config = HFAutoConfig.from_pretrained(cfg.model.encoder_model_name)
-    decoder_config = HFAutoConfig.from_pretrained(
-        cfg.model.decoder_model_name, trust_remote_code=True
-    )
-
+    # Create model config (dimensions are auto-detected)
     asr_config = ASRConfig(
         text_model_id=cfg.model.decoder_model_name,
         audio_model_id=cfg.model.encoder_model_name,
         attn_implementation=cfg.training.attn_implementation,
         model_dtype=cfg.training.model_dtype,
-        audio_downsample_rate=cfg.model.audio_downsample_rate,
         system_prompt=cfg.model.system_prompt,
-        encoder_dim=encoder_config.hidden_size,
-        llm_dim=decoder_config.hidden_size,
         projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
+        use_specaugment=cfg.training.get("use_specaugment", False),
+        label_smoothing=cfg.training.get("label_smoothing", 0.1),
     )
 
-    # Load from pretrained if specified, otherwise create new model
+    # Load or create model
     if cfg.model.get("pretrained_model_path"):
         print(f"Loading pretrained model from: {cfg.model.pretrained_model_path}")
-        model = ASRModel.from_pretrained(
-            cfg.model.pretrained_model_path,
-            config=asr_config,
-        )
+        model = ASRModel.from_pretrained(cfg.model.pretrained_model_path, config=asr_config)
     else:
         model = ASRModel(asr_config)
 
-    # Disable cache during training (required for gradient checkpointing)
     model.config.use_cache = False
 
+    # Load datasets
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
-    # Create data collator for both training and evaluation
+    # Create data collator
     data_collator = DataCollator(
         tokenizer=model.tokenizer,
         feature_extractor=model.feature_extractor,
@@ -478,55 +396,32 @@ def main(cfg: DictConfig) -> None:
                 early_stopping_threshold=cfg.early_stopping.threshold,
             )
         )
-
-    # Add custom push to hub callback if configured
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
         callbacks.append(PushToHubCallback())
 
-    # Convert config to dict and remove non-TrainingArguments fields
-    training_args = OmegaConf.to_container(cfg.training, resolve=True)
-    assert isinstance(training_args, dict), "training_args must be a dict"
-
-    # Apply torch.compile config if present
-    if compile_config := training_args.pop("torch_compile_config", None):
-        # Configure torch compilation settings
+    # Configure torch.compile if specified
+    training_config = OmegaConf.to_container(cfg.training, resolve=True)
+    assert isinstance(training_config, dict)
+    if compile_config := training_config.pop("torch_compile_config", None):
         torch._dynamo.config.cache_size_limit = compile_config.get("cache_size_limit", 64)
         torch._dynamo.config.capture_scalar_outputs = compile_config.get(
             "capture_scalar_outputs", True
         )
-        torch._dynamo.config.allow_unspec_int_on_nn_module = compile_config.get(
-            "allow_unspec_int_on_nn_module", True
-        )
         torch._inductor.config.compile_threads = compile_config.get("compile_threads", 4)
 
-    # Remove non-TrainingArguments fields
-    non_training_args = [
-        "torch_compile_dynamic",
-        "torch_compile_backend",
-        "torch_compile_mode",
-        "torch_compile_fullgraph",
-        "model_dtype",
-        "attn_implementation",
-    ]
-    for key in non_training_args:
-        training_args.pop(key, None)
-
+    # Create trainer with only valid TrainingArguments
     trainer = Trainer(
         model=model,
-        args=TrainingArguments(**training_args),
+        args=TrainingArguments(**get_valid_training_args(training_config)),
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=data_collator,
         callbacks=callbacks,
     )
 
-    # Check for checkpoint resumption
-    resume_from_checkpoint = cfg.training.get("resume_from_checkpoint", None)
-
-    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
     trainer.save_model()
 
-    # Push final model to hub if configured
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
         print(f"Pushing final model to Hub: {cfg.training.hub_model_id}")
         trainer.push_to_hub(commit_message="Training complete - final model")
