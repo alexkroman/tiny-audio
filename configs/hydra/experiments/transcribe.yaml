@@ -25,10 +25,10 @@ training:
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
-  per_device_train_batch_size: 6
+  per_device_train_batch_size: 8
   per_device_eval_batch_size: 24
-  gradient_accumulation_steps: 4
-  eval_accumulation_steps: 4
+  gradient_accumulation_steps: 2
+  eval_accumulation_steps: 2
 
   adam_beta1: 0.9
   adam_beta2: 0.95
@@ -47,8 +47,6 @@ training:
 
   # Memory optimization
   torch_compile: false
-    
-  gradient_checkpointing: false
 
   # Training duration - 50000 steps as requested
   max_steps: 20000

@@ -25,12 +25,12 @@ class MoEAudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.k = getattr(config, "projector_pool_stride", 2)
-        self.num_experts = getattr(config, "num_experts", 16)
+        self.num_experts = getattr(config, "num_experts", 8)
         self.top_k = getattr(config, "moe_top_k", 2)
 
         self.router_scale = getattr(config, "router_scale", 16.0)
-        self.bias_scale = getattr(config, "router_bias_scale", 0.001)
-        self.load_update_rate = getattr(config, "router_load_update_rate", 0.01)
+        self.bias_scale = getattr(config, "router_bias_scale", 0.5)
+        self.load_update_rate = getattr(config, "router_load_update_rate", 0.1)
         self.z_loss_coef = getattr(config, "router_z_loss_coef", 1e-4)
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
@@ -40,9 +40,8 @@ class MoEAudioProjector(nn.Module):
         in_dim = config.encoder_dim * self.k
         self.out_dim = config.llm_dim
 
-        # Expert hidden dims (1:1 ratio for shared and routed, per DeepSeek)
-        routed_expert_hidden = getattr(config, "projector_hidden_dim", None) or 1536
-        shared_expert_hidden = getattr(config, "shared_projector_hidden_dim", None) or 1536
+        routed_expert_hidden = getattr(config, "projector_hidden_dim", None) or 2048
+        shared_expert_hidden = getattr(config, "shared_projector_hidden_dim", None) or 2048
 
         self.ln_pre = RMSNorm(in_dim, eps=1e-6)
         self.ln_post = RMSNorm(self.out_dim, eps=1e-6)

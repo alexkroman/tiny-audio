@@ -8,8 +8,8 @@ Usage:
 Diagnoses:
 1. Integrity: Checks for NaNs or Infinity values (common in BF16 training).
 2. Router Health: Checks if the router is biased or exploding.
-3. Diversity: Checks if experts are identical clones (bad) or specialized (good).
-4. Fade-In: Checks if experts are balanced against the shared path.
+3. Load Balance: Checks the uniformity of the expert_load buffer (CRITICAL NEW CHECK).
+4. Diversity: Checks if experts are identical clones (bad) or specialized (good).
 5. Spectral Health: Uses SVD to check for rank collapse (feature richness).
 """
 
@@ -27,8 +27,13 @@ from safetensors.torch import load_file
 # --- Helper Functions ---
 
 
-def draw_ascii_bar(values: List[float], labels: Optional[List[str]] = None, max_width: int = 40):
-    """Draws a visual comparison bar chart."""
+def draw_ascii_bar(
+    values: List[float],
+    labels: Optional[List[str]] = None,
+    max_width: int = 40,
+    denominator: Optional[float] = None,
+):
+    """Draws a visual comparison bar chart with optional percentage."""
     if len(values) == 0:
         return
 
@@ -36,7 +41,7 @@ def draw_ascii_bar(values: List[float], labels: Optional[List[str]] = None, max_
     min_val, max_val = values.min(), values.max()
     range_val = max_val - min_val if max_val != min_val else 1.0
 
-    print("-" * 65)
+    print("-" * 75)
     for i, val in enumerate(values):
         # Normalize to 0-1 for width
         normalized = (val - min_val) / range_val if range_val > 0 else 0.5
@@ -45,8 +50,12 @@ def draw_ascii_bar(values: List[float], labels: Optional[List[str]] = None, max_
         bar = "█" * width
 
         label = f"{labels[i]:<4}" if labels else f"{i:<4}"
-        print(f"{label} | {bar:<{max_width}} {val:.6f}")
-    print("-" * 65)
+        if denominator is not None:
+            pct = (val / denominator) * 100
+            print(f"{label} | {bar:<{max_width}} {val:.1f} ({pct:.1f}%)")
+        else:
+            print(f"{label} | {bar:<{max_width}} {val:.6f}")
+    print("-" * 75)
 
 
 def compute_effective_rank(matrix: torch.Tensor) -> float:
@@ -127,7 +136,6 @@ def analyze_checkpoint(file_path: str):
         return
 
     # Filter for projector weights
-    # We look for 'projector' keys first, fallback to generic if not found
     proj_weights = {k: v for k, v in tensors.items() if "projector" in k}
 
     if not proj_weights:
@@ -144,6 +152,7 @@ def analyze_checkpoint(file_path: str):
     shared_w12 = None
     shared_w3 = None
     router_w = None
+    expert_load_buffer = None  # NEW: For load balance tracking
     experts_map = defaultdict(dict)
 
     # Scan for NaNs while loading
@@ -160,6 +169,9 @@ def analyze_checkpoint(file_path: str):
             shared_w3 = v
         elif "router_weights" in k_clean:
             router_w = v
+        # NEW: Load expert_load buffer
+        elif "expert_load" in k_clean:
+            expert_load_buffer = v
 
         # Regex to find expert index (e.g., experts.0.w12)
         match = re.search(r"experts\.(\d+)\.", k)
@@ -185,7 +197,7 @@ def analyze_checkpoint(file_path: str):
 
     print(f"   Found {num_experts} Routed Experts + 1 Shared Expert.")
 
-    # 2. ROUTER DIAGNOSTICS
+    # 2. ROUTER DIAGNOSTICS (Original [1])
     print("\n[1] ROUTER DIAGNOSTICS")
     if router_w is not None:
         r_std = router_w.std().item()
@@ -204,8 +216,39 @@ def analyze_checkpoint(file_path: str):
     else:
         print("   ❌ Router weights missing!")
 
-    # 3. EXPERT DIVERSITY
-    print("\n[2] EXPERT DIVERSITY (Input Weight W12)")
+    # 3. LOAD BALANCE DIAGNOSTICS (NEW CRITICAL SECTION)
+    print("\n[2] LOAD BALANCE DIAGNOSTICS (Router Effectiveness)")
+    if expert_load_buffer is not None:
+        load_values = expert_load_buffer.float().cpu().numpy()
+        
+        load_std = np.std(load_values)
+        load_max = np.max(load_values)
+        load_min = np.min(load_values)
+        
+        print(f"   Buffer Std Dev: {load_std:.6f} (Lower is better)")
+        
+        if load_min > 1e-9:
+            ratio = load_max / load_min
+            print(f"   Max/Min Ratio: {ratio:.2f}x")
+        else:
+            print("   ❌ CRITICAL FAILURE: At least one expert load is near zero.")
+            ratio = float('inf')
+            
+        print("\n   Current Load per Expert (Visual Check):")
+        draw_ascii_bar(load_values, labels=[str(i) for i in range(num_experts)], max_width=40)
+        
+        if ratio > 5.0 or load_min < 1e-9:
+            print("   ❌ RED ZONE: Load Imbalance is significant. Router is failing to use all experts.")
+        elif ratio > 2.0 or load_std > 0.05:
+            print("   ⚠️  YELLOW ZONE: Imbalance is present. Consider increasing router_bias_scale.")
+        else:
+            print("   ✅ Load balance appears stable and uniform.")
+    else:
+        print("   ❌ Expert Load Buffer missing!")
+
+
+    # 4. EXPERT DIVERSITY (Original [2])
+    print("\n[3] EXPERT DIVERSITY (Input Weight W12)")
     if len(routed_w12s) > 1:
         # Stack and flatten: [Num_Experts, Total_Params]
         flat_experts = torch.stack([w.view(-1) for w in routed_w12s]).float()
@@ -230,8 +273,8 @@ def analyze_checkpoint(file_path: str):
         else:
             print("   ✅ GREEN ZONE: Experts are specializing.")
 
-    # 4. INITIALIZATION / FADE-IN
-    print("\n[3] INITIALIZATION / FADE-IN STATUS")
+    # 5. INITIALIZATION / FADE-IN (Original [3])
+    print("\n[4] INITIALIZATION / FADE-IN STATUS")
     if shared_w3 is not None and len(routed_w3s) > 0:
         shared_mag = shared_w3.abs().mean().item()
         expert_mags = [w.abs().mean().item() for w in routed_w3s]
@@ -250,8 +293,8 @@ def analyze_checkpoint(file_path: str):
         else:
             print(f"   ℹ️  Ratio: {ratio:.2f}x (Check if this matches your init strategy).")
 
-    # 5. SPECTRAL HEALTH
-    print("\n[4] SPECTRAL HEALTH (Effective Rank)")
+    # 6. SPECTRAL HEALTH (Original [4])
+    print("\n[5] SPECTRAL HEALTH (Effective Rank)")
     if shared_w12 is not None:
         rank = compute_effective_rank(shared_w12)
         full_rank = min(shared_w12.shape)
@@ -267,7 +310,7 @@ def analyze_checkpoint(file_path: str):
             f"   Avg Routed Expert Rank: {avg_rank:.1f} / {full_rank} ({(avg_rank / full_rank) * 100:.1f}%)"
         )
         print("\n   Rank per Expert:")
-        draw_ascii_bar(ranks, labels=[str(i) for i in sorted_indices])
+        draw_ascii_bar(ranks, labels=[str(i) for i in sorted_indices], denominator=full_rank)
 
 
 if __name__ == "__main__":

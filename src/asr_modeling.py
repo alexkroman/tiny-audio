@@ -24,7 +24,7 @@ class ASRModel(PreTrainedModel):
     base_model_prefix = "model"
     main_input_name = "input_features"
     _supports_flash_attn_2 = True
-    supports_gradient_checkpointing = True
+    supports_gradient_checkpointing = False  # Frozen encoder/LLM don't benefit; projector is small
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
 
@@ -118,6 +118,7 @@ class ASRModel(PreTrainedModel):
         """Load and freeze the audio encoder."""
         encoder_kwargs = {
             "attn_implementation": config.attn_implementation,
+            "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
         # Only use device_map="auto" when NOT loading from pretrained
@@ -143,9 +144,10 @@ class ASRModel(PreTrainedModel):
         """Load and freeze the language model."""
         decoder_kwargs = {
             "attn_implementation": config.attn_implementation,
-            "dtype": dtype,
             "trust_remote_code": True,
             "tie_word_embeddings": True,
+            "low_cpu_mem_usage": True,
+            "dtype": dtype,
         }
         # Only use device_map="auto" when NOT loading from pretrained
         if not cls._is_loading_from_pretrained:
@@ -173,7 +175,9 @@ class ASRModel(PreTrainedModel):
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
         projector = MoEAudioProjector(config)
-        return projector.to(dtype=dtype)
+        # Move projector to same device as language model (important when using quantization)
+        device = next(self.language_model.parameters()).device
+        return projector.to(device=device, dtype=dtype)
 
     def _init_tokenizer(self, config: ASRConfig):
         """Initialize tokenizer with audio token."""

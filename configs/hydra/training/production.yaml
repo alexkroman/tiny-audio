@@ -18,7 +18,7 @@ eval_steps: 1000
 
 # Saving
 save_strategy: steps
-save_steps: 1000
+save_steps: 100
 save_total_limit: 5
 load_best_model_at_end: false
 metric_for_best_model: eval_loss
@@ -45,9 +45,9 @@ attn_implementation: flash_attention_2
 
 # Streaming compatibility settings
 dataloader_num_workers: 1  # Must be 0 to avoid torchcodec resource exhaustion with streaming
-dataloader_persistent_workers: false  # Not needed with 0 workers
+dataloader_persistent_workers: true  # Not needed with 0 workers
 dataloader_prefetch_factor: 2  # Not used with 0 workers 
-dataloader_pin_memory: false
+dataloader_pin_memory: true
 
 # Misc
 seed: 42

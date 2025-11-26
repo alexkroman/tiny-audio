@@ -270,7 +270,7 @@ class DataCollator(DataCollatorForSeq2Seq):
                 tokenize=True,
                 add_generation_prompt=False,
                 truncation=True,
-                max_length=1024,
+                max_length=512,
                 enable_thinking=False,
             )
 
