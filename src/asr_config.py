@@ -24,6 +24,7 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_hidden_dim: Optional[int] = None,
         projector_dropout: float = 0.05,  # Dropout rate for projector layers
         projector_input_noise: float = 0.02,  # Input noise for projector
+        alignment_loss_coef: float = 0.0,  # Coefficient for audio-text alignment loss
         inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
         max_new_tokens: Optional[int] = None,
@@ -68,6 +69,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_dropout = projector_dropout
         self.projector_input_noise = projector_input_noise
+        self.alignment_loss_coef = alignment_loss_coef
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
         if "audio_config" not in kwargs:

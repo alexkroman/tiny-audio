@@ -8,9 +8,8 @@ Usage:
 Diagnoses:
 1. Integrity: Checks for NaNs or Infinity values (common in BF16 training).
 2. Router Health: Checks if the router is biased or exploding.
-3. Load Balance: Checks the uniformity of the expert_load buffer (CRITICAL NEW CHECK).
-4. Diversity: Checks if experts are identical clones (bad) or specialized (good).
-5. Spectral Health: Uses SVD to check for rank collapse (feature richness).
+3. Diversity: Checks if experts are identical clones (bad) or specialized (good).
+4. Spectral Health: Uses SVD to check for rank collapse (feature richness).
 """
 
 import re
@@ -152,7 +151,6 @@ def analyze_checkpoint(file_path: str):
     shared_w12 = None
     shared_w3 = None
     router_w = None
-    expert_load_buffer = None  # NEW: For load balance tracking
     experts_map = defaultdict(dict)
 
     # Scan for NaNs while loading
@@ -169,9 +167,6 @@ def analyze_checkpoint(file_path: str):
             shared_w3 = v
         elif "router_weights" in k_clean:
             router_w = v
-        # NEW: Load expert_load buffer
-        elif "expert_load" in k_clean:
-            expert_load_buffer = v
 
         # Regex to find expert index (e.g., experts.0.w12)
         match = re.search(r"experts\.(\d+)\.", k)
@@ -197,58 +192,39 @@ def analyze_checkpoint(file_path: str):
 
     print(f"   Found {num_experts} Routed Experts + 1 Shared Expert.")
 
-    # 2. ROUTER DIAGNOSTICS (Original [1])
+    # 2. ROUTER DIAGNOSTICS
     print("\n[1] ROUTER DIAGNOSTICS")
     if router_w is not None:
-        r_std = router_w.std().item()
-        r_norm = torch.linalg.norm(router_w).item()
+        r_std = router_w.float().std().item()
+        r_norm = torch.linalg.norm(router_w.float()).item()
 
         print(f"   Router Weight Std:  {r_std:.5f}")
-        print(f"   Router Weight Mean: {router_w.mean().item():.5f}")
+        print(f"   Router Weight Mean: {router_w.float().mean().item():.5f}")
         print(f"   Router Weight Norm: {r_norm:.5f}")
+
+        # Check per-expert router weight norms (for balance)
+        expert_norms = torch.linalg.norm(router_w.float(), dim=1).cpu().numpy()
+        print(f"\n   Per-Expert Router Norms (should be similar for balance):")
+        draw_ascii_bar(expert_norms, labels=[str(i) for i in range(len(expert_norms))], max_width=40)
+
+        norm_std = np.std(expert_norms)
+        norm_ratio = np.max(expert_norms) / (np.min(expert_norms) + 1e-9)
+        print(f"   Norm Std Dev: {norm_std:.5f}")
+        print(f"   Max/Min Ratio: {norm_ratio:.2f}x")
 
         if r_std > 1.0:
             print("   ⚠️  High Variance: Router might be over-confident (Gradient Explosion).")
         elif r_std < 1e-4:
             print("   ⚠️  Low Variance: Router gradients might be vanishing.")
+        elif norm_ratio > 3.0:
+            print("   ⚠️  Uneven router norms: Some experts may be favored.")
         else:
             print("   ✅ Router weights look healthy.")
     else:
         print("   ❌ Router weights missing!")
 
-    # 3. LOAD BALANCE DIAGNOSTICS (NEW CRITICAL SECTION)
-    print("\n[2] LOAD BALANCE DIAGNOSTICS (Router Effectiveness)")
-    if expert_load_buffer is not None:
-        load_values = expert_load_buffer.float().cpu().numpy()
-        
-        load_std = np.std(load_values)
-        load_max = np.max(load_values)
-        load_min = np.min(load_values)
-        
-        print(f"   Buffer Std Dev: {load_std:.6f} (Lower is better)")
-        
-        if load_min > 1e-9:
-            ratio = load_max / load_min
-            print(f"   Max/Min Ratio: {ratio:.2f}x")
-        else:
-            print("   ❌ CRITICAL FAILURE: At least one expert load is near zero.")
-            ratio = float('inf')
-            
-        print("\n   Current Load per Expert (Visual Check):")
-        draw_ascii_bar(load_values, labels=[str(i) for i in range(num_experts)], max_width=40)
-        
-        if ratio > 5.0 or load_min < 1e-9:
-            print("   ❌ RED ZONE: Load Imbalance is significant. Router is failing to use all experts.")
-        elif ratio > 2.0 or load_std > 0.05:
-            print("   ⚠️  YELLOW ZONE: Imbalance is present. Consider increasing router_bias_scale.")
-        else:
-            print("   ✅ Load balance appears stable and uniform.")
-    else:
-        print("   ❌ Expert Load Buffer missing!")
-
-
-    # 4. EXPERT DIVERSITY (Original [2])
-    print("\n[3] EXPERT DIVERSITY (Input Weight W12)")
+    # 3. EXPERT DIVERSITY
+    print("\n[2] EXPERT DIVERSITY (Input Weight W12)")
     if len(routed_w12s) > 1:
         # Stack and flatten: [Num_Experts, Total_Params]
         flat_experts = torch.stack([w.view(-1) for w in routed_w12s]).float()
@@ -273,8 +249,8 @@ def analyze_checkpoint(file_path: str):
         else:
             print("   ✅ GREEN ZONE: Experts are specializing.")
 
-    # 5. INITIALIZATION / FADE-IN (Original [3])
-    print("\n[4] INITIALIZATION / FADE-IN STATUS")
+    # 4. INITIALIZATION / FADE-IN STATUS
+    print("\n[3] INITIALIZATION / FADE-IN STATUS")
     if shared_w3 is not None and len(routed_w3s) > 0:
         shared_mag = shared_w3.abs().mean().item()
         expert_mags = [w.abs().mean().item() for w in routed_w3s]
@@ -293,8 +269,8 @@ def analyze_checkpoint(file_path: str):
         else:
             print(f"   ℹ️  Ratio: {ratio:.2f}x (Check if this matches your init strategy).")
 
-    # 6. SPECTRAL HEALTH (Original [4])
-    print("\n[5] SPECTRAL HEALTH (Effective Rank)")
+    # 5. SPECTRAL HEALTH
+    print("\n[4] SPECTRAL HEALTH (Effective Rank)")
     if shared_w12 is not None:
         rank = compute_effective_rank(shared_w12)
         full_rank = min(shared_w12.shape)

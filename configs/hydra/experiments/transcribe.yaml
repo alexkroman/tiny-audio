@@ -46,7 +46,7 @@ training:
   label_smoothing: 0.1
 
   # Memory optimization
-  torch_compile: false
+  torch_compile: true
 
   # Training duration - 50000 steps as requested
   max_steps: 20000

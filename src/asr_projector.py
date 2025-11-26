@@ -29,13 +29,9 @@ class MoEAudioProjector(nn.Module):
         self.top_k = getattr(config, "moe_top_k", 2)
 
         self.router_scale = getattr(config, "router_scale", 16.0)
-        self.bias_scale = getattr(config, "router_bias_scale", 0.5)
-        self.load_update_rate = getattr(config, "router_load_update_rate", 0.1)
         self.z_loss_coef = getattr(config, "router_z_loss_coef", 1e-4)
+        self.balance_loss_coef = getattr(config, "router_balance_loss_coef", 1e-2)
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-
-        self.expert_load: torch.Tensor
-        self.register_buffer("expert_load", torch.ones(self.num_experts) / self.num_experts)
 
         in_dim = config.encoder_dim * self.k
         self.out_dim = config.llm_dim
@@ -79,8 +75,7 @@ class MoEAudioProjector(nn.Module):
         router_logits = F.linear(input_normed, router_normed) * self.router_scale
         routing_probs = torch.sigmoid(router_logits)
 
-        choice_probs = routing_probs - (self.bias_scale * self.expert_load)
-        _, top_k_indices = torch.topk(choice_probs, self.top_k, dim=-1)
+        _, top_k_indices = torch.topk(routing_probs, self.top_k, dim=-1)
         top_k_weights = torch.gather(routing_probs, -1, top_k_indices)
 
         denominator = top_k_weights.sum(dim=-1, keepdim=True) + 1e-20
@@ -91,24 +86,24 @@ class MoEAudioProjector(nn.Module):
         aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
         if self.training:
-            with torch.no_grad():
-                flat_indices = top_k_indices.flatten()
-
-                current_usage = torch.histc(
-                    flat_indices.float(), bins=self.num_experts, min=0, max=self.num_experts - 1
-                )
-
-                total_tokens = flat_indices.numel()
-
-                current_load = current_usage / total_tokens
-
-                self.expert_load = (
-                    1 - self.load_update_rate
-                ) * self.expert_load + self.load_update_rate * current_load
-
+            # Z-loss: regularize router logit magnitudes
             if self.z_loss_coef > 0:
                 z_loss = torch.logsumexp(router_logits, dim=-1).pow(2).mean()
-                aux_loss = z_loss * self.z_loss_coef
+                aux_loss = aux_loss + z_loss * self.z_loss_coef
+
+            # Balance loss (Switch Transformer style): penalize uneven load
+            if self.balance_loss_coef > 0:
+                num_tokens = top_k_indices.numel()
+                expert_mask = F.one_hot(top_k_indices, self.num_experts).float()
+                tokens_per_expert = expert_mask.sum(dim=(0, 1))
+                load = tokens_per_expert / num_tokens
+
+                # Mean routing probability per expert
+                importance = routing_probs.mean(dim=0)
+
+                # Balance loss: num_experts * sum(load_i * importance_i)
+                balance_loss = self.num_experts * (load * importance).sum()
+                aux_loss = aux_loss + balance_loss * self.balance_loss_coef
 
         routed_out = torch.zeros_like(shared_out)
 
