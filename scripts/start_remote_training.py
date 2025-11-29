@@ -44,7 +44,7 @@ def kill_existing_session(host, port, session_name):
     print(f"Ensured no session named '{session_name}' is running.")
 
 
-def start_training(host, port, experiment, session_name):
+def start_training(host, port, experiment, session_name, wandb_run_id=None, wandb_resume=None):
     """
     Creates and executes a training script inside a new tmux session on the remote host.
     """
@@ -53,8 +53,18 @@ def start_training(host, port, experiment, session_name):
     import os
 
     hf_token = os.environ.get("HF_TOKEN", "")
+    # Get W&B resume settings from args or environment (only if non-empty)
+    wandb_run_id = wandb_run_id or os.environ.get("WANDB_RUN_ID") or ""
+    wandb_resume = wandb_resume or os.environ.get("WANDB_RESUME") or ""
     if not hf_token:
         print("Warning: HF_TOKEN environment variable not set. This may cause issues.")
+
+    # Build optional W&B exports (only if values are set)
+    wandb_exports = ""
+    if wandb_run_id:
+        wandb_exports += f'export WANDB_RUN_ID="{wandb_run_id}"\n        '
+    if wandb_resume:
+        wandb_exports += f'export WANDB_RESUME="{wandb_resume}"\n        '
 
     # This script will be created and executed on the remote machine.
     # It activates the virtual environment to ensure all commands use the correct packages.
@@ -66,6 +76,9 @@ def start_training(host, port, experiment, session_name):
         # remains active so you can attach and debug the error message.
 
 
+        echo "--- Setting up system limits ---"
+        ulimit -n 65536  # Increase file descriptor limit for torchcodec audio decoding
+
         echo "--- Setting up environment variables ---"
         export PATH="/root/.local/bin:$PATH"
         export TOKENIZERS_PARALLELISM=false
@@ -74,6 +87,7 @@ def start_training(host, port, experiment, session_name):
         export HF_DATASETS_CACHE=/workspace/datasets
         export HF_HUB_ENABLE_HF_TRANSFER=1
         export HF_TOKEN="{hf_token}"
+        {wandb_exports.rstrip()}
         export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
         # Enable TF32 for A40 (2x matmul speedup with no accuracy loss)
         export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
@@ -167,6 +181,17 @@ def main():
         action="store_true",
         help="Kill any existing session with the same name before starting.",
     )
+    parser.add_argument(
+        "--wandb-run-id",
+        default=None,
+        help="W&B run ID to resume (or set WANDB_RUN_ID env var).",
+    )
+    parser.add_argument(
+        "--wandb-resume",
+        default=None,
+        choices=["must", "allow", "never"],
+        help="W&B resume mode: 'must' (fail if not found), 'allow', or 'never' (or set WANDB_RESUME env var).",
+    )
 
     args = parser.parse_args()
 
@@ -180,7 +205,7 @@ def main():
     if args.force:
         kill_existing_session(args.host, args.port, args.session_name)
 
-    if not start_training(args.host, args.port, args.experiment, args.session_name):
+    if not start_training(args.host, args.port, args.experiment, args.session_name, args.wandb_run_id, args.wandb_resume):
         print("Exiting due to failure in starting the training session.")
         sys.exit(1)
 

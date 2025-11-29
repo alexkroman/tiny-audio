@@ -101,10 +101,6 @@ class ASRModel(PreTrainedModel):
         # Audio projector (trainable)
         self.projector = self._create_projector(config, target_dtype)
 
-        # Loss function
-        self.label_smoothing = getattr(config, "label_smoothing", 0.1)
-        self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=self.label_smoothing)
-
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
@@ -122,10 +118,6 @@ class ASRModel(PreTrainedModel):
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
-        # Only use device_map="auto" when NOT loading from pretrained
-        # (avoids meta tensor conflicts during from_pretrained)
-        if not cls._is_loading_from_pretrained:
-            encoder_kwargs["device_map"] = "auto"
 
         if "whisper" in config.audio_model_id.lower():
             from transformers import WhisperModel
@@ -150,9 +142,6 @@ class ASRModel(PreTrainedModel):
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
-        # Only use device_map="auto" when NOT loading from pretrained
-        if not cls._is_loading_from_pretrained:
-            decoder_kwargs["device_map"] = "auto"
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
         decoder.config.use_cache = getattr(config, "use_cache", True)
@@ -393,8 +382,11 @@ class ASRModel(PreTrainedModel):
             logits = outputs.logits
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            loss = self.loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100,
+                label_smoothing=getattr(self.config, "label_smoothing", 0.0),
             )
 
         return CausalLMOutputWithPast(

@@ -333,13 +333,6 @@ def get_valid_training_args(config: dict) -> dict:
 
 @hydra.main(version_base=None, config_path="../configs/hydra", config_name="config")
 def main(cfg: DictConfig) -> None:
-    # Reduce logging noise
-    from transformers import logging as transformers_logging
-
-    transformers_logging.set_verbosity_error()
-    for logger in ["httpx", "httpcore", "datasets"]:
-        logging.getLogger(logger).setLevel(logging.WARNING)
-
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     nltk.download("punkt_tab", quiet=True)
@@ -352,7 +345,6 @@ def main(cfg: DictConfig) -> None:
         wandb.init(
             project="tiny-audio",
             config=OmegaConf.to_container(cfg, resolve=True),
-            name=cfg.training.get("run_name"),
         )
 
     # Create model config (dimensions are auto-detected)
@@ -366,7 +358,7 @@ def main(cfg: DictConfig) -> None:
         projector_type=cfg.model.get("projector_type", "moe"),
         projector_num_layers=cfg.model.get("projector_num_layers", 2),
         use_specaugment=cfg.training.get("use_specaugment", False),
-        label_smoothing=cfg.training.get("label_smoothing", 0.1),
+        label_smoothing=cfg.training.get("label_smoothing", 0.0),
     )
 
     # Load or create model

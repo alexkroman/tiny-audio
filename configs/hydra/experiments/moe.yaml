@@ -20,7 +20,7 @@ model:
 
 training:
   # Resume from checkpoint
-  # resume_from_checkpoint: "/workspace/outputs/2025-11-19/17-38-30/outputs/production_model/checkpoint-14000"
+  # resume_from_checkpoint: "/workspace/outputs/2025-11-28/18-59-02/outputs/production_model/checkpoint-8500"
 
   # Hub configuration
   push_to_hub: true
@@ -36,14 +36,14 @@ training:
   adam_beta1: 0.9
   adam_beta2: 0.999
 
-  learning_rate: 5.0e-4
+  learning_rate: 2.0e-4
 
   lr_scheduler_type: "cosine"
   warmup_steps: 1000  # Critical for MoE start
 
-  weight_decay: 0.1
+  weight_decay: 0.01
   max_grad_norm: 1.0
-  projector_dropout: 0.05
+  projector_dropout: 0.1
   use_specaugment: true
   label_smoothing: 0.1
 
@@ -54,7 +54,7 @@ training:
 
   # Reproducibility
   seed: 42
-  ignore_data_skip: true
+  ignore_data_skip: false
 
 # Early stopping configuration
 early_stopping:
