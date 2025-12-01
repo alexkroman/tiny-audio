@@ -25,7 +25,7 @@ class SwiGLU(nn.Module):
 class AudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.k = getattr(config, "projector_pool_stride", 2)  # Downsampling rate
+        self.k = getattr(config, "projector_pool_stride", 4)  # Downsampling rate
         in_dim = config.encoder_dim * self.k
         out_dim = config.llm_dim
         hidden_dim = config.projector_hidden_dim

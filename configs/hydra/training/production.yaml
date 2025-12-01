@@ -43,10 +43,9 @@ torch_compile: false
 model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
-# Streaming compatibility settings - CRITICAL for torchcodec stability
-dataloader_num_workers: 0  # Must be 0 to avoid torchcodec resource exhaustion with streaming
-dataloader_persistent_workers: false
-dataloader_pin_memory: false
+dataloader_num_workers: 1
+dataloader_persistent_workers: true
+dataloader_pin_memory: true
 
 # Misc
 seed: 42
