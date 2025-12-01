@@ -22,9 +22,11 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 2,
         projector_hidden_dim: Optional[int] = None,
-        projector_type: str = "moe",  # "moe" or "swiglu"
+        projector_type: str = "moe",  # "moe", "swiglu", or "residual"
+        projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.05,  # Dropout rate for projector layers
         projector_input_noise: float = 0.02,  # Input noise for projector
+        label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
         max_new_tokens: Optional[int] = None,
@@ -43,7 +45,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # Set default generation parameters
         generation_defaults = {
             "num_beams": 1,
-            "max_new_tokens": 128,
+            "max_new_tokens": 64,
             "min_new_tokens": 1,
             "do_sample": False,
             "repetition_penalty": 1.0,
@@ -68,8 +70,10 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
+        self.projector_num_layers = projector_num_layers
         self.projector_dropout = projector_dropout
         self.projector_input_noise = projector_input_noise
+        self.label_smoothing = label_smoothing
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
         if "audio_config" not in kwargs:

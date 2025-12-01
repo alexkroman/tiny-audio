@@ -62,6 +62,7 @@ datasets:
 
 # Audio processing
 sample_rate: 16000
+max_audio_duration_seconds: 30.0  # Skip audio longer than this to prevent OOM
 
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
