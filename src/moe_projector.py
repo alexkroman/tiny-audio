@@ -141,10 +141,11 @@ class MoEAudioProjector(nn.Module):
         routing_weights = F.softmax(router_logits, dim=-1)  # [B, T//4, num_experts]
 
         # 3. Weighted sum of expert outputs (Eq. 2: y = sum(w_i * E_i(x)))
+        # Use in-place add to reduce memory allocations
         final_out = torch.zeros_like(h_conv)
         for i, expert in enumerate(self.experts):
             expert_out = expert(h_conv)
             expert_weight = routing_weights[:, :, i : i + 1]
-            final_out = final_out + expert_out * expert_weight
+            final_out.add_(expert_out * expert_weight)
 
         return self.ln_post(final_out)

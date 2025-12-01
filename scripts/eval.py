@@ -410,7 +410,7 @@ def main():
         "--dataset",
         type=str,
         default="loquacious",
-        choices=["loquacious", "earnings22", "ami", "gigaspeech", "tedlium"],
+        choices=["loquacious", "earnings22", "ami", "gigaspeech", "tedlium", "combined"],
         help="Dataset to evaluate on (default: loquacious)",
     )
     parser.add_argument(
@@ -542,6 +542,131 @@ def main():
         text_field = "text"
         print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
         dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
+    elif args.dataset == "combined":
+        # Combined dataset with proportions matching combined.yaml training config:
+        # 50% LoquaciousSet, 10% each for GigaSpeech, Earnings22, AMI, TEDLIUM
+        print("Loading combined dataset with proportions: 50% Loquacious, 10% each for others...")
+
+        # Define dataset configs matching combined.yaml
+        dataset_configs = [
+            {
+                "name": "loquacious",
+                "path": "speechbrain/LoquaciousSet",
+                "config": "medium",
+                "split": "dev",
+                "audio_field": "wav",
+                "text_field": "text",
+                "weight": 0.50,
+            },
+            {
+                "name": "gigaspeech",
+                "path": "fixie-ai/gigaspeech",
+                "config": "xl",
+                "split": "validation",
+                "audio_field": "audio",
+                "text_field": "text",
+                "weight": 0.10,
+            },
+            {
+                "name": "earnings22",
+                "path": "sanchit-gandhi/earnings22_robust_split",
+                "config": "default",
+                "split": "validation",
+                "audio_field": "audio",
+                "text_field": "sentence",
+                "weight": 0.10,
+            },
+            {
+                "name": "ami",
+                "path": "TakalaWang/AMI_ASR",
+                "config": None,
+                "split": "validation",
+                "audio_field": "audio",
+                "text_field": "text",
+                "weight": 0.10,
+            },
+            {
+                "name": "tedlium",
+                "path": "sanchit-gandhi/tedlium-data",
+                "config": "default",
+                "split": "validation",
+                "audio_field": "audio",
+                "text_field": "text",
+                "weight": 0.10,
+            },
+        ]
+
+        # Create a generator that yields samples from each dataset proportionally
+        def combined_generator(configs, max_samples, seed):
+            """Yield samples from multiple datasets according to their weights."""
+            import random
+            random.seed(seed)
+
+            # Calculate samples per dataset based on weights
+            total_weight = sum(cfg["weight"] for cfg in configs)
+            samples_per_dataset = {}
+            remaining = max_samples if max_samples else 1000  # Default to 1000 if no max
+
+            for cfg in configs:
+                count = int(remaining * (cfg["weight"] / total_weight))
+                samples_per_dataset[cfg["name"]] = max(1, count)  # At least 1 sample
+
+            print(f"  Samples per dataset: {samples_per_dataset}")
+
+            # Load and yield from each dataset
+            for cfg in configs:
+                num_samples = samples_per_dataset[cfg["name"]]
+                # Use reservoir sampling buffer to get random samples from streaming dataset
+                buffer_size = num_samples * 10  # Buffer 10x more samples for better randomness
+                print(f"  Fetching {num_samples} random samples from {cfg['name']} (buffer={buffer_size})...")
+
+                if cfg["config"]:
+                    ds = load_dataset(cfg["path"], cfg["config"], split=cfg["split"], streaming=True)
+                else:
+                    ds = load_dataset(cfg["path"], split=cfg["split"], streaming=True)
+
+                # Shuffle the streaming dataset with seed for reproducibility
+                ds = ds.shuffle(seed=seed, buffer_size=buffer_size)
+
+                # Collect samples into buffer
+                buffer = []
+                for sample in ds:
+                    # Skip TEDLIUM ignore markers
+                    text = sample.get(cfg["text_field"], "")
+                    if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
+                        continue
+                    buffer.append(sample)
+                    if len(buffer) >= num_samples:
+                        break
+
+                selected = buffer
+
+                for sample in selected:
+                    # Yield with normalized field names
+                    yield {
+                        "audio": sample[cfg["audio_field"]],
+                        "text": sample[cfg["text_field"]],
+                        "source": cfg["name"],
+                    }
+
+        # Use generator to create samples - we'll iterate directly instead of using IterableDataset
+        # since interleave_datasets has issues with mixed audio formats
+        combined_samples = list(combined_generator(dataset_configs, args.max_samples, args.seed))
+
+        # Shuffle the combined samples
+        import random
+        random.seed(args.seed)
+        random.shuffle(combined_samples)
+
+        # Create a simple iterator
+        dataset = iter(combined_samples)
+        audio_field = "audio"
+        text_field = "text"
+        dataset_name = "combined"
+        dataset_config = "proportional"
+        # Set max_samples to None since we already limited in the generator
+        args.max_samples = None
+        print(f"Combined dataset ready with {len(combined_samples)} samples.")
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 

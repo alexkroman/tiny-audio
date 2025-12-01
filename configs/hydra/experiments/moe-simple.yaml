@@ -5,7 +5,7 @@
 # Based on stage1 configuration with multi-task data
 defaults:
   - override /model: large
-  - override /data: combined
+  - override /data: loquacious_large
   - override /training: production
 
 model:
@@ -16,36 +16,36 @@ model:
   encoder_model_name: openai/whisper-large-v3-turbo
 
   # Projector type: "moe" (Mixture of Experts) or "swiglu" (simple SwiGLU)
-  projector_type: residual
+  projector_type: moe
 
 training:
   # Resume from checkpoint
-  # resume_from_checkpoint: "/workspace/outputs/2025-11-29/15-47-20/outputs/production_model/checkpoint-12500"
+  # resume_from_checkpoint: "/workspace/outputs/2025-11-29/15-47-25/outputs/production_model/checkpoint-8500"
 
   # Hub configuration
   push_to_hub: true
-  hub_model_id: "mazesmazes/tiny-audio-residual"
+  hub_model_id: "mazesmazes/tiny-audio-moe-simple"
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 24
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 32
   gradient_accumulation_steps: 3
   eval_accumulation_steps: 3
 
   adam_beta1: 0.9
   adam_beta2: 0.999
 
-  learning_rate: 2.0e-4
+  learning_rate: 5.0e-4
 
   lr_scheduler_type: "cosine"
-  warmup_steps: 1000  # Critical for MoE start
+  warmup_steps: 2000  # Critical for MoE start
 
   weight_decay: 0.01
   max_grad_norm: 1.0
-  projector_dropout: 0.1
+  projector_dropout: 0.0
   use_specaugment: true
-  label_smoothing: 0.1
+  label_smoothing: 0.0
 
   # Memory optimization
   torch_compile: true
@@ -55,6 +55,9 @@ training:
   # Reproducibility
   seed: 43
   ignore_data_skip: true
+
+data:
+  max_audio_duration_seconds: 15.0
 
 # Early stopping configuration
 early_stopping:

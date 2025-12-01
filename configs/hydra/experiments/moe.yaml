@@ -20,7 +20,7 @@ model:
 
 training:
   # Resume from checkpoint
-  # resume_from_checkpoint: "/workspace/outputs/2025-11-28/18-59-02/outputs/production_model/checkpoint-8500"
+  # resume_from_checkpoint: "/workspace/outputs/2025-11-29/15-47-25/outputs/production_model/checkpoint-8500"
 
   # Hub configuration
   push_to_hub: true
@@ -53,8 +53,8 @@ training:
   max_steps: 15000
 
   # Reproducibility
-  seed: 42
-  ignore_data_skip: false
+  seed: 43
+  ignore_data_skip: true
 
 # Early stopping configuration
 early_stopping:

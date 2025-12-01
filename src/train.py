@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 
 import logging
+import os
 import re
 from dataclasses import fields
 from typing import Any
+
+# Use soundfile backend for audio decoding - more stable than torchcodec for streaming
+os.environ.setdefault("DATASETS_AUDIO_DECODER", "soundfile")
 
 import hydra
 import nltk
@@ -49,6 +53,7 @@ class DatasetLoader:
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
+        self.max_audio_duration = self.config.get("max_audio_duration_seconds", 30.0)
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> IterableDataset:
         dataset_path = dataset_cfg.get("path")
@@ -92,20 +97,38 @@ class DatasetLoader:
 
         return IterableDataset.from_generator(
             self._add_task_generator,
-            gen_kwargs={"dataset": ds, "task": task},
+            gen_kwargs={"dataset": ds, "task": task, "max_audio_duration": self.max_audio_duration},
             features=features,
         )
 
     @staticmethod
-    def _add_task_generator(dataset, task: str):
+    def _add_task_generator(dataset, task: str, max_audio_duration: float = 30.0):
         """Generator that adds task field and filters invalid samples."""
         for example in dataset:
             # Skip invalid audio
             audio = example.get("audio")
             if audio is None:
                 continue
+
             try:
-                _ = audio.get_all_samples()
+                # Handle different audio formats from streaming datasets
+                if hasattr(audio, "get_all_samples"):
+                    # torchcodec decoder object
+                    samples = audio.get_all_samples()
+                    sample_rate = audio.metadata.sample_rate
+                    num_samples = samples.data.shape[-1]
+                elif isinstance(audio, dict) and "array" in audio:
+                    # Dict format from datasets Audio feature (soundfile backend)
+                    arr = audio["array"]
+                    sample_rate = audio.get("sampling_rate", 16000)
+                    num_samples = len(arr) if hasattr(arr, "__len__") else arr.shape[-1]
+                else:
+                    continue
+
+                # Skip audio that's too long (causes OOM)
+                duration = num_samples / sample_rate
+                if duration > max_audio_duration:
+                    continue
             except Exception:
                 continue
 
@@ -237,15 +260,18 @@ class DataCollator(DataCollatorForSeq2Seq):
         return start, end
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Process audio
+        # Process audio - extract numpy arrays and release torchcodec references
         audio_arrays = []
         for f in features:
-            audio = f["audio"].get_all_samples().data.numpy().squeeze()
+            audio_obj = f["audio"]
+            audio = audio_obj.get_all_samples().data.numpy().squeeze()
             if audio.ndim > 1:
                 audio = audio.mean(axis=0)
             elif audio.ndim == 0:
                 audio = audio.reshape(1)
             audio_arrays.append(audio)
+            # Release torchcodec reference to prevent resource accumulation
+            f["audio"] = None
 
         audio_features = self.feature_extractor(
             audio_arrays,
