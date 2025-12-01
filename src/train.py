@@ -5,9 +5,6 @@ import re
 from dataclasses import fields
 from typing import Any
 
-# Use soundfile backend for audio decoding - more stable than torchcodec for streaming
-os.environ.setdefault("DATASETS_AUDIO_DECODER", "soundfile")
-
 import hydra
 import nltk
 import torch
