@@ -24,7 +24,7 @@ training:
 
   # Hub configuration
   push_to_hub: true
-  hub_model_id: "mazesmazes/tiny-audio-moe-simple"
+  hub_model_id: "mazesmazes/tiny-audio-moe"
   hub_strategy: "every_save"  # Push to root on every save (includes tokenizer)
   hub_private_repo: false
 

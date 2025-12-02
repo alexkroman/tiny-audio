@@ -5,7 +5,7 @@
 # Based on stage1 configuration with multi-task data
 defaults:
   - override /model: large
-  - override /data: combined
+  - override /data: loquacious_large
   - override /training: production
 
 model:
