@@ -123,13 +123,11 @@ def install_python_dependencies(host, port):
          python -c "import flash_attn" 2>/dev/null || pip install --user flash-attn --no-build-isolation && \
          echo "--- Installing PyTorch with CUDA 12.8 support (if needed) ---" && \
          python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || pip install --user torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128 && \
-         echo "--- Installing torchcodec with CUDA support (if needed) ---" && \
-         python -c "import torchcodec" 2>/dev/null || pip install --user torchcodec~=0.7.0 --index-url=https://download.pytorch.org/whl/cu128 && \
          echo "--- Installing accelerate ---" && \
          pip install --user accelerate && \
          echo "--- Installing project dependencies from poetry.lock (production only) ---" && \
          echo "Note: Only installing missing packages to avoid conflicts with system packages" && \
-         poetry export --only main --without-hashes | grep -v "^torch==" | grep -v "^torchcodec==" > /tmp/requirements.txt && \
+         poetry export --only main --without-hashes | grep -v "^torch==" > /tmp/requirements.txt && \
          pip install --user -r /tmp/requirements.txt 2>&1 | grep -v "already satisfied" || true && \
          echo "--- Installing project in editable mode ---" && \
          pip install --user -e . --no-deps && \

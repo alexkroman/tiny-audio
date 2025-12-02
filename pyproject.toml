@@ -65,12 +65,12 @@ priority = "supplemental"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
-# torch and torchcodec - Poetry will pull from pytorch-cu128 source on Linux when available
+# torch - Poetry will pull from pytorch-cu128 source on Linux when available
 torch = "~2.8.0"
-torchcodec = "~0.7.0"
+soundfile = ">=0.12.1"
 transformers = "*"
 accelerate = "*"
-datasets = {extras = ["audio"], version = ">=3.0.0"}
+datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
 peft = "*"
 evaluate = "*"
 jiwer = "*"

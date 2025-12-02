@@ -107,19 +107,13 @@ class DatasetLoader:
                 continue
 
             try:
-                # Handle different audio formats from streaming datasets
-                if hasattr(audio, "get_all_samples"):
-                    # torchcodec decoder object
-                    samples = audio.get_all_samples()
-                    sample_rate = audio.metadata.sample_rate
-                    num_samples = samples.data.shape[-1]
-                elif isinstance(audio, dict) and "array" in audio:
-                    # Dict format from datasets Audio feature (soundfile backend)
-                    arr = audio["array"]
-                    sample_rate = audio.get("sampling_rate", 16000)
-                    num_samples = len(arr) if hasattr(arr, "__len__") else arr.shape[-1]
-                else:
+                # Soundfile backend returns dict with 'array' and 'sampling_rate'
+                if not isinstance(audio, dict) or "array" not in audio:
                     continue
+
+                arr = audio["array"]
+                sample_rate = audio.get("sampling_rate", 16000)
+                num_samples = len(arr) if hasattr(arr, "__len__") else arr.shape[-1]
 
                 # Skip audio that's too long (causes OOM)
                 duration = num_samples / sample_rate
@@ -256,17 +250,20 @@ class DataCollator(DataCollatorForSeq2Seq):
         return start, end
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Process audio - extract numpy arrays and release torchcodec references
+        # Process audio - extract numpy arrays from soundfile dict format
         audio_arrays = []
         for f in features:
             audio_obj = f["audio"]
-            audio = audio_obj.get_all_samples().data.numpy().squeeze()
+            # Soundfile backend returns dict with 'array' and 'sampling_rate'
+            audio = audio_obj["array"]
+            if hasattr(audio, "numpy"):
+                audio = audio.numpy()
+            audio = audio.squeeze()
             if audio.ndim > 1:
                 audio = audio.mean(axis=0)
             elif audio.ndim == 0:
                 audio = audio.reshape(1)
             audio_arrays.append(audio)
-            # Release torchcodec reference to prevent resource accumulation
             f["audio"] = None
 
         audio_features = self.feature_extractor(

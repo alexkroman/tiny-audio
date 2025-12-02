@@ -2,6 +2,6 @@
 gradio
 transformers>=4.57.1
 torch
-torchcodec
+soundfile
 peft
 truecase
