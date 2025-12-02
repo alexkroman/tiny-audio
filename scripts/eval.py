@@ -1,751 +1,566 @@
 #!/usr/bin/env python3
 """
-Evaluate ASR models on the LoquaciousSet dataset using HuggingFace Inference API.
+Evaluate ASR models on audio datasets.
 
 Supports:
-- HuggingFace Hub models (e.g., mazesmazes/tiny-audio)
+- Local models (e.g., mazesmazes/tiny-audio)
 - HuggingFace Inference Endpoints (via endpoint URL)
 - AssemblyAI API for comparison
-
-Uses HuggingFace's evaluate library to compute WER and log predictions.
 """
 
-import argparse
 import io
 import os
+import re
 import tempfile
 import time
+import wave
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
+
+import numpy as np
+import torch
+from datasets import load_dataset
+from jiwer import wer
+from transformers import WhisperTokenizer
 
 # Disable tokenizers parallelism to avoid fork warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-import evaluate
-import numpy as np
-import torch
-from datasets import load_dataset
-from huggingface_hub import InferenceClient
-from torchcodec.decoders import AudioDecoder
+
+# =============================================================================
+# Audio Utilities
+# =============================================================================
 
 
-def audio_to_wav_bytes(audio_array, sample_rate):
-    """Convert audio array to WAV bytes using torchcodec."""
-    # Convert to numpy if needed
+def audio_to_wav_bytes(audio_array: np.ndarray | torch.Tensor, sample_rate: int) -> bytes:
+    """Convert audio array to WAV bytes."""
     if isinstance(audio_array, torch.Tensor):
         audio_array = audio_array.numpy()
-
-    # Ensure 1D shape
     if audio_array.ndim > 1:
         audio_array = audio_array.squeeze()
 
-    # Write to temp file and use torchcodec to encode as WAV
-    # torchcodec is primarily a decoder, so we'll use a simple WAV writer
-    import wave
-
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav_file:
-        wav_file.setnchannels(1)  # mono
+        wav_file.setnchannels(1)
         wav_file.setsampwidth(2)  # 16-bit
         wav_file.setframerate(sample_rate)
-        # Convert float32 to int16
         audio_int16 = (audio_array * 32767).astype(np.int16)
         wav_file.writeframes(audio_int16.tobytes())
-
     return buffer.getvalue()
 
 
-def wav_bytes_to_audio(wav_bytes):
-    """Convert WAV bytes to audio array using torchcodec."""
-    # Write bytes to temp file for torchcodec
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        f.write(wav_bytes)
-        temp_path = f.name
-
-    try:
-        decoder = AudioDecoder(temp_path)
-        audio_samples = decoder.get_all_samples()
-        audio_array = audio_samples.data.squeeze().numpy()
-        sample_rate = decoder.metadata.sample_rate
-        return audio_array, sample_rate
-    finally:
-        Path(temp_path).unlink()
-
-
-def prepare_wav_bytes(wav_data):
-    """Convert various WAV data formats to bytes for API calls."""
-    # Handle AudioDecoder objects (datasets library lazy loading)
-    if (
-        hasattr(wav_data, "__class__")
-        and "AudioDecoder" in str(type(wav_data))
-        and hasattr(wav_data, "get_all_samples")
-    ):
+def prepare_wav_bytes(wav_data) -> bytes:
+    """Convert various audio formats to WAV bytes."""
+    # AudioDecoder (lazy loading from datasets)
+    if hasattr(wav_data, "get_all_samples"):
         samples = wav_data.get_all_samples()
-        # samples should have .data and metadata with sample_rate
-        audio_array = samples.data.squeeze().numpy()
-        sample_rate = wav_data.metadata.sample_rate
-        return audio_to_wav_bytes(audio_array, sample_rate)
+        return audio_to_wav_bytes(samples.data.squeeze().numpy(), wav_data.metadata.sample_rate)
 
+    # Dict with bytes
     if isinstance(wav_data, dict):
         if "bytes" in wav_data:
-            # Already in bytes format
             return wav_data["bytes"]
         if "array" in wav_data and "sampling_rate" in wav_data:
-            # Dict with array and sampling_rate (earnings22 format)
             return audio_to_wav_bytes(wav_data["array"], wav_data["sampling_rate"])
 
-    # Audio object format (LoquaciousSet)
+    # Audio object (LoquaciousSet format)
     if hasattr(wav_data, "array") and hasattr(wav_data, "sampling_rate"):
         return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
 
-    raise ValueError(
-        f"Unsupported audio format: {type(wav_data)}, available attributes: {dir(wav_data) if hasattr(wav_data, '__dir__') else 'N/A'}"
-    )
+    raise ValueError(f"Unsupported audio format: {type(wav_data)}")
 
 
-def evaluate_huggingface(
-    dataset,
-    model_or_endpoint,
-    system_prompt=None,
-    user_prompt=None,
-    audio_field="wav",
-    text_field="text",
-):
-    """Evaluate using local transformers pipeline or HuggingFace Inference Endpoint.
+# =============================================================================
+# Text Normalization
+# =============================================================================
 
-    Args:
-        dataset: Dataset to evaluate on
-        model_or_endpoint: Model path or endpoint URL
-        system_prompt: Optional system prompt override
-        user_prompt: Optional user prompt override
-        audio_field: Name of the audio field in the dataset (default: "wav")
-        text_field: Name of the text field in the dataset (default: "text")
-    """
 
-    import re
+class TextNormalizer:
+    """Whisper-based text normalizer with ASR-specific preprocessing."""
 
-    from jiwer import wer
-    from transformers import WhisperTokenizer
+    def __init__(self):
+        self._tokenizer = None
 
-    # Custom preprocessing to remove <inaudible> tags and disfluencies before Whisper normalization
-    def preprocess_text(text: str) -> str:
-        # Remove <inaudible> tags
+    @property
+    def tokenizer(self) -> WhisperTokenizer:
+        if self._tokenizer is None:
+            self._tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+        return self._tokenizer
+
+    def preprocess(self, text: str) -> str:
+        """Remove inaudible tags and disfluencies."""
         text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
-        # Remove disfluencies (uh, um) - these are in Whisper's ignore patterns already
-        # but we keep this for compatibility with non-Whisper datasets
         return re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
 
-    predictions = []
-    references = []
-    per_sample_wers = []
-    per_sample_times = []
+    def normalize(self, text: str) -> str:
+        """Full normalization pipeline."""
+        return self.tokenizer.normalize(self.preprocess(text))
 
-    # Use Whisper's English text normalizer (includes number normalization, contractions, etc.)
-    # Load once at the start to avoid repeated downloads
-    whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
 
-    def normalize_text(text: str) -> str:
-        return whisper_tokenizer.normalize(preprocess_text(text))
+# =============================================================================
+# Dataset Configuration
+# =============================================================================
 
-    # Check if it's an inference endpoint (URL) or a model to load locally
-    if model_or_endpoint.startswith("http"):
-        print(f"Using HuggingFace Inference Endpoint: {model_or_endpoint}")
-        client = InferenceClient(base_url=model_or_endpoint)
 
-        # Create a temporary directory for WAV files
-        temp_dir = tempfile.mkdtemp()
+@dataclass
+class DatasetConfig:
+    """Configuration for a dataset."""
 
-        try:
-            for sample_count, sample in enumerate(dataset, start=1):
-                # Get WAV bytes for API
-                wav_bytes = prepare_wav_bytes(sample[audio_field])
+    name: str
+    path: str
+    audio_field: str
+    text_field: str
+    config: str | None = None
+    default_split: str = "test"
+    weight: float = 1.0
 
-                # Write to temporary file with .wav extension
-                temp_path = Path(temp_dir) / f"temp_{sample_count}.wav"
-                temp_path.write_bytes(wav_bytes)
 
-                try:
-                    start_time = time.time()
-                    result = client.automatic_speech_recognition(str(temp_path))
-                    inference_time = time.time() - start_time
-                    per_sample_times.append(inference_time)
+DATASET_REGISTRY: dict[str, DatasetConfig] = {
+    "loquacious": DatasetConfig(
+        name="loquacious",
+        path="speechbrain/LoquaciousSet",
+        config="medium",
+        audio_field="wav",
+        text_field="text",
+    ),
+    "earnings22": DatasetConfig(
+        name="earnings22",
+        path="sanchit-gandhi/earnings22_robust_split",
+        config="default",
+        audio_field="audio",
+        text_field="sentence",
+    ),
+    "ami": DatasetConfig(
+        name="ami",
+        path="TakalaWang/AMI_ASR",
+        config=None,
+        audio_field="audio",
+        text_field="text",
+    ),
+    "gigaspeech": DatasetConfig(
+        name="gigaspeech",
+        path="fixie-ai/gigaspeech",
+        config="dev",
+        audio_field="audio",
+        text_field="text",
+        default_split="dev",
+    ),
+    "tedlium": DatasetConfig(
+        name="tedlium",
+        path="sanchit-gandhi/tedlium-data",
+        config="default",
+        audio_field="audio",
+        text_field="text",
+    ),
+    "spanish": DatasetConfig(
+        name="spanish",
+        path="fixie-ai/common_voice_17_0",
+        config="es",
+        audio_field="audio",
+        text_field="sentence",
+    ),
+    "german": DatasetConfig(
+        name="german",
+        path="fixie-ai/common_voice_17_0",
+        config="de",
+        audio_field="audio",
+        text_field="sentence",
+    ),
+    "french": DatasetConfig(
+        name="french",
+        path="fixie-ai/common_voice_17_0",
+        config="fr",
+        audio_field="audio",
+        text_field="sentence",
+    ),
+}
 
-                    # Parse result - InferenceClient returns different formats
-                    if isinstance(result, dict):
-                        prediction = result.get("text", result.get("transcription", ""))
-                    elif isinstance(result, str):
-                        prediction = result
-                    elif hasattr(result, "text"):
-                        prediction = result.text
-                    else:
-                        prediction = str(result)
-                except Exception as e:
-                    import traceback
+# Combined dataset proportions
+COMBINED_WEIGHTS = {
+    "loquacious": 0.50,
+    "gigaspeech": 0.10,
+    "earnings22": 0.10,
+    "ami": 0.10,
+    "tedlium": 0.10,
+}
 
-                    print(f"Error processing sample {sample_count}:")
-                    print(f"  Exception type: {type(e).__name__}")
-                    print(f"  Error message: {str(e)}")
-                    print("  Full traceback:")
-                    traceback.print_exc()
-                    prediction = ""
-                    per_sample_times.append(0.0)
-                finally:
-                    # Clean up temporary file
-                    if temp_path.exists():
-                        temp_path.unlink()
 
-                predictions.append(prediction)
-                references.append(sample[text_field])
+def load_single_dataset(name: str, split: str, config_override: str | None = None):
+    """Load a single dataset by name."""
+    if name not in DATASET_REGISTRY:
+        raise ValueError(f"Unknown dataset: {name}. Available: {list(DATASET_REGISTRY.keys())}")
 
-                # Compute WER for this sample using Whisper normalization
-                norm_pred = normalize_text(prediction)
-                norm_ref = normalize_text(sample[text_field])
-                sample_wer = wer(norm_ref, norm_pred) * 100
-                per_sample_wers.append(sample_wer)
+    cfg = DATASET_REGISTRY[name]
+    config = config_override if config_override else cfg.config
 
-                print(
-                    f"Sample {sample_count}: WER = {sample_wer:.2f}%, Time = {per_sample_times[-1]:.2f}s"
-                )
-                print(f"  Ref:  {sample[text_field]}")
-                print(f"  Pred: {prediction}")
+    print(f"Loading {cfg.path} (config: {config}, split: {split})...")
+    if config:
+        return load_dataset(cfg.path, config, split=split, streaming=True)
+    return load_dataset(cfg.path, split=split, streaming=True)
 
-                # Print cumulative WER every 100 samples
-                if sample_count % 100 == 0:
-                    # Compute corpus-level WER (same as final metric)
-                    normalized_preds = [normalize_text(p) for p in predictions]
-                    normalized_refs = [normalize_text(r) for r in references]
-                    corpus_wer = wer(normalized_refs, normalized_preds) * 100
-                    avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
-                    print(f"\n{'=' * 80}")
-                    print(f"CHECKPOINT @ {sample_count} samples:")
-                    print(f"  Corpus WER: {corpus_wer:.2f}%")
-                    print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
-                    print(f"{'=' * 80}\n")
-        finally:
-            # Clean up temporary directory
-            import shutil
 
-            shutil.rmtree(temp_dir, ignore_errors=True)
-    else:
-        # Load model locally using custom ASRPipeline
+def load_combined_dataset(max_samples: int | None, seed: int) -> tuple[Iterator, int]:
+    """Load proportionally sampled combined dataset."""
+    import random
+
+    random.seed(seed)
+
+    total_samples = max_samples or 1000
+    samples_per_dataset = {
+        name: max(1, int(total_samples * weight)) for name, weight in COMBINED_WEIGHTS.items()
+    }
+    print(f"Loading combined dataset: {samples_per_dataset}")
+
+    all_samples = []
+    for name, num_samples in samples_per_dataset.items():
+        cfg = DATASET_REGISTRY[name]
+        validation_split = "validation" if name != "loquacious" else "dev"
+
+        if cfg.config:
+            ds = load_dataset(cfg.path, cfg.config, split=validation_split, streaming=True)
+        else:
+            ds = load_dataset(cfg.path, split=validation_split, streaming=True)
+
+        ds = ds.shuffle(seed=seed, buffer_size=num_samples * 10)
+
+        count = 0
+        for sample in ds:
+            # Skip TEDLIUM ignore markers
+            text = sample.get(cfg.text_field, "")
+            if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
+                continue
+
+            all_samples.append({
+                "audio": sample[cfg.audio_field],
+                "text": sample[cfg.text_field],
+                "source": name,
+            })
+            count += 1
+            if count >= num_samples:
+                break
+
+    random.shuffle(all_samples)
+    print(f"Combined dataset ready: {len(all_samples)} samples")
+    return iter(all_samples), len(all_samples)
+
+
+# =============================================================================
+# Evaluation Core
+# =============================================================================
+
+
+@dataclass
+class EvalResult:
+    """Result of a single sample evaluation."""
+
+    prediction: str
+    reference: str
+    wer: float
+    time: float
+
+
+class Evaluator:
+    """Base evaluator with common evaluation loop logic."""
+
+    def __init__(self, audio_field: str = "audio", text_field: str = "text"):
+        self.audio_field = audio_field
+        self.text_field = text_field
+        self.normalizer = TextNormalizer()
+        self.results: list[EvalResult] = []
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        """Transcribe audio and return (text, inference_time). Override in subclass."""
+        raise NotImplementedError
+
+    def evaluate(self, dataset, max_samples: int | None = None) -> list[EvalResult]:
+        """Run evaluation loop on dataset."""
+        self.results = []
+
+        for i, sample in enumerate(dataset, start=1):
+            if max_samples and i > max_samples:
+                break
+
+            try:
+                prediction, inference_time = self.transcribe(sample[self.audio_field])
+            except Exception as e:
+                print(f"Error on sample {i}: {e}")
+                prediction, inference_time = "", 0.0
+
+            reference = sample[self.text_field]
+            norm_pred = self.normalizer.normalize(prediction)
+            norm_ref = self.normalizer.normalize(reference)
+            sample_wer = wer(norm_ref, norm_pred) * 100 if norm_ref else 0.0
+
+            result = EvalResult(prediction, reference, sample_wer, inference_time)
+            self.results.append(result)
+
+            print(f"Sample {i}: WER={sample_wer:.1f}%, Time={inference_time:.2f}s")
+            print(f"  Ref:  {reference}")
+            print(f"  Pred: {prediction}")
+
+            # Checkpoint every 100 samples
+            if i % 100 == 0:
+                self._print_checkpoint(i)
+
+        return self.results
+
+    def _print_checkpoint(self, sample_count: int):
+        """Print cumulative metrics checkpoint."""
+        preds = [self.normalizer.normalize(r.prediction) for r in self.results]
+        refs = [self.normalizer.normalize(r.reference) for r in self.results]
+        corpus_wer = wer(refs, preds) * 100
+        avg_time = sum(r.time for r in self.results) / len(self.results)
+
+        print(f"\n{'=' * 60}")
+        print(f"CHECKPOINT @ {sample_count}: WER={corpus_wer:.2f}%, Avg Time={avg_time:.2f}s")
+        print(f"{'=' * 60}\n")
+
+    def compute_metrics(self) -> dict:
+        """Compute final metrics."""
+        if not self.results:
+            return {"wer": 0.0, "avg_time": 0.0, "num_samples": 0}
+
+        preds = [self.normalizer.normalize(r.prediction) for r in self.results]
+        refs = [self.normalizer.normalize(r.reference) for r in self.results]
+
+        return {
+            "wer": wer(refs, preds) * 100,
+            "avg_time": sum(r.time for r in self.results) / len(self.results),
+            "num_samples": len(self.results),
+        }
+
+
+class LocalEvaluator(Evaluator):
+    """Evaluator for local models."""
+
+    def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
+        super().__init__(**kwargs)
         from src.asr_modeling import ASRModel
         from src.asr_pipeline import ASRPipeline
 
-        # Load model - dtype and device handled automatically
-        model = ASRModel.from_pretrained(model_or_endpoint)
+        self.model = ASRModel.from_pretrained(model_path)
+        self.pipe = ASRPipeline(model=self.model)
+        self.user_prompt = user_prompt
 
-        # Create pipeline
-        pipe = ASRPipeline(model=model)
+    def transcribe(self, audio) -> tuple[str, float]:
+        start = time.time()
+        if self.user_prompt:
+            result = self.pipe(audio, user_prompt=self.user_prompt)
+        else:
+            result = self.pipe(audio)
+        elapsed = time.time() - start
 
-        for sample_count, sample in enumerate(dataset, start=1):
-            try:
-                # Pass audio directly to our custom pipeline
-                start_time = time.time()
-                # Pass user_prompt to pipeline if provided
-                if user_prompt is not None:
-                    result = pipe(sample[audio_field], user_prompt=user_prompt)
-                else:
-                    result = pipe(sample[audio_field])
-                inference_time = time.time() - start_time
-                per_sample_times.append(inference_time)
-
-                # Extract text from result
-                if isinstance(result, dict):
-                    prediction = result.get("text", "")
-                elif isinstance(result, str):
-                    prediction = result
-                else:
-                    prediction = str(result)
-
-            except Exception as e:
-                import traceback
-
-                print(f"Error processing sample {sample_count}:")
-                print(f"  Exception type: {type(e).__name__}")
-                print(f"  Error message: {str(e)}")
-                print("  Full traceback:")
-                traceback.print_exc()
-                prediction = ""
-                per_sample_times.append(0.0)
-
-            predictions.append(prediction)
-            references.append(sample[text_field])
-
-            # Compute WER for this sample using Whisper normalization
-            norm_pred = normalize_text(prediction)
-            norm_ref = normalize_text(sample[text_field])
-            sample_wer = wer(norm_ref, norm_pred) * 100
-            per_sample_wers.append(sample_wer)
-
-            print(
-                f"Sample {sample_count}: WER = {sample_wer:.2f}%, Time = {per_sample_times[-1]:.2f}s"
-            )
-            print(f"  Ref:  {sample[text_field]}")
-            print(f"  Pred: {prediction}")
-
-            # Print cumulative WER every 100 samples
-            if sample_count % 100 == 0:
-                # Compute corpus-level WER (same as final metric)
-                normalized_preds = [normalize_text(p) for p in predictions]
-                normalized_refs = [normalize_text(r) for r in references]
-                corpus_wer = wer(normalized_refs, normalized_preds) * 100
-                avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
-                print(f"\n{'=' * 80}")
-                print(f"CHECKPOINT @ {sample_count} samples:")
-                print(f"  Corpus WER: {corpus_wer:.2f}%")
-                print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
-                print(f"{'=' * 80}\n")
-
-    return predictions, references, per_sample_wers, per_sample_times
+        if isinstance(result, dict):
+            return result.get("text", ""), elapsed
+        return str(result), elapsed
 
 
-def evaluate_assemblyai(dataset, api_key, model="best", audio_field="wav", text_field="text"):
-    """Evaluate using AssemblyAI API.
+class EndpointEvaluator(Evaluator):
+    """Evaluator for HuggingFace Inference Endpoints."""
 
-    Args:
-        dataset: Dataset to evaluate on
-        api_key: AssemblyAI API key
-        model: AssemblyAI model to use
-        audio_field: Name of the audio field in the dataset (default: "wav")
-        text_field: Name of the text field in the dataset (default: "text")
-    """
-    import re
+    def __init__(self, endpoint_url: str, **kwargs):
+        super().__init__(**kwargs)
+        from huggingface_hub import InferenceClient
 
-    import assemblyai as aai
-    from jiwer import wer
-    from transformers import WhisperTokenizer
+        self.client = InferenceClient(base_url=endpoint_url)
+        self.temp_dir = tempfile.mkdtemp()
 
-    # Custom preprocessing to remove <inaudible> tags and disfluencies before Whisper normalization
-    def preprocess_text(text: str) -> str:
-        # Remove <inaudible> tags
-        text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
-        # Remove disfluencies (uh, um)
-        return re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
-
-    aai.settings.api_key = api_key
-
-    # Map string to SpeechModel enum
-    model_map = {
-        "best": aai.types.SpeechModel.best,
-        "universal": aai.types.SpeechModel.universal,
-        "slam_1": aai.types.SpeechModel.slam_1,
-        "nano": aai.types.SpeechModel.nano,
-    }
-
-    if model not in model_map:
-        raise ValueError(f"Invalid model '{model}'. Choose from: {list(model_map.keys())}")
-
-    config = aai.TranscriptionConfig(speech_model=model_map[model])
-    transcriber = aai.Transcriber(config=config)
-
-    print(f"Using AssemblyAI model: {model}")
-
-    predictions = []
-    references = []
-    per_sample_wers = []
-    per_sample_times = []
-
-    # Use Whisper's English text normalizer
-    whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
-
-    def normalize_text(text: str) -> str:
-        return whisper_tokenizer.normalize(preprocess_text(text))
-
-    for sample_count, sample in enumerate(dataset, start=1):
-        # Get WAV bytes for API
-        wav_bytes = prepare_wav_bytes(sample[audio_field])
+    def transcribe(self, audio) -> tuple[str, float]:
+        wav_bytes = prepare_wav_bytes(audio)
+        temp_path = Path(self.temp_dir) / f"temp_{time.time_ns()}.wav"
+        temp_path.write_bytes(wav_bytes)
 
         try:
-            start_time = time.time()
-            transcript = transcriber.transcribe(io.BytesIO(wav_bytes))
-            inference_time = time.time() - start_time
-            per_sample_times.append(inference_time)
-            prediction = transcript.text if transcript.text else ""
-        except Exception as e:
-            print(f"Error processing sample {sample_count}: {e}")
-            prediction = ""
-            per_sample_times.append(0.0)
+            start = time.time()
+            result = self.client.automatic_speech_recognition(str(temp_path))
+            elapsed = time.time() - start
 
-        predictions.append(prediction)
-        references.append(sample[text_field])
+            if isinstance(result, dict):
+                text = result.get("text", result.get("transcription", ""))
+            elif hasattr(result, "text"):
+                text = result.text
+            else:
+                text = str(result)
+            return text, elapsed
+        finally:
+            temp_path.unlink(missing_ok=True)
 
-        # Compute WER for this sample using Whisper normalization
-        norm_pred = normalize_text(prediction)
-        norm_ref = normalize_text(sample[text_field])
-        sample_wer = wer(norm_ref, norm_pred) * 100
-        per_sample_wers.append(sample_wer)
+    def __del__(self):
+        import shutil
 
-        print(f"Sample {sample_count}: WER = {sample_wer:.2f}%, Time = {per_sample_times[-1]:.2f}s")
-        print(f"  Ref:  {sample[text_field]}")
-        print(f"  Pred: {prediction}")
-
-        # Print cumulative WER every 100 samples
-        if sample_count % 100 == 0:
-            # Compute corpus-level WER (same as final metric)
-            normalized_preds = [normalize_text(p) for p in predictions]
-            normalized_refs = [normalize_text(r) for r in references]
-            corpus_wer = wer(normalized_refs, normalized_preds) * 100
-            avg_time_so_far = sum(per_sample_times) / len(per_sample_times)
-            print(f"\n{'=' * 80}")
-            print(f"CHECKPOINT @ {sample_count} samples:")
-            print(f"  Corpus WER: {corpus_wer:.2f}%")
-            print(f"  Avg Time/Sample: {avg_time_so_far:.2f}s")
-            print(f"{'=' * 80}\n")
-
-        # Rate limiting
-        time.sleep(0.5)
-
-    return predictions, references, per_sample_wers, per_sample_times
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Evaluate ASR models on audio datasets")
-    parser.add_argument(
-        "model",
-        type=str,
-        nargs="?",
-        default=None,
-        help="Model ID (e.g., mazesmazes/tiny-audio) or endpoint URL (not required when using --assemblyai)",
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="loquacious",
-        choices=["loquacious", "earnings22", "ami", "gigaspeech", "tedlium", "combined"],
-        help="Dataset to evaluate on (default: loquacious)",
-    )
-    parser.add_argument(
-        "--assemblyai",
-        action="store_true",
-        help="Use AssemblyAI API instead of HuggingFace",
-    )
-    parser.add_argument(
-        "--assemblyai-model",
-        type=str,
-        default="slam_1",
-        choices=["best", "universal", "slam_1", "nano"],
-        help="AssemblyAI model to use (default: slam_1)",
-    )
-    parser.add_argument(
-        "--api-key",
-        type=str,
-        default=os.environ.get("ASSEMBLYAI_API_KEY"),
-        help="AssemblyAI API key (required if --assemblyai)",
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="test",
-        help="Dataset split to evaluate (default: test)",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="medium",
-        help="Dataset config name (default: medium for loquacious, chunked for earnings22)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Output directory for results (default: outputs/eval_{model_name})",
-    )
-    parser.add_argument(
-        "--max-samples",
-        type=int,
-        default=None,
-        help="Maximum number of samples to evaluate (default: all)",
-    )
-    parser.add_argument(
-        "--system-prompt",
-        type=str,
-        default="/no_think /system_override",
-        help="System prompt to use for generation (default: task-focused transcription prompt)",
-    )
-    parser.add_argument(
-        "--user-prompt",
-        type=str,
-        default=None,
-        help="User prompt to override the default 'Repeat the following text, without any explanation: <audio>'. Must include <audio> token.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for dataset shuffling (default: 42)",
-    )
-    args = parser.parse_args()
+class AssemblyAIEvaluator(Evaluator):
+    """Evaluator for AssemblyAI API."""
 
-    # Validate arguments
-    if args.assemblyai:
-        if not args.api_key:
-            raise ValueError(
-                "AssemblyAI API key required. Set --api-key or ASSEMBLYAI_API_KEY env var"
-            )
-    else:
-        if not args.model:
-            raise ValueError("Model argument is required when not using --assemblyai")
+    MODEL_MAP = {"best": "best", "universal": "universal", "slam_1": "slam_1", "nano": "nano"}
 
-    # Set default output dir
-    if args.output_dir is None:
-        if args.assemblyai:
-            args.output_dir = Path(
-                f"outputs/eval_{args.dataset}_assemblyai_{args.assemblyai_model}"
-            )
-        else:
-            # Sanitize model name for directory
-            model_name = args.model.replace("/", "_").replace(":", "_")
-            if args.model.startswith("http"):
-                model_name = "endpoint_" + model_name.split("/")[-1]
-            args.output_dir = Path(f"outputs/eval_{args.dataset}_{model_name}")
+    def __init__(self, api_key: str, model: str = "slam_1", **kwargs):
+        super().__init__(**kwargs)
+        import assemblyai as aai
 
-    # Create output directory
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+        aai.settings.api_key = api_key
 
-    # Load WER metric
-    wer_metric = evaluate.load("wer")
+        if model not in self.MODEL_MAP:
+            raise ValueError(f"Invalid model '{model}'. Choose from: {list(self.MODEL_MAP.keys())}")
 
-    # Load dataset based on selection
-    if args.dataset == "loquacious":
-        dataset_name = "speechbrain/LoquaciousSet"
-        dataset_config = args.config if args.config != "medium" else "medium"
-        audio_field = "wav"
-        text_field = "text"
-        print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
-        dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
-    elif args.dataset == "earnings22":
-        dataset_name = "sanchit-gandhi/earnings22_robust_split"
-        # Use default config for earnings22_robust_split
-        dataset_config = args.config if args.config != "medium" else "default"
-        audio_field = "audio"
-        text_field = "sentence"  # earnings22_robust_split uses "sentence" field
-        print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
-        dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
-    elif args.dataset == "ami":
-        dataset_name = "TakalaWang/AMI_ASR"
-        dataset_config = None  # No config needed for AMI
-        audio_field = "audio"
-        text_field = "text"
-        print(f"Loading {dataset_name} dataset (split: {args.split})...")
-        dataset = load_dataset(dataset_name, split=args.split, streaming=True)
-    elif args.dataset == "gigaspeech":
-        dataset_name = "fixie-ai/gigaspeech"
-        # Use xl-empty-audio-removed config by default, or user-specified config
-        dataset_config = args.config if args.config != "medium" else "dev"
-        audio_field = "audio"
-        text_field = "text"
-        print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
-        dataset = load_dataset(dataset_name, dataset_config, split="dev", streaming=True)
-    elif args.dataset == "tedlium":
-        dataset_name = "sanchit-gandhi/tedlium-data"
-        dataset_config = args.config if args.config != "medium" else "default"
-        audio_field = "audio"
-        text_field = "text"
-        print(f"Loading {dataset_name} dataset (config: {dataset_config}, split: {args.split})...")
-        dataset = load_dataset(dataset_name, dataset_config, split=args.split, streaming=True)
-    elif args.dataset == "combined":
-        # Combined dataset with proportions matching combined.yaml training config:
-        # 50% LoquaciousSet, 10% each for GigaSpeech, Earnings22, AMI, TEDLIUM
-        print("Loading combined dataset with proportions: 50% Loquacious, 10% each for others...")
+        model_enum = getattr(aai.types.SpeechModel, model)
+        config = aai.TranscriptionConfig(speech_model=model_enum)
+        self.transcriber = aai.Transcriber(config=config)
 
-        # Define dataset configs matching combined.yaml
-        dataset_configs = [
-            {
-                "name": "loquacious",
-                "path": "speechbrain/LoquaciousSet",
-                "config": "medium",
-                "split": "dev",
-                "audio_field": "wav",
-                "text_field": "text",
-                "weight": 0.50,
-            },
-            {
-                "name": "gigaspeech",
-                "path": "fixie-ai/gigaspeech",
-                "config": "xl",
-                "split": "validation",
-                "audio_field": "audio",
-                "text_field": "text",
-                "weight": 0.10,
-            },
-            {
-                "name": "earnings22",
-                "path": "sanchit-gandhi/earnings22_robust_split",
-                "config": "default",
-                "split": "validation",
-                "audio_field": "audio",
-                "text_field": "sentence",
-                "weight": 0.10,
-            },
-            {
-                "name": "ami",
-                "path": "TakalaWang/AMI_ASR",
-                "config": None,
-                "split": "validation",
-                "audio_field": "audio",
-                "text_field": "text",
-                "weight": 0.10,
-            },
-            {
-                "name": "tedlium",
-                "path": "sanchit-gandhi/tedlium-data",
-                "config": "default",
-                "split": "validation",
-                "audio_field": "audio",
-                "text_field": "text",
-                "weight": 0.10,
-            },
-        ]
+    def transcribe(self, audio) -> tuple[str, float]:
+        wav_bytes = prepare_wav_bytes(audio)
 
-        # Create a generator that yields samples from each dataset proportionally
-        def combined_generator(configs, max_samples, seed):
-            """Yield samples from multiple datasets according to their weights."""
-            import random
-            random.seed(seed)
+        start = time.time()
+        transcript = self.transcriber.transcribe(io.BytesIO(wav_bytes))
+        elapsed = time.time() - start
 
-            # Calculate samples per dataset based on weights
-            total_weight = sum(cfg["weight"] for cfg in configs)
-            samples_per_dataset = {}
-            remaining = max_samples if max_samples else 1000  # Default to 1000 if no max
+        time.sleep(0.5)  # Rate limiting
+        return transcript.text or "", elapsed
 
-            for cfg in configs:
-                count = int(remaining * (cfg["weight"] / total_weight))
-                samples_per_dataset[cfg["name"]] = max(1, count)  # At least 1 sample
 
-            print(f"  Samples per dataset: {samples_per_dataset}")
+# =============================================================================
+# Results Output
+# =============================================================================
 
-            # Load and yield from each dataset
-            for cfg in configs:
-                num_samples = samples_per_dataset[cfg["name"]]
-                # Use reservoir sampling buffer to get random samples from streaming dataset
-                buffer_size = num_samples * 10  # Buffer 10x more samples for better randomness
-                print(f"  Fetching {num_samples} random samples from {cfg['name']} (buffer={buffer_size})...")
 
-                if cfg["config"]:
-                    ds = load_dataset(cfg["path"], cfg["config"], split=cfg["split"], streaming=True)
-                else:
-                    ds = load_dataset(cfg["path"], split=cfg["split"], streaming=True)
+def save_results(
+    output_path: Path,
+    model_name: str,
+    dataset_desc: str,
+    results: list[EvalResult],
+    metrics: dict,
+):
+    """Save evaluation results to file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-                # Shuffle the streaming dataset with seed for reproducibility
-                ds = ds.shuffle(seed=seed, buffer_size=buffer_size)
-
-                # Collect samples into buffer
-                buffer = []
-                for sample in ds:
-                    # Skip TEDLIUM ignore markers
-                    text = sample.get(cfg["text_field"], "")
-                    if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
-                        continue
-                    buffer.append(sample)
-                    if len(buffer) >= num_samples:
-                        break
-
-                selected = buffer
-
-                for sample in selected:
-                    # Yield with normalized field names
-                    yield {
-                        "audio": sample[cfg["audio_field"]],
-                        "text": sample[cfg["text_field"]],
-                        "source": cfg["name"],
-                    }
-
-        # Use generator to create samples - we'll iterate directly instead of using IterableDataset
-        # since interleave_datasets has issues with mixed audio formats
-        combined_samples = list(combined_generator(dataset_configs, args.max_samples, args.seed))
-
-        # Shuffle the combined samples
-        import random
-        random.seed(args.seed)
-        random.shuffle(combined_samples)
-
-        # Create a simple iterator
-        dataset = iter(combined_samples)
-        audio_field = "audio"
-        text_field = "text"
-        dataset_name = "combined"
-        dataset_config = "proportional"
-        # Set max_samples to None since we already limited in the generator
-        args.max_samples = None
-        print(f"Combined dataset ready with {len(combined_samples)} samples.")
-    else:
-        raise ValueError(f"Unknown dataset: {args.dataset}")
-
-    if args.max_samples:
-        dataset = dataset.take(args.max_samples)
-
-    # Run inference
-    print("Running inference...")
-
-    if args.assemblyai:
-        predictions, references, per_sample_wers, per_sample_times = evaluate_assemblyai(
-            dataset, args.api_key, args.assemblyai_model, audio_field, text_field
-        )
-        model_name = f"AssemblyAI ({args.assemblyai_model})"
-    else:
-        predictions, references, per_sample_wers, per_sample_times = evaluate_huggingface(
-            dataset, args.model, args.system_prompt, args.user_prompt, audio_field, text_field
-        )
-        model_name = args.model
-
-    # Normalize text before computing WER using Whisper's normalizer
-    import re
-
-    from transformers import WhisperTokenizer
-
-    # Custom preprocessing to remove <inaudible> tags and disfluencies
-    def preprocess_text(text: str) -> str:
-        text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
-        return re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
-
-    whisper_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
-    normalized_predictions = [whisper_tokenizer.normalize(preprocess_text(p)) for p in predictions]
-    normalized_references = [whisper_tokenizer.normalize(preprocess_text(r)) for r in references]
-
-    # Compute WER
-    wer = wer_metric.compute(predictions=normalized_predictions, references=normalized_references)
-
-    # Compute average response time
-    avg_time = sum(per_sample_times) / len(per_sample_times) if per_sample_times else 0.0
-
-    # Save results
-    num_samples = len(predictions)
-    wer_percent = wer * 100
-    results_file = args.output_dir / "results.txt"
-
-    # Build dataset description
-    if dataset_config:
-        dataset_desc = f"{dataset_name} (config: {dataset_config}, split: {args.split})"
-    else:
-        dataset_desc = f"{dataset_name} (split: {args.split})"
-
-    with results_file.open("w") as f:
+    with output_path.open("w") as f:
         f.write(f"Model: {model_name}\n")
         f.write(f"Dataset: {dataset_desc}\n")
-        f.write(f"Samples: {num_samples}\n")
-        f.write(f"WER: {wer_percent:.2f}%\n")
-        f.write(f"Avg Response Time: {avg_time:.2f}s\n\n")
+        f.write(f"Samples: {metrics['num_samples']}\n")
+        f.write(f"WER: {metrics['wer']:.2f}%\n")
+        f.write(f"Avg Response Time: {metrics['avg_time']:.2f}s\n\n")
         f.write("=" * 80 + "\n")
         f.write("Predictions vs Ground Truth\n")
         f.write("=" * 80 + "\n\n")
 
-        for i, (pred, ref, sample_wer, sample_time) in enumerate(
-            zip(predictions, references, per_sample_wers, per_sample_times)
-        ):
-            f.write(f"Sample {i + 1} - WER: {sample_wer:.2f}%, Time: {sample_time:.2f}s\n")
-            f.write(f"Ground Truth: {ref}\n")
-            f.write(f"Prediction:   {pred}\n")
+        for i, r in enumerate(results, 1):
+            f.write(f"Sample {i} - WER: {r.wer:.2f}%, Time: {r.time:.2f}s\n")
+            f.write(f"Ground Truth: {r.reference}\n")
+            f.write(f"Prediction:   {r.prediction}\n")
             f.write("-" * 80 + "\n\n")
 
-    # Print summary
-    print("\n" + "=" * 80)
+
+def print_summary(model_name: str, dataset_desc: str, metrics: dict, output_path: Path):
+    """Print final evaluation summary."""
+    print("\n" + "=" * 60)
     print("Evaluation Results")
-    print("=" * 80)
+    print("=" * 60)
     print(f"Model: {model_name}")
     print(f"Dataset: {dataset_desc}")
-    print(f"Samples: {num_samples}")
-    print(f"WER: {wer_percent:.2f}%")
-    print(f"Avg Response Time: {avg_time:.2f}s")
-    print(f"\nResults saved to: {results_file}")
+    print(f"Samples: {metrics['num_samples']}")
+    print(f"WER: {metrics['wer']:.2f}%")
+    print(f"Avg Time: {metrics['avg_time']:.2f}s")
+    print(f"\nResults saved to: {output_path}")
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Evaluate ASR models")
+    parser.add_argument("model", nargs="?", help="Model path or endpoint URL")
+    parser.add_argument(
+        "--dataset",
+        default="loquacious",
+        choices=list(DATASET_REGISTRY.keys()) + ["combined"],
+        help="Dataset to evaluate on",
+    )
+    parser.add_argument("--assemblyai", action="store_true", help="Use AssemblyAI API")
+    parser.add_argument(
+        "--assemblyai-model",
+        default="slam_1",
+        choices=["best", "universal", "slam_1", "nano"],
+    )
+    parser.add_argument("--api-key", default=os.environ.get("ASSEMBLYAI_API_KEY"))
+    parser.add_argument("--split", default="test")
+    parser.add_argument("--config", default=None, help="Dataset config override")
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--user-prompt", default=None, help="User prompt (must include <audio>)")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    # Validation
+    if args.assemblyai:
+        if not args.api_key:
+            raise ValueError("AssemblyAI API key required")
+        model_name = f"AssemblyAI ({args.assemblyai_model})"
+    else:
+        if not args.model:
+            raise ValueError("Model argument required")
+        model_name = args.model
+
+    # Output directory
+    if args.output_dir is None:
+        safe_name = model_name.replace("/", "_").replace(":", "_")
+        if args.model and args.model.startswith("http"):
+            safe_name = "endpoint_" + safe_name.split("/")[-1]
+        args.output_dir = Path(f"outputs/eval_{args.dataset}_{safe_name}")
+
+    # Load dataset
+    if args.dataset == "combined":
+        dataset, total = load_combined_dataset(args.max_samples, args.seed)
+        audio_field, text_field = "audio", "text"
+        dataset_desc = f"combined (proportional, {total} samples)"
+        args.max_samples = None  # Already limited
+    else:
+        cfg = DATASET_REGISTRY[args.dataset]
+        dataset = load_single_dataset(args.dataset, args.split, args.config)
+        audio_field, text_field = cfg.audio_field, cfg.text_field
+        config_name = args.config or cfg.config
+        dataset_desc = f"{cfg.path} (config: {config_name}, split: {args.split})"
+
+        if args.max_samples:
+            dataset = dataset.take(args.max_samples)
+
+    # Create evaluator
+    if args.assemblyai:
+        evaluator = AssemblyAIEvaluator(
+            args.api_key,
+            args.assemblyai_model,
+            audio_field=audio_field,
+            text_field=text_field,
+        )
+    elif args.model.startswith("http"):
+        evaluator = EndpointEvaluator(
+            args.model,
+            audio_field=audio_field,
+            text_field=text_field,
+        )
+    else:
+        evaluator = LocalEvaluator(
+            args.model,
+            user_prompt=args.user_prompt,
+            audio_field=audio_field,
+            text_field=text_field,
+        )
+
+    # Run evaluation
+    print("Running inference...")
+    evaluator.evaluate(dataset, args.max_samples)
+    metrics = evaluator.compute_metrics()
+
+    # Save and print results
+    output_path = args.output_dir / "results.txt"
+    save_results(output_path, model_name, dataset_desc, evaluator.results, metrics)
+    print_summary(model_name, dataset_desc, metrics, output_path)
 
 
 if __name__ == "__main__":

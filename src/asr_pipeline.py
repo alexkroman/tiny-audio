@@ -27,13 +27,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             model=model, feature_extractor=feature_extractor, tokenizer=tokenizer, **kwargs
         )
 
-        # Initialize text normalizer
-        if hasattr(tokenizer, "normalize"):
-            self.text_normalizer = tokenizer
-        else:
-            from transformers import WhisperTokenizer
+        # Initialize text normalizer (WhisperTokenizer has the normalize method we need)
+        from transformers import WhisperTokenizer
 
-            self.text_normalizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+        self.text_normalizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
 
     def __call__(self, inputs, **kwargs):
         generate_kwargs = {}
@@ -123,23 +120,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
     def _decode_audio_bytes(self, wav_bytes: bytes) -> dict[str, Any]:
         """Decode audio bytes to array format."""
-        import tempfile
+        import io
 
-        from torchcodec.decoders import AudioDecoder
+        import soundfile as sf
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.write(wav_bytes)
-            temp_path = f.name
-
-        try:
-            decoder = AudioDecoder(temp_path)
-            audio_result = decoder.get_all_samples()
-            return {
-                "raw": audio_result.data.squeeze().numpy(),
-                "sampling_rate": audio_result.sample_rate,
-            }
-        finally:
-            Path(temp_path).unlink()
+        audio_data, sample_rate = sf.read(io.BytesIO(wav_bytes))
+        return {
+            "raw": audio_data,
+            "sampling_rate": sample_rate,
+        }
 
     def _forward(self, model_inputs, **generate_kwargs) -> dict[str, Any]:
         task: str | None = generate_kwargs.pop("task", None)

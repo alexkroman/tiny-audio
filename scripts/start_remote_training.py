@@ -77,12 +77,12 @@ def start_training(host, port, experiment, session_name, wandb_run_id=None, wand
 
 
         echo "--- Setting up system limits ---"
-        ulimit -n 65536  # Increase file descriptor limit for torchcodec audio decoding
+        ulimit -n 65536  # Increase file descriptor limit for audio decoding
 
         echo "--- Setting up environment variables ---"
         export PATH="/root/.local/bin:$PATH"
         export TOKENIZERS_PARALLELISM=false
-        export HF_DATASETS_AUDIO_DECODER="torchcodec"
+        export HF_DATASETS_AUDIO_DECODER="soundfile"
         export HF_HOME=/workspace/.cache/huggingface
         export HF_DATASETS_CACHE=/workspace/datasets
         export HF_HUB_ENABLE_HF_TRANSFER=1

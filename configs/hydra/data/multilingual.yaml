@@ -1,0 +1,59 @@
+# Multilingual dataset configuration
+# 50% English (LoquaciousSet), 50% split between Spanish, German, French
+datasets:
+  # English - 50%
+  - path: speechbrain/LoquaciousSet
+    name: medium
+    audio_column: wav
+    text_column: text
+    task: transcribe
+    weight: 0.50
+    train_splits:
+      - train
+    eval_splits:
+      - dev
+
+  # Spanish - ~16.67%
+  - path: fixie-ai/common_voice_17_0
+    name: es
+    audio_column: audio
+    text_column: sentence
+    task: transcribe
+    weight: 0.167
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+
+  # German - ~16.67%
+  - path: fixie-ai/common_voice_17_0
+    name: de
+    audio_column: audio
+    text_column: sentence
+    task: transcribe
+    weight: 0.167
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+
+  # French - ~16.67%
+  - path: fixie-ai/common_voice_17_0
+    name: fr
+    audio_column: audio
+    text_column: sentence
+    task: transcribe
+    weight: 0.166
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+max_train_samples: null
+max_eval_samples: 10000
+use_streaming: true

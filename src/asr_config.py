@@ -94,15 +94,9 @@ class ASRConfig(transformers.PretrainedConfig):
 
         if isinstance(self.text_config, dict):
             # Reconstruct config from dict using the model_type stored in the dict
-            model_type = self.text_config.get("model_type")
-            if model_type:
-                config_class = transformers.AutoConfig.for_model(model_type).__class__
-                self.text_config = config_class(**self.text_config)
-            else:
-                # Fallback: try to load from model_id
-                self.text_config = transformers.AutoConfig.from_pretrained(
-                    text_model_id, trust_remote_code=True
-                )
+            model_type = self.text_config["model_type"]
+            config_class = transformers.AutoConfig.for_model(model_type).__class__
+            self.text_config = config_class(**self.text_config)
 
         if isinstance(self.audio_config, dict):
             model_type = self.audio_config.get("model_type")

@@ -54,7 +54,7 @@ class ResidualAudioProjector(nn.Module):
         super().__init__()
 
         # Temporal downsampling factor
-        self.k = getattr(config, "projector_pool_stride", 2)
+        self.k = getattr(config, "projector_pool_stride", 4)
 
         # Dimensions
         in_dim = config.encoder_dim * self.k  # After concatenating k frames
