@@ -68,7 +68,8 @@ python = ">=3.10,<3.13"
 # torch - Poetry will pull from pytorch-cu128 source on Linux when available
 torch = "~2.8.0"
 soundfile = ">=0.12.1"
-transformers = "*"
+librosa = ">=0.10.0"
+transformers = ">=4.57.3"
 accelerate = "*"
 datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
 peft = "*"

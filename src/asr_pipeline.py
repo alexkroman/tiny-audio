@@ -116,6 +116,21 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 "sampling_rate": self.model.config.audio_sample_rate,
             }
 
+        # Resample to target sample rate if needed (workaround for transformers bug)
+        # See: https://github.com/huggingface/transformers/pull/41298
+        if isinstance(inputs, dict) and "sampling_rate" in inputs:
+            in_sr = inputs["sampling_rate"]
+            target_sr = self.feature_extractor.sampling_rate
+            if in_sr != target_sr:
+                import librosa
+                import numpy as np
+
+                audio = inputs["raw"]
+                if hasattr(audio, "numpy"):
+                    audio = audio.numpy()
+                resampled = librosa.resample(audio, orig_sr=in_sr, target_sr=target_sr)
+                inputs = {"raw": resampled, "sampling_rate": target_sr}
+
         return super().preprocess(inputs, **preprocess_params)
 
     def _decode_audio_bytes(self, wav_bytes: bytes) -> dict[str, Any]:

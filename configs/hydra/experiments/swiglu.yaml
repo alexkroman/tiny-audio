@@ -20,7 +20,7 @@ model:
 
 training:
   # Resume from checkpoint
-  resume_from_checkpoint: "/workspace/outputs/2025-12-01/21-36-27/outputs/production_model/checkpoint-7000"
+  # resume_from_checkpoint: "/workspace/outputs/2025-12-01/21-36-27/outputs/production_model/checkpoint-7000"
 
   # Hub configuration
   push_to_hub: true

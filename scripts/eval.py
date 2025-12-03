@@ -174,6 +174,34 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         audio_field="audio",
         text_field="sentence",
     ),
+    "commonvoice": DatasetConfig(
+        name="commonvoice",
+        path="fixie-ai/common_voice_17_0",
+        config="en",
+        audio_field="audio",
+        text_field="sentence",
+    ),
+    "peoples": DatasetConfig(
+        name="peoples",
+        path="fixie-ai/peoples_speech",
+        config="clean",
+        audio_field="audio",
+        text_field="text",
+    ),
+    "librispeech": DatasetConfig(
+        name="librispeech",
+        path="openslr/librispeech_asr",
+        config="clean",
+        audio_field="audio",
+        text_field="text",
+    ),
+    "librispeech-other": DatasetConfig(
+        name="librispeech-other",
+        path="openslr/librispeech_asr",
+        config="other",
+        audio_field="audio",
+        text_field="text",
+    ),
 }
 
 # Combined dataset proportions
@@ -336,11 +364,14 @@ class LocalEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from src.asr_modeling import ASRModel
-        from src.asr_pipeline import ASRPipeline
+        from transformers import pipeline
 
-        self.model = ASRModel.from_pretrained(model_path)
-        self.pipe = ASRPipeline(model=self.model)
+        # Load using pipeline with trust_remote_code to use Hub's custom pipeline class
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_path,
+            trust_remote_code=True,
+        )
         self.user_prompt = user_prompt
 
     def transcribe(self, audio) -> tuple[str, float]:
@@ -522,10 +553,12 @@ def main():
         args.max_samples = None  # Already limited
     else:
         cfg = DATASET_REGISTRY[args.dataset]
-        dataset = load_single_dataset(args.dataset, args.split, args.config)
+        # Use dataset's default_split if user didn't override
+        split = args.split if args.split != "test" else cfg.default_split
+        dataset = load_single_dataset(args.dataset, split, args.config)
         audio_field, text_field = cfg.audio_field, cfg.text_field
         config_name = args.config or cfg.config
-        dataset_desc = f"{cfg.path} (config: {config_name}, split: {args.split})"
+        dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
 
         if args.max_samples:
             dataset = dataset.take(args.max_samples)

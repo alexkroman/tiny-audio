@@ -26,6 +26,7 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.05,  # Dropout rate for projector layers
         projector_input_noise: float = 0.02,  # Input noise for projector
+        use_specaugment: bool = True,  # Apply SpecAugment during training
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
@@ -73,6 +74,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_num_layers = projector_num_layers
         self.projector_dropout = projector_dropout
         self.projector_input_noise = projector_input_noise
+        self.use_specaugment = use_specaugment
         self.label_smoothing = label_smoothing
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens

@@ -1,17 +1,5 @@
-# Combined dataset configuration with five ASR datasets (including TEDLIUM)
+# OpenASR benchmark dataset configuration with equal weights (8 datasets)
 datasets:
-  # LoquaciousSet
-  - path: speechbrain/LoquaciousSet
-    name: medium
-    audio_column: wav
-    text_column: text
-    task: transcribe
-    train_splits:
-      - train
-    eval_splits:
-      - dev
-    sampling_weight: 0.50
-
   # GigaSpeech
   - path: fixie-ai/gigaspeech
     name: xl
@@ -22,19 +10,32 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.10
+    sampling_weight: 0.125
 
-  # Earnings22
-  - path: sanchit-gandhi/earnings22_robust_split
-    name: default
+  # LibriSpeech Clean
+  - path: openslr/librispeech_asr
+    name: clean
     audio_column: audio
-    text_column: sentence
+    text_column: text
     task: transcribe
     train_splits:
-      - train
+      - train.100
+      - train.360
     eval_splits:
       - validation
-    sampling_weight: 0.10
+    sampling_weight: 0.125
+
+  # LibriSpeech Other
+  - path: openslr/librispeech_asr
+    name: other
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits:
+      - train.500
+    eval_splits:
+      - validation
+    sampling_weight: 0.125
 
   # AMI ASR
   - path: TakalaWang/AMI_ASR
@@ -46,7 +47,19 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.10
+    sampling_weight: 0.125
+
+  # Earnings22
+  - path: sanchit-gandhi/earnings22_robust_split
+    name: default
+    audio_column: audio
+    text_column: sentence
+    task: transcribe
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+    sampling_weight: 0.125
 
   # TEDLIUM
   - path: sanchit-gandhi/tedlium-data
@@ -58,14 +71,38 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.10
+    sampling_weight: 0.125
+
+  # People's Speech
+  - path: fixie-ai/peoples_speech
+    name: clean
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+    sampling_weight: 0.125
+
+  # Common Voice English
+  - path: fixie-ai/common_voice_17_0
+    name: en
+    audio_column: audio
+    text_column: sentence
+    task: transcribe
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+    sampling_weight: 0.125
 
 # Audio processing
 sample_rate: 16000
-max_audio_duration_seconds: 30.0  # Skip audio longer than this to prevent OOM
+max_audio_duration_seconds: 15.0  # Skip audio longer than this to prevent OOM
 
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
-max_eval_samples: 5000  # Keep eval manageable
+max_eval_samples: 3000  # Keep eval manageable
 use_streaming: true

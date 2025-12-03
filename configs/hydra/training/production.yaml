@@ -35,7 +35,7 @@ hub_private_repo: false
 fp16: false
 bf16: true
 tf32: true  # Enable TF32 for A40 (2x matmul speedup)
-max_grad_norm: 1.0  # Increased from 1.0 - less aggressive clipping for projector training
+max_grad_norm: 1.0 
 torch_compile: false
 # torch_compile_mode: reduce-overhead
 
@@ -43,7 +43,7 @@ torch_compile: false
 model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
-dataloader_num_workers: 1
+dataloader_num_workers: 4
 dataloader_persistent_workers: true
 dataloader_pin_memory: true
 

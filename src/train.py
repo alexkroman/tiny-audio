@@ -145,21 +145,26 @@ class DatasetLoader:
                     (OmegaConf.create({**d_cfg, "name": c}), t, e)
                     for c, t, e in zip(d_cfg.configs, train_splits, eval_splits)
                 ]
+                for cfg, train_split, eval_split in configs:
+                    train_datasets.append(self._prepare_split(cfg, train_split))
+                    train_weights.append(weight)
+                    if eval_split:
+                        val_datasets.append(self._prepare_split(cfg, eval_split))
+                        val_weights.append(weight)
             else:
-                configs = [(d_cfg, t, e) for t in train_splits for e in eval_splits]
-
-            for cfg, train_split, eval_split in configs:
-                train_datasets.append(self._prepare_split(cfg, train_split))
-                train_weights.append(weight)
-                if eval_split:
-                    val_datasets.append(self._prepare_split(cfg, eval_split))
+                # Add all train splits
+                for train_split in train_splits:
+                    train_datasets.append(self._prepare_split(d_cfg, train_split))
+                    train_weights.append(weight)
+                # Add all eval splits (once, not per train split)
+                for eval_split in eval_splits:
+                    val_datasets.append(self._prepare_split(d_cfg, eval_split))
                     val_weights.append(weight)
 
         train_ds = self._combine_datasets(train_datasets, train_weights)
         val_ds = self._combine_datasets(val_datasets, val_weights)
 
         if train_ds:
-            train_ds = train_ds.shuffle(seed=self.seed, buffer_size=1000)
             if self.config.max_train_samples:
                 train_ds = train_ds.take(self.config.max_train_samples)
         if val_ds and self.config.max_eval_samples:
@@ -167,10 +172,11 @@ class DatasetLoader:
 
         return train_ds, val_ds
 
-    @staticmethod
-    def _combine_datasets(datasets: list, weights: list):
+    def _combine_datasets(self, datasets: list, weights: list):
         if not datasets:
             return None
+        # Shuffle each dataset before interleaving for better randomization
+        datasets = [ds.shuffle(seed=self.seed, buffer_size=1000) for ds in datasets]
         if len(datasets) == 1:
             return datasets[0]
         probs = [w / sum(weights) for w in weights]
@@ -252,19 +258,31 @@ class DataCollator(DataCollatorForSeq2Seq):
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         # Process audio - extract numpy arrays from soundfile dict format
         audio_arrays = []
+        valid_features = []
         for f in features:
-            audio_obj = f["audio"]
-            # Soundfile backend returns dict with 'array' and 'sampling_rate'
-            audio = audio_obj["array"]
-            if hasattr(audio, "numpy"):
-                audio = audio.numpy()
-            audio = audio.squeeze()
-            if audio.ndim > 1:
-                audio = audio.mean(axis=0)
-            elif audio.ndim == 0:
-                audio = audio.reshape(1)
-            audio_arrays.append(audio)
-            f["audio"] = None
+            try:
+                audio_obj = f["audio"]
+                # Soundfile backend returns dict with 'array' and 'sampling_rate'
+                audio = audio_obj["array"]
+                if hasattr(audio, "numpy"):
+                    audio = audio.numpy()
+                audio = audio.squeeze()
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=0)
+                elif audio.ndim == 0:
+                    audio = audio.reshape(1)
+                audio_arrays.append(audio)
+                valid_features.append(f)
+            except Exception:
+                # Skip corrupted audio files silently
+                continue
+            finally:
+                f["audio"] = None
+
+        if not audio_arrays:
+            raise ValueError("No valid audio samples in batch - all samples were corrupted")
+
+        features = valid_features
 
         audio_features = self.feature_extractor(
             audio_arrays,
@@ -297,6 +315,10 @@ class DataCollator(DataCollatorForSeq2Seq):
                 max_length=512,
                 enable_thinking=False,
             )
+
+            # Ensure <|im_end|> is present - truncation may have cut it off
+            if tokens[-1] != self._im_end_id:
+                tokens = tokens[:-1] + [self._im_end_id]  # Replace last token with im_end
 
             # Create labels - mask everything except assistant content
             labels = [-100] * len(tokens)
@@ -366,19 +388,8 @@ def main(cfg: DictConfig) -> None:
             config=OmegaConf.to_container(cfg, resolve=True),
         )
 
-    # Create model config (dimensions are auto-detected)
-    asr_config = ASRConfig(
-        text_model_id=cfg.model.decoder_model_name,
-        audio_model_id=cfg.model.encoder_model_name,
-        attn_implementation=cfg.training.attn_implementation,
-        model_dtype=cfg.training.model_dtype,
-        system_prompt=cfg.model.system_prompt,
-        projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
-        projector_type=cfg.model.get("projector_type", "moe"),
-        projector_num_layers=cfg.model.get("projector_num_layers", 2),
-        use_specaugment=cfg.training.get("use_specaugment", False),
-        label_smoothing=cfg.training.get("label_smoothing", 0.0),
-    )
+    # Create model config (uses defaults from ASRConfig)
+    asr_config = ASRConfig()
 
     # Load or create model
     if cfg.model.get("pretrained_model_path"):

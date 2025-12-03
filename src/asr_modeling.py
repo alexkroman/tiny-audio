@@ -576,6 +576,11 @@ class ASRModel(PreTrainedModel):
         src_dir = PathlibPath(__file__).parent
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
+        # Copy projector files
+        for projector_file in ["moe_projector.py", "residual_projector.py", "swiglu_projector.py"]:
+            src_path = src_dir / projector_file
+            if src_path.exists():
+                shutil.copy(src_path, save_dir / projector_file)
 
 
 # Register with transformers Auto classes
