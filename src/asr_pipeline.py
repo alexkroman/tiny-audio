@@ -4,7 +4,6 @@ from typing import Any
 
 import torch
 import transformers
-from truecase import get_true_case
 
 from .asr_modeling import ASRModel
 
@@ -26,11 +25,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         super().__init__(
             model=model, feature_extractor=feature_extractor, tokenizer=tokenizer, **kwargs
         )
-
-        # Initialize text normalizer (WhisperTokenizer has the normalize method we need)
-        from transformers import WhisperTokenizer
-
-        self.text_normalizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
 
     def __call__(self, inputs, **kwargs):
         generate_kwargs = {}
@@ -89,8 +83,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 all_tokens.extend(tokens.tolist() if torch.is_tensor(tokens) else tokens)
 
         text = self.tokenizer.decode(all_tokens, skip_special_tokens=True).strip()
-        text = self.text_normalizer.normalize(text)
-        text = get_true_case(text)
 
         return {"text": text}
 
@@ -240,7 +232,5 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             tokens = tokens[0]
 
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
-        text = self.text_normalizer.normalize(text)
-        text = get_true_case(text)
 
         return {"text": text}

@@ -526,11 +526,10 @@ class ASRModel(PreTrainedModel):
         generate_kwargs.setdefault("num_beams", self.config.num_beams)
         generate_kwargs.setdefault("do_sample", self.config.do_sample)
         generate_kwargs.setdefault("use_cache", self.config.use_cache)
-        generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
         generate_kwargs.setdefault("length_penalty", self.config.length_penalty)
+        generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
         generate_kwargs.setdefault("no_repeat_ngram_size", self.config.no_repeat_ngram_size)
-        if self.config.temperature is not None:
-            generate_kwargs.setdefault("temperature", self.config.temperature)
+        generate_kwargs.setdefault("temperature", self.config.temperature)
         if self.config.top_k is not None:
             generate_kwargs.setdefault("top_k", self.config.top_k)
         if self.config.top_p is not None:
@@ -540,10 +539,20 @@ class ASRModel(PreTrainedModel):
         )
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
 
+        # Create dummy input_ids matching inputs_embeds length for repetition penalty tracking
+        # Use pad_token_id as placeholder since the actual tokens don't matter for penalty calc
+        dummy_input_ids = torch.full(
+            (inputs_embeds.shape[0], inputs_embeds.shape[1]),
+            self.tokenizer.pad_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+
         # Generate (type ignore needed as generate() has complex return type)
         # Note: When using inputs_embeds, generate() returns only new tokens
         # (no placeholder positions for input embeddings), so no stripping needed
         output = self.language_model.generate(  # type: ignore[operator]
+            input_ids=dummy_input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             **generate_kwargs,
