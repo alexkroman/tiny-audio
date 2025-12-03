@@ -11,14 +11,19 @@ class SimpleAdapter(nn.Module):
     projecting the hidden dimension from 3072 to 4096 and back to 3072."
     """
 
-    def __init__(self, in_features, hidden_features, out_features):
+    def __init__(self, in_features, hidden_features, out_features, dropout=0.0):
         super().__init__()
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
         self.fc2 = nn.Linear(hidden_features, out_features)
 
     def forward(self, x):
-        return self.fc2(self.relu(self.fc1(x)))
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
 
 
 class MoEAudioProjector(nn.Module):
@@ -47,6 +52,9 @@ class MoEAudioProjector(nn.Module):
         # Adapter hidden dim: paper uses 4096
         adapter_hidden = getattr(config, "projector_hidden_dim", None) or 4096
 
+        # Dropout rate for experts (not applied to router)
+        self.dropout_rate = getattr(config, "projector_dropout", 0.1)
+
         # --- Convolutional Subsampling (Section III-B) ---
         # "two convolutional layers, each with a kernel size of 3 and a stride of 2"
         # Maps encoder_dim (1280) -> llm_dim (3072), total stride=4
@@ -70,7 +78,7 @@ class MoEAudioProjector(nn.Module):
         # "projecting the hidden dimension from 3072 to 4096 and back to 3072"
         self.experts = nn.ModuleList(
             [
-                SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim)
+                SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim, dropout=self.dropout_rate)
                 for _ in range(self.num_experts)
             ]
         )

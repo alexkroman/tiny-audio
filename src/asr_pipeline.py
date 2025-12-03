@@ -97,7 +97,13 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             if "bytes" in inputs:
                 inputs = self._decode_audio_bytes(inputs["bytes"])
             elif "array" in inputs:
-                inputs = {"raw": inputs["array"], "sampling_rate": inputs["sampling_rate"]}
+                inputs = {
+                    "raw": inputs["array"],
+                    "sampling_rate": inputs.get("sampling_rate", self.feature_extractor.sampling_rate),
+                }
+            elif "path" in inputs and "array" not in inputs:
+                # Lazy-loaded audio - load from path
+                inputs = self._decode_audio_bytes(Path(inputs["path"]).read_bytes())
         elif hasattr(inputs, "array") and hasattr(inputs, "sampling_rate"):
             inputs = {"raw": inputs.array, "sampling_rate": inputs.sampling_rate}
         elif hasattr(inputs, "__array__") and not isinstance(inputs, (dict, bytes, str)):
@@ -120,7 +126,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 audio = inputs["raw"]
                 if hasattr(audio, "numpy"):
                     audio = audio.numpy()
-                resampled = librosa.resample(audio, orig_sr=in_sr, target_sr=target_sr)
+                resampled = librosa.resample(
+                    np.asarray(audio, dtype=np.float32), orig_sr=in_sr, target_sr=target_sr
+                )
                 inputs = {"raw": resampled, "sampling_rate": target_sr}
 
         return super().preprocess(inputs, **preprocess_params)

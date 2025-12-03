@@ -1,4 +1,4 @@
-# OpenASR benchmark dataset configuration with equal weights (8 datasets)
+# OpenASR benchmark dataset configuration with equal weights (9 datasets)
 datasets:
   # GigaSpeech
   - path: fixie-ai/gigaspeech
@@ -10,7 +10,7 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.125
+    sampling_weight: 0.111
 
   # LibriSpeech Clean
   - path: openslr/librispeech_asr
@@ -23,7 +23,7 @@ datasets:
       - train.360
     eval_splits:
       - validation
-    sampling_weight: 0.125
+    sampling_weight: 0.111
 
   # LibriSpeech Other
   - path: openslr/librispeech_asr
@@ -35,7 +35,7 @@ datasets:
       - train.500
     eval_splits:
       - validation
-    sampling_weight: 0.125
+    sampling_weight: 0.111
 
   # AMI ASR
   - path: TakalaWang/AMI_ASR
@@ -47,7 +47,7 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.125
+    sampling_weight: 0.111
 
   # Earnings22
   - path: sanchit-gandhi/earnings22_robust_split
@@ -59,7 +59,7 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.125
+    sampling_weight: 0.111
 
   # TEDLIUM
   - path: sanchit-gandhi/tedlium-data
@@ -71,7 +71,7 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.125
+    sampling_weight: 0.111
 
   # People's Speech
   - path: fixie-ai/peoples_speech
@@ -83,7 +83,7 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.125
+    sampling_weight: 0.111
 
   # Common Voice English
   - path: fixie-ai/common_voice_17_0
@@ -95,7 +95,19 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 0.125
+    sampling_weight: 0.111
+
+  # Loquacious Medium (synthetic diverse speech)
+  - path: speechbrain/LoquaciousSet
+    name: medium
+    audio_column: wav
+    text_column: text
+    task: transcribe
+    train_splits:
+      - train
+    eval_splits:
+      - dev
+    sampling_weight: 0.111
 
 # Audio processing
 sample_rate: 16000

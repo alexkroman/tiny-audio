@@ -247,15 +247,7 @@ class ASRModel(PreTrainedModel):
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Apply SpecAugment masking to input features.
 
-        Uses Whisper's default parameters:
-        - mask_time_prob: 0.05 (5% of time steps)
-        - mask_time_length: 10 frames
-        - mask_feature_prob: 0.0 (disabled by default)
-        - mask_feature_length: 10 features
-        """
         if not getattr(self.config, "use_specaugment", False):
             return input_features
 
@@ -265,7 +257,7 @@ class ASRModel(PreTrainedModel):
         # Input shape: (batch_size, num_mel_bins, sequence_length) for Whisper
         batch_size, hidden_size, sequence_length = input_features.size()
 
-        mask_time_prob = getattr(self.config, "mask_time_prob", 0.05)
+        mask_time_prob = getattr(self.config, "mask_time_prob", 0.10)
         mask_time_length = getattr(self.config, "mask_time_length", 10)
         mask_feature_prob = getattr(self.config, "mask_feature_prob", 0.0)
         mask_feature_length = getattr(self.config, "mask_feature_length", 10)

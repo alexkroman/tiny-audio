@@ -389,8 +389,15 @@ def main(cfg: DictConfig) -> None:
             config=OmegaConf.to_container(cfg, resolve=True),
         )
 
-    # Create model config (uses defaults from ASRConfig)
-    asr_config = ASRConfig()
+    # Create model config from hydra config
+    # Merge model config with training config for model-specific params
+    model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
+    # Add training params that affect model behavior
+    training_model_params = ["label_smoothing", "projector_dropout", "use_specaugment"]
+    for param in training_model_params:
+        if cfg.training.get(param) is not None:
+            model_config_dict[param] = cfg.training[param]
+    asr_config = ASRConfig(**model_config_dict)
 
     # Load or create model
     if cfg.model.get("pretrained_model_path"):

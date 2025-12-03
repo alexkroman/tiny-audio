@@ -153,27 +153,6 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         audio_field="audio",
         text_field="text",
     ),
-    "spanish": DatasetConfig(
-        name="spanish",
-        path="fixie-ai/common_voice_17_0",
-        config="es",
-        audio_field="audio",
-        text_field="sentence",
-    ),
-    "german": DatasetConfig(
-        name="german",
-        path="fixie-ai/common_voice_17_0",
-        config="de",
-        audio_field="audio",
-        text_field="sentence",
-    ),
-    "french": DatasetConfig(
-        name="french",
-        path="fixie-ai/common_voice_17_0",
-        config="fr",
-        audio_field="audio",
-        text_field="sentence",
-    ),
     "commonvoice": DatasetConfig(
         name="commonvoice",
         path="fixie-ai/common_voice_17_0",
