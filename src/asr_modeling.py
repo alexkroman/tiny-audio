@@ -521,9 +521,20 @@ class ASRModel(PreTrainedModel):
             prompt_ids, audio_embeds, audio_mask=audio_mask
         )
 
-        # Set generation defaults
-        generate_kwargs.setdefault("max_new_tokens", getattr(self.config, "max_new_tokens", 128))
-        generate_kwargs.setdefault("use_cache", True)
+        # Set generation defaults from config
+        generate_kwargs.setdefault("max_new_tokens", self.config.max_new_tokens)
+        generate_kwargs.setdefault("num_beams", self.config.num_beams)
+        generate_kwargs.setdefault("do_sample", self.config.do_sample)
+        generate_kwargs.setdefault("use_cache", self.config.use_cache)
+        generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
+        generate_kwargs.setdefault("length_penalty", self.config.length_penalty)
+        generate_kwargs.setdefault("no_repeat_ngram_size", self.config.no_repeat_ngram_size)
+        if self.config.temperature is not None:
+            generate_kwargs.setdefault("temperature", self.config.temperature)
+        if self.config.top_k is not None:
+            generate_kwargs.setdefault("top_k", self.config.top_k)
+        if self.config.top_p is not None:
+            generate_kwargs.setdefault("top_p", self.config.top_p)
         generate_kwargs.setdefault(
             "eos_token_id", self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         )

@@ -108,25 +108,7 @@ class EndpointHandler:
         if inputs is None:
             raise ValueError("Missing 'inputs' in request data")
 
+        # Pass through any parameters from request, let model config provide defaults
         params = data.get("parameters", {})
-        max_new_tokens = params.get("max_new_tokens", 128)
-        num_beams = params.get("num_beams", 1)
-        do_sample = params.get("do_sample", False)
-        length_penalty = params.get("length_penalty", 1.0)
-        repetition_penalty = params.get("repetition_penalty", 1.05)
-        no_repeat_ngram_size = params.get("no_repeat_ngram_size", 0)
-        early_stopping = params.get("early_stopping", True)
-        default_diversity = self.pipe.model.config.inference_diversity_penalty
-        diversity_penalty = params.get("diversity_penalty", default_diversity)
 
-        return self.pipe(
-            inputs,
-            max_new_tokens=max_new_tokens,
-            num_beams=num_beams,
-            do_sample=do_sample,
-            length_penalty=length_penalty,
-            repetition_penalty=repetition_penalty,
-            no_repeat_ngram_size=no_repeat_ngram_size,
-            early_stopping=early_stopping,
-            diversity_penalty=diversity_penalty,
-        )
+        return self.pipe(inputs, **params)

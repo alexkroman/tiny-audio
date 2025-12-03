@@ -78,6 +78,21 @@ class ASRConfig(transformers.PretrainedConfig):
         self.label_smoothing = label_smoothing
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
+
+        # Generation parameters (use explicit value if provided, else use default)
+        self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]
+        self.max_new_tokens = max_new_tokens if max_new_tokens is not None else generation_defaults["max_new_tokens"]
+        self.min_new_tokens = min_new_tokens if min_new_tokens is not None else generation_defaults["min_new_tokens"]
+        self.do_sample = do_sample if do_sample is not None else generation_defaults["do_sample"]
+        self.repetition_penalty = repetition_penalty if repetition_penalty is not None else generation_defaults["repetition_penalty"]
+        self.length_penalty = length_penalty if length_penalty is not None else generation_defaults["length_penalty"]
+        self.no_repeat_ngram_size = no_repeat_ngram_size if no_repeat_ngram_size is not None else generation_defaults["no_repeat_ngram_size"]
+        self.use_cache = use_cache if use_cache is not None else generation_defaults["use_cache"]
+        self.temperature = temperature
+        self.top_k = top_k
+        self.top_p = top_p
+        self.early_stopping = early_stopping
+
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
             # Override dtype to match model_dtype
