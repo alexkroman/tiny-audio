@@ -161,8 +161,8 @@ class DatasetLoader:
                     val_datasets.append(self._prepare_split(d_cfg, eval_split))
                     val_weights.append(weight)
 
-        train_ds = self._combine_datasets(train_datasets, train_weights)
-        val_ds = self._combine_datasets(val_datasets, val_weights)
+        train_ds = self._combine_datasets(train_datasets, train_weights, shuffle=True)
+        val_ds = self._combine_datasets(val_datasets, val_weights, shuffle=False)
 
         if train_ds:
             if self.config.max_train_samples:
@@ -172,11 +172,12 @@ class DatasetLoader:
 
         return train_ds, val_ds
 
-    def _combine_datasets(self, datasets: list, weights: list):
+    def _combine_datasets(self, datasets: list, weights: list, shuffle: bool = True):
         if not datasets:
             return None
         # Shuffle each dataset before interleaving for better randomization
-        datasets = [ds.shuffle(seed=self.seed, buffer_size=1000) for ds in datasets]
+        if shuffle:
+            datasets = [ds.shuffle(seed=self.seed, buffer_size=1000) for ds in datasets]
         if len(datasets) == 1:
             return datasets[0]
         probs = [w / sum(weights) for w in weights]
