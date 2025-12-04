@@ -41,10 +41,9 @@ class SharedMoEBlock(nn.Module):
         self.shared_expert = SwiGLUExpert(input_dim, hidden_dim, output_dim)
 
         # Routed experts (sparse)
-        self.experts = nn.ModuleList([
-            SwiGLUExpert(input_dim, hidden_dim, output_dim)
-            for _ in range(num_experts)
-        ])
+        self.experts = nn.ModuleList(
+            [SwiGLUExpert(input_dim, hidden_dim, output_dim) for _ in range(num_experts)]
+        )
 
         # For auxiliary loss (cached to avoid recomputation)
         self.last_router_logits = None
@@ -118,7 +117,6 @@ def z_loss(router_logits: torch.Tensor) -> torch.Tensor:
 
 
 class SharedMoEAudioProjector(nn.Module):
-
     def __init__(self, config):
         super().__init__()
 
@@ -145,7 +143,7 @@ class SharedMoEAudioProjector(nn.Module):
 
     def _init_weights(self, in_dim: int):
         with torch.no_grad():
-            std = 1.0 / (in_dim ** 0.5)
+            std = 1.0 / (in_dim**0.5)
 
             # Shared expert (smaller std for down_proj since it's the "residual" path)
             nn.init.normal_(self.moe.shared_expert.gate_proj.weight, std=std)

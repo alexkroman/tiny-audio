@@ -205,7 +205,14 @@ def main():
     if args.force:
         kill_existing_session(args.host, args.port, args.session_name)
 
-    if not start_training(args.host, args.port, args.experiment, args.session_name, args.wandb_run_id, args.wandb_resume):
+    if not start_training(
+        args.host,
+        args.port,
+        args.experiment,
+        args.session_name,
+        args.wandb_run_id,
+        args.wandb_resume,
+    ):
         print("Exiting due to failure in starting the training session.")
         sys.exit(1)
 

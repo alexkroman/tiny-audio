@@ -24,9 +24,9 @@ ______________________________________________________________________
 By the end of this 3-class course, you will:
 
 1. **Train** your own customized ASR model
-2. **Evaluate** it on standard benchmarks (Word Error Rate)
-3. **Push** it to your own Hugging Face account
-4. **Add** your results to the community leaderboard
+1. **Evaluate** it on standard benchmarks (Word Error Rate)
+1. **Push** it to your own Hugging Face account
+1. **Add** your results to the community leaderboard
 
 This isn't just theory—you'll build a real, working model and deploy it with your name on it.
 
@@ -200,8 +200,8 @@ ______________________________________________________________________
 Think of it as three specialists:
 
 1. **The Listener (Encoder)**: Expert who listens to audio and writes detailed notes
-2. **The Translator (Projector)**: Translates notes into the writer's language — *this is who we hire and train*
-3. **The Writer (Decoder)**: Author who turns translated notes into fluent text
+1. **The Translator (Projector)**: Translates notes into the writer's language — *this is who we hire and train*
+1. **The Writer (Decoder)**: Author who turns translated notes into fluent text
 
 **Efficiency**
 
@@ -233,8 +233,8 @@ ______________________________________________________________________
 You will:
 
 1. **Exercise 1**: Set up your environment (15 min)
-2. **Exercise 2**: Run inference and evaluation (15 min)
-3. **Exercise 3**: Visualize data flow (20 min)
+1. **Exercise 2**: Run inference and evaluation (15 min)
+1. **Exercise 3**: Visualize data flow (20 min)
 
 **Note**: This is potentially the hardest part of the course—getting a Python project with many dependencies running locally. Once the demo works, everything else is straightforward.
 
@@ -442,6 +442,7 @@ Raw audio—amplitude over time.
 **2. Spectrogram**
 
 Frequency heatmap:
+
 - Bottom = bass
 - Middle = vowels
 - Top = consonants (s, f)
@@ -450,6 +451,7 @@ Frequency heatmap:
 **3. Encoder Output**
 
 What Whisper "understands":
+
 - X-axis = time steps (~20ms each)
 - Y-axis = 64 of 1280 feature dimensions (sorted by activation)
 - Brighter = higher activation
@@ -458,6 +460,7 @@ What Whisper "understands":
 **4. Projector Output**
 
 Translation from audio-space to text-space:
+
 - All dimensions contributing = well-trained projector
 - "Nearest tokens" section shows what text tokens each time step maps to
 - Mostly gibberish, but related to the speech—the LLM decodes the rest
@@ -486,13 +489,13 @@ ______________________________________________________________________
 
 1. **Architecture**: Encoder (listens) → MoE Projector (translates) → Decoder (writes)
 
-2. **Efficiency**: Only train the MoE projector, freeze everything else
+1. **Efficiency**: Only train the MoE projector, freeze everything else
 
-3. **Cost**: ~24 hours, ~$8-12 for a full training run
+1. **Cost**: ~24 hours, ~$8-12 for a full training run
 
-4. **Modality gap**: The projector bridges audio and text representations
+1. **Modality gap**: The projector bridges audio and text representations
 
-5. **You're ready**: Environment set up, can run inference and evaluation
+1. **You're ready**: Environment set up, can run inference and evaluation
 
 ______________________________________________________________________
 

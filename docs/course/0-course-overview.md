@@ -104,9 +104,9 @@ ______________________________________________________________________
 Create these free accounts before starting:
 
 1. **GitHub** — [github.com](https://github.com) (for code)
-2. **Hugging Face** — [huggingface.co](https://huggingface.co) (for models and demos)
-3. **Weights & Biases** — [wandb.ai](https://wandb.ai) (for training monitoring)
-4. **RunPod** — [runpod.io](https://runpod.io) (for cloud GPUs, Class 2)
+1. **Hugging Face** — [huggingface.co](https://huggingface.co) (for models and demos)
+1. **Weights & Biases** — [wandb.ai](https://wandb.ai) (for training monitoring)
+1. **RunPod** — [runpod.io](https://runpod.io) (for cloud GPUs, Class 2)
 
 ______________________________________________________________________
 

@@ -90,14 +90,30 @@ class ASRConfig(transformers.PretrainedConfig):
 
         # Generation parameters (use explicit value if provided, else use default)
         self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]
-        self.max_new_tokens = max_new_tokens if max_new_tokens is not None else generation_defaults["max_new_tokens"]
-        self.min_new_tokens = min_new_tokens if min_new_tokens is not None else generation_defaults["min_new_tokens"]
+        self.max_new_tokens = (
+            max_new_tokens if max_new_tokens is not None else generation_defaults["max_new_tokens"]
+        )
+        self.min_new_tokens = (
+            min_new_tokens if min_new_tokens is not None else generation_defaults["min_new_tokens"]
+        )
         self.do_sample = do_sample if do_sample is not None else generation_defaults["do_sample"]
-        self.repetition_penalty = repetition_penalty if repetition_penalty is not None else generation_defaults["repetition_penalty"]
-        self.length_penalty = length_penalty if length_penalty is not None else generation_defaults["length_penalty"]
-        self.no_repeat_ngram_size = no_repeat_ngram_size if no_repeat_ngram_size is not None else generation_defaults["no_repeat_ngram_size"]
+        self.repetition_penalty = (
+            repetition_penalty
+            if repetition_penalty is not None
+            else generation_defaults["repetition_penalty"]
+        )
+        self.length_penalty = (
+            length_penalty if length_penalty is not None else generation_defaults["length_penalty"]
+        )
+        self.no_repeat_ngram_size = (
+            no_repeat_ngram_size
+            if no_repeat_ngram_size is not None
+            else generation_defaults["no_repeat_ngram_size"]
+        )
         self.use_cache = use_cache if use_cache is not None else generation_defaults["use_cache"]
-        self.temperature = temperature if temperature is not None else generation_defaults["temperature"]
+        self.temperature = (
+            temperature if temperature is not None else generation_defaults["temperature"]
+        )
         self.top_k = top_k
         self.top_p = top_p
         self.early_stopping = early_stopping

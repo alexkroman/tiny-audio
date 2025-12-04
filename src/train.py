@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import os
 import re
 from dataclasses import fields
 from typing import Any
@@ -164,9 +163,8 @@ class DatasetLoader:
         train_ds = self._combine_datasets(train_datasets, train_weights, shuffle=True)
         val_ds = self._combine_datasets(val_datasets, val_weights, shuffle=False)
 
-        if train_ds:
-            if self.config.max_train_samples:
-                train_ds = train_ds.take(self.config.max_train_samples)
+        if train_ds and self.config.max_train_samples:
+            train_ds = train_ds.take(self.config.max_train_samples)
         if val_ds and self.config.max_eval_samples:
             val_ds = val_ds.take(self.config.max_eval_samples)
 
@@ -308,13 +306,15 @@ class DataCollator(DataCollatorForSeq2Seq):
             messages.append({"role": "user", "content": instruction})
             messages.append({"role": "assistant", "content": text})
 
-            tokens = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=False,
-                truncation=True,
-                max_length=512,
-                enable_thinking=False,
+            tokens = list(
+                self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=False,
+                    truncation=True,
+                    max_length=512,
+                    enable_thinking=False,
+                )
             )
 
             # Ensure <|im_end|> is present - truncation may have cut it off
@@ -392,6 +392,7 @@ def main(cfg: DictConfig) -> None:
     # Create model config from hydra config
     # Merge model config with training config for model-specific params
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
+    assert isinstance(model_config_dict, dict), "model config must be a dict"
     # Add training params that affect model behavior
     training_model_params = ["label_smoothing", "projector_dropout", "use_specaugment"]
     for param in training_model_params:

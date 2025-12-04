@@ -33,7 +33,7 @@ ______________________________________________________________________
 Tiny Audio trains locally on a MacBook (MPS driver), but it's slow. I typically:
 
 1. Test changes locally to verify they don't break anything
-2. Deploy to RunPod for real training
+1. Deploy to RunPod for real training
 
 RunPod provides:
 
@@ -49,9 +49,9 @@ RunPod provides:
 When you start a training run:
 
 1. **Downloads models**: Whisper encoder (~3GB) and SmolLM3 decoder (~6GB) from Hugging Face
-2. **Streams data**: Training data streams from Hugging Face (no terabyte downloads needed)
-3. **Trains MoE projector**: Only the MoE projector trains; encoder and decoder stay frozen
-4. **Saves checkpoints**: Every 500 steps, model saves to Hugging Face (resume if something crashes)
+1. **Streams data**: Training data streams from Hugging Face (no terabyte downloads needed)
+1. **Trains MoE projector**: Only the MoE projector trains; encoder and decoder stay frozen
+1. **Saves checkpoints**: Every 500 steps, model saves to Hugging Face (resume if something crashes)
 
 ### 3. Key Metrics (5 min)
 
@@ -61,7 +61,7 @@ During training, you'll see:
 |--------|---------------|------------------|
 | **Training Loss** | How well the model fits training data | Should decrease over time |
 | **Eval Loss** | Performance on unseen data (every 1,000 steps) | Should also decrease; if it rises while training loss falls, you're overfitting |
-| **Gradient Norm** | Size of updates the optimizer wants to make | Starts high (40+), should drop to <10 |
+| **Gradient Norm** | Size of updates the optimizer wants to make | Starts high (40+), should drop to \<10 |
 | **Learning Rate** | How big updates are allowed to be | Usually constant or scheduled decay |
 
 **The "Cliff" Phenomenon**
@@ -111,15 +111,15 @@ Paste into RunPod and click "Update".
 **Step 3: Deploy an A40 instance**
 
 1. Click **Deploy**
-2. Select **NVIDIA A40** (Featured GPUs)
+1. Select **NVIDIA A40** (Featured GPUs)
    - Cheapest with good availability
    - 48GB VRAM
    - ~$0.40/hour
-3. Choose **RunPod PyTorch 2.x** template
-4. GPU count: **1**
-5. Uncheck "Start Jupyter Notebook" (unless you want it)
-6. Ensure "SSH Terminal Access" is checked
-7. Click **Deploy**
+1. Choose **RunPod PyTorch 2.x** template
+1. GPU count: **1**
+1. Uncheck "Start Jupyter Notebook" (unless you want it)
+1. Ensure "SSH Terminal Access" is checked
+1. Click **Deploy**
 
 **Important**: Don't create "Savings Plans"—use on-demand only.
 
@@ -166,11 +166,11 @@ poetry run python scripts/deploy_runpod.py ssh.runpod.io 22115
 **What this script does** (I spent more time on this than the model code!):
 
 1. Tests SSH connection
-2. Syncs project files with `rsync`
-3. Installs system dependencies
-4. Installs Flash Attention (NVIDIA optimization)
-5. Installs Hugging Face Accelerate (multi-GPU support)
-6. Installs Python dependencies
+1. Syncs project files with `rsync`
+1. Installs system dependencies
+1. Installs Flash Attention (NVIDIA optimization)
+1. Installs Hugging Face Accelerate (multi-GPU support)
+1. Installs Python dependencies
 
 Takes 5-10 minutes. Output:
 
@@ -283,8 +283,8 @@ poetry run python scripts/start_remote_training.py <HOST> <PORT> --experiment my
 When prompted:
 
 1. Press **2** to log in with API key
-2. Paste your key from [wandb.ai/authorize](https://wandb.ai/authorize)
-3. It creates a project and starts logging
+1. Paste your key from [wandb.ai/authorize](https://wandb.ai/authorize)
+1. It creates a project and starts logging
 
 **Step 4: Watch training start**
 
@@ -302,7 +302,7 @@ Step 25/20000 | Loss: 8.34 | Grad Norm: 45.2 | LR: 1e-4 | Time: 2min | ETA: 20hr
 **Understanding output:**
 
 - `Loss`: Should decrease (high at first is normal)
-- `Grad Norm`: Starts 40+, should drop to <10 in a few hundred steps
+- `Grad Norm`: Starts 40+, should drop to \<10 in a few hundred steps
 - `ETA`: Estimated time remaining
 
 ### Success Checkpoint
@@ -337,8 +337,8 @@ Click your pod to see telemetry:
 | Metric | Target | Problem if exceeded |
 |--------|--------|---------------------|
 | VRAM | 80-90% | 100% = CUDA OOM crash |
-| GPU Util | 100% | <100% = bottleneck somewhere |
-| RAM | <100% | 100% = crash |
+| GPU Util | 100% | \<100% = bottleneck somewhere |
+| RAM | \<100% | 100% = crash |
 
 ### Monitor in Weights & Biases
 
@@ -360,7 +360,7 @@ Press `Ctrl+C` in tmux to stop. Cancel if:
 **After canceling:**
 
 1. **Start fresh**: Change config, restart
-2. **Resume from checkpoint**: Uncomment `pretrained_model_path` in your config
+1. **Resume from checkpoint**: Uncomment `pretrained_model_path` in your config
 
 ### CRITICAL: Terminate Unused Instances
 
@@ -391,8 +391,8 @@ ______________________________________________________________________
 During training (several hours to a day):
 
 1. **Check in periodically**: View loss in W&B, reattach to see output
-2. **Run evaluation**: Test WER locally (Class 3)
-3. **Run the demo**: Load your checkpoint to "vibe test" it
+1. **Run evaluation**: Test WER locally (Class 3)
+1. **Run the demo**: Load your checkpoint to "vibe test" it
 
 Every 1,000 steps, your model saves to Hugging Face. You can evaluate or demo any checkpoint.
 

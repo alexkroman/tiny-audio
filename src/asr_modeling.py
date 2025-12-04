@@ -20,14 +20,14 @@ try:
     from .asr_config import ASRConfig
     from .moe_projector import MoEAudioProjector
     from .residual_projector import ResidualAudioProjector
-    from .swiglu_projector import AudioProjector
     from .shared_moe_projector import SharedMoEAudioProjector
+    from .swiglu_projector import AudioProjector
 except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
     from moe_projector import MoEAudioProjector  # type: ignore[no-redef]
     from residual_projector import ResidualAudioProjector  # type: ignore[no-redef]
-    from swiglu_projector import AudioProjector  # type: ignore[no-redef]
     from shared_moe_projector import SharedMoEAudioProjector  # type: ignore[no-redef]
+    from swiglu_projector import AudioProjector  # type: ignore[no-redef]
 
 # Map projector type names to classes
 PROJECTOR_CLASSES = {
@@ -267,7 +267,6 @@ class ASRModel(PreTrainedModel):
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
         if not getattr(self.config, "use_specaugment", False):
             return input_features
 
@@ -310,9 +309,7 @@ class ASRModel(PreTrainedModel):
                 mask_feature_np, device=input_features.device, dtype=torch.bool
             )
             # Expand: (batch, features) -> (batch, features, seq)
-            mask_feature_expanded = mask_feature_indices[:, :, None].expand(
-                -1, -1, sequence_length
-            )
+            mask_feature_expanded = mask_feature_indices[:, :, None].expand(-1, -1, sequence_length)
             input_features = input_features.masked_fill(mask_feature_expanded, 0.0)
 
         return input_features
@@ -473,7 +470,7 @@ class ASRModel(PreTrainedModel):
 
             # Add auxiliary loss from MoE projectors if available
             if hasattr(self.projector, "get_aux_loss"):
-                aux_loss = self.projector.get_aux_loss()
+                aux_loss = self.projector.get_aux_loss()  # type: ignore[operator]
                 if aux_loss is not None and aux_loss.numel() > 0:
                     loss = loss + aux_loss.to(loss.device)
 
@@ -513,10 +510,10 @@ class ASRModel(PreTrainedModel):
             task, self.config.user_prompt or "Transcribe: <audio>"
         )
 
-        messages = []
+        messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_prompt})
+        messages.append({"role": "user", "content": user_prompt or "Transcribe: <audio>"})
 
         prompt_ids = self.tokenizer.apply_chat_template(
             messages,

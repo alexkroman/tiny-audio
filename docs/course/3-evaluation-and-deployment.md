@@ -174,13 +174,13 @@ Create a live demo anyone can use.
 **Step 1: Create a Space**
 
 1. Go to [huggingface.co](https://huggingface.co)
-2. Click your profile → **New Space**
-3. Configure:
+1. Click your profile → **New Space**
+1. Configure:
    - **Name**: `tiny-audio-demo`
    - **License**: MIT
    - **SDK**: Gradio
    - **Hardware**: CPU basic (free)
-4. Click **Create Space**
+1. Click **Create Space**
 
 **Step 2: Deploy with the script**
 
@@ -201,12 +201,12 @@ poetry run python scripts/deploy_to_hf_space.py \
 Set your model ID using an environment variable:
 
 1. Go to your Space
-2. Click **Settings** → **Variables and secrets**
-3. Click **New variable**
-4. Add:
+1. Click **Settings** → **Variables and secrets**
+1. Click **New variable**
+1. Add:
    - **Name**: `MODEL_ID`
    - **Value**: `your-username/your-model-name`
-5. Click **Save**
+1. Click **Save**
 
 Space rebuilds automatically (2-3 minutes).
 
@@ -253,9 +253,9 @@ print(result["text"])
 For production:
 
 1. Go to your model on Hugging Face
-2. Click **Deploy** → **Inference Endpoints**
-3. Configure region, GPU type, scaling
-4. Click **Create Endpoint**
+1. Click **Deploy** → **Inference Endpoints**
+1. Configure region, GPU type, scaling
+1. Click **Create Endpoint**
 
 **Test with eval script:**
 
@@ -304,8 +304,8 @@ In the repo's `README.md`, find the leaderboard table and add your entry:
 **Step 3: Submit a PR**
 
 1. Fork the repository
-2. Make your changes
-3. Submit PR titled: "Add [username] to leaderboard (WER: XX.XX%)"
+1. Make your changes
+1. Submit PR titled: "Add [username] to leaderboard (WER: XX.XX%)"
 
 ### Success Checkpoint
 
