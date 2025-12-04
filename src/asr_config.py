@@ -22,10 +22,14 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 2,
         projector_hidden_dim: Optional[int] = None,
-        projector_type: str = "moe",  # "moe", "swiglu", or "residual"
+        projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe"
         projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.05,  # Dropout rate for projector layers
         projector_input_noise: float = 0.02,  # Input noise for projector
+        # MoE-specific configuration
+        num_experts: int = 4,  # Number of experts in MoE projectors
+        num_experts_per_tok: int = 2,  # Top-k experts per token
+        router_aux_loss_coef: float = 0.01,  # Auxiliary loss coefficient for load balancing
         use_specaugment: bool = True,  # Apply SpecAugment during training
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_diversity_penalty: float = 0.0,
@@ -75,6 +79,10 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_num_layers = projector_num_layers
         self.projector_dropout = projector_dropout
         self.projector_input_noise = projector_input_noise
+        # MoE-specific configuration
+        self.num_experts = num_experts
+        self.num_experts_per_tok = num_experts_per_tok
+        self.router_aux_loss_coef = router_aux_loss_coef
         self.use_specaugment = use_specaugment
         self.label_smoothing = label_smoothing
         self.inference_diversity_penalty = inference_diversity_penalty

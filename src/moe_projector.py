@@ -157,3 +157,7 @@ class MoEAudioProjector(nn.Module):
             final_out.add_(expert_out * expert_weight)
 
         return self.ln_post(final_out)
+
+    def get_aux_loss(self) -> torch.Tensor:
+        """Return auxiliary loss (none for dense MoE - all experts always used)."""
+        return torch.tensor(0.0)

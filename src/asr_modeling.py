@@ -21,11 +21,21 @@ try:
     from .moe_projector import MoEAudioProjector
     from .residual_projector import ResidualAudioProjector
     from .swiglu_projector import AudioProjector
+    from .shared_moe_projector import SharedMoEAudioProjector
 except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
     from moe_projector import MoEAudioProjector  # type: ignore[no-redef]
     from residual_projector import ResidualAudioProjector  # type: ignore[no-redef]
     from swiglu_projector import AudioProjector  # type: ignore[no-redef]
+    from shared_moe_projector import SharedMoEAudioProjector  # type: ignore[no-redef]
+
+# Map projector type names to classes
+PROJECTOR_CLASSES = {
+    "swiglu": AudioProjector,
+    "residual": ResidualAudioProjector,
+    "moe": MoEAudioProjector,
+    "shared_moe": SharedMoEAudioProjector,
+}
 
 
 class ASRModel(PreTrainedModel):
@@ -179,12 +189,13 @@ class ASRModel(PreTrainedModel):
 
         # Select projector type based on config
         projector_type = getattr(config, "projector_type", "moe")
-        if projector_type == "swiglu":
-            projector = AudioProjector(config)
-        elif projector_type == "residual":
-            projector = ResidualAudioProjector(config)
-        else:  # default to "moe"
-            projector = MoEAudioProjector(config)
+        projector_class = PROJECTOR_CLASSES.get(projector_type)
+        if projector_class is None:
+            raise ValueError(
+                f"Unknown projector_type: {projector_type}. "
+                f"Valid options: {list(PROJECTOR_CLASSES.keys())}"
+            )
+        projector = projector_class(config)
 
         # Move projector to same device as language model (important when using quantization)
         device = next(self.language_model.parameters()).device
@@ -266,7 +277,7 @@ class ASRModel(PreTrainedModel):
         # Input shape: (batch_size, num_mel_bins, sequence_length) for Whisper
         batch_size, hidden_size, sequence_length = input_features.size()
 
-        mask_time_prob = getattr(self.config, "mask_time_prob", 0.10)
+        mask_time_prob = getattr(self.config, "mask_time_prob", 0.05)
         mask_time_length = getattr(self.config, "mask_time_length", 10)
         mask_feature_prob = getattr(self.config, "mask_feature_prob", 0.0)
         mask_feature_length = getattr(self.config, "mask_feature_length", 10)
@@ -460,6 +471,12 @@ class ASRModel(PreTrainedModel):
                 label_smoothing=getattr(self.config, "label_smoothing", 0.0),
             )
 
+            # Add auxiliary loss from MoE projectors if available
+            if hasattr(self.projector, "get_aux_loss"):
+                aux_loss = self.projector.get_aux_loss()
+                if aux_loss is not None and aux_loss.numel() > 0:
+                    loss = loss + aux_loss.to(loss.device)
+
         return CausalLMOutputWithPast(
             loss=loss,
             logits=outputs.logits,
@@ -598,7 +615,13 @@ class ASRModel(PreTrainedModel):
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projector files
-        for projector_file in ["moe_projector.py", "residual_projector.py", "swiglu_projector.py"]:
+        projector_files = [
+            "moe_projector.py",
+            "residual_projector.py",
+            "swiglu_projector.py",
+            "shared_moe_projector.py",
+        ]
+        for projector_file in projector_files:
             src_path = src_dir / projector_file
             if src_path.exists():
                 shutil.copy(src_path, save_dir / projector_file)
