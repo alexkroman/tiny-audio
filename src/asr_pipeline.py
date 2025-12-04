@@ -4,7 +4,6 @@ from typing import Any
 
 import torch
 import transformers
-from truecase import get_true_case
 
 from .asr_modeling import ASRModel
 
@@ -26,11 +25,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         super().__init__(
             model=model, feature_extractor=feature_extractor, tokenizer=tokenizer, **kwargs
         )
-
-        # Initialize text normalizer (WhisperTokenizer has the normalize method we need)
-        from transformers import WhisperTokenizer
-
-        self.text_normalizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
 
     def __call__(self, inputs, **kwargs):
         generate_kwargs = {}
@@ -89,8 +83,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 all_tokens.extend(tokens.tolist() if torch.is_tensor(tokens) else tokens)
 
         text = self.tokenizer.decode(all_tokens, skip_special_tokens=True).strip()
-        text = self.text_normalizer.normalize(text)
-        text = get_true_case(text)
 
         return {"text": text}
 
@@ -105,7 +97,13 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             if "bytes" in inputs:
                 inputs = self._decode_audio_bytes(inputs["bytes"])
             elif "array" in inputs:
-                inputs = {"raw": inputs["array"], "sampling_rate": inputs["sampling_rate"]}
+                inputs = {
+                    "raw": inputs["array"],
+                    "sampling_rate": inputs.get("sampling_rate", self.feature_extractor.sampling_rate),
+                }
+            elif "path" in inputs and "array" not in inputs:
+                # Lazy-loaded audio - load from path
+                inputs = self._decode_audio_bytes(Path(inputs["path"]).read_bytes())
         elif hasattr(inputs, "array") and hasattr(inputs, "sampling_rate"):
             inputs = {"raw": inputs.array, "sampling_rate": inputs.sampling_rate}
         elif hasattr(inputs, "__array__") and not isinstance(inputs, (dict, bytes, str)):
@@ -115,6 +113,23 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 "raw": inputs.cpu().numpy(),
                 "sampling_rate": self.model.config.audio_sample_rate,
             }
+
+        # Resample to target sample rate if needed (workaround for transformers bug)
+        # See: https://github.com/huggingface/transformers/pull/41298
+        if isinstance(inputs, dict) and "sampling_rate" in inputs:
+            in_sr = inputs["sampling_rate"]
+            target_sr = self.feature_extractor.sampling_rate
+            if in_sr != target_sr:
+                import librosa
+                import numpy as np
+
+                audio = inputs["raw"]
+                if hasattr(audio, "numpy"):
+                    audio = audio.numpy()
+                resampled = librosa.resample(
+                    np.asarray(audio, dtype=np.float32), orig_sr=in_sr, target_sr=target_sr
+                )
+                inputs = {"raw": resampled, "sampling_rate": target_sr}
 
         return super().preprocess(inputs, **preprocess_params)
 
@@ -225,7 +240,5 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             tokens = tokens[0]
 
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
-        text = self.text_normalizer.normalize(text)
-        text = get_true_case(text)
 
         return {"text": text}

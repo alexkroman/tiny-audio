@@ -153,26 +153,33 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         audio_field="audio",
         text_field="text",
     ),
-    "spanish": DatasetConfig(
-        name="spanish",
+    "commonvoice": DatasetConfig(
+        name="commonvoice",
         path="fixie-ai/common_voice_17_0",
-        config="es",
+        config="en",
         audio_field="audio",
         text_field="sentence",
     ),
-    "german": DatasetConfig(
-        name="german",
-        path="fixie-ai/common_voice_17_0",
-        config="de",
+    "peoples": DatasetConfig(
+        name="peoples",
+        path="fixie-ai/peoples_speech",
+        config="clean",
         audio_field="audio",
-        text_field="sentence",
+        text_field="text",
     ),
-    "french": DatasetConfig(
-        name="french",
-        path="fixie-ai/common_voice_17_0",
-        config="fr",
+    "librispeech": DatasetConfig(
+        name="librispeech",
+        path="openslr/librispeech_asr",
+        config="clean",
         audio_field="audio",
-        text_field="sentence",
+        text_field="text",
+    ),
+    "librispeech-other": DatasetConfig(
+        name="librispeech-other",
+        path="openslr/librispeech_asr",
+        config="other",
+        audio_field="audio",
+        text_field="text",
     ),
 }
 
@@ -276,18 +283,24 @@ class Evaluator:
     def evaluate(self, dataset, max_samples: int | None = None) -> list[EvalResult]:
         """Run evaluation loop on dataset."""
         self.results = []
+        processed = 0
 
-        for i, sample in enumerate(dataset, start=1):
-            if max_samples and i > max_samples:
+        for sample in dataset:
+            reference = sample[self.text_field]
+
+            # Skip TEDLIUM ignore markers
+            if isinstance(reference, str) and reference.strip() == "ignore_time_segment_in_scoring":
+                continue
+
+            processed += 1
+            if max_samples and processed > max_samples:
                 break
 
             try:
                 prediction, inference_time = self.transcribe(sample[self.audio_field])
             except Exception as e:
-                print(f"Error on sample {i}: {e}")
+                print(f"Error on sample {processed}: {e}")
                 prediction, inference_time = "", 0.0
-
-            reference = sample[self.text_field]
             norm_pred = self.normalizer.normalize(prediction)
             norm_ref = self.normalizer.normalize(reference)
             sample_wer = wer(norm_ref, norm_pred) * 100 if norm_ref else 0.0
@@ -295,13 +308,13 @@ class Evaluator:
             result = EvalResult(prediction, reference, sample_wer, inference_time)
             self.results.append(result)
 
-            print(f"Sample {i}: WER={sample_wer:.1f}%, Time={inference_time:.2f}s")
+            print(f"Sample {processed}: WER={sample_wer:.1f}%, Time={inference_time:.2f}s")
             print(f"  Ref:  {reference}")
             print(f"  Pred: {prediction}")
 
             # Checkpoint every 100 samples
-            if i % 100 == 0:
-                self._print_checkpoint(i)
+            if processed % 100 == 0:
+                self._print_checkpoint(processed)
 
         return self.results
 
@@ -336,11 +349,14 @@ class LocalEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from src.asr_modeling import ASRModel
-        from src.asr_pipeline import ASRPipeline
+        from transformers import pipeline
 
-        self.model = ASRModel.from_pretrained(model_path)
-        self.pipe = ASRPipeline(model=self.model)
+        # Load using pipeline with trust_remote_code to use Hub's custom pipeline class
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_path,
+            trust_remote_code=True,
+        )
         self.user_prompt = user_prompt
 
     def transcribe(self, audio) -> tuple[str, float]:
@@ -471,6 +487,92 @@ def print_summary(model_name: str, dataset_desc: str, metrics: dict, output_path
 # =============================================================================
 
 
+def run_all_datasets(args, model_name: str):
+    """Run evaluation on all datasets sequentially, saving results to separate folders."""
+    safe_name = model_name.replace("/", "_").replace(":", "_")
+    if args.model and args.model.startswith("http"):
+        safe_name = "endpoint_" + safe_name.split("/")[-1]
+
+    all_results: dict[str, dict] = {}
+    output_dirs: list[Path] = []
+
+    print(f"\n{'=' * 60}")
+    print(f"Running evaluation on ALL datasets")
+    print(f"Model: {model_name}")
+    print(f"{'=' * 60}\n")
+
+    for dataset_name, cfg in DATASET_REGISTRY.items():
+        print(f"\n{'=' * 60}")
+        print(f"Evaluating: {dataset_name}")
+        print(f"{'=' * 60}\n")
+
+        try:
+            # Load dataset
+            split = args.split if args.split != "test" else cfg.default_split
+            dataset = load_single_dataset(dataset_name, split, args.config)
+            audio_field, text_field = cfg.audio_field, cfg.text_field
+            config_name = args.config or cfg.config
+            dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
+
+            if args.max_samples:
+                dataset = dataset.take(args.max_samples)
+
+            # Create evaluator
+            if args.assemblyai:
+                evaluator = AssemblyAIEvaluator(
+                    args.api_key,
+                    args.assemblyai_model,
+                    audio_field=audio_field,
+                    text_field=text_field,
+                )
+            elif args.model.startswith("http"):
+                evaluator = EndpointEvaluator(
+                    args.model,
+                    audio_field=audio_field,
+                    text_field=text_field,
+                )
+            else:
+                evaluator = LocalEvaluator(
+                    args.model,
+                    user_prompt=args.user_prompt,
+                    audio_field=audio_field,
+                    text_field=text_field,
+                )
+
+            # Run evaluation
+            evaluator.evaluate(dataset, args.max_samples)
+            metrics = evaluator.compute_metrics()
+
+            # Save results using same path format as single dataset runs
+            output_dir = Path(f"outputs/eval_{dataset_name}_{safe_name}")
+            output_path = output_dir / "results.txt"
+            save_results(output_path, model_name, dataset_desc, evaluator.results, metrics)
+            output_dirs.append(output_dir)
+
+            all_results[dataset_name] = metrics
+            print(f"\n{dataset_name}: WER={metrics['wer']:.2f}%, Samples={metrics['num_samples']}")
+
+        except Exception as e:
+            print(f"Error evaluating {dataset_name}: {e}")
+            all_results[dataset_name] = {"wer": -1, "error": str(e)}
+
+    # Print summary of all datasets
+    print(f"\n{'=' * 60}")
+    print("SUMMARY - All Datasets")
+    print(f"{'=' * 60}")
+    print(f"Model: {model_name}")
+    print(f"{'=' * 60}")
+    for name, metrics in all_results.items():
+        if "error" in metrics:
+            print(f"  {name}: ERROR - {metrics['error']}")
+        else:
+            print(f"  {name}: WER={metrics['wer']:.2f}% ({metrics['num_samples']} samples)")
+    print(f"{'=' * 60}")
+    print("Results saved to:")
+    for output_dir in output_dirs:
+        print(f"  {output_dir}")
+
+
 def main():
     import argparse
 
@@ -479,8 +581,8 @@ def main():
     parser.add_argument(
         "--dataset",
         default="loquacious",
-        choices=list(DATASET_REGISTRY.keys()) + ["combined"],
-        help="Dataset to evaluate on",
+        choices=list(DATASET_REGISTRY.keys()) + ["combined", "all"],
+        help="Dataset to evaluate on ('all' runs all datasets sequentially)",
     )
     parser.add_argument("--assemblyai", action="store_true", help="Use AssemblyAI API")
     parser.add_argument(
@@ -507,6 +609,11 @@ def main():
             raise ValueError("Model argument required")
         model_name = args.model
 
+    # Handle --dataset all: run all datasets sequentially
+    if args.dataset == "all":
+        run_all_datasets(args, model_name)
+        return
+
     # Output directory
     if args.output_dir is None:
         safe_name = model_name.replace("/", "_").replace(":", "_")
@@ -522,10 +629,12 @@ def main():
         args.max_samples = None  # Already limited
     else:
         cfg = DATASET_REGISTRY[args.dataset]
-        dataset = load_single_dataset(args.dataset, args.split, args.config)
+        # Use dataset's default_split if user didn't override
+        split = args.split if args.split != "test" else cfg.default_split
+        dataset = load_single_dataset(args.dataset, split, args.config)
         audio_field, text_field = cfg.audio_field, cfg.text_field
         config_name = args.config or cfg.config
-        dataset_desc = f"{cfg.path} (config: {config_name}, split: {args.split})"
+        dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
 
         if args.max_samples:
             dataset = dataset.take(args.max_samples)

@@ -247,15 +247,7 @@ class ASRModel(PreTrainedModel):
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Apply SpecAugment masking to input features.
 
-        Uses Whisper's default parameters:
-        - mask_time_prob: 0.05 (5% of time steps)
-        - mask_time_length: 10 frames
-        - mask_feature_prob: 0.0 (disabled by default)
-        - mask_feature_length: 10 features
-        """
         if not getattr(self.config, "use_specaugment", False):
             return input_features
 
@@ -265,7 +257,7 @@ class ASRModel(PreTrainedModel):
         # Input shape: (batch_size, num_mel_bins, sequence_length) for Whisper
         batch_size, hidden_size, sequence_length = input_features.size()
 
-        mask_time_prob = getattr(self.config, "mask_time_prob", 0.05)
+        mask_time_prob = getattr(self.config, "mask_time_prob", 0.10)
         mask_time_length = getattr(self.config, "mask_time_length", 10)
         mask_feature_prob = getattr(self.config, "mask_feature_prob", 0.0)
         mask_feature_length = getattr(self.config, "mask_feature_length", 10)
@@ -521,18 +513,38 @@ class ASRModel(PreTrainedModel):
             prompt_ids, audio_embeds, audio_mask=audio_mask
         )
 
-        # Set generation defaults
-        generate_kwargs.setdefault("max_new_tokens", getattr(self.config, "max_new_tokens", 128))
-        generate_kwargs.setdefault("use_cache", True)
+        # Set generation defaults from config
+        generate_kwargs.setdefault("max_new_tokens", self.config.max_new_tokens)
+        generate_kwargs.setdefault("num_beams", self.config.num_beams)
+        generate_kwargs.setdefault("do_sample", self.config.do_sample)
+        generate_kwargs.setdefault("use_cache", self.config.use_cache)
+        generate_kwargs.setdefault("length_penalty", self.config.length_penalty)
+        generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
+        generate_kwargs.setdefault("no_repeat_ngram_size", self.config.no_repeat_ngram_size)
+        generate_kwargs.setdefault("temperature", self.config.temperature)
+        if self.config.top_k is not None:
+            generate_kwargs.setdefault("top_k", self.config.top_k)
+        if self.config.top_p is not None:
+            generate_kwargs.setdefault("top_p", self.config.top_p)
         generate_kwargs.setdefault(
             "eos_token_id", self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         )
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
 
+        # Create dummy input_ids matching inputs_embeds length for repetition penalty tracking
+        # Use pad_token_id as placeholder since the actual tokens don't matter for penalty calc
+        dummy_input_ids = torch.full(
+            (inputs_embeds.shape[0], inputs_embeds.shape[1]),
+            self.tokenizer.pad_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+
         # Generate (type ignore needed as generate() has complex return type)
         # Note: When using inputs_embeds, generate() returns only new tokens
         # (no placeholder positions for input embeddings), so no stripping needed
         output = self.language_model.generate(  # type: ignore[operator]
+            input_ids=dummy_input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             **generate_kwargs,
@@ -576,6 +588,11 @@ class ASRModel(PreTrainedModel):
         src_dir = PathlibPath(__file__).parent
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
+        # Copy projector files
+        for projector_file in ["moe_projector.py", "residual_projector.py", "swiglu_projector.py"]:
+            src_path = src_dir / projector_file
+            if src_path.exists():
+                shutil.copy(src_path, save_dir / projector_file)
 
 
 # Register with transformers Auto classes

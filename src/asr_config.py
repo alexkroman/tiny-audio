@@ -26,6 +26,7 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.05,  # Dropout rate for projector layers
         projector_input_noise: float = 0.02,  # Input noise for projector
+        use_specaugment: bool = True,  # Apply SpecAugment during training
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
@@ -45,9 +46,10 @@ class ASRConfig(transformers.PretrainedConfig):
         # Set default generation parameters
         generation_defaults = {
             "num_beams": 1,
-            "max_new_tokens": 64,
-            "min_new_tokens": 1,
+            "max_new_tokens": 256,
+            "min_new_tokens": 0,
             "do_sample": False,
+            "temperature": 0.1,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,
@@ -73,9 +75,25 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_num_layers = projector_num_layers
         self.projector_dropout = projector_dropout
         self.projector_input_noise = projector_input_noise
+        self.use_specaugment = use_specaugment
         self.label_smoothing = label_smoothing
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
+
+        # Generation parameters (use explicit value if provided, else use default)
+        self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]
+        self.max_new_tokens = max_new_tokens if max_new_tokens is not None else generation_defaults["max_new_tokens"]
+        self.min_new_tokens = min_new_tokens if min_new_tokens is not None else generation_defaults["min_new_tokens"]
+        self.do_sample = do_sample if do_sample is not None else generation_defaults["do_sample"]
+        self.repetition_penalty = repetition_penalty if repetition_penalty is not None else generation_defaults["repetition_penalty"]
+        self.length_penalty = length_penalty if length_penalty is not None else generation_defaults["length_penalty"]
+        self.no_repeat_ngram_size = no_repeat_ngram_size if no_repeat_ngram_size is not None else generation_defaults["no_repeat_ngram_size"]
+        self.use_cache = use_cache if use_cache is not None else generation_defaults["use_cache"]
+        self.temperature = temperature if temperature is not None else generation_defaults["temperature"]
+        self.top_k = top_k
+        self.top_p = top_p
+        self.early_stopping = early_stopping
+
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
             # Override dtype to match model_dtype

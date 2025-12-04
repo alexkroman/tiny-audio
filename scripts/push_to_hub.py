@@ -43,6 +43,9 @@ def main():
             "asr_modeling.py",
             "asr_processing.py",
             "asr_pipeline.py",
+            "moe_projector.py",
+            "residual_projector.py",
+            "swiglu_projector.py",
             "handler.py",  # For Inference Endpoints
         ]
         for filename in custom_files:

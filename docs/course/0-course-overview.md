@@ -20,7 +20,7 @@ Welcome to a hands-on course on building modern AI. This isn't just about learni
 | **Duration** | 3.5 hours (3 classes) |
 | **Cost** | ~$8-12 for cloud GPU training |
 | **Prerequisites** | Basic Python, command line, git |
-| **Architecture** | Whisper encoder + MLP projector + SmolLM3 decoder |
+| **Architecture** | Whisper encoder + MoE projector + SmolLM3 decoder |
 
 **Format options:**
 
