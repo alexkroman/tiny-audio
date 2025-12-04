@@ -3,5 +3,6 @@ gradio
 transformers>=4.57.1
 torch
 soundfile
+librosa
 peft
 truecase

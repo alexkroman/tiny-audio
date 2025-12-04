@@ -4,7 +4,10 @@ from pathlib import Path
 import transformers
 from transformers import AutoTokenizer, ProcessorMixin
 
-from .asr_config import ASRConfig
+try:
+    from .asr_config import ASRConfig
+except ImportError:
+    from asr_config import ASRConfig  # type: ignore[no-redef]
 
 
 class ASRProcessor(ProcessorMixin):

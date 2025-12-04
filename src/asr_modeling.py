@@ -16,10 +16,16 @@ from transformers.models.whisper.modeling_whisper import (
     _compute_mask_indices,
 )
 
-from .asr_config import ASRConfig
-from .moe_projector import MoEAudioProjector
-from .residual_projector import ResidualAudioProjector
-from .swiglu_projector import AudioProjector
+try:
+    from .asr_config import ASRConfig
+    from .moe_projector import MoEAudioProjector
+    from .residual_projector import ResidualAudioProjector
+    from .swiglu_projector import AudioProjector
+except ImportError:
+    from asr_config import ASRConfig  # type: ignore[no-redef]
+    from moe_projector import MoEAudioProjector  # type: ignore[no-redef]
+    from residual_projector import ResidualAudioProjector  # type: ignore[no-redef]
+    from swiglu_projector import AudioProjector  # type: ignore[no-redef]
 
 
 class ASRModel(PreTrainedModel):
@@ -234,7 +240,10 @@ class ASRModel(PreTrainedModel):
 
     def get_processor(self):
         """Get the processor for this model."""
-        from .asr_processing import ASRProcessor
+        try:
+            from .asr_processing import ASRProcessor
+        except ImportError:
+            from asr_processing import ASRProcessor  # type: ignore[no-redef]
 
         return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
 

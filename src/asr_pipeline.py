@@ -5,7 +5,10 @@ from typing import Any
 import torch
 import transformers
 
-from .asr_modeling import ASRModel
+try:
+    from .asr_modeling import ASRModel
+except ImportError:
+    from asr_modeling import ASRModel  # type: ignore[no-redef]
 
 
 class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
