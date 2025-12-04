@@ -17,9 +17,9 @@ By the end of this class, you will:
 
 ______________________________________________________________________
 
-# PART A: LECTURE (40 minutes)
+## PART A: LECTURE (40 minutes)
 
-## 1. Course Goals (5 min)
+### 1. Course Goals (5 min)
 
 By the end of this 3-class course, you will:
 
@@ -30,15 +30,15 @@ By the end of this 3-class course, you will:
 
 This isn't just theory—you'll build a real, working model and deploy it with your name on it.
 
-### Why Build AI Models?
+**Why Build AI Models?**
 
 Most AI startups today are essentially wrappers on top of LLMs. Very few companies are actually building AI models. Understanding how to train models—not just use them—is a valuable and increasingly rare skill.
 
 ______________________________________________________________________
 
-## 2. What is Automatic Speech Recognition? (5 min)
+### 2. What is Automatic Speech Recognition? (5 min)
 
-### The Problem
+**The Problem**
 
 Humans communicate through speech, but computers understand text. ASR bridges this gap, turning complex human speech into machine-readable text.
 
@@ -50,7 +50,7 @@ Humans communicate through speech, but computers understand text. ASR bridges th
 - Voice search and commands
 - Medical dictation systems
 
-### The Challenge
+**The Challenge**
 
 Speech recognition is difficult because it must handle two types of variability:
 
@@ -70,7 +70,7 @@ Speech recognition is difficult because it must handle two types of variability:
 
 **Debugging tip**: When you see transcription errors, ask yourself: Is this an acoustic problem (the model misheard) or a linguistic problem (the model heard correctly but chose the wrong word)?
 
-### How Modern ASR Works
+**How Modern ASR Works**
 
 **Classic Era (1950s-2010s)**: Rule-based → Hidden Markov Models
 
@@ -98,9 +98,9 @@ Speech recognition is difficult because it must handle two types of variability:
 
 ______________________________________________________________________
 
-## 3. The Architecture (15 min)
+### 3. The Architecture (15 min)
 
-### High-Level Overview
+**High-Level Overview**
 
 ```
 [Audio Wave] → [Pre-processing] → [Encoder] → [Projector] → [Decoder] → [Text]
@@ -113,7 +113,7 @@ ______________________________________________________________________
 - **Projector**: "Translates" — bridges audio and text spaces
 - **Decoder**: "Writes" — generates the final transcription
 
-### Step 1: Audio Pre-processing
+**Step 1: Audio Pre-processing**
 
 Before a model can "hear" audio, we convert it to a standardized format.
 
@@ -127,7 +127,7 @@ Before a model can "hear" audio, we convert it to a standardized format.
 
 This spectrogram is what the encoder actually processes.
 
-### Step 2: The Encoder (Whisper)
+**Step 2: The Encoder (Whisper)**
 
 **Purpose**: Extract meaningful features from each time segment of audio.
 
@@ -147,7 +147,7 @@ This spectrogram is what the encoder actually processes.
 
 **Key insight**: The encoder is audio-only. At this stage, "to," "too," and "two" all look identical—same sound, different spellings.
 
-### Step 3: The MoE Projector
+**Step 3: The MoE Projector**
 
 **Purpose**: Translate between audio-space and text-space.
 
@@ -171,7 +171,7 @@ The encoder outputs 1280 audio dimensions. The LLM expects 2048 text dimensions.
 
 **Key insight**: This is the **only component we train**. The encoder and decoder stay frozen.
 
-### Step 4: The Decoder (SmolLM3)
+**Step 4: The Decoder (SmolLM3)**
 
 **Purpose**: Generate coherent text from the translated embeddings.
 
@@ -193,9 +193,9 @@ The encoder outputs 1280 audio dimensions. The LLM expects 2048 text dimensions.
 
 ______________________________________________________________________
 
-## 4. Why This Architecture? (5 min)
+### 4. Why This Architecture? (5 min)
 
-### The Team Analogy
+**The Team Analogy**
 
 Think of it as three specialists:
 
@@ -203,7 +203,7 @@ Think of it as three specialists:
 2. **The Translator (Projector)**: Translates notes into the writer's language — *this is who we hire and train*
 3. **The Writer (Decoder)**: Author who turns translated notes into fluent text
 
-### Efficiency
+**Efficiency**
 
 We only train the MoE projector instead of billions of parameters:
 
@@ -218,7 +218,7 @@ We only train the MoE projector instead of billions of parameters:
 - ~24 hours on a single A40 GPU
 - ~$8-12 for a full training run
 
-### Beyond Transcription
+**Beyond Transcription**
 
 Tiny Audio is actually a **multitask audio model**. Same architecture can do:
 
@@ -228,9 +228,7 @@ Tiny Audio is actually a **multitask audio model**. Same architecture can do:
 
 ______________________________________________________________________
 
-# PART B: HANDS-ON WORKSHOP (50 minutes)
-
-## Overview
+## PART B: HANDS-ON WORKSHOP (50 minutes)
 
 You will:
 
