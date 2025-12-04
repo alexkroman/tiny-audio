@@ -88,10 +88,7 @@ Get quantitative performance metrics across multiple datasets.
 This is the official benchmark for the leaderboard:
 
 ```bash
-poetry run python scripts/eval.py your-username/your-model \
-    --dataset loquacious \
-    --max-samples 500 \
-    --split test
+poetry run eval your-username/your-model --dataset loquacious --max-samples 500
 ```
 
 **What this does:**
@@ -125,19 +122,13 @@ CHECKPOINT @ 100 samples:
 **Step 2: Evaluate on Earnings22 (domain-specific)**
 
 ```bash
-poetry run python scripts/eval.py your-username/your-model \
-    --dataset earnings22 \
-    --max-samples 100 \
-    --split test
+poetry run eval your-username/your-model --dataset earnings22 --max-samples 100
 ```
 
 **Step 3: Evaluate on AMI (meetings)**
 
 ```bash
-poetry run python scripts/eval.py your-username/your-model \
-    --dataset ami \
-    --max-samples 100 \
-    --split test
+poetry run eval your-username/your-model --dataset ami --max-samples 100
 ```
 
 **Step 4: Compare with AssemblyAI (optional)**
@@ -147,11 +138,7 @@ If you have an API key:
 ```bash
 export ASSEMBLYAI_API_KEY='your_key'
 
-poetry run python scripts/eval.py \
-    --assemblyai \
-    --assemblyai-model slam_1 \
-    --dataset loquacious \
-    --max-samples 100
+poetry run eval --assemblyai --assemblyai-model slam_1 --dataset loquacious --max-samples 100
 ```
 
 ### Analyzing Results
@@ -293,9 +280,7 @@ Add your results to the community leaderboard.
 **Step 1: Get your official WER**
 
 ```bash
-poetry run python scripts/eval.py your-username/your-model \
-    --dataset loquacious \
-    --max-samples 500
+poetry run eval your-username/your-model --dataset loquacious --max-samples 500
 ```
 
 Record the **Corpus WER**.
@@ -338,8 +323,8 @@ You've completed the course! You now have:
 
 **Improve your model:**
 
-- Try different encoders (HuBERT, WavLM)
-- Use a larger decoder (Qwen 7B)
+- Try different projector types (MoE, SwiGLU, Residual)
+- Use a larger decoder
 - Train on more diverse data
 
 **Extend the project:**
@@ -362,19 +347,19 @@ ______________________________________________________________________
 
 ```bash
 # Basic
-poetry run python scripts/eval.py MODEL --max-samples 100
+poetry run eval MODEL --max-samples 100
 
 # Different datasets
-poetry run python scripts/eval.py MODEL --dataset loquacious
-poetry run python scripts/eval.py MODEL --dataset earnings22
-poetry run python scripts/eval.py MODEL --dataset ami
-poetry run python scripts/eval.py MODEL --dataset gigaspeech
+poetry run eval MODEL --dataset loquacious
+poetry run eval MODEL --dataset earnings22
+poetry run eval MODEL --dataset ami
+poetry run eval MODEL --dataset gigaspeech
 
 # Compare with AssemblyAI
-poetry run python scripts/eval.py --assemblyai --assemblyai-model slam_1
+poetry run eval --assemblyai --assemblyai-model slam_1
 
 # Test inference endpoint
-poetry run python scripts/eval.py "https://endpoint-url" --max-samples 10
+poetry run eval "https://endpoint-url" --max-samples 10
 ```
 
 ### Deploy Script

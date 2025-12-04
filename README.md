@@ -66,44 +66,44 @@ poetry run python src/train.py +experiments=stage1
 
 Tiny Audio is built on a simple, powerful idea: combine the best pretrained models for audio and language, and efficiently teach them to work together.
 
-1. **The Ear (Audio Encoder):** We start with `facebook/hubert-xlarge-ls960-ft`, a massive model that has already learned to understand the nuances of human speech. We keep this frozen, leveraging its pretrained knowledge.
-1. **The Bridge (Audio Projector):** This is a small, trainable SwiGLU MLP with temporal compression that acts as a translator, converting the audio features from the encoder into a format the language model can understand. This is the only component we train.
+1. **The Ear (Audio Encoder):** We start with `openai/whisper-large-v3-turbo`, a state-of-the-art model that has already learned to understand the nuances of human speech. We keep this frozen, leveraging its pretrained knowledge.
+1. **The Bridge (MoE Audio Projector):** This is a Mixture of Simple Adapters (MOSA) projector that acts as a translator, converting the audio features from the encoder into a format the language model can understand. It uses convolutional downsampling (4x compression) and dense routing over 4 expert adapters. This is the only component we train.
 1. **The Brain (Language Model):** We use `HuggingFaceTB/SmolLM3-3B`, a powerful yet efficient language model that already knows how to generate coherent text. We keep this frozen as well, relying on its language understanding capabilities.
 
-By keeping both the encoder and decoder completely frozen and only training the projector (~13M parameters), we achieve incredible efficiency without sacrificing performance.
+By keeping both the encoder and decoder completely frozen and only training the MoE projector, we achieve incredible efficiency without sacrificing performance.
 
 ### Key Concepts Explained
 
-**What is the Audio Projector?** A SwiGLU MLP with temporal compression that bridges the audio encoder and language model. It concatenates k=2 consecutive audio frames (reducing sequence length by 2x) and uses three linear layers with SwiGLU activation to transform from audio space (1280-dim) to language model space (3072-dim for SmolLM3-3B).
+**What is the MoE Audio Projector?** A Mixture of Simple Adapters (MOSA) architecture that bridges the audio encoder and language model. It uses convolutional downsampling (4x compression) followed by dense routing over 4 expert adapters, each consisting of Linear→ReLU→Linear layers (2048→4096→2048).
 
-**What is SwiGLU?** Swish Gated Linear Unit - a modern activation function that gates information flow. Used in Llama and other state-of-the-art models. Formula: `SwiGLU(x) = Swish(Wx) ⊗ (Vx)` where `Swish(x) = x × sigmoid(x)`.
+**What is MOSA?** Mixture of Simple Adapters - unlike sparse MoE that routes to top-K experts, MOSA uses dense softmax routing over all experts. This provides stable training without auxiliary load-balancing losses while maintaining the benefits of expert specialization.
 
-**What is Temporal Compression?** Instead of processing every audio frame, we concatenate k=2 consecutive frames before projection. This reduces the sequence length by 2x while preserving temporal information, making the model more efficient.
+**What is Convolutional Downsampling?** Two 1D conv layers with stride 2 each (total 4x compression) reduce the audio sequence length while preserving temporal information. This is more efficient than frame concatenation and produces better representations.
 
 **Why 16kHz audio?** This sample rate captures human speech frequency range (85-255 Hz fundamental + harmonics up to ~8kHz) while being computationally efficient. Industry standard for ASR.
 
-**Why projector-only training?** The encoder and decoder are already excellent at their tasks from pretraining. We only need to teach them how to communicate, which the projector accomplishes with just ~13M parameters (vs 4.3B total).
+**Why projector-only training?** The encoder and decoder are already excellent at their tasks from pretraining. We only need to teach them how to communicate, which the MoE projector accomplishes efficiently.
 
 ### Projector Architecture
 
-The Audio Projector is the key innovation that makes Tiny Audio efficient:
+The MoE Audio Projector is the key innovation that makes Tiny Audio efficient:
 
-**Architecture Details:**
+**Architecture Details (MOSA - Mixture of Simple Adapters):**
 
-- **Input**: HuBERT embeddings (1280-dim) concatenated from k=2 frames → 2560-dim
-- **Hidden layer**: 5120-dim (2x encoder dim)
-- **Output**: 3072-dim (SmolLM3-3B embedding size)
-- **Activation**: SwiGLU (same as Llama/Mistral MLPs)
-- **Parameters**: ~13M total
+- **Input**: Whisper encoder embeddings (1280-dim)
+- **Convolutional downsampling**: Two Conv1D layers (stride 2 each) → 4x sequence compression
+- **Router**: Linear→ReLU→Linear (1280→512→4) with dense softmax
+- **Experts**: 4 adapters, each Linear→ReLU→Linear (2048→4096→2048)
+- **Output**: 2048-dim (SmolLM3-3B embedding size)
+- **Normalization**: RMSNorm for stability
 
 **Why projector-only training works:**
 
-- **You train only 13M parameters** instead of 4.3+ billion (0.3% of total)
 - **Training is fast** (~24 hours on A40) with no gradient computation for frozen models
 - **It's cheap** (~$12 for a full run)
 - **You leverage pretrained knowledge** from both audio and language domains
 - **Memory efficient** - runs on a single A40 40GB GPU
-- **Simple and stable** - no complex adapter configurations or hyperparameter tuning
+- **Stable training** - dense routing eliminates need for auxiliary load-balancing losses
 - **Modular design** - easily swap encoder or decoder models without retraining everything
 
 ## Training details
@@ -117,44 +117,31 @@ The Audio Projector is the key innovation that makes Tiny Audio efficient:
 **Configuration**: The repo uses Hydra for configs, so you can easily tweak things:
 
 ```bash
-# Try different encoders
-poetry run python src/train.py model.encoder_model_name=facebook/hubert-large-ls960-ft
-
-# Adjust encoder LoRA rank (0 = frozen encoder, higher = more adaptation)
-poetry run python src/train.py encoder_lora.r=8
-
-# Adjust decoder LoRA rank (0 = frozen decoder, higher = more adaptation)
-poetry run python src/train.py peft.r=64
+# Use different projector types
+poetry run python src/train.py +experiments=moe       # MoE projector (default)
+poetry run python src/train.py +experiments=swiglu    # Simple SwiGLU projector
+poetry run python src/train.py +experiments=residual  # Residual projector
 
 # Adjust learning rate
 poetry run python src/train.py training.learning_rate=1e-4
 
 # Change batch size (if you're running out of memory)
 poetry run python src/train.py training.per_device_train_batch_size=5
-
-# Disable encoder LoRA (train only projector + decoder LoRA)
-poetry run python src/train.py encoder_lora.r=0
-
-# Disable decoder LoRA (train only projector + encoder LoRA)
-poetry run python src/train.py peft.peft_method=null
-
-# Train only projector (no LoRA on encoder or decoder)
-poetry run python src/train.py encoder_lora.r=0 peft.peft_method=null
 ```
 
 The training script automatically logs to Weights & Biases (wandb), saves checkpoints to `outputs/`, and pushes the final model to HuggingFace.
 
-**Training Stages**: The repo includes pre-configured experiment files:
+**Experiment Presets**: The repo includes pre-configured experiment files:
 
 ```bash
-# Stage 1: Full PEFT training (projector + encoder LoRA + decoder LoRA)
-poetry run python src/train.py +experiments=stage1
+# MoE projector (recommended)
+poetry run python src/train.py +experiments=moe
 
-# Mac minimal: Quick local testing
-poetry run python src/train.py +experiments=mac_minimal
+# SwiGLU projector (simpler alternative)
+poetry run python src/train.py +experiments=swiglu
 
-# Decoder LoRA only: Use archived config (projector + decoder LoRA, frozen encoder)
-poetry run python src/train.py +experiments=archive/lora_decoder
+# Residual projector
+poetry run python src/train.py +experiments=residual
 ```
 
 Each experiment combines model, data, and training configs. Check `configs/hydra/experiments/` for all available presets.
@@ -214,11 +201,11 @@ All training runs are logged to [Weights & Biases](https://wandb.ai) for detaile
 Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable, hackable codebase** designed to train an ASR model start to end and produce a working model you can actually use and learn from.
 
 - **~1000 lines of core code** across 7 Python files in `src/`
-- **Parameter-efficient training**: Train only ~146M parameters (projector + encoder LoRA + decoder LoRA) instead of 9.3B+
-- **Dependency-lite**: Just PyTorch, transformers, datasets, PEFT, and a few other essentials via Poetry
+- **Projector-only training**: Train only the MoE projector while keeping encoder and decoder frozen
+- **Dependency-lite**: Just PyTorch, transformers, datasets, and a few other essentials via Poetry
 - **No magic**: Read the code and understand exactly what's happening
 - **Fully yours**: Train it, modify it, deploy it however you want
-- **Flexible training**: Easily toggle encoder/decoder LoRA on/off, adjust rank, change target modules
+- **Multiple projector types**: MoE (MOSA), SwiGLU, or Residual projectors
 
 The entire codebase is small enough to read in an afternoon and understand deeply.
 
@@ -274,9 +261,10 @@ Tiny Audio is nowhere finished. The goal is to make ASR training accessible on b
 
 This project builds upon:
 
-- [HuBERT](https://huggingface.co/docs/transformers/model_doc/hubert) by Facebook AI for audio encoding
-- [Qwen-3 8B](https://huggingface.co/Qwen/Qwen3-8B) by Alibaba for language modeling
+- [Whisper](https://huggingface.co/openai/whisper-large-v3-turbo) by OpenAI for audio encoding
+- [SmolLM3-3B](https://huggingface.co/HuggingFaceTB/SmolLM3-3B) by Hugging Face for language modeling
 - [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) by SpeechBrain for training data
+- [MOSA](https://arxiv.org/abs/2508.18998) paper for the Mixture of Simple Adapters architecture
 
 ## Citation
 

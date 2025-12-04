@@ -147,16 +147,17 @@ This spectrogram is what the encoder actually processes.
 
 **Key insight**: The encoder is audio-only. At this stage, "to," "too," and "two" all look identical—same sound, different spellings.
 
-### Step 3: The Projector (~13M parameters)
+### Step 3: The MoE Projector
 
 **Purpose**: Translate between audio-space and text-space.
 
-The encoder outputs 1280 audio dimensions. The LLM expects 1536 text dimensions. They speak different "languages." The projector translates.
+The encoder outputs 1280 audio dimensions. The LLM expects 2048 text dimensions. They speak different "languages." The projector translates.
 
 **What it does:**
 
-- Maps 1280 audio dimensions → 1536 text dimensions
-- Groups frames together (5x temporal downsampling) for speed
+- Maps 1280 audio dimensions → 2048 text dimensions
+- Uses convolutional downsampling (4x compression) for efficiency
+- Routes through 4 expert adapters using dense softmax routing
 - Learns to solve problems sound alone can't answer
 
 **What the projector learns:**
@@ -166,7 +167,7 @@ The encoder outputs 1280 audio dimensions. The LLM expects 1536 text dimensions.
 - Question marks — rising tone → add "?"
 - Capitalization — "apple" (fruit) vs "Apple" (company)
 
-**Architecture**: Surprisingly simple—just an MLP (multi-layer perceptron). I tried complex projectors; simple works best.
+**Architecture**: Mixture of Simple Adapters (MOSA) - convolutional downsampling followed by dense routing over 4 expert adapters. Each expert is a simple Linear→ReLU→Linear network.
 
 **Key insight**: This is the **only component we train**. The encoder and decoder stay frozen.
 
@@ -204,18 +205,17 @@ Think of it as three specialists:
 
 ### Efficiency
 
-We only train ~13M parameters instead of ~4.3 billion (0.3% of total):
+We only train the MoE projector instead of billions of parameters:
 
 | Component | Parameters | Training |
 |-----------|------------|----------|
-| Encoder (Whisper) | ~1.5B | Frozen |
-| Projector | ~13M | **Trained** |
+| Encoder (Whisper) | ~809M | Frozen |
+| MoE Projector | trainable | **Trained** |
 | Decoder (SmolLM3) | ~3B | Frozen |
 
 **Training is fast and cheap:**
 
-- ~4 hours on a single A40 GPU
-- Less than $2 for a working model
+- ~24 hours on a single A40 GPU
 - ~$8-12 for a full training run
 
 ### Beyond Transcription
@@ -378,10 +378,7 @@ Try:
 Stop the demo (Ctrl+C), then run:
 
 ```bash
-poetry run python scripts/eval.py mazesmazes/tiny-audio \
-    --dataset loquacious \
-    --max-samples 100 \
-    --split test
+poetry run eval mazesmazes/tiny-audio --dataset loquacious --max-samples 100
 ```
 
 **What this does:**
@@ -489,11 +486,11 @@ ______________________________________________________________________
 
 ## Key Takeaways
 
-1. **Architecture**: Encoder (listens) → Projector (translates) → Decoder (writes)
+1. **Architecture**: Encoder (listens) → MoE Projector (translates) → Decoder (writes)
 
-2. **Efficiency**: Only train the projector (~13M params), freeze everything else
+2. **Efficiency**: Only train the MoE projector, freeze everything else
 
-3. **Cost**: ~4 hours, less than $2 for a working model
+3. **Cost**: ~24 hours, ~$8-12 for a full training run
 
 4. **Modality gap**: The projector bridges audio and text representations
 

@@ -48,10 +48,10 @@ RunPod provides:
 
 When you start a training run:
 
-1. **Downloads models**: Whisper encoder (~1.6GB) and SmolLM3 decoder (~10GB) from Hugging Face
+1. **Downloads models**: Whisper encoder (~3GB) and SmolLM3 decoder (~6GB) from Hugging Face
 2. **Streams data**: Training data streams from Hugging Face (no terabyte downloads needed)
-3. **Trains projector**: Only the small projector network trains; encoder and decoder stay frozen
-4. **Saves checkpoints**: Every 1,000 steps, model saves to Hugging Face (resume if something crashes)
+3. **Trains MoE projector**: Only the MoE projector trains; encoder and decoder stay frozen
+4. **Saves checkpoints**: Every 500 steps, model saves to Hugging Face (resume if something crashes)
 
 ## Key Metrics
 
@@ -216,29 +216,31 @@ Most changes are **config changes, not code changes**. Configs are YAML files in
 **Step 2: Create your config**
 
 ```bash
-cp configs/hydra/experiments/transcribe.yaml configs/hydra/experiments/my_experiment.yaml
+cp configs/hydra/experiments/moe.yaml configs/hydra/experiments/my_experiment.yaml
 ```
 
 Edit `my_experiment.yaml`:
 
 ```yaml
 # REQUIRED: Change to YOUR Hugging Face username
-hub_model_id: "your-username/tiny-audio-yourname"
+training:
+  hub_model_id: "your-username/tiny-audio-yourname"
 
 # Optional: Experiment with these
-# max_steps: 10000       # Fewer steps = faster (default: 20000)
-# batch_size: 8          # Higher = faster, but uses more VRAM
-# learning_rate: 1e-4    # How aggressive updates are
+# training:
+#   max_steps: 10000       # Fewer steps = faster (default: 15000)
+#   per_device_train_batch_size: 8  # Higher = faster, but uses more VRAM
+#   learning_rate: 1e-3    # How aggressive updates are
 ```
 
 **Key hyperparameters:**
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
-| `max_steps` | 20,000 | Training duration (5,000 is enough to test) |
-| `batch_size` | 8 | Samples per step (higher = faster, more VRAM) |
-| `learning_rate` | 1e-4 | Update aggressiveness |
-| `projector_pool_stride` | 2 | Compression factor (4 = faster inference) |
+| `max_steps` | 15,000 | Training duration (5,000 is enough to test) |
+| `per_device_train_batch_size` | 14 | Samples per step (higher = faster, more VRAM) |
+| `learning_rate` | 1e-3 | Update aggressiveness |
+| `projector_type` | moe | Projector architecture (moe, swiglu, residual) |
 
 **Step 3: Re-deploy**
 
@@ -400,12 +402,12 @@ Once you have a working pipeline:
 
 **Easy wins:**
 
-- Swap decoder to Qwen 7B (~10x better performance)
-- Try different encoders (HuBERT, WavLM)
+- Try different projector types (MoE, SwiGLU, Residual)
+- Adjust learning rate and batch size
 
 **Interesting experiments:**
 
-- Different projector architectures
+- Swap decoder to a larger LLM
 - Multilingual datasets
 - Other tasks: emotion detection, audio description
 
