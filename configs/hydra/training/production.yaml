@@ -43,9 +43,9 @@ torch_compile: false
 model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
-dataloader_num_workers: 1
-dataloader_persistent_workers: true
-dataloader_pin_memory: true
+dataloader_num_workers: 0
+# dataloader_persistent_workers: true
+# dataloader_pin_memory: true
 
 # Misc
 seed: 42

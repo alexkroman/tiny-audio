@@ -177,7 +177,7 @@ class DatasetLoader:
             return None
         # Shuffle each dataset before interleaving for better randomization
         if shuffle:
-            datasets = [ds.shuffle(seed=self.seed, buffer_size=10000) for ds in datasets]
+            datasets = [ds.shuffle(seed=self.seed, buffer_size=1000) for ds in datasets]
         if len(datasets) == 1:
             return datasets[0]
         probs = [w / sum(weights) for w in weights]
