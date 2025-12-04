@@ -16,9 +16,9 @@ By the end of this class, you will:
 
 ______________________________________________________________________
 
-# PART A: LECTURE (15 minutes)
+## PART A: LECTURE (15 min)
 
-## 1. Understanding WER (5 min)
+### 1. Understanding WER (5 min)
 
 The industry-standard metric for ASR is **Word Error Rate (WER)**.
 
@@ -48,20 +48,25 @@ WER = (Substitutions + Insertions + Deletions) / Total Reference Words
 
 **Important**: WER is quantitative. Always do qualitative "vibe testing" too—run the demo and listen to outputs on different audio types.
 
-## 2. Evaluation Datasets (5 min)
+### 2. Evaluation Datasets (5 min)
 
-Different datasets test different capabilities:
+Different datasets test different capabilities. The training config (`combined.yaml`) uses 9 datasets with equal weights:
 
 | Dataset | What it tests |
 |---------|---------------|
-| **LoquaciousSet** | General benchmark (5+ sources, leaderboard uses this) |
-| **Earnings22** | Financial domain (company names, financial terms, noisy audio) |
-| **AMI** | Meetings (multi-speaker, conversational) |
+| **LoquaciousSet** | General benchmark (synthetic diverse speech, leaderboard uses this) |
 | **GigaSpeech** | Diverse sources (YouTube, podcasts, audiobooks) |
+| **LibriSpeech Clean** | Read audiobooks (clear speech, standard benchmark) |
+| **LibriSpeech Other** | Read audiobooks (more challenging acoustics) |
+| **AMI** | Meetings (multi-speaker, conversational) |
+| **Earnings22** | Financial domain (company names, financial terms, noisy audio) |
+| **TEDLIUM** | TED talks (lectures, presentations) |
+| **People's Speech** | Large-scale diverse speech (various domains) |
+| **Common Voice** | Crowdsourced recordings (accents, varied quality) |
 
 Testing on multiple datasets reveals where your model excels and struggles.
 
-## 3. Deployment Options (5 min)
+### 3. Deployment Options (5 min)
 
 | Option | Cost | Use case |
 |--------|------|----------|
@@ -73,7 +78,7 @@ We'll set up a Space (free demo) and optionally an Inference Endpoint.
 
 ______________________________________________________________________
 
-# PART B: HANDS-ON WORKSHOP (45 minutes)
+## PART B: HANDS-ON WORKSHOP (45 min)
 
 ## Exercise 1: Evaluate Your Model (15 min)
 
@@ -193,15 +198,15 @@ poetry run python scripts/deploy_to_hf_space.py \
 
 **Step 3: Configure your model**
 
-After deployment, update the model ID:
+Set your model ID using an environment variable:
 
 1. Go to your Space
-2. Click **Files** → **app.py** → **Edit**
-3. Change `MODEL_ID = "mazesmazes/tiny-audio"` to your model:
-   ```python
-   MODEL_ID = "your-username/your-model-name"
-   ```
-4. Click **Commit changes**
+2. Click **Settings** → **Variables and secrets**
+3. Click **New variable**
+4. Add:
+   - **Name**: `MODEL_ID`
+   - **Value**: `your-username/your-model-name`
+5. Click **Save**
 
 Space rebuilds automatically (2-3 minutes).
 
@@ -338,37 +343,6 @@ You've completed the course! You now have:
 - Write a blog post
 - Present at a meetup
 - Contribute back to the repo
-
-______________________________________________________________________
-
-## Quick Reference
-
-### Eval Script
-
-```bash
-# Basic
-poetry run eval MODEL --max-samples 100
-
-# Different datasets
-poetry run eval MODEL --dataset loquacious
-poetry run eval MODEL --dataset earnings22
-poetry run eval MODEL --dataset ami
-poetry run eval MODEL --dataset gigaspeech
-
-# Compare with AssemblyAI
-poetry run eval --assemblyai --assemblyai-model slam_1
-
-# Test inference endpoint
-poetry run eval "https://endpoint-url" --max-samples 10
-```
-
-### Deploy Script
-
-```bash
-poetry run python scripts/deploy_to_hf_space.py \
-    --space-url https://huggingface.co/spaces/username/space \
-    --force
-```
 
 ______________________________________________________________________
 

@@ -79,7 +79,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="mazesmazes/tiny-audio",
+        default=os.environ.get("MODEL_ID", "mazesmazes/tiny-audio"),
         help="HuggingFace Hub model ID (e.g., mazesmazes/tiny-audio)",
     )
     parser.add_argument("--port", type=int, default=7860, help="Port to run the demo on")

@@ -26,9 +26,9 @@ Before starting, ensure you have:
 
 ______________________________________________________________________
 
-# PART A: INTRODUCTION (15 min)
+## PART A: LECTURE (15 min)
 
-## Why RunPod?
+### 1. Why RunPod? (5 min)
 
 Tiny Audio trains locally on a MacBook (MPS driver), but it's slow. I typically:
 
@@ -44,7 +44,7 @@ RunPod provides:
 
 **Cost**: A full training run takes ~20 hours and costs ~$8-12. For this class, even a few hours produces a working model.
 
-## How Training Works
+### 2. How Training Works (5 min)
 
 When you start a training run:
 
@@ -53,7 +53,7 @@ When you start a training run:
 3. **Trains MoE projector**: Only the MoE projector trains; encoder and decoder stay frozen
 4. **Saves checkpoints**: Every 500 steps, model saves to Hugging Face (resume if something crashes)
 
-## Key Metrics
+### 3. Key Metrics (5 min)
 
 During training, you'll see:
 
@@ -64,7 +64,7 @@ During training, you'll see:
 | **Gradient Norm** | Size of updates the optimizer wants to make | Starts high (40+), should drop to <10 |
 | **Learning Rate** | How big updates are allowed to be | Usually constant or scheduled decay |
 
-### The "Cliff" Phenomenon
+**The "Cliff" Phenomenon**
 
 With multimodal models, you often see a dramatic cliff in training loss:
 
@@ -76,7 +76,7 @@ This is normal! Don't panic if your model seems broken for the first hour.
 
 ______________________________________________________________________
 
-# PART B: HANDS-ON WORKSHOP (45 min)
+## PART B: HANDS-ON WORKSHOP (45 min)
 
 ## Exercise 1: Set Up RunPod (10 min)
 
