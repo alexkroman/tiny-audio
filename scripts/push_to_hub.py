@@ -46,6 +46,7 @@ def main():
             "moe_projector.py",
             "residual_projector.py",
             "swiglu_projector.py",
+            "shared_moe_projector.py",
             "handler.py",  # For Inference Endpoints
         ]
         for filename in custom_files:
