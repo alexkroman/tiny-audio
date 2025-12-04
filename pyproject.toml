@@ -72,7 +72,6 @@ librosa = ">=0.10.0"
 transformers = ">=4.57.3"
 accelerate = "*"
 datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
-peft = "*"
 evaluate = "*"
 jiwer = "*"
 wandb = "*"

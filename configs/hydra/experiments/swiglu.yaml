@@ -39,7 +39,7 @@ training:
   learning_rate: 1.0e-4
 
   lr_scheduler_type: "cosine"
-  warmup_steps: 1000  # Critical for MoE start
+  warmup_steps: 500  # Critical for MoE start
 
   weight_decay: 0.01
   max_grad_norm: 1.0
@@ -53,7 +53,7 @@ training:
   # Memory optimization
   torch_compile: true
 
-  max_steps: 15000
+  max_steps: 20000
 
   # Reproducibility
   seed: 44
