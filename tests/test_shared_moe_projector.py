@@ -40,14 +40,12 @@ def test_forward_pass_and_shape(model_and_config):
     batch_size = 2
     seq_len = 100
     input_features = torch.randn(batch_size, seq_len, config.encoder_dim)
-    attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long)
-    attention_mask[1, -12:] = 0
 
-    output = model(input_features, attention_mask=attention_mask)
+    output = model(input_features)
 
     expected_seq_len = seq_len // config.projector_pool_stride
     expected_shape = (batch_size, expected_seq_len, config.llm_dim)
-    
+
     assert output.shape == expected_shape, f"Output shape is {output.shape}, expected {expected_shape}"
 
 def test_aux_loss_calculation(model_and_config):
@@ -56,12 +54,10 @@ def test_aux_loss_calculation(model_and_config):
     batch_size = 2
     seq_len = 100
     input_features = torch.randn(batch_size, seq_len, config.encoder_dim)
-    attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long)
-    attention_mask[1, -12:] = 0
-    
+
     # Forward pass is necessary to populate router logits
-    model(input_features, attention_mask=attention_mask)
-    
+    model(input_features)
+
     aux_loss = model.get_aux_loss()
     assert isinstance(aux_loss, torch.Tensor), "Aux loss should be a tensor."
     assert aux_loss.ndim == 0, "Aux loss should be a scalar."
@@ -72,12 +68,10 @@ def test_backward_pass_and_gradients(model_and_config):
     batch_size = 2
     seq_len = 100
     input_features = torch.randn(batch_size, seq_len, config.encoder_dim)
-    attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long)
-    attention_mask[1, -12:] = 0
 
-    output = model(input_features, attention_mask=attention_mask)
+    output = model(input_features)
     aux_loss = model.get_aux_loss()
-    
+
     loss = output.sum() + aux_loss
     loss.backward()
 
@@ -87,5 +81,5 @@ def test_backward_pass_and_gradients(model_and_config):
             if torch.any(param.grad != 0):
                 grad_found = True
                 break
-                
+
     assert grad_found, "No non-zero gradients found on projector parameters after backward pass."

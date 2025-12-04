@@ -33,22 +33,13 @@ class AudioProjector(nn.Module):
             hidden_dim = config.encoder_dim * 2
 
         dropout_rate = getattr(config, "projector_dropout", 0.0)
-        self.use_post_norm = getattr(config, "projector_post_norm", False)
 
-        from transformers.models.llama.modeling_llama import LlamaRMSNorm
-
-        self.ln_pre = LlamaRMSNorm(in_dim, eps=1e-6)
         self.proj1 = SwiGLU(in_dim, hidden_dim, hidden_dim, dropout=dropout_rate)
         self.proj2 = SwiGLU(hidden_dim, hidden_dim, out_dim, dropout=dropout_rate)
-        self.ln_post = LlamaRMSNorm(out_dim, eps=1e-6) if self.use_post_norm else None
-        self.layer_scale = nn.Parameter(torch.ones(out_dim) * 1e-4)
         self.output_dropout = nn.Dropout(dropout_rate)
 
         with torch.no_grad():
             std = getattr(config, "projector_init_std", 0.02)
-            self.ln_pre.weight.data.fill_(1.0)
-            if self.ln_post is not None:
-                self.ln_post.weight.data.fill_(1.0)
             # Initialize first layer
             nn.init.normal_(self.proj1.w1.weight, mean=0.0, std=std)
             nn.init.normal_(self.proj1.w2.weight, mean=0.0, std=std)
@@ -71,12 +62,7 @@ class AudioProjector(nn.Module):
             x = F.pad(x, (0, 0, 0, pad_len))
 
         x = x.contiguous().view(batch_size, -1, dim * self.k)
-        x = self.ln_pre(x)
         x = self.proj1(x)
         x = self.proj2(x)
-        if self.ln_post is not None:
-            x = self.ln_post(x)
-        # Apply layer scale for training stability
-        x = x * self.layer_scale
 
         return self.output_dropout(x)
