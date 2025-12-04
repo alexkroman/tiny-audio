@@ -55,6 +55,7 @@ class SharedExpert(nn.Module):
 class RoutedExperts(nn.Module):
     """
     Sparse routed experts using a vectorized, torch.compile-friendly implementation.
+    Uses einsum instead of bmm for better Triton kernel generation.
     """
 
     def __init__(
@@ -64,11 +65,12 @@ class RoutedExperts(nn.Module):
         self.num_experts = num_experts
         self.top_k = top_k
         self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
         self.output_dim = output_dim
 
-        # Fused gate+up projection: [num_experts, 2*hidden, input]
-        self.gate_up_proj = nn.Parameter(torch.empty(num_experts, 2 * hidden_dim, input_dim))
-        # Down projection: [num_experts, output, hidden]
+        # Separate gate and up projections for cleaner compute
+        self.gate_proj = nn.Parameter(torch.empty(num_experts, hidden_dim, input_dim))
+        self.up_proj = nn.Parameter(torch.empty(num_experts, hidden_dim, input_dim))
         self.down_proj = nn.Parameter(torch.empty(num_experts, output_dim, hidden_dim))
         self.act = nn.SiLU()
 
@@ -79,49 +81,32 @@ class RoutedExperts(nn.Module):
         top_k_weights: torch.Tensor,
     ) -> torch.Tensor:
         """
-        A vectorized, torch.compile-friendly forward pass for routed experts.
-
         Args:
             hidden_states: [num_tokens, input_dim]
             top_k_indices: [num_tokens, top_k]
             top_k_weights: [num_tokens, top_k]
         """
-        output = torch.zeros(
-            hidden_states.shape[0],
-            self.output_dim,
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+        # Process all top_k experts at once using einsum
+        # Gather weights for all selected experts: [num_tokens, top_k, ...]
+        gate_w = self.gate_proj[top_k_indices]  # [N, K, H, D]
+        up_w = self.up_proj[top_k_indices]      # [N, K, H, D]
+        down_w = self.down_proj[top_k_indices]  # [N, K, O, H]
 
-        # self.top_k is a small, static number, so this loop can be unrolled by torch.compile.
-        for k in range(self.top_k):
-            # Get the k-th expert indices and weights for each token
-            expert_indices = top_k_indices[:, k]
-            expert_weights = top_k_weights[:, k]
+        # Gate projection: [N, D] x [N, K, H, D] -> [N, K, H]
+        gate_out = torch.einsum('nd,nkhd->nkh', hidden_states, gate_w)
 
-            # Gather the weights for all tokens at once for the k-th expert choice
-            gate_up_w = self.gate_up_proj[expert_indices]
-            down_w = self.down_proj[expert_indices]
+        # Up projection: [N, D] x [N, K, H, D] -> [N, K, H]
+        up_out = torch.einsum('nd,nkhd->nkh', hidden_states, up_w)
 
-            # Apply the expert MLPs in a batched manner using torch.bmm
-            # hidden_states: [N, D_in] -> [N, D_in, 1]
-            # gate_up_w:   [N, 2*D_hidden, D_in]
-            # Result:      [N, 2*D_hidden, 1]
-            gate_up_out = torch.bmm(gate_up_w, hidden_states.unsqueeze(-1))
+        # SwiGLU
+        h = self.act(gate_out) * up_out  # [N, K, H]
 
-            # SwiGLU activation
-            gate, up = gate_up_out.squeeze(-1).chunk(2, dim=-1)
-            h = self.act(gate) * up
+        # Down projection: [N, K, H] x [N, K, O, H] -> [N, K, O]
+        expert_out = torch.einsum('nkh,nkoh->nko', h, down_w)
 
-            # Down projection
-            # h:      [N, D_hidden] -> [N, D_hidden, 1]
-            # down_w: [N, D_out, D_hidden]
-            # Result: [N, D_out, 1]
-            down_out = torch.bmm(down_w, h.unsqueeze(-1)).squeeze(-1)
-
-            # Weight by router score and accumulate
-            down_out = down_out * expert_weights.unsqueeze(-1)
-            output += down_out
+        # Weight by router scores and sum over experts
+        # [N, K, O] * [N, K, 1] -> sum -> [N, O]
+        output = (expert_out * top_k_weights.unsqueeze(-1)).sum(dim=1)
 
         return output
 
@@ -274,11 +259,13 @@ class SharedMoEAudioProjector(nn.Module):
             nn.init.normal_(self.moe.shared_expert.down_proj.weight, std=down_proj_std)
 
             # Routed experts - zero init down_proj so they "grow in" from zero
-            nn.init.normal_(self.moe.routed_experts.gate_up_proj, std=std)
+            nn.init.normal_(self.moe.routed_experts.gate_proj, std=std)
+            nn.init.normal_(self.moe.routed_experts.up_proj, std=std)
             nn.init.zeros_(self.moe.routed_experts.down_proj)
 
             # Router stays zero-initialized
 
+    @torch.compiler.disable
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
         batch_size, seq_len, dim = x.size()
 
