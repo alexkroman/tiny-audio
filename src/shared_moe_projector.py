@@ -132,7 +132,7 @@ class SharedMoEAudioProjector(nn.Module):
         # MoE config
         self.num_experts = getattr(config, "num_experts", 4)
         self.top_k = getattr(config, "num_experts_per_tok", 2)
-        self.aux_loss_coef = getattr(config, "router_aux_loss_coef", 0.01)
+        self.aux_loss_coef = getattr(config, "router_aux_loss_coef", 0.02)
         self.z_loss_coef = getattr(config, "router_z_loss_coef", 0.001)
 
         # Layers
@@ -143,18 +143,17 @@ class SharedMoEAudioProjector(nn.Module):
 
     def _init_weights(self, in_dim: int):
         with torch.no_grad():
-            std = 1.0 / (in_dim**0.5)
+            # Shared expert - orthogonal init for stable condition numbers
+            nn.init.orthogonal_(self.moe.shared_expert.gate_proj.weight)
+            nn.init.orthogonal_(self.moe.shared_expert.up_proj.weight)
+            nn.init.orthogonal_(self.moe.shared_expert.down_proj.weight, gain=0.5)
 
-            # Shared expert (smaller std for down_proj since it's the "residual" path)
-            nn.init.normal_(self.moe.shared_expert.gate_proj.weight, std=std)
-            nn.init.normal_(self.moe.shared_expert.up_proj.weight, std=std)
-            nn.init.normal_(self.moe.shared_expert.down_proj.weight, std=std / 2.0)
-
-            # Routed experts - zero init down_proj so they "grow in" from zero
+            # Routed experts - orthogonal for gate/up, tiny orthogonal for down (grow-in)
+            # gain=0.01 gives ~1% initial contribution while maintaining good conditioning
             for expert in self.moe.experts:
-                nn.init.normal_(expert.gate_proj.weight, std=std)
-                nn.init.normal_(expert.up_proj.weight, std=std)
-                nn.init.zeros_(expert.down_proj.weight)
+                nn.init.orthogonal_(expert.gate_proj.weight)
+                nn.init.orthogonal_(expert.up_proj.weight)
+                nn.init.orthogonal_(expert.down_proj.weight, gain=0.01)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = x.size()

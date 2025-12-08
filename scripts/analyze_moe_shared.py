@@ -6,13 +6,20 @@ Usage:
     python scripts/analyze_moe_shared.py path/to/checkpoint/model.safetensors
 
 Analyzes SharedMoEAudioProjector architecture:
-1. Integrity: Checks for NaNs or Infinity values
-2. Shared vs Routed Expert Balance: Compares contribution levels
-3. Router Health: Checks routing patterns and load balancing
+1. Shared vs Routed Expert Balance: Compares contribution levels
+2. Router Diagnostics: Routing patterns and load balancing
+3. SwiGLU Expert Analysis: Gate/Up/Down projection health
 4. Expert Diversity: Checks if routed experts are specialized
-5. SwiGLU Analysis: Gate/Up/Down projection health
-6. Grow-in Analysis: Checks if routed experts are "growing in" from zero-init
-7. Spectral Health: Uses SVD to check for rank collapse
+5. Grow-in Analysis: Checks if routed experts are "growing in" from zero-init
+6. Spectral Health: Uses SVD to check for rank collapse (effective rank)
+7. Weight Magnitude Analysis: L2 norms, mean absolute values
+8. Condition Number Analysis: Numerical stability checks
+9. Initialization Deviation: Compares to expected init values
+10. Dead Neuron Detection: Finds near-zero rows/columns
+11. Gate-Up Alignment: SwiGLU redundancy check
+12. Weight Distribution Health: Kurtosis and skewness
+13. Router Decision Sharpness: Expert distinguishability
+14. Singular Value Distribution: Energy concentration analysis
 """
 
 import re
@@ -524,17 +531,19 @@ def analyze_checkpoint(file_path: str):
         current_std = w.float().std().item()
 
         # Estimate expected init std
+        in_dim = w.shape[1] if w.dim() >= 2 else w.shape[0]
         if "down_proj" in name and "experts" in name:
-            expected_std = 0.0  # Zero init for routed down_proj
-            if current_std > 0.001:
+            # Tiny orthogonal init (gain=0.01) for routed down_proj
+            expected_std = 0.01 / (in_dim ** 0.5)
+            ratio = current_std / (expected_std + 1e-10)
+            if ratio > 3.0:
                 deviation_stats.append({
                     "name": name,
                     "current_std": current_std,
-                    "note": "grown from zero",
+                    "expected_std": expected_std,
+                    "note": f"grown {ratio:.1f}x from init",
                 })
         else:
-            # Normal init with std ~ 1/sqrt(in_dim)
-            in_dim = w.shape[1] if w.dim() >= 2 else w.shape[0]
             expected_std = 1.0 / (in_dim ** 0.5)
             ratio = current_std / (expected_std + 1e-10)
             if ratio < 0.3 or ratio > 3.0:
@@ -555,7 +564,214 @@ def analyze_checkpoint(file_path: str):
     else:
         print("   ✅ All weights within expected initialization range")
 
-    # 10. SUMMARY
+    # 10. DEAD NEURON DETECTION
+    print("\n" + "=" * 70)
+    print("[10] DEAD NEURON DETECTION")
+    print("=" * 70)
+
+    dead_neuron_threshold = 1e-4
+    dead_neuron_report = []
+
+    for name, w in proj_weights.items():
+        if "weight" not in name or w.dim() < 2:
+            continue
+
+        w_float = w.float()
+        row_norms = w_float.norm(dim=1)
+        col_norms = w_float.norm(dim=0)
+        dead_rows = (row_norms < dead_neuron_threshold).sum().item()
+        dead_cols = (col_norms < dead_neuron_threshold).sum().item()
+
+        if dead_rows > 0 or dead_cols > 0:
+            dead_neuron_report.append({
+                "name": name,
+                "dead_rows": dead_rows,
+                "total_rows": w.shape[0],
+                "dead_cols": dead_cols,
+                "total_cols": w.shape[1],
+            })
+
+    if dead_neuron_report:
+        print("\n   ⚠️  Dead neurons detected (norm < 1e-4):")
+        for d in dead_neuron_report:
+            print(f"      {d['name']}:")
+            print(f"         Rows: {d['dead_rows']}/{d['total_rows']} dead ({d['dead_rows']/d['total_rows']*100:.1f}%)")
+            print(f"         Cols: {d['dead_cols']}/{d['total_cols']} dead ({d['dead_cols']/d['total_cols']*100:.1f}%)")
+    else:
+        print("\n   ✅ No dead neurons detected")
+
+    # 11. GATE-UP ALIGNMENT (SwiGLU-specific)
+    print("\n" + "=" * 70)
+    print("[11] GATE-UP ALIGNMENT (SwiGLU Redundancy Check)")
+    print("=" * 70)
+
+    print("\n   In SwiGLU, gate and up projections are multiplied together.")
+    print("   Low similarity = complementary patterns (good)")
+    print("   High similarity = redundant capacity (bad)")
+
+    gate_up_sims = []
+
+    # Shared expert
+    if "gate_proj" in shared_expert and "up_proj" in shared_expert:
+        gate = shared_expert["gate_proj"].float().flatten()
+        up = shared_expert["up_proj"].float().flatten()
+        sim = F.cosine_similarity(gate, up, dim=0).item()
+        gate_up_sims.append(("Shared", sim))
+
+    # Routed experts
+    for idx in sorted_indices:
+        if "gate_proj" in routed_experts[idx] and "up_proj" in routed_experts[idx]:
+            gate = routed_experts[idx]["gate_proj"].float().flatten()
+            up = routed_experts[idx]["up_proj"].float().flatten()
+            sim = F.cosine_similarity(gate, up, dim=0).item()
+            gate_up_sims.append((f"E{idx}", sim))
+
+    if gate_up_sims:
+        print(f"\n   {'Expert':<10} {'Gate-Up Cosine Sim':<20} {'Status'}")
+        print("   " + "-" * 45)
+        for name, sim in gate_up_sims:
+            status = "✅ complementary" if abs(sim) < 0.3 else "⚠️ correlated" if abs(sim) < 0.7 else "❌ redundant"
+            print(f"   {name:<10} {sim:<20.4f} {status}")
+
+        avg_sim = np.mean([abs(s[1]) for s in gate_up_sims])
+        print(f"\n   Average |similarity|: {avg_sim:.4f}")
+        if avg_sim < 0.3:
+            print("   ✅ Gate and Up projections are learning complementary patterns")
+        elif avg_sim < 0.7:
+            print("   ⚠️  Some redundancy between Gate and Up projections")
+        else:
+            print("   ❌ High redundancy - Gate and Up learning similar patterns")
+
+    # 12. WEIGHT DISTRIBUTION HEALTH
+    print("\n" + "=" * 70)
+    print("[12] WEIGHT DISTRIBUTION HEALTH (Kurtosis & Skewness)")
+    print("=" * 70)
+
+    print("\n   Healthy weights: kurtosis ≈ 0 (Gaussian), skewness ≈ 0 (symmetric)")
+    print("   High kurtosis = heavy tails/outliers, High skewness = asymmetric")
+
+    dist_stats = []
+    for name, w in proj_weights.items():
+        if "weight" not in name:
+            continue
+        w_flat = w.float().flatten()
+        mean = w_flat.mean()
+        std = w_flat.std()
+        if std < 1e-10:
+            continue
+
+        centered = w_flat - mean
+        kurtosis = (centered ** 4).mean() / (std ** 4) - 3  # Excess kurtosis
+        skewness = (centered ** 3).mean() / (std ** 3)
+
+        dist_stats.append({
+            "name": name.split(".")[-2] + "." + name.split(".")[-1] if "." in name else name,
+            "kurtosis": kurtosis.item(),
+            "skewness": skewness.item(),
+        })
+
+    if dist_stats:
+        # Group by component type
+        print(f"\n   {'Component':<35} {'Kurtosis':<12} {'Skewness':<12} {'Status'}")
+        print("   " + "-" * 70)
+        for s in dist_stats:
+            k_status = "✅" if abs(s["kurtosis"]) < 1 else "⚠️" if abs(s["kurtosis"]) < 3 else "❌"
+            s_status = "✅" if abs(s["skewness"]) < 0.5 else "⚠️" if abs(s["skewness"]) < 1 else "❌"
+            status = k_status if abs(s["kurtosis"]) > abs(s["skewness"]) else s_status
+            print(f"   {s['name']:<35} {s['kurtosis']:<12.4f} {s['skewness']:<12.4f} {status}")
+
+    # 13. ROUTER DECISION SHARPNESS
+    print("\n" + "=" * 70)
+    print("[13] ROUTER DECISION SHARPNESS")
+    print("=" * 70)
+
+    print("\n   How distinguishable are experts from the router's perspective?")
+    print("   Higher distances = sharper routing decisions")
+
+    if router_weights:
+        for name, w in router_weights.items():
+            if w.dim() < 2:
+                continue
+
+            w_float = w.float()
+            n_experts = w_float.shape[0]
+
+            if n_experts < 2:
+                continue
+
+            # Pairwise L2 distances between expert routing vectors
+            distances = []
+            for i in range(n_experts):
+                for j in range(i + 1, n_experts):
+                    d = (w_float[i] - w_float[j]).norm().item()
+                    distances.append((f"E{i}-E{j}", d))
+
+            if distances:
+                dists_only = [d[1] for d in distances]
+                print(f"\n   Router: {name}")
+                print(f"      Mean distance: {np.mean(dists_only):.4f}")
+                print(f"      Min distance:  {np.min(dists_only):.4f}")
+                print(f"      Max distance:  {np.max(dists_only):.4f}")
+
+                min_dist = np.min(dists_only)
+                if min_dist < 0.01:
+                    print("   ❌ Some expert pairs are nearly indistinguishable")
+                elif min_dist < 0.1:
+                    print("   ⚠️  Some expert pairs have low separation")
+                else:
+                    print("   ✅ All expert pairs are well-separated")
+
+                # Show pairwise distances
+                if len(distances) <= 10:
+                    print("\n   Pairwise distances:")
+                    for pair, d in sorted(distances, key=lambda x: x[1]):
+                        print(f"      {pair}: {d:.4f}")
+
+    # 14. SINGULAR VALUE DISTRIBUTION
+    print("\n" + "=" * 70)
+    print("[14] SINGULAR VALUE DISTRIBUTION")
+    print("=" * 70)
+
+    print("\n   Analyzing concentration of singular values (energy distribution)")
+
+    sv_stats = []
+    for expert_name, expert_dict in [("Shared", shared_expert)] + [(f"E{i}", routed_experts[i]) for i in sorted_indices]:
+        if "gate_proj" not in expert_dict:
+            continue
+
+        w = expert_dict["gate_proj"].float()
+        try:
+            s = torch.linalg.svdvals(w)
+            s_sq = s ** 2
+            total_energy = s_sq.sum().item()
+
+            sv_stats.append({
+                "name": expert_name,
+                "sv_max": s[0].item(),
+                "sv_min": s[-1].item(),
+                "sv_median": s[len(s)//2].item(),
+                "top10_energy": (s_sq[:10].sum() / total_energy * 100).item(),
+                "top50_energy": (s_sq[:50].sum() / total_energy * 100).item(),
+            })
+        except Exception:
+            pass
+
+    if sv_stats:
+        print(f"\n   {'Expert':<10} {'σ_max':<10} {'σ_min':<10} {'σ_med':<10} {'Top-10 %':<10} {'Top-50 %':<10}")
+        print("   " + "-" * 60)
+        for s in sv_stats:
+            print(f"   {s['name']:<10} {s['sv_max']:<10.2f} {s['sv_min']:<10.4f} {s['sv_median']:<10.4f} {s['top10_energy']:<10.1f} {s['top50_energy']:<10.1f}")
+
+        avg_top10 = np.mean([s["top10_energy"] for s in sv_stats])
+        print(f"\n   Average top-10 singular value energy: {avg_top10:.1f}%")
+        if avg_top10 > 50:
+            print("   ⚠️  Energy concentrated in top singular values (potential low-rank)")
+        elif avg_top10 > 30:
+            print("   ✅ Moderate energy distribution")
+        else:
+            print("   ✅ Energy well-distributed across singular values")
+
+    # 15. SUMMARY
     print("\n" + "=" * 70)
     print("[SUMMARY]")
     print("=" * 70)

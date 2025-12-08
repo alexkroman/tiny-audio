@@ -554,29 +554,17 @@ class ASRModel(PreTrainedModel):
         )
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
 
-        # Create dummy input_ids matching inputs_embeds length for repetition penalty tracking
-        # Use pad_token_id as placeholder since the actual tokens don't matter for penalty calc
-        dummy_input_ids = torch.full(
-            (inputs_embeds.shape[0], inputs_embeds.shape[1]),
-            self.tokenizer.pad_token_id,
-            dtype=torch.long,
-            device=device,
-        )
-
-        # Generate (type ignore needed as generate() has complex return type)
-        # Note: When using inputs_embeds, generate() returns only new tokens
-        # (no placeholder positions for input embeddings), so no stripping needed
+        # Generate without input_ids - using only inputs_embeds
+        # This avoids issues with dummy input_ids interfering with generation
         output = self.language_model.generate(  # type: ignore[operator]
-            input_ids=dummy_input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             **generate_kwargs,
         )
 
-        # Return generated tokens directly - no stripping needed with inputs_embeds
+        # When using inputs_embeds without input_ids, generate returns only new tokens
         if isinstance(output, torch.Tensor):
             return output
-        # Handle GenerateOutput types that have sequences attribute
         return output.sequences
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):

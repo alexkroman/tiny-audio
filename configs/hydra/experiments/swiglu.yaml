@@ -43,7 +43,7 @@ training:
 
   weight_decay: 0.01
   max_grad_norm: 1.0
-  projector_dropout: 0.1
+  projector_dropout: 0.0
   use_specaugment: true
   label_smoothing: 0.0
 
