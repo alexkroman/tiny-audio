@@ -73,16 +73,14 @@ class ResidualAudioProjector(nn.Module):
         self.ln_input = LlamaRMSNorm(out_dim, eps=1e-6)
 
         # Residual MLP blocks for nonlinear refinement
-        self.layers = nn.ModuleList([
-            ResidualMLP(out_dim, hidden_dim, dropout=dropout_rate)
-            for _ in range(self.num_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [ResidualMLP(out_dim, hidden_dim, dropout=dropout_rate) for _ in range(self.num_layers)]
+        )
 
         # Per-layer norms (applied after each residual block)
-        self.layer_norms = nn.ModuleList([
-            LlamaRMSNorm(out_dim, eps=1e-6)
-            for _ in range(self.num_layers)
-        ])
+        self.layer_norms = nn.ModuleList(
+            [LlamaRMSNorm(out_dim, eps=1e-6) for _ in range(self.num_layers)]
+        )
 
         self.output_dropout = nn.Dropout(dropout_rate)
 
@@ -106,7 +104,7 @@ class ResidualAudioProjector(nn.Module):
             # Layer norms
             self.ln_input.weight.data.fill_(1.0)
             for ln in self.layer_norms:
-                ln.weight.data.fill_(1.0)
+                ln.weight.data.fill_(1.0)  # type: ignore[operator]
 
             # Residual blocks: small init on output projection
             for layer in self.layers:

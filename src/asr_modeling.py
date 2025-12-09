@@ -20,12 +20,22 @@ try:
     from .asr_config import ASRConfig
     from .moe_projector import MoEAudioProjector
     from .residual_projector import ResidualAudioProjector
+    from .shared_moe_projector import SharedMoEAudioProjector
     from .swiglu_projector import AudioProjector
 except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
     from moe_projector import MoEAudioProjector  # type: ignore[no-redef]
     from residual_projector import ResidualAudioProjector  # type: ignore[no-redef]
+    from shared_moe_projector import SharedMoEAudioProjector  # type: ignore[no-redef]
     from swiglu_projector import AudioProjector  # type: ignore[no-redef]
+
+# Map projector type names to classes
+PROJECTOR_CLASSES = {
+    "swiglu": AudioProjector,
+    "residual": ResidualAudioProjector,
+    "moe": MoEAudioProjector,
+    "shared_moe": SharedMoEAudioProjector,
+}
 
 
 class ASRModel(PreTrainedModel):
@@ -179,12 +189,13 @@ class ASRModel(PreTrainedModel):
 
         # Select projector type based on config
         projector_type = getattr(config, "projector_type", "moe")
-        if projector_type == "swiglu":
-            projector = AudioProjector(config)
-        elif projector_type == "residual":
-            projector = ResidualAudioProjector(config)
-        else:  # default to "moe"
-            projector = MoEAudioProjector(config)
+        projector_class = PROJECTOR_CLASSES.get(projector_type)
+        if projector_class is None:
+            raise ValueError(
+                f"Unknown projector_type: {projector_type}. "
+                f"Valid options: {list(PROJECTOR_CLASSES.keys())}"
+            )
+        projector = projector_class(config)
 
         # Move projector to same device as language model (important when using quantization)
         device = next(self.language_model.parameters()).device
@@ -256,7 +267,6 @@ class ASRModel(PreTrainedModel):
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
         if not getattr(self.config, "use_specaugment", False):
             return input_features
 
@@ -266,7 +276,7 @@ class ASRModel(PreTrainedModel):
         # Input shape: (batch_size, num_mel_bins, sequence_length) for Whisper
         batch_size, hidden_size, sequence_length = input_features.size()
 
-        mask_time_prob = getattr(self.config, "mask_time_prob", 0.10)
+        mask_time_prob = getattr(self.config, "mask_time_prob", 0.05)
         mask_time_length = getattr(self.config, "mask_time_length", 10)
         mask_feature_prob = getattr(self.config, "mask_feature_prob", 0.0)
         mask_feature_length = getattr(self.config, "mask_feature_length", 10)
@@ -299,9 +309,7 @@ class ASRModel(PreTrainedModel):
                 mask_feature_np, device=input_features.device, dtype=torch.bool
             )
             # Expand: (batch, features) -> (batch, features, seq)
-            mask_feature_expanded = mask_feature_indices[:, :, None].expand(
-                -1, -1, sequence_length
-            )
+            mask_feature_expanded = mask_feature_indices[:, :, None].expand(-1, -1, sequence_length)
             input_features = input_features.masked_fill(mask_feature_expanded, 0.0)
 
         return input_features
@@ -460,6 +468,12 @@ class ASRModel(PreTrainedModel):
                 label_smoothing=getattr(self.config, "label_smoothing", 0.0),
             )
 
+            # Add auxiliary loss from MoE projectors if available
+            if hasattr(self.projector, "get_aux_loss"):
+                aux_loss = self.projector.get_aux_loss()  # type: ignore[operator]
+                if aux_loss is not None and aux_loss.numel() > 0:
+                    loss = loss + aux_loss.to(loss.device)
+
         return CausalLMOutputWithPast(
             loss=loss,
             logits=outputs.logits,
@@ -496,10 +510,10 @@ class ASRModel(PreTrainedModel):
             task, self.config.user_prompt or "Transcribe: <audio>"
         )
 
-        messages = []
+        messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_prompt})
+        messages.append({"role": "user", "content": user_prompt or "Transcribe: <audio>"})
 
         prompt_ids = self.tokenizer.apply_chat_template(
             messages,
@@ -540,29 +554,17 @@ class ASRModel(PreTrainedModel):
         )
         generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
 
-        # Create dummy input_ids matching inputs_embeds length for repetition penalty tracking
-        # Use pad_token_id as placeholder since the actual tokens don't matter for penalty calc
-        dummy_input_ids = torch.full(
-            (inputs_embeds.shape[0], inputs_embeds.shape[1]),
-            self.tokenizer.pad_token_id,
-            dtype=torch.long,
-            device=device,
-        )
-
-        # Generate (type ignore needed as generate() has complex return type)
-        # Note: When using inputs_embeds, generate() returns only new tokens
-        # (no placeholder positions for input embeddings), so no stripping needed
+        # Generate without input_ids - using only inputs_embeds
+        # This avoids issues with dummy input_ids interfering with generation
         output = self.language_model.generate(  # type: ignore[operator]
-            input_ids=dummy_input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             **generate_kwargs,
         )
 
-        # Return generated tokens directly - no stripping needed with inputs_embeds
+        # When using inputs_embeds without input_ids, generate returns only new tokens
         if isinstance(output, torch.Tensor):
             return output
-        # Handle GenerateOutput types that have sequences attribute
         return output.sequences
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
@@ -598,7 +600,13 @@ class ASRModel(PreTrainedModel):
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projector files
-        for projector_file in ["moe_projector.py", "residual_projector.py", "swiglu_projector.py"]:
+        projector_files = [
+            "moe_projector.py",
+            "residual_projector.py",
+            "swiglu_projector.py",
+            "shared_moe_projector.py",
+        ]
+        for projector_file in projector_files:
             src_path = src_dir / projector_file
             if src_path.exists():
                 shutil.copy(src_path, save_dir / projector_file)

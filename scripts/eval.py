@@ -238,11 +238,13 @@ def load_combined_dataset(max_samples: int | None, seed: int) -> tuple[Iterator,
             if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
                 continue
 
-            all_samples.append({
-                "audio": sample[cfg.audio_field],
-                "text": sample[cfg.text_field],
-                "source": name,
-            })
+            all_samples.append(
+                {
+                    "audio": sample[cfg.audio_field],
+                    "text": sample[cfg.text_field],
+                    "source": name,
+                }
+            )
             count += 1
             if count >= num_samples:
                 break
@@ -497,7 +499,7 @@ def run_all_datasets(args, model_name: str):
     output_dirs: list[Path] = []
 
     print(f"\n{'=' * 60}")
-    print(f"Running evaluation on ALL datasets")
+    print("Running evaluation on ALL datasets")
     print(f"Model: {model_name}")
     print(f"{'=' * 60}\n")
 

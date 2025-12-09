@@ -25,34 +25,34 @@ class SwiGLU(nn.Module):
 class AudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.k = getattr(config, "projector_pool_stride", 4)  # Downsampling rate
+        self.k = getattr(config, "projector_pool_stride", 4)
         in_dim = config.encoder_dim * self.k
         out_dim = config.llm_dim
         hidden_dim = config.projector_hidden_dim
         if hidden_dim is None:
-            hidden_dim = config.encoder_dim * 4
+            hidden_dim = config.encoder_dim * 2
 
         dropout_rate = getattr(config, "projector_dropout", 0.0)
 
-        from transformers.models.llama.modeling_llama import LlamaRMSNorm
-
-        self.ln_pre = LlamaRMSNorm(in_dim, eps=1e-6)
-        self.proj = SwiGLU(in_dim, hidden_dim, out_dim, dropout=dropout_rate)
-        self.ln_post = LlamaRMSNorm(out_dim, eps=1e-6)
+        self.proj1 = SwiGLU(in_dim, hidden_dim, hidden_dim, dropout=dropout_rate)
+        self.proj2 = SwiGLU(hidden_dim, hidden_dim, out_dim, dropout=dropout_rate)
         self.output_dropout = nn.Dropout(dropout_rate)
 
         with torch.no_grad():
             std = getattr(config, "projector_init_std", 0.02)
-            self.ln_pre.weight.data.fill_(1.0)
-            self.ln_post.weight.data.fill_(1.0)
-            nn.init.normal_(self.proj.w1.weight, mean=0.0, std=std)
-            nn.init.normal_(self.proj.w2.weight, mean=0.0, std=std)
-            nn.init.normal_(self.proj.w3.weight, mean=0.0, std=std)
+            # Initialize first layer
+            nn.init.normal_(self.proj1.w1.weight, mean=0.0, std=std)
+            nn.init.normal_(self.proj1.w2.weight, mean=0.0, std=std)
+            nn.init.normal_(self.proj1.w3.weight, mean=0.0, std=std)
+            # Initialize second layer
+            nn.init.normal_(self.proj2.w1.weight, mean=0.0, std=std)
+            nn.init.normal_(self.proj2.w2.weight, mean=0.0, std=std)
+            nn.init.normal_(self.proj2.w3.weight, mean=0.0, std=std)
 
     def forward(self, x):
         batch_size, seq_len, dim = x.size()
 
-        target_dtype = self.proj.w1.weight.dtype
+        target_dtype = self.proj1.w1.weight.dtype
         if x.dtype != target_dtype:
             x = x.to(target_dtype)
 
@@ -62,8 +62,7 @@ class AudioProjector(nn.Module):
             x = F.pad(x, (0, 0, 0, pad_len))
 
         x = x.contiguous().view(batch_size, -1, dim * self.k)
-        x = self.ln_pre(x)
-        x = self.proj(x)
-        x = self.ln_post(x)
+        x = self.proj1(x)
+        x = self.proj2(x)
 
         return self.output_dropout(x)

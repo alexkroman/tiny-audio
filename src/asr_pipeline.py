@@ -102,7 +102,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             elif "array" in inputs:
                 inputs = {
                     "raw": inputs["array"],
-                    "sampling_rate": inputs.get("sampling_rate", self.feature_extractor.sampling_rate),
+                    "sampling_rate": inputs.get(
+                        "sampling_rate", self.feature_extractor.sampling_rate
+                    ),
                 }
             elif "path" in inputs and "array" not in inputs:
                 # Lazy-loaded audio - load from path

@@ -22,8 +22,7 @@ class SimpleAdapter(nn.Module):
         x = self.fc1(x)
         x = self.relu(x)
         x = self.dropout(x)
-        x = self.fc2(x)
-        return x
+        return self.fc2(x)
 
 
 class MoEAudioProjector(nn.Module):
@@ -157,3 +156,7 @@ class MoEAudioProjector(nn.Module):
             final_out.add_(expert_out * expert_weight)
 
         return self.ln_post(final_out)
+
+    def get_aux_loss(self) -> torch.Tensor:
+        """Return auxiliary loss (none for dense MoE - all experts always used)."""
+        return torch.tensor(0.0)

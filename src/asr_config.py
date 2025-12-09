@@ -22,10 +22,14 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 2,
         projector_hidden_dim: Optional[int] = None,
-        projector_type: str = "moe",  # "moe", "swiglu", or "residual"
+        projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe"
         projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.05,  # Dropout rate for projector layers
         projector_input_noise: float = 0.02,  # Input noise for projector
+        # MoE-specific configuration
+        num_experts: int = 4,  # Number of experts in MoE projectors
+        num_experts_per_tok: int = 2,  # Top-k experts per token
+        router_aux_loss_coef: float = 0.01,  # Auxiliary loss coefficient for load balancing
         use_specaugment: bool = True,  # Apply SpecAugment during training
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_diversity_penalty: float = 0.0,
@@ -46,7 +50,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # Set default generation parameters
         generation_defaults = {
             "num_beams": 1,
-            "max_new_tokens": 256,
+            "max_new_tokens": 96,
             "min_new_tokens": 0,
             "do_sample": False,
             "temperature": 0.1,
@@ -75,6 +79,10 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_num_layers = projector_num_layers
         self.projector_dropout = projector_dropout
         self.projector_input_noise = projector_input_noise
+        # MoE-specific configuration
+        self.num_experts = num_experts
+        self.num_experts_per_tok = num_experts_per_tok
+        self.router_aux_loss_coef = router_aux_loss_coef
         self.use_specaugment = use_specaugment
         self.label_smoothing = label_smoothing
         self.inference_diversity_penalty = inference_diversity_penalty
@@ -82,14 +90,30 @@ class ASRConfig(transformers.PretrainedConfig):
 
         # Generation parameters (use explicit value if provided, else use default)
         self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]
-        self.max_new_tokens = max_new_tokens if max_new_tokens is not None else generation_defaults["max_new_tokens"]
-        self.min_new_tokens = min_new_tokens if min_new_tokens is not None else generation_defaults["min_new_tokens"]
+        self.max_new_tokens = (
+            max_new_tokens if max_new_tokens is not None else generation_defaults["max_new_tokens"]
+        )
+        self.min_new_tokens = (
+            min_new_tokens if min_new_tokens is not None else generation_defaults["min_new_tokens"]
+        )
         self.do_sample = do_sample if do_sample is not None else generation_defaults["do_sample"]
-        self.repetition_penalty = repetition_penalty if repetition_penalty is not None else generation_defaults["repetition_penalty"]
-        self.length_penalty = length_penalty if length_penalty is not None else generation_defaults["length_penalty"]
-        self.no_repeat_ngram_size = no_repeat_ngram_size if no_repeat_ngram_size is not None else generation_defaults["no_repeat_ngram_size"]
+        self.repetition_penalty = (
+            repetition_penalty
+            if repetition_penalty is not None
+            else generation_defaults["repetition_penalty"]
+        )
+        self.length_penalty = (
+            length_penalty if length_penalty is not None else generation_defaults["length_penalty"]
+        )
+        self.no_repeat_ngram_size = (
+            no_repeat_ngram_size
+            if no_repeat_ngram_size is not None
+            else generation_defaults["no_repeat_ngram_size"]
+        )
         self.use_cache = use_cache if use_cache is not None else generation_defaults["use_cache"]
-        self.temperature = temperature if temperature is not None else generation_defaults["temperature"]
+        self.temperature = (
+            temperature if temperature is not None else generation_defaults["temperature"]
+        )
         self.top_k = top_k
         self.top_p = top_p
         self.early_stopping = early_stopping

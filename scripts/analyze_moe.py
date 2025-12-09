@@ -379,7 +379,9 @@ def analyze_checkpoint(file_path: str):
 
     print("\n   Weight Statistics by Layer Type:")
     print("   " + "-" * 70)
-    print(f"   {'Layer Type':<15} {'L2 Norm':<12} {'Mean |W|':<12} {'Std':<12} {'Max |W|':<12} {'Sparsity':<10}")
+    print(
+        f"   {'Layer Type':<15} {'L2 Norm':<12} {'Mean |W|':<12} {'Std':<12} {'Max |W|':<12} {'Sparsity':<10}"
+    )
     print("   " + "-" * 70)
 
     layer_summaries = {}
@@ -464,7 +466,9 @@ def analyze_checkpoint(file_path: str):
             )
 
     if expert_stats:
-        print(f"   {'Expert':<10} {'FC1 Var':<12} {'FC2 Var':<12} {'FC1 Kurt':<12} {'FC2 Kurt':<12}")
+        print(
+            f"   {'Expert':<10} {'FC1 Var':<12} {'FC2 Var':<12} {'FC1 Kurt':<12} {'FC2 Kurt':<12}"
+        )
         print("   " + "-" * 58)
         for s in expert_stats:
             print(
@@ -541,10 +545,12 @@ def analyze_checkpoint(file_path: str):
             max_entropy = np.log(num_experts)
             normalized_entropy = entropy / max_entropy
 
-            print(f"   Router Bias Analysis (default routing preferences):")
+            print("   Router Bias Analysis (default routing preferences):")
             print(f"      Bias values: {final_router_bias.cpu().numpy().round(3)}")
             print(f"      Default probs: {default_probs.cpu().numpy().round(3)}")
-            print(f"      Entropy: {entropy:.3f} / {max_entropy:.3f} ({normalized_entropy * 100:.1f}% of max)")
+            print(
+                f"      Entropy: {entropy:.3f} / {max_entropy:.3f} ({normalized_entropy * 100:.1f}% of max)"
+            )
 
             draw_ascii_bar(
                 default_probs.cpu().numpy(),
@@ -668,7 +674,7 @@ def analyze_checkpoint(file_path: str):
             print(f"   ⚠️  Some weights shrank significantly ({min_ratio:.2f}x init)")
             print("      → May indicate vanishing gradients or over-regularization")
         if 0.5 <= avg_ratio <= 3.0:
-            print(f"   ✅ Weight magnitudes in reasonable range")
+            print("   ✅ Weight magnitudes in reasonable range")
 
     # 11. SUMMARY
     print("\n" + "=" * 65)
