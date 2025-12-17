@@ -79,6 +79,9 @@ def start_training(host, port, experiment, session_name, wandb_run_id=None, wand
         echo "--- Setting up system limits ---"
         ulimit -n 65536  # Increase file descriptor limit for audio decoding
 
+        echo "--- Installing hf_transfer (Rust) for fast downloads ---"
+        pip install hf_transfer --quiet --root-user-action=ignore
+
         echo "--- Setting up environment variables ---"
         export PATH="/root/.local/bin:$PATH"
         export TOKENIZERS_PARALLELISM=false
@@ -107,6 +110,8 @@ def start_training(host, port, experiment, session_name, wandb_run_id=None, wand
         echo "Python version: $(python --version)"
         echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())' 2>/dev/null)"
         echo "Audio decoder: $HF_DATASETS_AUDIO_DECODER"
+        echo "HF_HUB_ENABLE_HF_TRANSFER: $HF_HUB_ENABLE_HF_TRANSFER"
+        python -c "import hf_transfer; print(f'hf_transfer version: {{hf_transfer.__version__}}')" 2>/dev/null || echo "hf_transfer: NOT INSTALLED"
         echo "============================="
 
         cd /workspace

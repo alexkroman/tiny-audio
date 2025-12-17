@@ -21,8 +21,9 @@ class ASRConfig(transformers.PretrainedConfig):
         audio_sample_rate: int = 16000,
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 2,
+        downsample_rate: int = 16,  # For deepseek_conv: progressive downsampling factor
         projector_hidden_dim: Optional[int] = None,
-        projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe"
+        projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe", "conv", "deepseek_conv"
         projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.05,  # Dropout rate for projector layers
         projector_input_noise: float = 0.02,  # Input noise for projector
@@ -74,6 +75,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.audio_sample_rate = audio_sample_rate
         self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
+        self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
         self.projector_num_layers = projector_num_layers

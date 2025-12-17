@@ -1,0 +1,72 @@
+# @package _global_
+
+# DeepSeek-style progressive convolutional projector
+# Uses stacked stride-2 convolutions for 16x downsampling (vs single-stride in conv)
+defaults:
+  - override /model: large
+  - override /data: loquacious_medium
+  - override /training: production
+
+model:
+  decoder_model_name: HuggingFaceTB/SmolLM3-3B
+  encoder_model_name: openai/whisper-large-v3-turbo
+
+  projector_type: deepseek_conv
+  downsample_rate: 16  # Progressive 2x strides (4 conv layers)
+
+training:
+  # Hub configuration
+  push_to_hub: true
+  hub_model_id: "mazesmazes/tiny-audio-deepseek-conv"
+  hub_strategy: "every_save"
+  hub_private_repo: false
+
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 24
+  gradient_accumulation_steps: 3
+  eval_accumulation_steps: 3
+
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+
+  learning_rate: 1.0e-4
+
+  lr_scheduler_type: "cosine"
+  warmup_steps: 500
+
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  projector_dropout: 0.0
+  use_specaugment: true
+  label_smoothing: 0.0
+
+  data:
+    max_audio_duration_seconds: 15.0
+
+  # Memory optimization
+  torch_compile: false
+
+  # Data loading optimization for Intel Xeon Gold 6342 (24 cores / 48 threads)
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 8  # Increased prefetch to keep GPU fed
+  dataloader_pin_memory: true
+  dataloader_persistent_workers: true
+  dataloader_drop_last: true  # Avoid small final batches that underutilize GPU
+
+  num_train_epochs: 1
+  max_steps: -1  # Disabled, use epochs instead
+
+  # Reproducibility
+  seed: 44
+  ignore_data_skip: true
+
+# Disable streaming for deepseek_conv (requires fixed sequence lengths)
+# Use parallel processing for faster data loading
+data:
+  use_streaming: false
+  num_proc: 16  # Parallel workers for dataset map/filter operations
+
+# Early stopping configuration
+early_stopping:
+  patience: null
+  threshold: 0.0

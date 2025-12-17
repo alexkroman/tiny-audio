@@ -41,7 +41,7 @@ TASK_PROMPTS = {
 
 
 class DatasetLoader:
-    """Loads and prepares streaming datasets for training."""
+    """Loads and prepares datasets for training (streaming or non-streaming)."""
 
     def __init__(self, config: DictConfig):
         self.config = config.data
@@ -49,8 +49,10 @@ class DatasetLoader:
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
         self.max_audio_duration = self.config.get("max_audio_duration_seconds", 30.0)
+        self.use_streaming = self.config.get("use_streaming", True)
+        self.num_proc = self.config.get("num_proc", 16) if not self.use_streaming else None
 
-    def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> IterableDataset:
+    def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
             raise ValueError("Dataset path is required")
@@ -59,8 +61,9 @@ class DatasetLoader:
             dataset_path,
             name=dataset_cfg.get("name"),
             split=split,
-            streaming=True,
+            streaming=self.use_streaming,
             cache_dir=self.cache_dir,
+            num_proc=self.num_proc,  # Parallel download/processing
         )
 
         # Normalize column names
@@ -82,23 +85,55 @@ class DatasetLoader:
             ds = ds.remove_columns(extra_cols)
 
         task = dataset_cfg.get("task", "transcribe")
-        features = Features(
-            {
-                "audio": Audio(sampling_rate=self.sample_rate),
-                "text": Value("string"),
-                "task": Value("string"),
-            }
-        )
 
-        return IterableDataset.from_generator(
-            self._add_task_generator,
-            gen_kwargs={"dataset": ds, "task": task, "max_audio_duration": self.max_audio_duration},
-            features=features,
-        )
+        if self.use_streaming:
+            # Streaming mode: use generator
+            features = Features(
+                {
+                    "audio": Audio(sampling_rate=self.sample_rate),
+                    "text": Value("string"),
+                    "task": Value("string"),
+                }
+            )
+            return IterableDataset.from_generator(
+                self._add_task_generator,
+                gen_kwargs={"dataset": ds, "task": task, "max_audio_duration": self.max_audio_duration},
+                features=features,
+            )
+        else:
+            # Non-streaming mode: use parallel map/filter with num_proc
+            max_dur = self.max_audio_duration
+            sample_rate = self.sample_rate
+
+            def filter_valid(example):
+                audio = example.get("audio")
+                if audio is None:
+                    return False
+                if not isinstance(audio, dict) or "array" not in audio:
+                    return False
+                arr = audio["array"]
+                sr = audio.get("sampling_rate", sample_rate)
+                num_samples = len(arr) if hasattr(arr, "__len__") else arr.shape[-1]
+                duration = num_samples / sr
+                if duration > max_dur:
+                    return False
+                text = example.get("text", "")
+                if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
+                    return False
+                return True
+
+            def add_task(example):
+                example["task"] = task
+                return example
+
+            print(f"Processing dataset with num_proc={self.num_proc}")
+            ds = ds.filter(filter_valid, num_proc=self.num_proc)
+            ds = ds.map(add_task, num_proc=self.num_proc)
+            return ds
 
     @staticmethod
     def _add_task_generator(dataset, task: str, max_audio_duration: float = 30.0):
-        """Generator that adds task field and filters invalid samples."""
+        """Generator that adds task field and filters invalid samples (streaming mode)."""
         for example in dataset:
             # Skip invalid audio
             audio = example.get("audio")
@@ -175,7 +210,12 @@ class DatasetLoader:
             return None
         # Shuffle each dataset before interleaving for better randomization
         if shuffle:
-            datasets = [ds.shuffle(seed=self.seed, buffer_size=100) for ds in datasets]
+            if self.use_streaming:
+                # Streaming mode: use buffer-based shuffle
+                datasets = [ds.shuffle(seed=self.seed, buffer_size=100) for ds in datasets]
+            else:
+                # Non-streaming mode: shuffle entire dataset
+                datasets = [ds.shuffle(seed=self.seed) for ds in datasets]
         if len(datasets) == 1:
             return datasets[0]
         probs = [w / sum(weights) for w in weights]
@@ -443,9 +483,14 @@ def main(cfg: DictConfig) -> None:
         torch._inductor.config.compile_threads = compile_config.get("compile_threads", 4)
 
     # Create trainer with only valid TrainingArguments
+    valid_args = get_valid_training_args(training_config)
+    print(f"Dataloader config: num_workers={valid_args.get('dataloader_num_workers')}, "
+          f"prefetch_factor={valid_args.get('dataloader_prefetch_factor')}, "
+          f"pin_memory={valid_args.get('dataloader_pin_memory')}, "
+          f"persistent_workers={valid_args.get('dataloader_persistent_workers')}")
     trainer = Trainer(
         model=model,
-        args=TrainingArguments(**get_valid_training_args(training_config)),
+        args=TrainingArguments(**valid_args),
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=data_collator,

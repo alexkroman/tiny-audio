@@ -18,12 +18,16 @@ from transformers.models.whisper.modeling_whisper import (
 
 try:
     from .asr_config import ASRConfig
+    from .conv_projector import ConvAudioProjector
+    from .deepseek_conv_projector import DeepSeekConvAudioProjector
     from .moe_projector import MoEAudioProjector
     from .residual_projector import ResidualAudioProjector
     from .shared_moe_projector import SharedMoEAudioProjector
     from .swiglu_projector import AudioProjector
 except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
+    from conv_projector import ConvAudioProjector  # type: ignore[no-redef]
+    from deepseek_conv_projector import DeepSeekConvAudioProjector  # type: ignore[no-redef]
     from moe_projector import MoEAudioProjector  # type: ignore[no-redef]
     from residual_projector import ResidualAudioProjector  # type: ignore[no-redef]
     from shared_moe_projector import SharedMoEAudioProjector  # type: ignore[no-redef]
@@ -35,6 +39,8 @@ PROJECTOR_CLASSES = {
     "residual": ResidualAudioProjector,
     "moe": MoEAudioProjector,
     "shared_moe": SharedMoEAudioProjector,
+    "conv": ConvAudioProjector,
+    "deepseek_conv": DeepSeekConvAudioProjector,
 }
 
 
@@ -601,6 +607,8 @@ class ASRModel(PreTrainedModel):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projector files
         projector_files = [
+            "conv_projector.py",
+            "deepseek_conv_projector.py",
             "moe_projector.py",
             "residual_projector.py",
             "swiglu_projector.py",
