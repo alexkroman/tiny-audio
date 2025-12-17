@@ -126,6 +126,11 @@ class ASRModel(PreTrainedModel):
         # Audio projector (trainable)
         self.projector = self._create_projector(config, target_dtype)
 
+        # Cache whether projector accepts attention_mask
+        import inspect
+        sig = inspect.signature(self.projector.forward)
+        self._projector_accepts_mask = 'attention_mask' in sig.parameters
+
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
@@ -342,17 +347,29 @@ class ASRModel(PreTrainedModel):
                 )
             hidden_states = encoder_out.last_hidden_state
 
-        audio_embeds = self.projector(hidden_states)
-
-        # Create attention mask for projected audio
-        if audio_attention_mask is not None:
-            mask_float = audio_attention_mask.unsqueeze(1).float()
-            pooled_mask = F.interpolate(mask_float, size=audio_embeds.shape[1], mode="nearest")
-            audio_mask = pooled_mask.squeeze(1).long()
+        # Handle projectors that return (embeds, mask) or just embeds
+        if self._projector_accepts_mask:
+            proj_out = self.projector(hidden_states, attention_mask=audio_attention_mask)
         else:
-            audio_mask = torch.ones(
-                audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long
-            )
+            proj_out = self.projector(hidden_states)
+
+        if isinstance(proj_out, tuple):
+            audio_embeds, audio_mask = proj_out
+            if audio_mask is None:
+                audio_mask = torch.ones(
+                    audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long
+                )
+        else:
+            audio_embeds = proj_out
+            # Create attention mask for projected audio
+            if audio_attention_mask is not None:
+                mask_float = audio_attention_mask.unsqueeze(1).float()
+                pooled_mask = F.interpolate(mask_float, size=audio_embeds.shape[1], mode="nearest")
+                audio_mask = pooled_mask.squeeze(1).long()
+            else:
+                audio_mask = torch.ones(
+                    audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long
+                )
 
         return audio_embeds, audio_mask
 

@@ -21,10 +21,10 @@ training:
   hub_strategy: "every_save"
   hub_private_repo: false
 
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 24
-  gradient_accumulation_steps: 3
-  eval_accumulation_steps: 3
+  per_device_train_batch_size: 12  # Increase if VRAM allows
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 2  # Effective batch = 24
+  eval_accumulation_steps: 1  # Faster eval
 
   adam_beta1: 0.9
   adam_beta2: 0.95
@@ -47,11 +47,19 @@ training:
   torch_compile: false
 
   # Data loading optimization for Intel Xeon Gold 6342 (24 cores / 48 threads)
-  dataloader_num_workers: 16
+  dataloader_num_workers: 20  # Leave 4 cores for training/GPU ops
   dataloader_prefetch_factor: 8  # Increased prefetch to keep GPU fed
   dataloader_pin_memory: true
   dataloader_persistent_workers: true
   dataloader_drop_last: true  # Avoid small final batches that underutilize GPU
+
+  # Group similar-length samples to minimize padding waste
+  group_by_length: true
+
+  # Reduce save/eval overhead
+  save_steps: 1000  # Less frequent saves
+  eval_steps: 2000  # Less frequent evals
+  logging_steps: 50  # Less frequent logging
 
   num_train_epochs: 1
   max_steps: -1  # Disabled, use epochs instead
@@ -64,7 +72,7 @@ training:
 # Use parallel processing for faster data loading
 data:
   use_streaming: false
-  num_proc: 16  # Parallel workers for dataset map/filter operations
+  num_proc: 24  # Intel Xeon Gold 6342 has 24 physical cores
 
 # Early stopping configuration
 early_stopping:

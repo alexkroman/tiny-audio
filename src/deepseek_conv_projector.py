@@ -31,20 +31,20 @@ class DeepSeekConvAudioProjector(nn.Module):
             # OPTIMIZATION: Use GroupNorm (usually 32 groups) to avoid Transpose overhead
             # This works directly on [B, C, T]
             layers.append(nn.GroupNorm(num_groups=32, num_channels=next_dim))
-            layers.append(nn.GELU())
+            layers.append(nn.GELU(approximate='tanh'))  # Faster approximate GELU
             
             current_dim = next_dim
             current_stride *= 2
             
         self.compressor = nn.Sequential(*layers)
-        
-        # 2. MLP Connector
+
+        # 2. MLP Connector with fused GELU for better performance
         self.mlp = nn.Sequential(
             nn.Linear(current_dim, llm_dim),
-            nn.GELU(),
+            nn.GELU(approximate='tanh'),  # Faster approximate GELU
             nn.Linear(llm_dim, llm_dim)
         )
-        
+
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -59,7 +59,7 @@ class DeepSeekConvAudioProjector(nn.Module):
         B, T, D = x.shape
         
         # 1. Prepare inputs for Conv1d [B, Dim, Seq_Len]
-        x = x.transpose(1, 2)
+        x = x.transpose(1, 2).contiguous()  # Ensure contiguous for Conv1d
         
         # 2. Calculate padding
         pad_amt = (self.target_downsample - (T % self.target_downsample)) % self.target_downsample
