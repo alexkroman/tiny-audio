@@ -112,26 +112,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Initialize tokenizer and special tokens
         self._init_tokenizer(config)
 
-        # Set up generation config with our defaults
+        # Set up generation config with greedy decoding defaults
         self.generation_config = self.language_model.generation_config
         self.generation_config.max_new_tokens = config.max_new_tokens
         self.generation_config.num_beams = config.num_beams
-        self.generation_config.do_sample = config.do_sample
+        self.generation_config.do_sample = False
         self.generation_config.use_cache = config.use_cache
         self.generation_config.length_penalty = config.length_penalty
         self.generation_config.repetition_penalty = config.repetition_penalty
         self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
-        # Only set sampling params when do_sample=True, otherwise clear them
-        if config.do_sample:
-            self.generation_config.temperature = config.temperature
-            if config.top_k is not None:
-                self.generation_config.top_k = config.top_k
-            if config.top_p is not None:
-                self.generation_config.top_p = config.top_p
-        else:
-            self.generation_config.temperature = None
-            self.generation_config.top_k = None
-            self.generation_config.top_p = None
         self.generation_config.eos_token_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
