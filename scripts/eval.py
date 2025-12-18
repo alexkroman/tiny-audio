@@ -20,7 +20,7 @@ from typing import Iterator
 
 import numpy as np
 import torch
-from datasets import load_dataset
+from datasets import Audio, load_dataset
 from jiwer import wer
 from transformers import WhisperTokenizer
 
@@ -211,8 +211,12 @@ def load_single_dataset(name: str, split: str, config_override: str | None = Non
 
     print(f"Loading {cfg.path} (config: {config}, split: {split})...")
     if config:
-        return load_dataset(cfg.path, config, split=split, streaming=True)
-    return load_dataset(cfg.path, split=split, streaming=True)
+        ds = load_dataset(cfg.path, config, split=split, streaming=True)
+    else:
+        ds = load_dataset(cfg.path, split=split, streaming=True)
+
+    # Cast audio column to ensure proper decoding with streaming
+    return ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))
 
 
 def load_combined_dataset(max_samples: int | None, seed: int) -> tuple[Iterator, int]:
@@ -237,6 +241,8 @@ def load_combined_dataset(max_samples: int | None, seed: int) -> tuple[Iterator,
         else:
             ds = load_dataset(cfg.path, split=validation_split, streaming=True)
 
+        # Cast audio column to ensure proper decoding with streaming
+        ds = ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))
         ds = ds.shuffle(seed=seed, buffer_size=num_samples * 10)
 
         count = 0
