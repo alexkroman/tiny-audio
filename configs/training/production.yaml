@@ -73,6 +73,7 @@ label_smoothing: 0.0
 disable_tqdm: false
 log_level: info
 ignore_data_skip: false
+resume_from_checkpoint: null
 
 # Required by HF Trainer
 remove_unused_columns: false

@@ -44,11 +44,13 @@ def kill_existing_session(host, port, session_name):
     print(f"Ensured no session named '{session_name}' is running.")
 
 
-def start_training(host, port, experiment, session_name, wandb_run_id=None, wandb_resume=None):
+def start_training(host, port, experiment, session_name, wandb_run_id=None, wandb_resume=None, extra_args=None):
     """
     Creates and executes a training script inside a new tmux session on the remote host.
     """
     print(f"\nStarting training session '{session_name}' with experiment '{experiment}'...")
+    if extra_args:
+        print(f"Extra args: {' '.join(extra_args)}")
 
     import os
 
@@ -66,6 +68,9 @@ def start_training(host, port, experiment, session_name, wandb_run_id=None, wand
     if wandb_resume:
         wandb_exports += f'export WANDB_RESUME="{wandb_resume}"\n        '
 
+    # Build extra args string for Hydra overrides
+    extra_args_str = " ".join(extra_args) if extra_args else ""
+
     # This script will be created and executed on the remote machine.
     # It activates the virtual environment to ensure all commands use the correct packages.
     training_script_content = textwrap.dedent(
@@ -76,13 +81,8 @@ def start_training(host, port, experiment, session_name, wandb_run_id=None, wand
         # remains active so you can attach and debug the error message.
 
 
-        echo "--- Setting up system limits ---"
         ulimit -n 65536  # Increase file descriptor limit for audio decoding
-
-        echo "--- Installing hf_transfer (Rust) for fast downloads ---"
         pip install hf_transfer --quiet --root-user-action=ignore
-
-        echo "--- Setting up environment variables ---"
         export PATH="/root/.local/bin:$PATH"
         export TOKENIZERS_PARALLELISM=false
         export HF_DATASETS_AUDIO_DECODER="soundfile"
@@ -104,11 +104,7 @@ def start_training(host, port, experiment, session_name, wandb_run_id=None, wand
         export TORCH_CUDA_GRAPHS_ENABLED=0
 
         cd /workspace
-
-        echo "--- Launching Training ---"
-        # Use accelerate directly (it's installed in system Python)
-        # Then pass python path explicitly for training script
-        accelerate launch --config_file configs/accelerate/a40.yaml -m scripts.train +experiments={experiment}
+        accelerate launch --config_file configs/accelerate/a40.yaml -m scripts.train +experiments={experiment} {extra_args_str}
         EXIT_CODE=$?
 
         if [ $EXIT_CODE -eq 0 ]; then
@@ -187,7 +183,7 @@ def main():
         help="W&B resume mode: 'must' (fail if not found), 'allow', or 'never' (or set WANDB_RESUME env var).",
     )
 
-    args = parser.parse_args()
+    args, extra_args = parser.parse_known_args()
 
     if args.session_name is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
@@ -206,6 +202,7 @@ def main():
         args.session_name,
         args.wandb_run_id,
         args.wandb_resume,
+        extra_args,
     ):
         print("Exiting due to failure in starting the training session.")
         sys.exit(1)
