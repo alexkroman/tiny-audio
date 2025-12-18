@@ -138,9 +138,7 @@ def analyze_checkpoint(file_path: str):
     if not proj_weights:
         print("⚠️  No 'projector' prefix found. Searching for moe/expert keys...")
         proj_weights = {
-            k: v
-            for k, v in tensors.items()
-            if "moe" in k or "expert" in k or "router" in k
+            k: v for k, v in tensors.items() if "moe" in k or "expert" in k or "router" in k
         }
 
     if not proj_weights:
@@ -217,9 +215,13 @@ def analyze_checkpoint(file_path: str):
         total_norm = shared_down_norm + sum(routed_down_norms)
 
         print("\n   Output Contribution (down_proj L2 norms):")
-        print(f"      Shared expert:     {shared_down_norm:.4f} ({shared_down_norm/total_norm*100:.1f}%)")
+        print(
+            f"      Shared expert:     {shared_down_norm:.4f} ({shared_down_norm / total_norm * 100:.1f}%)"
+        )
         print(f"      Routed avg:        {avg_routed_norm:.4f}")
-        print(f"      Routed total:      {sum(routed_down_norms):.4f} ({sum(routed_down_norms)/total_norm*100:.1f}%)")
+        print(
+            f"      Routed total:      {sum(routed_down_norms):.4f} ({sum(routed_down_norms) / total_norm * 100:.1f}%)"
+        )
 
         # Visual comparison
         all_down_norms = [shared_down_norm] + routed_down_norms
@@ -297,7 +299,9 @@ def analyze_checkpoint(file_path: str):
             w = expert_dict[proj_name].float()
             std = w.std().item()
             norm = torch.linalg.norm(w).item()
-            print(f"      {proj_name:<12} Shape: {str(list(w.shape)):<20} Std: {std:.5f}, Norm: {norm:.4f}")
+            print(
+                f"      {proj_name:<12} Shape: {str(list(w.shape)):<20} Std: {std:.5f}, Norm: {norm:.4f}"
+            )
 
     if shared_expert:
         analyze_swiglu_expert("Shared Expert", shared_expert)
@@ -378,12 +382,14 @@ def analyze_checkpoint(file_path: str):
             norm = torch.linalg.norm(w).item()
             std = w.std().item()
             near_zero_pct = (w.abs() < 1e-6).float().mean().item() * 100
-            down_proj_stats.append({
-                "idx": idx,
-                "norm": norm,
-                "std": std,
-                "near_zero_pct": near_zero_pct,
-            })
+            down_proj_stats.append(
+                {
+                    "idx": idx,
+                    "norm": norm,
+                    "std": std,
+                    "near_zero_pct": near_zero_pct,
+                }
+            )
 
     if down_proj_stats:
         print(f"\n   {'Expert':<10} {'L2 Norm':<12} {'Std':<12} {'Near-Zero %':<12}")
@@ -402,7 +408,7 @@ def analyze_checkpoint(file_path: str):
         if "down_proj" in shared_expert:
             shared_norm = torch.linalg.norm(shared_expert["down_proj"].float()).item()
             print(f"\n   Shared expert down_proj norm: {shared_norm:.4f}")
-            print(f"   Routed/Shared ratio: {avg_norm/shared_norm:.3f}")
+            print(f"   Routed/Shared ratio: {avg_norm / shared_norm:.3f}")
 
     # 6. SPECTRAL HEALTH
     print("\n" + "=" * 70)
@@ -414,7 +420,7 @@ def analyze_checkpoint(file_path: str):
         rank = compute_effective_rank(shared_expert["gate_proj"])
         full_rank = min(shared_expert["gate_proj"].shape)
         print("\n   Shared Expert gate_proj:")
-        print(f"      Effective Rank: {rank:.1f} / {full_rank} ({rank/full_rank*100:.1f}%)")
+        print(f"      Effective Rank: {rank:.1f} / {full_rank} ({rank / full_rank * 100:.1f}%)")
 
     # Check routed experts
     if num_experts > 0 and "gate_proj" in routed_experts[sorted_indices[0]]:
@@ -429,7 +435,9 @@ def analyze_checkpoint(file_path: str):
             avg_rank = np.mean(ranks)
 
             print("\n   Routed Expert gate_proj Effective Rank:")
-            print(f"      Average: {avg_rank:.1f} / {full_rank} ({avg_rank/full_rank*100:.1f}%)")
+            print(
+                f"      Average: {avg_rank:.1f} / {full_rank} ({avg_rank / full_rank * 100:.1f}%)"
+            )
             draw_ascii_bar(ranks, labels=[f"E{i}" for i in sorted_indices], denominator=full_rank)
 
             if avg_rank / full_rank < 0.3:
@@ -533,25 +541,29 @@ def analyze_checkpoint(file_path: str):
         in_dim = w.shape[1] if w.dim() >= 2 else w.shape[0]
         if "down_proj" in name and "experts" in name:
             # Tiny orthogonal init (gain=0.01) for routed down_proj
-            expected_std = 0.01 / (in_dim ** 0.5)
+            expected_std = 0.01 / (in_dim**0.5)
             ratio = current_std / (expected_std + 1e-10)
             if ratio > 3.0:
-                deviation_stats.append({
-                    "name": name,
-                    "current_std": current_std,
-                    "expected_std": expected_std,
-                    "note": f"grown {ratio:.1f}x from init",
-                })
+                deviation_stats.append(
+                    {
+                        "name": name,
+                        "current_std": current_std,
+                        "expected_std": expected_std,
+                        "note": f"grown {ratio:.1f}x from init",
+                    }
+                )
         else:
-            expected_std = 1.0 / (in_dim ** 0.5)
+            expected_std = 1.0 / (in_dim**0.5)
             ratio = current_std / (expected_std + 1e-10)
             if ratio < 0.3 or ratio > 3.0:
-                deviation_stats.append({
-                    "name": name,
-                    "current_std": current_std,
-                    "expected_std": expected_std,
-                    "ratio": ratio,
-                })
+                deviation_stats.append(
+                    {
+                        "name": name,
+                        "current_std": current_std,
+                        "expected_std": expected_std,
+                        "ratio": ratio,
+                    }
+                )
 
     if deviation_stats:
         print("\n   Notable deviations from expected initialization:")
@@ -582,20 +594,26 @@ def analyze_checkpoint(file_path: str):
         dead_cols = (col_norms < dead_neuron_threshold).sum().item()
 
         if dead_rows > 0 or dead_cols > 0:
-            dead_neuron_report.append({
-                "name": name,
-                "dead_rows": dead_rows,
-                "total_rows": w.shape[0],
-                "dead_cols": dead_cols,
-                "total_cols": w.shape[1],
-            })
+            dead_neuron_report.append(
+                {
+                    "name": name,
+                    "dead_rows": dead_rows,
+                    "total_rows": w.shape[0],
+                    "dead_cols": dead_cols,
+                    "total_cols": w.shape[1],
+                }
+            )
 
     if dead_neuron_report:
         print("\n   ⚠️  Dead neurons detected (norm < 1e-4):")
         for d in dead_neuron_report:
             print(f"      {d['name']}:")
-            print(f"         Rows: {d['dead_rows']}/{d['total_rows']} dead ({d['dead_rows']/d['total_rows']*100:.1f}%)")
-            print(f"         Cols: {d['dead_cols']}/{d['total_cols']} dead ({d['dead_cols']/d['total_cols']*100:.1f}%)")
+            print(
+                f"         Rows: {d['dead_rows']}/{d['total_rows']} dead ({d['dead_rows'] / d['total_rows'] * 100:.1f}%)"
+            )
+            print(
+                f"         Cols: {d['dead_cols']}/{d['total_cols']} dead ({d['dead_cols'] / d['total_cols'] * 100:.1f}%)"
+            )
     else:
         print("\n   ✅ No dead neurons detected")
 
@@ -629,7 +647,13 @@ def analyze_checkpoint(file_path: str):
         print(f"\n   {'Expert':<10} {'Gate-Up Cosine Sim':<20} {'Status'}")
         print("   " + "-" * 45)
         for name, sim in gate_up_sims:
-            status = "✅ complementary" if abs(sim) < 0.3 else "⚠️ correlated" if abs(sim) < 0.7 else "❌ redundant"
+            status = (
+                "✅ complementary"
+                if abs(sim) < 0.3
+                else "⚠️ correlated"
+                if abs(sim) < 0.7
+                else "❌ redundant"
+            )
             print(f"   {name:<10} {sim:<20.4f} {status}")
 
         avg_sim = np.mean([abs(s[1]) for s in gate_up_sims])
@@ -660,14 +684,16 @@ def analyze_checkpoint(file_path: str):
             continue
 
         centered = w_flat - mean
-        kurtosis = (centered ** 4).mean() / (std ** 4) - 3  # Excess kurtosis
-        skewness = (centered ** 3).mean() / (std ** 3)
+        kurtosis = (centered**4).mean() / (std**4) - 3  # Excess kurtosis
+        skewness = (centered**3).mean() / (std**3)
 
-        dist_stats.append({
-            "name": name.split(".")[-2] + "." + name.split(".")[-1] if "." in name else name,
-            "kurtosis": kurtosis.item(),
-            "skewness": skewness.item(),
-        })
+        dist_stats.append(
+            {
+                "name": name.split(".")[-2] + "." + name.split(".")[-1] if "." in name else name,
+                "kurtosis": kurtosis.item(),
+                "skewness": skewness.item(),
+            }
+        )
 
     if dist_stats:
         # Group by component type
@@ -734,32 +760,40 @@ def analyze_checkpoint(file_path: str):
     print("\n   Analyzing concentration of singular values (energy distribution)")
 
     sv_stats = []
-    for expert_name, expert_dict in [("Shared", shared_expert)] + [(f"E{i}", routed_experts[i]) for i in sorted_indices]:
+    for expert_name, expert_dict in [("Shared", shared_expert)] + [
+        (f"E{i}", routed_experts[i]) for i in sorted_indices
+    ]:
         if "gate_proj" not in expert_dict:
             continue
 
         w = expert_dict["gate_proj"].float()
         try:
             s = torch.linalg.svdvals(w)
-            s_sq = s ** 2
+            s_sq = s**2
             total_energy = s_sq.sum().item()
 
-            sv_stats.append({
-                "name": expert_name,
-                "sv_max": s[0].item(),
-                "sv_min": s[-1].item(),
-                "sv_median": s[len(s)//2].item(),
-                "top10_energy": (s_sq[:10].sum() / total_energy * 100).item(),
-                "top50_energy": (s_sq[:50].sum() / total_energy * 100).item(),
-            })
+            sv_stats.append(
+                {
+                    "name": expert_name,
+                    "sv_max": s[0].item(),
+                    "sv_min": s[-1].item(),
+                    "sv_median": s[len(s) // 2].item(),
+                    "top10_energy": (s_sq[:10].sum() / total_energy * 100).item(),
+                    "top50_energy": (s_sq[:50].sum() / total_energy * 100).item(),
+                }
+            )
         except Exception:
             pass
 
     if sv_stats:
-        print(f"\n   {'Expert':<10} {'σ_max':<10} {'σ_min':<10} {'σ_med':<10} {'Top-10 %':<10} {'Top-50 %':<10}")
+        print(
+            f"\n   {'Expert':<10} {'σ_max':<10} {'σ_min':<10} {'σ_med':<10} {'Top-10 %':<10} {'Top-50 %':<10}"
+        )
         print("   " + "-" * 60)
         for s in sv_stats:
-            print(f"   {s['name']:<10} {s['sv_max']:<10.2f} {s['sv_min']:<10.4f} {s['sv_median']:<10.4f} {s['top10_energy']:<10.1f} {s['top50_energy']:<10.1f}")
+            print(
+                f"   {s['name']:<10} {s['sv_max']:<10.2f} {s['sv_min']:<10.4f} {s['sv_median']:<10.4f} {s['top10_energy']:<10.1f} {s['top50_energy']:<10.1f}"
+            )
 
         avg_top10 = np.mean([s["top10_energy"] for s in sv_stats])
         print(f"\n   Average top-10 singular value energy: {avg_top10:.1f}%")
@@ -776,20 +810,14 @@ def analyze_checkpoint(file_path: str):
     print("=" * 70)
 
     total_params = sum(v.numel() for v in proj_weights.values())
-    shared_params = sum(
-        v.numel() for k, v in proj_weights.items() if "shared_expert" in k
-    )
-    routed_params = sum(
-        v.numel() for k, v in proj_weights.items() if "experts." in k
-    )
-    router_params = sum(
-        v.numel() for k, v in proj_weights.items() if "router" in k
-    )
+    shared_params = sum(v.numel() for k, v in proj_weights.items() if "shared_expert" in k)
+    routed_params = sum(v.numel() for k, v in proj_weights.items() if "experts." in k)
+    router_params = sum(v.numel() for k, v in proj_weights.items() if "router" in k)
 
     print(f"\n   Total projector parameters: {total_params:,}")
-    print(f"      Shared expert: {shared_params:,} ({shared_params/total_params*100:.1f}%)")
-    print(f"      Routed experts: {routed_params:,} ({routed_params/total_params*100:.1f}%)")
-    print(f"      Router: {router_params:,} ({router_params/total_params*100:.1f}%)")
+    print(f"      Shared expert: {shared_params:,} ({shared_params / total_params * 100:.1f}%)")
+    print(f"      Routed experts: {routed_params:,} ({routed_params / total_params * 100:.1f}%)")
+    print(f"      Router: {router_params:,} ({router_params / total_params * 100:.1f}%)")
     print(f"   Number of routed experts: {num_experts}")
     print(f"   Architecture: SharedMoE (1 shared + {num_experts} routed SwiGLU experts)")
 

@@ -369,10 +369,12 @@ def main(cfg: DictConfig) -> None:
 
     # Create trainer with only valid TrainingArguments
     valid_args = get_valid_training_args(training_config)
-    print(f"Dataloader config: num_workers={valid_args.get('dataloader_num_workers')}, "
-          f"prefetch_factor={valid_args.get('dataloader_prefetch_factor')}, "
-          f"pin_memory={valid_args.get('dataloader_pin_memory')}, "
-          f"persistent_workers={valid_args.get('dataloader_persistent_workers')}")
+    print(
+        f"Dataloader config: num_workers={valid_args.get('dataloader_num_workers')}, "
+        f"prefetch_factor={valid_args.get('dataloader_prefetch_factor')}, "
+        f"pin_memory={valid_args.get('dataloader_pin_memory')}, "
+        f"persistent_workers={valid_args.get('dataloader_persistent_workers')}"
+    )
     trainer = Trainer(
         model=model,
         args=TrainingArguments(**valid_args),
