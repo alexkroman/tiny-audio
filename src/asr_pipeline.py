@@ -26,8 +26,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         )
 
     def preprocess(self, inputs, **preprocess_params):
-        preprocess_params.setdefault("chunk_length_s", 0)
-
         # Handle dict with "array" key (from datasets)
         if isinstance(inputs, dict) and "array" in inputs:
             inputs = {
@@ -35,10 +33,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 "sampling_rate": inputs.get("sampling_rate", self.feature_extractor.sampling_rate),
             }
 
-        return super().preprocess(inputs, **preprocess_params)
+        for item in super().preprocess(inputs, **preprocess_params):
+            if "is_last" not in item:
+                item["is_last"] = True
+            yield item
 
     def _forward(self, model_inputs, **generate_kwargs) -> dict[str, Any]:
-        # Extract audio features
+        # Extract audio features and is_last flag
+        is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
+
         if isinstance(model_inputs, dict):
             input_features = model_inputs.get("input_features")
             if input_features is not None:
@@ -51,9 +54,13 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             **generate_kwargs,
         )
 
-        return {"tokens": generated_ids}
+        return {"tokens": generated_ids, "is_last": is_last}
 
     def postprocess(self, model_outputs, **kwargs) -> dict[str, str]:
+        # Handle list of outputs (from chunking)
+        if isinstance(model_outputs, list):
+            model_outputs = model_outputs[0] if model_outputs else {}
+
         tokens = model_outputs.get("tokens")
         if tokens is None:
             return super().postprocess(model_outputs, **kwargs)

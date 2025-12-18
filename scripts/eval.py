@@ -52,21 +52,27 @@ def audio_to_wav_bytes(audio_array: np.ndarray | torch.Tensor, sample_rate: int)
 
 def prepare_wav_bytes(wav_data) -> bytes:
     """Convert various audio formats to WAV bytes."""
-    # AudioDecoder (lazy loading from datasets)
-    if hasattr(wav_data, "get_all_samples"):
-        samples = wav_data.get_all_samples()
-        return audio_to_wav_bytes(samples.data.squeeze().numpy(), wav_data.metadata.sample_rate)
-
-    # Dict with bytes
+    # Dict with array (most common HF datasets format)
     if isinstance(wav_data, dict):
-        if "bytes" in wav_data:
-            return wav_data["bytes"]
         if "array" in wav_data and "sampling_rate" in wav_data:
             return audio_to_wav_bytes(wav_data["array"], wav_data["sampling_rate"])
+        if "bytes" in wav_data:
+            return wav_data["bytes"]
+        if "path" in wav_data and wav_data["path"]:
+            # Load from file path
+            import soundfile as sf
+            audio_array, sample_rate = sf.read(wav_data["path"])
+            return audio_to_wav_bytes(audio_array, sample_rate)
 
-    # Audio object (LoquaciousSet format)
+    # Audio object with array/sampling_rate attributes
     if hasattr(wav_data, "array") and hasattr(wav_data, "sampling_rate"):
         return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
+
+    # AudioDecoder - try to get path and load with soundfile
+    if hasattr(wav_data, "path") and wav_data.path:
+        import soundfile as sf
+        audio_array, sample_rate = sf.read(wav_data.path)
+        return audio_to_wav_bytes(audio_array, sample_rate)
 
     raise ValueError(f"Unsupported audio format: {type(wav_data)}")
 
@@ -362,6 +368,18 @@ class LocalEvaluator(Evaluator):
         self.user_prompt = user_prompt
 
     def transcribe(self, audio) -> tuple[str, float]:
+        # Convert to pipeline-compatible format
+        if isinstance(audio, dict) and "array" in audio and "raw" not in audio:
+            # Standard HF datasets format: "array" -> "raw"
+            audio = {"raw": audio["array"], "sampling_rate": audio["sampling_rate"]}
+        elif not isinstance(audio, (str, dict)) or (isinstance(audio, dict) and "raw" not in audio):
+            # For other formats (AudioDecoder, bytes, etc.), convert to WAV file
+            wav_bytes = prepare_wav_bytes(audio)
+            temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            temp_file.write(wav_bytes)
+            temp_file.close()
+            audio = temp_file.name
+
         start = time.time()
         if self.user_prompt:
             result = self.pipe(audio, user_prompt=self.user_prompt)

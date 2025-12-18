@@ -121,11 +121,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.generation_config.length_penalty = config.length_penalty
         self.generation_config.repetition_penalty = config.repetition_penalty
         self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
-        self.generation_config.temperature = config.temperature
-        if config.top_k is not None:
-            self.generation_config.top_k = config.top_k
-        if config.top_p is not None:
-            self.generation_config.top_p = config.top_p
+        # Only set sampling params when do_sample=True, otherwise clear them
+        if config.do_sample:
+            self.generation_config.temperature = config.temperature
+            if config.top_k is not None:
+                self.generation_config.top_k = config.top_k
+            if config.top_p is not None:
+                self.generation_config.top_p = config.top_p
+        else:
+            self.generation_config.temperature = None
+            self.generation_config.top_k = None
+            self.generation_config.top_p = None
         self.generation_config.eos_token_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
