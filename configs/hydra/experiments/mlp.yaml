@@ -16,7 +16,7 @@ model:
 training:
   # Hub configuration
   push_to_hub: true
-  hub_model_id: "mazesmazes/tiny-audio-mlp"
+  hub_model_id: "mazesmazes/tiny-audio"
   hub_strategy: "every_save"
   hub_private_repo: false
 
@@ -64,9 +64,8 @@ training:
   seed: 44
   ignore_data_skip: true
 
-# MLP projector works with streaming
 data:
-  use_streaming: true
+  use_streaming: false
 
 # Early stopping configuration
 early_stopping:

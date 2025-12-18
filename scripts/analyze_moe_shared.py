@@ -30,8 +30,8 @@ from typing import Optional
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from safetensors.torch import load_file
+from torch.nn import functional
 
 
 def draw_ascii_bar(
@@ -296,7 +296,6 @@ def analyze_checkpoint(file_path: str):
                 continue
             w = expert_dict[proj_name].float()
             std = w.std().item()
-            mean = w.mean().item()
             norm = torch.linalg.norm(w).item()
             print(f"      {proj_name:<12} Shape: {str(list(w.shape)):<20} Std: {std:.5f}, Norm: {norm:.4f}")
 
@@ -305,7 +304,7 @@ def analyze_checkpoint(file_path: str):
 
     # Analyze first and last routed expert as samples
     if num_experts > 0:
-        analyze_swiglu_expert(f"Routed Expert 0", routed_experts[sorted_indices[0]])
+        analyze_swiglu_expert("Routed Expert 0", routed_experts[sorted_indices[0]])
         if num_experts > 1:
             analyze_swiglu_expert(
                 f"Routed Expert {sorted_indices[-1]}", routed_experts[sorted_indices[-1]]
@@ -325,7 +324,7 @@ def analyze_checkpoint(file_path: str):
 
         if len(gate_weights) > 1:
             flat_experts = torch.stack([w.view(-1) for w in gate_weights]).float()
-            norm_experts = F.normalize(flat_experts, p=2, dim=1)
+            norm_experts = functional.normalize(flat_experts, p=2, dim=1)
 
             sim_matrix = torch.mm(norm_experts, norm_experts.t())
 
@@ -414,7 +413,7 @@ def analyze_checkpoint(file_path: str):
     if "gate_proj" in shared_expert:
         rank = compute_effective_rank(shared_expert["gate_proj"])
         full_rank = min(shared_expert["gate_proj"].shape)
-        print(f"\n   Shared Expert gate_proj:")
+        print("\n   Shared Expert gate_proj:")
         print(f"      Effective Rank: {rank:.1f} / {full_rank} ({rank/full_rank*100:.1f}%)")
 
     # Check routed experts
@@ -429,7 +428,7 @@ def analyze_checkpoint(file_path: str):
             full_rank = min(routed_experts[sorted_indices[0]]["gate_proj"].shape)
             avg_rank = np.mean(ranks)
 
-            print(f"\n   Routed Expert gate_proj Effective Rank:")
+            print("\n   Routed Expert gate_proj Effective Rank:")
             print(f"      Average: {avg_rank:.1f} / {full_rank} ({avg_rank/full_rank*100:.1f}%)")
             draw_ascii_bar(ranks, labels=[f"E{i}" for i in sorted_indices], denominator=full_rank)
 
@@ -615,7 +614,7 @@ def analyze_checkpoint(file_path: str):
     if "gate_proj" in shared_expert and "up_proj" in shared_expert:
         gate = shared_expert["gate_proj"].float().flatten()
         up = shared_expert["up_proj"].float().flatten()
-        sim = F.cosine_similarity(gate, up, dim=0).item()
+        sim = functional.cosine_similarity(gate, up, dim=0).item()
         gate_up_sims.append(("Shared", sim))
 
     # Routed experts
@@ -623,7 +622,7 @@ def analyze_checkpoint(file_path: str):
         if "gate_proj" in routed_experts[idx] and "up_proj" in routed_experts[idx]:
             gate = routed_experts[idx]["gate_proj"].float().flatten()
             up = routed_experts[idx]["up_proj"].float().flatten()
-            sim = F.cosine_similarity(gate, up, dim=0).item()
+            sim = functional.cosine_similarity(gate, up, dim=0).item()
             gate_up_sims.append((f"E{idx}", sim))
 
     if gate_up_sims:

@@ -26,5 +26,4 @@ class MLPAudioProjector(nn.Module):
         """
         x = self.linear_1(x)
         x = self.act(x)
-        x = self.linear_2(x)
-        return x
+        return self.linear_2(x)

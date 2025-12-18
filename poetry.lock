@@ -4805,6 +4805,39 @@ tests = ["autopep8", "isort", "llnl-hatchet", "numpy", "pytest", "pytest-forked"
 tutorials = ["matplotlib", "pandas", "tabulate"]
 
 [[package]]
+name = "trl"
+version = "0.26.1"
+description = "Train transformer language models with reinforcement learning."
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "trl-0.26.1-py3-none-any.whl", hash = "sha256:acadfdfa9da58345f3ff23407b9acaea62378eeb335967034b961b091cdd7d9f"},
+    {file = "trl-0.26.1.tar.gz", hash = "sha256:8a6f41c9a2098164dd731d6a4befe1a7e50974de94e5d55fd846023826c23de7"},
+]
+
+[package.dependencies]
+accelerate = ">=1.4.0"
+datasets = ">=3.0.0"
+transformers = ">=4.56.1"
+
+[package.extras]
+bco = ["joblib", "scikit-learn"]
+deepspeed = ["deepspeed (>=0.14.4)"]
+dev = ["Pillow", "bitsandbytes", "deepspeed (>=0.14.4)", "hf-doc-builder", "jmespath", "joblib", "kernels", "liger-kernel (>=0.6.4)", "llm-blender (>=0.0.2)", "num2words (==0.5.14)", "openai (>=1.23.2)", "peft (>=0.8.0)", "pre-commit", "pytest", "pytest-cov", "pytest-rerunfailures (==15.1)", "pytest-xdist", "scikit-learn", "torchvision"]
+judges = ["llm-blender (>=0.0.2)", "openai (>=1.23.2)"]
+kernels = ["kernels"]
+liger = ["liger-kernel (>=0.6.4)"]
+math-verify = ["math-verify (>=0.5.2)"]
+peft = ["peft (>=0.8.0)"]
+quality = ["hf-doc-builder", "pre-commit"]
+quantization = ["bitsandbytes"]
+scikit = ["scikit-learn"]
+test = ["pytest", "pytest-cov", "pytest-rerunfailures (==15.1)", "pytest-xdist"]
+vllm = ["fastapi", "pydantic", "requests", "uvicorn", "vllm (>=0.10.2,<0.12.0)"]
+vlm = ["Pillow", "num2words (==0.5.14)", "torchvision"]
+
+[[package]]
 name = "truecase"
 version = "0.0.14"
 description = "A library to restore capitalization for text"
@@ -5336,4 +5369,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "9f21150e863b84f7698720bbcbdb5b4e9826d37c85f9cf350d739672ec97c163"
+content-hash = "8e25bbec79ae0e2d11a44c043adaadc310e84a0be7c898aad4a04625468c1a76"

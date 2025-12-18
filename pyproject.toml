@@ -84,6 +84,7 @@ gradio = "*"
 assemblyai = "*"
 typer = ">=0.19.2"
 truecase = "*"
+trl = ">=0.26.0"
 nltk = "*"
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 
@@ -120,7 +121,7 @@ warn_no_return = true
 follow_imports = "normal"
 ignore_missing_imports = true
 # Ignore specific error codes that are library-related
-disable_error_code = ["assignment", "override", "call-overload", "arg-type", "index", "union-attr", "call-arg"]
+disable_error_code = ["assignment", "override", "call-overload", "arg-type", "index", "union-attr", "call-arg", "misc", "operator"]
 
 [[tool.mypy.overrides]]
 module = "transformers.*"

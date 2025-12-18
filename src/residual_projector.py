@@ -104,7 +104,7 @@ class ResidualAudioProjector(nn.Module):
             # Layer norms
             self.ln_input.weight.data.fill_(1.0)
             for ln in self.layer_norms:
-                ln.weight.data.fill_(1.0)  # type: ignore[operator]
+                ln.weight.data.fill_(1.0)
 
             # Residual blocks: small init on output projection
             for layer in self.layers:

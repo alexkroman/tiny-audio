@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 
-import re
 from dataclasses import fields
 from typing import Any
 
 import hydra
 import nltk
-import numpy as np
 import torch
 import truecase
+import wandb
 from datasets import (
     Audio,
     Dataset,
@@ -20,25 +19,17 @@ from datasets import (
 )
 from omegaconf import DictConfig, OmegaConf
 from transformers import (
-    DataCollatorForSeq2Seq,
     EarlyStoppingCallback,
     Trainer,
     TrainerCallback,
     TrainingArguments,
-    WhisperTokenizer,
 )
+from trl.trainer.utils import DataCollatorForChatML
 
-import wandb
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
 
-# Shared task prompts (matches ASRModel.TASK_PROMPTS)
-TASK_PROMPTS = {
-    "transcribe": "Transcribe: <audio>",
-    "continue": "Continue: <audio>",
-    "describe": "Describe: <audio>",
-    "emotion": "Emotion: <audio>",
-}
+TRANSCRIBE_INSTRUCTION = "Transcribe: <audio>"
 
 
 class DatasetLoader:
@@ -85,65 +76,41 @@ class DatasetLoader:
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
-        task = dataset_cfg.get("task", "transcribe")
-
         if self.use_streaming:
-            # Streaming mode: use generator
+            # Streaming mode: use generator to filter invalid samples
             features = Features(
                 {
                     "audio": Audio(sampling_rate=self.sample_rate),
                     "text": Value("string"),
-                    "task": Value("string"),
                 }
             )
             return IterableDataset.from_generator(
-                self._add_task_generator,
-                gen_kwargs={"dataset": ds, "task": task, "max_audio_duration": self.max_audio_duration},
+                self._filter_generator,
+                gen_kwargs={"dataset": ds, "max_audio_duration": self.max_audio_duration},
                 features=features,
             )
-        else:
-            # Non-streaming mode: use parallel map/filter with num_proc
-            max_dur = self.max_audio_duration
-            sample_rate = self.sample_rate
 
-            def filter_valid(example):
-                audio = example.get("audio")
-                if audio is None:
-                    return False
-                if not isinstance(audio, dict) or "array" not in audio:
-                    return False
-                arr = audio["array"]
-                sr = audio.get("sampling_rate", sample_rate)
-                num_samples = len(arr) if hasattr(arr, "__len__") else arr.shape[-1]
-                duration = num_samples / sr
-                if duration > max_dur:
-                    return False
-                text = example.get("text", "")
-                if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
-                    return False
-                return True
+        # Non-streaming mode: filter TEDLIUM ignore markers only for TEDLIUM dataset
+        # Duration filtering happens in DataCollator to avoid loading all audio upfront
+        if "tedlium" in dataset_path.lower():
 
-            def add_task(example):
-                example["task"] = task
-                return example
+            def filter_tedlium(text):
+                return text.strip() != "ignore_time_segment_in_scoring"
 
-            print(f"Processing dataset with num_proc={self.num_proc}")
-            ds = ds.filter(filter_valid, num_proc=self.num_proc)
-            ds = ds.map(add_task, num_proc=self.num_proc)
+            print(f"Filtering TEDLIUM with num_proc={self.num_proc}")
+            ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
-            return ds
+        return ds
 
     @staticmethod
-    def _add_task_generator(dataset, task: str, max_audio_duration: float = 30.0):
-        """Generator that adds task field and filters invalid samples (streaming mode)."""
+    def _filter_generator(dataset, max_audio_duration: float = 30.0):
+        """Generator that filters invalid samples (streaming mode)."""
         for example in dataset:
-            # Skip invalid audio
             audio = example.get("audio")
             if audio is None:
                 continue
 
             try:
-                # Soundfile backend returns dict with 'array' and 'sampling_rate'
                 if not isinstance(audio, dict) or "array" not in audio:
                     continue
 
@@ -163,7 +130,6 @@ class DatasetLoader:
             if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
                 continue
 
-            example["task"] = task
             yield example
 
     def load(self) -> tuple[Dataset, Dataset]:
@@ -224,162 +190,78 @@ class DatasetLoader:
         return interleave_datasets(datasets, probabilities=probs)
 
 
-class DataCollator(DataCollatorForSeq2Seq):
+class DataCollator:
     """Collates audio and text data for training."""
 
-    # Text preprocessing patterns
-    TEXT_REPLACEMENTS = {
-        r"<PERIOD>": ".",
-        r"<COMMA>": ",",
-        r"<QUESTIONMARK>": "?",
-        r"<EXCLAMATIONPOINT>": "!",
-        r"<inaudible>": "",
-        r"\b(uh|um|ah)\b": "",
-    }
-
     def __init__(
-        self, tokenizer: Any, feature_extractor: Any, sample_rate: int, system_prompt: str = None
+        self,
+        tokenizer: Any,
+        feature_extractor: Any,
+        sample_rate: int,
+        system_prompt: str = None,
+        max_audio_duration: float = 30.0,
     ):
-        super().__init__(tokenizer=tokenizer, padding=True)
+        self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
-        self.is_whisper = feature_extractor.__class__.__name__ == "WhisperFeatureExtractor"
+        self.max_audio_duration = max_audio_duration
 
-        # Text normalizer
-        self.text_normalizer = (
-            tokenizer
-            if hasattr(tokenizer, "normalize")
-            else WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+        # Use trl's DataCollatorForChatML for label masking
+        self.text_collator = DataCollatorForChatML(
+            tokenizer=tokenizer,
+            max_length=512,
         )
 
-        # Cache special token IDs
-        self._im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-        self._im_start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
-        self._assistant_id = tokenizer.convert_tokens_to_ids("assistant")
-        self._think_end_id = tokenizer.convert_tokens_to_ids("</think>")
-
-    def _normalize_text(self, text: str) -> str:
-        """Preprocess and normalize text."""
-        if not isinstance(text, str):
-            return ""
-        for pattern, repl in self.TEXT_REPLACEMENTS.items():
-            text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", "", text)  # Strip HTML-like tags
-        return self.text_normalizer.normalize(text)
-
-    def _find_assistant_content_range(self, tokens: list[int]) -> tuple[int, int]:
-        """Find the start and end indices of assistant content for label masking."""
-        # Try to find </think> tag first (for thinking models)
-        if self._think_end_id in tokens:
-            start = tokens.index(self._think_end_id) + 1
-        else:
-            # Find <|im_start|>assistant pattern
-            start = -1
-            for i in range(len(tokens) - 1):
-                if tokens[i] == self._im_start_id and tokens[i + 1] == self._assistant_id:
-                    start = i + 2
-                    break
-
-        if start < 0:
-            return -1, -1
-
-        # Skip whitespace tokens
-        while start < len(tokens) and self.tokenizer.decode([tokens[start]]).strip() == "":
-            start += 1
-
-        # Find <|im_end|> after content start
-        try:
-            end = tokens.index(self._im_end_id, start)
-        except ValueError:
-            return -1, -1
-
-        return start, end
-
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Process audio - extract numpy arrays from soundfile dict format
+        # Process audio, filtering out samples that are too long
         audio_arrays = []
         valid_features = []
         for f in features:
             try:
-                audio_obj = f["audio"]
-                # Soundfile backend returns dict with 'array' and 'sampling_rate'
-                audio = audio_obj["array"]
+                audio = f["audio"]["array"]
                 if hasattr(audio, "numpy"):
                     audio = audio.numpy()
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
-                elif audio.ndim == 0:
-                    audio = audio.reshape(1)
+                # Skip audio that's too long
+                duration = len(audio) / self.sample_rate
+                if duration > self.max_audio_duration:
+                    continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
             except Exception:
-                # Skip corrupted audio files silently
                 continue
             finally:
                 f["audio"] = None
 
         if not audio_arrays:
-            raise ValueError("No valid audio samples in batch - all samples were corrupted")
+            raise ValueError("No valid audio samples in batch")
 
-        features = valid_features
-
-        audio_features = self.feature_extractor(
+        audio_out = self.feature_extractor(
             audio_arrays,
             sampling_rate=self.sample_rate,
-            padding="max_length" if self.is_whisper else True,
+            padding="max_length",
             return_tensors="pt",
-            return_attention_mask=True,
         )
 
-        # Process text
+        # Build messages for each sample - DataCollatorForChatML handles tokenization and masking
         text_features = []
-        for f in features:
-            text = self._normalize_text(f.get("text", ""))
-            text = truecase.get_true_case(text)
-
-            task = f.get("task", "transcribe")
-            instruction = TASK_PROMPTS.get(task, TASK_PROMPTS["transcribe"])
+        for f in valid_features:
+            text = truecase.get_true_case((f.get("text") or "").strip())
 
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": instruction})
+            messages.append({"role": "user", "content": TRANSCRIBE_INSTRUCTION})
             messages.append({"role": "assistant", "content": text})
 
-            tokens = list(
-                self.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    add_generation_prompt=False,
-                    truncation=True,
-                    max_length=512,
-                    enable_thinking=False,
-                )
-            )
+            text_features.append({"messages": messages})
 
-            # Ensure <|im_end|> is present - truncation may have cut it off
-            if tokens[-1] != self._im_end_id:
-                tokens = tokens[:-1] + [self._im_end_id]  # Replace last token with im_end
-
-            # Create labels - mask everything except assistant content
-            labels = [-100] * len(tokens)
-            start, end = self._find_assistant_content_range(tokens)
-            if start > 0 and end > 0:
-                labels[start : end + 1] = tokens[start : end + 1]
-
-            text_features.append({"input_ids": tokens, "labels": labels})
-
-        batch = super().__call__(text_features)
-
-        # Add audio to batch
-        if "input_values" in audio_features:
-            batch["input_values"] = audio_features.input_values
-        elif "input_features" in audio_features:
-            batch["input_features"] = audio_features.input_features
-        if "attention_mask" in audio_features:
-            batch["audio_attention_mask"] = audio_features.attention_mask
+        # Let trl handle tokenization, label masking, and padding
+        batch = self.text_collator(text_features)
+        batch["input_features"] = audio_out.input_features
 
         return batch
 
@@ -460,6 +342,7 @@ def main(cfg: DictConfig) -> None:
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         system_prompt=cfg.model.system_prompt,
+        max_audio_duration=cfg.data.get("max_audio_duration_seconds", 30.0),
     )
 
     # Setup callbacks

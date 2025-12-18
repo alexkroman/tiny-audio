@@ -1,9 +1,9 @@
+import json
 from pathlib import Path
 from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # noqa: N812
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -53,12 +53,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
 
-    TASK_PROMPTS = {
-        "transcribe": "Transcribe: <audio>",
-        "continue": "Continue: <audio>",
-        "describe": "Describe: <audio>",
-        "emotion": "Emotion: <audio>",
-    }
+    TRANSCRIBE_PROMPT = "Transcribe: "
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
@@ -335,218 +330,158 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         audio_features: torch.Tensor,
         audio_attention_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode audio and project to LLM embedding space."""
+    ) -> torch.Tensor:
+        """Encode audio and project to LLM embedding space.
+
+        Returns flattened audio embeddings of shape (total_audio_tokens, hidden_dim).
+        """
         # Apply SpecAugment during training (before encoding)
-        is_whisper = hasattr(self.audio_tower.config, "num_mel_bins")
-        if is_whisper:
-            audio_features = self._apply_specaugment(audio_features, audio_attention_mask)
+        audio_features = self._apply_specaugment(audio_features, audio_attention_mask)
 
         with torch.no_grad():
-            if is_whisper:
-                encoder_out = self.audio_tower(
-                    input_features=audio_features, attention_mask=audio_attention_mask
-                )
-            else:
-                encoder_out = self.audio_tower(
-                    input_values=audio_features, attention_mask=audio_attention_mask
-                )
+            encoder_out = self.audio_tower(
+                input_features=audio_features, attention_mask=audio_attention_mask
+            )
             hidden_states = encoder_out.last_hidden_state
 
         audio_embeds = self.projector(hidden_states)
-        audio_mask = torch.ones(
-            audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long
-        )
 
-        return audio_embeds, audio_mask
-
-    def _merge_audio_features(
-        self,
-        input_ids: torch.Tensor,
-        audio_embeds: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        audio_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Merge audio embeddings into text embeddings at <audio> token positions.
-
-        Returns: (inputs_embeds, attention_mask, labels)
-        """
-        batch_size, seq_len = input_ids.shape
-        num_audio_tokens = audio_embeds.shape[1]
-        device = input_ids.device
-
-        # Find audio token position in each sequence
-        audio_positions = (input_ids == self.audio_token_id).int().argmax(dim=1)
-
-        # Calculate new sequence length (replace 1 audio token with num_audio_tokens)
-        new_seq_len = seq_len - 1 + num_audio_tokens
-
-        # Get text embeddings
-        text_embeds = self.language_model.get_input_embeddings()(input_ids)
-
-        # Build merged embeddings
-        merged_embeds = torch.zeros(
-            batch_size, new_seq_len, text_embeds.shape[-1], device=device, dtype=text_embeds.dtype
-        )
-        merged_attention = torch.ones(batch_size, new_seq_len, device=device, dtype=torch.long)
-        merged_labels = None
-        if labels is not None:
-            merged_labels = torch.full(
-                (batch_size, new_seq_len), -100, device=device, dtype=labels.dtype
-            )
-
-        for i in range(batch_size):
-            pos = audio_positions[i].item()
-
-            # Before audio token
-            if pos > 0:
-                merged_embeds[i, :pos] = text_embeds[i, :pos]
-                if attention_mask is not None:
-                    merged_attention[i, :pos] = attention_mask[i, :pos]
-                if merged_labels is not None and labels is not None:
-                    merged_labels[i, :pos] = labels[i, :pos]
-
-            # Audio embeddings
-            audio_end = pos + num_audio_tokens
-            merged_embeds[i, pos:audio_end] = audio_embeds[i]
-            if audio_mask is not None:
-                merged_attention[i, pos:audio_end] = audio_mask[i]
-
-            # After audio token
-            remaining = seq_len - pos - 1
-            if remaining > 0:
-                merged_embeds[i, audio_end : audio_end + remaining] = text_embeds[i, pos + 1 :]
-                if attention_mask is not None:
-                    merged_attention[i, audio_end : audio_end + remaining] = attention_mask[
-                        i, pos + 1 :
-                    ]
-                if merged_labels is not None and labels is not None:
-                    merged_labels[i, audio_end : audio_end + remaining] = labels[i, pos + 1 :]
-
-        return merged_embeds, merged_attention, merged_labels
+        # Flatten: (batch, seq, hidden) -> (batch * seq, hidden)
+        # This allows masked_scatter to do 1:1 replacement
+        return audio_embeds.reshape(-1, audio_embeds.shape[-1])
 
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
-        input_values: Optional[torch.Tensor] = None,
         input_features: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        past_key_values: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.Tensor] = None,
         audio_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
-        # Accept either input_values (wav2vec2) or input_features (whisper)
-        audio_inputs = input_features if input_features is not None else input_values
-
-        if audio_inputs is not None:
-            if input_ids is None:
-                raise ValueError("input_ids required when audio is provided")
-
-            # Encode audio
-            audio_embeds, audio_mask = self._encode_audio(audio_inputs, audio_attention_mask)
-
-            # Merge audio with text
-            inputs_embeds, full_attention_mask, labels = self._merge_audio_features(
-                input_ids, audio_embeds, attention_mask, labels, audio_mask
-            )
-        else:
-            # Text-only forward
+        # Get text embeddings if not provided
+        if inputs_embeds is None:
             inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-            full_attention_mask = attention_mask
 
-        # Run through language model
+        if input_features is not None and input_ids is not None:
+            # Encode audio -> flattened (total_audio_tokens, hidden_dim)
+            audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+
+            # Replace <audio> token placeholders with audio embeddings using masked_scatter
+            audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
+            inputs_embeds = inputs_embeds.masked_scatter(
+                audio_token_mask.to(inputs_embeds.device),
+                audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
+            )
+
+        # Run through language model (let it compute loss if labels provided)
         outputs = self.language_model(
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
-            attention_mask=full_attention_mask,
-            use_cache=False,
+            labels=labels,
+            use_cache=use_cache,
+            cache_position=cache_position,
             **kwargs,
         )
 
-        # Compute loss if labels provided
-        loss = None
-        if labels is not None:
-            logits = outputs.logits
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=-100,
-                label_smoothing=getattr(self.config, "label_smoothing", 0.0),
-            )
+        # Add auxiliary loss from MoE projectors if available
+        if outputs.loss is not None and hasattr(self.projector, "get_aux_loss"):
+            aux_loss = self.projector.get_aux_loss()
+            if aux_loss is not None and aux_loss.numel() > 0:
+                outputs.loss = outputs.loss + aux_loss.to(outputs.loss.device)
 
-            # Add auxiliary loss from MoE projectors if available
-            if hasattr(self.projector, "get_aux_loss"):
-                aux_loss = self.projector.get_aux_loss()  # type: ignore[operator]
-                if aux_loss is not None and aux_loss.numel() > 0:
-                    loss = loss + aux_loss.to(loss.device)
+        return outputs
 
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=outputs.logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+    def prepare_inputs_for_generation(self, *args, **kwargs):
+        """Prepare inputs for generation, handling audio features for cached decoding."""
+        input_features = kwargs.pop("input_features", None)
+        cache_position = kwargs.get("cache_position")
+
+        model_inputs = self.language_model.prepare_inputs_for_generation(*args, **kwargs)
+
+        # Only pass audio features on the first generation step (cache_position[0] == 0)
+        if cache_position is not None and cache_position[0] == 0 and input_features is not None:
+            model_inputs["input_features"] = input_features
+
+        return model_inputs
+
+    def _get_num_audio_tokens(self, input_features: torch.Tensor) -> int:
+        """Calculate number of audio tokens based on input shape.
+
+        Whisper: input_features shape is (batch, n_mels, mel_len)
+        Encoder output is mel_len // 2 due to stride-2 conv
+        """
+        mel_len = input_features.shape[-1]
+        return mel_len // 2
 
     @torch.no_grad()
     def generate(
         self,
-        input_values: Optional[torch.Tensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
         input_features: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         audio_attention_mask: Optional[torch.Tensor] = None,
         system_prompt: Optional[str] = None,
-        user_prompt: Optional[str] = None,
-        task: Optional[str] = None,
         **generate_kwargs,
     ) -> torch.Tensor:
-        """Generate text from audio input."""
-        audio_inputs = input_features if input_features is not None else input_values
-        if audio_inputs is None:
-            raise ValueError("input_values or input_features required for generation")
+        """Generate transcription from audio input.
 
-        device = audio_inputs.device
-        batch_size = audio_inputs.shape[0]
+        Can be called in two ways:
+        1. With input_ids containing <audio> tokens (from processor)
+        2. With just audio, and we build the prompt internally
+        """
+        if input_features is None:
+            raise ValueError("input_features required for generation")
 
-        # Encode audio
-        audio_embeds, audio_mask = self._encode_audio(audio_inputs, audio_attention_mask)
+        device = input_features.device
+        batch_size = input_features.shape[0]
 
-        # Build prompt
-        system_prompt = system_prompt or self.system_prompt
-        user_prompt = user_prompt or self.TASK_PROMPTS.get(
-            task, self.config.user_prompt or "Transcribe: <audio>"
+        # Encode audio -> flattened embeddings
+        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+
+        # If input_ids not provided, build prompt with correct number of audio tokens
+        if input_ids is None:
+            num_audio_tokens = self._get_num_audio_tokens(input_features)
+            audio_placeholder = "<audio>" * num_audio_tokens
+
+            system_prompt = system_prompt or self.system_prompt
+
+            messages: list[dict[str, str]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": self.TRANSCRIBE_PROMPT + audio_placeholder})
+
+            input_ids = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt",
+            ).to(device)
+
+            if input_ids.dim() == 1:
+                input_ids = input_ids.unsqueeze(0)
+            if input_ids.shape[0] == 1 and batch_size > 1:
+                input_ids = input_ids.expand(batch_size, -1)
+
+            attention_mask = torch.ones_like(input_ids)
+
+        # Get text embeddings and replace audio tokens with audio embeddings
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
+        inputs_embeds = inputs_embeds.masked_scatter(
+            audio_token_mask.to(inputs_embeds.device),
+            audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
         )
 
-        messages: list[dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_prompt or "Transcribe: <audio>"})
-
-        prompt_ids = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            enable_thinking=False,
-        ).to(device)
-
-        if prompt_ids.dim() == 1:
-            prompt_ids = prompt_ids.unsqueeze(0)
-        if prompt_ids.shape[0] == 1 and batch_size > 1:
-            prompt_ids = prompt_ids.expand(batch_size, -1)
-
-        if not (prompt_ids == self.audio_token_id).any():
-            raise ValueError("Audio token <audio> not found in prompt")
-
-        # Merge audio with prompt
-        inputs_embeds, attention_mask, _ = self._merge_audio_features(
-            prompt_ids, audio_embeds, audio_mask=audio_mask
-        )
-
-        # Generate using language model (defaults from self.generation_config)
+        # Generate using language model
         output = self.language_model.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -583,9 +518,27 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         finally:
             self.tokenizer = tokenizer
 
-        # Save tokenizer and processor
+        # Save tokenizer and feature extractor
         self.tokenizer.save_pretrained(save_dir)
-        self.get_processor().save_pretrained(save_dir)
+        self.feature_extractor.save_pretrained(save_dir)
+
+        # Add processor auto_map to preprocessor_config.json
+        config_path = save_dir / "preprocessor_config.json"
+        if config_path.exists():
+            with config_path.open() as f:
+                processor_config = json.load(f)
+        else:
+            processor_config = {}
+
+        processor_config.update(
+            {
+                "processor_class": "ASRProcessor",
+                "auto_map": {"AutoProcessor": "asr_processing.ASRProcessor"},
+            }
+        )
+
+        with config_path.open("w") as f:
+            json.dump(processor_config, f, indent=2)
 
         # Copy source files for auto-loading
         src_dir = PathlibPath(__file__).parent
