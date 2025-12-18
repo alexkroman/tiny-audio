@@ -322,10 +322,9 @@ This takes 5-10 minutes.
 
 ```bash
 poetry run python scripts/download_samples.py  # Optional, downloads test audio
-poetry run python scripts/verify_setup.py
+poetry run python -c "import torch; print(f'PyTorch {torch.__version__}')"
+poetry run python -c "from transformers import pipeline; print('Transformers OK')"
 ```
-
-You should see: `✅ All checks passed!`
 
 **Don't worry** about matplotlib or librosa warnings—torch-codec handles audio processing.
 
@@ -334,7 +333,7 @@ You should see: `✅ All checks passed!`
 - [ ] Accounts created (GitHub, Hugging Face, optionally W&B)
 - [ ] Repository cloned
 - [ ] Poetry installed and dependencies installed
-- [ ] Verify script passes
+- [ ] Python imports work
 
 ______________________________________________________________________
 

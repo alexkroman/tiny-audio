@@ -33,7 +33,6 @@ Documentation = "https://github.com/alexkroman/tiny-audio#readme"
 [project.scripts]
 # Course tools
 download-samples = "scripts.download_samples:download_samples"
-verify-setup = "scripts.verify_setup:main"
 
 # Model scripts (use: poetry run python scripts/train.py for training due to Hydra config paths)
 eval = "scripts.eval:main"
@@ -167,10 +166,6 @@ testpaths = ["tests"]
 
 # Ignore directories
 norecursedirs = ["outputs", ".venv", "venv", ".git", "__pycache__", "*.egg-info"]
-
-# Asyncio configuration to fix deprecation warning
-asyncio_mode = "strict"
-asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100
