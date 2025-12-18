@@ -42,9 +42,9 @@ run-handler = "scripts.run_handler_local:main"
 
 # Deployment scripts
 deploy-hf = "scripts.deploy_to_hf_space:main"
-deploy-runpod = "scripts.deploy_runpod:main"
-remote-train = "scripts.start_remote_training:main"
-attach-remote = "scripts.attach_remote_session:main"
+deploy-runpod = "scripts.deploy_runpod:cli"
+remote-train = "scripts.start_remote_training:cli"
+attach-remote = "scripts.attach_remote_session:cli"
 find-checkpoint = "scripts.find_checkpoint:cli"
 
 # Development tools
@@ -88,6 +88,7 @@ truecase = "*"
 trl = ">=0.26.0"
 nltk = "*"
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
+fabric = ">=3.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"

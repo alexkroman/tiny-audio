@@ -13,7 +13,6 @@ import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
-
 # =============================================================================
 # MLP Projector
 # =============================================================================
@@ -168,7 +167,9 @@ class MoEAudioProjector(nn.Module):
 
         # Router on high-res input, then downsample weights
         router_logits = self.router(x)
-        router_logits = router_logits.view(batch_size, seq_len // 4, 4, self.num_experts).mean(dim=2)
+        router_logits = router_logits.view(batch_size, seq_len // 4, 4, self.num_experts).mean(
+            dim=2
+        )
         routing_weights = F.softmax(router_logits, dim=-1)
 
         # Weighted sum of expert outputs

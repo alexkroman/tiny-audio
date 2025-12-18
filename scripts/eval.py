@@ -61,6 +61,7 @@ def prepare_wav_bytes(wav_data) -> bytes:
         if "path" in wav_data and wav_data["path"]:
             # Load from file path
             import soundfile as sf
+
             audio_array, sample_rate = sf.read(wav_data["path"])
             return audio_to_wav_bytes(audio_array, sample_rate)
 
@@ -71,6 +72,7 @@ def prepare_wav_bytes(wav_data) -> bytes:
     # AudioDecoder - try to get path and load with soundfile
     if hasattr(wav_data, "path") and wav_data.path:
         import soundfile as sf
+
         audio_array, sample_rate = sf.read(wav_data.path)
         return audio_to_wav_bytes(audio_array, sample_rate)
 

@@ -234,7 +234,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if hasattr(self.language_model, "_set_gradient_checkpointing"):
             self.language_model._set_gradient_checkpointing(enable, gradient_checkpointing_func)
         elif hasattr(self.language_model, "gradient_checkpointing_enable") and enable:
-            self.language_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            self.language_model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
         elif hasattr(self.language_model, "gradient_checkpointing_disable") and not enable:
             self.language_model.gradient_checkpointing_disable()
 

@@ -292,7 +292,6 @@ def main(cfg: DictConfig) -> None:
     torch.backends.cudnn.allow_tf32 = True
     nltk.download("punkt_tab", quiet=True)
 
-
     # Initialize wandb
     if cfg.training.get("report_to") == "wandb":
         wandb.init(
