@@ -113,10 +113,26 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Language model (frozen)
         self.language_model = self._load_language_model(config, target_dtype)
-        self.generation_config = self.language_model.generation_config
 
         # Initialize tokenizer and special tokens
         self._init_tokenizer(config)
+
+        # Set up generation config with our defaults
+        self.generation_config = self.language_model.generation_config
+        self.generation_config.max_new_tokens = config.max_new_tokens
+        self.generation_config.num_beams = config.num_beams
+        self.generation_config.do_sample = config.do_sample
+        self.generation_config.use_cache = config.use_cache
+        self.generation_config.length_penalty = config.length_penalty
+        self.generation_config.repetition_penalty = config.repetition_penalty
+        self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
+        self.generation_config.temperature = config.temperature
+        if config.top_k is not None:
+            self.generation_config.top_k = config.top_k
+        if config.top_p is not None:
+            self.generation_config.top_p = config.top_p
+        self.generation_config.eos_token_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+        self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
         # Feature extractor for audio preprocessing
         self.feature_extractor = self._create_feature_extractor(config)
@@ -530,29 +546,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             prompt_ids, audio_embeds, audio_mask=audio_mask
         )
 
-        # Set generation defaults from config
-        generate_kwargs.setdefault("max_new_tokens", self.config.max_new_tokens)
-        generate_kwargs.setdefault("num_beams", self.config.num_beams)
-        generate_kwargs.setdefault("do_sample", self.config.do_sample)
-        generate_kwargs.setdefault("use_cache", self.config.use_cache)
-        generate_kwargs.setdefault("length_penalty", self.config.length_penalty)
-        generate_kwargs.setdefault("repetition_penalty", self.config.repetition_penalty)
-        generate_kwargs.setdefault("no_repeat_ngram_size", self.config.no_repeat_ngram_size)
-        generate_kwargs.setdefault("temperature", self.config.temperature)
-        if self.config.top_k is not None:
-            generate_kwargs.setdefault("top_k", self.config.top_k)
-        if self.config.top_p is not None:
-            generate_kwargs.setdefault("top_p", self.config.top_p)
-        generate_kwargs.setdefault(
-            "eos_token_id", self.tokenizer.convert_tokens_to_ids("<|im_end|>")
-        )
-        generate_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
-
-        # Generate without input_ids - using only inputs_embeds
-        # This avoids issues with dummy input_ids interfering with generation
-        output = self.language_model.generate(  # type: ignore[operator]
+        # Generate using language model (defaults from self.generation_config)
+        output = self.language_model.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
+            generation_config=self.generation_config,
             **generate_kwargs,
         )
 
