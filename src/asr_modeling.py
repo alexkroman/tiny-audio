@@ -100,6 +100,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.generation_config.max_new_tokens = config.max_new_tokens
         self.generation_config.num_beams = config.num_beams
         self.generation_config.do_sample = False
+        # Clear sampling params (inherited from LLM) since we use greedy decoding
+        self.generation_config.temperature = None
+        self.generation_config.top_p = None
+        self.generation_config.top_k = None
         self.generation_config.use_cache = config.use_cache
         self.generation_config.length_penalty = config.length_penalty
         self.generation_config.repetition_penalty = config.repetition_penalty
