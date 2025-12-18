@@ -1,8 +1,8 @@
-import json
-from pathlib import Path
+from typing import Optional, Union
 
+import torch
 import transformers
-from transformers import AutoTokenizer, ProcessorMixin
+from transformers import ProcessorMixin
 
 try:
     from .asr_config import ASRConfig
@@ -11,66 +11,81 @@ except ImportError:
 
 
 class ASRProcessor(ProcessorMixin):
-    """Generic processor that can handle both Wav2Vec2 and Whisper feature extractors."""
+    """Processor for Whisper-based ASR models."""
 
-    feature_extractor_class: str = "AutoFeatureExtractor"
-    tokenizer_class: str = "AutoTokenizer"
+    attributes = ["feature_extractor", "tokenizer"]
+    feature_extractor_class = "AutoFeatureExtractor"
+    tokenizer_class = "AutoTokenizer"
+    AUDIO_TOKEN = "<audio>"
+    TRANSCRIBE_PROMPT = "Transcribe: "
 
     def __init__(self, feature_extractor, tokenizer):
         self.feature_extractor = feature_extractor
         self.tokenizer = tokenizer
+        self.audio_token_id = tokenizer.convert_tokens_to_ids(self.AUDIO_TOKEN)
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
-        from transformers import AutoFeatureExtractor
+    def __call__(
+        self,
+        audio: Optional[Union[list, "torch.Tensor"]] = None,
+        text: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        return_tensors: str = "pt",
+        **kwargs,
+    ) -> dict:
+        """Process audio and text inputs for inference.
 
-        # Load feature extractor and tokenizer from saved model directory
-        feature_extractor = AutoFeatureExtractor.from_pretrained(
-            pretrained_model_name_or_path, **kwargs
-        )
+        Args:
+            audio: Raw audio waveform(s)
+            text: Target transcription (optional, for training - but use DataCollator instead)
+            system_prompt: Optional system prompt
+            return_tensors: Return format ("pt" for PyTorch)
 
-        tokenizer = AutoTokenizer.from_pretrained(
-            pretrained_model_name_or_path, trust_remote_code=True, **kwargs
-        )
+        Returns:
+            Dict with input_features, input_ids, attention_mask
+        """
+        result = {}
 
-        return cls(feature_extractor=feature_extractor, tokenizer=tokenizer)
-
-    def save_pretrained(self, save_directory, **kwargs):
-        """Override save_pretrained to avoid attribute errors from base class."""
-        save_path = Path(save_directory)
-        save_path.mkdir(parents=True, exist_ok=True)
-
-        # Save the feature extractor (this creates preprocessor_config.json with all feature extractor settings)
-        if self.feature_extractor is not None:
-            self.feature_extractor.save_pretrained(save_directory)
-
-        # Save the tokenizer
-        if self.tokenizer is not None:
-            self.tokenizer.save_pretrained(save_directory)
-
-        # Load the existing preprocessor_config.json and add processor-specific metadata
-        config_path = save_path / "preprocessor_config.json"
-        if config_path.exists():
-            with config_path.open() as f:
-                processor_config = json.load(f)
+        # Process audio
+        if audio is not None:
+            audio_inputs = self.feature_extractor(
+                audio,
+                sampling_rate=getattr(self.feature_extractor, "sampling_rate", 16000),
+                return_tensors=return_tensors,
+                **kwargs,
+            )
+            result["input_features"] = audio_inputs["input_features"]
+            # Whisper encoder output length = mel_len // 2 (stride-2 conv)
+            num_audio_tokens = audio_inputs["input_features"].shape[-1] // 2
         else:
-            processor_config = {}
+            num_audio_tokens = 0
 
-        # Add/update processor metadata while preserving feature extractor settings
-        feature_extractor_type = self.feature_extractor.__class__.__name__
-        processor_config.update(
-            {
-                "processor_class": self.__class__.__name__,
-                "feature_extractor_class": self.feature_extractor_class,
-                "tokenizer_class": self.tokenizer_class,
-                "feature_extractor_type": feature_extractor_type,  # Dynamic based on actual type
-                "auto_map": {"AutoProcessor": "asr_processing.ASRProcessor"},
-            }
+        # Build prompt with audio token placeholders
+        user_content = self.TRANSCRIBE_PROMPT
+        if num_audio_tokens > 0:
+            user_content += self.AUDIO_TOKEN * num_audio_tokens
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_content})
+        if text is not None:
+            messages.append({"role": "assistant", "content": text})
+
+        # Tokenize
+        input_ids = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=(text is None),
+            return_tensors=return_tensors,
         )
 
-        # Save the merged config
-        with config_path.open("w") as f:
-            json.dump(processor_config, f, indent=2)
+        if isinstance(input_ids, torch.Tensor) and input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+
+        result["input_ids"] = input_ids
+        result["attention_mask"] = torch.ones_like(input_ids)
+
+        return result
 
 
 ASRProcessor.register_for_auto_class()

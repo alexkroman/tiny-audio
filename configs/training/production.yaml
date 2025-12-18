@@ -1,0 +1,81 @@
+# Production training configuration
+output_dir: ./outputs/production_model
+
+# Optimizer
+optim: adamw_torch_fused
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_epsilon: 1e-8
+learning_rate: 3.0e-4
+weight_decay: 0.1
+max_grad_norm: 1.0
+warmup_steps: 1000
+lr_scheduler_type: cosine
+
+# Training
+max_steps: -1
+num_train_epochs: 1
+seed: 42
+per_device_train_batch_size: 6
+per_device_eval_batch_size: 6
+gradient_accumulation_steps: 3
+eval_accumulation_steps: 3
+
+# Logging
+logging_steps: 25
+logging_first_step: true
+logging_nan_inf_filter: false
+report_to: wandb
+wandb_project: tiny-audio
+
+# Evaluation
+eval_strategy: steps
+eval_steps: 2000
+
+# Saving
+save_strategy: steps
+save_steps: 1000
+save_total_limit: 5
+load_best_model_at_end: false
+metric_for_best_model: eval_loss
+greater_is_better: false
+save_safetensors: true
+
+# Hub
+push_to_hub: true
+hub_model_id: "mazesmazes/tiny-audio"
+hub_strategy: every_save
+hub_token: null
+hub_private_repo: false
+
+# Performance
+fp16: false
+bf16: true
+tf32: true
+torch_compile: false
+model_dtype: bfloat16
+attn_implementation: flash_attention_2
+
+# Data loading
+dataloader_num_workers: 8
+dataloader_prefetch_factor: 3
+dataloader_pin_memory: true
+dataloader_persistent_workers: true
+dataloader_drop_last: true
+group_by_length: false
+
+# Model training options
+projector_dropout: 0.0
+use_specaugment: true
+label_smoothing: 0.0
+
+# Misc
+disable_tqdm: false
+log_level: info
+ignore_data_skip: false
+resume_from_checkpoint: null
+
+# Required by HF Trainer
+remove_unused_columns: false
+label_names:
+  - labels

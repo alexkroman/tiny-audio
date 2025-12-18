@@ -139,9 +139,8 @@ def deploy_to_space(
                 print("\n❌ Push failed: Space already has content.")
                 print("   Use --force to overwrite existing content.")
                 raise SystemExit(1)
-            if result.returncode != 0:
-                print(f"\n❌ Push failed: {result.stderr}")
-                raise SystemExit(1)
+            print(f"\n❌ Push failed: {result.stderr}")
+            raise SystemExit(1)
 
         print("\n✅ Successfully deployed to Hugging Face Space!")
         print(f"🔗 Your Space will be available at: {space_url.replace('.git', '')}")

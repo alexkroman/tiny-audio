@@ -21,8 +21,9 @@ class ASRConfig(transformers.PretrainedConfig):
         audio_sample_rate: int = 16000,
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 2,
+        downsample_rate: int = 16,
         projector_hidden_dim: Optional[int] = None,
-        projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe"
+        projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe", "mlp"
         projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.05,  # Dropout rate for projector layers
         projector_input_noise: float = 0.02,  # Input noise for projector
@@ -36,24 +37,17 @@ class ASRConfig(transformers.PretrainedConfig):
         inference_warmup_tokens: int = 10,
         max_new_tokens: Optional[int] = None,
         min_new_tokens: Optional[int] = None,
-        do_sample: Optional[bool] = None,
-        temperature: Optional[float] = None,
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
         repetition_penalty: Optional[float] = None,
         length_penalty: Optional[float] = None,
         no_repeat_ngram_size: Optional[int] = None,
-        early_stopping: Optional[bool] = None,
         use_cache: Optional[bool] = None,
         **kwargs,
     ):
-        # Set default generation parameters
+        # Set default generation parameters (greedy decoding only)
         generation_defaults = {
             "num_beams": 1,
             "max_new_tokens": 96,
             "min_new_tokens": 0,
-            "do_sample": False,
-            "temperature": 0.1,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,
@@ -74,6 +68,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.audio_sample_rate = audio_sample_rate
         self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
+        self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
         self.projector_num_layers = projector_num_layers
@@ -96,7 +91,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.min_new_tokens = (
             min_new_tokens if min_new_tokens is not None else generation_defaults["min_new_tokens"]
         )
-        self.do_sample = do_sample if do_sample is not None else generation_defaults["do_sample"]
         self.repetition_penalty = (
             repetition_penalty
             if repetition_penalty is not None
@@ -111,12 +105,6 @@ class ASRConfig(transformers.PretrainedConfig):
             else generation_defaults["no_repeat_ngram_size"]
         )
         self.use_cache = use_cache if use_cache is not None else generation_defaults["use_cache"]
-        self.temperature = (
-            temperature if temperature is not None else generation_defaults["temperature"]
-        )
-        self.top_k = top_k
-        self.top_p = top_p
-        self.early_stopping = early_stopping
 
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)

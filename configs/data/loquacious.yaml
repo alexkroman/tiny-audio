@@ -1,10 +1,10 @@
-# LoquaciousSet clean configuration
+# LoquaciousSet dataset configuration
 datasets:
   - path: speechbrain/LoquaciousSet
-    name: clean
+    name: medium  # Options: clean, medium, large
     audio_column: wav
     text_column: text
-    task: transcribe  # Explicitly set the task
+    task: transcribe
     train_splits:
       - train
     eval_splits:
@@ -12,9 +12,10 @@ datasets:
 
 # Audio processing
 sample_rate: 16000
+max_audio_duration_seconds: 30.0
 
-# Dataset processing
+# Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
-max_eval_samples: 1000
-use_streaming: true
+max_eval_samples: 500
+use_streaming: false

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import re
+import contextlib
 from dataclasses import fields
 from typing import Any
 
@@ -8,6 +8,7 @@ import hydra
 import nltk
 import torch
 import truecase
+import wandb
 from datasets import (
     Audio,
     Dataset,
@@ -19,38 +20,31 @@ from datasets import (
 )
 from omegaconf import DictConfig, OmegaConf
 from transformers import (
-    DataCollatorForSeq2Seq,
     EarlyStoppingCallback,
     Trainer,
     TrainerCallback,
     TrainingArguments,
-    WhisperTokenizer,
 )
+from trl.trainer.utils import DataCollatorForChatML
 
-import wandb
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
 
-# Shared task prompts (matches ASRModel.TASK_PROMPTS)
-TASK_PROMPTS = {
-    "transcribe": "Transcribe: <audio>",
-    "continue": "Continue: <audio>",
-    "describe": "Describe: <audio>",
-    "emotion": "Emotion: <audio>",
-}
+TRANSCRIBE_PREFIX = "Transcribe: "  # Used in DataCollator, matches ASRConfig.user_prompt
 
 
 class DatasetLoader:
-    """Loads and prepares streaming datasets for training."""
+    """Loads and prepares datasets for training (streaming or non-streaming)."""
 
     def __init__(self, config: DictConfig):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
-        self.max_audio_duration = self.config.get("max_audio_duration_seconds", 30.0)
+        self.use_streaming = self.config.get("use_streaming", True)
+        self.num_proc = self.config.get("num_proc", 16) if not self.use_streaming else None
 
-    def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> IterableDataset:
+    def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
             raise ValueError("Dataset path is required")
@@ -59,8 +53,9 @@ class DatasetLoader:
             dataset_path,
             name=dataset_cfg.get("name"),
             split=split,
-            streaming=True,
+            streaming=self.use_streaming,
             cache_dir=self.cache_dir,
+            num_proc=self.num_proc,  # Parallel download/processing
         )
 
         # Normalize column names
@@ -81,42 +76,41 @@ class DatasetLoader:
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
-        task = dataset_cfg.get("task", "transcribe")
-        features = Features(
-            {
-                "audio": Audio(sampling_rate=self.sample_rate),
-                "text": Value("string"),
-                "task": Value("string"),
-            }
-        )
+        if self.use_streaming:
+            # Streaming mode: use generator to filter invalid samples
+            features = Features(
+                {
+                    "audio": Audio(sampling_rate=self.sample_rate),
+                    "text": Value("string"),
+                }
+            )
+            return IterableDataset.from_generator(
+                self._filter_generator,
+                gen_kwargs={"dataset": ds},
+                features=features,
+            )
 
-        return IterableDataset.from_generator(
-            self._add_task_generator,
-            gen_kwargs={"dataset": ds, "task": task, "max_audio_duration": self.max_audio_duration},
-            features=features,
-        )
+        # Non-streaming mode: filter TEDLIUM ignore markers only for TEDLIUM dataset
+        # Duration filtering happens in DataCollator to avoid loading all audio upfront
+        if "tedlium" in dataset_path.lower():
+
+            def filter_tedlium(text):
+                return text.strip() != "ignore_time_segment_in_scoring"
+
+            ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
+
+        return ds
 
     @staticmethod
-    def _add_task_generator(dataset, task: str, max_audio_duration: float = 30.0):
-        """Generator that adds task field and filters invalid samples."""
+    def _filter_generator(dataset):
+        """Generator that filters invalid samples (streaming mode)."""
         for example in dataset:
-            # Skip invalid audio
             audio = example.get("audio")
             if audio is None:
                 continue
 
             try:
-                # Soundfile backend returns dict with 'array' and 'sampling_rate'
                 if not isinstance(audio, dict) or "array" not in audio:
-                    continue
-
-                arr = audio["array"]
-                sample_rate = audio.get("sampling_rate", 16000)
-                num_samples = len(arr) if hasattr(arr, "__len__") else arr.shape[-1]
-
-                # Skip audio that's too long (causes OOM)
-                duration = num_samples / sample_rate
-                if duration > max_audio_duration:
                     continue
             except Exception:
                 continue
@@ -126,7 +120,6 @@ class DatasetLoader:
             if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
                 continue
 
-            example["task"] = task
             yield example
 
     def load(self) -> tuple[Dataset, Dataset]:
@@ -175,169 +168,92 @@ class DatasetLoader:
             return None
         # Shuffle each dataset before interleaving for better randomization
         if shuffle:
-            datasets = [ds.shuffle(seed=self.seed, buffer_size=100) for ds in datasets]
+            if self.use_streaming:
+                # Streaming mode: use buffer-based shuffle
+                datasets = [ds.shuffle(seed=self.seed, buffer_size=100) for ds in datasets]
+            else:
+                # Non-streaming mode: shuffle entire dataset
+                datasets = [ds.shuffle(seed=self.seed) for ds in datasets]
         if len(datasets) == 1:
             return datasets[0]
         probs = [w / sum(weights) for w in weights]
         return interleave_datasets(datasets, probabilities=probs)
 
 
-class DataCollator(DataCollatorForSeq2Seq):
+class DataCollator:
     """Collates audio and text data for training."""
 
-    # Text preprocessing patterns
-    TEXT_REPLACEMENTS = {
-        r"<PERIOD>": ".",
-        r"<COMMA>": ",",
-        r"<QUESTIONMARK>": "?",
-        r"<EXCLAMATIONPOINT>": "!",
-        r"<inaudible>": "",
-        r"\b(uh|um|ah)\b": "",
-    }
-
     def __init__(
-        self, tokenizer: Any, feature_extractor: Any, sample_rate: int, system_prompt: str = None
+        self,
+        tokenizer: Any,
+        feature_extractor: Any,
+        sample_rate: int,
+        system_prompt: str = None,
     ):
-        super().__init__(tokenizer=tokenizer, padding=True)
+        self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
-        self.is_whisper = feature_extractor.__class__.__name__ == "WhisperFeatureExtractor"
 
-        # Text normalizer
-        self.text_normalizer = (
-            tokenizer
-            if hasattr(tokenizer, "normalize")
-            else WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+        # Use trl's DataCollatorForChatML for label masking
+        # max_length needs to accommodate audio tokens (1500 for 30s) + prompt + response
+        self.text_collator = DataCollatorForChatML(
+            tokenizer=tokenizer,
+            max_length=2048,
         )
 
-        # Cache special token IDs
-        self._im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-        self._im_start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
-        self._assistant_id = tokenizer.convert_tokens_to_ids("assistant")
-        self._think_end_id = tokenizer.convert_tokens_to_ids("</think>")
-
-    def _normalize_text(self, text: str) -> str:
-        """Preprocess and normalize text."""
-        if not isinstance(text, str):
-            return ""
-        for pattern, repl in self.TEXT_REPLACEMENTS.items():
-            text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", "", text)  # Strip HTML-like tags
-        return self.text_normalizer.normalize(text)
-
-    def _find_assistant_content_range(self, tokens: list[int]) -> tuple[int, int]:
-        """Find the start and end indices of assistant content for label masking."""
-        # Try to find </think> tag first (for thinking models)
-        if self._think_end_id in tokens:
-            start = tokens.index(self._think_end_id) + 1
-        else:
-            # Find <|im_start|>assistant pattern
-            start = -1
-            for i in range(len(tokens) - 1):
-                if tokens[i] == self._im_start_id and tokens[i + 1] == self._assistant_id:
-                    start = i + 2
-                    break
-
-        if start < 0:
-            return -1, -1
-
-        # Skip whitespace tokens
-        while start < len(tokens) and self.tokenizer.decode([tokens[start]]).strip() == "":
-            start += 1
-
-        # Find <|im_end|> after content start
-        try:
-            end = tokens.index(self._im_end_id, start)
-        except ValueError:
-            return -1, -1
-
-        return start, end
-
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Process audio - extract numpy arrays from soundfile dict format
+        # Process audio
         audio_arrays = []
         valid_features = []
         for f in features:
             try:
-                audio_obj = f["audio"]
-                # Soundfile backend returns dict with 'array' and 'sampling_rate'
-                audio = audio_obj["array"]
+                audio = f["audio"]["array"]
                 if hasattr(audio, "numpy"):
                     audio = audio.numpy()
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
-                elif audio.ndim == 0:
-                    audio = audio.reshape(1)
                 audio_arrays.append(audio)
                 valid_features.append(f)
             except Exception:
-                # Skip corrupted audio files silently
                 continue
             finally:
                 f["audio"] = None
 
         if not audio_arrays:
-            raise ValueError("No valid audio samples in batch - all samples were corrupted")
+            raise ValueError("No valid audio samples in batch")
 
-        features = valid_features
-
-        audio_features = self.feature_extractor(
+        audio_out = self.feature_extractor(
             audio_arrays,
             sampling_rate=self.sample_rate,
-            padding="max_length" if self.is_whisper else True,
+            padding="max_length",
             return_tensors="pt",
-            return_attention_mask=True,
         )
 
-        # Process text
-        text_features = []
-        for f in features:
-            text = self._normalize_text(f.get("text", ""))
-            text = truecase.get_true_case(text)
+        # Compute number of audio tokens from mel spectrogram length
+        # Whisper encoder has stride-2, MLP projector has stride-2 = 4x total
+        mel_len = audio_out.input_features.shape[-1]
+        num_audio_tokens = mel_len // 4
+        audio_placeholder = "<audio>" * num_audio_tokens
+        user_content = TRANSCRIBE_PREFIX + audio_placeholder
 
-            task = f.get("task", "transcribe")
-            instruction = TASK_PROMPTS.get(task, TASK_PROMPTS["transcribe"])
+        # Build messages for each sample - DataCollatorForChatML handles tokenization and masking
+        text_features = []
+        for f in valid_features:
+            text = truecase.get_true_case((f.get("text") or "").strip())
 
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": instruction})
+            messages.append({"role": "user", "content": user_content})
             messages.append({"role": "assistant", "content": text})
 
-            tokens = list(
-                self.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    add_generation_prompt=False,
-                    truncation=True,
-                    max_length=512,
-                    enable_thinking=False,
-                )
-            )
+            text_features.append({"messages": messages})
 
-            # Ensure <|im_end|> is present - truncation may have cut it off
-            if tokens[-1] != self._im_end_id:
-                tokens = tokens[:-1] + [self._im_end_id]  # Replace last token with im_end
-
-            # Create labels - mask everything except assistant content
-            labels = [-100] * len(tokens)
-            start, end = self._find_assistant_content_range(tokens)
-            if start > 0 and end > 0:
-                labels[start : end + 1] = tokens[start : end + 1]
-
-            text_features.append({"input_ids": tokens, "labels": labels})
-
-        batch = super().__call__(text_features)
-
-        # Add audio to batch
-        if "input_values" in audio_features:
-            batch["input_values"] = audio_features.input_values
-        elif "input_features" in audio_features:
-            batch["input_features"] = audio_features.input_features
-        if "attention_mask" in audio_features:
-            batch["audio_attention_mask"] = audio_features.attention_mask
+        # Let trl handle tokenization, label masking, and padding
+        batch = self.text_collator(text_features)
+        batch["input_features"] = audio_out.input_features
 
         return batch
 
@@ -353,16 +269,12 @@ class PushToHubCallback(TrainerCallback):
         if model is None:
             return control
 
-        print(f"\n📤 Pushing checkpoint (step {state.global_step}) to Hub...")
-        try:
+        with contextlib.suppress(Exception):
             model.push_to_hub(
                 repo_id=args.hub_model_id,
                 commit_message=f"Training in progress - step {state.global_step}",
                 private=args.hub_private_repo,
             )
-            print(f"✅ Successfully pushed to {args.hub_model_id}")
-        except Exception as e:
-            print(f"⚠️  Failed to push to hub: {e}")
 
         return control
 
@@ -373,19 +285,16 @@ def get_valid_training_args(config: dict) -> dict:
     return {k: v for k, v in config.items() if k in valid_fields}
 
 
-@hydra.main(version_base=None, config_path="../configs/hydra", config_name="config")
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     nltk.download("punkt_tab", quiet=True)
 
-    if cfg.get("verbose"):
-        print(OmegaConf.to_yaml(cfg))
-
     # Initialize wandb
     if cfg.training.get("report_to") == "wandb":
         wandb.init(
-            project="tiny-audio",
+            project=cfg.training.get("wandb_project", "tiny-audio"),
             config=OmegaConf.to_container(cfg, resolve=True),
         )
 
@@ -402,7 +311,6 @@ def main(cfg: DictConfig) -> None:
 
     # Load or create model
     if cfg.model.get("pretrained_model_path"):
-        print(f"Loading pretrained model from: {cfg.model.pretrained_model_path}")
         model = ASRModel.from_pretrained(cfg.model.pretrained_model_path, config=asr_config)
     else:
         model = ASRModel(asr_config)
@@ -443,9 +351,10 @@ def main(cfg: DictConfig) -> None:
         torch._inductor.config.compile_threads = compile_config.get("compile_threads", 4)
 
     # Create trainer with only valid TrainingArguments
+    valid_args = get_valid_training_args(training_config)
     trainer = Trainer(
         model=model,
-        args=TrainingArguments(**get_valid_training_args(training_config)),
+        args=TrainingArguments(**valid_args),
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=data_collator,
@@ -456,7 +365,6 @@ def main(cfg: DictConfig) -> None:
     trainer.save_model()
 
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
-        print(f"Pushing final model to Hub: {cfg.training.hub_model_id}")
         trainer.push_to_hub(commit_message="Training complete - final model")
 
 

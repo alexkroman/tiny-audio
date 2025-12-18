@@ -2,7 +2,7 @@
 
 **Duration**: 1 hour (15 min lecture + 45 min hands-on)
 
-**Goal**: Evaluate your model's performance, deploy a public demo, and add your results to the leaderboard.
+**Goal**: Evaluate your model's performance and deploy a public demo.
 
 ## Learning Objectives
 
@@ -12,7 +12,6 @@ By the end of this class, you will:
 - Evaluate your model on multiple datasets
 - Deploy a live demo to Hugging Face Spaces
 - Set up Hugging Face Inference Endpoints (optional)
-- Add your results to the community leaderboard
 
 ______________________________________________________________________
 
@@ -50,19 +49,14 @@ WER = (Substitutions + Insertions + Deletions) / Total Reference Words
 
 ### 2. Evaluation Datasets (5 min)
 
-Different datasets test different capabilities. The training config (`combined.yaml`) uses 9 datasets with equal weights:
+Different datasets test different capabilities:
 
 | Dataset | What it tests |
 |---------|---------------|
-| **LoquaciousSet** | General benchmark (synthetic diverse speech, leaderboard uses this) |
-| **GigaSpeech** | Diverse sources (YouTube, podcasts, audiobooks) |
-| **LibriSpeech Clean** | Read audiobooks (clear speech, standard benchmark) |
-| **LibriSpeech Other** | Read audiobooks (more challenging acoustics) |
+| **LoquaciousSet** | General benchmark (diverse speech) |
+| **Earnings22** | Financial domain (company names, financial terms) |
 | **AMI** | Meetings (multi-speaker, conversational) |
-| **Earnings22** | Financial domain (company names, financial terms, noisy audio) |
-| **TEDLIUM** | TED talks (lectures, presentations) |
-| **People's Speech** | Large-scale diverse speech (various domains) |
-| **Common Voice** | Crowdsourced recordings (accents, varied quality) |
+| **LibriSpeech** | Read audiobooks (clean speech) |
 
 Testing on multiple datasets reveals where your model excels and struggles.
 
@@ -90,7 +84,7 @@ Get quantitative performance metrics across multiple datasets.
 
 **Step 1: Evaluate on LoquaciousSet (benchmark)**
 
-This is the official benchmark for the leaderboard:
+This is the primary benchmark:
 
 ```bash
 poetry run eval your-username/your-model --dataset loquacious --max-samples 500
@@ -122,7 +116,7 @@ CHECKPOINT @ 100 samples:
 ================================================================================
 ```
 
-**Record your final Corpus WER!** You'll need it for the leaderboard.
+**Record your final Corpus WER!**
 
 **Step 2: Evaluate on Earnings22 (domain-specific)**
 
@@ -274,47 +268,6 @@ poetry run python scripts/eval.py \
 
 ______________________________________________________________________
 
-## Exercise 4: Add to Leaderboard (5 min)
-
-### Goal
-
-Add your results to the community leaderboard.
-
-### Instructions
-
-**Step 1: Get your official WER**
-
-```bash
-poetry run eval your-username/your-model --dataset loquacious --max-samples 500
-```
-
-Record the **Corpus WER**.
-
-**Step 2: Edit the README**
-
-In the repo's `README.md`, find the leaderboard table and add your entry:
-
-```markdown
-| Rank | Contributor | WER | Model | Date |
-|------|------------|-----|-------|------|
-| 🥇 | [@alexkroman](https://github.com/alexkroman) | **12.14** | [mazesmazes/tiny-audio](https://huggingface.co/mazesmazes/tiny-audio) | 2025-10-23 |
-| 🥈 | [@your-username](https://github.com/your-username) | **XX.XX** | [your-username/your-model](https://huggingface.co/your-username/your-model) | 2025-XX-XX |
-```
-
-**Step 3: Submit a PR**
-
-1. Fork the repository
-1. Make your changes
-1. Submit PR titled: "Add [username] to leaderboard (WER: XX.XX%)"
-
-### Success Checkpoint
-
-- [ ] Have official WER score
-- [ ] Added to leaderboard
-- [ ] Submitted PR
-
-______________________________________________________________________
-
 ## Congratulations!
 
 You've completed the course! You now have:
@@ -322,13 +275,12 @@ You've completed the course! You now have:
 - ✅ A trained ASR model on Hugging Face
 - ✅ Evaluation results across multiple datasets
 - ✅ A live demo anyone can use
-- ✅ Your name on the leaderboard
 
 ### What's Next?
 
 **Improve your model:**
 
-- Try different projector types (MoE, SwiGLU, Residual)
+- Try different projector types (MLP, MoE, SwiGLU, Residual)
 - Use a larger decoder
 - Train on more diverse data
 

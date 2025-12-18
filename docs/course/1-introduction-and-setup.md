@@ -26,7 +26,6 @@ By the end of this 3-class course, you will:
 1. **Train** your own customized ASR model
 1. **Evaluate** it on standard benchmarks (Word Error Rate)
 1. **Push** it to your own Hugging Face account
-1. **Add** your results to the community leaderboard
 
 This isn't just theory—you'll build a real, working model and deploy it with your name on it.
 
@@ -147,7 +146,7 @@ This spectrogram is what the encoder actually processes.
 
 **Key insight**: The encoder is audio-only. At this stage, "to," "too," and "two" all look identical—same sound, different spellings.
 
-**Step 3: The MoE Projector**
+**Step 3: The MLP Projector**
 
 **Purpose**: Translate between audio-space and text-space.
 
@@ -157,7 +156,7 @@ The encoder outputs 1280 audio dimensions. The LLM expects 2048 text dimensions.
 
 - Maps 1280 audio dimensions → 2048 text dimensions
 - Uses convolutional downsampling (4x compression) for efficiency
-- Routes through 4 expert adapters using dense softmax routing
+- Passes through two linear layers to learn the translation
 - Learns to solve problems sound alone can't answer
 
 **What the projector learns:**
@@ -167,7 +166,7 @@ The encoder outputs 1280 audio dimensions. The LLM expects 2048 text dimensions.
 - Question marks — rising tone → add "?"
 - Capitalization — "apple" (fruit) vs "Apple" (company)
 
-**Architecture**: Mixture of Simple Adapters (MOSA) - convolutional downsampling followed by dense routing over 4 expert adapters. Each expert is a simple Linear→ReLU→Linear network.
+**Architecture**: Multi-Layer Perceptron (MLP) - convolutional downsampling followed by two linear layers and a GELU activation.
 
 **Key insight**: This is the **only component we train**. The encoder and decoder stay frozen.
 
@@ -205,12 +204,12 @@ Think of it as three specialists:
 
 **Efficiency**
 
-We only train the MoE projector instead of billions of parameters:
+We only train the MLP projector instead of billions of parameters:
 
 | Component | Parameters | Training |
 |-----------|------------|----------|
 | Encoder (Whisper) | ~809M | Frozen |
-| MoE Projector | trainable | **Trained** |
+| MLP Projector | trainable | **Trained** |
 | Decoder (SmolLM3) | ~3B | Frozen |
 
 **Training is fast and cheap:**
@@ -321,11 +320,9 @@ This takes 5-10 minutes.
 **Step 7: Verify installation**
 
 ```bash
-poetry run python scripts/download_samples.py  # Optional, downloads test audio
-poetry run python scripts/verify_setup.py
+poetry run python -c "import torch; print(f'PyTorch {torch.__version__}')"
+poetry run python -c "from transformers import pipeline; print('Transformers OK')"
 ```
-
-You should see: `✅ All checks passed!`
 
 **Don't worry** about matplotlib or librosa warnings—torch-codec handles audio processing.
 
@@ -334,7 +331,7 @@ You should see: `✅ All checks passed!`
 - [ ] Accounts created (GitHub, Hugging Face, optionally W&B)
 - [ ] Repository cloned
 - [ ] Poetry installed and dependencies installed
-- [ ] Verify script passes
+- [ ] Python imports work
 
 ______________________________________________________________________
 
@@ -487,9 +484,9 @@ ______________________________________________________________________
 
 ## Key Takeaways
 
-1. **Architecture**: Encoder (listens) → MoE Projector (translates) → Decoder (writes)
+1. **Architecture**: Encoder (listens) → MLP Projector (translates) → Decoder (writes)
 
-1. **Efficiency**: Only train the MoE projector, freeze everything else
+1. **Efficiency**: Only train the MLP projector, freeze everything else
 
 1. **Cost**: ~24 hours, ~$8-12 for a full training run
 

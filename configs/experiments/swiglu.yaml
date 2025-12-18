@@ -1,0 +1,8 @@
+# @package _global_
+# SwiGLU projector
+
+model:
+  projector_type: swiglu
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-swiglu"
