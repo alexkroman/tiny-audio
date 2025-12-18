@@ -8,7 +8,7 @@
 
 This isn't just another ASR model. This is a launchpad. A minimal, hackable, and deeply understandable codebase that empowers you to build, train, and deploy your own speech recognition system from scratch. In a single day, on a single GPU, for the price of a few coffees.
 
-Tiny Audio combines the power of massive pretrained models like HuBERT and SmolLM3-3B with an efficient projector-only training approach, allowing you to create a high-quality, custom ASR model that is truly yours.
+Tiny Audio combines the power of massive pretrained models (Whisper encoder + SmolLM3 decoder) with an efficient projector-only training approach, allowing you to create a high-quality, custom ASR model that is truly yours.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
@@ -77,40 +77,31 @@ Tiny Audio is built on a simple, powerful idea: combine the best pretrained mode
 1. **The Bridge (MLP Audio Projector):** This is a simple Multi-Layer Perceptron (MLP) projector that acts as a translator, converting the audio features from the encoder into a format the language model can understand. It uses convolutional downsampling (4x compression) followed by two linear layers. This is the only component we train.
 1. **The Brain (Language Model):** We use `HuggingFaceTB/SmolLM3-3B`, a powerful yet efficient language model that already knows how to generate coherent text. We keep this frozen as well, relying on its language understanding capabilities.
 
-By keeping both the encoder and decoder completely frozen and only training the MoE projector, we achieve incredible efficiency without sacrificing performance.
+By keeping both the encoder and decoder frozen and only training the projector, we achieve efficiency without sacrificing quality.
 
-### Key Concepts Explained
+### Key Concepts
 
-**What is the MLP Audio Projector?** A simple Multi-Layer Perceptron architecture that bridges the audio encoder and language model. It uses convolutional downsampling (4x compression) followed by a GELU activation and two linear layers.
+- **Convolutional Downsampling**: Two 1D conv layers with stride 2 each (4x compression) reduce the audio sequence length while preserving temporal information
+- **16kHz Audio**: Industry standard sample rate that captures human speech frequency range while being computationally efficient
+- **Projector-only Training**: The encoder and decoder are already excellent at their jobs from pretraining—we only need to teach them how to communicate
 
-**What is MOSA?** Mixture of Simple Adapters - unlike sparse MoE that routes to top-K experts, MOSA uses dense softmax routing over all experts. This provides stable training without auxiliary load-balancing losses while maintaining the benefits of expert specialization.
+### MLP Projector Architecture
 
-**What is Convolutional Downsampling?** Two 1D conv layers with stride 2 each (total 4x compression) reduce the audio sequence length while preserving temporal information. This is more efficient than frame concatenation and produces better representations.
+```
+Whisper embeddings (1280-dim)
+    ↓
+Conv1D (stride 2) → Conv1D (stride 2)  [4x compression]
+    ↓
+Linear (1280 → 2048) → GELU → Linear (2048 → 2048)
+    ↓
+RMSNorm → SmolLM3-3B embeddings (2048-dim)
+```
 
-**Why 16kHz audio?** This sample rate captures human speech frequency range (85-255 Hz fundamental + harmonics up to ~8kHz) while being computationally efficient. Industry standard for ASR.
-
-**Why projector-only training?** The encoder and decoder are already excellent at their tasks from pretraining. We only need to teach them how to communicate, which the MoE projector accomplishes efficiently.
-
-### Projector Architecture
-
-The MLP Audio Projector is the key innovation that makes Tiny Audio efficient:
-
-**Architecture Details (MLP - Multi-Layer Perceptron):**
-
-- **Input**: Whisper encoder embeddings (1280-dim)
-- **Convolutional downsampling**: Two Conv1D layers (stride 2 each) → 4x sequence compression
-- **Layers**: Linear layer (1280 -> 2048), GELU activation, Linear layer (2048 -> 2048)
-- **Output**: 2048-dim (SmolLM3-3B embedding size)
-- **Normalization**: RMSNorm for stability
-
-**Why projector-only training works:**
-
-- **Training is fast** (~24 hours on A40) with no gradient computation for frozen models
-- **It's cheap** (~$12 for a full run)
-- **You leverage pretrained knowledge** from both audio and language domains
-- **Memory efficient** - runs on a single A40 40GB GPU
-- **Stable training** - dense routing eliminates need for auxiliary load-balancing losses
-- **Modular design** - easily swap encoder or decoder models without retraining everything
+**Why this works:**
+- Fast training (~24 hours on A40) with no gradients for frozen models
+- Cheap (~$12 for a full run)
+- Leverages pretrained knowledge from both audio and language domains
+- Memory efficient—runs on a single A40 40GB GPU
 
 ## Training details
 
@@ -120,41 +111,21 @@ The MLP Audio Projector is the key innovation that makes Tiny Audio efficient:
 
 **Time & Cost**: ~24 hours on A40 = ~$12 depending on your provider
 
-**Configuration**: The repo uses Hydra for configs, so you can easily tweak things:
+**Configuration**: Hydra configs with easy overrides:
 
 ```bash
-# Use different projector types
-poetry run python scripts/train.py +experiments=mlp      # MLP projector (default)
-poetry run python scripts/train.py +experiments=moe       # MoE projector
-poetry run python scripts/train.py +experiments=swiglu    # Simple SwiGLU projector
-poetry run python scripts/train.py +experiments=residual  # Residual projector
+# Projector experiments (see configs/experiments/)
+poetry run python scripts/train.py +experiments=mlp       # MLP (default)
+poetry run python scripts/train.py +experiments=moe       # MoE
+poetry run python scripts/train.py +experiments=swiglu    # SwiGLU
+poetry run python scripts/train.py +experiments=residual  # Residual
 
-# Adjust learning rate
+# Override any config value
 poetry run python scripts/train.py training.learning_rate=1e-4
-
-# Change batch size (if you're running out of memory)
 poetry run python scripts/train.py training.per_device_train_batch_size=5
 ```
 
-The training script automatically logs to Weights & Biases (wandb), saves checkpoints to `outputs/`, and pushes the final model to HuggingFace.
-
-**Experiment Presets**: The repo includes pre-configured experiment files:
-
-```bash
-# MLP projector (recommended)
-poetry run python scripts/train.py +experiments=mlp
-
-# MoE projector
-poetry run python scripts/train.py +experiments=moe
-
-# SwiGLU projector (simpler alternative)
-poetry run python scripts/train.py +experiments=swiglu
-
-# Residual projector
-poetry run python scripts/train.py +experiments=residual
-```
-
-Each experiment combines model, data, and training configs. Check `configs/experiments/` for all available presets.
+Training logs to Weights & Biases, saves checkpoints to `outputs/`, and pushes the final model to HuggingFace.
 
 ## Evaluation
 
@@ -208,16 +179,13 @@ All training runs are logged to [Weights & Biases](https://wandb.ai) for detaile
 
 ## What makes this repo different?
 
-Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable, hackable codebase** designed to train an ASR model start to end and produce a working model you can actually use and learn from.
+Tiny Audio is not a SOTA ASR model. It's a **minimal, readable, hackable codebase** designed to train ASR models start to end.
 
-- **~1000 lines of core code** across 7 Python files in `src/`
-- **Projector-only training**: Train only the MoE projector while keeping encoder and decoder frozen
-- **Dependency-lite**: Just PyTorch, transformers, datasets, and a few other essentials via Poetry
+- **~1000 lines of core code** across 7 files in `src/`
+- **Projector-only training** keeps encoder and decoder frozen
+- **Dependency-lite**: PyTorch, transformers, datasets, and a few essentials
 - **No magic**: Read the code and understand exactly what's happening
-- **Fully yours**: Train it, modify it, deploy it however you want
-- **Multiple projector types**: mlp (default), MoE (MOSA), SwiGLU, or Residual projectors
-
-The entire codebase is small enough to read in an afternoon and understand deeply.
+- **Multiple projector types**: MLP (default), MoE, SwiGLU, Residual
 
 ## Project structure
 
@@ -269,22 +237,19 @@ Tiny Audio is nowhere finished. The goal is to make ASR training accessible on b
 
 ## Acknowledgments
 
-This project builds upon:
-
 - [Whisper](https://huggingface.co/openai/whisper-large-v3-turbo) by OpenAI for audio encoding
 - [SmolLM3-3B](https://huggingface.co/HuggingFaceTB/SmolLM3-3B) by Hugging Face for language modeling
 - [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) by SpeechBrain for training data
-- [MOSA](https://arxiv.org/abs/2508.18998) paper for the Mixture of Simple Adapters architecture
 
 ## Citation
 
 If you use Tiny Audio in your research, please cite:
 
 ```bibtex
-@software{kroman2024tinyaudio,
+@software{kroman2025tinyaudio,
   author = {Kroman, Alex},
   title = {Tiny Audio: Train your own speech recognition model in 24 hours},
-  year = {2024},
+  year = {2025},
   publisher = {GitHub},
   url = {https://github.com/alexkroman/tiny-audio}
 }
