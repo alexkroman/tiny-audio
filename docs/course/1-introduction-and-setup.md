@@ -320,7 +320,6 @@ This takes 5-10 minutes.
 **Step 7: Verify installation**
 
 ```bash
-poetry run python scripts/download_samples.py  # Optional, downloads test audio
 poetry run python -c "import torch; print(f'PyTorch {torch.__version__}')"
 poetry run python -c "from transformers import pipeline; print('Transformers OK')"
 ```
