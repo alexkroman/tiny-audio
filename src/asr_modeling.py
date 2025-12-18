@@ -11,6 +11,7 @@ from transformers import (
     AutoTokenizer,
     PreTrainedModel,
 )
+from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.whisper.modeling_whisper import (
     _compute_mask_indices,
@@ -18,16 +19,14 @@ from transformers.models.whisper.modeling_whisper import (
 
 try:
     from .asr_config import ASRConfig
-    from .conv_projector import ConvAudioProjector
-    from .deepseek_conv_projector import DeepSeekConvAudioProjector
+    from .mlp_projector import MLPAudioProjector
     from .moe_projector import MoEAudioProjector
     from .residual_projector import ResidualAudioProjector
     from .shared_moe_projector import SharedMoEAudioProjector
     from .swiglu_projector import AudioProjector
 except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
-    from conv_projector import ConvAudioProjector  # type: ignore[no-redef]
-    from deepseek_conv_projector import DeepSeekConvAudioProjector  # type: ignore[no-redef]
+    from mlp_projector import MLPAudioProjector  # type: ignore[no-redef]
     from moe_projector import MoEAudioProjector  # type: ignore[no-redef]
     from residual_projector import ResidualAudioProjector  # type: ignore[no-redef]
     from shared_moe_projector import SharedMoEAudioProjector  # type: ignore[no-redef]
@@ -39,12 +38,11 @@ PROJECTOR_CLASSES = {
     "residual": ResidualAudioProjector,
     "moe": MoEAudioProjector,
     "shared_moe": SharedMoEAudioProjector,
-    "conv": ConvAudioProjector,
-    "deepseek_conv": DeepSeekConvAudioProjector,
+    "mlp": MLPAudioProjector,
 }
 
 
-class ASRModel(PreTrainedModel):
+class ASRModel(PreTrainedModel, GenerationMixin):
     """Audio-to-text model combining an audio encoder, projector, and language model."""
 
     config_class = ASRConfig
@@ -125,11 +123,6 @@ class ASRModel(PreTrainedModel):
 
         # Audio projector (trainable)
         self.projector = self._create_projector(config, target_dtype)
-
-        # Cache whether projector accepts attention_mask
-        import inspect
-        sig = inspect.signature(self.projector.forward)
-        self._projector_accepts_mask = 'attention_mask' in sig.parameters
 
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
@@ -245,9 +238,6 @@ class ASRModel(PreTrainedModel):
         """Weight initialization (projector weights are initialized in MoEAudioProjector)."""
         pass
 
-    def can_generate(self) -> bool:
-        return True
-
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
 
@@ -347,29 +337,10 @@ class ASRModel(PreTrainedModel):
                 )
             hidden_states = encoder_out.last_hidden_state
 
-        # Handle projectors that return (embeds, mask) or just embeds
-        if self._projector_accepts_mask:
-            proj_out = self.projector(hidden_states, attention_mask=audio_attention_mask)
-        else:
-            proj_out = self.projector(hidden_states)
-
-        if isinstance(proj_out, tuple):
-            audio_embeds, audio_mask = proj_out
-            if audio_mask is None:
-                audio_mask = torch.ones(
-                    audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long
-                )
-        else:
-            audio_embeds = proj_out
-            # Create attention mask for projected audio
-            if audio_attention_mask is not None:
-                mask_float = audio_attention_mask.unsqueeze(1).float()
-                pooled_mask = F.interpolate(mask_float, size=audio_embeds.shape[1], mode="nearest")
-                audio_mask = pooled_mask.squeeze(1).long()
-            else:
-                audio_mask = torch.ones(
-                    audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long
-                )
+        audio_embeds = self.projector(hidden_states)
+        audio_mask = torch.ones(
+            audio_embeds.shape[:2], device=audio_embeds.device, dtype=torch.long
+        )
 
         return audio_embeds, audio_mask
 
@@ -624,8 +595,7 @@ class ASRModel(PreTrainedModel):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projector files
         projector_files = [
-            "conv_projector.py",
-            "deepseek_conv_projector.py",
+            "mlp_projector.py",
             "moe_projector.py",
             "residual_projector.py",
             "swiglu_projector.py",

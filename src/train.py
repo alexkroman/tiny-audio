@@ -44,7 +44,7 @@ TASK_PROMPTS = {
 class DatasetLoader:
     """Loads and prepares datasets for training (streaming or non-streaming)."""
 
-    def __init__(self, config: DictConfig, feature_extractor=None):
+    def __init__(self, config: DictConfig):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
@@ -52,8 +52,6 @@ class DatasetLoader:
         self.max_audio_duration = self.config.get("max_audio_duration_seconds", 30.0)
         self.use_streaming = self.config.get("use_streaming", True)
         self.num_proc = self.config.get("num_proc", 16) if not self.use_streaming else None
-        self.feature_extractor = feature_extractor
-        self.precompute_features = not self.use_streaming and feature_extractor is not None
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
@@ -132,33 +130,6 @@ class DatasetLoader:
             print(f"Processing dataset with num_proc={self.num_proc}")
             ds = ds.filter(filter_valid, num_proc=self.num_proc)
             ds = ds.map(add_task, num_proc=self.num_proc)
-
-            # Pre-compute mel spectrograms (cached by HF datasets)
-            if self.precompute_features:
-                fe = self.feature_extractor
-                is_whisper = fe.__class__.__name__ == "WhisperFeatureExtractor"
-
-                def extract_features(example):
-                    audio = example["audio"]["array"]
-                    if hasattr(audio, "numpy"):
-                        audio = audio.numpy()
-                    audio = audio.squeeze()
-                    if audio.ndim > 1:
-                        audio = audio.mean(axis=0)
-                    features = fe(
-                        audio,
-                        sampling_rate=sample_rate,
-                        padding="max_length" if is_whisper else False,
-                        return_tensors="np",
-                    )
-                    if "input_features" in features:
-                        example["input_features"] = features["input_features"][0]
-                    elif "input_values" in features:
-                        example["input_values"] = features["input_values"][0]
-                    return example
-
-                print("Pre-computing mel spectrograms (cached after first run)...")
-                ds = ds.map(extract_features, num_proc=self.num_proc)
 
             return ds
 
@@ -326,58 +297,41 @@ class DataCollator(DataCollatorForSeq2Seq):
         return start, end
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Check if features are pre-computed
-        precomputed = "input_features" in features[0] or "input_values" in features[0]
-
-        if precomputed:
-            # Use pre-computed spectrograms
-            if "input_features" in features[0]:
-                input_key = "input_features"
-            else:
-                input_key = "input_values"
-
-            # Stack pre-computed features into batch
-            stacked = torch.tensor(np.stack([f[input_key] for f in features]))
-            audio_features = {input_key: stacked}
-            # Clear audio to free memory
-            for f in features:
+        # Process audio - extract numpy arrays from soundfile dict format
+        audio_arrays = []
+        valid_features = []
+        for f in features:
+            try:
+                audio_obj = f["audio"]
+                # Soundfile backend returns dict with 'array' and 'sampling_rate'
+                audio = audio_obj["array"]
+                if hasattr(audio, "numpy"):
+                    audio = audio.numpy()
+                audio = audio.squeeze()
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=0)
+                elif audio.ndim == 0:
+                    audio = audio.reshape(1)
+                audio_arrays.append(audio)
+                valid_features.append(f)
+            except Exception:
+                # Skip corrupted audio files silently
+                continue
+            finally:
                 f["audio"] = None
-        else:
-            # Process audio - extract numpy arrays from soundfile dict format
-            audio_arrays = []
-            valid_features = []
-            for f in features:
-                try:
-                    audio_obj = f["audio"]
-                    # Soundfile backend returns dict with 'array' and 'sampling_rate'
-                    audio = audio_obj["array"]
-                    if hasattr(audio, "numpy"):
-                        audio = audio.numpy()
-                    audio = audio.squeeze()
-                    if audio.ndim > 1:
-                        audio = audio.mean(axis=0)
-                    elif audio.ndim == 0:
-                        audio = audio.reshape(1)
-                    audio_arrays.append(audio)
-                    valid_features.append(f)
-                except Exception:
-                    # Skip corrupted audio files silently
-                    continue
-                finally:
-                    f["audio"] = None
 
-            if not audio_arrays:
-                raise ValueError("No valid audio samples in batch - all samples were corrupted")
+        if not audio_arrays:
+            raise ValueError("No valid audio samples in batch - all samples were corrupted")
 
-            features = valid_features
+        features = valid_features
 
-            audio_features = self.feature_extractor(
-                audio_arrays,
-                sampling_rate=self.sample_rate,
-                padding="max_length" if self.is_whisper else True,
-                return_tensors="pt",
-                return_attention_mask=True,
-            )
+        audio_features = self.feature_extractor(
+            audio_arrays,
+            sampling_rate=self.sample_rate,
+            padding="max_length" if self.is_whisper else True,
+            return_tensors="pt",
+            return_attention_mask=True,
+        )
 
         # Process text
         text_features = []
@@ -497,8 +451,8 @@ def main(cfg: DictConfig) -> None:
 
     model.config.use_cache = False
 
-    # Load datasets (pass feature_extractor for pre-computing spectrograms)
-    train_dataset, val_dataset = DatasetLoader(cfg, feature_extractor=model.feature_extractor).load()
+    # Load datasets
+    train_dataset, val_dataset = DatasetLoader(cfg).load()
 
     # Create data collator
     data_collator = DataCollator(
