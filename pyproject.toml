@@ -85,6 +85,7 @@ assemblyai = "*"
 typer = ">=0.19.2"
 truecase = "*"
 trl = ">=0.26.0"
+ctc-forced-aligner = {git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git"}
 nltk = "*"
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 fabric = ">=3.0.0"
@@ -135,6 +136,7 @@ ignore_errors = true
 [tool.pyright]
 include = ["src"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
+ignore = ["src/asr_pipeline.py"]  # Uses lazy-loaded ctc_forced_aligner
 typeCheckingMode = "basic"
 reportPrivateImportUsage = false
 reportOptionalMemberAccess = false
