@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from transformers import AutoTokenizer, WhisperFeatureExtractor
 
-from src.train import DataCollator
+from scripts.train import DataCollator
 
 
 @pytest.fixture
@@ -270,7 +270,7 @@ class TestModelIntegration:
 
     def test_different_audio_produces_different_loss(self, model):
         """Verify that different audio inputs produce different losses."""
-        from src.train import DataCollator
+        from scripts.train import DataCollator
 
         collator = DataCollator(
             tokenizer=model.tokenizer,
@@ -319,7 +319,7 @@ class TestModelIntegration:
 
     def test_audio_embeddings_replace_audio_tokens(self, model):
         """Verify that <audio> token embeddings are replaced with projected audio."""
-        from src.train import DataCollator
+        from scripts.train import DataCollator
         import torch
 
         collator = DataCollator(
@@ -354,7 +354,7 @@ class TestModelIntegration:
 
     def test_all_audio_embeddings_used(self, model):
         """Verify that all projected audio embeddings are used, not just one."""
-        from src.train import DataCollator
+        from scripts.train import DataCollator
         import torch
 
         collator = DataCollator(

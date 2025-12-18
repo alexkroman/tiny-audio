@@ -19,27 +19,10 @@ from transformers.models.whisper.modeling_whisper import (
 
 try:
     from .asr_config import ASRConfig
-    from .mlp_projector import MLPAudioProjector
-    from .moe_projector import MoEAudioProjector
-    from .residual_projector import ResidualAudioProjector
-    from .shared_moe_projector import SharedMoEAudioProjector
-    from .swiglu_projector import AudioProjector
+    from .projectors import PROJECTOR_CLASSES
 except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
-    from mlp_projector import MLPAudioProjector  # type: ignore[no-redef]
-    from moe_projector import MoEAudioProjector  # type: ignore[no-redef]
-    from residual_projector import ResidualAudioProjector  # type: ignore[no-redef]
-    from shared_moe_projector import SharedMoEAudioProjector  # type: ignore[no-redef]
-    from swiglu_projector import AudioProjector  # type: ignore[no-redef]
-
-# Map projector type names to classes
-PROJECTOR_CLASSES = {
-    "swiglu": AudioProjector,
-    "residual": ResidualAudioProjector,
-    "moe": MoEAudioProjector,
-    "shared_moe": SharedMoEAudioProjector,
-    "mlp": MLPAudioProjector,
-}
+    from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -198,7 +181,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
         # Select projector type based on config
-        projector_type = getattr(config, "projector_type", "moe")
+        projector_type = getattr(config, "projector_type", "mlp")
         projector_class = PROJECTOR_CLASSES.get(projector_type)
         if projector_class is None:
             raise ValueError(
@@ -551,18 +534,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         src_dir = PathlibPath(__file__).parent
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
-        # Copy projector files
-        projector_files = [
-            "mlp_projector.py",
-            "moe_projector.py",
-            "residual_projector.py",
-            "swiglu_projector.py",
-            "shared_moe_projector.py",
-        ]
-        for projector_file in projector_files:
-            src_path = src_dir / projector_file
-            if src_path.exists():
-                shutil.copy(src_path, save_dir / projector_file)
+        # Copy projectors module
+        shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
 
 
 # Register with transformers Auto classes

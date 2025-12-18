@@ -50,7 +50,7 @@ When you start a training run:
 
 1. **Downloads models**: Whisper encoder (~3GB) and SmolLM3 decoder (~6GB) from Hugging Face
 1. **Streams data**: Training data streams from Hugging Face (no terabyte downloads needed)
-1. **Trains MoE projector**: Only the MoE projector trains; encoder and decoder stay frozen
+1. **Trains MLP projector**: Only the MLP projector trains; encoder and decoder stay frozen
 1. **Saves checkpoints**: Every 500 steps, model saves to Hugging Face (resume if something crashes)
 
 ### 3. Key Metrics (5 min)
@@ -216,7 +216,7 @@ Most changes are **config changes, not code changes**. Configs are YAML files in
 **Step 2: Create your config**
 
 ```bash
-cp configs/hydra/experiments/moe.yaml configs/hydra/experiments/my_experiment.yaml
+cp configs/hydra/experiments/mlp.yaml configs/hydra/experiments/my_experiment.yaml
 ```
 
 Edit `my_experiment.yaml`:
@@ -240,7 +240,7 @@ training:
 | `max_steps` | 15,000 | Training duration (5,000 is enough to test) |
 | `per_device_train_batch_size` | 14 | Samples per step (higher = faster, more VRAM) |
 | `learning_rate` | 1e-3 | Update aggressiveness |
-| `projector_type` | moe | Projector architecture (moe, swiglu, residual) |
+| `projector_type` | mlp | Projector architecture (mlp, moe, swiglu, residual) |
 
 **Step 3: Re-deploy**
 
@@ -402,7 +402,7 @@ Once you have a working pipeline:
 
 **Easy wins:**
 
-- Try different projector types (MoE, SwiGLU, Residual)
+- Try different projector types (MLP, MoE, SwiGLU, Residual)
 - Adjust learning rate and batch size
 
 **Interesting experiments:**

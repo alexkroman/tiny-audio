@@ -1,0 +1,8 @@
+# @package _global_
+# Simple 2-layer MLP projector
+
+model:
+  projector_type: mlp
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio"

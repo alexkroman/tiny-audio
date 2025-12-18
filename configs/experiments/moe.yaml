@@ -1,0 +1,8 @@
+# @package _global_
+# Mixture of Experts projector
+
+model:
+  projector_type: moe
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-moe"

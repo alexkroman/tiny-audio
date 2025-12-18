@@ -103,23 +103,12 @@ def start_training(host, port, experiment, session_name, wandb_run_id=None, wand
         # Disable CUDA graphs (incompatible with CPU-GPU sync in flash attention)
         export TORCH_CUDA_GRAPHS_ENABLED=0
 
-        echo "--- Verifying environment ---"
-        echo "Experiment: {experiment}"
-        echo "Current PATH: $PATH"
-        echo "Python executable: $(which python)"
-        echo "Python version: $(python --version)"
-        echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())' 2>/dev/null)"
-        echo "Audio decoder: $HF_DATASETS_AUDIO_DECODER"
-        echo "HF_HUB_ENABLE_HF_TRANSFER: $HF_HUB_ENABLE_HF_TRANSFER"
-        python -c "import hf_transfer; print(f'hf_transfer version: {{hf_transfer.__version__}}')" 2>/dev/null || echo "hf_transfer: NOT INSTALLED"
-        echo "============================="
-
         cd /workspace
 
         echo "--- Launching Training ---"
         # Use accelerate directly (it's installed in system Python)
         # Then pass python path explicitly for training script
-        accelerate launch --config_file configs/accelerate/a40.yaml -m src.train +experiments={experiment}
+        accelerate launch --config_file configs/accelerate/a40.yaml -m scripts.train +experiments={experiment}
         EXIT_CODE=$?
 
         if [ $EXIT_CODE -eq 0 ]; then

@@ -328,7 +328,7 @@ You've completed the course! You now have:
 
 **Improve your model:**
 
-- Try different projector types (MoE, SwiGLU, Residual)
+- Try different projector types (MLP, MoE, SwiGLU, Residual)
 - Use a larger decoder
 - Train on more diverse data
 

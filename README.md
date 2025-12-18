@@ -55,11 +55,18 @@ cd tiny-audio
 poetry install
 
 # 2. Run a quick test to make sure everything is working (~5 minutes)
-poetry run python src/train.py +experiments=mac_minimal
+poetry run python scripts/train.py +experiments=mlp data.max_train_samples=100 training.max_steps=10
 
 # 3. Start the full training (~24 hours on an A40 GPU)
 export HF_TOKEN='your-hugging-face-token' # Get from hf.co/settings/tokens
-poetry run python src/train.py +experiments=stage1
+poetry run python scripts/train.py +experiments=mlp
+
+# 4. Resume training from a checkpoint (if training was interrupted)
+poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpoint=/path/to/checkpoint-XXXX
+
+# For remote training, find the latest checkpoint and resume:
+poetry run find-checkpoint <host> <port>  # prints latest checkpoint path
+poetry run remote-train <host> <port> --experiment mlp --wandb-run-id <run-id> --wandb-resume must training.resume_from_checkpoint=/path/to/checkpoint-XXXX
 ```
 
 ## How It Works: The Tiny Audio Architecture
@@ -67,14 +74,14 @@ poetry run python src/train.py +experiments=stage1
 Tiny Audio is built on a simple, powerful idea: combine the best pretrained models for audio and language, and efficiently teach them to work together.
 
 1. **The Ear (Audio Encoder):** We start with `openai/whisper-large-v3-turbo`, a state-of-the-art model that has already learned to understand the nuances of human speech. We keep this frozen, leveraging its pretrained knowledge.
-1. **The Bridge (MoE Audio Projector):** This is a Mixture of Simple Adapters (MOSA) projector that acts as a translator, converting the audio features from the encoder into a format the language model can understand. It uses convolutional downsampling (4x compression) and dense routing over 4 expert adapters. This is the only component we train.
+1. **The Bridge (MLP Audio Projector):** This is a simple Multi-Layer Perceptron (MLP) projector that acts as a translator, converting the audio features from the encoder into a format the language model can understand. It uses convolutional downsampling (4x compression) followed by two linear layers. This is the only component we train.
 1. **The Brain (Language Model):** We use `HuggingFaceTB/SmolLM3-3B`, a powerful yet efficient language model that already knows how to generate coherent text. We keep this frozen as well, relying on its language understanding capabilities.
 
 By keeping both the encoder and decoder completely frozen and only training the MoE projector, we achieve incredible efficiency without sacrificing performance.
 
 ### Key Concepts Explained
 
-**What is the MoE Audio Projector?** A Mixture of Simple Adapters (MOSA) architecture that bridges the audio encoder and language model. It uses convolutional downsampling (4x compression) followed by dense routing over 4 expert adapters, each consisting of Linear→ReLU→Linear layers (2048→4096→2048).
+**What is the MLP Audio Projector?** A simple Multi-Layer Perceptron architecture that bridges the audio encoder and language model. It uses convolutional downsampling (4x compression) followed by a GELU activation and two linear layers.
 
 **What is MOSA?** Mixture of Simple Adapters - unlike sparse MoE that routes to top-K experts, MOSA uses dense softmax routing over all experts. This provides stable training without auxiliary load-balancing losses while maintaining the benefits of expert specialization.
 
@@ -86,14 +93,13 @@ By keeping both the encoder and decoder completely frozen and only training the 
 
 ### Projector Architecture
 
-The MoE Audio Projector is the key innovation that makes Tiny Audio efficient:
+The MLP Audio Projector is the key innovation that makes Tiny Audio efficient:
 
-**Architecture Details (MOSA - Mixture of Simple Adapters):**
+**Architecture Details (MLP - Multi-Layer Perceptron):**
 
 - **Input**: Whisper encoder embeddings (1280-dim)
 - **Convolutional downsampling**: Two Conv1D layers (stride 2 each) → 4x sequence compression
-- **Router**: Linear→ReLU→Linear (1280→512→4) with dense softmax
-- **Experts**: 4 adapters, each Linear→ReLU→Linear (2048→4096→2048)
+- **Layers**: Linear layer (1280 -> 2048), GELU activation, Linear layer (2048 -> 2048)
 - **Output**: 2048-dim (SmolLM3-3B embedding size)
 - **Normalization**: RMSNorm for stability
 
@@ -118,15 +124,16 @@ The MoE Audio Projector is the key innovation that makes Tiny Audio efficient:
 
 ```bash
 # Use different projector types
-poetry run python src/train.py +experiments=moe       # MoE projector (default)
-poetry run python src/train.py +experiments=swiglu    # Simple SwiGLU projector
-poetry run python src/train.py +experiments=residual  # Residual projector
+poetry run python scripts/train.py +experiments=mlp      # MLP projector (default)
+poetry run python scripts/train.py +experiments=moe       # MoE projector
+poetry run python scripts/train.py +experiments=swiglu    # Simple SwiGLU projector
+poetry run python scripts/train.py +experiments=residual  # Residual projector
 
 # Adjust learning rate
-poetry run python src/train.py training.learning_rate=1e-4
+poetry run python scripts/train.py training.learning_rate=1e-4
 
 # Change batch size (if you're running out of memory)
-poetry run python src/train.py training.per_device_train_batch_size=5
+poetry run python scripts/train.py training.per_device_train_batch_size=5
 ```
 
 The training script automatically logs to Weights & Biases (wandb), saves checkpoints to `outputs/`, and pushes the final model to HuggingFace.
@@ -134,17 +141,20 @@ The training script automatically logs to Weights & Biases (wandb), saves checkp
 **Experiment Presets**: The repo includes pre-configured experiment files:
 
 ```bash
-# MoE projector (recommended)
-poetry run python src/train.py +experiments=moe
+# MLP projector (recommended)
+poetry run python scripts/train.py +experiments=mlp
+
+# MoE projector
+poetry run python scripts/train.py +experiments=moe
 
 # SwiGLU projector (simpler alternative)
-poetry run python src/train.py +experiments=swiglu
+poetry run python scripts/train.py +experiments=swiglu
 
 # Residual projector
-poetry run python src/train.py +experiments=residual
+poetry run python scripts/train.py +experiments=residual
 ```
 
-Each experiment combines model, data, and training configs. Check `configs/hydra/experiments/` for all available presets.
+Each experiment combines model, data, and training configs. Check `configs/experiments/` for all available presets.
 
 ## Evaluation
 
@@ -205,7 +215,7 @@ Tiny Audio is not a SOTA ASR model. It's a **single, cohesive, minimal, readable
 - **Dependency-lite**: Just PyTorch, transformers, datasets, and a few other essentials via Poetry
 - **No magic**: Read the code and understand exactly what's happening
 - **Fully yours**: Train it, modify it, deploy it however you want
-- **Multiple projector types**: MoE (MOSA), SwiGLU, or Residual projectors
+- **Multiple projector types**: mlp (default), MoE (MOSA), SwiGLU, or Residual projectors
 
 The entire codebase is small enough to read in an afternoon and understand deeply.
 
@@ -213,23 +223,23 @@ The entire codebase is small enough to read in an afternoon and understand deepl
 
 ```text
 tiny-audio/
-├── src/                      # Core code (~1,200 lines)
+├── src/                      # Core library code
 │   ├── asr_modeling.py      # Model architecture
 │   ├── asr_config.py        # Model configuration
 │   ├── asr_pipeline.py      # HuggingFace pipeline integration
 │   ├── asr_processing.py    # Audio/text processing
-│   ├── train.py             # Training script
+│   ├── projectors.py        # All projector architectures
 │   └── handler.py           # Inference handler
-├── configs/                 # Hydra configurations
-│   └── hydra/
-│       ├── config.yaml      # Main config
-│       ├── model/           # Model variants
-│       ├── training/        # Training hyperparameters
-│       └── experiments/     # Full experiment presets
-├── scripts/                 # Utility scripts
-│   ├── eval.py             # Evaluation
-│   ├── deploy_runpod.py    # Remote deployment
+├── scripts/                 # Training and utility scripts
+│   ├── train.py             # Training script (Hydra-based)
+│   ├── eval.py              # Evaluation
+│   ├── deploy_runpod.py     # Remote deployment
 │   └── ...
+├── configs/                 # Hydra configurations
+│   ├── config.yaml          # Main config
+│   ├── experiments/         # Projector presets
+│   ├── data/                # Dataset configs
+│   └── training/            # Training hyperparameters
 ├── demo/                    # Gradio web interface
 └── tests/                   # Test suite
 ```

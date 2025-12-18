@@ -1,0 +1,44 @@
+# Main configuration
+defaults:
+  - data: loquacious
+  - training: production
+  - _self_
+
+# Model configuration (must match ASRConfig parameter names)
+model:
+  audio_model_id: openai/whisper-large-v3-turbo
+  text_model_id: HuggingFaceTB/SmolLM3-3B
+  system_prompt: "/no_think /system_override"
+  projector_type: mlp  # Options: mlp, moe, swiglu, residual, shared_moe
+
+  # Projector settings
+  projector_pool_stride: 2
+  projector_num_layers: 2
+  projector_hidden_dim: null
+  projector_init_std: 0.02
+  projector_input_noise: 0.0
+
+  # MoE settings (for moe/shared_moe projector types)
+  num_experts: 4
+  num_experts_per_tok: 2
+  router_aux_loss_coef: 0.01
+
+  # Generation settings
+  max_new_tokens: 256
+
+# Hydra output directories
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: true
+
+# Early stopping (set patience to enable)
+early_stopping:
+  patience: null
+  threshold: 0.0
+
+verbose: false

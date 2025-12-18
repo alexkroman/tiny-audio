@@ -35,7 +35,7 @@ Documentation = "https://github.com/alexkroman/tiny-audio#readme"
 download-samples = "scripts.download_samples:download_samples"
 verify-setup = "scripts.verify_setup:main"
 
-# Model scripts (use: poetry run python src/train.py for training due to Hydra config paths)
+# Model scripts (use: poetry run python scripts/train.py for training due to Hydra config paths)
 eval = "scripts.eval:main"
 push-to-hub = "scripts.push_to_hub:main"
 run-handler = "scripts.run_handler_local:main"
@@ -45,6 +45,7 @@ deploy-hf = "scripts.deploy_to_hf_space:main"
 deploy-runpod = "scripts.deploy_runpod:main"
 remote-train = "scripts.start_remote_training:main"
 attach-remote = "scripts.attach_remote_session:main"
+find-checkpoint = "scripts.find_checkpoint:cli"
 
 # Development tools
 lint = "scripts.dev_tools:lint"

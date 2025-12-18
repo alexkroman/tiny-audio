@@ -9,15 +9,15 @@ python_version: "3.11"
 app_file: app.py
 pinned: false
 license: mit
-short_description: Efficient ASR with HuBERT encoder and Qwen3-8B decoder
+short_description: Efficient ASR with Whisper encoder and SmolLM3 decoder
 models:
   - mazesmazes/tiny-audio
 tags:
   - audio
   - automatic-speech-recognition
-  - wav2vec2
-  - qwen3
-  - lora
+  - whisper
+  - smollm
+  - mlp
 suggested_hardware: cpu-upgrade
 preload_from_hub:
   - mazesmazes/tiny-audio
@@ -27,13 +27,13 @@ preload_from_hub:
 
 This Space demonstrates an Automatic Speech Recognition (ASR) model that combines:
 
-- **HuBERT-large encoder** for audio feature extraction
-- **Qwen3-8B decoder** for efficient text generation
+- **Whisper encoder** for audio feature extraction
+- **SmolLM3 decoder** for efficient text generation
 
 ## Features
 
 - 🎙️ **Record from microphone** or upload audio files
-- ⚡ **Fast inference** with only ~2% trainable parameters
+- ⚡ **Fast inference** with a small number of trainable parameters
 - 🎯 **English transcription** optimized for speech-to-text
 - 📊 **Lightweight model** suitable for edge deployment
 
@@ -41,9 +41,9 @@ This Space demonstrates an Automatic Speech Recognition (ASR) model that combine
 
 The model uses a novel architecture that bridges audio and text modalities:
 
-1. **Audio Encoder**: Frozen HuBERT-large encoder (317M params)
+1. **Audio Encoder**: Frozen Whisper encoder
 2. **Projection Layer**: Custom audio-to-text space mapping
-3. **Text Decoder**: Qwen3-8B (frozen)
+3. **Text Decoder**: SmolLM3 (frozen)
 
 ## Usage
 
@@ -68,10 +68,11 @@ The model uses a novel architecture that bridges audio and text modalities:
 If you use this model in your research, please cite:
 
 ```bibtex
-@software{tiny_audio_2024,
+@software{kroman2024tinyaudio,
   author = {Kroman, Alex},
-  title = {Tiny Audio: Efficient ASR with HuBERT and Qwen3-8B},
+  title = {Tiny Audio: Train your own speech recognition model in 24 hours},
   year = {2024},
+  publisher = {GitHub},
   url = {https://github.com/alexkroman/tiny-audio}
 }
 ```

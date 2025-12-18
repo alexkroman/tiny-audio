@@ -29,7 +29,7 @@ from trl.trainer.utils import DataCollatorForChatML
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
 
-TRANSCRIBE_PREFIX = "Transcribe: "
+TRANSCRIBE_PREFIX = "Transcribe: "  # Used in DataCollator, matches ASRConfig.user_prompt
 
 
 class DatasetLoader:
@@ -96,7 +96,6 @@ class DatasetLoader:
             def filter_tedlium(text):
                 return text.strip() != "ignore_time_segment_in_scoring"
 
-            print(f"Filtering TEDLIUM with num_proc={self.num_proc}")
             ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
         return ds
@@ -269,16 +268,14 @@ class PushToHubCallback(TrainerCallback):
         if model is None:
             return control
 
-        print(f"\n📤 Pushing checkpoint (step {state.global_step}) to Hub...")
         try:
             model.push_to_hub(
                 repo_id=args.hub_model_id,
                 commit_message=f"Training in progress - step {state.global_step}",
                 private=args.hub_private_repo,
             )
-            print(f"✅ Successfully pushed to {args.hub_model_id}")
-        except Exception as e:
-            print(f"⚠️  Failed to push to hub: {e}")
+        except Exception:
+            pass
 
         return control
 
@@ -289,19 +286,17 @@ def get_valid_training_args(config: dict) -> dict:
     return {k: v for k, v in config.items() if k in valid_fields}
 
 
-@hydra.main(version_base=None, config_path="../configs/hydra", config_name="config")
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     nltk.download("punkt_tab", quiet=True)
 
-    if cfg.get("verbose"):
-        print(OmegaConf.to_yaml(cfg))
 
     # Initialize wandb
     if cfg.training.get("report_to") == "wandb":
         wandb.init(
-            project="tiny-audio",
+            project=cfg.training.get("wandb_project", "tiny-audio"),
             config=OmegaConf.to_container(cfg, resolve=True),
         )
 
@@ -318,7 +313,6 @@ def main(cfg: DictConfig) -> None:
 
     # Load or create model
     if cfg.model.get("pretrained_model_path"):
-        print(f"Loading pretrained model from: {cfg.model.pretrained_model_path}")
         model = ASRModel.from_pretrained(cfg.model.pretrained_model_path, config=asr_config)
     else:
         model = ASRModel(asr_config)
@@ -360,12 +354,6 @@ def main(cfg: DictConfig) -> None:
 
     # Create trainer with only valid TrainingArguments
     valid_args = get_valid_training_args(training_config)
-    print(
-        f"Dataloader config: num_workers={valid_args.get('dataloader_num_workers')}, "
-        f"prefetch_factor={valid_args.get('dataloader_prefetch_factor')}, "
-        f"pin_memory={valid_args.get('dataloader_pin_memory')}, "
-        f"persistent_workers={valid_args.get('dataloader_persistent_workers')}"
-    )
     trainer = Trainer(
         model=model,
         args=TrainingArguments(**valid_args),
@@ -379,7 +367,6 @@ def main(cfg: DictConfig) -> None:
     trainer.save_model()
 
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
-        print(f"Pushing final model to Hub: {cfg.training.hub_model_id}")
         trainer.push_to_hub(commit_message="Training complete - final model")
 
 
