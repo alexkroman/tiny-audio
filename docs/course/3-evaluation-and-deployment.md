@@ -50,19 +50,14 @@ WER = (Substitutions + Insertions + Deletions) / Total Reference Words
 
 ### 2. Evaluation Datasets (5 min)
 
-Different datasets test different capabilities. The training config (`combined.yaml`) uses 9 datasets with equal weights:
+Different datasets test different capabilities:
 
 | Dataset | What it tests |
 |---------|---------------|
-| **LoquaciousSet** | General benchmark (synthetic diverse speech, leaderboard uses this) |
-| **GigaSpeech** | Diverse sources (YouTube, podcasts, audiobooks) |
-| **LibriSpeech Clean** | Read audiobooks (clear speech, standard benchmark) |
-| **LibriSpeech Other** | Read audiobooks (more challenging acoustics) |
+| **LoquaciousSet** | General benchmark (diverse speech, leaderboard uses this) |
+| **Earnings22** | Financial domain (company names, financial terms) |
 | **AMI** | Meetings (multi-speaker, conversational) |
-| **Earnings22** | Financial domain (company names, financial terms, noisy audio) |
-| **TEDLIUM** | TED talks (lectures, presentations) |
-| **People's Speech** | Large-scale diverse speech (various domains) |
-| **Common Voice** | Crowdsourced recordings (accents, varied quality) |
+| **LibriSpeech** | Read audiobooks (clean speech) |
 
 Testing on multiple datasets reveals where your model excels and struggles.
 
@@ -295,10 +290,10 @@ Record the **Corpus WER**.
 In the repo's `README.md`, find the leaderboard table and add your entry:
 
 ```markdown
-| Rank | Contributor | WER | Model | Date |
-|------|------------|-----|-------|------|
-| 🥇 | [@alexkroman](https://github.com/alexkroman) | **12.14** | [mazesmazes/tiny-audio](https://huggingface.co/mazesmazes/tiny-audio) | 2025-10-23 |
-| 🥈 | [@your-username](https://github.com/your-username) | **XX.XX** | [your-username/your-model](https://huggingface.co/your-username/your-model) | 2025-XX-XX |
+| Rank | Contributor | WER | Git Hash | Date |
+|------|------------|-----|----------|------|
+| 🥇 | [@alexkroman](https://github.com/alexkroman) | **12.14** | [`5a5f3a0`](https://github.com/alexkroman/tiny-audio/commit/5a5f3a0) | 2025-10-23 |
+| 🥈 | [@your-username](https://github.com/your-username) | **XX.XX** | [`abcd123`](https://github.com/alexkroman/tiny-audio/commit/abcd123) | 2025-XX-XX |
 ```
 
 **Step 3: Submit a PR**

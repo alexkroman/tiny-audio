@@ -37,7 +37,7 @@ Tiny Audio trains locally on a MacBook (MPS driver), but it's slow. I typically:
 
 RunPod provides:
 
-- Easy access to powerful GPUs (A40 with 48GB VRAM)
+- Easy access to powerful GPUs (A40 with 40GB VRAM)
 - Simple UI for managing instances
 - Pay-as-you-go (~$0.40/hour for A40)
 - Ability to scale to multiple GPUs
@@ -113,7 +113,7 @@ Paste into RunPod and click "Update".
 1. Click **Deploy**
 1. Select **NVIDIA A40** (Featured GPUs)
    - Cheapest with good availability
-   - 48GB VRAM
+   - 40GB VRAM
    - ~$0.40/hour
 1. Choose **RunPod PyTorch 2.x** template
 1. GPU count: **1**
@@ -154,13 +154,13 @@ poetry install  # If you haven't already
 **Step 2: Run the deploy script**
 
 ```bash
-poetry run python scripts/deploy_runpod.py <HOST> <PORT>
+poetry run deploy-runpod <HOST> <PORT>
 ```
 
 Example:
 
 ```bash
-poetry run python scripts/deploy_runpod.py ssh.runpod.io 22115
+poetry run deploy-runpod ssh.runpod.io 22115
 ```
 
 **What this script does** (I spent more time on this than the model code!):
@@ -211,12 +211,12 @@ Create your own experiment configuration.
 
 **Step 1: Understand the config system**
 
-Most changes are **config changes, not code changes**. Configs are YAML files in `configs/hydra/experiments/`.
+Most changes are **config changes, not code changes**. Configs are YAML files in `configs/experiments/`.
 
 **Step 2: Create your config**
 
 ```bash
-cp configs/hydra/experiments/mlp.yaml configs/hydra/experiments/my_experiment.yaml
+cp configs/experiments/mlp.yaml configs/experiments/my_experiment.yaml
 ```
 
 Edit `my_experiment.yaml`:
@@ -245,7 +245,7 @@ training:
 **Step 3: Re-deploy**
 
 ```bash
-poetry run python scripts/deploy_runpod.py <HOST> <PORT>
+poetry run deploy-runpod <HOST> <PORT>
 ```
 
 ### Success Checkpoint
@@ -275,7 +275,7 @@ export HF_TOKEN='hf_your_token_here'
 **Step 2: Start training**
 
 ```bash
-poetry run python scripts/start_remote_training.py <HOST> <PORT> --experiment my_experiment
+poetry run remote-train <HOST> <PORT> --experiment my_experiment
 ```
 
 **Step 3: Set up Weights & Biases**
@@ -327,7 +327,7 @@ Training runs in `tmux`, so you can disconnect safely:
 # Detach: Press Ctrl+B, then D
 
 # Reattach later:
-poetry run python scripts/attach_remote.py <HOST> <PORT>
+poetry run attach-remote <HOST> <PORT>
 ```
 
 ### Monitor in RunPod

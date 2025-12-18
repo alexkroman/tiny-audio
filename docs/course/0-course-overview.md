@@ -8,7 +8,7 @@ Welcome to a hands-on course on building modern AI. This isn't just about learni
 
 - Understand the encoder-projector-decoder architecture used in modern ASR
 - Train your own model by keeping large models frozen and only training the projector
-- Work with ~13M trainable parameters instead of 4.3+ billion
+- Work with ~12M trainable parameters instead of 4+ billion
 - Publish your model to Hugging Face Hub
 - Deploy a live demo anyone can use
 - Add your results to the community leaderboard
@@ -87,7 +87,7 @@ ______________________________________________________________________
 
 ### For Training (Class 2)
 
-- **Cloud GPU (recommended)**: NVIDIA A40 48GB on RunPod (~$0.40/hour)
+- **Cloud GPU (recommended)**: NVIDIA A40 40GB on RunPod (~$0.40/hour)
 - **Local GPU**: NVIDIA RTX 3090/4090 24GB+
 - **Apple Silicon**: M1/M2/M3 Max/Ultra with 32GB+ RAM (slower)
 
