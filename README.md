@@ -98,6 +98,7 @@ RMSNorm → SmolLM3-3B embeddings (2048-dim)
 ```
 
 **Why this works:**
+
 - Fast training (~24 hours on A40) with no gradients for frozen models
 - Cheap (~$12 for a full run)
 - Leverages pretrained knowledge from both audio and language domains

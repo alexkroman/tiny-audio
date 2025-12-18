@@ -377,10 +377,9 @@ class LocalEvaluator(Evaluator):
         elif not isinstance(audio, (str, dict)) or (isinstance(audio, dict) and "raw" not in audio):
             # For other formats (AudioDecoder, bytes, etc.), convert to WAV file
             wav_bytes = prepare_wav_bytes(audio)
-            temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            temp_file.write(wav_bytes)
-            temp_file.close()
-            audio = temp_file.name
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_file.write(wav_bytes)
+                audio = temp_file.name
 
         start = time.time()
         if self.user_prompt:

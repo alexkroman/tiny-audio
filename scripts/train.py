@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import contextlib
 from dataclasses import fields
 from typing import Any
 
@@ -268,14 +269,12 @@ class PushToHubCallback(TrainerCallback):
         if model is None:
             return control
 
-        try:
+        with contextlib.suppress(Exception):
             model.push_to_hub(
                 repo_id=args.hub_model_id,
                 commit_message=f"Training in progress - step {state.global_step}",
                 private=args.hub_private_repo,
             )
-        except Exception:
-            pass
 
         return control
 
