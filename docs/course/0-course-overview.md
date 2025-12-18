@@ -11,7 +11,6 @@ Welcome to a hands-on course on building modern AI. This isn't just about learni
 - Work with ~12M trainable parameters instead of 4+ billion
 - Publish your model to Hugging Face Hub
 - Deploy a live demo anyone can use
-- Add your results to the community leaderboard
 
 **Course Details:**
 
@@ -61,7 +60,6 @@ ______________________________________________________________________
 - Evaluating on multiple datasets (LoquaciousSet, Earnings22, AMI)
 - Deploying a live demo to Hugging Face Spaces
 - Setting up Hugging Face Inference Endpoints
-- Adding your results to the leaderboard
 
 ______________________________________________________________________
 
@@ -114,7 +112,6 @@ ______________________________________________________________________
 
 - **GitHub Issues**: Report bugs or ask questions
 - **Discussions**: Share your results and learnings
-- **Leaderboard**: See how your model compares to others
 
 ______________________________________________________________________
 

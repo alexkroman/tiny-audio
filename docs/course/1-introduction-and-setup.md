@@ -26,7 +26,6 @@ By the end of this 3-class course, you will:
 1. **Train** your own customized ASR model
 1. **Evaluate** it on standard benchmarks (Word Error Rate)
 1. **Push** it to your own Hugging Face account
-1. **Add** your results to the community leaderboard
 
 This isn't just theory—you'll build a real, working model and deploy it with your name on it.
 

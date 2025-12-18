@@ -2,7 +2,7 @@
 
 **Duration**: 1 hour (15 min lecture + 45 min hands-on)
 
-**Goal**: Evaluate your model's performance, deploy a public demo, and add your results to the leaderboard.
+**Goal**: Evaluate your model's performance and deploy a public demo.
 
 ## Learning Objectives
 
@@ -12,7 +12,6 @@ By the end of this class, you will:
 - Evaluate your model on multiple datasets
 - Deploy a live demo to Hugging Face Spaces
 - Set up Hugging Face Inference Endpoints (optional)
-- Add your results to the community leaderboard
 
 ______________________________________________________________________
 
@@ -54,7 +53,7 @@ Different datasets test different capabilities:
 
 | Dataset | What it tests |
 |---------|---------------|
-| **LoquaciousSet** | General benchmark (diverse speech, leaderboard uses this) |
+| **LoquaciousSet** | General benchmark (diverse speech) |
 | **Earnings22** | Financial domain (company names, financial terms) |
 | **AMI** | Meetings (multi-speaker, conversational) |
 | **LibriSpeech** | Read audiobooks (clean speech) |
@@ -85,7 +84,7 @@ Get quantitative performance metrics across multiple datasets.
 
 **Step 1: Evaluate on LoquaciousSet (benchmark)**
 
-This is the official benchmark for the leaderboard:
+This is the primary benchmark:
 
 ```bash
 poetry run eval your-username/your-model --dataset loquacious --max-samples 500
@@ -117,7 +116,7 @@ CHECKPOINT @ 100 samples:
 ================================================================================
 ```
 
-**Record your final Corpus WER!** You'll need it for the leaderboard.
+**Record your final Corpus WER!**
 
 **Step 2: Evaluate on Earnings22 (domain-specific)**
 
@@ -269,47 +268,6 @@ poetry run python scripts/eval.py \
 
 ______________________________________________________________________
 
-## Exercise 4: Add to Leaderboard (5 min)
-
-### Goal
-
-Add your results to the community leaderboard.
-
-### Instructions
-
-**Step 1: Get your official WER**
-
-```bash
-poetry run eval your-username/your-model --dataset loquacious --max-samples 500
-```
-
-Record the **Corpus WER**.
-
-**Step 2: Edit the README**
-
-In the repo's `README.md`, find the leaderboard table and add your entry:
-
-```markdown
-| Rank | Contributor | WER | Git Hash | Date |
-|------|------------|-----|----------|------|
-| 🥇 | [@alexkroman](https://github.com/alexkroman) | **12.14** | [`5a5f3a0`](https://github.com/alexkroman/tiny-audio/commit/5a5f3a0) | 2025-10-23 |
-| 🥈 | [@your-username](https://github.com/your-username) | **XX.XX** | [`abcd123`](https://github.com/alexkroman/tiny-audio/commit/abcd123) | 2025-XX-XX |
-```
-
-**Step 3: Submit a PR**
-
-1. Fork the repository
-1. Make your changes
-1. Submit PR titled: "Add [username] to leaderboard (WER: XX.XX%)"
-
-### Success Checkpoint
-
-- [ ] Have official WER score
-- [ ] Added to leaderboard
-- [ ] Submitted PR
-
-______________________________________________________________________
-
 ## Congratulations!
 
 You've completed the course! You now have:
@@ -317,7 +275,6 @@ You've completed the course! You now have:
 - ✅ A trained ASR model on Hugging Face
 - ✅ Evaluation results across multiple datasets
 - ✅ A live demo anyone can use
-- ✅ Your name on the leaderboard
 
 ### What's Next?
 
