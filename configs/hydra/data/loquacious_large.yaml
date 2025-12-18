@@ -17,5 +17,5 @@ max_audio_duration_seconds: 30.0
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
-max_eval_samples: 10000
+max_eval_samples: 1000
 use_streaming: true  # Enable streaming mode for faster startup

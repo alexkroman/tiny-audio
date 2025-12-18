@@ -176,7 +176,7 @@ def main():
     )
     parser.add_argument("host", help="RunPod instance IP address or hostname.")
     parser.add_argument("port", type=int, help="SSH port for the RunPod instance.")
-    parser.add_argument("--experiment", default="swiglu", help="Experiment config to run.")
+    parser.add_argument("--experiment", default="mlp", help="Experiment config to run.")
     parser.add_argument("--session-name", default=None, help="Custom name for the tmux session.")
     parser.add_argument(
         "--no-attach", action="store_true", help="Start the session but do not attach to it."

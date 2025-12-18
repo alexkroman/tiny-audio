@@ -49,7 +49,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     base_model_prefix = "model"
     main_input_name = "input_features"
     _supports_flash_attn_2 = True
-    supports_gradient_checkpointing = False  # Frozen encoder/LLM don't benefit; projector is small
+    supports_gradient_checkpointing = True
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
 
@@ -248,6 +248,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def _init_weights(self, module):
         """Weight initialization (projector weights are initialized in MoEAudioProjector)."""
         pass
+
+    def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func=None):
+        """Enable/disable gradient checkpointing for the language model."""
+        # The LLM still stores activations during forward for backprop to projector
+        # Gradient checkpointing trades compute for memory by recomputing activations
+        if hasattr(self.language_model, "_set_gradient_checkpointing"):
+            self.language_model._set_gradient_checkpointing(enable, gradient_checkpointing_func)
+        elif hasattr(self.language_model, "gradient_checkpointing_enable") and enable:
+            self.language_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        elif hasattr(self.language_model, "gradient_checkpointing_disable") and not enable:
+            self.language_model.gradient_checkpointing_disable()
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()

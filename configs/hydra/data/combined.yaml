@@ -116,5 +116,5 @@ max_audio_duration_seconds: 15.0  # Skip audio longer than this to prevent OOM
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
-max_eval_samples: 3000  # Keep eval manageable
+max_eval_samples: 1000  # Keep eval manageable
 use_streaming: true

@@ -16,5 +16,5 @@ sample_rate: 16000
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
-max_eval_samples: 10000
+max_eval_samples: 500
 use_streaming: true  # Enable streaming mode for faster startup

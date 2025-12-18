@@ -9,8 +9,13 @@ from src.train import DataCollator
 
 @pytest.fixture
 def tokenizer():
-    """Load the SmolLM tokenizer."""
-    return AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M-Instruct")
+    """Load the SmolLM tokenizer with <audio> token added."""
+    tok = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M-Instruct")
+    # Add <audio> token like ASRModel does
+    existing_special = tok.additional_special_tokens or []
+    if "<audio>" not in existing_special:
+        tok.add_special_tokens({"additional_special_tokens": existing_special + ["<audio>"]})
+    return tok
 
 
 @pytest.fixture
@@ -161,6 +166,63 @@ class TestLabelMasking:
                     f"Label mismatch at position {i}: label={label}, input_id={input_id}"
 
 
+class TestAudioTokens:
+    """Test that audio tokens are correctly inserted to match projector output."""
+
+    def test_audio_token_count_matches_encoder_output(self, collator, tokenizer):
+        """Verify number of <audio> tokens matches expected encoder output length."""
+        samples = [create_sample("Test transcription.", duration_sec=1.0)]
+
+        batch = collator(samples)
+
+        # Get the audio token ID
+        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+
+        # Count audio tokens in input_ids
+        num_audio_tokens = (batch["input_ids"] == audio_token_id).sum().item()
+
+        # Expected: mel_len // 2 (Whisper encoder has stride-2)
+        mel_len = batch["input_features"].shape[-1]
+        expected_audio_tokens = mel_len // 2
+
+        assert num_audio_tokens == expected_audio_tokens, (
+            f"Audio token count mismatch: got {num_audio_tokens}, "
+            f"expected {expected_audio_tokens} (mel_len={mel_len})"
+        )
+
+    def test_audio_tokens_not_just_one(self, collator, tokenizer):
+        """Verify we have many audio tokens, not just a single placeholder."""
+        samples = [create_sample("Test.", duration_sec=1.0)]
+
+        batch = collator(samples)
+
+        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        num_audio_tokens = (batch["input_ids"] == audio_token_id).sum().item()
+
+        # Should have many audio tokens (Whisper outputs ~1500 for 30s, ~50 for 1s)
+        assert num_audio_tokens > 10, (
+            f"Expected many audio tokens, got only {num_audio_tokens}. "
+            "This suggests audio embeddings would be discarded."
+        )
+
+    def test_audio_tokens_are_masked(self, collator, tokenizer):
+        """Verify audio tokens are masked in labels (not trained on)."""
+        samples = [create_sample("Test.", duration_sec=1.0)]
+
+        batch = collator(samples)
+
+        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        labels = batch["labels"][0]
+        input_ids = batch["input_ids"][0]
+
+        # All positions with <audio> token should have label=-100
+        audio_positions = (input_ids == audio_token_id).nonzero(as_tuple=True)[0]
+        for pos in audio_positions:
+            assert labels[pos].item() == -100, (
+                f"Audio token at position {pos} should be masked but has label {labels[pos]}"
+            )
+
+
 class TestBatchProcessing:
     """Test batch processing behavior."""
 
@@ -187,6 +249,136 @@ class TestBatchProcessing:
         # Whisper expects (batch, n_mels, time)
         assert len(batch["input_features"].shape) == 3
         assert batch["input_features"].shape[1] == 80  # n_mels for Whisper
+
+
+class TestModelIntegration:
+    """Integration tests verifying audio actually influences the model."""
+
+    @pytest.fixture
+    def model(self):
+        """Load a small model for testing."""
+        from src.asr_config import ASRConfig
+        from src.asr_modeling import ASRModel
+
+        config = ASRConfig(
+            encoder_model_name="openai/whisper-tiny",
+            decoder_model_name="HuggingFaceTB/SmolLM2-135M-Instruct",
+            projector_type="mlp",
+            model_dtype="float32",
+            attn_implementation="eager",
+        )
+        return ASRModel(config)
+
+    def test_different_audio_produces_different_loss(self, model):
+        """Verify that different audio inputs produce different losses."""
+        from src.train import DataCollator
+
+        collator = DataCollator(
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
+            sample_rate=16000,
+            system_prompt=None,
+        )
+
+        # Create two samples with different audio but same text
+        sample_rate = 16000
+        duration = 1.0
+        t = np.linspace(0, duration, int(sample_rate * duration))
+
+        # 440Hz sine wave
+        audio1 = (np.sin(2 * np.pi * 440 * t) * 0.5).astype(np.float32)
+        # 880Hz sine wave (different frequency)
+        audio2 = (np.sin(2 * np.pi * 880 * t) * 0.5).astype(np.float32)
+
+        sample1 = {"audio": {"array": audio1, "sampling_rate": sample_rate}, "text": "Test."}
+        sample2 = {"audio": {"array": audio2, "sampling_rate": sample_rate}, "text": "Test."}
+
+        batch1 = collator([sample1])
+        batch2 = collator([sample2])
+
+        model.eval()
+        import torch
+        with torch.no_grad():
+            out1 = model(
+                input_ids=batch1["input_ids"],
+                input_features=batch1["input_features"],
+                labels=batch1["labels"],
+                attention_mask=batch1["attention_mask"],
+            )
+            out2 = model(
+                input_ids=batch2["input_ids"],
+                input_features=batch2["input_features"],
+                labels=batch2["labels"],
+                attention_mask=batch2["attention_mask"],
+            )
+
+        loss_diff = abs(out1.loss.item() - out2.loss.item())
+        assert loss_diff > 0.001, (
+            f"Different audio should produce different loss. "
+            f"Loss1={out1.loss.item():.4f}, Loss2={out2.loss.item():.4f}, diff={loss_diff:.6f}"
+        )
+
+    def test_audio_embeddings_replace_audio_tokens(self, model):
+        """Verify that <audio> token embeddings are replaced with projected audio."""
+        from src.train import DataCollator
+        import torch
+
+        collator = DataCollator(
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
+            sample_rate=16000,
+            system_prompt=None,
+        )
+
+        sample = create_sample("Test.", duration_sec=1.0)
+        batch = collator([sample])
+
+        # Get original text embeddings (before audio injection)
+        original_embeds = model.language_model.get_input_embeddings()(batch["input_ids"])
+
+        # Get the audio token positions
+        audio_token_mask = batch["input_ids"] == model.audio_token_id
+
+        # Encode audio and get what would be injected
+        audio_embeds = model._encode_audio(batch["input_features"], None)
+
+        # The audio embeddings should be different from the original <audio> token embedding
+        audio_token_embed = original_embeds[audio_token_mask][0]  # First audio token's original embedding
+        projected_audio_embed = audio_embeds[0]  # First projected audio embedding
+
+        # They should be different (projected audio != text embedding of <audio> token)
+        embed_diff = (audio_token_embed - projected_audio_embed).abs().mean().item()
+        assert embed_diff > 0.01, (
+            f"Projected audio embedding should differ from <audio> token embedding. "
+            f"Mean diff={embed_diff:.6f}"
+        )
+
+    def test_all_audio_embeddings_used(self, model):
+        """Verify that all projected audio embeddings are used, not just one."""
+        from src.train import DataCollator
+        import torch
+
+        collator = DataCollator(
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
+            sample_rate=16000,
+            system_prompt=None,
+        )
+
+        sample = create_sample("Test.", duration_sec=1.0)
+        batch = collator([sample])
+
+        # Count audio tokens in input
+        num_audio_tokens = (batch["input_ids"] == model.audio_token_id).sum().item()
+
+        # Get projected audio embeddings
+        audio_embeds = model._encode_audio(batch["input_features"], None)
+        num_audio_embeds = audio_embeds.shape[0]
+
+        assert num_audio_tokens == num_audio_embeds, (
+            f"Mismatch: {num_audio_tokens} <audio> tokens but {num_audio_embeds} audio embeddings. "
+            "This means some audio embeddings would be discarded by masked_scatter."
+        )
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ from trl.trainer.utils import DataCollatorForChatML
 from src.asr_config import ASRConfig
 from src.asr_modeling import ASRModel
 
-TRANSCRIBE_INSTRUCTION = "Transcribe: <audio>"
+TRANSCRIBE_PREFIX = "Transcribe: "
 
 
 class DatasetLoader:
@@ -208,9 +208,10 @@ class DataCollator:
         self.max_audio_duration = max_audio_duration
 
         # Use trl's DataCollatorForChatML for label masking
+        # max_length needs to accommodate audio tokens (1500 for 30s) + prompt + response
         self.text_collator = DataCollatorForChatML(
             tokenizer=tokenizer,
-            max_length=512,
+            max_length=2048,
         )
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
@@ -246,6 +247,13 @@ class DataCollator:
             return_tensors="pt",
         )
 
+        # Compute number of audio tokens from mel spectrogram length
+        # Whisper encoder has stride-2, so num_audio_tokens = mel_len // 2
+        mel_len = audio_out.input_features.shape[-1]
+        num_audio_tokens = mel_len // 2
+        audio_placeholder = "<audio>" * num_audio_tokens
+        user_content = TRANSCRIBE_PREFIX + audio_placeholder
+
         # Build messages for each sample - DataCollatorForChatML handles tokenization and masking
         text_features = []
         for f in valid_features:
@@ -254,7 +262,7 @@ class DataCollator:
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": TRANSCRIBE_INSTRUCTION})
+            messages.append({"role": "user", "content": user_content})
             messages.append({"role": "assistant", "content": text})
 
             text_features.append({"messages": messages})
