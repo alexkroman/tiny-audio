@@ -46,9 +46,8 @@ def collator_no_system(tokenizer, feature_extractor):
     )
 
 
-def create_sample(text: str, duration_sec: float = 1.0):
+def create_sample(text: str, duration_sec: float = 1.0, sample_rate: int = 16000):
     """Create a sample with dummy audio."""
-    sample_rate = 16000
     num_samples = int(duration_sec * sample_rate)
     audio_array = np.random.randn(num_samples).astype(np.float32) * 0.1
     return {
@@ -181,9 +180,9 @@ class TestAudioTokens:
         # Count audio tokens in input_ids
         num_audio_tokens = (batch["input_ids"] == audio_token_id).sum().item()
 
-        # Expected: mel_len // 2 (Whisper encoder has stride-2)
+        # Expected: mel_len // 4 (Whisper stride-2 × projector stride-2)
         mel_len = batch["input_features"].shape[-1]
-        expected_audio_tokens = mel_len // 2
+        expected_audio_tokens = mel_len // 4
 
         assert num_audio_tokens == expected_audio_tokens, (
             f"Audio token count mismatch: got {num_audio_tokens}, "

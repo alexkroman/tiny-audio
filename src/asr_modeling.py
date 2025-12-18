@@ -429,9 +429,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         Whisper: input_features shape is (batch, n_mels, mel_len)
         Encoder output is mel_len // 2 due to stride-2 conv
+        MLP projector adds another stride-2 for 4x total downsampling
         """
         mel_len = input_features.shape[-1]
-        return mel_len // 2
+        return mel_len // 4
 
     @torch.no_grad()
     def generate(

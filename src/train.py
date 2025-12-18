@@ -40,7 +40,6 @@ class DatasetLoader:
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
-        self.max_audio_duration = self.config.get("max_audio_duration_seconds", 30.0)
         self.use_streaming = self.config.get("use_streaming", True)
         self.num_proc = self.config.get("num_proc", 16) if not self.use_streaming else None
 
@@ -86,7 +85,7 @@ class DatasetLoader:
             )
             return IterableDataset.from_generator(
                 self._filter_generator,
-                gen_kwargs={"dataset": ds, "max_audio_duration": self.max_audio_duration},
+                gen_kwargs={"dataset": ds},
                 features=features,
             )
 
@@ -103,7 +102,7 @@ class DatasetLoader:
         return ds
 
     @staticmethod
-    def _filter_generator(dataset, max_audio_duration: float = 30.0):
+    def _filter_generator(dataset):
         """Generator that filters invalid samples (streaming mode)."""
         for example in dataset:
             audio = example.get("audio")
@@ -112,15 +111,6 @@ class DatasetLoader:
 
             try:
                 if not isinstance(audio, dict) or "array" not in audio:
-                    continue
-
-                arr = audio["array"]
-                sample_rate = audio.get("sampling_rate", 16000)
-                num_samples = len(arr) if hasattr(arr, "__len__") else arr.shape[-1]
-
-                # Skip audio that's too long (causes OOM)
-                duration = num_samples / sample_rate
-                if duration > max_audio_duration:
                     continue
             except Exception:
                 continue
@@ -199,13 +189,11 @@ class DataCollator:
         feature_extractor: Any,
         sample_rate: int,
         system_prompt: str = None,
-        max_audio_duration: float = 30.0,
     ):
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
-        self.max_audio_duration = max_audio_duration
 
         # Use trl's DataCollatorForChatML for label masking
         # max_length needs to accommodate audio tokens (1500 for 30s) + prompt + response
@@ -215,7 +203,7 @@ class DataCollator:
         )
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Process audio, filtering out samples that are too long
+        # Process audio
         audio_arrays = []
         valid_features = []
         for f in features:
@@ -226,10 +214,6 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
-                # Skip audio that's too long
-                duration = len(audio) / self.sample_rate
-                if duration > self.max_audio_duration:
-                    continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
             except Exception:
@@ -248,9 +232,9 @@ class DataCollator:
         )
 
         # Compute number of audio tokens from mel spectrogram length
-        # Whisper encoder has stride-2, so num_audio_tokens = mel_len // 2
+        # Whisper encoder has stride-2, MLP projector has stride-2 = 4x total
         mel_len = audio_out.input_features.shape[-1]
-        num_audio_tokens = mel_len // 2
+        num_audio_tokens = mel_len // 4
         audio_placeholder = "<audio>" * num_audio_tokens
         user_content = TRANSCRIBE_PREFIX + audio_placeholder
 
@@ -350,7 +334,6 @@ def main(cfg: DictConfig) -> None:
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         system_prompt=cfg.model.system_prompt,
-        max_audio_duration=cfg.data.get("max_audio_duration_seconds", 30.0),
     )
 
     # Setup callbacks
