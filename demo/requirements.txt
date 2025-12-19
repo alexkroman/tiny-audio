@@ -1,0 +1,14 @@
+# Use latest compatible versions
+gradio>=4.44.1
+transformers>=4.57.1
+torch
+soundfile
+librosa
+peft
+truecase
+
+# Forced alignment for word-level timestamps
+ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
+
+# Speaker diarization
+pyannote-audio>=3.1.0

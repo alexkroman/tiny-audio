@@ -22,6 +22,8 @@ import numpy as np
 import torch
 from datasets import Audio, load_dataset
 from jiwer import wer
+from pyannote.core import Annotation, Segment, Timeline
+from pyannote.metrics.diarization import DiarizationErrorRate
 from transformers import WhisperTokenizer
 
 # Disable tokenizers parallelism to avoid fork warnings
@@ -198,6 +200,39 @@ COMBINED_WEIGHTS = {
     "earnings22": 0.10,
     "ami": 0.10,
     "tedlium": 0.10,
+}
+
+
+# =============================================================================
+# Diarization Dataset Configuration
+# =============================================================================
+
+
+@dataclass
+class DiarizationDatasetConfig:
+    """Configuration for a diarization dataset."""
+
+    name: str
+    path: str
+    audio_field: str
+    speakers_field: str
+    timestamps_start_field: str
+    timestamps_end_field: str
+    config: str | None = None
+    default_split: str = "test"
+
+
+DIARIZATION_DATASET_REGISTRY: dict[str, DiarizationDatasetConfig] = {
+    "callhome": DiarizationDatasetConfig(
+        name="callhome",
+        path="talkbank/callhome",
+        config="eng",
+        audio_field="audio",
+        speakers_field="speakers",
+        timestamps_start_field="timestamps_start",
+        timestamps_end_field="timestamps_end",
+        default_split="data",
+    ),
 }
 
 
@@ -465,6 +500,342 @@ class AssemblyAIEvaluator(Evaluator):
 
 
 # =============================================================================
+# Diarization Evaluation
+# =============================================================================
+
+
+@dataclass
+class DiarizationResult:
+    """Result of a single diarization evaluation."""
+
+    der: float  # Sample DER percentage
+    confusion: float  # Sample confusion percentage
+    missed: float  # Sample missed percentage
+    false_alarm: float  # Sample false alarm percentage
+    time: float
+    num_speakers_ref: int
+    num_speakers_hyp: int
+    # Raw values for corpus-level calculation
+    total: float = 0.0  # Total reference duration
+    confusion_raw: float = 0.0  # Confusion duration
+    missed_raw: float = 0.0  # Missed detection duration
+    false_alarm_raw: float = 0.0  # False alarm duration
+
+
+class DiarizationEvaluator:
+    """Evaluator for speaker diarization using pyannote DER metric."""
+
+    def __init__(
+        self,
+        audio_field: str = "audio",
+        speakers_field: str = "speakers",
+        timestamps_start_field: str = "timestamps_start",
+        timestamps_end_field: str = "timestamps_end",
+        hf_token: str | None = None,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ):
+        self.audio_field = audio_field
+        self.speakers_field = speakers_field
+        self.timestamps_start_field = timestamps_start_field
+        self.timestamps_end_field = timestamps_end_field
+        self.hf_token = hf_token or os.environ.get("HF_TOKEN")
+        self.num_speakers = num_speakers
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
+        self.results: list[DiarizationResult] = []
+        self.metric = DiarizationErrorRate()
+
+    def _build_reference_annotation(self, sample: dict) -> Annotation:
+        """Build pyannote Annotation from dataset sample."""
+        annotation = Annotation()
+        speakers = sample[self.speakers_field]
+        starts = sample[self.timestamps_start_field]
+        ends = sample[self.timestamps_end_field]
+
+        for speaker, start, end in zip(speakers, starts, ends):
+            annotation[Segment(start, end)] = speaker
+
+        return annotation
+
+    def _build_hypothesis_annotation(self, segments: list[dict]) -> Annotation:
+        """Build pyannote Annotation from diarization output."""
+        annotation = Annotation()
+        for seg in segments:
+            annotation[Segment(seg["start"], seg["end"])] = seg["speaker"]
+        return annotation
+
+    def diarize(self, audio) -> tuple[list[dict], float]:
+        """Run diarization on audio and return (segments, inference_time)."""
+        import io
+
+        import librosa
+
+        from src.asr_pipeline import SpeakerDiarizer
+
+        # Prepare audio array - handle both decoded and raw bytes formats
+        if isinstance(audio, dict):
+            if "array" in audio:
+                # Already decoded
+                audio_array = audio["array"]
+                sample_rate = audio.get("sampling_rate", 16000)
+            elif "bytes" in audio:
+                # Raw bytes - decode with librosa (avoids torchcodec CPU issues)
+                audio_array, sample_rate = librosa.load(io.BytesIO(audio["bytes"]), sr=16000)
+            else:
+                raise ValueError(f"Unsupported audio dict format: {audio.keys()}")
+        else:
+            raise ValueError(f"Unsupported audio format: {type(audio)}")
+
+        # Ensure float32 dtype (pyannote requires consistent dtype)
+        if hasattr(audio_array, "astype"):
+            audio_array = audio_array.astype(np.float32)
+
+        start = time.time()
+        segments = SpeakerDiarizer.diarize(
+            audio_array,
+            sample_rate=sample_rate,
+            num_speakers=self.num_speakers,
+            min_speakers=self.min_speakers,
+            max_speakers=self.max_speakers,
+            hf_token=self.hf_token,
+        )
+        elapsed = time.time() - start
+
+        return segments, elapsed
+
+    def evaluate(self, dataset, max_samples: int | None = None) -> list[DiarizationResult]:
+        """Run diarization evaluation loop on dataset."""
+        self.results = []
+        processed = 0
+
+        for sample in dataset:
+            processed += 1
+            if max_samples and processed > max_samples:
+                break
+
+            try:
+                # Get reference annotation
+                reference = self._build_reference_annotation(sample)
+
+                # Build UEM (evaluation region) from reference extent
+                uem = Timeline([reference.get_timeline().extent()])
+
+                # Run diarization
+                segments, inference_time = self.diarize(sample[self.audio_field])
+                hypothesis = self._build_hypothesis_annotation(segments)
+
+                # Compute DER with detailed components
+                details = self.metric(reference, hypothesis, uem=uem, detailed=True)
+
+                # Extract raw values for corpus calculation
+                total = details["total"]
+                confusion_raw = details["confusion"]
+                missed_raw = details["missed detection"]
+                false_alarm_raw = details["false alarm"]
+
+                # Compute per-sample percentages
+                if total > 0:
+                    der = (confusion_raw + missed_raw + false_alarm_raw) / total
+                    confusion = confusion_raw / total
+                    missed = missed_raw / total
+                    false_alarm = false_alarm_raw / total
+                else:
+                    der = confusion = missed = false_alarm = 0.0
+
+                result = DiarizationResult(
+                    der=der * 100,
+                    confusion=confusion * 100,
+                    missed=missed * 100,
+                    false_alarm=false_alarm * 100,
+                    time=inference_time,
+                    num_speakers_ref=len(set(sample[self.speakers_field])),
+                    num_speakers_hyp=len(set(seg["speaker"] for seg in segments)),
+                    total=total,
+                    confusion_raw=confusion_raw,
+                    missed_raw=missed_raw,
+                    false_alarm_raw=false_alarm_raw,
+                )
+                self.results.append(result)
+
+                print(
+                    f"Sample {processed}: DER={result.der:.1f}% "
+                    f"(conf={result.confusion:.1f}%, miss={result.missed:.1f}%, fa={result.false_alarm:.1f}%) "
+                    f"Time={inference_time:.2f}s "
+                    f"Speakers: ref={result.num_speakers_ref}, hyp={result.num_speakers_hyp}"
+                )
+
+            except Exception as e:
+                print(f"Error on sample {processed}: {e}")
+                # Skip failed samples - don't add to results to avoid polluting corpus metrics
+                continue
+
+            # Checkpoint every 50 samples
+            if processed % 50 == 0:
+                self._print_checkpoint(processed)
+
+        return self.results
+
+    def _print_checkpoint(self, sample_count: int):
+        """Print cumulative metrics checkpoint."""
+        metrics = self.compute_metrics()
+        print(f"\n{'=' * 60}")
+        print(
+            f"CHECKPOINT @ {sample_count}: DER={metrics['der']:.2f}% "
+            f"(conf={metrics['confusion']:.2f}%, miss={metrics['missed']:.2f}%, fa={metrics['false_alarm']:.2f}%)"
+        )
+        print(f"{'=' * 60}\n")
+
+    def compute_metrics(self) -> dict:
+        """Compute final corpus-level metrics."""
+        if not self.results:
+            return {
+                "der": 0.0,
+                "confusion": 0.0,
+                "missed": 0.0,
+                "false_alarm": 0.0,
+                "avg_time": 0.0,
+                "num_samples": 0,
+            }
+
+        # Corpus-level: sum raw values across all samples
+        total_duration = sum(r.total for r in self.results)
+        total_confusion = sum(r.confusion_raw for r in self.results)
+        total_missed = sum(r.missed_raw for r in self.results)
+        total_false_alarm = sum(r.false_alarm_raw for r in self.results)
+
+        if total_duration > 0:
+            corpus_der = (total_confusion + total_missed + total_false_alarm) / total_duration * 100
+            corpus_confusion = total_confusion / total_duration * 100
+            corpus_missed = total_missed / total_duration * 100
+            corpus_false_alarm = total_false_alarm / total_duration * 100
+        else:
+            corpus_der = corpus_confusion = corpus_missed = corpus_false_alarm = 0.0
+
+        return {
+            "der": corpus_der,
+            "confusion": corpus_confusion,
+            "missed": corpus_missed,
+            "false_alarm": corpus_false_alarm,
+            "avg_time": sum(r.time for r in self.results) / len(self.results),
+            "num_samples": len(self.results),
+        }
+
+
+class AssemblyAIDiarizationEvaluator(DiarizationEvaluator):
+    """Evaluator for AssemblyAI speaker diarization."""
+
+    MODEL_MAP = {"best": "best", "universal": "universal", "slam_1": "slam_1", "nano": "nano"}
+
+    def __init__(self, api_key: str, model: str = "slam_1", **kwargs):
+        # Remove hf_token since we don't use pyannote
+        kwargs.pop("hf_token", None)
+        super().__init__(**kwargs)
+        import assemblyai as aai
+
+        aai.settings.api_key = api_key
+
+        if model not in self.MODEL_MAP:
+            raise ValueError(f"Invalid model '{model}'. Choose from: {list(self.MODEL_MAP.keys())}")
+
+        model_enum = getattr(aai.types.SpeechModel, model)
+        config = aai.TranscriptionConfig(
+            speech_model=model_enum,
+            speaker_labels=True,
+        )
+        self.transcriber = aai.Transcriber(config=config)
+
+    def diarize(self, audio) -> tuple[list[dict], float]:
+        """Run AssemblyAI diarization on audio."""
+        wav_bytes = prepare_wav_bytes(audio)
+
+        start = time.time()
+        transcript = self.transcriber.transcribe(io.BytesIO(wav_bytes))
+        elapsed = time.time() - start
+
+        # Convert utterances to segment format
+        segments = []
+        if transcript.utterances:
+            for utt in transcript.utterances:
+                segments.append({
+                    "speaker": utt.speaker,
+                    "start": utt.start / 1000.0,  # ms -> seconds
+                    "end": utt.end / 1000.0,
+                })
+
+        time.sleep(0.5)  # Rate limiting
+        return segments, elapsed
+
+
+def load_diarization_dataset(name: str, split: str, config_override: str | None = None):
+    """Load a diarization dataset by name."""
+    if name not in DIARIZATION_DATASET_REGISTRY:
+        raise ValueError(
+            f"Unknown diarization dataset: {name}. "
+            f"Available: {list(DIARIZATION_DATASET_REGISTRY.keys())}"
+        )
+
+    cfg = DIARIZATION_DATASET_REGISTRY[name]
+    config = config_override if config_override else cfg.config
+
+    print(f"Loading {cfg.path} (config: {config}, split: {split})...")
+    if config:
+        ds = load_dataset(cfg.path, config, split=split, streaming=True)
+    else:
+        ds = load_dataset(cfg.path, split=split, streaming=True)
+
+    # Use decode=False to avoid torchcodec CPU issues - we'll decode manually with librosa
+    return ds.cast_column(cfg.audio_field, Audio(decode=False))
+
+
+def save_diarization_results(
+    output_path: Path,
+    dataset_desc: str,
+    results: list[DiarizationResult],
+    metrics: dict,
+):
+    """Save diarization evaluation results to file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w") as f:
+        f.write(f"Diarization Evaluation\n")
+        f.write(f"Dataset: {dataset_desc}\n")
+        f.write(f"Samples: {metrics['num_samples']}\n")
+        f.write(f"DER: {metrics['der']:.2f}%\n")
+        f.write(f"  - Confusion: {metrics['confusion']:.2f}%\n")
+        f.write(f"  - Missed Detection: {metrics['missed']:.2f}%\n")
+        f.write(f"  - False Alarm: {metrics['false_alarm']:.2f}%\n")
+        f.write(f"Avg Response Time: {metrics['avg_time']:.2f}s\n\n")
+        f.write("=" * 80 + "\n")
+        f.write("Per-Sample Results\n")
+        f.write("=" * 80 + "\n\n")
+
+        for i, r in enumerate(results, 1):
+            f.write(
+                f"Sample {i} - DER: {r.der:.2f}% "
+                f"(conf={r.confusion:.2f}%, miss={r.missed:.2f}%, fa={r.false_alarm:.2f}%), "
+                f"Time: {r.time:.2f}s, "
+                f"Speakers: ref={r.num_speakers_ref}, hyp={r.num_speakers_hyp}\n"
+            )
+
+
+def print_diarization_summary(dataset_desc: str, metrics: dict, output_path: Path):
+    """Print final diarization evaluation summary."""
+    print("\n" + "=" * 60)
+    print("Diarization Evaluation Results")
+    print("=" * 60)
+    print(f"Dataset: {dataset_desc}")
+    print(f"Samples: {metrics['num_samples']}")
+    print(f"DER: {metrics['der']:.2f}%")
+    print(f"  - Confusion: {metrics['confusion']:.2f}%")
+    print(f"  - Missed Detection: {metrics['missed']:.2f}%")
+    print(f"  - False Alarm: {metrics['false_alarm']:.2f}%")
+    print(f"Avg Time: {metrics['avg_time']:.2f}s")
+    print(f"\nResults saved to: {output_path}")
+
+
+# =============================================================================
 # Results Output
 # =============================================================================
 
@@ -600,16 +971,87 @@ def run_all_datasets(args, model_name: str):
         print(f"  {output_dir}")
 
 
+def run_diarization_eval(args):
+    """Run diarization evaluation."""
+    # Set default dataset for diarization if not specified
+    if args.dataset is None:
+        args.dataset = "callhome"
+
+    # Validate diarization dataset choice
+    if args.dataset not in DIARIZATION_DATASET_REGISTRY:
+        raise ValueError(
+            f"Unknown diarization dataset: {args.dataset}. "
+            f"Available: {list(DIARIZATION_DATASET_REGISTRY.keys())}"
+        )
+
+    cfg = DIARIZATION_DATASET_REGISTRY[args.dataset]
+    split = args.split if args.split != "test" else cfg.default_split
+
+    # Output directory
+    model_suffix = f"_assemblyai_{args.assemblyai_model}" if args.assemblyai else "_pyannote"
+    if args.output_dir is None:
+        args.output_dir = Path(f"outputs/diarization_eval_{args.dataset}{model_suffix}")
+
+    # Load dataset
+    dataset = load_diarization_dataset(args.dataset, split, args.config)
+    config_name = args.config or cfg.config
+    dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
+
+    if args.max_samples:
+        dataset = dataset.take(args.max_samples)
+
+    # Create evaluator
+    if args.assemblyai:
+        if not args.api_key:
+            raise ValueError("AssemblyAI API key required (--api-key or ASSEMBLYAI_API_KEY env var)")
+        evaluator = AssemblyAIDiarizationEvaluator(
+            api_key=args.api_key,
+            model=args.assemblyai_model,
+            audio_field=cfg.audio_field,
+            speakers_field=cfg.speakers_field,
+            timestamps_start_field=cfg.timestamps_start_field,
+            timestamps_end_field=cfg.timestamps_end_field,
+        )
+        model_name = f"AssemblyAI ({args.assemblyai_model})"
+    else:
+        evaluator = DiarizationEvaluator(
+            audio_field=cfg.audio_field,
+            speakers_field=cfg.speakers_field,
+            timestamps_start_field=cfg.timestamps_start_field,
+            timestamps_end_field=cfg.timestamps_end_field,
+            hf_token=os.environ.get("HF_TOKEN"),
+            num_speakers=args.num_speakers,
+            min_speakers=args.min_speakers,
+            max_speakers=args.max_speakers,
+        )
+        model_name = "pyannote/speaker-diarization-3.1"
+
+    # Run evaluation
+    print(f"Running diarization evaluation with {model_name}...")
+    evaluator.evaluate(dataset, args.max_samples)
+    metrics = evaluator.compute_metrics()
+
+    # Save and print results
+    output_path = args.output_dir / "results.txt"
+    save_diarization_results(output_path, dataset_desc, evaluator.results, metrics)
+    print_diarization_summary(dataset_desc, metrics, output_path)
+
+
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Evaluate ASR models")
-    parser.add_argument("model", nargs="?", help="Model path or endpoint URL")
+    parser = argparse.ArgumentParser(description="Evaluate ASR models and speaker diarization")
+    parser.add_argument("model", nargs="?", help="Model path or endpoint URL (not needed for diarization)")
+    parser.add_argument(
+        "--task",
+        default="asr",
+        choices=["asr", "diarization"],
+        help="Task to evaluate: 'asr' for speech recognition, 'diarization' for speaker diarization",
+    )
     parser.add_argument(
         "--dataset",
-        default="loquacious",
-        choices=list(DATASET_REGISTRY.keys()) + ["combined", "all"],
-        help="Dataset to evaluate on ('all' runs all datasets sequentially)",
+        default=None,
+        help="Dataset to evaluate on (default: loquacious for ASR, callhome for diarization)",
     )
     parser.add_argument("--assemblyai", action="store_true", help="Use AssemblyAI API")
     parser.add_argument(
@@ -624,7 +1066,25 @@ def main():
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--user-prompt", default=None, help="User prompt (must include <audio>)")
     parser.add_argument("--seed", type=int, default=42)
+    # Diarization-specific args
+    parser.add_argument("--num-speakers", type=int, default=None, help="Exact number of speakers (diarization)")
+    parser.add_argument("--min-speakers", type=int, default=None, help="Min number of speakers (diarization)")
+    parser.add_argument("--max-speakers", type=int, default=None, help="Max number of speakers (diarization)")
     args = parser.parse_args()
+
+    # Handle diarization task
+    if args.task == "diarization":
+        run_diarization_eval(args)
+        return
+
+    # Set default dataset for ASR if not specified
+    if args.dataset is None:
+        args.dataset = "loquacious"
+
+    # Validate ASR dataset choice
+    valid_asr_datasets = list(DATASET_REGISTRY.keys()) + ["combined", "all"]
+    if args.dataset not in valid_asr_datasets:
+        raise ValueError(f"Unknown ASR dataset: {args.dataset}. Available: {valid_asr_datasets}")
 
     # Validation
     if args.assemblyai:
