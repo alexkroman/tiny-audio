@@ -24,7 +24,7 @@ from datasets import Audio, load_dataset
 from jiwer import wer
 from pyannote.core import Annotation, Segment, Timeline
 from pyannote.metrics.diarization import DiarizationErrorRate
-from transformers import WhisperTokenizer
+from whisper.normalizers import EnglishTextNormalizer
 
 # Disable tokenizers parallelism to avoid fork warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -90,13 +90,7 @@ class TextNormalizer:
     """Whisper-based text normalizer with ASR-specific preprocessing."""
 
     def __init__(self):
-        self._tokenizer = None
-
-    @property
-    def tokenizer(self) -> WhisperTokenizer:
-        if self._tokenizer is None:
-            self._tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
-        return self._tokenizer
+        self._normalizer = EnglishTextNormalizer()
 
     def preprocess(self, text: str) -> str:
         """Remove inaudible tags and disfluencies."""
@@ -105,7 +99,7 @@ class TextNormalizer:
 
     def normalize(self, text: str) -> str:
         """Full normalization pipeline."""
-        return self.tokenizer.normalize(self.preprocess(text))
+        return self._normalizer(self.preprocess(text))
 
 
 # =============================================================================
@@ -130,7 +124,7 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
     "loquacious": DatasetConfig(
         name="loquacious",
         path="speechbrain/LoquaciousSet",
-        config="medium",
+        config="small",
         audio_field="wav",
         text_field="text",
     ),

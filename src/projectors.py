@@ -357,11 +357,26 @@ class ResidualAudioProjector(nn.Module):
 # =============================================================================
 
 
+class RMSNorm(nn.Module):
+    """RMS Normalization (SOTA normalization for transformers)."""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        var = x.pow(2).mean(-1, keepdim=True)
+        x_normed = x * torch.rsqrt(var + self.eps)
+        return self.weight * x_normed
+
+
 class SwiGLUExpert(nn.Module):
     """SwiGLU expert MLP."""
 
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
         super().__init__()
+        # Bias=False is strictly preferred for MoE experts to reduce memory/compute
         self.gate_proj = nn.Linear(input_dim, hidden_dim, bias=False)
         self.up_proj = nn.Linear(input_dim, hidden_dim, bias=False)
         self.down_proj = nn.Linear(hidden_dim, output_dim, bias=False)
@@ -372,7 +387,7 @@ class SwiGLUExpert(nn.Module):
 
 
 class SharedMoEBlock(nn.Module):
-    """MoE block with shared expert + sparse routed experts."""
+    """MoE block with Shared + Sigmoid-Routed Experts."""
 
     def __init__(
         self,
@@ -387,8 +402,11 @@ class SharedMoEBlock(nn.Module):
         self.top_k = top_k
         self.output_dim = output_dim
 
+        # RMSNorm before routing
+        self.norm = RMSNorm(input_dim)
+
         self.router = nn.Linear(input_dim, num_experts, bias=False)
-        nn.init.zeros_(self.router.weight)
+        nn.init.normal_(self.router.weight, mean=0.0, std=0.02)
 
         self.shared_expert = SwiGLUExpert(input_dim, hidden_dim, output_dim)
         self.experts = nn.ModuleList(
@@ -401,19 +419,28 @@ class SharedMoEBlock(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = hidden_states.shape
 
-        shared_out = self.shared_expert(hidden_states)
+        # 1. Apply Shared Expert
+        normed_states = self.norm(hidden_states)
+        shared_out = self.shared_expert(normed_states)
 
-        flat_hidden = hidden_states.view(-1, dim)
+        # 2. Router Logic (Sigmoid Style)
+        flat_hidden = normed_states.view(-1, dim)
         router_logits = self.router(flat_hidden)
-        router_probs = F.softmax(router_logits.float(), dim=-1)
+
+        # Sigmoid routing
+        router_probs = torch.sigmoid(router_logits)
 
         self.last_router_logits = router_logits
         self.last_router_probs = router_probs
 
-        top_k_weights, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
-        top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
+        # 3. Top-K Selection
+        top_k_scores, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
+
+        # Normalize weights
+        top_k_weights = top_k_scores / (top_k_scores.sum(dim=-1, keepdim=True) + 1e-6)
         top_k_weights = top_k_weights.to(hidden_states.dtype)
 
+        # 4. Dispatch
         routed_out = self._dispatch_experts(flat_hidden, top_k_indices, top_k_weights)
         routed_out = routed_out.view(batch_size, seq_len, -1)
 
@@ -437,7 +464,7 @@ class SharedMoEBlock(nn.Module):
 
             token_indices, slot_indices = torch.where(expert_mask)
             expert_input = hidden_states[token_indices]
-            expert_output = expert(expert_input)
+            expert_output = expert(expert_input).to(output.dtype)
             weights = top_k_weights[token_indices, slot_indices].unsqueeze(-1)
             output.index_add_(0, token_indices, expert_output * weights)
 
@@ -446,11 +473,9 @@ class SharedMoEBlock(nn.Module):
 
 def load_balancing_loss(router_probs: torch.Tensor, num_experts: int, top_k: int) -> torch.Tensor:
     """Auxiliary loss to encourage balanced expert usage."""
-    _, selected = torch.topk(router_probs, top_k, dim=-1)
-    expert_mask = F.one_hot(selected, num_experts).float()
-    tokens_per_expert = expert_mask.mean(dim=(0, 1))
     prob_per_expert = router_probs.mean(dim=0)
-    return (tokens_per_expert * prob_per_expert).sum() * num_experts
+    target_mean = prob_per_expert.mean()
+    return (prob_per_expert - target_mean).square().sum() * num_experts
 
 
 def z_loss(router_logits: torch.Tensor) -> torch.Tensor:
@@ -464,9 +489,15 @@ class SharedMoEAudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.k = getattr(config, "projector_pool_stride", 4)
-
+        # Default stride is now 2 (was 4)
+        self.k = getattr(config, "projector_pool_stride", 2)
         encoder_dim = config.encoder_dim
+
+        # Depthwise Conv for temporal mixing
+        self.temporal_conv = nn.Conv1d(
+            encoder_dim, encoder_dim, kernel_size=3, padding=1, groups=encoder_dim
+        )
+
         in_dim = encoder_dim * self.k
         out_dim = config.llm_dim
         hidden_dim = getattr(config, "projector_hidden_dim", None) or in_dim
@@ -477,9 +508,9 @@ class SharedMoEAudioProjector(nn.Module):
         self.z_loss_coef = getattr(config, "router_z_loss_coef", 0.001)
 
         self.moe = SharedMoEBlock(in_dim, hidden_dim, out_dim, self.num_experts, self.top_k)
-        self._init_weights(in_dim)
+        self._init_weights()
 
-    def _init_weights(self, in_dim: int):
+    def _init_weights(self):
         with torch.no_grad():
             nn.init.orthogonal_(self.moe.shared_expert.gate_proj.weight)
             nn.init.orthogonal_(self.moe.shared_expert.up_proj.weight)
@@ -496,6 +527,11 @@ class SharedMoEAudioProjector(nn.Module):
         target_dtype = self.moe.shared_expert.gate_proj.weight.dtype
         if x.dtype != target_dtype:
             x = x.to(target_dtype)
+
+        # Temporal Context Injection
+        x_ctx = x.transpose(1, 2)
+        x_ctx = self.temporal_conv(x_ctx)
+        x = x + x_ctx.transpose(1, 2)
 
         if seq_len % self.k:
             x = F.pad(x, (0, 0, 0, self.k - seq_len % self.k))

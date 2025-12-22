@@ -74,6 +74,7 @@ accelerate = "*"
 datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
 evaluate = "*"
 jiwer = "*"
+openai-whisper = "*"
 wandb = "*"
 numpy = "*"
 hydra-core = "*"
