@@ -339,7 +339,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
             hidden_states = encoder_out.last_hidden_state
 
-        audio_embeds = self.projector(hidden_states)
+        # Downsample attention mask to match encoder output (Whisper has stride-2)
+        encoder_mask = None
+        if audio_attention_mask is not None:
+            # Pool mask by taking max over stride-2 windows (if any frame is valid, keep it)
+            encoder_mask = audio_attention_mask[:, ::2]
+            # Ensure mask length matches encoder output
+            if encoder_mask.shape[1] > hidden_states.shape[1]:
+                encoder_mask = encoder_mask[:, : hidden_states.shape[1]]
+
+        audio_embeds = self.projector(hidden_states, attention_mask=encoder_mask)
 
         # Flatten: (batch, seq, hidden) -> (batch * seq, hidden)
         # This allows masked_scatter to do 1:1 replacement
@@ -409,14 +418,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         return model_inputs
 
     def _get_num_audio_tokens(self, input_features: torch.Tensor) -> int:
-        """Calculate number of audio tokens based on input shape.
+        """Calculate number of audio tokens based on input shape and projector.
 
         Whisper: input_features shape is (batch, n_mels, mel_len)
         Encoder output is mel_len // 2 due to stride-2 conv
-        MLP projector adds another stride-2 for 4x total downsampling
+        Projector then applies its own downsampling.
         """
         mel_len = input_features.shape[-1]
-        return mel_len // 4
+        # Whisper encoder halves the sequence length
+        encoder_output_len = mel_len // 2
+        # Use projector's method to get final token count
+        return self.projector.get_output_length(encoder_output_len)
 
     @torch.no_grad()
     def generate(

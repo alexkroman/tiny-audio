@@ -23,7 +23,7 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_pool_stride: int = 2,
         downsample_rate: int = 16,
         projector_hidden_dim: Optional[int] = None,
-        projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe", "mlp"
+        projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe", "mlp", "qformer"
         projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.05,  # Dropout rate for projector layers
         projector_input_noise: float = 0.02,  # Input noise for projector
@@ -32,6 +32,12 @@ class ASRConfig(transformers.PretrainedConfig):
         num_experts_per_tok: int = 2,  # Top-k experts per token
         router_aux_loss_coef: float = 0.01,  # Auxiliary loss coefficient for load balancing
         use_specaugment: bool = True,  # Apply SpecAugment during training
+        # QFormer-specific configuration
+        qformer_window_size: int = 100,  # Window size for QFormer processing
+        qformer_hidden_size: Optional[int] = None,  # QFormer hidden size (defaults to encoder_dim)
+        qformer_num_layers: int = 2,  # Number of QFormer transformer layers
+        qformer_num_heads: int = 8,  # Number of attention heads in QFormer (must divide hidden size)
+        qformer_intermediate_size: Optional[int] = None,  # FFN size (defaults to 4x hidden)
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
@@ -79,6 +85,12 @@ class ASRConfig(transformers.PretrainedConfig):
         self.num_experts_per_tok = num_experts_per_tok
         self.router_aux_loss_coef = router_aux_loss_coef
         self.use_specaugment = use_specaugment
+        # QFormer-specific configuration
+        self.qformer_window_size = qformer_window_size
+        self.qformer_hidden_size = qformer_hidden_size
+        self.qformer_num_layers = qformer_num_layers
+        self.qformer_num_heads = qformer_num_heads
+        self.qformer_intermediate_size = qformer_intermediate_size
         self.label_smoothing = label_smoothing
         self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens

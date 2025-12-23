@@ -6,11 +6,15 @@ This module contains all projector architectures:
 - SwiGLUAudioProjector: SwiGLU-based projector with temporal pooling
 - ResidualAudioProjector: Residual MLP blocks with linear projection
 - SharedMoEAudioProjector: Shared expert + sparse routed experts
+- QFormerAudioProjector: BLIP-2 QFormer with learnable queries (Granite-style)
 """
+
+import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
+from transformers import AutoModel, Blip2QFormerConfig
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 # =============================================================================
@@ -44,7 +48,12 @@ class MLPAudioProjector(nn.Module):
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
 
-    def forward(self, x):
+    def get_output_length(self, input_length: int) -> int:
+        """Calculate output sequence length given input length."""
+        # Conv stride=2 halves the length (with padding=1, kernel=3)
+        return (input_length + 1) // 2
+
+    def forward(self, x, attention_mask=None):
         """
         x: [Batch, Seq_Len, Dim]
         Returns: [Batch, Seq_Len // 2, llm_dim]
@@ -153,7 +162,14 @@ class MoEAudioProjector(nn.Module):
 
             self.ln_post.weight.data.fill_(1.0)
 
-    def forward(self, x):
+    def get_output_length(self, input_length: int) -> int:
+        """Calculate output sequence length given input length."""
+        # Two conv layers with stride=2 each = stride 4 total
+        # Pad to multiple of 4, then divide by 4
+        padded = input_length + (4 - input_length % 4) % 4
+        return padded // 4
+
+    def forward(self, x, attention_mask=None):
         batch_size, seq_len, _ = x.shape
 
         # Pad to be divisible by stride (4)
@@ -235,7 +251,15 @@ class SwiGLUAudioProjector(nn.Module):
             nn.init.normal_(self.proj2.w2.weight, mean=0.0, std=std)
             nn.init.normal_(self.proj2.w3.weight, mean=0.0, std=std)
 
-    def forward(self, x):
+    def get_output_length(self, input_length: int) -> int:
+        """Calculate output sequence length given input length."""
+        # Temporal pooling with stride k
+        remainder = input_length % self.k
+        if remainder:
+            input_length += self.k - remainder
+        return input_length // self.k
+
+    def forward(self, x, attention_mask=None):
         batch_size, seq_len, dim = x.size()
 
         target_dtype = self.proj1.w1.weight.dtype
@@ -329,7 +353,15 @@ class ResidualAudioProjector(nn.Module):
                 if layer.fc2.bias is not None:
                     nn.init.zeros_(layer.fc2.bias)
 
-    def forward(self, x):
+    def get_output_length(self, input_length: int) -> int:
+        """Calculate output sequence length given input length."""
+        # Temporal pooling with stride k
+        remainder = input_length % self.k
+        if remainder:
+            input_length += self.k - remainder
+        return input_length // self.k
+
+    def forward(self, x, attention_mask=None):
         batch_size, seq_len, dim = x.size()
 
         target_dtype = self.input_proj.weight.dtype
@@ -521,7 +553,14 @@ class SharedMoEAudioProjector(nn.Module):
                 nn.init.orthogonal_(expert.up_proj.weight)
                 nn.init.orthogonal_(expert.down_proj.weight, gain=0.01)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def get_output_length(self, input_length: int) -> int:
+        """Calculate output sequence length given input length."""
+        # Temporal pooling with stride k
+        if input_length % self.k:
+            input_length += self.k - input_length % self.k
+        return input_length // self.k
+
+    def forward(self, x: torch.Tensor, attention_mask=None) -> torch.Tensor:
         batch_size, seq_len, dim = x.size()
 
         target_dtype = self.moe.shared_expert.gate_proj.weight.dtype
@@ -551,6 +590,129 @@ class SharedMoEAudioProjector(nn.Module):
 
 
 # =============================================================================
+# QFormer Projector (Granite-style)
+# =============================================================================
+
+
+class QFormerAudioProjector(nn.Module):
+    """
+    BLIP-2 QFormer projector with learnable queries.
+
+    Based on GraniteSpeechEncoderProjector - uses a QFormer model with learnable
+    query embeddings to compress and project audio encoder outputs. The audio
+    sequence is processed in windows and downsampled via cross-attention.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+
+        encoder_dim = config.encoder_dim
+        llm_dim = config.llm_dim
+
+        # Window and downsampling parameters
+        self.window_size = getattr(config, "qformer_window_size", 100)
+        self.downsample_rate = getattr(config, "downsample_rate", 16)
+        self.num_queries = self.window_size // self.downsample_rate
+
+        # QFormer hidden size (matches encoder for cross-attention)
+        qformer_hidden = getattr(config, "qformer_hidden_size", None) or encoder_dim
+        qformer_num_layers = getattr(config, "qformer_num_layers", 2)
+        # Default heads must divide hidden size evenly (1280 / 8 = 160)
+        qformer_num_heads = getattr(config, "qformer_num_heads", 8)
+        qformer_intermediate = getattr(config, "qformer_intermediate_size", None) or (qformer_hidden * 4)
+
+        # Learnable query embeddings (Granite uses std=1.0)
+        self.query = nn.Parameter(torch.zeros(1, self.num_queries, qformer_hidden))
+        self.query.data.normal_(mean=0.0, std=1.0)
+
+        # Optional projection if encoder dim != qformer hidden
+        if encoder_dim != qformer_hidden:
+            self.encoder_proj = nn.Linear(encoder_dim, qformer_hidden, bias=False)
+        else:
+            self.encoder_proj = None
+
+        # Configure QFormer
+        qformer_config = Blip2QFormerConfig(
+            hidden_size=qformer_hidden,
+            num_hidden_layers=qformer_num_layers,
+            num_attention_heads=qformer_num_heads,
+            intermediate_size=qformer_intermediate,
+            encoder_hidden_size=qformer_hidden,
+            cross_attention_frequency=1,
+        )
+        self.qformer = AutoModel.from_config(qformer_config)
+
+        # Final projection to LLM dimension (Granite uses bias=True)
+        self.linear = nn.Linear(qformer_hidden, llm_dim)
+
+    def get_output_length(self, input_length: int) -> int:
+        """Calculate output sequence length given input length."""
+        # QFormer uses window-based processing with num_queries per window
+        nblocks = math.ceil(input_length / self.window_size)
+        return nblocks * self.num_queries
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden_states: [batch_size, seq_len, encoder_dim]
+            attention_mask: [batch_size, seq_len] - 1 for real frames, 0 for padding
+
+        Returns:
+            projected: [batch_size, num_output_tokens, llm_dim]
+        """
+        batch_size, seq_len, dim = hidden_states.size()
+
+        # Ensure float dtype for QFormer
+        target_dtype = self.query.dtype
+        if hidden_states.dtype != target_dtype:
+            hidden_states = hidden_states.to(target_dtype)
+
+        # Optional encoder projection
+        if self.encoder_proj is not None:
+            hidden_states = self.encoder_proj(hidden_states)
+
+        # Compute number of windows and pad to fit
+        nblocks = math.ceil(seq_len / self.window_size)
+        pad = nblocks * self.window_size - seq_len
+        if pad > 0:
+            hidden_states = F.pad(hidden_states, (0, 0, 0, pad), "constant", 0)
+            # Also pad the attention mask with zeros (marking padding as invalid)
+            if attention_mask is not None:
+                attention_mask = F.pad(attention_mask, (0, pad), "constant", 0)
+
+        # Reshape to process each window: [batch*nblocks, window_size, dim]
+        effective_batch = batch_size * nblocks
+        hidden_states = hidden_states.view(effective_batch, self.window_size, -1)
+
+        # Reshape attention mask to match windows: [batch*nblocks, window_size]
+        encoder_attention_mask = None
+        if attention_mask is not None:
+            encoder_attention_mask = attention_mask.view(effective_batch, self.window_size)
+
+        # Expand queries to match batch size (Granite relies on broadcast, but CUDA has issues)
+        query_embeds = self.query.expand(effective_batch, -1, -1)
+
+        # QFormer cross-attention
+        query_output = self.qformer(
+            query_embeds=query_embeds,
+            encoder_hidden_states=hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            return_dict=True,
+        )
+
+        # Reshape back: [batch, nblocks * num_queries, hidden]
+        output_tokens = nblocks * self.num_queries
+        query_proj = query_output.last_hidden_state.view(batch_size, output_tokens, -1)
+
+        # Project to LLM dimension
+        return self.linear(query_proj)
+
+
+# =============================================================================
 # Projector Registry
 # =============================================================================
 
@@ -560,4 +722,5 @@ PROJECTOR_CLASSES = {
     "swiglu": SwiGLUAudioProjector,
     "residual": ResidualAudioProjector,
     "shared_moe": SharedMoEAudioProjector,
+    "qformer": QFormerAudioProjector,
 }

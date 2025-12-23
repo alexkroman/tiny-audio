@@ -1,0 +1,14 @@
+# @package _global_
+# QFormer projector (Granite-style with learnable queries)
+
+model:
+  projector_type: qformer
+  qformer_window_size: 100
+  qformer_num_layers: 2
+  qformer_num_heads: 8
+  downsample_rate: 16
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-qformer"
+  per_device_train_batch_size: 24
+  per_device_eval_batch_size: 24

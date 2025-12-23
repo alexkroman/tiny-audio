@@ -189,11 +189,13 @@ class DataCollator:
         feature_extractor: Any,
         sample_rate: int,
         system_prompt: str = None,
+        projector: Any = None,
     ):
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
+        self.projector = projector
 
         # Use trl's DataCollatorForChatML for label masking
         # max_length needs to accommodate audio tokens (1500 for 30s) + prompt + response
@@ -232,9 +234,10 @@ class DataCollator:
         )
 
         # Compute number of audio tokens from mel spectrogram length
-        # Whisper encoder has stride-2, MLP projector has stride-2 = 4x total
+        # Whisper encoder has stride-2, then projector applies its own downsampling
         mel_len = audio_out.input_features.shape[-1]
-        num_audio_tokens = mel_len // 4
+        encoder_output_len = mel_len // 2
+        num_audio_tokens = self.projector.get_output_length(encoder_output_len)
         audio_placeholder = "<audio>" * num_audio_tokens
         user_content = TRANSCRIBE_PREFIX + audio_placeholder
 
@@ -326,6 +329,7 @@ def main(cfg: DictConfig) -> None:
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         system_prompt=cfg.model.system_prompt,
+        projector=model.projector,
     )
 
     # Setup callbacks

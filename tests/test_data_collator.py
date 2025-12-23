@@ -7,6 +7,19 @@ from transformers import AutoTokenizer, WhisperFeatureExtractor
 from scripts.train import DataCollator
 
 
+class MockProjector:
+    """Mock projector that mimics stride-2 downsampling."""
+
+    def get_output_length(self, input_length: int) -> int:
+        return input_length // 2
+
+
+@pytest.fixture
+def projector():
+    """Create a mock projector."""
+    return MockProjector()
+
+
 @pytest.fixture
 def tokenizer():
     """Load the SmolLM tokenizer with <audio> token added."""
@@ -25,24 +38,26 @@ def feature_extractor():
 
 
 @pytest.fixture
-def collator(tokenizer, feature_extractor):
+def collator(tokenizer, feature_extractor, projector):
     """Create DataCollator instance."""
     return DataCollator(
         tokenizer=tokenizer,
         feature_extractor=feature_extractor,
         sample_rate=16000,
         system_prompt="You are a helpful assistant.",
+        projector=projector,
     )
 
 
 @pytest.fixture
-def collator_no_system(tokenizer, feature_extractor):
+def collator_no_system(tokenizer, feature_extractor, projector):
     """Create DataCollator without system prompt."""
     return DataCollator(
         tokenizer=tokenizer,
         feature_extractor=feature_extractor,
         sample_rate=16000,
         system_prompt=None,
+        projector=projector,
     )
 
 
@@ -277,6 +292,7 @@ class TestModelIntegration:
             feature_extractor=model.feature_extractor,
             sample_rate=16000,
             system_prompt=None,
+            projector=model.projector,
         )
 
         # Create two samples with different audio but same text
@@ -327,6 +343,7 @@ class TestModelIntegration:
             feature_extractor=model.feature_extractor,
             sample_rate=16000,
             system_prompt=None,
+            projector=model.projector,
         )
 
         sample = create_sample("Test.", duration_sec=1.0)
@@ -362,6 +379,7 @@ class TestModelIntegration:
             feature_extractor=model.feature_extractor,
             sample_rate=16000,
             system_prompt=None,
+            projector=model.projector,
         )
 
         sample = create_sample("Test.", duration_sec=1.0)

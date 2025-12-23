@@ -19,10 +19,11 @@ class ASRProcessor(ProcessorMixin):
     AUDIO_TOKEN = "<audio>"
     TRANSCRIBE_PROMPT = "Transcribe: "
 
-    def __init__(self, feature_extractor, tokenizer):
+    def __init__(self, feature_extractor, tokenizer, projector=None):
         self.feature_extractor = feature_extractor
         self.tokenizer = tokenizer
         self.audio_token_id = tokenizer.convert_tokens_to_ids(self.AUDIO_TOKEN)
+        self.projector = projector
 
     def __call__(
         self,
@@ -55,7 +56,9 @@ class ASRProcessor(ProcessorMixin):
             )
             result["input_features"] = audio_inputs["input_features"]
             # Whisper encoder output length = mel_len // 2 (stride-2 conv)
-            num_audio_tokens = audio_inputs["input_features"].shape[-1] // 2
+            mel_len = audio_inputs["input_features"].shape[-1]
+            encoder_output_len = mel_len // 2
+            num_audio_tokens = self.projector.get_output_length(encoder_output_len)
         else:
             num_audio_tokens = 0
 
