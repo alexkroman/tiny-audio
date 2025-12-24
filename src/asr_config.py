@@ -25,8 +25,7 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_hidden_dim: Optional[int] = None,
         projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe", "mlp", "qformer"
         projector_num_layers: int = 2,  # Number of layers (for residual projector)
-        projector_dropout: float = 0.05,  # Dropout rate for projector layers
-        projector_input_noise: float = 0.02,  # Input noise for projector
+        projector_dropout: float = 0.0,  # Dropout rate for projector layers
         # MoE-specific configuration
         num_experts: int = 4,  # Number of experts in MoE projectors
         num_experts_per_tok: int = 2,  # Top-k experts per token
@@ -39,10 +38,8 @@ class ASRConfig(transformers.PretrainedConfig):
         qformer_num_heads: int = 16,  # Number of attention heads in QFormer
         qformer_intermediate_size: Optional[int] = None,  # FFN size (defaults to 4x hidden)
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
-        inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
         max_new_tokens: Optional[int] = None,
-        min_new_tokens: Optional[int] = None,
         repetition_penalty: Optional[float] = None,
         length_penalty: Optional[float] = None,
         no_repeat_ngram_size: Optional[int] = None,
@@ -53,7 +50,6 @@ class ASRConfig(transformers.PretrainedConfig):
         generation_defaults = {
             "num_beams": 1,
             "max_new_tokens": 96,
-            "min_new_tokens": 0,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,
@@ -79,7 +75,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_type = projector_type
         self.projector_num_layers = projector_num_layers
         self.projector_dropout = projector_dropout
-        self.projector_input_noise = projector_input_noise
         # MoE-specific configuration
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
@@ -92,16 +87,12 @@ class ASRConfig(transformers.PretrainedConfig):
         self.qformer_num_heads = qformer_num_heads
         self.qformer_intermediate_size = qformer_intermediate_size
         self.label_smoothing = label_smoothing
-        self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
 
         # Generation parameters (use explicit value if provided, else use default)
         self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]
         self.max_new_tokens = (
             max_new_tokens if max_new_tokens is not None else generation_defaults["max_new_tokens"]
-        )
-        self.min_new_tokens = (
-            min_new_tokens if min_new_tokens is not None else generation_defaults["min_new_tokens"]
         )
         self.repetition_penalty = (
             repetition_penalty

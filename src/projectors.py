@@ -68,10 +68,13 @@ class MLPAudioProjector(nn.Module):
         return self.linear_2(x)
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 # =============================================================================
 # MoE Projector (MOSA-style)
 # =============================================================================
-
 
 class SimpleAdapter(nn.Module):
     """Simple adapter: Linear -> ReLU -> Dropout -> Linear."""
@@ -93,24 +96,23 @@ class SimpleAdapter(nn.Module):
 class MoEAudioProjector(nn.Module):
     """
     MOSA-style projector: Mixture of Simple Adapters.
-
-    From paper (arXiv:2508.18998):
-    - Dense mixture (softmax over ALL experts) instead of sparse Top-K
-    - Simple Linear->ReLU->Linear adapters
-    - No auxiliary losses - just cross-entropy on transcripts
-    - Conv downsampling: stride 4 total (two conv layers, stride 2 each)
+    Target: Whisper-Large-v3 (1280) -> SmolLM2 (2048)
     """
 
     def __init__(self, config):
         super().__init__()
 
-        self.encoder_dim = config.encoder_dim
-        self.llm_dim = config.llm_dim
+        # Logic for Whisper (1280) and SmolLM2 (2048)
+        self.encoder_dim = config.encoder_dim  # 1280
+        self.llm_dim = config.llm_dim          # 2048
         self.num_experts = getattr(config, "num_experts", 4)
-        adapter_hidden = getattr(config, "projector_hidden_dim", None) or 4096
-        self.dropout_rate = getattr(config, "projector_dropout", 0.1)
+        
+        # Paper explicitly uses 4096 for adapter hidden dim
+        adapter_hidden = 4096 
+        self.dropout_rate = getattr(config, "projector_dropout", 0.0)
 
-        # Convolutional Subsampling (stride 4 total)
+        # 1. Convolutional Subsampling (stride 4 total)
+        # First layer maps to LLM dim, second layer maintains it
         self.conv = nn.Sequential(
             nn.Conv1d(self.encoder_dim, self.llm_dim, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
@@ -118,7 +120,7 @@ class MoEAudioProjector(nn.Module):
             nn.ReLU(),
         )
 
-        # Router
+        # 2. Base Router (Paper: 1280 -> 512 -> 4)
         router_hidden = 512
         self.router = nn.Sequential(
             nn.Linear(self.encoder_dim, router_hidden),
@@ -126,7 +128,7 @@ class MoEAudioProjector(nn.Module):
             nn.Linear(router_hidden, self.num_experts),
         )
 
-        # Experts
+        # 3. Experts (SimpleAdapters)
         self.experts = nn.ModuleList(
             [
                 SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim, dropout=self.dropout_rate)
@@ -134,14 +136,14 @@ class MoEAudioProjector(nn.Module):
             ]
         )
 
-        self.ln_post = LlamaRMSNorm(self.llm_dim, eps=1e-6)
         self._init_weights()
 
     def _init_weights(self):
+        """Initializes weights according to MOSA paper logic."""
         std = 0.02
         with torch.no_grad():
             for module in self.conv:
-                if isinstance(module, nn.Conv1d):
+                if isinstance(module, (nn.Conv1d, nn.Linear)):
                     nn.init.normal_(module.weight, mean=0.0, std=std)
                     if module.bias is not None:
                         nn.init.zeros_(module.bias)
@@ -154,52 +156,56 @@ class MoEAudioProjector(nn.Module):
 
             for expert in self.experts:
                 nn.init.normal_(expert.fc1.weight, mean=0.0, std=std)
-                nn.init.normal_(expert.fc2.weight, mean=0.0, std=std)
+                # Zero-init the second layer of the adapter to stabilize start of training
+                nn.init.zeros_(expert.fc2.weight)
                 if expert.fc1.bias is not None:
                     nn.init.zeros_(expert.fc1.bias)
                 if expert.fc2.bias is not None:
                     nn.init.zeros_(expert.fc2.bias)
 
-            self.ln_post.weight.data.fill_(1.0)
-
-    def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length."""
-        # Two conv layers with stride=2 each = stride 4 total
-        # Pad to multiple of 4, then divide by 4
-        padded = input_length + (4 - input_length % 4) % 4
-        return padded // 4
-
     def forward(self, x):
+        """
+        Input x: (Batch, Seq_Len, 1280)
+        """
         batch_size, seq_len, _ = x.shape
 
-        # Pad to be divisible by stride (4)
+        # Pad sequence to be divisible by 4 for the router-to-adapter window alignment
         pad_amt = (4 - (seq_len % 4)) % 4
         if pad_amt > 0:
             x = F.pad(x, (0, 0, 0, pad_amt))
             seq_len = x.shape[1]
 
-        # Convolutional Downsampling
+        # --- Router Branch ---
+        # Router looks at high-res features
+        router_logits = self.router(x) # (B, S, 4)
+        
+        # Average logits across the 4-frame window to match downsampled length
+        # This matches the stride of the conv layers
+        router_logits = router_logits.view(batch_size, seq_len // 4, 4, self.num_experts).mean(dim=2)
+        routing_weights = F.softmax(router_logits, dim=-1) # (B, S/4, 4)
+
+        # --- Adapter Branch ---
+        # Downsample features: (B, S, 1280) -> (B, S/4, 2048)
         h_conv = self.conv(x.permute(0, 2, 1)).permute(0, 2, 1)
 
-        # Router on high-res input, then downsample weights
-        router_logits = self.router(x)
-        router_logits = router_logits.view(batch_size, seq_len // 4, 4, self.num_experts).mean(
-            dim=2
-        )
-        routing_weights = F.softmax(router_logits, dim=-1)
-
-        # Weighted sum of expert outputs
+        # Dense mixture: Sum all expert outputs weighted by routing probabilities
         final_out = torch.zeros_like(h_conv)
         for i, expert in enumerate(self.experts):
             expert_out = expert(h_conv)
             expert_weight = routing_weights[:, :, i : i + 1]
             final_out.add_(expert_out * expert_weight)
 
-        return self.ln_post(final_out)
+        return final_out
 
     def get_aux_loss(self) -> torch.Tensor:
-        """Return auxiliary loss (none for dense MoE)."""
+        """MOSA uses only cross-entropy loss, so aux loss is 0."""
         return torch.tensor(0.0)
+
+    def get_output_length(self, input_length: int) -> int:
+        """Calculate output sequence length given input length."""
+        # Two conv layers with stride=2 each = stride 4 total
+        padded = input_length + (4 - input_length % 4) % 4
+        return padded // 4
 
 
 # =============================================================================
