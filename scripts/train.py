@@ -230,13 +230,14 @@ class DataCollator:
             audio_arrays,
             sampling_rate=self.sample_rate,
             padding="max_length",
+            return_attention_mask=True,
             return_tensors="pt",
         )
 
-        # Compute number of audio tokens from mel spectrogram length
-        # Whisper encoder has stride-2, then projector applies its own downsampling
-        mel_len = audio_out.input_features.shape[-1]
-        encoder_output_len = mel_len // 2
+        # Use actual audio length (from attention mask) for token count
+        # This avoids wasting compute on padded silence
+        real_mel_len = audio_out.attention_mask.sum(dim=-1).max().item()
+        encoder_output_len = real_mel_len // 2
         num_audio_tokens = self.projector.get_output_length(encoder_output_len)
         audio_placeholder = "<audio>" * num_audio_tokens
         user_content = TRANSCRIBE_PREFIX + audio_placeholder
@@ -257,6 +258,7 @@ class DataCollator:
         # Let trl handle tokenization, label masking, and padding
         batch = self.text_collator(text_features)
         batch["input_features"] = audio_out.input_features
+        batch["audio_attention_mask"] = audio_out.attention_mask
 
         return batch
 

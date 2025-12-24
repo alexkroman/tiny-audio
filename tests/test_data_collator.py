@@ -195,13 +195,14 @@ class TestAudioTokens:
         # Count audio tokens in input_ids
         num_audio_tokens = (batch["input_ids"] == audio_token_id).sum().item()
 
-        # Expected: mel_len // 4 (Whisper stride-2 × projector stride-2)
-        mel_len = batch["input_features"].shape[-1]
-        expected_audio_tokens = mel_len // 4
+        # Expected: real_mel_len // 4 (Whisper stride-2 × projector stride-2)
+        # Use attention mask to get actual audio length (not padded)
+        real_mel_len = batch["audio_attention_mask"].sum().item()
+        expected_audio_tokens = real_mel_len // 4
 
         assert num_audio_tokens == expected_audio_tokens, (
             f"Audio token count mismatch: got {num_audio_tokens}, "
-            f"expected {expected_audio_tokens} (mel_len={mel_len})"
+            f"expected {expected_audio_tokens} (real_mel_len={real_mel_len})"
         )
 
     def test_audio_tokens_not_just_one(self, collator, tokenizer):
@@ -275,8 +276,8 @@ class TestModelIntegration:
         from src.asr_modeling import ASRModel
 
         config = ASRConfig(
-            encoder_model_name="openai/whisper-tiny",
-            decoder_model_name="HuggingFaceTB/SmolLM2-135M-Instruct",
+            audio_model_id="openai/whisper-tiny",
+            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
             projector_type="mlp",
             model_dtype="float32",
             attn_implementation="eager",
@@ -317,12 +318,14 @@ class TestModelIntegration:
             out1 = model(
                 input_ids=batch1["input_ids"],
                 input_features=batch1["input_features"],
+                audio_attention_mask=batch1["audio_attention_mask"],
                 labels=batch1["labels"],
                 attention_mask=batch1["attention_mask"],
             )
             out2 = model(
                 input_ids=batch2["input_ids"],
                 input_features=batch2["input_features"],
+                audio_attention_mask=batch2["audio_attention_mask"],
                 labels=batch2["labels"],
                 attention_mask=batch2["attention_mask"],
             )
@@ -356,7 +359,10 @@ class TestModelIntegration:
         audio_token_mask = batch["input_ids"] == model.audio_token_id
 
         # Encode audio and get what would be injected
-        audio_embeds = model._encode_audio(batch["input_features"], None)
+        audio_embeds = model._encode_audio(
+            batch["input_features"],
+            batch["audio_attention_mask"],
+        )
 
         # The audio embeddings should be different from the original <audio> token embedding
         audio_token_embed = original_embeds[audio_token_mask][0]  # First audio token's original embedding
@@ -389,7 +395,10 @@ class TestModelIntegration:
         num_audio_tokens = (batch["input_ids"] == model.audio_token_id).sum().item()
 
         # Get projected audio embeddings
-        audio_embeds = model._encode_audio(batch["input_features"], None)
+        audio_embeds = model._encode_audio(
+            batch["input_features"],
+            batch["audio_attention_mask"],
+        )
         num_audio_embeds = audio_embeds.shape[0]
 
         assert num_audio_tokens == num_audio_embeds, (

@@ -440,15 +440,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # Extract audio features and is_last flag
         is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
 
-        if isinstance(model_inputs, dict):
-            input_features = model_inputs.get("input_features")
-            if input_features is not None:
-                input_features = input_features.to(self.model.device)
-        else:
-            input_features = model_inputs.to(self.model.device)
+        input_features = model_inputs["input_features"].to(self.model.device)
+        audio_attention_mask = model_inputs["attention_mask"].to(self.model.device)
 
         generated_ids = self.model.generate(
             input_features=input_features,
+            audio_attention_mask=audio_attention_mask,
             **generate_kwargs,
         )
 

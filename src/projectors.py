@@ -53,7 +53,7 @@ class MLPAudioProjector(nn.Module):
         # Conv stride=2 halves the length (with padding=1, kernel=3)
         return (input_length + 1) // 2
 
-    def forward(self, x, attention_mask=None):
+    def forward(self, x):
         """
         x: [Batch, Seq_Len, Dim]
         Returns: [Batch, Seq_Len // 2, llm_dim]
@@ -169,7 +169,7 @@ class MoEAudioProjector(nn.Module):
         padded = input_length + (4 - input_length % 4) % 4
         return padded // 4
 
-    def forward(self, x, attention_mask=None):
+    def forward(self, x):
         batch_size, seq_len, _ = x.shape
 
         # Pad to be divisible by stride (4)
@@ -259,7 +259,7 @@ class SwiGLUAudioProjector(nn.Module):
             input_length += self.k - remainder
         return input_length // self.k
 
-    def forward(self, x, attention_mask=None):
+    def forward(self, x):
         batch_size, seq_len, dim = x.size()
 
         target_dtype = self.proj1.w1.weight.dtype
@@ -361,7 +361,7 @@ class ResidualAudioProjector(nn.Module):
             input_length += self.k - remainder
         return input_length // self.k
 
-    def forward(self, x, attention_mask=None):
+    def forward(self, x):
         batch_size, seq_len, dim = x.size()
 
         target_dtype = self.input_proj.weight.dtype
@@ -522,7 +522,7 @@ class SharedMoEAudioProjector(nn.Module):
         super().__init__()
 
         # Default stride is now 2 (was 4)
-        self.k = getattr(config, "projector_pool_stride", 2)
+        self.k = getattr(config, "projector_pool_stride", 4)
         encoder_dim = config.encoder_dim
 
         # Depthwise Conv for temporal mixing
@@ -560,7 +560,7 @@ class SharedMoEAudioProjector(nn.Module):
             input_length += self.k - input_length % self.k
         return input_length // self.k
 
-    def forward(self, x: torch.Tensor, attention_mask=None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = x.size()
 
         target_dtype = self.moe.shared_expert.gate_proj.weight.dtype
@@ -609,16 +609,15 @@ class QFormerAudioProjector(nn.Module):
         encoder_dim = config.encoder_dim
         llm_dim = config.llm_dim
 
-        # Window and downsampling parameters
-        self.window_size = getattr(config, "qformer_window_size", 100)
-        self.downsample_rate = getattr(config, "downsample_rate", 16)
+        # Window and downsampling parameters (Granite defaults: window=15, downsample=5)
+        self.window_size = getattr(config, "qformer_window_size", 15)
+        self.downsample_rate = getattr(config, "downsample_rate", 5)
         self.num_queries = self.window_size // self.downsample_rate
 
         # QFormer hidden size (matches encoder for cross-attention)
         qformer_hidden = getattr(config, "qformer_hidden_size", None) or encoder_dim
         qformer_num_layers = getattr(config, "qformer_num_layers", 2)
-        # Default heads must divide hidden size evenly (1280 / 8 = 160)
-        qformer_num_heads = getattr(config, "qformer_num_heads", 8)
+        qformer_num_heads = getattr(config, "qformer_num_heads", 16)
         qformer_intermediate = getattr(config, "qformer_intermediate_size", None) or (qformer_hidden * 4)
 
         # Learnable query embeddings (Granite uses std=1.0)
@@ -631,7 +630,7 @@ class QFormerAudioProjector(nn.Module):
         else:
             self.encoder_proj = None
 
-        # Configure QFormer
+        # Configure QFormer to match Granite's exact config
         qformer_config = Blip2QFormerConfig(
             hidden_size=qformer_hidden,
             num_hidden_layers=qformer_num_layers,
@@ -639,6 +638,12 @@ class QFormerAudioProjector(nn.Module):
             intermediate_size=qformer_intermediate,
             encoder_hidden_size=qformer_hidden,
             cross_attention_frequency=1,
+            # Granite-specific settings
+            hidden_act="gelu",
+            attention_probs_dropout_prob=0.1,
+            hidden_dropout_prob=0.1,
+            layer_norm_eps=1e-12,
+            initializer_range=0.02,
         )
         self.qformer = AutoModel.from_config(qformer_config)
 
@@ -651,15 +656,10 @@ class QFormerAudioProjector(nn.Module):
         nblocks = math.ceil(input_length / self.window_size)
         return nblocks * self.num_queries
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor = None,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
         Args:
             hidden_states: [batch_size, seq_len, encoder_dim]
-            attention_mask: [batch_size, seq_len] - 1 for real frames, 0 for padding
 
         Returns:
             projected: [batch_size, num_output_tokens, llm_dim]
@@ -680,27 +680,18 @@ class QFormerAudioProjector(nn.Module):
         pad = nblocks * self.window_size - seq_len
         if pad > 0:
             hidden_states = F.pad(hidden_states, (0, 0, 0, pad), "constant", 0)
-            # Also pad the attention mask with zeros (marking padding as invalid)
-            if attention_mask is not None:
-                attention_mask = F.pad(attention_mask, (0, pad), "constant", 0)
 
         # Reshape to process each window: [batch*nblocks, window_size, dim]
         effective_batch = batch_size * nblocks
         hidden_states = hidden_states.view(effective_batch, self.window_size, -1)
 
-        # Reshape attention mask to match windows: [batch*nblocks, window_size]
-        encoder_attention_mask = None
-        if attention_mask is not None:
-            encoder_attention_mask = attention_mask.view(effective_batch, self.window_size)
-
-        # Expand queries to match batch size (Granite relies on broadcast, but CUDA has issues)
+        # Expand queries to match batch size
         query_embeds = self.query.expand(effective_batch, -1, -1)
 
         # QFormer cross-attention
         query_output = self.qformer(
             query_embeds=query_embeds,
             encoder_hidden_states=hidden_states,
-            encoder_attention_mask=encoder_attention_mask,
             return_dict=True,
         )
 

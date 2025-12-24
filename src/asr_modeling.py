@@ -269,11 +269,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """Only save trainable projector weights."""
         return {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
 
-    def _apply_specaugment(
-        self,
-        input_features: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def _apply_specaugment(self, input_features: torch.Tensor) -> torch.Tensor:
         if not getattr(self.config, "use_specaugment", False):
             return input_features
 
@@ -294,7 +290,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 (batch_size, sequence_length),
                 mask_prob=mask_time_prob,
                 mask_length=mask_time_length,
-                attention_mask=attention_mask,
                 min_masks=2,
             )
             mask_time_indices = torch.tensor(
@@ -324,31 +319,30 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def _encode_audio(
         self,
         audio_features: torch.Tensor,
-        audio_attention_mask: Optional[torch.Tensor] = None,
+        audio_attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         """Encode audio and project to LLM embedding space.
 
-        Returns flattened audio embeddings of shape (total_audio_tokens, hidden_dim).
+        Args:
+            audio_features: Mel spectrogram features (batch, n_mels, mel_len)
+            audio_attention_mask: Mask indicating real vs padded mel frames (batch, mel_len)
+
+        Returns:
+            Flattened audio embeddings of shape (total_audio_tokens, hidden_dim).
         """
         # Apply SpecAugment during training (before encoding)
-        audio_features = self._apply_specaugment(audio_features, audio_attention_mask)
+        audio_features = self._apply_specaugment(audio_features)
 
         with torch.no_grad():
-            encoder_out = self.audio_tower(
-                input_features=audio_features, attention_mask=audio_attention_mask
-            )
+            encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
-        # Downsample attention mask to match encoder output (Whisper has stride-2)
-        encoder_mask = None
-        if audio_attention_mask is not None:
-            # Pool mask by taking max over stride-2 windows (if any frame is valid, keep it)
-            encoder_mask = audio_attention_mask[:, ::2]
-            # Ensure mask length matches encoder output
-            if encoder_mask.shape[1] > hidden_states.shape[1]:
-                encoder_mask = encoder_mask[:, : hidden_states.shape[1]]
+        # Truncate to actual audio length (mel_frames -> encoder_frames via stride-2 conv)
+        real_encoder_len = audio_attention_mask.sum(dim=-1) // 2
+        max_real_len = real_encoder_len.max().item()
+        hidden_states = hidden_states[:, :max_real_len]
 
-        audio_embeds = self.projector(hidden_states, attention_mask=encoder_mask)
+        audio_embeds = self.projector(hidden_states)
 
         # Flatten: (batch, seq, hidden) -> (batch * seq, hidden)
         # This allows masked_scatter to do 1:1 replacement
@@ -358,6 +352,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         input_ids: Optional[torch.Tensor] = None,
         input_features: Optional[torch.Tensor] = None,
+        audio_attention_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         past_key_values: Optional[torch.Tensor] = None,
@@ -365,7 +360,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
-        audio_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
@@ -417,17 +411,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         return model_inputs
 
-    def _get_num_audio_tokens(self, input_features: torch.Tensor) -> int:
-        """Calculate number of audio tokens based on input shape and projector.
+    def _get_num_audio_tokens(
+        self,
+        audio_attention_mask: torch.Tensor,
+    ) -> int:
+        """Calculate number of audio tokens based on actual audio length.
 
-        Whisper: input_features shape is (batch, n_mels, mel_len)
-        Encoder output is mel_len // 2 due to stride-2 conv
-        Projector then applies its own downsampling.
+        Uses attention mask to get real audio length, then computes:
+        mel_frames -> encoder_frames (stride-2) -> projector output tokens
         """
-        mel_len = input_features.shape[-1]
-        # Whisper encoder halves the sequence length
+        mel_len = audio_attention_mask.sum(dim=-1).max().item()
         encoder_output_len = mel_len // 2
-        # Use projector's method to get final token count
         return self.projector.get_output_length(encoder_output_len)
 
     @torch.no_grad()
@@ -435,8 +429,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         input_ids: Optional[torch.Tensor] = None,
         input_features: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
         audio_attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         system_prompt: Optional[str] = None,
         **generate_kwargs,
     ) -> torch.Tensor:
@@ -448,6 +442,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """
         if input_features is None:
             raise ValueError("input_features required for generation")
+        if audio_attention_mask is None:
+            raise ValueError("audio_attention_mask required for generation")
 
         device = input_features.device
         batch_size = input_features.shape[0]
@@ -457,7 +453,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # If input_ids not provided, build prompt with correct number of audio tokens
         if input_ids is None:
-            num_audio_tokens = self._get_num_audio_tokens(input_features)
+            num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
             audio_placeholder = "<audio>" * num_audio_tokens
 
             system_prompt = system_prompt or self.system_prompt

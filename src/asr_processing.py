@@ -51,13 +51,16 @@ class ASRProcessor(ProcessorMixin):
             audio_inputs = self.feature_extractor(
                 audio,
                 sampling_rate=getattr(self.feature_extractor, "sampling_rate", 16000),
+                return_attention_mask=True,
                 return_tensors=return_tensors,
                 **kwargs,
             )
             result["input_features"] = audio_inputs["input_features"]
-            # Whisper encoder output length = mel_len // 2 (stride-2 conv)
-            mel_len = audio_inputs["input_features"].shape[-1]
-            encoder_output_len = mel_len // 2
+            result["audio_attention_mask"] = audio_inputs["attention_mask"]
+
+            # Use actual audio length (from attention mask) for token count
+            real_mel_len = audio_inputs["attention_mask"].sum(dim=-1).max().item()
+            encoder_output_len = real_mel_len // 2
             num_audio_tokens = self.projector.get_output_length(encoder_output_len)
         else:
             num_audio_tokens = 0

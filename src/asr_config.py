@@ -20,8 +20,8 @@ class ASRConfig(transformers.PretrainedConfig):
         llm_dim: Optional[int] = None,
         audio_sample_rate: int = 16000,
         projector_init_std: float = 0.02,
-        projector_pool_stride: int = 2,
-        downsample_rate: int = 16,
+        projector_pool_stride: int = 4,
+        downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
         projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe", "mlp", "qformer"
         projector_num_layers: int = 2,  # Number of layers (for residual projector)
@@ -32,11 +32,11 @@ class ASRConfig(transformers.PretrainedConfig):
         num_experts_per_tok: int = 2,  # Top-k experts per token
         router_aux_loss_coef: float = 0.01,  # Auxiliary loss coefficient for load balancing
         use_specaugment: bool = True,  # Apply SpecAugment during training
-        # QFormer-specific configuration
-        qformer_window_size: int = 100,  # Window size for QFormer processing
+        # QFormer-specific configuration (Granite defaults)
+        qformer_window_size: int = 15,  # Window size for QFormer processing
         qformer_hidden_size: Optional[int] = None,  # QFormer hidden size (defaults to encoder_dim)
         qformer_num_layers: int = 2,  # Number of QFormer transformer layers
-        qformer_num_heads: int = 8,  # Number of attention heads in QFormer (must divide hidden size)
+        qformer_num_heads: int = 16,  # Number of attention heads in QFormer
         qformer_intermediate_size: Optional[int] = None,  # FFN size (defaults to 4x hidden)
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_diversity_penalty: float = 0.0,

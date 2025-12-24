@@ -12,7 +12,7 @@ model:
   projector_type: mlp  # Options: mlp, moe, swiglu, residual, shared_moe
 
   # Projector settings
-  projector_pool_stride: 2
+  projector_pool_stride: 4
   projector_num_layers: 2
   projector_hidden_dim: null
   projector_init_std: 0.02
