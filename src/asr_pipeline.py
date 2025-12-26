@@ -119,11 +119,13 @@ class ForcedAligner:
             token_char = labels[span.token]
             if token_char == "|":  # Word separator
                 if current_word_start is not None and word_idx < len(words):
-                    word_timestamps.append({
-                        "word": words[word_idx],
-                        "start": current_word_start * frame_duration,
-                        "end": current_word_end * frame_duration,
-                    })
+                    word_timestamps.append(
+                        {
+                            "word": words[word_idx],
+                            "start": current_word_start * frame_duration,
+                            "end": current_word_end * frame_duration,
+                        }
+                    )
                     word_idx += 1
                 current_word_start = None
                 current_word_end = None
@@ -134,11 +136,13 @@ class ForcedAligner:
 
         # Don't forget the last word
         if current_word_start is not None and word_idx < len(words):
-            word_timestamps.append({
-                "word": words[word_idx],
-                "start": current_word_start * frame_duration,
-                "end": current_word_end * frame_duration,
-            })
+            word_timestamps.append(
+                {
+                    "word": words[word_idx],
+                    "start": current_word_start * frame_duration,
+                    "end": current_word_end * frame_duration,
+                }
+            )
 
         return word_timestamps
 
@@ -234,11 +238,13 @@ class SpeakerDiarizer:
         # Convert to simple format
         segments = []
         for turn, _, speaker in annotation.itertracks(yield_label=True):
-            segments.append({
-                "speaker": speaker,
-                "start": turn.start,
-                "end": turn.end,
-            })
+            segments.append(
+                {
+                    "speaker": speaker,
+                    "start": turn.start,
+                    "end": turn.end,
+                }
+            )
 
         return segments
 

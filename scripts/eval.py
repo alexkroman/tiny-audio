@@ -24,7 +24,7 @@ from datasets import Audio, load_dataset
 from jiwer import wer
 from pyannote.core import Annotation, Segment, Timeline
 from pyannote.metrics.diarization import DiarizationErrorRate
-from whisper.normalizers import EnglishTextNormalizer
+from transformers.models.whisper.english_normalizer import BasicTextNormalizer
 
 # Disable tokenizers parallelism to avoid fork warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -90,7 +90,7 @@ class TextNormalizer:
     """Whisper-based text normalizer with ASR-specific preprocessing."""
 
     def __init__(self):
-        self._normalizer = EnglishTextNormalizer()
+        self._normalizer = BasicTextNormalizer()
 
     def preprocess(self, text: str) -> str:
         """Remove inaudible tags and disfluencies."""
@@ -752,11 +752,13 @@ class AssemblyAIDiarizationEvaluator(DiarizationEvaluator):
         segments = []
         if transcript.utterances:
             for utt in transcript.utterances:
-                segments.append({
-                    "speaker": utt.speaker,
-                    "start": utt.start / 1000.0,  # ms -> seconds
-                    "end": utt.end / 1000.0,
-                })
+                segments.append(
+                    {
+                        "speaker": utt.speaker,
+                        "start": utt.start / 1000.0,  # ms -> seconds
+                        "end": utt.end / 1000.0,
+                    }
+                )
 
         time.sleep(0.5)  # Rate limiting
         return segments, elapsed
@@ -793,7 +795,7 @@ def save_diarization_results(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open("w") as f:
-        f.write(f"Diarization Evaluation\n")
+        f.write("Diarization Evaluation\n")
         f.write(f"Dataset: {dataset_desc}\n")
         f.write(f"Samples: {metrics['num_samples']}\n")
         f.write(f"DER: {metrics['der']:.2f}%\n")
@@ -997,7 +999,9 @@ def run_diarization_eval(args):
     # Create evaluator
     if args.assemblyai:
         if not args.api_key:
-            raise ValueError("AssemblyAI API key required (--api-key or ASSEMBLYAI_API_KEY env var)")
+            raise ValueError(
+                "AssemblyAI API key required (--api-key or ASSEMBLYAI_API_KEY env var)"
+            )
         evaluator = AssemblyAIDiarizationEvaluator(
             api_key=args.api_key,
             model=args.assemblyai_model,
@@ -1035,7 +1039,9 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Evaluate ASR models and speaker diarization")
-    parser.add_argument("model", nargs="?", help="Model path or endpoint URL (not needed for diarization)")
+    parser.add_argument(
+        "model", nargs="?", help="Model path or endpoint URL (not needed for diarization)"
+    )
     parser.add_argument(
         "--task",
         default="asr",
@@ -1061,9 +1067,15 @@ def main():
     parser.add_argument("--user-prompt", default=None, help="User prompt (must include <audio>)")
     parser.add_argument("--seed", type=int, default=42)
     # Diarization-specific args
-    parser.add_argument("--num-speakers", type=int, default=None, help="Exact number of speakers (diarization)")
-    parser.add_argument("--min-speakers", type=int, default=None, help="Min number of speakers (diarization)")
-    parser.add_argument("--max-speakers", type=int, default=None, help="Max number of speakers (diarization)")
+    parser.add_argument(
+        "--num-speakers", type=int, default=None, help="Exact number of speakers (diarization)"
+    )
+    parser.add_argument(
+        "--min-speakers", type=int, default=None, help="Min number of speakers (diarization)"
+    )
+    parser.add_argument(
+        "--max-speakers", type=int, default=None, help="Max number of speakers (diarization)"
+    )
     args = parser.parse_args()
 
     # Handle diarization task

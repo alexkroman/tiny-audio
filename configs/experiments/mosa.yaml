@@ -1,0 +1,10 @@
+# @package _global_
+# MOSA-Large (Mixture of Speech Adapters) projector
+# 8 experts with deep router (~187M params)
+
+model:
+  projector_type: mosa
+  num_experts: 8
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-mosa"

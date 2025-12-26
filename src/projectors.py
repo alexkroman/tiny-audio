@@ -68,144 +68,155 @@ class MLPAudioProjector(nn.Module):
         return self.linear_2(x)
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 # =============================================================================
 # MoE Projector (MOSA-style)
 # =============================================================================
 
+
 class SimpleAdapter(nn.Module):
-    """Simple adapter: Linear -> ReLU -> Dropout -> Linear."""
+    """Simple 2-layer ReLU adapter (from MOSA paper)."""
 
-    def __init__(self, in_features, hidden_features, out_features, dropout=0.0):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
         super().__init__()
-        self.fc1 = nn.Linear(in_features, hidden_features)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
-        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.act = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
 
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        return self.fc2(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(self.act(self.fc1(x)))
 
 
-class MoEAudioProjector(nn.Module):
-    """
-    MOSA-style projector: Mixture of Simple Adapters.
-    Target: Whisper-Large-v3 (1280) -> SmolLM2 (2048)
-    """
+class SwiGLUExpert(nn.Module):
+    """SwiGLU expert (gated MLP with SiLU activation)."""
 
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.up_proj = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.down_proj = nn.Linear(hidden_dim, output_dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
+class MOSAProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.encoder_dim = getattr(config, "encoder_dim", None) or 1280
+        self.llm_dim = getattr(config, "llm_dim", None) or 2048
+        self.num_experts = getattr(config, "num_experts", None) or 8
+        adapter_hidden = getattr(config, "adapter_hidden_dim", None) or 4096
 
-        # Logic for Whisper (1280) and SmolLM2 (2048)
-        self.encoder_dim = config.encoder_dim  # 1280
-        self.llm_dim = config.llm_dim          # 2048
-        self.num_experts = getattr(config, "num_experts", 4)
-        
-        # Paper explicitly uses 4096 for adapter hidden dim
-        adapter_hidden = 4096 
-        self.dropout_rate = getattr(config, "projector_dropout", 0.0)
+        # Auxiliary loss coefficients (MOSA paper uses only cross-entropy, no aux losses)
+        self.aux_loss_coef = getattr(config, "router_aux_loss_coef", 0.0)
+        self.z_loss_coef = getattr(config, "router_z_loss_coef", 0.0)
 
-        # 1. Convolutional Subsampling (stride 4 total)
-        # First layer maps to LLM dim, second layer maintains it
+        # Store router state for aux loss computation
+        self.last_router_logits = None
+        self.last_routing_weights = None
+
+        # --- 1. Pre-Norms (CRITICAL for stability) ---
+        self.in_norm = LlamaRMSNorm(self.encoder_dim, eps=1e-8)
+
+        # --- 2. Convolutional Subsampling (Stride 4) ---
         self.conv = nn.Sequential(
             nn.Conv1d(self.encoder_dim, self.llm_dim, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Conv1d(self.llm_dim, self.llm_dim, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
+            nn.SiLU(),
         )
 
-        # 2. Base Router (Paper: 1280 -> 512 -> 4)
-        router_hidden = 512
+        # --- 3. Deep Router (ReLU per MOSA paper) ---
         self.router = nn.Sequential(
-            nn.Linear(self.encoder_dim, router_hidden),
+            nn.Linear(self.encoder_dim, 2560),
             nn.ReLU(),
-            nn.Linear(router_hidden, self.num_experts),
+            nn.Linear(2560, 5120),
+            nn.ReLU(),
+            nn.Linear(5120, 2560),
+            nn.ReLU(),
+            nn.Linear(2560, 1280),
+            nn.ReLU(),
+            nn.Linear(1280, self.num_experts),
         )
 
-        # 3. Experts (SimpleAdapters)
+        # --- 4. Experts (Simple 2-layer ReLU adapters per MOSA paper) ---
         self.experts = nn.ModuleList(
             [
-                SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim, dropout=self.dropout_rate)
+                SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim)
                 for _ in range(self.num_experts)
             ]
         )
 
-        self._init_weights()
+        # --- 5. Output Norm ---
+        # Projects often drift in magnitude; this clamps them before the LLM.
+        self.out_norm = LlamaRMSNorm(self.llm_dim, eps=1e-8)
 
-    def _init_weights(self):
-        """Initializes weights according to MOSA paper logic."""
-        std = 0.02
-        with torch.no_grad():
-            for module in self.conv:
-                if isinstance(module, (nn.Conv1d, nn.Linear)):
-                    nn.init.normal_(module.weight, mean=0.0, std=std)
-                    if module.bias is not None:
-                        nn.init.zeros_(module.bias)
-
-            for module in self.router:
-                if isinstance(module, nn.Linear):
-                    nn.init.normal_(module.weight, mean=0.0, std=std)
-                    if module.bias is not None:
-                        nn.init.zeros_(module.bias)
-
-            for expert in self.experts:
-                nn.init.normal_(expert.fc1.weight, mean=0.0, std=std)
-                # Zero-init the second layer of the adapter to stabilize start of training
-                nn.init.zeros_(expert.fc2.weight)
-                if expert.fc1.bias is not None:
-                    nn.init.zeros_(expert.fc1.bias)
-                if expert.fc2.bias is not None:
-                    nn.init.zeros_(expert.fc2.bias)
+        # Using PyTorch default initialization (like MOSA paper)
 
     def forward(self, x):
-        """
-        Input x: (Batch, Seq_Len, 1280)
-        """
+        # x: (B, S, 1280)
         batch_size, seq_len, _ = x.shape
 
-        # Pad sequence to be divisible by 4 for the router-to-adapter window alignment
+        # Apply Input Norm
+        x = self.in_norm(x)
+
+        # --- 1. Conv Branch ---
+        x_trans = x.permute(0, 2, 1)  # (B, D, S)
+        h_conv = self.conv(x_trans).permute(0, 2, 1)  # (B, S//4, llm_dim)
+
+        # --- 2. Router Branch ---
         pad_amt = (4 - (seq_len % 4)) % 4
         if pad_amt > 0:
-            x = F.pad(x, (0, 0, 0, pad_amt))
-            seq_len = x.shape[1]
+            x_padded = F.pad(x, (0, 0, 0, pad_amt))
+        else:
+            x_padded = x
 
-        # --- Router Branch ---
-        # Router looks at high-res features
-        router_logits = self.router(x) # (B, S, 4)
-        
-        # Average logits across the 4-frame window to match downsampled length
-        # This matches the stride of the conv layers
-        router_logits = router_logits.view(batch_size, seq_len // 4, 4, self.num_experts).mean(dim=2)
-        routing_weights = F.softmax(router_logits, dim=-1) # (B, S/4, 4)
+        # Mean pool to align receptive fields
+        x_pooled = x_padded.view(batch_size, -1, 4, self.encoder_dim).mean(dim=2)  # (B, S//4, D)
 
-        # --- Adapter Branch ---
-        # Downsample features: (B, S, 1280) -> (B, S/4, 2048)
-        h_conv = self.conv(x.permute(0, 2, 1)).permute(0, 2, 1)
+        # Router Logits
+        router_logits = self.router(x_pooled)  # (B, S//4, num_experts)
 
-        # Dense mixture: Sum all expert outputs weighted by routing probabilities
-        final_out = torch.zeros_like(h_conv)
-        for i, expert in enumerate(self.experts):
-            expert_out = expert(h_conv)
-            expert_weight = routing_weights[:, :, i : i + 1]
-            final_out.add_(expert_out * expert_weight)
+        # Softmax for Dense MoE (Soft Mixing)
+        routing_weights = F.softmax(router_logits, dim=-1)
 
-        return final_out
+        # Store for aux loss computation
+        self.last_router_logits = router_logits
+        self.last_routing_weights = routing_weights
 
-    def get_aux_loss(self) -> torch.Tensor:
-        """MOSA uses only cross-entropy loss, so aux loss is 0."""
-        return torch.tensor(0.0)
+        # --- 3. Expert Mixture (Dense Execution) ---
+        # Warning: High VRAM usage. Runs all experts.
+        # h_conv: (B, S//4, llm_dim)
+
+        # Stack approach is clean but memory hungry.
+        # Checkpointing could be added here if OOM occurs.
+        expert_outputs = torch.stack([expert(h_conv) for expert in self.experts])  # (E, B, S//4, D)
+
+        # Weighted Sum
+        # (Experts, Batch, Seq, Dim) * (Batch, Seq, Experts) -> (Batch, Seq, Dim)
+        final_out = torch.einsum("ebsd, bse -> bsd", expert_outputs, routing_weights)
+
+        return self.out_norm(final_out)
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length."""
         # Two conv layers with stride=2 each = stride 4 total
         padded = input_length + (4 - input_length % 4) % 4
         return padded // 4
+
+    def get_aux_loss(self) -> torch.Tensor:
+        """Compute auxiliary losses: load balancing + z-loss."""
+        if self.last_router_logits is None:
+            return torch.tensor(0.0, device=self.conv[0].weight.device)
+
+        # Flatten for loss computation: (B, S, E) -> (B*S, E)
+        logits_flat = self.last_router_logits.view(-1, self.num_experts)
+        probs_flat = self.last_routing_weights.view(-1, self.num_experts)
+
+        balance = load_balancing_loss(probs_flat, self.num_experts, top_k=self.num_experts)
+        z = z_loss(logits_flat)
+
+        return self.aux_loss_coef * balance + self.z_loss_coef * z
 
 
 # =============================================================================
@@ -327,13 +338,13 @@ class ResidualAudioProjector(nn.Module):
         dropout_rate = getattr(config, "projector_dropout", 0.0)
 
         self.input_proj = nn.Linear(in_dim, out_dim)
-        self.ln_input = LlamaRMSNorm(out_dim, eps=1e-6)
+        self.ln_input = LlamaRMSNorm(out_dim, eps=1e-8)
 
         self.layers = nn.ModuleList(
             [ResidualMLP(out_dim, hidden_dim, dropout=dropout_rate) for _ in range(self.num_layers)]
         )
         self.layer_norms = nn.ModuleList(
-            [LlamaRMSNorm(out_dim, eps=1e-6) for _ in range(self.num_layers)]
+            [LlamaRMSNorm(out_dim, eps=1e-8) for _ in range(self.num_layers)]
         )
 
         self.output_dropout = nn.Dropout(dropout_rate)
@@ -395,35 +406,6 @@ class ResidualAudioProjector(nn.Module):
 # =============================================================================
 
 
-class RMSNorm(nn.Module):
-    """RMS Normalization (SOTA normalization for transformers)."""
-
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        var = x.pow(2).mean(-1, keepdim=True)
-        x_normed = x * torch.rsqrt(var + self.eps)
-        return self.weight * x_normed
-
-
-class SwiGLUExpert(nn.Module):
-    """SwiGLU expert MLP."""
-
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
-        super().__init__()
-        # Bias=False is strictly preferred for MoE experts to reduce memory/compute
-        self.gate_proj = nn.Linear(input_dim, hidden_dim, bias=False)
-        self.up_proj = nn.Linear(input_dim, hidden_dim, bias=False)
-        self.down_proj = nn.Linear(hidden_dim, output_dim, bias=False)
-        self.act = nn.SiLU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(self.act(self.gate_proj(x)) * self.up_proj(x))
-
-
 class SharedMoEBlock(nn.Module):
     """MoE block with Shared + Sigmoid-Routed Experts."""
 
@@ -441,7 +423,7 @@ class SharedMoEBlock(nn.Module):
         self.output_dim = output_dim
 
         # RMSNorm before routing
-        self.norm = RMSNorm(input_dim)
+        self.norm = LlamaRMSNorm(input_dim, eps=1e-8)
 
         self.router = nn.Linear(input_dim, num_experts, bias=False)
         nn.init.normal_(self.router.weight, mean=0.0, std=0.02)
@@ -624,7 +606,9 @@ class QFormerAudioProjector(nn.Module):
         qformer_hidden = getattr(config, "qformer_hidden_size", None) or encoder_dim
         qformer_num_layers = getattr(config, "qformer_num_layers", 2)
         qformer_num_heads = getattr(config, "qformer_num_heads", 16)
-        qformer_intermediate = getattr(config, "qformer_intermediate_size", None) or (qformer_hidden * 4)
+        qformer_intermediate = getattr(config, "qformer_intermediate_size", None) or (
+            qformer_hidden * 4
+        )
 
         # Learnable query embeddings (Granite uses std=1.0)
         self.query = nn.Parameter(torch.zeros(1, self.num_queries, qformer_hidden))
@@ -715,7 +699,7 @@ class QFormerAudioProjector(nn.Module):
 
 PROJECTOR_CLASSES = {
     "mlp": MLPAudioProjector,
-    "moe": MoEAudioProjector,
+    "mosa": MOSAProjector,
     "swiglu": SwiGLUAudioProjector,
     "residual": ResidualAudioProjector,
     "shared_moe": SharedMoEAudioProjector,
