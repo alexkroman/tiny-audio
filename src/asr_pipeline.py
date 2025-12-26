@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -418,7 +419,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 }
         elif isinstance(inputs, str):
             # File path - load audio using ffmpeg (same as HF pipeline)
-            with open(inputs, "rb") as f:
+            with Path(inputs).open("rb") as f:
                 audio = ffmpeg_read(f.read(), sampling_rate=16000)
             return {"array": audio, "sampling_rate": 16000}
         elif isinstance(inputs, bytes):

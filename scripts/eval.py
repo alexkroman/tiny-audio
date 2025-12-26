@@ -654,7 +654,7 @@ class DiarizationEvaluator:
                     false_alarm=false_alarm * 100,
                     time=inference_time,
                     num_speakers_ref=len(set(sample[self.speakers_field])),
-                    num_speakers_hyp=len(set(seg["speaker"] for seg in segments)),
+                    num_speakers_hyp=len({seg["speaker"] for seg in segments}),
                     total=total,
                     confusion_raw=confusion_raw,
                     missed_raw=missed_raw,

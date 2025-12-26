@@ -166,10 +166,7 @@ class MOSAProjector(nn.Module):
 
         # --- 2. Router Branch ---
         pad_amt = (4 - (seq_len % 4)) % 4
-        if pad_amt > 0:
-            x_padded = F.pad(x, (0, 0, 0, pad_amt))
-        else:
-            x_padded = x
+        x_padded = F.pad(x, (0, 0, 0, pad_amt)) if pad_amt > 0 else x
 
         # Mean pool to align receptive fields
         x_pooled = x_padded.view(batch_size, -1, 4, self.encoder_dim).mean(dim=2)  # (B, S//4, D)

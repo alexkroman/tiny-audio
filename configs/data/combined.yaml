@@ -1,0 +1,55 @@
+# Combined dataset configuration
+# Interleaves Common Voice, GigaSpeech, People's Speech, and LibriSpeech
+datasets:
+  - path: fixie-ai/common_voice_17_0
+    name: en
+    audio_column: audio
+    text_column: sentence
+    train_splits:
+      - train
+    eval_splits:
+      - validation
+    sampling_weight: 0.25
+
+  - path: fixie-ai/gigaspeech
+    name: xl-empty-audio-removed
+    audio_column: audio
+    text_column: text
+    train_splits:
+      - train
+    eval_splits:
+      - dev
+    sampling_weight: 0.25
+
+  - path: fixie-ai/peoples_speech
+    name: clean
+    audio_column: audio
+    text_column: text
+    train_splits:
+      - train
+    eval_splits: []  # No eval split available
+    sampling_weight: 0.25
+
+  - path: fixie-ai/librispeech_asr
+    name: clean
+    audio_column: audio
+    text_column: text
+    train_splits:
+      - train.100
+      - train.360
+    eval_splits:
+      - validation
+    sampling_weight: 0.25
+
+# Audio processing
+sample_rate: 16000
+max_audio_duration_seconds: 30.0
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+max_train_samples: null
+max_eval_samples: 500
+use_streaming: true
+
+# Text processing
+use_truecase: false  # Set to true to apply truecase to transcriptions

@@ -19,3 +19,6 @@ dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
 max_eval_samples: 500
 use_streaming: false
+
+# Text processing
+use_truecase: true  # Set to false to disable truecase normalization
