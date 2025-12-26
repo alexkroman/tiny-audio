@@ -339,7 +339,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Truncate to actual audio length (mel_frames -> encoder_frames via stride-2 conv)
         real_encoder_len = audio_attention_mask.sum(dim=-1) // 2
-        max_real_len = real_encoder_len.max().item()
+        max_real_len = int(real_encoder_len.max().item())
         hidden_states = hidden_states[:, :max_real_len]
 
         audio_embeds = self.projector(hidden_states)
@@ -420,9 +420,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         Uses attention mask to get real audio length, then computes:
         mel_frames -> encoder_frames (stride-2) -> projector output tokens
         """
-        mel_len = audio_attention_mask.sum(dim=-1).max().item()
+        mel_len = int(audio_attention_mask.sum(dim=-1).max().item())
         encoder_output_len = mel_len // 2
-        return self.projector.get_output_length(encoder_output_len)
+        return int(self.projector.get_output_length(encoder_output_len))
 
     @torch.no_grad()
     def generate(
