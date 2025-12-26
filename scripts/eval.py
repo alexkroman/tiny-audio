@@ -24,7 +24,8 @@ from datasets import Audio, load_dataset
 from jiwer import wer
 from pyannote.core import Annotation, Segment, Timeline
 from pyannote.metrics.diarization import DiarizationErrorRate
-from transformers.models.whisper.english_normalizer import BasicTextNormalizer
+from transformers import WhisperTokenizer
+from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 # Disable tokenizers parallelism to avoid fork warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -87,10 +88,18 @@ def prepare_wav_bytes(wav_data) -> bytes:
 
 
 class TextNormalizer:
-    """Whisper-based text normalizer with ASR-specific preprocessing."""
+    """Whisper-based text normalizer with ASR-specific preprocessing.
+
+    Uses EnglishTextNormalizer which handles:
+    - Lowercase and punctuation removal
+    - Number normalization ("three" <-> "3")
+    - British to American spelling ("colour" -> "color")
+    """
 
     def __init__(self):
-        self._normalizer = BasicTextNormalizer()
+        # Load spelling mapping from Whisper tokenizer
+        tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+        self._normalizer = EnglishTextNormalizer(tokenizer.english_spelling_normalizer)
 
     def preprocess(self, text: str) -> str:
         """Remove inaudible tags and disfluencies."""
