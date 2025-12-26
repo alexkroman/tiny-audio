@@ -1,0 +1,16 @@
+# @package _global_
+# MOSA Stage 2 training on combined dataset
+# Continues from stage 1 checkpoint with diverse data
+
+defaults:
+  - /data: combined
+
+model:
+  projector_type: mosa
+  num_experts: 8
+  pretrained_model_path: mazesmazes/tiny-audio-mosa
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-mosa-stage2"
+  learning_rate: 1.0e-4
+  warmup_steps: 500

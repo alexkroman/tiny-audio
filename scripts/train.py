@@ -177,7 +177,9 @@ class DatasetLoader:
         if len(datasets) == 1:
             return datasets[0]
         probs = [w / sum(weights) for w in weights]
-        return interleave_datasets(datasets, probabilities=probs)
+        return interleave_datasets(
+            datasets, probabilities=probs, stopping_strategy="first_exhausted"
+        )
 
 
 class DataCollator:
@@ -190,14 +192,12 @@ class DataCollator:
         sample_rate: int,
         system_prompt: str = None,
         projector: Any = None,
-        use_truecase: bool = True,
     ):
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
         self.projector = projector
-        self.use_truecase = use_truecase
 
         # Use trl's DataCollatorForChatML for label masking
         # max_length needs to accommodate audio tokens (1500 for 30s) + prompt + response
@@ -247,8 +247,7 @@ class DataCollator:
         # Build messages for each sample - DataCollatorForChatML handles tokenization and masking
         text_features = []
         for f in valid_features:
-            raw_text = (f.get("text") or "").strip()
-            text = truecase.get_true_case(raw_text) if self.use_truecase else raw_text
+            text = truecase.get_true_case((f.get("text") or "").strip())
 
             messages = []
             if self.system_prompt:
@@ -335,7 +334,6 @@ def main(cfg: DictConfig) -> None:
         sample_rate=cfg.data.sample_rate,
         system_prompt=cfg.model.system_prompt,
         projector=model.projector,
-        use_truecase=cfg.data.get("use_truecase", True),
     )
 
     # Setup callbacks
