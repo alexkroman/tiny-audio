@@ -30,7 +30,6 @@ class ASRConfig(transformers.PretrainedConfig):
         num_experts: int = 4,  # Number of experts in MoE projectors
         num_experts_per_tok: int = 2,  # Top-k experts per token
         router_aux_loss_coef: float = 0.01,  # Auxiliary loss coefficient for load balancing
-        use_specaugment: bool = True,  # Apply SpecAugment during training
         # QFormer-specific configuration (Granite defaults)
         qformer_window_size: int = 15,  # Window size for QFormer processing
         qformer_hidden_size: Optional[int] = None,  # QFormer hidden size (defaults to encoder_dim)
@@ -79,7 +78,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
         self.router_aux_loss_coef = router_aux_loss_coef
-        self.use_specaugment = use_specaugment
         # QFormer-specific configuration
         self.qformer_window_size = qformer_window_size
         self.qformer_hidden_size = qformer_hidden_size

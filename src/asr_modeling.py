@@ -13,9 +13,6 @@ from transformers import (
 )
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.models.whisper.modeling_whisper import (
-    _compute_mask_indices,
-)
 
 try:
     from .asr_config import ASRConfig
@@ -269,53 +266,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """Only save trainable projector weights."""
         return {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
 
-    def _apply_specaugment(self, input_features: torch.Tensor) -> torch.Tensor:
-        if not getattr(self.config, "use_specaugment", False):
-            return input_features
-
-        if not self.training:
-            return input_features
-
-        # Input shape: (batch_size, num_mel_bins, sequence_length) for Whisper
-        batch_size, hidden_size, sequence_length = input_features.size()
-
-        mask_time_prob = getattr(self.config, "mask_time_prob", 0.05)
-        mask_time_length = getattr(self.config, "mask_time_length", 10)
-        mask_feature_prob = getattr(self.config, "mask_feature_prob", 0.0)
-        mask_feature_length = getattr(self.config, "mask_feature_length", 10)
-
-        # Time masking
-        if mask_time_prob > 0:
-            mask_time_np = _compute_mask_indices(
-                (batch_size, sequence_length),
-                mask_prob=mask_time_prob,
-                mask_length=mask_time_length,
-                min_masks=2,
-            )
-            mask_time_indices = torch.tensor(
-                mask_time_np, device=input_features.device, dtype=torch.bool
-            )
-            # Expand to cover all features: (batch, seq) -> (batch, features, seq)
-            mask_time_expanded = mask_time_indices[:, None].expand(-1, hidden_size, -1)
-            input_features = input_features.masked_fill(mask_time_expanded, 0.0)
-
-        # Feature masking
-        if mask_feature_prob > 0:
-            mask_feature_np = _compute_mask_indices(
-                (batch_size, hidden_size),
-                mask_prob=mask_feature_prob,
-                mask_length=mask_feature_length,
-                min_masks=2,
-            )
-            mask_feature_indices = torch.tensor(
-                mask_feature_np, device=input_features.device, dtype=torch.bool
-            )
-            # Expand: (batch, features) -> (batch, features, seq)
-            mask_feature_expanded = mask_feature_indices[:, :, None].expand(-1, -1, sequence_length)
-            input_features = input_features.masked_fill(mask_feature_expanded, 0.0)
-
-        return input_features
-
     def _encode_audio(
         self,
         audio_features: torch.Tensor,
@@ -330,9 +280,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         Returns:
             Flattened audio embeddings of shape (total_audio_tokens, hidden_dim).
         """
-        # Apply SpecAugment during training (before encoding)
-        audio_features = self._apply_specaugment(audio_features)
-
         with torch.no_grad():
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state

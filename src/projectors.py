@@ -222,180 +222,83 @@ class MOSAProjector(nn.Module):
 
 
 class SwiGLU(nn.Module):
-    def __init__(self, in_features, hidden_features, out_features, bias=False, dropout=0.0):
+    """SwiGLU activation block (Llama-style: SiLU(Gate) * Value -> Output)."""
+
+    def __init__(self, in_features, hidden_features, out_features):
         super().__init__()
-        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
-        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
-        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
+        self.w1 = nn.Linear(in_features, hidden_features, bias=False)  # Gate
+        self.w2 = nn.Linear(in_features, hidden_features, bias=False)  # Value
+        self.w3 = nn.Linear(hidden_features, out_features, bias=False)  # Output
         self.act = nn.SiLU()
-        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        x_gate = self.act(self.w1(x))
-        x_val = self.w2(x)
-        x = x_gate * x_val
-        x = self.dropout(x)
-        return self.w3(x)
+        return self.w3(self.act(self.w1(x)) * self.w2(x))
 
 
 class SwiGLUAudioProjector(nn.Module):
-    """SwiGLU-based projector with temporal pooling."""
+    """
+    Optimized for Frozen LLM + 2500h Data.
+    Target: 12.5 Hz Output (Stride 4) with 8/3 SwiGLU Expansion.
+    """
 
     def __init__(self, config):
         super().__init__()
         self.k = getattr(config, "projector_pool_stride", 4)
-        in_dim = config.encoder_dim * self.k
-        out_dim = config.llm_dim
-        hidden_dim = config.projector_hidden_dim
-        if hidden_dim is None:
-            hidden_dim = config.encoder_dim * 2
+        encoder_dim = config.encoder_dim
+        llm_dim = config.llm_dim
 
-        dropout_rate = getattr(config, "projector_dropout", 0.0)
+        # Conv Expansion (Compensating for Time Compression)
+        # We compress time by 4x, so we expand width by 2x to preserve info density.
+        hidden_dim = int(encoder_dim * 2)
 
-        self.proj1 = SwiGLU(in_dim, hidden_dim, hidden_dim, dropout=dropout_rate)
-        self.proj2 = SwiGLU(hidden_dim, hidden_dim, out_dim, dropout=dropout_rate)
-        self.output_dropout = nn.Dropout(dropout_rate)
+        # SwiGLU Internal Expansion (The 8/3 Ratio)
+        # To match standard FFN capacity: 4 * (2/3) = 8/3
+        swiglu_inner = int(hidden_dim * 8 / 3)
 
-        with torch.no_grad():
-            std = getattr(config, "projector_init_std", 0.02)
-            nn.init.normal_(self.proj1.w1.weight, mean=0.0, std=std)
-            nn.init.normal_(self.proj1.w2.weight, mean=0.0, std=std)
-            nn.init.normal_(self.proj1.w3.weight, mean=0.0, std=std)
-            nn.init.normal_(self.proj2.w1.weight, mean=0.0, std=std)
-            nn.init.normal_(self.proj2.w2.weight, mean=0.0, std=std)
-            nn.init.normal_(self.proj2.w3.weight, mean=0.0, std=std)
-
-    def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length."""
-        # Temporal pooling with stride k
-        remainder = input_length % self.k
-        if remainder:
-            input_length += self.k - remainder
-        return input_length // self.k
-
-    def forward(self, x):
-        batch_size, seq_len, dim = x.size()
-
-        target_dtype = self.proj1.w1.weight.dtype
-        if x.dtype != target_dtype:
-            x = x.to(target_dtype)
-
-        remainder = seq_len % self.k
-        if remainder:
-            pad_len = self.k - remainder
-            x = F.pad(x, (0, 0, 0, pad_len))
-
-        x = x.contiguous().view(batch_size, -1, dim * self.k)
-        x = self.proj1(x)
-        x = self.proj2(x)
-
-        return self.output_dropout(x)
-
-
-# Alias for backwards compatibility
-AudioProjector = SwiGLUAudioProjector
-
-
-# =============================================================================
-# Residual Projector
-# =============================================================================
-
-
-class ResidualMLP(nn.Module):
-    """MLP block with residual connection: Output = x + MLP(x)."""
-
-    def __init__(self, dim, hidden_dim, dropout=0.0):
-        super().__init__()
-        self.fc1 = nn.Linear(dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, dim)
-        self.act = nn.GELU()
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        residual = x
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-        x = self.dropout(x)
-        return residual + x
-
-
-class ResidualAudioProjector(nn.Module):
-    """Residual MLP projector for audio-to-LLM feature translation."""
-
-    def __init__(self, config):
-        super().__init__()
-
-        self.k = getattr(config, "projector_pool_stride", 4)
-        in_dim = config.encoder_dim * self.k
-        out_dim = config.llm_dim
-        hidden_dim = getattr(config, "projector_hidden_dim", None) or out_dim * 4
-        self.num_layers = getattr(config, "projector_num_layers", 2)
-        dropout_rate = getattr(config, "projector_dropout", 0.0)
-
-        self.input_proj = nn.Linear(in_dim, out_dim)
-        self.ln_input = LlamaRMSNorm(out_dim, eps=1e-8)
-
-        self.layers = nn.ModuleList(
-            [ResidualMLP(out_dim, hidden_dim, dropout=dropout_rate) for _ in range(self.num_layers)]
-        )
-        self.layer_norms = nn.ModuleList(
-            [LlamaRMSNorm(out_dim, eps=1e-8) for _ in range(self.num_layers)]
+        self.downsample = nn.Conv1d(
+            in_channels=encoder_dim,
+            out_channels=hidden_dim,
+            kernel_size=self.k,
+            stride=self.k,
+            padding=0,
         )
 
-        self.output_dropout = nn.Dropout(dropout_rate)
-        self._init_weights(config)
+        self.norm = LlamaRMSNorm(hidden_dim, eps=1e-8)
 
-    def _init_weights(self, config):
-        std = getattr(config, "projector_init_std", 0.02)
+        self.proj = SwiGLU(hidden_dim, swiglu_inner, llm_dim)
 
-        with torch.no_grad():
-            nn.init.normal_(self.input_proj.weight, mean=0.0, std=std)
-            if self.input_proj.bias is not None:
-                nn.init.zeros_(self.input_proj.bias)
+        self.apply(self._init_weights)
 
-            self.ln_input.weight.data.fill_(1.0)
-            for ln in self.layer_norms:
-                ln.weight.data.fill_(1.0)
-
-            for layer in self.layers:
-                nn.init.normal_(layer.fc1.weight, mean=0.0, std=std)
-                nn.init.normal_(layer.fc2.weight, mean=0.0, std=std * 0.1)
-                if layer.fc1.bias is not None:
-                    nn.init.zeros_(layer.fc1.bias)
-                if layer.fc2.bias is not None:
-                    nn.init.zeros_(layer.fc2.bias)
-
-    def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length."""
-        # Temporal pooling with stride k
-        remainder = input_length % self.k
-        if remainder:
-            input_length += self.k - remainder
-        return input_length // self.k
+    def _init_weights(self, m):
+        if isinstance(m, (nn.Linear, nn.Conv1d)):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        batch_size, seq_len, dim = x.size()
+        # x: [Batch, Seq, Dim]
+        batch, seq, dim = x.shape
 
-        target_dtype = self.input_proj.weight.dtype
-        if x.dtype != target_dtype:
-            x = x.to(target_dtype)
-
-        remainder = seq_len % self.k
-        if remainder:
-            pad_len = self.k - remainder
+        # Manual Padding (prevents frame dropping)
+        if seq % self.k != 0:
+            pad_len = self.k - (seq % self.k)
             x = F.pad(x, (0, 0, 0, pad_len))
 
-        x = x.contiguous().view(batch_size, -1, dim * self.k)
-        x = self.input_proj(x)
-        x = self.ln_input(x)
+        # [B, S, D] -> [B, D, S]
+        x = x.transpose(1, 2)
 
-        for layer, ln in zip(self.layers, self.layer_norms):
-            x = layer(x)
-            x = ln(x)
+        # Downsample (50Hz -> 12.5Hz)
+        x = self.downsample(x)
 
-        return self.output_dropout(x)
+        # [B, D, S] -> [B, S, D]
+        x = x.transpose(1, 2)
+
+        # Norm & Project
+        x = self.norm(x)
+        return self.proj(x)
+
+    def get_output_length(self, input_length: int) -> int:
+        return (input_length + self.k - 1) // self.k
 
 
 # =============================================================================
@@ -506,7 +409,6 @@ class SharedMoEAudioProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        # Default stride is now 2 (was 4)
         self.k = getattr(config, "projector_pool_stride", 4)
         encoder_dim = config.encoder_dim
 
@@ -691,6 +593,84 @@ class QFormerAudioProjector(nn.Module):
 
 
 # =============================================================================
+# Transformer Projector
+# =============================================================================
+
+
+class TransformerAudioProjector(nn.Module):
+    """
+    2-Layer Transformer Projector (FunASR Style).
+    Uses standard torch.nn.TransformerEncoder for context mixing.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.k = getattr(config, "projector_pool_stride", 8)
+
+        encoder_dim = config.encoder_dim
+        llm_dim = config.llm_dim
+
+        # Input: Stacked frames (e.g. 1280 * 8 = 10240)
+        in_dim = encoder_dim * self.k
+
+        # Bottleneck dimension for the Transformer
+        transformer_dim = getattr(config, "projector_hidden_dim", 2048)
+
+        # Compressor: Squash massive stacked frames to workable size
+        self.compressor = nn.Linear(in_dim, transformer_dim, bias=False)
+
+        # The Adapter: Standard PyTorch Transformer
+        # norm_first=True is essential for training stability (Pre-Norm)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=transformer_dim,
+            nhead=8,
+            dim_feedforward=int(transformer_dim * 4),
+            dropout=0.1,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.adapter = nn.TransformerEncoder(
+            encoder_layer, num_layers=getattr(config, "projector_num_layers", 2)
+        )
+
+        # Final Projection: Transformer space -> Frozen LLM space
+        self.out_proj = nn.Linear(transformer_dim, llm_dim, bias=False)
+
+        # Final Norm: Airlock to match Llama's expected distribution
+        self.norm = LlamaRMSNorm(llm_dim, eps=1e-8)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        # x: [Batch, Seq, Dim]
+        batch, seq, dim = x.shape
+
+        # Stride Padding
+        if seq % self.k != 0:
+            pad_len = self.k - (seq % self.k)
+            x = F.pad(x, (0, 0, 0, pad_len))
+
+        # Downsampling via frame stacking: [B, S, D] -> [B, S/k, D*k]
+        x = x.reshape(batch, -1, dim * self.k)
+
+        # Compress -> Transformer -> Project
+        x = self.compressor(x)
+        x = self.adapter(x)
+        x = self.out_proj(x)
+        return self.norm(x)
+
+    def get_output_length(self, input_length: int) -> int:
+        return (input_length + self.k - 1) // self.k
+
+
+# =============================================================================
 # Projector Registry
 # =============================================================================
 
@@ -698,7 +678,7 @@ PROJECTOR_CLASSES = {
     "mlp": MLPAudioProjector,
     "mosa": MOSAProjector,
     "swiglu": SwiGLUAudioProjector,
-    "residual": ResidualAudioProjector,
     "shared_moe": SharedMoEAudioProjector,
     "qformer": QFormerAudioProjector,
+    "transformer": TransformerAudioProjector,
 }

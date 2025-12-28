@@ -1,0 +1,8 @@
+# @package _global_
+# Transformer projector
+
+model:
+  projector_type: transformer
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-transformer"

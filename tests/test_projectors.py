@@ -8,12 +8,12 @@ from src.projectors import (
     MLPAudioProjector,
     MOSAProjector,
     QFormerAudioProjector,
-    ResidualAudioProjector,
     SharedMoEAudioProjector,
     SimpleAdapter,
     SwiGLU,
     SwiGLUAudioProjector,
     SwiGLUExpert,
+    TransformerAudioProjector,
     load_balancing_loss,
     z_loss,
 )
@@ -248,44 +248,54 @@ class TestSwiGLUAudioProjector:
 
 
 # =============================================================================
-# Residual Projector Tests
+# Transformer Projector Tests
 # =============================================================================
 
 
-class TestResidualAudioProjector:
-    """Tests for ResidualAudioProjector."""
+class TestTransformerAudioProjector:
+    """Tests for TransformerAudioProjector."""
 
     @pytest.fixture
     def config(self):
         return MockConfig(
             encoder_dim=256,
             llm_dim=512,
-            projector_hidden_dim=1024,
-            projector_pool_stride=4,
+            projector_hidden_dim=512,
+            projector_pool_stride=8,
             projector_num_layers=2,
         )
 
     @pytest.fixture
     def projector(self, config):
-        return ResidualAudioProjector(config)
+        return TransformerAudioProjector(config)
 
     def test_forward_shape(self, projector):
-        """Test that Residual projector produces correct output shape."""
+        """Test that Transformer projector produces correct output shape."""
         x = torch.randn(2, 100, 256)
         out = projector(x)
-        assert out.shape == (2, 25, 512)
+        # Stride-8 pooling: ceil(100/8) = 13
+        expected_len = projector.get_output_length(100)
+        assert out.shape == (2, expected_len, 512)
 
     def test_get_output_length(self, projector):
         """Test output length calculation."""
-        assert projector.get_output_length(100) == 25
-        assert projector.get_output_length(101) == 26
+        assert projector.get_output_length(100) == 13  # ceil(100/8)
+        assert projector.get_output_length(104) == 13  # exact
+        assert projector.get_output_length(8) == 1
+
+    def test_handles_padding(self, projector):
+        """Test that projector handles sequences not divisible by stride."""
+        for seq_len in [99, 100, 101, 102, 103]:
+            x = torch.randn(1, seq_len, 256)
+            out = projector(x)
+            expected_len = projector.get_output_length(seq_len)
+            assert out.shape[1] == expected_len
 
     def test_num_layers(self, config):
         """Test that projector respects num_layers config."""
         config.projector_num_layers = 3
-        projector = ResidualAudioProjector(config)
-        assert len(projector.layers) == 3
-        assert len(projector.layer_norms) == 3
+        projector = TransformerAudioProjector(config)
+        assert projector.adapter.num_layers == 3
 
 
 # =============================================================================
@@ -433,7 +443,7 @@ class TestProjectorRegistry:
 
     def test_all_projectors_registered(self):
         """Test that all projector types are in the registry."""
-        expected = {"mlp", "mosa", "swiglu", "residual", "shared_moe", "qformer"}
+        expected = {"mlp", "mosa", "swiglu", "shared_moe", "qformer", "transformer"}
         assert set(PROJECTOR_CLASSES.keys()) == expected
 
     def test_registry_instantiation(self):
@@ -453,7 +463,7 @@ class TestProjectorRegistry:
 class TestGradientFlow:
     """Tests for gradient flow through projectors."""
 
-    @pytest.mark.parametrize("projector_type", ["mlp", "mosa", "swiglu", "residual", "shared_moe"])
+    @pytest.mark.parametrize("projector_type", ["mlp", "mosa", "swiglu", "shared_moe", "transformer"])
     def test_gradients_flow(self, projector_type):
         """Test that gradients flow through projector."""
         config = MockConfig()

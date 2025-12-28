@@ -1,8 +1,0 @@
-# @package _global_
-# Residual projector
-
-model:
-  projector_type: residual
-
-training:
-  hub_model_id: "mazesmazes/tiny-audio-residual"
