@@ -18,12 +18,30 @@ class ASRProcessor(ProcessorMixin):
     tokenizer_class = "AutoTokenizer"
     AUDIO_TOKEN = "<audio>"
     TRANSCRIBE_PROMPT = "Transcribe: "
+    # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
+    DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
 
-    def __init__(self, feature_extractor, tokenizer, projector=None):
+    def __init__(
+        self,
+        feature_extractor,
+        tokenizer,
+        projector=None,
+        encoder_stride: int = 2,
+        encoder_conv_layers: Optional[list] = None,
+    ):
         self.feature_extractor = feature_extractor
         self.tokenizer = tokenizer
         self.audio_token_id = tokenizer.convert_tokens_to_ids(self.AUDIO_TOKEN)
         self.projector = projector
+        self.encoder_stride = encoder_stride  # Legacy, kept for compatibility
+        self.encoder_conv_layers = encoder_conv_layers or self.DEFAULT_ENCODER_CONV_LAYERS
+
+    def _compute_encoder_output_length(self, mel_length: int) -> int:
+        """Compute encoder output length using conv layer formulas."""
+        length = mel_length
+        for padding, kernel_size, stride in self.encoder_conv_layers:
+            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
+        return length
 
     def __call__(
         self,
@@ -59,8 +77,8 @@ class ASRProcessor(ProcessorMixin):
             result["audio_attention_mask"] = audio_inputs["attention_mask"]
 
             # Use actual audio length (from attention mask) for token count
-            real_mel_len = audio_inputs["attention_mask"].sum(dim=-1).max().item()
-            encoder_output_len = real_mel_len // 2
+            real_mel_len = int(audio_inputs["attention_mask"].sum(dim=-1).max().item())
+            encoder_output_len = self._compute_encoder_output_length(real_mel_len)
             num_audio_tokens = self.projector.get_output_length(encoder_output_len)
         else:
             num_audio_tokens = 0

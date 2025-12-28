@@ -185,6 +185,9 @@ class DatasetLoader:
 class DataCollator:
     """Collates audio and text data for training."""
 
+    # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
+    DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
+
     def __init__(
         self,
         tokenizer: Any,
@@ -192,12 +195,14 @@ class DataCollator:
         sample_rate: int,
         system_prompt: str = None,
         projector: Any = None,
+        encoder_conv_layers: list = None,
     ):
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
         self.projector = projector
+        self.encoder_conv_layers = encoder_conv_layers or self.DEFAULT_ENCODER_CONV_LAYERS
 
         # Use trl's DataCollatorForChatML for label masking
         # max_length needs to accommodate audio tokens (1500 for 30s) + prompt + response
@@ -205,6 +210,13 @@ class DataCollator:
             tokenizer=tokenizer,
             max_length=2048,
         )
+
+    def _compute_encoder_output_length(self, mel_length: int) -> int:
+        """Compute encoder output length using conv layer formulas."""
+        length = mel_length
+        for padding, kernel_size, stride in self.encoder_conv_layers:
+            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
+        return length
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         # Process audio
@@ -236,18 +248,20 @@ class DataCollator:
             return_tensors="pt",
         )
 
-        # Use actual audio length (from attention mask) for token count
-        # This avoids wasting compute on padded silence
-        real_mel_len = audio_out.attention_mask.sum(dim=-1).max().item()
-        encoder_output_len = real_mel_len // 2
-        num_audio_tokens = self.projector.get_output_length(encoder_output_len)
-        audio_placeholder = "<audio>" * num_audio_tokens
-        user_content = TRANSCRIBE_PREFIX + audio_placeholder
+        # Compute per-sample audio token counts (like GlmAsr)
+        mel_lengths = audio_out.attention_mask.sum(dim=-1)  # Per-sample mel lengths
+        audio_token_counts = []
+        for mel_len in mel_lengths:
+            encoder_len = self._compute_encoder_output_length(int(mel_len.item()))
+            num_tokens = self.projector.get_output_length(encoder_len)
+            audio_token_counts.append(num_tokens)
 
-        # Build messages for each sample - DataCollatorForChatML handles tokenization and masking
+        # Build messages for each sample with per-sample audio token counts
         text_features = []
-        for f in valid_features:
+        for f, num_audio_tokens in zip(valid_features, audio_token_counts):
             text = truecase.get_true_case((f.get("text") or "").strip())
+            audio_placeholder = "<audio>" * num_audio_tokens
+            user_content = TRANSCRIBE_PREFIX + audio_placeholder
 
             messages = []
             if self.system_prompt:
@@ -334,6 +348,7 @@ def main(cfg: DictConfig) -> None:
         sample_rate=cfg.data.sample_rate,
         system_prompt=cfg.model.system_prompt,
         projector=model.projector,
+        encoder_conv_layers=model.config.encoder_conv_layers,
     )
 
     # Setup callbacks

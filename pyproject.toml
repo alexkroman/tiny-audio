@@ -69,7 +69,8 @@ python = ">=3.10,<3.13"
 torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
-transformers = ">=4.57.3"
+# GLM-ASR requires transformers from source (>= 5.x not yet released)
+transformers = {git = "https://github.com/huggingface/transformers.git"}
 accelerate = "*"
 datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
 evaluate = "*"
@@ -124,7 +125,7 @@ warn_no_return = true
 follow_imports = "normal"
 ignore_missing_imports = true
 # Ignore specific error codes that are library-related
-disable_error_code = ["assignment", "override", "call-overload", "arg-type", "index", "union-attr", "call-arg", "misc", "operator"]
+disable_error_code = ["assignment", "override", "call-overload", "arg-type", "index", "union-attr", "call-arg", "misc", "operator", "attr-defined"]
 
 [[tool.mypy.overrides]]
 module = "transformers.*"

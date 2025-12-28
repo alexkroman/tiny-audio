@@ -248,7 +248,7 @@ class TestASRModelGeneration:
 class TestProjectorTypes:
     """Tests for different projector types."""
 
-    @pytest.mark.parametrize("projector_type", ["mlp", "swiglu"])
+    @pytest.mark.parametrize("projector_type", ["mlp", "mosa"])
     def test_projector_type_initialization(self, projector_type):
         """Test that model initializes with different projector types."""
         config = ASRConfig(
@@ -320,6 +320,12 @@ class TestProcessorIntegration:
         assert processor is not None
         assert hasattr(processor, "feature_extractor")
         assert hasattr(processor, "tokenizer")
+
+    def test_get_processor_has_encoder_stride(self, model):
+        """Test that processor has encoder_stride attribute."""
+        processor = model.get_processor()
+        assert hasattr(processor, "encoder_stride")
+        assert processor.encoder_stride == model.encoder_stride
 
 
 if __name__ == "__main__":

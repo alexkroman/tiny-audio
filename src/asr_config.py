@@ -15,9 +15,13 @@ class ASRConfig(transformers.PretrainedConfig):
         model_dtype: str = "bfloat16",
         num_beams: Optional[int] = None,
         system_prompt: str = "/no_think /system_override",
-        user_prompt: str = "Transcribe: <audio>",
+        user_prompt: str = "Please transcribe this English audio into text: <audio>",
         encoder_dim: Optional[int] = None,
         llm_dim: Optional[int] = None,
+        encoder_stride: int = 2,  # Temporal downsampling factor of audio encoder (legacy, use encoder_conv_layers)
+        # Encoder conv layers: list of (padding, kernel_size, stride) tuples
+        # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
+        encoder_conv_layers: Optional[list] = None,
         audio_sample_rate: int = 16000,
         projector_init_std: float = 0.02,
         projector_pool_stride: int = 4,
@@ -66,6 +70,9 @@ class ASRConfig(transformers.PretrainedConfig):
         self.user_prompt = user_prompt
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
+        self.encoder_stride = encoder_stride
+        # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
+        self.encoder_conv_layers = encoder_conv_layers or [(1, 3, 1), (1, 3, 2)]
         self.audio_sample_rate = audio_sample_rate
         self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride

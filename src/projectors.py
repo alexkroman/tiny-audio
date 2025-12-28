@@ -1,10 +1,8 @@
 """Audio projector modules for bridging encoder and decoder embeddings.
 
 This module contains all projector architectures:
-- MLPAudioProjector: Simple 2-layer MLP with conv downsampling
-- MoEAudioProjector: MOSA-style dense mixture of experts
-- SwiGLUAudioProjector: SwiGLU-based projector with temporal pooling
-- ResidualAudioProjector: Residual MLP blocks with linear projection
+- MLPAudioProjector: Simple 2-layer MLP with frame stacking downsampling
+- MOSAProjector: MOSA-style dense mixture of experts
 - SharedMoEAudioProjector: Shared expert + sparse routed experts
 - QFormerAudioProjector: BLIP-2 QFormer with learnable queries (Granite-style)
 """
@@ -23,45 +21,38 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 
 class MLPAudioProjector(nn.Module):
-    """2-layer MLP projector with conv-based 2x temporal downsampling."""
+    """2-layer MLP projector with frame-stacking downsampling (like GLM-ASR)."""
 
     def __init__(self, config):
         super().__init__()
 
         encoder_dim = getattr(config, "encoder_dim", 768)
         llm_dim = getattr(config, "llm_dim", 2048)
+        self.k = getattr(config, "projector_pool_stride", 4)
 
-        self.downsample = nn.Conv1d(
-            encoder_dim, encoder_dim, kernel_size=3, stride=2, padding=1, bias=False
-        )
-        self.linear_1 = nn.Linear(encoder_dim, llm_dim, bias=False)
+        # Frame stacking: concat k adjacent frames then project
+        in_dim = encoder_dim * self.k
+        self.linear_1 = nn.Linear(in_dim, llm_dim, bias=False)
         self.act = nn.GELU()
         self.linear_2 = nn.Linear(llm_dim, llm_dim, bias=False)
 
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        elif isinstance(module, nn.Conv1d):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length."""
-        # Conv stride=2 halves the length (with padding=1, kernel=3)
-        return (input_length + 1) // 2
+        return (input_length + self.k - 1) // self.k
 
     def forward(self, x):
         """
         x: [Batch, Seq_Len, Dim]
-        Returns: [Batch, Seq_Len // 2, llm_dim]
+        Returns: [Batch, Seq_Len // k, llm_dim]
         """
-        # Conv1d expects [Batch, Channels, Seq_Len]
-        x = x.transpose(1, 2)
-        x = self.downsample(x)
-        x = x.transpose(1, 2)
+        batch, seq, dim = x.shape
+        # Pad to multiple of k
+        chunk_num = (seq + self.k - 1) // self.k
+        pad_num = chunk_num * self.k - seq
+        if pad_num > 0:
+            x = F.pad(x, (0, 0, 0, pad_num))
+        # Frame stacking: [B, S, D] -> [B, S/k, D*k]
+        x = x.contiguous().view(batch, chunk_num, dim * self.k)
 
         x = self.linear_1(x)
         x = self.act(x)
@@ -214,77 +205,6 @@ class MOSAProjector(nn.Module):
         z = z_loss(logits_flat)
 
         return self.aux_loss_coef * balance + self.z_loss_coef * z
-
-
-# =============================================================================
-# SwiGLU Projector
-# =============================================================================
-
-
-class SwiGLU(nn.Module):
-    """SwiGLU activation block (Llama-style: SiLU(Gate) * Value -> Output)."""
-
-    def __init__(self, in_features, hidden_features, out_features):
-        super().__init__()
-        self.w1 = nn.Linear(in_features, hidden_features, bias=False)  # Gate
-        self.w2 = nn.Linear(in_features, hidden_features, bias=False)  # Value
-        self.w3 = nn.Linear(hidden_features, out_features, bias=False)  # Output
-        self.act = nn.SiLU()
-
-    def forward(self, x):
-        return self.w3(self.act(self.w1(x)) * self.w2(x))
-
-
-class SwiGLUAudioProjector(nn.Module):
-    """
-    SwiGLU projector with frame stacking (FunASR-style).
-    Uses frame stacking for downsampling, linear projection, then SwiGLU.
-    """
-
-    def __init__(self, config):
-        super().__init__()
-        self.k = getattr(config, "projector_pool_stride", 4)
-        encoder_dim = config.encoder_dim
-        llm_dim = config.llm_dim
-
-        # Frame stacking input dimension
-        in_dim = encoder_dim * self.k  # 1280 * 4 = 5120
-
-        # Hidden dim after initial projection (balanced compression like transformer)
-        hidden_dim = getattr(config, "projector_hidden_dim", None) or 4096
-
-        # Initial linear projection (frame stacking → hidden)
-        self.linear = nn.Linear(in_dim, hidden_dim)
-
-        # Norm before SwiGLU
-        self.norm = LlamaRMSNorm(hidden_dim, eps=1e-8)
-
-        # SwiGLU with 8/3 expansion ratio
-        swiglu_inner = int(hidden_dim * 8 / 3)
-        self.proj = SwiGLU(hidden_dim, swiglu_inner, llm_dim)
-
-    def forward(self, x):
-        # x: [Batch, Seq, Dim]
-        batch, seq, dim = x.shape
-
-        # Padding to multiple of k
-        chunk_num = (seq - 1) // self.k + 1
-        pad_num = chunk_num * self.k - seq
-        if pad_num > 0:
-            x = F.pad(x, (0, 0, 0, pad_num))
-
-        # Frame stacking: [B, S, D] -> [B, S/k, D*k]
-        x = x.contiguous().view(batch, chunk_num, dim * self.k)
-
-        # Linear projection
-        x = self.linear(x)
-
-        # Norm & SwiGLU
-        x = self.norm(x)
-        return self.proj(x)
-
-    def get_output_length(self, input_length: int) -> int:
-        return (input_length - 1) // self.k + 1
 
 
 # =============================================================================
@@ -585,7 +505,6 @@ class QFormerAudioProjector(nn.Module):
 PROJECTOR_CLASSES = {
     "mlp": MLPAudioProjector,
     "mosa": MOSAProjector,
-    "swiglu": SwiGLUAudioProjector,
     "shared_moe": SharedMoEAudioProjector,
     "qformer": QFormerAudioProjector,
 }

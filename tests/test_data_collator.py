@@ -25,7 +25,7 @@ def tokenizer():
     """Load the SmolLM tokenizer with <audio> token added."""
     tok = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M-Instruct")
     # Add <audio> token like ASRModel does
-    existing_special = tok.additional_special_tokens or []
+    existing_special = getattr(tok, "additional_special_tokens", None) or []
     if "<audio>" not in existing_special:
         tok.add_special_tokens({"additional_special_tokens": existing_special + ["<audio>"]})
     return tok

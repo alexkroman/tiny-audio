@@ -1,0 +1,17 @@
+# @package _global_
+# GLM-ASR-Nano encoder (zai-org/GLM-ASR-Nano-2512)
+# Uses 128 mel bins, encoder hidden_size=1280
+# NOTE: Requires transformers >= 5.x or installed from source:
+#   pip install git+https://github.com/huggingface/transformers.git
+
+model:
+  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  text_model_id: Qwen/Qwen3-0.6B
+  encoder_stride: 2  # GLM encoder has conv2 with stride=2
+  projector_type: mlp
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-glm"
+  per_device_train_batch_size: 18
+  per_device_eval_batch_size: 18
+  gradient_accumulation_steps: 1

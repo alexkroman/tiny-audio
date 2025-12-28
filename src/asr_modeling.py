@@ -81,6 +81,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         super().__init__(config)
 
         self.system_prompt = config.system_prompt
+        self.encoder_stride = config.encoder_stride
         target_dtype = getattr(torch, config.model_dtype)
 
         # Audio encoder (frozen)
@@ -129,7 +130,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         encoder_kwargs = {
             "attn_implementation": config.attn_implementation,
             "low_cpu_mem_usage": True,
-            "dtype": dtype,
+            "torch_dtype": dtype,
         }
 
         if "whisper" in config.audio_model_id.lower():
@@ -138,6 +139,22 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
             encoder = full_model.encoder
             del full_model
+        elif "glm" in config.audio_model_id.lower():
+            # GLM-ASR models use audio_tower as the encoder
+            # Requires transformers >= 5.x or installed from source
+            from transformers import AutoModelForSeq2SeqLM
+
+            full_model = AutoModelForSeq2SeqLM.from_pretrained(
+                config.audio_model_id, trust_remote_code=True, **encoder_kwargs
+            )
+            # GLM stores encoder at audio_tower (GlmAsrEncoder)
+            encoder = full_model.audio_tower
+            # Clear references to free VRAM from the LLM decoder
+            full_model.language_model = None
+            full_model.multi_modal_projector = None
+            del full_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
@@ -207,7 +224,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
 
         # Add audio token
-        existing_special = self.tokenizer.additional_special_tokens or []
+        existing_special = getattr(self.tokenizer, "additional_special_tokens", None) or []
         if "<audio>" not in existing_special:
             self.tokenizer.add_special_tokens(
                 {"additional_special_tokens": existing_special + ["<audio>"]}
@@ -260,11 +277,38 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         except ImportError:
             from asr_processing import ASRProcessor  # type: ignore[no-redef]
 
-        return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
+        return ASRProcessor(
+            feature_extractor=self.feature_extractor,
+            tokenizer=self.tokenizer,
+            projector=self.projector,
+            encoder_stride=self.encoder_stride,
+            encoder_conv_layers=self.config.encoder_conv_layers,
+        )
 
     def state_dict(self, *args, **kwargs):
         """Only save trainable projector weights."""
         return {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
+
+    def _compute_encoder_output_lengths(
+        self,
+        audio_attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute per-sample encoder output lengths using conv layer formulas.
+
+        Args:
+            audio_attention_mask: Mask indicating real vs padded mel frames (batch, mel_len)
+
+        Returns:
+            Tensor of encoder output lengths per sample (batch,)
+        """
+        # Get mel frame lengths from attention mask
+        lengths = audio_attention_mask.sum(dim=-1)
+
+        # Apply conv layer formulas: output = (input + 2*pad - (kernel-1) - 1) // stride + 1
+        for padding, kernel_size, stride in self.config.encoder_conv_layers:
+            lengths = (lengths + 2 * padding - (kernel_size - 1) - 1) // stride + 1
+
+        return lengths
 
     def _encode_audio(
         self,
@@ -284,16 +328,22 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
-        # Truncate to actual audio length (mel_frames -> encoder_frames via stride-2 conv)
-        real_encoder_len = audio_attention_mask.sum(dim=-1) // 2
-        max_real_len = int(real_encoder_len.max().item())
-        hidden_states = hidden_states[:, :max_real_len]
+        # Compute per-sample encoder output lengths using conv formulas
+        encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
 
+        # Project to LLM space
         audio_embeds = self.projector(hidden_states)
 
-        # Flatten: (batch, seq, hidden) -> (batch * seq, hidden)
-        # This allows masked_scatter to do 1:1 replacement
-        return audio_embeds.reshape(-1, audio_embeds.shape[-1])
+        # Compute per-sample projector output lengths
+        projector_lengths = torch.tensor(
+            [self.projector.get_output_length(int(length.item())) for length in encoder_lengths],
+            device=audio_embeds.device,
+        )
+
+        # Create valid mask for variable-length samples and extract only real embeddings
+        max_len = audio_embeds.shape[1]
+        valid_mask = torch.arange(max_len, device=audio_embeds.device)[None, :] < projector_lengths[:, None]
+        return audio_embeds[valid_mask]
 
     def forward(
         self,
@@ -365,10 +415,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """Calculate number of audio tokens based on actual audio length.
 
         Uses attention mask to get real audio length, then computes:
-        mel_frames -> encoder_frames (stride-2) -> projector output tokens
+        mel_frames -> encoder_frames (via conv formulas) -> projector output tokens
         """
-        mel_len = int(audio_attention_mask.sum(dim=-1).max().item())
-        encoder_output_len = mel_len // 2
+        encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
+        # Use max length for batch (all samples should have same token count for generation)
+        encoder_output_len = int(encoder_lengths.max().item())
         return int(self.projector.get_output_length(encoder_output_len))
 
     @torch.no_grad()
@@ -410,12 +461,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": self.TRANSCRIBE_PROMPT + audio_placeholder})
 
-            input_ids = self.tokenizer.apply_chat_template(
+            chat_result = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
                 add_generation_prompt=True,
                 return_tensors="pt",
-            ).to(device)
+            )
+            input_ids = chat_result.input_ids.to(device)
 
             if input_ids.dim() == 1:
                 input_ids = input_ids.unsqueeze(0)
