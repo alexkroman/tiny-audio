@@ -10,7 +10,6 @@ Supports:
 
 import io
 import os
-import re
 import tempfile
 import time
 from dataclasses import dataclass
@@ -82,27 +81,23 @@ def prepare_wav_bytes(wav_data) -> bytes:
 
 
 class TextNormalizer:
-    """Whisper-based text normalizer with ASR-specific preprocessing.
+    """Whisper-based text normalizer for ASR evaluation.
 
     Uses EnglishTextNormalizer which handles:
     - Lowercase and punctuation removal
     - Number normalization ("three" <-> "3")
     - British to American spelling ("colour" -> "color")
+    - Disfluency removal ("uh", "um", "hmm")
+    - Tag removal ("<inaudible>", etc.)
     """
 
     def __init__(self):
-        # Load spelling mapping from Whisper tokenizer
         tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
         self._normalizer = EnglishTextNormalizer(tokenizer.english_spelling_normalizer)
 
-    def preprocess(self, text: str) -> str:
-        """Remove inaudible tags and disfluencies."""
-        text = re.sub(r"<inaudible>", "", text, flags=re.IGNORECASE)
-        return re.sub(r"\b(uh|um)\b", "", text, flags=re.IGNORECASE)
-
     def normalize(self, text: str) -> str:
-        """Full normalization pipeline."""
-        return self._normalizer(self.preprocess(text))
+        """Normalize text for WER calculation."""
+        return self._normalizer(text)
 
 
 # =============================================================================
