@@ -13,7 +13,6 @@ from src.projectors import (
     SwiGLU,
     SwiGLUAudioProjector,
     SwiGLUExpert,
-    TransformerAudioProjector,
     load_balancing_loss,
     z_loss,
 )
@@ -248,64 +247,6 @@ class TestSwiGLUAudioProjector:
 
 
 # =============================================================================
-# Transformer Projector Tests
-# =============================================================================
-
-
-class TestTransformerAudioProjector:
-    """Tests for TransformerAudioProjector."""
-
-    @pytest.fixture
-    def config(self):
-        return MockConfig(
-            encoder_dim=256,
-            llm_dim=512,
-            projector_hidden_dim=512,
-            projector_pool_stride=4,
-            projector_num_layers=2,
-        )
-
-    @pytest.fixture
-    def projector(self, config):
-        return TransformerAudioProjector(config)
-
-    def test_forward_shape(self, projector):
-        """Test that Transformer projector produces correct output shape."""
-        x = torch.randn(2, 100, 256)
-        out = projector(x)
-        # Stride-4 pooling: (100-1)//4 + 1 = 25
-        expected_len = projector.get_output_length(100)
-        assert out.shape == (2, expected_len, 512)
-
-    def test_get_output_length(self, projector):
-        """Test output length calculation."""
-        # FunASR formula: (seq - 1) // k + 1
-        assert projector.get_output_length(100) == 25
-        assert projector.get_output_length(101) == 26
-        assert projector.get_output_length(4) == 1
-
-    def test_handles_padding(self, projector):
-        """Test that projector handles sequences not divisible by stride."""
-        for seq_len in [99, 100, 101, 102, 103]:
-            x = torch.randn(1, seq_len, 256)
-            out = projector(x)
-            expected_len = projector.get_output_length(seq_len)
-            assert out.shape[1] == expected_len
-
-    def test_num_layers(self, config):
-        """Test that projector respects num_layers config."""
-        config.projector_num_layers = 3
-        projector = TransformerAudioProjector(config)
-        assert projector.blocks.num_layers == 3
-
-    def test_no_blocks_when_zero_layers(self, config):
-        """Test that blocks is None when num_layers is 0."""
-        config.projector_num_layers = 0
-        projector = TransformerAudioProjector(config)
-        assert projector.blocks is None
-
-
-# =============================================================================
 # Shared MoE Projector Tests
 # =============================================================================
 
@@ -450,7 +391,7 @@ class TestProjectorRegistry:
 
     def test_all_projectors_registered(self):
         """Test that all projector types are in the registry."""
-        expected = {"mlp", "mosa", "swiglu", "shared_moe", "qformer", "transformer"}
+        expected = {"mlp", "mosa", "swiglu", "shared_moe", "qformer"}
         assert set(PROJECTOR_CLASSES.keys()) == expected
 
     def test_registry_instantiation(self):
@@ -470,7 +411,7 @@ class TestProjectorRegistry:
 class TestGradientFlow:
     """Tests for gradient flow through projectors."""
 
-    @pytest.mark.parametrize("projector_type", ["mlp", "mosa", "swiglu", "shared_moe", "transformer"])
+    @pytest.mark.parametrize("projector_type", ["mlp", "mosa", "swiglu", "shared_moe"])
     def test_gradients_flow(self, projector_type):
         """Test that gradients flow through projector."""
         config = MockConfig()

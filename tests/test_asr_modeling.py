@@ -248,7 +248,7 @@ class TestASRModelGeneration:
 class TestProjectorTypes:
     """Tests for different projector types."""
 
-    @pytest.mark.parametrize("projector_type", ["mlp", "swiglu", "transformer"])
+    @pytest.mark.parametrize("projector_type", ["mlp", "swiglu"])
     def test_projector_type_initialization(self, projector_type):
         """Test that model initializes with different projector types."""
         config = ASRConfig(

@@ -237,8 +237,8 @@ class SwiGLU(nn.Module):
 
 class SwiGLUAudioProjector(nn.Module):
     """
-    Optimized for Frozen LLM + 2500h Data.
-    Target: 12.5 Hz Output (Stride 4) with 8/3 SwiGLU Expansion.
+    SwiGLU projector with frame stacking (FunASR-style).
+    Uses frame stacking for downsampling, linear projection, then SwiGLU.
     """
 
     def __init__(self, config):
@@ -247,58 +247,44 @@ class SwiGLUAudioProjector(nn.Module):
         encoder_dim = config.encoder_dim
         llm_dim = config.llm_dim
 
-        # Conv Expansion (Compensating for Time Compression)
-        # We compress time by 4x, so we expand width by 2x to preserve info density.
-        hidden_dim = int(encoder_dim * 2)
+        # Frame stacking input dimension
+        in_dim = encoder_dim * self.k  # 1280 * 4 = 5120
 
-        # SwiGLU Internal Expansion (The 8/3 Ratio)
-        # To match standard FFN capacity: 4 * (2/3) = 8/3
-        swiglu_inner = int(hidden_dim * 8 / 3)
+        # Hidden dim after initial projection (balanced compression like transformer)
+        hidden_dim = getattr(config, "projector_hidden_dim", None) or 4096
 
-        self.downsample = nn.Conv1d(
-            in_channels=encoder_dim,
-            out_channels=hidden_dim,
-            kernel_size=self.k,
-            stride=self.k,
-            padding=0,
-        )
+        # Initial linear projection (frame stacking → hidden)
+        self.linear = nn.Linear(in_dim, hidden_dim)
 
+        # Norm before SwiGLU
         self.norm = LlamaRMSNorm(hidden_dim, eps=1e-8)
 
+        # SwiGLU with 8/3 expansion ratio
+        swiglu_inner = int(hidden_dim * 8 / 3)
         self.proj = SwiGLU(hidden_dim, swiglu_inner, llm_dim)
-
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, (nn.Linear, nn.Conv1d)):
-            nn.init.trunc_normal_(m.weight, std=0.02)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
         # x: [Batch, Seq, Dim]
         batch, seq, dim = x.shape
 
-        # Manual Padding (prevents frame dropping)
-        if seq % self.k != 0:
-            pad_len = self.k - (seq % self.k)
-            x = F.pad(x, (0, 0, 0, pad_len))
+        # Padding to multiple of k
+        chunk_num = (seq - 1) // self.k + 1
+        pad_num = chunk_num * self.k - seq
+        if pad_num > 0:
+            x = F.pad(x, (0, 0, 0, pad_num))
 
-        # [B, S, D] -> [B, D, S]
-        x = x.transpose(1, 2)
+        # Frame stacking: [B, S, D] -> [B, S/k, D*k]
+        x = x.contiguous().view(batch, chunk_num, dim * self.k)
 
-        # Downsample (50Hz -> 12.5Hz)
-        x = self.downsample(x)
+        # Linear projection
+        x = self.linear(x)
 
-        # [B, D, S] -> [B, S, D]
-        x = x.transpose(1, 2)
-
-        # Norm & Project
+        # Norm & SwiGLU
         x = self.norm(x)
         return self.proj(x)
 
     def get_output_length(self, input_length: int) -> int:
-        return (input_length + self.k - 1) // self.k
+        return (input_length - 1) // self.k + 1
 
 
 # =============================================================================
@@ -593,92 +579,6 @@ class QFormerAudioProjector(nn.Module):
 
 
 # =============================================================================
-# Transformer Projector
-# =============================================================================
-
-
-class TransformerAudioProjector(nn.Module):
-    """
-    Transformer Projector (FunASR Style).
-    Projects to LLM dim first, then applies transformer blocks for context mixing.
-    """
-
-    def __init__(self, config):
-        super().__init__()
-        # Default stride 4: Whisper (2x) * Projector (4x) = 8x total → ~12.5 Hz
-        # Similar to FunASR's 6x total (~16.67 Hz)
-        self.k = getattr(config, "projector_pool_stride", 4)
-
-        encoder_dim = config.encoder_dim
-        llm_dim = config.llm_dim
-
-        # Input: Stacked frames (e.g. 1280 * 2 = 2560)
-        in_dim = encoder_dim * self.k
-
-        # FFN hidden dim for initial projection (FunASR default: 2048)
-        ffn_dim = getattr(config, "projector_hidden_dim", None) or 2048
-
-        # FunASR-style projection: linear1 -> relu -> linear2
-        self.linear1 = nn.Linear(in_dim, ffn_dim)
-        self.relu = nn.ReLU()
-        self.linear2 = nn.Linear(ffn_dim, llm_dim)
-
-        # Transformer blocks operating at llm_dim
-        num_layers = getattr(config, "projector_num_layers", 2)
-        if num_layers > 0:
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=llm_dim,
-                nhead=getattr(config, "projector_num_heads", 8),
-                dim_feedforward=llm_dim // 4,  # FunASR uses quarter size
-                dropout=0.0,
-                activation="relu",
-                batch_first=True,
-                norm_first=True,
-            )
-            self.blocks = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        else:
-            self.blocks = None
-
-        # Final Norm for stability when projecting to frozen LLM
-        self.norm = LlamaRMSNorm(llm_dim, eps=1e-8)
-
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            nn.init.trunc_normal_(m.weight, std=0.02)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
-
-    def forward(self, x):
-        # x: [Batch, Seq, Dim]
-        batch, seq, dim = x.shape
-
-        # Padding to multiple of k
-        chunk_num = (seq - 1) // self.k + 1
-        pad_num = chunk_num * self.k - seq
-        if pad_num > 0:
-            x = F.pad(x, (0, 0, 0, pad_num))
-
-        # Frame stacking: [B, S, D] -> [B, S/k, D*k]
-        x = x.contiguous().view(batch, chunk_num, dim * self.k)
-
-        # FunASR-style projection to LLM dim
-        x = self.linear1(x)
-        x = self.relu(x)
-        x = self.linear2(x)
-
-        # Transformer context mixing
-        if self.blocks is not None:
-            x = self.blocks(x)
-
-        return self.norm(x)
-
-    def get_output_length(self, input_length: int) -> int:
-        return (input_length - 1) // self.k + 1
-
-
-# =============================================================================
 # Projector Registry
 # =============================================================================
 
@@ -688,5 +588,4 @@ PROJECTOR_CLASSES = {
     "swiglu": SwiGLUAudioProjector,
     "shared_moe": SharedMoEAudioProjector,
     "qformer": QFormerAudioProjector,
-    "transformer": TransformerAudioProjector,
 }
