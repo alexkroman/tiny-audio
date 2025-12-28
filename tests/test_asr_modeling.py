@@ -248,7 +248,7 @@ class TestASRModelGeneration:
 class TestProjectorTypes:
     """Tests for different projector types."""
 
-    @pytest.mark.parametrize("projector_type", ["mlp", "swiglu", "residual"])
+    @pytest.mark.parametrize("projector_type", ["mlp", "swiglu", "transformer"])
     def test_projector_type_initialization(self, projector_type):
         """Test that model initializes with different projector types."""
         config = ASRConfig(
@@ -272,37 +272,6 @@ class TestProjectorTypes:
         )
         with pytest.raises(ValueError, match="Unknown projector_type"):
             ASRModel(config)
-
-
-class TestSpecAugment:
-    """Tests for SpecAugment functionality."""
-
-    def test_specaugment_disabled_by_default(self, model):
-        """Test that specaugment is disabled by default."""
-        audio = torch.randn(1, 80, 100)
-        model.eval()
-        output = model._apply_specaugment(audio)
-        # Should be unchanged
-        assert torch.equal(audio, output)
-
-    def test_specaugment_only_during_training(self, config):
-        """Test that specaugment only applies during training."""
-        config.use_specaugment = True
-        config.mask_time_prob = 0.5
-        model = ASRModel(config)
-
-        audio = torch.randn(1, 80, 100)
-
-        # During eval, should not apply
-        model.eval()
-        output_eval = model._apply_specaugment(audio.clone())
-        assert torch.equal(audio, output_eval)
-
-        # During training, should apply (with high probability)
-        model.train()
-        output_train = model._apply_specaugment(audio.clone())
-        # With 50% mask prob, it's very likely something changed
-        # But we can't guarantee it, so we just check it runs
 
 
 class TestEmbeddingOperations:

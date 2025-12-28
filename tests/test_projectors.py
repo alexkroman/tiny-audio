@@ -261,7 +261,7 @@ class TestTransformerAudioProjector:
             encoder_dim=256,
             llm_dim=512,
             projector_hidden_dim=512,
-            projector_pool_stride=8,
+            projector_pool_stride=4,
             projector_num_layers=2,
         )
 
@@ -273,15 +273,16 @@ class TestTransformerAudioProjector:
         """Test that Transformer projector produces correct output shape."""
         x = torch.randn(2, 100, 256)
         out = projector(x)
-        # Stride-8 pooling: ceil(100/8) = 13
+        # Stride-4 pooling: (100-1)//4 + 1 = 25
         expected_len = projector.get_output_length(100)
         assert out.shape == (2, expected_len, 512)
 
     def test_get_output_length(self, projector):
         """Test output length calculation."""
-        assert projector.get_output_length(100) == 13  # ceil(100/8)
-        assert projector.get_output_length(104) == 13  # exact
-        assert projector.get_output_length(8) == 1
+        # FunASR formula: (seq - 1) // k + 1
+        assert projector.get_output_length(100) == 25
+        assert projector.get_output_length(101) == 26
+        assert projector.get_output_length(4) == 1
 
     def test_handles_padding(self, projector):
         """Test that projector handles sequences not divisible by stride."""
@@ -295,7 +296,13 @@ class TestTransformerAudioProjector:
         """Test that projector respects num_layers config."""
         config.projector_num_layers = 3
         projector = TransformerAudioProjector(config)
-        assert projector.adapter.num_layers == 3
+        assert projector.blocks.num_layers == 3
+
+    def test_no_blocks_when_zero_layers(self, config):
+        """Test that blocks is None when num_layers is 0."""
+        config.projector_num_layers = 0
+        projector = TransformerAudioProjector(config)
+        assert projector.blocks is None
 
 
 # =============================================================================

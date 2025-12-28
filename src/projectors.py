@@ -599,45 +599,47 @@ class QFormerAudioProjector(nn.Module):
 
 class TransformerAudioProjector(nn.Module):
     """
-    2-Layer Transformer Projector (FunASR Style).
-    Uses standard torch.nn.TransformerEncoder for context mixing.
+    Transformer Projector (FunASR Style).
+    Projects to LLM dim first, then applies transformer blocks for context mixing.
     """
 
     def __init__(self, config):
         super().__init__()
-        self.k = getattr(config, "projector_pool_stride", 8)
+        # Default stride 4: Whisper (2x) * Projector (4x) = 8x total → ~12.5 Hz
+        # Similar to FunASR's 6x total (~16.67 Hz)
+        self.k = getattr(config, "projector_pool_stride", 4)
 
         encoder_dim = config.encoder_dim
         llm_dim = config.llm_dim
 
-        # Input: Stacked frames (e.g. 1280 * 8 = 10240)
+        # Input: Stacked frames (e.g. 1280 * 2 = 2560)
         in_dim = encoder_dim * self.k
 
-        # Bottleneck dimension for the Transformer
-        transformer_dim = getattr(config, "projector_hidden_dim", 2048)
+        # FFN hidden dim for initial projection (FunASR default: 2048)
+        ffn_dim = getattr(config, "projector_hidden_dim", None) or 2048
 
-        # Compressor: Squash massive stacked frames to workable size
-        self.compressor = nn.Linear(in_dim, transformer_dim, bias=False)
+        # FunASR-style projection: linear1 -> relu -> linear2
+        self.linear1 = nn.Linear(in_dim, ffn_dim)
+        self.relu = nn.ReLU()
+        self.linear2 = nn.Linear(ffn_dim, llm_dim)
 
-        # The Adapter: Standard PyTorch Transformer
-        # norm_first=True is essential for training stability (Pre-Norm)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=transformer_dim,
-            nhead=8,
-            dim_feedforward=int(transformer_dim * 4),
-            dropout=0.1,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.adapter = nn.TransformerEncoder(
-            encoder_layer, num_layers=getattr(config, "projector_num_layers", 2)
-        )
+        # Transformer blocks operating at llm_dim
+        num_layers = getattr(config, "projector_num_layers", 2)
+        if num_layers > 0:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=llm_dim,
+                nhead=getattr(config, "projector_num_heads", 8),
+                dim_feedforward=llm_dim // 4,  # FunASR uses quarter size
+                dropout=0.0,
+                activation="relu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.blocks = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        else:
+            self.blocks = None
 
-        # Final Projection: Transformer space -> Frozen LLM space
-        self.out_proj = nn.Linear(transformer_dim, llm_dim, bias=False)
-
-        # Final Norm: Airlock to match Llama's expected distribution
+        # Final Norm for stability when projecting to frozen LLM
         self.norm = LlamaRMSNorm(llm_dim, eps=1e-8)
 
         self.apply(self._init_weights)
@@ -652,22 +654,28 @@ class TransformerAudioProjector(nn.Module):
         # x: [Batch, Seq, Dim]
         batch, seq, dim = x.shape
 
-        # Stride Padding
-        if seq % self.k != 0:
-            pad_len = self.k - (seq % self.k)
-            x = F.pad(x, (0, 0, 0, pad_len))
+        # Padding to multiple of k
+        chunk_num = (seq - 1) // self.k + 1
+        pad_num = chunk_num * self.k - seq
+        if pad_num > 0:
+            x = F.pad(x, (0, 0, 0, pad_num))
 
-        # Downsampling via frame stacking: [B, S, D] -> [B, S/k, D*k]
-        x = x.reshape(batch, -1, dim * self.k)
+        # Frame stacking: [B, S, D] -> [B, S/k, D*k]
+        x = x.contiguous().view(batch, chunk_num, dim * self.k)
 
-        # Compress -> Transformer -> Project
-        x = self.compressor(x)
-        x = self.adapter(x)
-        x = self.out_proj(x)
+        # FunASR-style projection to LLM dim
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.linear2(x)
+
+        # Transformer context mixing
+        if self.blocks is not None:
+            x = self.blocks(x)
+
         return self.norm(x)
 
     def get_output_length(self, input_length: int) -> int:
-        return (input_length + self.k - 1) // self.k
+        return (input_length - 1) // self.k + 1
 
 
 # =============================================================================
