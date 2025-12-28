@@ -47,12 +47,12 @@ attach-remote = "scripts.attach_remote_session:cli"
 find-checkpoint = "scripts.find_checkpoint:cli"
 
 # Development tools
-lint = "scripts.dev_tools:lint"
-format = "scripts.dev_tools:format_code"
-format-md = "scripts.dev_tools:format_markdown"
-type-check = "scripts.dev_tools:type_check"
-test = "scripts.dev_tools:test"
-check = "scripts.dev_tools:check_all"
+lint = "scripts.dev_tools:lint_cli"
+format = "scripts.dev_tools:format_cli"
+type-check = "scripts.dev_tools:type_check_cli"
+test = "scripts.dev_tools:test_cli"
+check = "scripts.dev_tools:check_cli"
+dev = "scripts.dev_tools:cli"
 
 [tool.poetry]
 packages = [{include = "src"}]

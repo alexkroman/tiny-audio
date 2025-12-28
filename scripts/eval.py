@@ -13,19 +13,22 @@ import os
 import re
 import tempfile
 import time
-import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+import evaluate
 import numpy as np
+import soundfile as sf
 import torch
 from datasets import Audio, load_dataset
-from jiwer import wer
 from pyannote.core import Annotation, Segment, Timeline
 from pyannote.metrics.diarization import DiarizationErrorRate
 from transformers import WhisperTokenizer
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
+
+# Load WER metric once at module level
+wer_metric = evaluate.load("wer")
 
 # Disable tokenizers parallelism to avoid fork warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -37,19 +40,15 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def audio_to_wav_bytes(audio_array: np.ndarray | torch.Tensor, sample_rate: int) -> bytes:
-    """Convert audio array to WAV bytes."""
+    """Convert audio array to WAV bytes using soundfile."""
     if isinstance(audio_array, torch.Tensor):
         audio_array = audio_array.numpy()
     if audio_array.ndim > 1:
         audio_array = audio_array.squeeze()
 
     buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)  # 16-bit
-        wav_file.setframerate(sample_rate)
-        audio_int16 = (audio_array * 32767).astype(np.int16)
-        wav_file.writeframes(audio_int16.tobytes())
+    sf.write(buffer, audio_array, sample_rate, format="WAV", subtype="PCM_16")
+    buffer.seek(0)
     return buffer.getvalue()
 
 
@@ -62,9 +61,6 @@ def prepare_wav_bytes(wav_data) -> bytes:
         if "bytes" in wav_data:
             return wav_data["bytes"]
         if "path" in wav_data and wav_data["path"]:
-            # Load from file path
-            import soundfile as sf
-
             audio_array, sample_rate = sf.read(wav_data["path"])
             return audio_to_wav_bytes(audio_array, sample_rate)
 
@@ -74,8 +70,6 @@ def prepare_wav_bytes(wav_data) -> bytes:
 
     # AudioDecoder - try to get path and load with soundfile
     if hasattr(wav_data, "path") and wav_data.path:
-        import soundfile as sf
-
         audio_array, sample_rate = sf.read(wav_data.path)
         return audio_to_wav_bytes(audio_array, sample_rate)
 
@@ -357,7 +351,7 @@ class Evaluator:
                 prediction, inference_time = "", 0.0
             norm_pred = self.normalizer.normalize(prediction)
             norm_ref = self.normalizer.normalize(reference)
-            sample_wer = wer(norm_ref, norm_pred) * 100 if norm_ref else 0.0
+            sample_wer = wer_metric.compute(predictions=[norm_pred], references=[norm_ref]) * 100 if norm_ref else 0.0
 
             result = EvalResult(prediction, reference, sample_wer, inference_time)
             self.results.append(result)
@@ -376,7 +370,7 @@ class Evaluator:
         """Print cumulative metrics checkpoint."""
         preds = [self.normalizer.normalize(r.prediction) for r in self.results]
         refs = [self.normalizer.normalize(r.reference) for r in self.results]
-        corpus_wer = wer(refs, preds) * 100
+        corpus_wer = wer_metric.compute(predictions=preds, references=refs) * 100
         avg_time = sum(r.time for r in self.results) / len(self.results)
 
         print(f"\n{'=' * 60}")
@@ -392,7 +386,7 @@ class Evaluator:
         refs = [self.normalizer.normalize(r.reference) for r in self.results]
 
         return {
-            "wer": wer(refs, preds) * 100,
+            "wer": wer_metric.compute(predictions=preds, references=refs) * 100,
             "avg_time": sum(r.time for r in self.results) / len(self.results),
             "num_samples": len(self.results),
         }
