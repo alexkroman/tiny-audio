@@ -21,7 +21,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 
 class MLPAudioProjector(nn.Module):
-    """2-layer MLP projector with frame-stacking downsampling (like GLM-ASR)."""
+    """2-layer MLP projector with frame-stacking downsampling (matches GLM-ASR)."""
 
     def __init__(self, config):
         super().__init__()
@@ -31,10 +31,12 @@ class MLPAudioProjector(nn.Module):
         self.k = getattr(config, "projector_pool_stride", 4)
 
         # Frame stacking: concat k adjacent frames then project
+        # Matches GLM-ASR: in_dim -> 2*llm_dim -> llm_dim
         in_dim = encoder_dim * self.k
-        self.linear_1 = nn.Linear(in_dim, llm_dim, bias=False)
+        hidden_dim = llm_dim * 2
+        self.linear_1 = nn.Linear(in_dim, hidden_dim)
         self.act = nn.GELU()
-        self.linear_2 = nn.Linear(llm_dim, llm_dim, bias=False)
+        self.linear_2 = nn.Linear(hidden_dim, llm_dim)
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length."""
