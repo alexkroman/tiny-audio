@@ -342,7 +342,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Create valid mask for variable-length samples and extract only real embeddings
         max_len = audio_embeds.shape[1]
-        valid_mask = torch.arange(max_len, device=audio_embeds.device)[None, :] < projector_lengths[:, None]
+        valid_mask = (
+            torch.arange(max_len, device=audio_embeds.device)[None, :] < projector_lengths[:, None]
+        )
         return audio_embeds[valid_mask]
 
     def forward(

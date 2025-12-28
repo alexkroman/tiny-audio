@@ -346,7 +346,11 @@ class Evaluator:
                 prediction, inference_time = "", 0.0
             norm_pred = self.normalizer.normalize(prediction)
             norm_ref = self.normalizer.normalize(reference)
-            sample_wer = wer_metric.compute(predictions=[norm_pred], references=[norm_ref]) * 100 if norm_ref else 0.0
+            sample_wer = (
+                wer_metric.compute(predictions=[norm_pred], references=[norm_ref]) * 100
+                if norm_ref
+                else 0.0
+            )
 
             result = EvalResult(prediction, reference, sample_wer, inference_time)
             self.results.append(result)

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Any
 
@@ -473,4 +474,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 tokens = tokens[0]
 
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
+        # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
+        text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
         return {"text": text}

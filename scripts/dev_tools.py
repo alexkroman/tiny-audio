@@ -50,9 +50,7 @@ def _format_code() -> int:
     md_files = [f for f in md_files if f.name not in excluded_files]
 
     if md_files:
-        code = run_command(
-            ["mdformat"] + [str(f) for f in md_files], "Formatting Markdown Files"
-        )
+        code = run_command(["mdformat"] + [str(f) for f in md_files], "Formatting Markdown Files")
         exit_code = max(exit_code, code)
 
     return exit_code
