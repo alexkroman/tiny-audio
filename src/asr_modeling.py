@@ -38,6 +38,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         """Load model from pretrained, handling device placement correctly."""
+        from pathlib import Path
+
         from safetensors.torch import load_file
         from transformers.utils.hub import cached_file
 
@@ -71,6 +73,22 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if model_file is not None:
                 state_dict = load_file(model_file)
                 model.load_state_dict(state_dict, strict=False)
+
+            # Load LoRA adapter if present
+            adapter_config = cached_file(
+                pretrained_model_name_or_path,
+                "adapter_config.json",
+                _raise_exceptions_for_missing_entries=False,
+                **cache_kwargs,
+            )
+            if adapter_config is not None:
+                from peft import PeftModel
+
+                # Get adapter directory (parent of adapter_config.json)
+                adapter_path = Path(adapter_config).parent
+                model.language_model = PeftModel.from_pretrained(
+                    model.language_model, adapter_path, is_trainable=False
+                )
 
             return model
         finally:

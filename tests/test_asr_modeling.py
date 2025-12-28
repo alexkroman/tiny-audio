@@ -142,12 +142,17 @@ class TestASRModelForward:
         audio_placeholder = "<audio>" * num_audio_tokens
         messages = [{"role": "user", "content": f"Transcribe: {audio_placeholder}"}]
 
-        input_ids = model.tokenizer.apply_chat_template(
+        chat_result = model.tokenizer.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt",
         )
+        # Handle both BatchEncoding and plain tensor returns
+        if hasattr(chat_result, "input_ids"):
+            input_ids = chat_result.input_ids
+        else:
+            input_ids = chat_result
 
         attention_mask = torch.ones_like(input_ids)
 

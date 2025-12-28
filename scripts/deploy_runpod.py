@@ -102,8 +102,8 @@ def install_dependencies(conn: Connection) -> None:
         python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || \
             pip install --user torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128
 
-        # Install accelerate
-        pip install --user accelerate
+        # Install accelerate and peft
+        pip install --user accelerate peft
 
         # Export and install dependencies (excluding torch to preserve system version)
         cd /workspace

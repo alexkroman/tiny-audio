@@ -2,6 +2,7 @@
 
 import contextlib
 from dataclasses import fields
+from pathlib import Path
 from typing import Any
 
 import hydra
@@ -19,6 +20,7 @@ from datasets import (
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
+from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -153,6 +155,12 @@ class DatasetLoader:
                     val_datasets.append(self._prepare_split(d_cfg, eval_split))
                     val_weights.append(weight)
 
+        # Skip samples BEFORE combining/shuffling (for stage 2 to skip stage 1 data)
+        skip_samples = self.config.get("skip_train_samples", 0)
+        if skip_samples:
+            print(f"Skipping first {skip_samples} training samples")
+            train_datasets = [ds.skip(skip_samples) for ds in train_datasets]
+
         train_ds = self._combine_datasets(train_datasets, train_weights, shuffle=True)
         val_ds = self._combine_datasets(val_datasets, val_weights, shuffle=False)
 
@@ -279,6 +287,27 @@ class DataCollator:
         return batch
 
 
+class SavePeftAdapterCallback(TrainerCallback):
+    """Saves PEFT adapter to checkpoint directory during saves."""
+
+    def on_save(self, args, state, control, **kwargs):
+        model = kwargs.get("model")
+        if model is None:
+            return control
+
+        # Check if language_model is a PeftModel
+        if not isinstance(getattr(model, "language_model", None), PeftModel):
+            return control
+
+        # Save adapter to checkpoint directory
+        checkpoint_dir = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+        if checkpoint_dir.exists():
+            model.language_model.save_pretrained(checkpoint_dir)
+            print(f"Saved PEFT adapter to {checkpoint_dir}")
+
+        return control
+
+
 class PushToHubCallback(TrainerCallback):
     """Pushes model to Hub on every save."""
 
@@ -338,6 +367,33 @@ def main(cfg: DictConfig) -> None:
 
     model.config.use_cache = False
 
+    # Apply LoRA if configured
+    if cfg.model.get("use_lora"):
+        lora_config = LoraConfig(
+            r=cfg.model.get("lora_r", 64),
+            lora_alpha=cfg.model.get("lora_alpha", 32),
+            lora_dropout=cfg.model.get("lora_dropout", 0.0),
+            target_modules=cfg.model.get("lora_target_modules", "all-linear"),
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+
+        # Check for existing adapter in output directory
+        output_dir = Path(cfg.training.get("output_dir", "./outputs"))
+        adapter_config = output_dir / "adapter_config.json"
+        if adapter_config.exists():
+            print(f"Loading existing LoRA adapter from {output_dir}")
+            model.language_model = PeftModel.from_pretrained(
+                model.language_model, output_dir, is_trainable=True
+            )
+        else:
+            print("Applying new LoRA adapter to language model")
+            model.language_model = get_peft_model(model.language_model, lora_config)
+
+        # Freeze projector for stage 2 (only train LoRA)
+        model.projector.requires_grad_(False)
+        model.language_model.print_trainable_parameters()
+
     # Load datasets
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
@@ -360,6 +416,8 @@ def main(cfg: DictConfig) -> None:
                 early_stopping_threshold=cfg.early_stopping.threshold,
             )
         )
+    if cfg.model.get("use_lora"):
+        callbacks.append(SavePeftAdapterCallback())
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
         callbacks.append(PushToHubCallback())
 
@@ -386,6 +444,12 @@ def main(cfg: DictConfig) -> None:
 
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
     trainer.save_model()
+
+    # Save PEFT adapter to final output directory
+    if cfg.model.get("use_lora") and isinstance(model.language_model, PeftModel):
+        output_dir = Path(cfg.training.get("output_dir", "./outputs"))
+        model.language_model.save_pretrained(output_dir)
+        print(f"Saved final PEFT adapter to {output_dir}")
 
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
         trainer.push_to_hub(commit_message="Training complete - final model")

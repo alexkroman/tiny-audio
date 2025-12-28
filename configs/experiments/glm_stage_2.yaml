@@ -1,0 +1,30 @@
+# @package _global_
+# Stage 2: LoRA fine-tuning of LLM with frozen projector
+# Requires stage 1 checkpoint with trained projector
+
+model:
+  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  text_model_id: Qwen/Qwen3-1.7B
+  encoder_stride: 2  # GLM encoder has conv2 with stride=2
+  projector_type: mlp
+  pretrained_model_path: "mazesmazes/tiny-audio-glm"
+
+  # LoRA configuration
+  use_lora: true
+  lora_r: 32
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_target_modules: "all-linear"  # Target all linear layers
+
+data:
+  skip_train_samples: 1000  # Skip samples already seen in stage 1
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-glm"
+  warmup_steps: 100
+  per_device_train_batch_size: 12
+  per_device_eval_batch_size: 12
+  gradient_accumulation_steps: 2
+  num_train_epochs: 2
+  save_steps: 500
+  eval_steps: 500
