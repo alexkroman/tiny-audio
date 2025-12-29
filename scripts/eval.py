@@ -958,10 +958,6 @@ class BaseAlignmentEvaluator:
         self.normalizer = TextNormalizer()
         self.results: list[AlignmentResult] = []
 
-        # Load evaluate metrics
-        self.mae_metric = evaluate.load("mae")
-        self.accuracy_metric = evaluate.load("accuracy")
-
     def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
         """Transcribe audio and return (text, word_timestamps, inference_time)."""
         raise NotImplementedError
@@ -1095,29 +1091,11 @@ class BaseAlignmentEvaluator:
                 "num_samples": len(self.results),
             }
 
-        # Use evaluate library for MAE
-        mae_result = self.mae_metric.compute(
-            predictions=all_pred_times,
-            references=all_ref_times,
-        )
-        mae = mae_result["mae"]
+        # Direct MAE calculation
+        mae = sum(abs(p - r) for p, r in zip(all_pred_times, all_ref_times)) / len(all_pred_times)
 
-        # Use evaluate library for alignment accuracy (1=aligned, 0=not aligned per word)
-        # Build alignment predictions: 1 for each aligned word, 0 for each unaligned
-        alignment_predictions = []
-        alignment_references = []
-        for r in self.results:
-            # All reference words should be aligned (reference=1)
-            alignment_references.extend([1] * r.num_ref_words)
-            # Actually aligned words get prediction=1, unaligned get prediction=0
-            alignment_predictions.extend([1] * r.num_aligned_words)
-            alignment_predictions.extend([0] * (r.num_ref_words - r.num_aligned_words))
-
-        accuracy_result = self.accuracy_metric.compute(
-            predictions=alignment_predictions,
-            references=alignment_references,
-        )
-        alignment_rate = accuracy_result["accuracy"]
+        # Direct alignment rate calculation
+        alignment_rate = total_aligned / total_ref if total_ref > 0 else 0.0
         alignment_error = 1.0 - alignment_rate
 
         return {
