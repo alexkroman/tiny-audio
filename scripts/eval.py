@@ -228,6 +228,37 @@ DIARIZATION_DATASET_REGISTRY: dict[str, DiarizationDatasetConfig] = {
 }
 
 
+# =============================================================================
+# Timestamp Alignment Dataset Configuration
+# =============================================================================
+
+
+@dataclass
+class AlignmentDatasetConfig:
+    """Configuration for a timestamp alignment dataset."""
+
+    name: str
+    path: str
+    audio_field: str
+    text_field: str
+    words_field: str  # Field containing word-level alignments
+    config: str | None = None
+    default_split: str = "dev_clean"
+
+
+ALIGNMENT_DATASET_REGISTRY: dict[str, AlignmentDatasetConfig] = {
+    "librispeech-alignments": AlignmentDatasetConfig(
+        name="librispeech-alignments",
+        path="gilkeyio/librispeech-alignments",
+        config=None,
+        audio_field="audio",
+        text_field="transcript",
+        words_field="words",
+        default_split="dev_clean",
+    ),
+}
+
+
 def load_single_dataset(name: str, split: str, config_override: str | None = None):
     """Load a single dataset by name."""
     if name not in DATASET_REGISTRY:
@@ -832,6 +863,445 @@ def print_diarization_summary(dataset_desc: str, metrics: dict, output_path: Pat
 
 
 # =============================================================================
+# Timestamp Alignment Evaluation
+# =============================================================================
+
+
+@dataclass
+class AlignmentResult:
+    """Result of a single timestamp alignment evaluation."""
+
+    pred_starts: list[float]  # Predicted start times for aligned words
+    pred_ends: list[float]  # Predicted end times for aligned words
+    ref_starts: list[float]  # Reference start times for aligned words
+    ref_ends: list[float]  # Reference end times for aligned words
+    num_aligned_words: int  # Number of words successfully aligned
+    num_ref_words: int  # Number of reference words
+    num_pred_words: int  # Number of predicted words
+    time: float  # Inference time
+    reference_text: str
+    predicted_text: str
+
+
+def align_words_to_reference(
+    pred_words: list[dict],
+    ref_words: list[dict],
+    normalizer: TextNormalizer,
+) -> list[tuple[dict, dict]]:
+    """Align predicted words to reference words using normalized text matching.
+
+    Uses a simple greedy alignment: for each reference word, find the best
+    matching predicted word that hasn't been used yet.
+
+    Returns:
+        List of (pred_word, ref_word) tuples for successfully aligned words.
+    """
+    aligned_pairs = []
+
+    # Normalize reference words
+    ref_normalized = []
+    for rw in ref_words:
+        word = rw.get("word", "")
+        # Skip <unk> tokens in reference
+        if word == "<unk>":
+            continue
+        norm = normalizer.normalize(word).strip()
+        if norm:
+            ref_normalized.append((norm, rw))
+
+    # Normalize predicted words
+    pred_normalized = []
+    for pw in pred_words:
+        word = pw.get("word", "")
+        norm = normalizer.normalize(word).strip()
+        if norm:
+            pred_normalized.append((norm, pw))
+
+    # Greedy alignment: for each ref word, find matching pred word
+    used_pred_indices = set()
+
+    for ref_norm, ref_word in ref_normalized:
+        best_match_idx = None
+        best_time_diff = float("inf")
+
+        for i, (pred_norm, pred_word) in enumerate(pred_normalized):
+            if i in used_pred_indices:
+                continue
+
+            # Check if normalized words match
+            if pred_norm == ref_norm:
+                # Prefer matches closer in time
+                time_diff = abs(pred_word.get("start", 0) - ref_word.get("start", 0))
+                if time_diff < best_time_diff:
+                    best_time_diff = time_diff
+                    best_match_idx = i
+
+        if best_match_idx is not None:
+            used_pred_indices.add(best_match_idx)
+            aligned_pairs.append((pred_normalized[best_match_idx][1], ref_word))
+
+    return aligned_pairs
+
+
+class BaseAlignmentEvaluator:
+    """Base class for timestamp alignment evaluators."""
+
+    def __init__(
+        self,
+        audio_field: str = "audio",
+        text_field: str = "transcript",
+        words_field: str = "words",
+    ):
+        self.audio_field = audio_field
+        self.text_field = text_field
+        self.words_field = words_field
+        self.normalizer = TextNormalizer()
+        self.results: list[AlignmentResult] = []
+
+        # Load evaluate metrics
+        self.mae_metric = evaluate.load("mae")
+        self.accuracy_metric = evaluate.load("accuracy")
+
+    def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
+        """Transcribe audio and return (text, word_timestamps, inference_time)."""
+        raise NotImplementedError
+
+    def evaluate(self, dataset, max_samples: int | None = None) -> list[AlignmentResult]:
+        """Run timestamp alignment evaluation loop on dataset."""
+        self.results = []
+        processed = 0
+
+        for sample in dataset:
+            processed += 1
+            if max_samples and processed > max_samples:
+                break
+
+            ref_text = sample[self.text_field]
+            ref_words = sample[self.words_field]
+
+            try:
+                pred_text, pred_words, inference_time = self.transcribe_with_timestamps(
+                    sample[self.audio_field]
+                )
+            except Exception as e:
+                print(f"Error on sample {processed}: {e}")
+                continue
+
+            # Align predicted words to reference words
+            aligned_pairs = align_words_to_reference(pred_words, ref_words, self.normalizer)
+
+            if not aligned_pairs:
+                print(f"Sample {processed}: No words aligned (ref={len(ref_words)}, pred={len(pred_words)})")
+                result = AlignmentResult(
+                    pred_starts=[],
+                    pred_ends=[],
+                    ref_starts=[],
+                    ref_ends=[],
+                    num_aligned_words=0,
+                    num_ref_words=len(ref_words),
+                    num_pred_words=len(pred_words),
+                    time=inference_time,
+                    reference_text=ref_text,
+                    predicted_text=pred_text,
+                )
+                self.results.append(result)
+                continue
+
+            # Extract timestamps from aligned pairs
+            pred_starts = []
+            pred_ends = []
+            ref_starts = []
+            ref_ends = []
+
+            for pred_word, ref_word in aligned_pairs:
+                pred_starts.append(pred_word.get("start", 0))
+                pred_ends.append(pred_word.get("end", 0))
+                ref_starts.append(ref_word.get("start", 0))
+                ref_ends.append(ref_word.get("end", 0))
+
+            result = AlignmentResult(
+                pred_starts=pred_starts,
+                pred_ends=pred_ends,
+                ref_starts=ref_starts,
+                ref_ends=ref_ends,
+                num_aligned_words=len(aligned_pairs),
+                num_ref_words=len(ref_words),
+                num_pred_words=len(pred_words),
+                time=inference_time,
+                reference_text=ref_text,
+                predicted_text=pred_text,
+            )
+            self.results.append(result)
+
+            # Compute sample-level MAE for logging
+            mae_start = sum(abs(p - r) for p, r in zip(pred_starts, ref_starts)) / len(pred_starts)
+            mae_end = sum(abs(p - r) for p, r in zip(pred_ends, ref_ends)) / len(pred_ends)
+            mae_combined = (mae_start + mae_end) / 2
+
+            print(
+                f"Sample {processed}: MAE={mae_combined*1000:.1f}ms, "
+                f"Aligned={len(aligned_pairs)}/{len(ref_words)} words, "
+                f"Time={inference_time:.2f}s"
+            )
+
+            # Checkpoint every 50 samples
+            if processed % 50 == 0:
+                self._print_checkpoint(processed)
+
+        return self.results
+
+    def _print_checkpoint(self, sample_count: int):
+        """Print cumulative metrics checkpoint."""
+        metrics = self.compute_metrics()
+        print(f"\n{'=' * 60}")
+        print(
+            f"CHECKPOINT @ {sample_count}: MAE={metrics['mae']*1000:.1f}ms, "
+            f"Alignment Error={metrics['alignment_error']*100:.1f}%"
+        )
+        print(f"{'=' * 60}\n")
+
+    def compute_metrics(self) -> dict:
+        """Compute final corpus-level metrics using evaluate library."""
+        if not self.results:
+            return {
+                "mae": 0.0,
+                "alignment_error": 1.0,
+                "mae_adjusted": float("inf"),
+                "avg_time": 0.0,
+                "num_samples": 0,
+            }
+
+        # Collect all predictions and references across samples
+        all_pred_times = []
+        all_ref_times = []
+        total_aligned = 0
+        total_ref = 0
+
+        for r in self.results:
+            # Combine start and end times for MAE calculation
+            all_pred_times.extend(r.pred_starts)
+            all_pred_times.extend(r.pred_ends)
+            all_ref_times.extend(r.ref_starts)
+            all_ref_times.extend(r.ref_ends)
+            total_aligned += r.num_aligned_words
+            total_ref += r.num_ref_words
+
+        if not all_pred_times:
+            return {
+                "mae": float("nan"),
+                "alignment_error": 1.0,
+                "mae_adjusted": float("inf"),
+                "avg_time": sum(r.time for r in self.results) / len(self.results),
+                "num_samples": len(self.results),
+            }
+
+        # Use evaluate library for MAE
+        mae_result = self.mae_metric.compute(
+            predictions=all_pred_times,
+            references=all_ref_times,
+        )
+        mae = mae_result["mae"]
+
+        # Use evaluate library for alignment accuracy (1=aligned, 0=not aligned per word)
+        # Build alignment predictions: 1 for each aligned word, 0 for each unaligned
+        alignment_predictions = []
+        alignment_references = []
+        for r in self.results:
+            # All reference words should be aligned (reference=1)
+            alignment_references.extend([1] * r.num_ref_words)
+            # Actually aligned words get prediction=1, unaligned get prediction=0
+            alignment_predictions.extend([1] * r.num_aligned_words)
+            alignment_predictions.extend([0] * (r.num_ref_words - r.num_aligned_words))
+
+        accuracy_result = self.accuracy_metric.compute(
+            predictions=alignment_predictions,
+            references=alignment_references,
+        )
+        alignment_rate = accuracy_result["accuracy"]
+        alignment_error = 1.0 - alignment_rate
+
+        return {
+            "mae": mae,
+            "alignment_error": alignment_error,
+            "alignment_rate": alignment_rate,
+            "mae_adjusted": mae / alignment_rate if alignment_rate > 0 else float("inf"),
+            "total_aligned_words": total_aligned,
+            "total_ref_words": total_ref,
+            "avg_time": sum(r.time for r in self.results) / len(self.results),
+            "num_samples": len(self.results),
+        }
+
+
+class TimestampAlignmentEvaluator(BaseAlignmentEvaluator):
+    """Evaluator for word-level timestamp alignment accuracy using local models."""
+
+    def __init__(
+        self,
+        model_path: str,
+        audio_field: str = "audio",
+        text_field: str = "transcript",
+        words_field: str = "words",
+        user_prompt: str | None = None,
+    ):
+        super().__init__(audio_field, text_field, words_field)
+        self.user_prompt = user_prompt
+
+        # Load model and pipeline
+        from src.asr_modeling import ASRModel
+        from src.asr_pipeline import ASRPipeline
+
+        model = ASRModel.from_pretrained(model_path)
+        self.pipe = ASRPipeline(model=model)
+
+    def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
+        """Transcribe audio and return (text, word_timestamps, inference_time)."""
+        # Convert to pipeline-compatible format
+        if isinstance(audio, dict) and "array" in audio and "raw" not in audio:
+            audio_input = {"raw": audio["array"], "sampling_rate": audio["sampling_rate"]}
+        else:
+            audio_input = audio
+
+        start = time.time()
+        if self.user_prompt:
+            result = self.pipe(audio_input, return_timestamps=True, user_prompt=self.user_prompt)
+        else:
+            result = self.pipe(audio_input, return_timestamps=True)
+        elapsed = time.time() - start
+
+        text = result.get("text", "")
+        words = result.get("words", [])
+
+        return text, words, elapsed
+
+
+class AssemblyAIAlignmentEvaluator(BaseAlignmentEvaluator):
+    """Evaluator for word-level timestamp alignment accuracy using AssemblyAI."""
+
+    MODEL_MAP = {"best": "best", "universal": "universal", "slam_1": "slam_1", "nano": "nano"}
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "slam_1",
+        audio_field: str = "audio",
+        text_field: str = "transcript",
+        words_field: str = "words",
+    ):
+        super().__init__(audio_field, text_field, words_field)
+        import assemblyai as aai
+
+        aai.settings.api_key = api_key
+
+        if model not in self.MODEL_MAP:
+            raise ValueError(f"Invalid model '{model}'. Choose from: {list(self.MODEL_MAP.keys())}")
+
+        model_enum = getattr(aai.types.SpeechModel, model)
+        config = aai.TranscriptionConfig(speech_model=model_enum)
+        self.transcriber = aai.Transcriber(config=config)
+
+    def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
+        """Transcribe audio and return (text, word_timestamps, inference_time)."""
+        wav_bytes = prepare_wav_bytes(audio)
+
+        start = time.time()
+        transcript = self.transcriber.transcribe(io.BytesIO(wav_bytes))
+        elapsed = time.time() - start
+
+        text = transcript.text or ""
+
+        # Extract word-level timestamps from AssemblyAI response
+        words = []
+        if transcript.words:
+            for word in transcript.words:
+                words.append({
+                    "word": word.text,
+                    "start": word.start / 1000.0,  # Convert ms to seconds
+                    "end": word.end / 1000.0,
+                })
+
+        time.sleep(0.5)  # Rate limiting
+        return text, words, elapsed
+
+
+def load_alignment_dataset(name: str, split: str, config_override: str | None = None):
+    """Load a timestamp alignment dataset by name."""
+    if name not in ALIGNMENT_DATASET_REGISTRY:
+        raise ValueError(
+            f"Unknown alignment dataset: {name}. "
+            f"Available: {list(ALIGNMENT_DATASET_REGISTRY.keys())}"
+        )
+
+    cfg = ALIGNMENT_DATASET_REGISTRY[name]
+    config = config_override if config_override else cfg.config
+
+    print(f"Loading {cfg.path} (config: {config}, split: {split})...")
+    if config:
+        ds = load_dataset(cfg.path, config, split=split, streaming=True)
+    else:
+        ds = load_dataset(cfg.path, split=split, streaming=True)
+
+    # Cast audio column to ensure proper decoding
+    return ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))
+
+
+def save_alignment_results(
+    output_path: Path,
+    model_name: str,
+    dataset_desc: str,
+    results: list[AlignmentResult],
+    metrics: dict,
+):
+    """Save timestamp alignment evaluation results to file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w") as f:
+        f.write("Timestamp Alignment Evaluation\n")
+        f.write(f"Model: {model_name}\n")
+        f.write(f"Dataset: {dataset_desc}\n")
+        f.write(f"Samples: {metrics['num_samples']}\n\n")
+        f.write(f"MAE: {metrics['mae']*1000:.1f}ms @ {metrics['alignment_rate']*100:.1f}% alignment\n")
+        f.write(f"MAE (adjusted): {metrics['mae_adjusted']*1000:.1f}ms\n")
+        f.write(f"Alignment Error: {metrics['alignment_error']*100:.1f}%\n\n")
+        f.write("=" * 80 + "\n")
+        f.write("Per-Sample Results\n")
+        f.write("=" * 80 + "\n\n")
+
+        for i, r in enumerate(results, 1):
+            # Compute sample-level MAE from raw timestamps
+            if r.pred_starts:
+                mae = sum(
+                    abs(p - ref)
+                    for p, ref in zip(r.pred_starts + r.pred_ends, r.ref_starts + r.ref_ends)
+                ) / (2 * len(r.pred_starts))
+                f.write(
+                    f"Sample {i} - MAE: {mae*1000:.1f}ms, "
+                    f"Aligned: {r.num_aligned_words}/{r.num_ref_words}, Time: {r.time:.2f}s\n"
+                )
+            else:
+                f.write(
+                    f"Sample {i} - No alignment, "
+                    f"Ref words: {r.num_ref_words}, Time: {r.time:.2f}s\n"
+                )
+            f.write(f"  Ref:  {r.reference_text}\n")
+            f.write(f"  Pred: {r.predicted_text}\n\n")
+
+
+def print_alignment_summary(model_name: str, dataset_desc: str, metrics: dict, output_path: Path):
+    """Print final timestamp alignment evaluation summary."""
+    print("\n" + "=" * 60)
+    print("Timestamp Alignment Evaluation Results")
+    print("=" * 60)
+    print(f"Model: {model_name}")
+    print(f"Dataset: {dataset_desc}")
+    print(f"Samples: {metrics['num_samples']}")
+    print()
+    print(f"MAE: {metrics['mae']*1000:.1f}ms @ {metrics['alignment_rate']*100:.1f}% alignment")
+    print(f"MAE (adjusted): {metrics['mae_adjusted']*1000:.1f}ms")
+    print(f"Alignment Error: {metrics['alignment_error']*100:.1f}%")
+    print(f"\nResults saved to: {output_path}")
+
+
+# =============================================================================
 # Results Output
 # =============================================================================
 
@@ -1035,6 +1505,74 @@ def run_diarization_eval(args):
     print_diarization_summary(dataset_desc, metrics, output_path)
 
 
+def run_alignment_eval(args):
+    """Run timestamp alignment evaluation."""
+    # Determine model name
+    if args.assemblyai:
+        if not args.api_key:
+            raise ValueError("AssemblyAI API key required (--api-key or ASSEMBLYAI_API_KEY env var)")
+        model_name = f"AssemblyAI ({args.assemblyai_model})"
+    elif args.model:
+        model_name = args.model
+    else:
+        raise ValueError("Model argument required for alignment evaluation (or use --assemblyai)")
+
+    # Set default dataset for alignment if not specified
+    if args.dataset is None:
+        args.dataset = "librispeech-alignments"
+
+    # Validate alignment dataset choice
+    if args.dataset not in ALIGNMENT_DATASET_REGISTRY:
+        raise ValueError(
+            f"Unknown alignment dataset: {args.dataset}. "
+            f"Available: {list(ALIGNMENT_DATASET_REGISTRY.keys())}"
+        )
+
+    cfg = ALIGNMENT_DATASET_REGISTRY[args.dataset]
+    split = args.split if args.split != "test" else cfg.default_split
+
+    # Output directory
+    if args.output_dir is None:
+        safe_name = model_name.replace("/", "_").replace(":", "_").replace(" ", "_")
+        args.output_dir = Path(f"outputs/alignment_eval_{args.dataset}_{safe_name}")
+
+    # Load dataset
+    dataset = load_alignment_dataset(args.dataset, split, args.config)
+    config_name = args.config or cfg.config
+    dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
+
+    if args.max_samples:
+        dataset = dataset.take(args.max_samples)
+
+    # Create evaluator
+    if args.assemblyai:
+        evaluator = AssemblyAIAlignmentEvaluator(
+            api_key=args.api_key,
+            model=args.assemblyai_model,
+            audio_field=cfg.audio_field,
+            text_field=cfg.text_field,
+            words_field=cfg.words_field,
+        )
+    else:
+        evaluator = TimestampAlignmentEvaluator(
+            model_path=model_name,
+            audio_field=cfg.audio_field,
+            text_field=cfg.text_field,
+            words_field=cfg.words_field,
+            user_prompt=args.user_prompt,
+        )
+
+    # Run evaluation
+    print(f"Running timestamp alignment evaluation with {model_name}...")
+    evaluator.evaluate(dataset, args.max_samples)
+    metrics = evaluator.compute_metrics()
+
+    # Save and print results
+    output_path = args.output_dir / "results.txt"
+    save_alignment_results(output_path, model_name, dataset_desc, evaluator.results, metrics)
+    print_alignment_summary(model_name, dataset_desc, metrics, output_path)
+
+
 def main():
     import argparse
 
@@ -1045,13 +1583,13 @@ def main():
     parser.add_argument(
         "--task",
         default="asr",
-        choices=["asr", "diarization"],
-        help="Task to evaluate: 'asr' for speech recognition, 'diarization' for speaker diarization",
+        choices=["asr", "diarization", "alignment"],
+        help="Task to evaluate: 'asr' for speech recognition, 'diarization' for speaker diarization, 'alignment' for timestamp alignment",
     )
     parser.add_argument(
         "--dataset",
         default=None,
-        help="Dataset to evaluate on (default: loquacious for ASR, callhome for diarization)",
+        help="Dataset to evaluate on (default: loquacious for ASR, callhome for diarization, librispeech-alignments for alignment)",
     )
     parser.add_argument("--assemblyai", action="store_true", help="Use AssemblyAI API")
     parser.add_argument(
@@ -1081,6 +1619,11 @@ def main():
     # Handle diarization task
     if args.task == "diarization":
         run_diarization_eval(args)
+        return
+
+    # Handle alignment task
+    if args.task == "alignment":
+        run_alignment_eval(args)
         return
 
     # Set default dataset for ASR if not specified
