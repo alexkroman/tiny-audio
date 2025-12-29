@@ -38,8 +38,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         """Load model from pretrained, handling device placement correctly."""
-        from pathlib import Path
-
         from safetensors.torch import load_file
         from transformers.utils.hub import cached_file
 
@@ -84,10 +82,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if adapter_config is not None:
                 from peft import PeftModel
 
-                # Get adapter directory (parent of adapter_config.json)
-                adapter_path = str(Path(adapter_config).parent)
+                # Pass original repo ID to PEFT, let it handle caching
                 model.language_model = PeftModel.from_pretrained(
-                    model.language_model, adapter_path, is_trainable=False
+                    model.language_model, pretrained_model_name_or_path, is_trainable=False
                 )
 
             return model

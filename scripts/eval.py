@@ -396,21 +396,12 @@ class LocalEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from transformers import pipeline
-
         from src.asr_modeling import ASRModel
+        from src.asr_pipeline import ASRPipeline
 
-        # Load model first to get its feature_extractor
-        model = ASRModel.from_pretrained(model_path, trust_remote_code=True)
-
-        # Load using pipeline with explicit feature_extractor from model
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model,
-            feature_extractor=model.feature_extractor,
-            tokenizer=model.tokenizer,
-            trust_remote_code=True,
-        )
+        # Load model and use our custom pipeline
+        model = ASRModel.from_pretrained(model_path)
+        self.pipe = ASRPipeline(model=model)
         self.user_prompt = user_prompt
 
     def transcribe(self, audio) -> tuple[str, float]:
