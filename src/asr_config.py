@@ -52,7 +52,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # Set default generation parameters (greedy decoding only)
         generation_defaults = {
             "num_beams": 1,
-            "max_new_tokens": 96,
+            "max_new_tokens": 256,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,
