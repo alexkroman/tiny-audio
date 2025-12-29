@@ -145,7 +145,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         encoder_kwargs = {
             "attn_implementation": config.attn_implementation,
             "low_cpu_mem_usage": True,
-            "torch_dtype": dtype,
+            "dtype": dtype,
         }
 
         if "whisper" in config.audio_model_id.lower():

@@ -476,4 +476,32 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
         # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
         text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+        # Truncate if a word repeats more than 3 times consecutively
+        text = self._truncate_repetitions(text, max_repeats=3)
         return {"text": text}
+
+    def _truncate_repetitions(self, text: str, max_repeats: int = 3) -> str:
+        """Truncate text when a word repeats more than max_repeats times consecutively.
+
+        Args:
+            text: Input text to check for repetitions
+            max_repeats: Maximum allowed consecutive repetitions (default 3)
+
+        Returns:
+            Truncated text if repetition detected, otherwise original text
+        """
+        words = text.split()
+        if len(words) <= max_repeats:
+            return text
+
+        repeat_count = 1
+        for i in range(1, len(words)):
+            if words[i].lower() == words[i - 1].lower():
+                repeat_count += 1
+                if repeat_count > max_repeats:
+                    # Keep up to max_repeats of the repeated word
+                    return " ".join(words[:i])
+            else:
+                repeat_count = 1
+
+        return text
