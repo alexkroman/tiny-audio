@@ -28,9 +28,20 @@ from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 # Load WER metric once at module level
 wer_metric = evaluate.load("wer")
-
-# Disable tokenizers parallelism to avoid fork warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# AssemblyAI model options
+ASSEMBLYAI_MODELS = {"best", "universal", "slam_1", "nano"}
+
+
+def setup_assemblyai(api_key: str, model: str, speaker_labels: bool = False):
+    """Initialize AssemblyAI transcriber with given model."""
+    import assemblyai as aai
+    aai.settings.api_key = api_key
+    if model not in ASSEMBLYAI_MODELS:
+        raise ValueError(f"Invalid model '{model}'. Choose from: {ASSEMBLYAI_MODELS}")
+    config = aai.TranscriptionConfig(speech_model=getattr(aai.types.SpeechModel, model), speaker_labels=speaker_labels)
+    return aai.Transcriber(config=config)
 
 
 # =============================================================================
@@ -101,222 +112,121 @@ class TextNormalizer:
 
 
 # =============================================================================
-# Dataset Configuration
+# Dataset Configuration (Unified)
 # =============================================================================
 
 
 @dataclass
 class DatasetConfig:
-    """Configuration for a dataset."""
+    """Unified configuration for all dataset types."""
 
     name: str
     path: str
     audio_field: str
-    text_field: str
+    text_field: str = "text"
     config: str | None = None
     default_split: str = "test"
     weight: float = 1.0
+    # Diarization-specific
+    speakers_field: str | None = None
+    timestamps_start_field: str | None = None
+    timestamps_end_field: str | None = None
+    # Alignment-specific
+    words_field: str | None = None
 
 
 DATASET_REGISTRY: dict[str, DatasetConfig] = {
+    # ASR datasets
     "loquacious": DatasetConfig(
-        name="loquacious",
-        path="speechbrain/LoquaciousSet",
-        config="small",
-        audio_field="wav",
-        text_field="text",
+        name="loquacious", path="speechbrain/LoquaciousSet", config="small",
+        audio_field="wav", text_field="text",
     ),
     "earnings22": DatasetConfig(
-        name="earnings22",
-        path="sanchit-gandhi/earnings22_robust_split",
-        config="default",
-        audio_field="audio",
-        text_field="sentence",
+        name="earnings22", path="sanchit-gandhi/earnings22_robust_split", config="default",
+        audio_field="audio", text_field="sentence",
     ),
     "ami": DatasetConfig(
-        name="ami",
-        path="TakalaWang/AMI_ASR",
-        config=None,
-        audio_field="audio",
-        text_field="text",
+        name="ami", path="TakalaWang/AMI_ASR", audio_field="audio", text_field="text",
     ),
     "gigaspeech": DatasetConfig(
-        name="gigaspeech",
-        path="fixie-ai/gigaspeech",
-        config="dev",
-        audio_field="audio",
-        text_field="text",
-        default_split="dev",
+        name="gigaspeech", path="fixie-ai/gigaspeech", config="dev",
+        audio_field="audio", text_field="text", default_split="dev",
     ),
     "tedlium": DatasetConfig(
-        name="tedlium",
-        path="sanchit-gandhi/tedlium-data",
-        config="default",
-        audio_field="audio",
-        text_field="text",
+        name="tedlium", path="sanchit-gandhi/tedlium-data", config="default",
+        audio_field="audio", text_field="text",
     ),
     "commonvoice": DatasetConfig(
-        name="commonvoice",
-        path="fixie-ai/common_voice_17_0",
-        config="en",
-        audio_field="audio",
-        text_field="sentence",
+        name="commonvoice", path="fixie-ai/common_voice_17_0", config="en",
+        audio_field="audio", text_field="sentence",
     ),
     "peoples": DatasetConfig(
-        name="peoples",
-        path="fixie-ai/peoples_speech",
-        config="clean",
-        audio_field="audio",
-        text_field="text",
+        name="peoples", path="fixie-ai/peoples_speech", config="clean",
+        audio_field="audio", text_field="text",
     ),
     "librispeech": DatasetConfig(
-        name="librispeech",
-        path="openslr/librispeech_asr",
-        config="clean",
-        audio_field="audio",
-        text_field="text",
+        name="librispeech", path="openslr/librispeech_asr", config="clean",
+        audio_field="audio", text_field="text",
     ),
     "librispeech-other": DatasetConfig(
-        name="librispeech-other",
-        path="openslr/librispeech_asr",
-        config="other",
-        audio_field="audio",
-        text_field="text",
+        name="librispeech-other", path="openslr/librispeech_asr", config="other",
+        audio_field="audio", text_field="text",
     ),
-}
-
-# Combined dataset proportions
-COMBINED_WEIGHTS = {
-    "loquacious": 0.50,
-    "gigaspeech": 0.10,
-    "earnings22": 0.10,
-    "ami": 0.10,
-    "tedlium": 0.10,
-}
-
-
-# =============================================================================
-# Diarization Dataset Configuration
-# =============================================================================
-
-
-@dataclass
-class DiarizationDatasetConfig:
-    """Configuration for a diarization dataset."""
-
-    name: str
-    path: str
-    audio_field: str
-    speakers_field: str
-    timestamps_start_field: str
-    timestamps_end_field: str
-    config: str | None = None
-    default_split: str = "test"
-
-
-DIARIZATION_DATASET_REGISTRY: dict[str, DiarizationDatasetConfig] = {
-    "callhome": DiarizationDatasetConfig(
-        name="callhome",
-        path="talkbank/callhome",
-        config="eng",
-        audio_field="audio",
-        speakers_field="speakers",
-        timestamps_start_field="timestamps_start",
+    # Diarization datasets
+    "callhome": DatasetConfig(
+        name="callhome", path="talkbank/callhome", config="eng",
+        audio_field="audio", text_field="text", default_split="data",
+        speakers_field="speakers", timestamps_start_field="timestamps_start",
         timestamps_end_field="timestamps_end",
-        default_split="data",
     ),
-}
-
-
-# =============================================================================
-# Timestamp Alignment Dataset Configuration
-# =============================================================================
-
-
-@dataclass
-class AlignmentDatasetConfig:
-    """Configuration for a timestamp alignment dataset."""
-
-    name: str
-    path: str
-    audio_field: str
-    text_field: str
-    words_field: str  # Field containing word-level alignments
-    config: str | None = None
-    default_split: str = "dev_clean"
-
-
-ALIGNMENT_DATASET_REGISTRY: dict[str, AlignmentDatasetConfig] = {
-    "librispeech-alignments": AlignmentDatasetConfig(
-        name="librispeech-alignments",
-        path="gilkeyio/librispeech-alignments",
-        config=None,
-        audio_field="audio",
-        text_field="transcript",
+    # Alignment datasets
+    "librispeech-alignments": DatasetConfig(
+        name="librispeech-alignments", path="gilkeyio/librispeech-alignments",
+        audio_field="audio", text_field="transcript", default_split="dev_clean",
         words_field="words",
-        default_split="dev_clean",
     ),
 }
 
+COMBINED_WEIGHTS = {"loquacious": 0.50, "gigaspeech": 0.10, "earnings22": 0.10, "ami": 0.10, "tedlium": 0.10}
+DIARIZATION_DATASETS = {"callhome"}
+ALIGNMENT_DATASETS = {"librispeech-alignments"}
 
-def load_single_dataset(name: str, split: str, config_override: str | None = None):
-    """Load a single dataset by name."""
+
+def load_eval_dataset(name: str, split: str, config_override: str | None = None, decode_audio: bool = True):
+    """Load any dataset by name with unified interface."""
     if name not in DATASET_REGISTRY:
         raise ValueError(f"Unknown dataset: {name}. Available: {list(DATASET_REGISTRY.keys())}")
 
     cfg = DATASET_REGISTRY[name]
-    config = config_override if config_override else cfg.config
+    config = config_override or cfg.config
 
     print(f"Loading {cfg.path} (config: {config}, split: {split})...")
-    if config:
-        ds = load_dataset(cfg.path, config, split=split, streaming=True)
-    else:
-        ds = load_dataset(cfg.path, split=split, streaming=True)
-
-    # Cast audio column to ensure proper decoding with streaming
-    return ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))
+    ds = load_dataset(cfg.path, config, split=split, streaming=True) if config else load_dataset(cfg.path, split=split, streaming=True)
+    audio_opts = Audio(sampling_rate=16000) if decode_audio else Audio(decode=False)
+    return ds.cast_column(cfg.audio_field, audio_opts)
 
 
 def load_combined_dataset(max_samples: int | None, seed: int) -> tuple[Iterator, int]:
     """Load proportionally sampled combined dataset."""
     import random
-
     random.seed(seed)
 
     total_samples = max_samples or 1000
-    samples_per_dataset = {
-        name: max(1, int(total_samples * weight)) for name, weight in COMBINED_WEIGHTS.items()
-    }
+    samples_per_dataset = {name: max(1, int(total_samples * weight)) for name, weight in COMBINED_WEIGHTS.items()}
     print(f"Loading combined dataset: {samples_per_dataset}")
 
     all_samples = []
     for name, num_samples in samples_per_dataset.items():
         cfg = DATASET_REGISTRY[name]
-        validation_split = "validation" if name != "loquacious" else "dev"
-
-        if cfg.config:
-            ds = load_dataset(cfg.path, cfg.config, split=validation_split, streaming=True)
-        else:
-            ds = load_dataset(cfg.path, split=validation_split, streaming=True)
-
-        # Cast audio column to ensure proper decoding with streaming
-        ds = ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))
-        ds = ds.shuffle(seed=seed, buffer_size=num_samples * 10)
+        validation_split = "dev" if name == "loquacious" else "validation"
+        ds = load_eval_dataset(name, validation_split).shuffle(seed=seed, buffer_size=num_samples * 10)
 
         count = 0
         for sample in ds:
-            # Skip TEDLIUM ignore markers
             text = sample.get(cfg.text_field, "")
             if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
                 continue
-
-            all_samples.append(
-                {
-                    "audio": sample[cfg.audio_field],
-                    "text": sample[cfg.text_field],
-                    "source": name,
-                }
-            )
+            all_samples.append({"audio": sample[cfg.audio_field], "text": sample[cfg.text_field], "source": name})
             count += 1
             if count >= num_samples:
                 break
@@ -498,29 +408,16 @@ class EndpointEvaluator(Evaluator):
 class AssemblyAIEvaluator(Evaluator):
     """Evaluator for AssemblyAI API."""
 
-    MODEL_MAP = {"best": "best", "universal": "universal", "slam_1": "slam_1", "nano": "nano"}
-
     def __init__(self, api_key: str, model: str = "slam_1", **kwargs):
         super().__init__(**kwargs)
-        import assemblyai as aai
-
-        aai.settings.api_key = api_key
-
-        if model not in self.MODEL_MAP:
-            raise ValueError(f"Invalid model '{model}'. Choose from: {list(self.MODEL_MAP.keys())}")
-
-        model_enum = getattr(aai.types.SpeechModel, model)
-        config = aai.TranscriptionConfig(speech_model=model_enum)
-        self.transcriber = aai.Transcriber(config=config)
+        self.transcriber = setup_assemblyai(api_key, model)
 
     def transcribe(self, audio) -> tuple[str, float]:
         wav_bytes = prepare_wav_bytes(audio)
-
         start = time.time()
         transcript = self.transcriber.transcribe(io.BytesIO(wav_bytes))
         elapsed = time.time() - start
-
-        time.sleep(0.5)  # Rate limiting
+        time.sleep(0.5)
         return transcript.text or "", elapsed
 
 
@@ -751,69 +648,20 @@ class DiarizationEvaluator:
 class AssemblyAIDiarizationEvaluator(DiarizationEvaluator):
     """Evaluator for AssemblyAI speaker diarization."""
 
-    MODEL_MAP = {"best": "best", "universal": "universal", "slam_1": "slam_1", "nano": "nano"}
-
     def __init__(self, api_key: str, model: str = "slam_1", **kwargs):
-        # Remove hf_token since we don't use pyannote
         kwargs.pop("hf_token", None)
         super().__init__(**kwargs)
-        import assemblyai as aai
-
-        aai.settings.api_key = api_key
-
-        if model not in self.MODEL_MAP:
-            raise ValueError(f"Invalid model '{model}'. Choose from: {list(self.MODEL_MAP.keys())}")
-
-        model_enum = getattr(aai.types.SpeechModel, model)
-        config = aai.TranscriptionConfig(
-            speech_model=model_enum,
-            speaker_labels=True,
-        )
-        self.transcriber = aai.Transcriber(config=config)
+        self.transcriber = setup_assemblyai(api_key, model, speaker_labels=True)
 
     def diarize(self, audio) -> tuple[list[dict], float]:
         """Run AssemblyAI diarization on audio."""
         wav_bytes = prepare_wav_bytes(audio)
-
         start = time.time()
         transcript = self.transcriber.transcribe(io.BytesIO(wav_bytes))
         elapsed = time.time() - start
-
-        # Convert utterances to segment format
-        segments = []
-        if transcript.utterances:
-            for utt in transcript.utterances:
-                segments.append(
-                    {
-                        "speaker": utt.speaker,
-                        "start": utt.start / 1000.0,  # ms -> seconds
-                        "end": utt.end / 1000.0,
-                    }
-                )
-
-        time.sleep(0.5)  # Rate limiting
+        segments = [{"speaker": u.speaker, "start": u.start / 1000.0, "end": u.end / 1000.0} for u in (transcript.utterances or [])]
+        time.sleep(0.5)
         return segments, elapsed
-
-
-def load_diarization_dataset(name: str, split: str, config_override: str | None = None):
-    """Load a diarization dataset by name."""
-    if name not in DIARIZATION_DATASET_REGISTRY:
-        raise ValueError(
-            f"Unknown diarization dataset: {name}. "
-            f"Available: {list(DIARIZATION_DATASET_REGISTRY.keys())}"
-        )
-
-    cfg = DIARIZATION_DATASET_REGISTRY[name]
-    config = config_override if config_override else cfg.config
-
-    print(f"Loading {cfg.path} (config: {config}, split: {split})...")
-    if config:
-        ds = load_dataset(cfg.path, config, split=split, streaming=True)
-    else:
-        ds = load_dataset(cfg.path, split=split, streaming=True)
-
-    # Use decode=False to avoid torchcodec CPU issues - we'll decode manually with librosa
-    return ds.cast_column(cfg.audio_field, Audio(decode=False))
 
 
 def save_diarization_results(
@@ -1155,71 +1003,20 @@ class TimestampAlignmentEvaluator(BaseAlignmentEvaluator):
 class AssemblyAIAlignmentEvaluator(BaseAlignmentEvaluator):
     """Evaluator for word-level timestamp alignment accuracy using AssemblyAI."""
 
-    MODEL_MAP = {"best": "best", "universal": "universal", "slam_1": "slam_1", "nano": "nano"}
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str = "slam_1",
-        audio_field: str = "audio",
-        text_field: str = "transcript",
-        words_field: str = "words",
-    ):
+    def __init__(self, api_key: str, model: str = "slam_1", audio_field: str = "audio",
+                 text_field: str = "transcript", words_field: str = "words"):
         super().__init__(audio_field, text_field, words_field)
-        import assemblyai as aai
-
-        aai.settings.api_key = api_key
-
-        if model not in self.MODEL_MAP:
-            raise ValueError(f"Invalid model '{model}'. Choose from: {list(self.MODEL_MAP.keys())}")
-
-        model_enum = getattr(aai.types.SpeechModel, model)
-        config = aai.TranscriptionConfig(speech_model=model_enum)
-        self.transcriber = aai.Transcriber(config=config)
+        self.transcriber = setup_assemblyai(api_key, model)
 
     def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
         """Transcribe audio and return (text, word_timestamps, inference_time)."""
         wav_bytes = prepare_wav_bytes(audio)
-
         start = time.time()
         transcript = self.transcriber.transcribe(io.BytesIO(wav_bytes))
         elapsed = time.time() - start
-
-        text = transcript.text or ""
-
-        # Extract word-level timestamps from AssemblyAI response
-        words = []
-        if transcript.words:
-            for word in transcript.words:
-                words.append({
-                    "word": word.text,
-                    "start": word.start / 1000.0,  # Convert ms to seconds
-                    "end": word.end / 1000.0,
-                })
-
-        time.sleep(0.5)  # Rate limiting
-        return text, words, elapsed
-
-
-def load_alignment_dataset(name: str, split: str, config_override: str | None = None):
-    """Load a timestamp alignment dataset by name."""
-    if name not in ALIGNMENT_DATASET_REGISTRY:
-        raise ValueError(
-            f"Unknown alignment dataset: {name}. "
-            f"Available: {list(ALIGNMENT_DATASET_REGISTRY.keys())}"
-        )
-
-    cfg = ALIGNMENT_DATASET_REGISTRY[name]
-    config = config_override if config_override else cfg.config
-
-    print(f"Loading {cfg.path} (config: {config}, split: {split})...")
-    if config:
-        ds = load_dataset(cfg.path, config, split=split, streaming=True)
-    else:
-        ds = load_dataset(cfg.path, split=split, streaming=True)
-
-    # Cast audio column to ensure proper decoding
-    return ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))
+        words = [{"word": w.text, "start": w.start / 1000.0, "end": w.end / 1000.0} for w in (transcript.words or [])]
+        time.sleep(0.5)
+        return transcript.text or "", words, elapsed
 
 
 def save_alignment_results(
@@ -1351,7 +1148,7 @@ def run_all_datasets(args, model_name: str):
         try:
             # Load dataset
             split = args.split if args.split != "test" else cfg.default_split
-            dataset = load_single_dataset(dataset_name, split, args.config)
+            dataset = load_eval_dataset(dataset_name, split, args.config)
             audio_field, text_field = cfg.audio_field, cfg.text_field
             config_name = args.config or cfg.config
             dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
@@ -1417,58 +1214,40 @@ def run_all_datasets(args, model_name: str):
 
 def run_diarization_eval(args):
     """Run diarization evaluation."""
-    # Set default dataset for diarization if not specified
     if args.dataset is None:
         args.dataset = "callhome"
 
-    # Validate diarization dataset choice
-    if args.dataset not in DIARIZATION_DATASET_REGISTRY:
-        raise ValueError(
-            f"Unknown diarization dataset: {args.dataset}. "
-            f"Available: {list(DIARIZATION_DATASET_REGISTRY.keys())}"
-        )
+    if args.dataset not in DIARIZATION_DATASETS:
+        raise ValueError(f"Unknown diarization dataset: {args.dataset}. Available: {DIARIZATION_DATASETS}")
 
-    cfg = DIARIZATION_DATASET_REGISTRY[args.dataset]
+    cfg = DATASET_REGISTRY[args.dataset]
     split = args.split if args.split != "test" else cfg.default_split
 
-    # Output directory
     model_suffix = f"_assemblyai_{args.assemblyai_model}" if args.assemblyai else "_pyannote"
     if args.output_dir is None:
         args.output_dir = Path(f"outputs/diarization_eval_{args.dataset}{model_suffix}")
 
-    # Load dataset
-    dataset = load_diarization_dataset(args.dataset, split, args.config)
-    config_name = args.config or cfg.config
-    dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
+    dataset = load_eval_dataset(args.dataset, split, args.config, decode_audio=False)
+    dataset_desc = f"{cfg.path} (config: {args.config or cfg.config}, split: {split})"
 
     if args.max_samples:
         dataset = dataset.take(args.max_samples)
 
-    # Create evaluator
     if args.assemblyai:
         if not args.api_key:
-            raise ValueError(
-                "AssemblyAI API key required (--api-key or ASSEMBLYAI_API_KEY env var)"
-            )
+            raise ValueError("AssemblyAI API key required (--api-key or ASSEMBLYAI_API_KEY env var)")
         evaluator = AssemblyAIDiarizationEvaluator(
-            api_key=args.api_key,
-            model=args.assemblyai_model,
-            audio_field=cfg.audio_field,
-            speakers_field=cfg.speakers_field,
-            timestamps_start_field=cfg.timestamps_start_field,
+            api_key=args.api_key, model=args.assemblyai_model, audio_field=cfg.audio_field,
+            speakers_field=cfg.speakers_field, timestamps_start_field=cfg.timestamps_start_field,
             timestamps_end_field=cfg.timestamps_end_field,
         )
         model_name = f"AssemblyAI ({args.assemblyai_model})"
     else:
         evaluator = DiarizationEvaluator(
-            audio_field=cfg.audio_field,
-            speakers_field=cfg.speakers_field,
-            timestamps_start_field=cfg.timestamps_start_field,
-            timestamps_end_field=cfg.timestamps_end_field,
-            hf_token=os.environ.get("HF_TOKEN"),
-            num_speakers=args.num_speakers,
-            min_speakers=args.min_speakers,
-            max_speakers=args.max_speakers,
+            audio_field=cfg.audio_field, speakers_field=cfg.speakers_field,
+            timestamps_start_field=cfg.timestamps_start_field, timestamps_end_field=cfg.timestamps_end_field,
+            hf_token=os.environ.get("HF_TOKEN"), num_speakers=args.num_speakers,
+            min_speakers=args.min_speakers, max_speakers=args.max_speakers,
         )
         model_name = "pyannote/speaker-diarization-3.1"
 
@@ -1485,7 +1264,6 @@ def run_diarization_eval(args):
 
 def run_alignment_eval(args):
     """Run timestamp alignment evaluation."""
-    # Determine model name
     if args.assemblyai:
         if not args.api_key:
             raise ValueError("AssemblyAI API key required (--api-key or ASSEMBLYAI_API_KEY env var)")
@@ -1495,49 +1273,34 @@ def run_alignment_eval(args):
     else:
         raise ValueError("Model argument required for alignment evaluation (or use --assemblyai)")
 
-    # Set default dataset for alignment if not specified
     if args.dataset is None:
         args.dataset = "librispeech-alignments"
 
-    # Validate alignment dataset choice
-    if args.dataset not in ALIGNMENT_DATASET_REGISTRY:
-        raise ValueError(
-            f"Unknown alignment dataset: {args.dataset}. "
-            f"Available: {list(ALIGNMENT_DATASET_REGISTRY.keys())}"
-        )
+    if args.dataset not in ALIGNMENT_DATASETS:
+        raise ValueError(f"Unknown alignment dataset: {args.dataset}. Available: {ALIGNMENT_DATASETS}")
 
-    cfg = ALIGNMENT_DATASET_REGISTRY[args.dataset]
+    cfg = DATASET_REGISTRY[args.dataset]
     split = args.split if args.split != "test" else cfg.default_split
 
-    # Output directory
     if args.output_dir is None:
         safe_name = model_name.replace("/", "_").replace(":", "_").replace(" ", "_")
         args.output_dir = Path(f"outputs/alignment_eval_{args.dataset}_{safe_name}")
 
-    # Load dataset
-    dataset = load_alignment_dataset(args.dataset, split, args.config)
-    config_name = args.config or cfg.config
-    dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
+    dataset = load_eval_dataset(args.dataset, split, args.config)
+    dataset_desc = f"{cfg.path} (config: {args.config or cfg.config}, split: {split})"
 
     if args.max_samples:
         dataset = dataset.take(args.max_samples)
 
-    # Create evaluator
     if args.assemblyai:
         evaluator = AssemblyAIAlignmentEvaluator(
-            api_key=args.api_key,
-            model=args.assemblyai_model,
-            audio_field=cfg.audio_field,
-            text_field=cfg.text_field,
-            words_field=cfg.words_field,
+            api_key=args.api_key, model=args.assemblyai_model, audio_field=cfg.audio_field,
+            text_field=cfg.text_field, words_field=cfg.words_field,
         )
     else:
         evaluator = TimestampAlignmentEvaluator(
-            model_path=model_name,
-            audio_field=cfg.audio_field,
-            text_field=cfg.text_field,
-            words_field=cfg.words_field,
-            user_prompt=args.user_prompt,
+            model_path=model_name, audio_field=cfg.audio_field, text_field=cfg.text_field,
+            words_field=cfg.words_field, user_prompt=args.user_prompt,
         )
 
     # Run evaluation
@@ -1645,7 +1408,7 @@ def main():
         cfg = DATASET_REGISTRY[args.dataset]
         # Use dataset's default_split if user didn't override
         split = args.split if args.split != "test" else cfg.default_split
-        dataset = load_single_dataset(args.dataset, split, args.config)
+        dataset = load_eval_dataset(args.dataset, split, args.config)
         audio_field, text_field = cfg.audio_field, cfg.text_field
         config_name = args.config or cfg.config
         dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
