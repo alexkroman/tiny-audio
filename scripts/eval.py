@@ -398,10 +398,17 @@ class LocalEvaluator(Evaluator):
         super().__init__(**kwargs)
         from transformers import pipeline
 
-        # Load using pipeline with trust_remote_code to use Hub's custom pipeline class
+        from src.asr_modeling import ASRModel
+
+        # Load model first to get its feature_extractor
+        model = ASRModel.from_pretrained(model_path, trust_remote_code=True)
+
+        # Load using pipeline with explicit feature_extractor from model
         self.pipe = pipeline(
             "automatic-speech-recognition",
-            model=model_path,
+            model=model,
+            feature_extractor=model.feature_extractor,
+            tokenizer=model.tokenizer,
             trust_remote_code=True,
         )
         self.user_prompt = user_prompt

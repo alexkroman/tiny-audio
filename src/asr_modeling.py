@@ -85,7 +85,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 from peft import PeftModel
 
                 # Get adapter directory (parent of adapter_config.json)
-                adapter_path = Path(adapter_config).parent
+                adapter_path = str(Path(adapter_config).parent)
                 model.language_model = PeftModel.from_pretrained(
                     model.language_model, adapter_path, is_trainable=False
                 )
@@ -186,7 +186,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         decoder_kwargs = {
             "attn_implementation": config.attn_implementation,
             "trust_remote_code": True,
-            "tie_word_embeddings": True,
+            "tie_word_embeddings": False,
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
