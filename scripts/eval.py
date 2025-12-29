@@ -1140,7 +1140,10 @@ def run_all_datasets(args, model_name: str):
     print(f"Model: {model_name}")
     print(f"{'=' * 60}\n")
 
-    for dataset_name, cfg in DATASET_REGISTRY.items():
+    # Skip diarization and alignment datasets (they require special evaluation modes)
+    asr_datasets = {k: v for k, v in DATASET_REGISTRY.items() if k not in DIARIZATION_DATASETS and k not in ALIGNMENT_DATASETS}
+
+    for dataset_name, cfg in asr_datasets.items():
         print(f"\n{'=' * 60}")
         print(f"Evaluating: {dataset_name}")
         print(f"{'=' * 60}\n")
