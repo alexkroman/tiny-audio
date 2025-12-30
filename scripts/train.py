@@ -363,30 +363,44 @@ def main(cfg: DictConfig) -> None:
 
     # Apply LoRA if configured
     if cfg.model.get("use_lora"):
-        # OmegaConf.to_container converts ListConfig to native Python list
-        target_modules = OmegaConf.to_container(cfg.model.get("lora_target_modules", "all-linear"))
-
-        lora_config = LoraConfig(
-            r=cfg.model.get("lora_r", 64),
-            lora_alpha=cfg.model.get("lora_alpha", 32),
-            lora_dropout=cfg.model.get("lora_dropout", 0.0),
-            target_modules=target_modules,
-            bias="none",
-            task_type="CAUSAL_LM",
+        # Check if model already has PEFT adapters (e.g., from pretrained checkpoint)
+        has_peft = isinstance(model.language_model, PeftModel) or hasattr(
+            model.language_model, "peft_config"
         )
-
-        # Check for existing adapter in output_dir
-        output_dir = Path(cfg.training.get("output_dir", "./outputs"))
-        adapter_config = output_dir / "adapter_config.json"
-
-        if adapter_config.exists():
-            print(f"Loading existing LoRA adapter from {output_dir}")
-            model.language_model = PeftModel.from_pretrained(
-                model.language_model, str(output_dir), is_trainable=True
-            )
+        if has_peft:
+            print("Model already has LoRA adapters from pretrained checkpoint")
+            # Ensure adapters are trainable
+            for param in model.language_model.parameters():
+                if param.requires_grad:
+                    break
+            else:
+                # No trainable params found, enable training
+                model.language_model.train()
         else:
-            print("Applying new LoRA adapter to language model")
-            model.language_model = get_peft_model(model.language_model, lora_config)
+            # OmegaConf.to_container converts ListConfig to native Python list
+            target_modules = OmegaConf.to_container(cfg.model.get("lora_target_modules", "all-linear"))
+
+            lora_config = LoraConfig(
+                r=cfg.model.get("lora_r", 64),
+                lora_alpha=cfg.model.get("lora_alpha", 32),
+                lora_dropout=cfg.model.get("lora_dropout", 0.0),
+                target_modules=target_modules,
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+
+            # Check for existing adapter in output_dir
+            output_dir = Path(cfg.training.get("output_dir", "./outputs"))
+            adapter_config = output_dir / "adapter_config.json"
+
+            if adapter_config.exists():
+                print(f"Loading existing LoRA adapter from {output_dir}")
+                model.language_model = PeftModel.from_pretrained(
+                    model.language_model, str(output_dir), is_trainable=True
+                )
+            else:
+                print("Applying new LoRA adapter to language model")
+                model.language_model = get_peft_model(model.language_model, lora_config)
 
         model.language_model.print_trainable_parameters()
 
