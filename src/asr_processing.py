@@ -26,14 +26,12 @@ class ASRProcessor(ProcessorMixin):
         feature_extractor,
         tokenizer,
         projector=None,
-        encoder_stride: int = 2,
         encoder_conv_layers: Optional[list] = None,
     ):
         self.feature_extractor = feature_extractor
         self.tokenizer = tokenizer
         self.audio_token_id = tokenizer.convert_tokens_to_ids(self.AUDIO_TOKEN)
         self.projector = projector
-        self.encoder_stride = encoder_stride  # Legacy, kept for compatibility
         self.encoder_conv_layers = encoder_conv_layers or self.DEFAULT_ENCODER_CONV_LAYERS
 
     def _compute_encoder_output_length(self, mel_length: int) -> int:

@@ -326,11 +326,11 @@ class TestProcessorIntegration:
         assert hasattr(processor, "feature_extractor")
         assert hasattr(processor, "tokenizer")
 
-    def test_get_processor_has_encoder_stride(self, model):
-        """Test that processor has encoder_stride attribute."""
+    def test_get_processor_has_encoder_conv_layers(self, model):
+        """Test that processor has encoder_conv_layers attribute."""
         processor = model.get_processor()
-        assert hasattr(processor, "encoder_stride")
-        assert processor.encoder_stride == model.encoder_stride
+        assert hasattr(processor, "encoder_conv_layers")
+        assert processor.encoder_conv_layers == model.config.encoder_conv_layers
 
 
 if __name__ == "__main__":
