@@ -31,8 +31,8 @@ training:
   hub_model_id: "mazesmazes/tiny-audio"
   weight_decay: 0.01
   warmup_steps: 1000
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
+  per_device_train_batch_size: 14
+  per_device_eval_batch_size: 14
   gradient_accumulation_steps: 2
   num_train_epochs: 1
   save_steps: 500
