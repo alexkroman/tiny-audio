@@ -40,7 +40,7 @@ class MLPAudioProjector(nn.Module):
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length."""
-        return (input_length + self.k - 1) // self.k
+        return input_length // self.k
 
     def forward(self, x):
         """
@@ -48,13 +48,9 @@ class MLPAudioProjector(nn.Module):
         Returns: [Batch, Seq_Len // k, llm_dim]
         """
         batch, seq, dim = x.shape
-        # Pad to multiple of k
-        chunk_num = (seq + self.k - 1) // self.k
-        pad_num = chunk_num * self.k - seq
-        if pad_num > 0:
-            x = F.pad(x, (0, 0, 0, pad_num))
-        # Frame stacking: [B, S, D] -> [B, S/k, D*k]
-        x = x.contiguous().view(batch, chunk_num, dim * self.k)
+        # Reshape to combine k frames: [B, S, D] -> [B, -1, D*k]
+        # -1 infers sequence length, implicitly downsampling by factor k
+        x = x.reshape(batch, -1, dim * self.k)
 
         x = self.linear_1(x)
         x = self.act(x)

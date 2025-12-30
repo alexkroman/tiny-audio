@@ -369,16 +369,26 @@ def main(cfg: DictConfig) -> None:
         )
         if has_peft:
             print("Model already has LoRA adapters from pretrained checkpoint")
-            # Ensure adapters are trainable
-            for param in model.language_model.parameters():
-                if param.requires_grad:
-                    break
+            # Enable training on LoRA parameters using PEFT's API
+            if isinstance(model.language_model, PeftModel):
+                # Get adapter name and set trainable
+                adapter_name = model.language_model.active_adapter
+                model.language_model.set_adapter(adapter_name)
+                for name, param in model.language_model.named_parameters():
+                    if "lora_" in name:
+                        param.requires_grad = True
             else:
-                # No trainable params found, enable training
-                model.language_model.train()
+                # Fallback for non-PeftModel with peft_config attribute
+                for name, param in model.language_model.named_parameters():
+                    if "lora_" in name:
+                        param.requires_grad = True
         else:
-            # OmegaConf.to_container converts ListConfig to native Python list
-            target_modules = OmegaConf.to_container(cfg.model.get("lora_target_modules", "all-linear"))
+            # Handle both string ("all-linear") and list configs
+            target_modules_cfg = cfg.model.get("lora_target_modules", "all-linear")
+            if isinstance(target_modules_cfg, str):
+                target_modules = target_modules_cfg
+            else:
+                target_modules = OmegaConf.to_container(target_modules_cfg)
 
             lora_config = LoraConfig(
                 r=cfg.model.get("lora_r", 64),
