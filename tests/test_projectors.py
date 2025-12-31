@@ -6,9 +6,9 @@ import torch
 from src.projectors import (
     PROJECTOR_CLASSES,
     MLPAudioProjector,
+    MoEAudioProjector,
     MOSAProjector,
     QFormerAudioProjector,
-    SharedMoEAudioProjector,
     SimpleAdapter,
     SwiGLUExpert,
     load_balancing_loss,
@@ -152,54 +152,20 @@ class TestMOSAProjector:
         assert out.shape == (2, 25, 512)
 
     def test_get_output_length(self, projector):
-        """Test output length calculation for stride-4."""
+        """Test output length calculation for stride-4 (floor division)."""
         assert projector.get_output_length(100) == 25
-        assert projector.get_output_length(101) == 26  # Padded to 104
+        assert projector.get_output_length(101) == 25  # Floor division
         assert projector.get_output_length(4) == 1
-        assert projector.get_output_length(5) == 2  # Padded to 8
-
-    def test_routing_weights_stored(self, projector):
-        """Test that router logits and weights are stored after forward."""
-        x = torch.randn(2, 100, 256)
-        _ = projector(x)
-        assert projector.last_router_logits is not None
-        assert projector.last_routing_weights is not None
-        # Shape should be (batch, seq//4, num_experts)
-        assert projector.last_routing_weights.shape == (2, 25, 4)
-
-    def test_routing_weights_sum_to_one(self, projector):
-        """Test that routing weights sum to 1 (softmax)."""
-        x = torch.randn(2, 100, 256)
-        _ = projector(x)
-        sums = projector.last_routing_weights.sum(dim=-1)
-        assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
-
-    def test_aux_loss(self, projector):
-        """Test auxiliary loss computation."""
-        x = torch.randn(2, 100, 256)
-        _ = projector(x)
-        aux_loss = projector.get_aux_loss()
-        assert aux_loss.numel() == 1
-        assert aux_loss >= 0
-
-    def test_aux_loss_zero_when_disabled(self, config):
-        """Test aux loss is zero when coefficients are zero."""
-        config.router_aux_loss_coef = 0.0
-        config.router_z_loss_coef = 0.0
-        projector = MOSAProjector(config)
-        x = torch.randn(2, 100, 256)
-        _ = projector(x)
-        aux_loss = projector.get_aux_loss()
-        assert aux_loss == 0.0
+        assert projector.get_output_length(5) == 1  # Floor division
 
 
 # =============================================================================
-# Shared MoE Projector Tests
+# MoE Projector Tests
 # =============================================================================
 
 
-class TestSharedMoEAudioProjector:
-    """Tests for SharedMoEAudioProjector."""
+class TestMoEAudioProjector:
+    """Tests for MoEAudioProjector."""
 
     @pytest.fixture
     def config(self):
@@ -216,7 +182,7 @@ class TestSharedMoEAudioProjector:
 
     @pytest.fixture
     def projector(self, config):
-        return SharedMoEAudioProjector(config)
+        return MoEAudioProjector(config)
 
     def test_forward_shape(self, projector):
         """Test that SharedMoE projector produces correct output shape."""
@@ -338,7 +304,7 @@ class TestProjectorRegistry:
 
     def test_all_projectors_registered(self):
         """Test that all projector types are in the registry."""
-        expected = {"mlp", "mosa", "shared_moe", "qformer"}
+        expected = {"mlp", "mosa", "moe", "qformer"}
         assert set(PROJECTOR_CLASSES.keys()) == expected
 
     def test_registry_instantiation(self):
@@ -358,7 +324,7 @@ class TestProjectorRegistry:
 class TestGradientFlow:
     """Tests for gradient flow through projectors."""
 
-    @pytest.mark.parametrize("projector_type", ["mlp", "mosa", "shared_moe"])
+    @pytest.mark.parametrize("projector_type", ["mlp", "mosa", "moe"])
     def test_gradients_flow(self, projector_type):
         """Test that gradients flow through projector."""
         config = MockConfig()

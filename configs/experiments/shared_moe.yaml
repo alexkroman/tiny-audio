@@ -1,8 +1,0 @@
-# @package _global_
-# Shared MoE projector
-
-model:
-  projector_type: shared_moe
-
-training:
-  hub_model_id: "mazesmazes/tiny-audio-moe-shared"

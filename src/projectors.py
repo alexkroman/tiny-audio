@@ -89,124 +89,71 @@ class SwiGLUExpert(nn.Module):
 
 
 class MOSAProjector(nn.Module):
+    """MOSA-Base projector: simple 2-layer router with 4 simple adapters.
+
+    Based on "MOSA: Mixtures of Simple Adapters" (arXiv:2508.18998).
+    Uses softmax gating over all experts (dense MoE) with only cross-entropy loss.
+    Uses frame-stacking for downsampling (like MLP projector).
+    """
+
     def __init__(self, config):
         super().__init__()
         self.encoder_dim = getattr(config, "encoder_dim", None) or 1280
         self.llm_dim = getattr(config, "llm_dim", None) or 2048
-        self.num_experts = getattr(config, "num_experts", None) or 8
+        self.k = getattr(config, "projector_pool_stride", 4)
+        self.num_experts = getattr(config, "num_experts", None) or 4  # MOSA-Base uses 4
         adapter_hidden = getattr(config, "adapter_hidden_dim", None) or 4096
 
-        # Auxiliary loss coefficients (MOSA paper uses only cross-entropy, no aux losses)
-        self.aux_loss_coef = getattr(config, "router_aux_loss_coef", 0.0)
-        self.z_loss_coef = getattr(config, "router_z_loss_coef", 0.0)
+        # Frame stacking: concat k adjacent frames then project
+        in_dim = self.encoder_dim * self.k
 
-        # Store router state for aux loss computation
-        self.last_router_logits = None
-        self.last_routing_weights = None
-
-        # --- 1. Pre-Norms (CRITICAL for stability) ---
-        self.in_norm = LlamaRMSNorm(self.encoder_dim, eps=1e-8)
-
-        # --- 2. Convolutional Subsampling (Stride 4) ---
-        self.conv = nn.Sequential(
-            nn.Conv1d(self.encoder_dim, self.llm_dim, kernel_size=3, stride=2, padding=1),
-            nn.SiLU(),
-            nn.Conv1d(self.llm_dim, self.llm_dim, kernel_size=3, stride=2, padding=1),
-            nn.SiLU(),
-        )
-
-        # --- 3. Deep Router (ReLU per MOSA paper) ---
+        # --- 1. Simple Router (MOSA-Base: 2 layers with ReLU) ---
+        # Maps encoder_dim -> 512 -> num_experts
+        router_hidden = getattr(config, "router_hidden_dim", None) or 512
         self.router = nn.Sequential(
-            nn.Linear(self.encoder_dim, 2560),
+            nn.Linear(self.encoder_dim, router_hidden),
             nn.ReLU(),
-            nn.Linear(2560, 5120),
-            nn.ReLU(),
-            nn.Linear(5120, 2560),
-            nn.ReLU(),
-            nn.Linear(2560, 1280),
-            nn.ReLU(),
-            nn.Linear(1280, self.num_experts),
+            nn.Linear(router_hidden, self.num_experts),
         )
 
-        # --- 4. Experts (Simple 2-layer ReLU adapters per MOSA paper) ---
+        # --- 2. Experts (Simple 2-layer ReLU adapters per MOSA paper) ---
+        # Each expert: in_dim (stacked frames) -> hidden -> llm_dim
         self.experts = nn.ModuleList(
             [
-                SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim)
+                SimpleAdapter(in_dim, adapter_hidden, self.llm_dim)
                 for _ in range(self.num_experts)
             ]
         )
 
-        # --- 5. Output Norm ---
-        # Projects often drift in magnitude; this clamps them before the LLM.
-        self.out_norm = LlamaRMSNorm(self.llm_dim, eps=1e-8)
-
         # Using PyTorch default initialization (like MOSA paper)
 
     def forward(self, x):
-        # x: (B, S, 1280)
-        batch_size, seq_len, _ = x.shape
+        # x: (B, S, encoder_dim)
+        batch_size, seq_len, dim = x.shape
 
-        # Apply Input Norm
-        x = self.in_norm(x)
+        # --- 1. Router Branch ---
+        # Mean pool encoder outputs for routing decisions
+        x_pooled = x.reshape(batch_size, -1, self.k, self.encoder_dim).mean(dim=2)  # (B, S//k, D)
 
-        # --- 1. Conv Branch ---
-        x_trans = x.permute(0, 2, 1)  # (B, D, S)
-        h_conv = self.conv(x_trans).permute(0, 2, 1)  # (B, S//4, llm_dim)
+        # Router logits and softmax gating (dense MoE)
+        routing_weights = F.softmax(self.router(x_pooled), dim=-1)  # (B, S//k, num_experts)
 
-        # --- 2. Router Branch ---
-        pad_amt = (4 - (seq_len % 4)) % 4
-        x_padded = F.pad(x, (0, 0, 0, pad_amt)) if pad_amt > 0 else x
-
-        # Mean pool to align receptive fields
-        x_pooled = x_padded.view(batch_size, -1, 4, self.encoder_dim).mean(dim=2)  # (B, S//4, D)
-
-        # Router Logits
-        router_logits = self.router(x_pooled)  # (B, S//4, num_experts)
-
-        # Softmax for Dense MoE (Soft Mixing)
-        routing_weights = F.softmax(router_logits, dim=-1)
-
-        # Store for aux loss computation
-        self.last_router_logits = router_logits
-        self.last_routing_weights = routing_weights
+        # --- 2. Frame stacking for experts ---
+        # Reshape to combine k frames: [B, S, D] -> [B, S//k, D*k]
+        x_stacked = x.reshape(batch_size, -1, dim * self.k)
 
         # --- 3. Expert Mixture (Dense Execution) ---
-        # Warning: High VRAM usage. Runs all experts.
-        # h_conv: (B, S//4, llm_dim)
-
-        # Stack approach is clean but memory hungry.
-        # Checkpointing could be added here if OOM occurs.
-        expert_outputs = torch.stack([expert(h_conv) for expert in self.experts])  # (E, B, S//4, D)
-
-        # Weighted Sum
-        # (Experts, Batch, Seq, Dim) * (Batch, Seq, Experts) -> (Batch, Seq, Dim)
-        final_out = torch.einsum("ebsd, bse -> bsd", expert_outputs, routing_weights)
-
-        return self.out_norm(final_out)
+        # Run all experts and compute weighted sum
+        expert_outputs = torch.stack([expert(x_stacked) for expert in self.experts])  # (E, B, S//k, D)
+        return torch.einsum("ebsd, bse -> bsd", expert_outputs, routing_weights)
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length."""
-        # Two conv layers with stride=2 each = stride 4 total
-        padded = input_length + (4 - input_length % 4) % 4
-        return padded // 4
-
-    def get_aux_loss(self) -> torch.Tensor:
-        """Compute auxiliary losses: load balancing + z-loss."""
-        if self.last_router_logits is None:
-            return torch.tensor(0.0, device=self.conv[0].weight.device)
-
-        # Flatten for loss computation: (B, S, E) -> (B*S, E)
-        logits_flat = self.last_router_logits.view(-1, self.num_experts)
-        probs_flat = self.last_routing_weights.view(-1, self.num_experts)
-
-        balance = load_balancing_loss(probs_flat, self.num_experts, top_k=self.num_experts)
-        z = z_loss(logits_flat)
-
-        return self.aux_loss_coef * balance + self.z_loss_coef * z
+        return input_length // self.k
 
 
 # =============================================================================
-# Shared MoE Projector
+# MoE Projector (Shared Expert + Sparse Routed Experts)
 # =============================================================================
 
 
@@ -232,9 +179,9 @@ class SharedMoEBlock(nn.Module):
         self.router = nn.Linear(input_dim, num_experts, bias=False)
         nn.init.normal_(self.router.weight, mean=0.0, std=0.02)
 
-        self.shared_expert = SwiGLUExpert(input_dim, hidden_dim, output_dim)
+        self.shared_expert = SimpleAdapter(input_dim, hidden_dim, output_dim)
         self.experts = nn.ModuleList(
-            [SwiGLUExpert(input_dim, hidden_dim, output_dim) for _ in range(num_experts)]
+            [SimpleAdapter(input_dim, hidden_dim, output_dim) for _ in range(num_experts)]
         )
 
         self.last_router_logits = None
@@ -307,8 +254,8 @@ def z_loss(router_logits: torch.Tensor) -> torch.Tensor:
     return torch.logsumexp(router_logits.float(), dim=-1).square().mean()
 
 
-class SharedMoEAudioProjector(nn.Module):
-    """Shared expert + sparse routed experts projector."""
+class MoEAudioProjector(nn.Module):
+    """MoE projector with shared expert + sparse routed experts."""
 
     def __init__(self, config):
         super().__init__()
@@ -335,14 +282,12 @@ class SharedMoEAudioProjector(nn.Module):
 
     def _init_weights(self):
         with torch.no_grad():
-            nn.init.orthogonal_(self.moe.shared_expert.gate_proj.weight)
-            nn.init.orthogonal_(self.moe.shared_expert.up_proj.weight)
-            nn.init.orthogonal_(self.moe.shared_expert.down_proj.weight, gain=0.5)
+            nn.init.orthogonal_(self.moe.shared_expert.fc1.weight)
+            nn.init.orthogonal_(self.moe.shared_expert.fc2.weight, gain=0.5)
 
             for expert in self.moe.experts:
-                nn.init.orthogonal_(expert.gate_proj.weight)
-                nn.init.orthogonal_(expert.up_proj.weight)
-                nn.init.orthogonal_(expert.down_proj.weight, gain=0.01)
+                nn.init.orthogonal_(expert.fc1.weight)
+                nn.init.orthogonal_(expert.fc2.weight, gain=0.01)
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length."""
@@ -354,7 +299,7 @@ class SharedMoEAudioProjector(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = x.size()
 
-        target_dtype = self.moe.shared_expert.gate_proj.weight.dtype
+        target_dtype = self.moe.shared_expert.fc1.weight.dtype
         if x.dtype != target_dtype:
             x = x.to(target_dtype)
 
@@ -503,6 +448,6 @@ class QFormerAudioProjector(nn.Module):
 PROJECTOR_CLASSES = {
     "mlp": MLPAudioProjector,
     "mosa": MOSAProjector,
-    "shared_moe": SharedMoEAudioProjector,
+    "moe": MoEAudioProjector,
     "qformer": QFormerAudioProjector,
 }
