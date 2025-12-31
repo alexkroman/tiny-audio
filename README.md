@@ -33,11 +33,11 @@ print(result["text"])
 
 ## 🎓 Learn by Building: A Free, Hands-On Course
 
-This repository is also a free, 6-hour course designed to teach you the art and science of building modern ASR systems. No black boxes. No magic. Just clean, understandable code and a clear path from raw audio to a deployed model.
+This repository is also a free, 3.5-hour course designed to teach you the art and science of building modern ASR systems. No black boxes. No magic. Just clean, understandable code and a clear path from raw audio to a deployed model.
 
 **[📚 Start the Course](docs/QUICKSTART.md)** | **[📖 See the Full Curriculum](docs/course/0-course-overview.md)**
 
-In just six hours, you will:
+In just 3.5 hours, you will:
 
 - **Understand the Architecture:** Go deep on the encoder-projector-decoder model that powers modern ASR.
 - **Master Efficient Training:** Learn how to train just the projector while leveraging frozen pretrained models.
@@ -117,9 +117,9 @@ RMSNorm → SmolLM3-3B embeddings (2048-dim)
 ```bash
 # Projector experiments (see configs/experiments/)
 poetry run python scripts/train.py +experiments=mlp       # MLP (default)
-poetry run python scripts/train.py +experiments=moe       # MoE
-poetry run python scripts/train.py +experiments=swiglu    # SwiGLU
-poetry run python scripts/train.py +experiments=residual  # Residual
+poetry run python scripts/train.py +experiments=mosa      # MOSA (dense MoE)
+poetry run python scripts/train.py +experiments=moe       # MoE (shared + sparse)
+poetry run python scripts/train.py +experiments=qformer   # QFormer
 
 # Override any config value
 poetry run python scripts/train.py training.learning_rate=1e-4
@@ -186,7 +186,7 @@ Tiny Audio is not a SOTA ASR model. It's a **minimal, readable, hackable codebas
 - **Projector-only training** keeps encoder and decoder frozen
 - **Dependency-lite**: PyTorch, transformers, datasets, and a few essentials
 - **No magic**: Read the code and understand exactly what's happening
-- **Multiple projector types**: MLP (default), MoE, SwiGLU, Residual
+- **Multiple projector types**: MLP (default), MOSA, MoE, QFormer
 
 ## Project structure
 

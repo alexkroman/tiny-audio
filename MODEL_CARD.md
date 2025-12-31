@@ -69,5 +69,5 @@ print(result["text"])
 ## Learn More
 
 - **[Train your own model](https://github.com/alexkroman/tiny-audio)** — The full codebase with training scripts
-- **[Free 3-hour course](https://github.com/alexkroman/tiny-audio/blob/main/docs/course/0-course-overview.md)** — Build your own ASR system from scratch
+- **[Free 3.5-hour course](https://github.com/alexkroman/tiny-audio/blob/main/docs/course/0-course-overview.md)** — Build your own ASR system from scratch
 - **[Submit to leaderboard](https://github.com/alexkroman/tiny-audio#leaderboard)** — Share your trained model

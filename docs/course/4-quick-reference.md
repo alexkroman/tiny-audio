@@ -50,7 +50,7 @@ poetry run python scripts/train.py +experiments=mlp
 
 # Train with different projector
 poetry run python scripts/train.py +experiments=mosa
-poetry run python scripts/train.py +experiments=shared_moe
+poetry run python scripts/train.py +experiments=moe
 poetry run python scripts/train.py +experiments=qformer
 
 # Override config values
@@ -62,18 +62,13 @@ poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpo
 
 ______________________________________________________________________
 
-## Architecture Overview
+## Architecture
 
 ```
 Audio → Whisper Encoder (frozen) → Projector (trained) → SmolLM3 (frozen) → Text
-         ~809M params              ~12M params            ~3B params
 ```
 
-| Component | Purpose | Trainable |
-|-----------|---------|-----------|
-| Encoder (Whisper) | Extracts audio features | No |
-| Projector | Bridges audio→text space | **Yes** |
-| Decoder (SmolLM3) | Generates text | No |
+Only the projector (~12M params) is trained. See [README](../../README.md#how-it-works-the-tiny-audio-architecture) for details.
 
 ______________________________________________________________________
 
@@ -83,7 +78,7 @@ ______________________________________________________________________
 |------|-------------|----------|
 | `mlp` | 2-layer MLP with frame stacking | Default, fast training |
 | `mosa` | Dense mixture of experts | Better accuracy, more VRAM |
-| `shared_moe` | Shared + sparse routed experts | Balance of speed and accuracy |
+| `moe` | Shared + sparse routed experts | Balance of speed and accuracy |
 | `qformer` | QFormer with learnable queries | Advanced, BLIP-2 style |
 
 ______________________________________________________________________
@@ -121,17 +116,6 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-## WER Interpretation
-
-| WER | Quality |
-|-----|---------|
-| < 5% | Excellent (commercial) |
-| 5-10% | Very good |
-| 10-20% | Good (course target) |
-| > 30% | Poor |
-
-______________________________________________________________________
-
 ## Config File Structure
 
 ```
@@ -144,7 +128,7 @@ configs/
 └── experiments/         # Projector presets
     ├── mlp.yaml
     ├── mosa.yaml
-    ├── shared_moe.yaml
+    ├── moe.yaml
     └── qformer.yaml
 ```
 

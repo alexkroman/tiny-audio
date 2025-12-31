@@ -81,6 +81,9 @@ ______________________________________________________________________
 **Attention**
 A mechanism that lets models focus on relevant parts of the input. Used in both encoder and decoder.
 
+**LoRA (Low-Rank Adaptation)**
+A parameter-efficient fine-tuning technique that adds small trainable matrices to frozen model layers. Used in `mosa` and `moe` configs to lightly fine-tune the language model.
+
 **MLP (Multi-Layer Perceptron)**
 A simple neural network with stacked linear layers and activation functions.
 
@@ -126,10 +129,10 @@ ______________________________________________________________________
 The simplest projector: frame stacking followed by two linear layers. Fast to train, good baseline.
 
 **MOSA Projector**
-Dense mixture of experts with convolutional downsampling. All experts contribute to every prediction.
+Dense mixture of experts with frame stacking. All experts contribute to every prediction via softmax routing. The `mosa` config uses GLM-ASR encoder, Qwen decoder, and LoRA.
 
-**Shared MoE Projector**
-A shared expert plus sparse routed experts. Balance between MLP simplicity and MoE capacity.
+**MoE Projector**
+A shared expert plus sparse routed experts (top-k). Balance between MLP simplicity and MoE capacity. The `moe` config uses GLM-ASR encoder, Qwen decoder, and LoRA.
 
 **QFormer Projector**
 Uses learnable query tokens and cross-attention to compress audio sequences. Based on BLIP-2.

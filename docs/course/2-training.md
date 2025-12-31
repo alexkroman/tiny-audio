@@ -233,23 +233,23 @@ training:
 #   learning_rate: 1e-3    # How aggressive updates are
 ```
 
-**Key hyperparameters:**
+**Key hyperparameters** (see [Quick Reference](./4-quick-reference.md#key-hyperparameters) for full list):
 
-| Parameter | Default | Effect |
-|-----------|---------|--------|
-| `max_steps` | 15,000 | Training duration (5,000 is enough to test) |
-| `per_device_train_batch_size` | 14 | Samples per step (higher = faster, more VRAM) |
-| `learning_rate` | 1e-3 | Update aggressiveness |
-| `projector_type` | mlp | Projector architecture (see below) |
+- `max_steps`: Training duration (default 15,000; 5,000 is enough to test)
+- `per_device_train_batch_size`: Samples per step (default 14)
+- `learning_rate`: Update aggressiveness (default 1e-3)
+- `projector_type`: Projector architecture (see below)
 
 **Projector architectures:**
 
 | Type | Description | VRAM | Training Speed |
 |------|-------------|------|----------------|
 | `mlp` | 2-layer MLP with frame stacking (4x downsampling) | Low | Fast |
-| `mosa` | Dense MoE with 8 experts, all contribute to each prediction | High | Slow |
-| `shared_moe` | Shared expert + 4 sparse routed experts (top-2) | Medium | Medium |
+| `mosa` | Dense MoE with 4 experts, all contribute to each prediction | High | Slow |
+| `moe` | Shared expert + sparse routed experts (top-k) | Medium | Medium |
 | `qformer` | QFormer with learnable queries, BLIP-2 style | Medium | Medium |
+
+**Note:** The `mosa` and `moe` configs use different base models (GLM-ASR encoder, Qwen decoder) and include LoRA fine-tuning of the decoder. See `configs/experiments/` for details.
 
 **Recommendation**: Start with `mlp` for your first run. It's the fastest to train and produces good results. Try other architectures after you have a working baseline.
 
@@ -413,7 +413,7 @@ Once you have a working pipeline:
 
 **Easy wins:**
 
-- Try different projector types (MLP, MOSA, SharedMoE, QFormer)
+- Try different projector types (MLP, MOSA, MoE, QFormer)
 - Adjust learning rate and batch size
 
 **Interesting experiments:**

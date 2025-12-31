@@ -280,7 +280,7 @@ You've completed the course! You now have:
 
 **Improve your model:**
 
-- Try different projector types (MLP, MOSA, SharedMoE, QFormer)
+- Try different projector types (MLP, MOSA, MoE, QFormer)
 - Use a larger decoder
 - Train on more diverse data
 

@@ -26,7 +26,7 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_pool_stride: int = 4,
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
-        projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe", "mlp", "qformer"
+        projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
         projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.0,  # Dropout rate for projector layers
         # MoE-specific configuration
