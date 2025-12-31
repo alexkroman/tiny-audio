@@ -125,8 +125,6 @@ class MOSAProjector(nn.Module):
             ]
         )
 
-        # Using PyTorch default initialization (like MOSA paper)
-
     def forward(self, x):
         # x: (B, S, encoder_dim)
         batch_size, seq_len, dim = x.shape
