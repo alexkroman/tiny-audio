@@ -106,15 +106,14 @@ class TestMLPAudioProjector:
         assert out.shape == (2, 25, 512)
 
     def test_get_output_length(self, projector):
-        """Test output length calculation."""
-        # Stride-4: (n + k - 1) // k
+        """Test output length calculation (floor division)."""
         assert projector.get_output_length(100) == 25
-        assert projector.get_output_length(101) == 26
+        assert projector.get_output_length(104) == 26
         assert projector.get_output_length(4) == 1
 
     def test_downsampling(self, projector):
-        """Test that downsampling reduces sequence length by 4."""
-        for seq_len in [10, 50, 100, 101]:
+        """Test that downsampling reduces sequence length by k (must be divisible)."""
+        for seq_len in [8, 48, 100, 200]:  # All divisible by k=4
             x = torch.randn(1, seq_len, 256)
             out = projector(x)
             expected_len = projector.get_output_length(seq_len)

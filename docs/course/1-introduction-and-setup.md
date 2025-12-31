@@ -529,8 +529,8 @@ ______________________________________________________________________
 If you're stuck:
 
 1. Check the [GitHub Issues](https://github.com/alexkroman/tiny-audio/issues)
-2. Search for your error message
-3. Open a new issue with:
+1. Search for your error message
+1. Open a new issue with:
    - Your OS and Python version
    - The full error traceback
    - What you were trying to do

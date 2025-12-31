@@ -22,7 +22,7 @@ A model whose weights don't update during training. We freeze the encoder and de
 The direction and magnitude of change needed to reduce the loss. Computed via backpropagation.
 
 **Gradient Norm**
-The size of all gradients combined. High values (>100) indicate instability; low values (<10) indicate stable training.
+The size of all gradients combined. High values (>100) indicate instability; low values (\<10) indicate stable training.
 
 **Inference**
 Using a trained model to make predictions, as opposed to training it.

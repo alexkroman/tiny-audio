@@ -119,10 +119,7 @@ class MOSAProjector(nn.Module):
         # --- 2. Experts (Simple 2-layer ReLU adapters per MOSA paper) ---
         # Each expert: in_dim (stacked frames) -> hidden -> llm_dim
         self.experts = nn.ModuleList(
-            [
-                SimpleAdapter(in_dim, adapter_hidden, self.llm_dim)
-                for _ in range(self.num_experts)
-            ]
+            [SimpleAdapter(in_dim, adapter_hidden, self.llm_dim) for _ in range(self.num_experts)]
         )
 
     def forward(self, x):
@@ -142,7 +139,9 @@ class MOSAProjector(nn.Module):
 
         # --- 3. Expert Mixture (Dense Execution) ---
         # Run all experts and compute weighted sum
-        expert_outputs = torch.stack([expert(x_stacked) for expert in self.experts])  # (E, B, S//k, D)
+        expert_outputs = torch.stack(
+            [expert(x_stacked) for expert in self.experts]
+        )  # (E, B, S//k, D)
         return torch.einsum("ebsd, bse -> bsd", expert_outputs, routing_weights)
 
     def get_output_length(self, input_length: int) -> int:
