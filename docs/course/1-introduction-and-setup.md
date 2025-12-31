@@ -430,7 +430,20 @@ poetry run python docs/course/examples/trace_data.py
 
 **Step 3: Open the output**
 
-Open `data_trace.html` in your browser. You'll see:
+The script saves the visualization to `docs/course/examples/data_trace.html`. Open it in your browser:
+
+```bash
+# macOS
+open docs/course/examples/data_trace.html
+
+# Linux
+xdg-open docs/course/examples/data_trace.html
+
+# Windows
+start docs/course/examples/data_trace.html
+```
+
+You'll see:
 
 **1. Waveform**
 
@@ -479,6 +492,48 @@ Re-run the visualization to see differences.
 - [ ] Generated visualization HTML
 - [ ] Understand each stage (waveform → spectrogram → encoder → projector)
 - [ ] Can identify what the projector does
+
+______________________________________________________________________
+
+## Troubleshooting
+
+### Installation Issues
+
+| Problem | Solution |
+|---------|----------|
+| `poetry install` hangs | Try `poetry install -vvv` for verbose output |
+| SSL certificate errors | Run `poetry config certificates.default.cert false` |
+| Python version mismatch | Install Python 3.10+ with `pyenv` or `brew install python@3.11` |
+| `torch` installation fails | Visit [pytorch.org](https://pytorch.org) for platform-specific instructions |
+| Apple Silicon issues | Ensure you're using native ARM Python, not Rosetta |
+
+### Runtime Issues
+
+| Problem | Solution |
+|---------|----------|
+| "CUDA out of memory" | Reduce batch size or use CPU for inference |
+| Model download fails | Check HF_TOKEN is set; try `huggingface-cli login` |
+| Demo won't start | Check if port 7860 is in use; try `--port 7861` |
+| Slow inference on Mac | Expected—MPS is slower than CUDA. Use CPU: `--device cpu` |
+| Import errors | Run `poetry install` again; check Python version |
+
+### Common Warnings (Safe to Ignore)
+
+- `matplotlib` or `librosa` warnings during install
+- `FutureWarning` from transformers
+- `UserWarning: TypedStorage is deprecated`
+- Flash Attention warnings on non-CUDA systems
+
+### Getting Help
+
+If you're stuck:
+
+1. Check the [GitHub Issues](https://github.com/alexkroman/tiny-audio/issues)
+2. Search for your error message
+3. Open a new issue with:
+   - Your OS and Python version
+   - The full error traceback
+   - What you were trying to do
 
 ______________________________________________________________________
 

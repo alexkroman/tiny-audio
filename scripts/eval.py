@@ -297,8 +297,8 @@ class Evaluator:
             self.results.append(result)
 
             print(f"Sample {processed}: WER={sample_wer:.1f}%, Time={inference_time:.2f}s")
-            print(f"  Ref:  {reference}")
-            print(f"  Pred: {prediction}")
+            print(f"  Ref:  {norm_ref}")
+            print(f"  Pred: {norm_pred}")
 
             # Checkpoint every 100 samples
             if processed % 100 == 0:

@@ -9,7 +9,7 @@ model:
   audio_model_id: openai/whisper-large-v3-turbo
   text_model_id: HuggingFaceTB/SmolLM3-3B
   system_prompt: "/no_think /system_override"
-  projector_type: mlp  # Options: mlp, moe, swiglu, residual, shared_moe
+  projector_type: mlp  # Options: mlp, mosa, shared_moe, qformer
 
   # Projector settings
   projector_pool_stride: 4
