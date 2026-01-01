@@ -22,12 +22,10 @@ class ASRConfig(transformers.PretrainedConfig):
         # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
         encoder_conv_layers: Optional[list] = None,
         audio_sample_rate: int = 16000,
-        projector_init_std: float = 0.02,
         projector_pool_stride: int = 4,
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
         projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
-        projector_num_layers: int = 2,  # Number of layers (for residual projector)
         projector_dropout: float = 0.0,  # Dropout rate for projector layers
         # MoE-specific configuration
         num_experts: int = 4,  # Number of experts in MoE projectors
@@ -72,12 +70,10 @@ class ASRConfig(transformers.PretrainedConfig):
         # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
         self.encoder_conv_layers = encoder_conv_layers or [(1, 3, 1), (1, 3, 2)]
         self.audio_sample_rate = audio_sample_rate
-        self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
         self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
-        self.projector_num_layers = projector_num_layers
         self.projector_dropout = projector_dropout
         # MoE-specific configuration
         self.num_experts = num_experts

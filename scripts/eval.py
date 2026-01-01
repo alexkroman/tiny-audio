@@ -334,6 +334,10 @@ class Evaluator:
             if isinstance(reference, str) and reference.strip() == "ignore_time_segment_in_scoring":
                 continue
 
+            # Skip samples marked as inaudible
+            if isinstance(reference, str) and "inaudible" in reference.lower():
+                continue
+
             processed += 1
             if max_samples and processed > max_samples:
                 break
@@ -402,6 +406,13 @@ class LocalEvaluator(Evaluator):
         model = ASRModel.from_pretrained(model_path)
         self.pipe = ASRPipeline(model=model)
         self.user_prompt = user_prompt
+
+        # Print generation config
+        gen_config = model.generation_config
+        print(f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
+              f"repetition_penalty={gen_config.repetition_penalty}, "
+              f"length_penalty={gen_config.length_penalty}, "
+              f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}")
 
     def transcribe(self, audio) -> tuple[str, float]:
         # Convert to pipeline-compatible format
@@ -877,11 +888,16 @@ class BaseAlignmentEvaluator:
         processed = 0
 
         for sample in dataset:
+            ref_text = sample[self.text_field]
+
+            # Skip samples marked as inaudible
+            if isinstance(ref_text, str) and "inaudible" in ref_text.lower():
+                continue
+
             processed += 1
             if max_samples and processed > max_samples:
                 break
 
-            ref_text = sample[self.text_field]
             ref_words = sample[self.words_field]
 
             try:
@@ -1041,6 +1057,13 @@ class TimestampAlignmentEvaluator(BaseAlignmentEvaluator):
 
         model = ASRModel.from_pretrained(model_path)
         self.pipe = ASRPipeline(model=model)
+
+        # Print generation config
+        gen_config = model.generation_config
+        print(f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
+              f"repetition_penalty={gen_config.repetition_penalty}, "
+              f"length_penalty={gen_config.length_penalty}, "
+              f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}")
 
     def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
         """Transcribe audio and return (text, word_timestamps, inference_time)."""

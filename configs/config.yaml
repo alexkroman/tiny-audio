@@ -13,10 +13,7 @@ model:
 
   # Projector settings
   projector_pool_stride: 4
-  projector_num_layers: 2
   projector_hidden_dim: null
-  projector_init_std: 0.02
-  projector_input_noise: 0.0
 
   # MoE settings (for moe/mosa projector types)
   num_experts: 4

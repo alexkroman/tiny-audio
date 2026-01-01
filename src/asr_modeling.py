@@ -568,6 +568,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Copy projectors module
         shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
 
+    def create_or_update_model_card(self, output_dir: Union[str, Path]):
+        """No-op for model card creation - we use MODEL_CARD.md in repo instead."""
+        pass
+
 
 # Register with transformers Auto classes
 AutoConfig.register("asr_model", ASRConfig)
