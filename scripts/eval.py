@@ -452,15 +452,13 @@ class LocalStreamingEvaluator(Evaluator):
             import librosa
             audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
 
-        # Process audio
+        # Process audio (ASRProcessor handles sampling_rate internally)
         inputs = self.processor(
             audio_array,
-            sampling_rate=16000,
             return_tensors="pt",
-            return_attention_mask=True,
         )
-        input_features = inputs.input_features.to(self.model.device)
-        audio_attention_mask = inputs.attention_mask.to(self.model.device)
+        input_features = inputs["input_features"].to(device=self.model.device, dtype=self.model.dtype)
+        audio_attention_mask = inputs["audio_attention_mask"].to(self.model.device)
 
         # Set up streamer to capture first token time
         streamer = TextIteratorStreamer(

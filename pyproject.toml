@@ -92,8 +92,16 @@ pyannote-audio = ">=3.1.0"
 nltk = "*"
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 fabric = ">=3.0.0"
+pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
+
+[tool.poetry.extras]
+local = ["pyaudio"]
+
+[tool.poetry.group.local]
+optional = true
+
+[tool.poetry.group.local.dependencies]
 pyaudio = "^0.2.14"
-pipecat-ai = {extras = ["local", "openai", "silero"], version = "^0.0.98"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"

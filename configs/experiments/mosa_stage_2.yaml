@@ -1,9 +1,6 @@
 # @package _global_
 # MOSA Stage 2: Continue training from mazesmazes/tiny-audio on combined dataset
 
-defaults:
-  - override /data: combined
-
 model:
   pretrained_model_path: mazesmazes/tiny-audio
   projector_type: mosa
@@ -24,11 +21,11 @@ training:
   output_dir: outputs/mosa_stage_2
   hub_model_id: "mazesmazes/tiny-audio"
   weight_decay: 0.01
-  warmup_steps: 500
+  warmup_steps: 100
   learning_rate: 1e-5  # Lower LR for stage 2
   per_device_train_batch_size: 14
   per_device_eval_batch_size: 14
   gradient_accumulation_steps: 2
-  max_steps: 20000
+  num_train_epochs: 1
   save_steps: 500
-  eval_steps: 1000
+  eval_steps: 500

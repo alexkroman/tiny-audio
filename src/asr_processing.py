@@ -94,14 +94,21 @@ class ASRProcessor(ProcessorMixin):
             messages.append({"role": "assistant", "content": text})
 
         # Tokenize
-        input_ids = self.tokenizer.apply_chat_template(
+        tokenized = self.tokenizer.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=(text is None),
             return_tensors=return_tensors,
         )
 
-        if isinstance(input_ids, torch.Tensor) and input_ids.dim() == 1:
+        # Handle both tensor and BatchEncoding returns
+        if isinstance(tokenized, torch.Tensor):
+            input_ids = tokenized
+        else:
+            # BatchEncoding or dict-like object
+            input_ids = tokenized["input_ids"] if "input_ids" in tokenized else tokenized.input_ids
+
+        if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
 
         result["input_ids"] = input_ids
