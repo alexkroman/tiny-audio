@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
-from typing import Optional, Union
+from threading import Thread
+from typing import Iterator, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
+    TextIteratorStreamer,
 )
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -515,6 +517,120 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if isinstance(output, torch.Tensor):
             return output
         return output.sequences
+
+    def generate_streaming(
+        self,
+        input_features: torch.Tensor,
+        audio_attention_mask: torch.Tensor,
+        system_prompt: Optional[str] = None,
+        **generate_kwargs,
+    ) -> Iterator[str]:
+        """Generate transcription with streaming token output.
+
+        Yields partial transcript strings as tokens are generated.
+        Reduces time-to-first-word by streaming tokens as they're decoded.
+
+        Args:
+            input_features: Mel spectrogram features (batch, n_mels, mel_len)
+            audio_attention_mask: Mask for real vs padded mel frames (batch, mel_len)
+            system_prompt: Optional system prompt override
+            **generate_kwargs: Additional generation arguments
+
+        Yields:
+            Partial transcript text as each token is generated
+        """
+        device = input_features.device
+        batch_size = input_features.shape[0]
+
+        # Encode audio -> flattened embeddings
+        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+
+        # Build prompt with correct number of audio tokens
+        num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
+        audio_placeholder = "<audio>" * num_audio_tokens
+
+        system_prompt = system_prompt or self.system_prompt
+
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": self.TRANSCRIBE_PROMPT + audio_placeholder})
+
+        chat_result = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+        )
+        input_ids = chat_result.input_ids.to(device)
+
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if input_ids.shape[0] == 1 and batch_size > 1:
+            input_ids = input_ids.expand(batch_size, -1)
+
+        attention_mask = torch.ones_like(input_ids)
+
+        # Get text embeddings and replace audio tokens with audio embeddings
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
+        inputs_embeds = inputs_embeds.masked_scatter(
+            audio_token_mask.to(inputs_embeds.device),
+            audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
+        )
+
+        # Setup streamer for token-by-token output
+        streamer = TextIteratorStreamer(
+            self.tokenizer,
+            skip_prompt=True,
+            skip_special_tokens=True,
+        )
+
+        # Prepare generation kwargs
+        gen_kwargs = {
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "generation_config": self.generation_config,
+            "streamer": streamer,
+            **generate_kwargs,
+        }
+
+        # Run generation in background thread
+        thread = Thread(target=self.language_model.generate, kwargs=gen_kwargs)
+        thread.start()
+
+        # Yield tokens as they're generated, filtering out <think>...</think> blocks
+        # SmolLM3 always starts in thinking mode, so assume we're in a think block
+        in_think_block = True
+        buffer = ""
+
+        for text in streamer:
+            buffer += text
+
+            # Check for think block start (in case model outputs multiple think blocks)
+            while "<think>" in buffer:
+                in_think_block = True
+                # Yield any text before <think>
+                before_think = buffer.split("<think>")[0]
+                if before_think:
+                    yield before_think
+                buffer = buffer.split("<think>", 1)[-1]
+
+            # Check for think block end
+            while in_think_block and "</think>" in buffer:
+                in_think_block = False
+                buffer = buffer.split("</think>", 1)[-1]
+
+            # Yield text if not in think block
+            if not in_think_block and buffer:
+                yield buffer
+                buffer = ""
+
+        # Yield any remaining buffer
+        if buffer and not in_think_block:
+            yield buffer
+
+        thread.join()
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
         """Save model, tokenizer, and processor."""

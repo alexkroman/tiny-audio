@@ -459,6 +459,97 @@ class AssemblyAIEvaluator(Evaluator):
         return transcript.text or "", elapsed
 
 
+class AssemblyAIStreamingEvaluator(Evaluator):
+    """Evaluator for AssemblyAI Streaming API (Universal-Streaming model)."""
+
+    def __init__(self, api_key: str, **kwargs):
+        super().__init__(**kwargs)
+        self.api_key = api_key
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        import threading
+
+        from assemblyai.streaming.v3 import (
+            StreamingClient,
+            StreamingClientOptions,
+            StreamingEvents,
+            StreamingParameters,
+        )
+
+        # Convert audio to raw PCM bytes (16kHz, 16-bit mono)
+        if isinstance(audio, dict) and "array" in audio:
+            audio_array = audio["array"]
+            sample_rate = audio.get("sampling_rate", 16000)
+        else:
+            wav_bytes = prepare_wav_bytes(audio)
+            audio_array, sample_rate = sf.read(io.BytesIO(wav_bytes))
+
+        # Resample to 16kHz if needed
+        if sample_rate != 16000:
+            import librosa
+            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
+
+        # Convert to 16-bit PCM bytes
+        if isinstance(audio_array, np.ndarray):
+            if audio_array.dtype != np.float32:
+                audio_array = audio_array.astype(np.float32)
+            if np.abs(audio_array).max() > 1.0:
+                audio_array = audio_array / np.abs(audio_array).max()
+            pcm_data = (audio_array * 32767).astype(np.int16).tobytes()
+        else:
+            pcm_data = audio_array
+
+        # State for this transcription
+        transcripts = {}
+        error_occurred = [None]
+        session_done = threading.Event()
+
+        def on_turn(client, event):
+            if event.transcript and event.end_of_turn and event.turn_is_formatted:
+                transcripts[event.turn_order] = event.transcript
+
+        def on_error(client, error):
+            error_occurred[0] = error
+            session_done.set()
+
+        def on_terminated(client, event):
+            session_done.set()
+
+        # Create new session for each sample
+        client = StreamingClient(
+            StreamingClientOptions(
+                api_key=self.api_key,
+                api_host="streaming.assemblyai.com",
+            )
+        )
+        client.on(StreamingEvents.Turn, on_turn)
+        client.on(StreamingEvents.Error, on_error)
+        client.on(StreamingEvents.Termination, on_terminated)
+
+        start = time.time()
+
+        client.connect(StreamingParameters(sample_rate=16000, format_turns=True))
+
+        try:
+            # Stream audio in chunks
+            chunk_size = 3200  # 100ms of 16kHz 16-bit audio
+            for i in range(0, len(pcm_data), chunk_size):
+                client.stream(pcm_data[i:i + chunk_size])
+                time.sleep(0.02)
+        finally:
+            # Terminate session and wait for final transcripts
+            client.disconnect(terminate=True)
+
+        session_done.wait(timeout=30)
+        elapsed = time.time() - start
+
+        if error_occurred[0]:
+            raise RuntimeError(f"Streaming error: {error_occurred[0]}")
+
+        full_transcript = " ".join(transcripts[k] for k in sorted(transcripts.keys()))
+        return full_transcript, elapsed
+
+
 # =============================================================================
 # Diarization Evaluation
 # =============================================================================
@@ -1231,7 +1322,13 @@ def run_all_datasets(args, model_name: str):
                 dataset = dataset.take(args.max_samples)
 
             # Create evaluator
-            if args.assemblyai:
+            if args.assemblyai_streaming:
+                evaluator = AssemblyAIStreamingEvaluator(
+                    args.api_key,
+                    audio_field=audio_field,
+                    text_field=text_field,
+                )
+            elif args.assemblyai:
                 evaluator = AssemblyAIEvaluator(
                     args.api_key,
                     args.assemblyai_model,
@@ -1427,11 +1524,17 @@ def main():
         default=None,
         help="Dataset to evaluate on (default: loquacious for ASR, callhome for diarization, librispeech-alignments for alignment)",
     )
-    parser.add_argument("--assemblyai", action="store_true", help="Use AssemblyAI API")
+    parser.add_argument("--assemblyai", action="store_true", help="Use AssemblyAI batch API")
+    parser.add_argument(
+        "--assemblyai-streaming",
+        action="store_true",
+        help="Use AssemblyAI Streaming API (Universal-Streaming model)",
+    )
     parser.add_argument(
         "--assemblyai-model",
         default="slam_1",
         choices=["best", "universal", "slam_1", "nano"],
+        help="Model for batch API (ignored for streaming)",
     )
     parser.add_argument("--api-key", default=os.environ.get("ASSEMBLYAI_API_KEY"))
     parser.add_argument("--split", default="test")
@@ -1472,10 +1575,13 @@ def main():
         raise ValueError(f"Unknown ASR dataset: {args.dataset}. Available: {valid_asr_datasets}")
 
     # Validation
-    if args.assemblyai:
+    if args.assemblyai or args.assemblyai_streaming:
         if not args.api_key:
             raise ValueError("AssemblyAI API key required")
-        model_name = f"AssemblyAI ({args.assemblyai_model})"
+        if args.assemblyai_streaming:
+            model_name = "AssemblyAI (Universal-Streaming)"
+        else:
+            model_name = f"AssemblyAI ({args.assemblyai_model})"
     else:
         if not args.model:
             raise ValueError("Model argument required")
@@ -1506,7 +1612,13 @@ def main():
         dataset = dataset.take(args.max_samples)
 
     # Create evaluator
-    if args.assemblyai:
+    if args.assemblyai_streaming:
+        evaluator = AssemblyAIStreamingEvaluator(
+            args.api_key,
+            audio_field=audio_field,
+            text_field=text_field,
+        )
+    elif args.assemblyai:
         evaluator = AssemblyAIEvaluator(
             args.api_key,
             args.assemblyai_model,
