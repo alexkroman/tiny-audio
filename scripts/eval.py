@@ -407,6 +407,121 @@ class LocalEvaluator(Evaluator):
         return str(result), elapsed
 
 
+class LocalStreamingEvaluator(Evaluator):
+    """Evaluator for local models with streaming metrics (TTFB, processing time)."""
+
+    def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
+        super().__init__(**kwargs)
+        from src.asr_modeling import ASRModel
+
+        self.model = ASRModel.from_pretrained(model_path)
+        self.model.eval()
+        self.processor = self.model.get_processor()
+        self.user_prompt = user_prompt
+
+        # Track timing stats
+        self.ttfb_times: list[float] = []
+        self.processing_times: list[float] = []
+
+        # Print generation config
+        gen_config = self.model.generation_config
+        print(f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
+              f"min_new_tokens={gen_config.min_new_tokens}, "
+              f"repetition_penalty={gen_config.repetition_penalty}, "
+              f"length_penalty={gen_config.length_penalty}, "
+              f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}")
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        import threading
+
+        from transformers import TextIteratorStreamer
+
+        # Extract audio array
+        if isinstance(audio, dict) and "array" in audio:
+            audio_array = audio["array"]
+            sample_rate = audio.get("sampling_rate", 16000)
+        elif isinstance(audio, dict) and "raw" in audio:
+            audio_array = audio["raw"]
+            sample_rate = audio.get("sampling_rate", 16000)
+        else:
+            wav_bytes = prepare_wav_bytes(audio)
+            audio_array, sample_rate = sf.read(io.BytesIO(wav_bytes))
+
+        # Resample to 16kHz if needed
+        if sample_rate != 16000:
+            import librosa
+            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
+
+        # Process audio
+        inputs = self.processor(
+            audio_array,
+            sampling_rate=16000,
+            return_tensors="pt",
+            return_attention_mask=True,
+        )
+        input_features = inputs.input_features.to(self.model.device)
+        audio_attention_mask = inputs.attention_mask.to(self.model.device)
+
+        # Set up streamer to capture first token time
+        streamer = TextIteratorStreamer(
+            self.model.tokenizer,
+            skip_special_tokens=True,
+            skip_prompt=True,
+        )
+
+        first_token_time = [None]
+        generation_start = [None]
+
+        def generate():
+            generation_start[0] = time.time()
+            self.model.generate(
+                input_features=input_features,
+                audio_attention_mask=audio_attention_mask,
+                streamer=streamer,
+            )
+
+        # Start generation in background thread
+        thread = threading.Thread(target=generate)
+        thread.start()
+
+        # Collect tokens and measure TTFB
+        tokens = []
+        for text in streamer:
+            if first_token_time[0] is None and text:
+                first_token_time[0] = time.time()
+            tokens.append(text)
+
+        thread.join()
+        processing_end = time.time()
+
+        # Calculate timing metrics
+        processing_time = processing_end - generation_start[0] if generation_start[0] else 0
+        ttfb = (first_token_time[0] - generation_start[0]) if first_token_time[0] and generation_start[0] else None
+
+        # Store for aggregation
+        self.processing_times.append(processing_time)
+        if ttfb is not None:
+            self.ttfb_times.append(ttfb)
+
+        # Print timing info
+        ttfb_str = f"{ttfb * 1000:.0f}ms" if ttfb else "N/A"
+        print(f"  [Streaming] TTFB: {ttfb_str}, Processing: {processing_time * 1000:.0f}ms")
+
+        full_text = "".join(tokens).strip().lower()
+        return full_text, processing_time
+
+    def compute_metrics(self) -> dict:
+        """Compute final metrics including streaming-specific timing."""
+        metrics = super().compute_metrics()
+        if self.ttfb_times:
+            metrics["avg_ttfb"] = sum(self.ttfb_times) / len(self.ttfb_times)
+            metrics["min_ttfb"] = min(self.ttfb_times)
+            metrics["max_ttfb"] = max(self.ttfb_times)
+        if self.processing_times:
+            metrics["avg_processing"] = sum(self.processing_times) / len(self.processing_times)
+        return metrics
+
+
 class EndpointEvaluator(Evaluator):
     """Evaluator for HuggingFace Inference Endpoints."""
 
@@ -465,6 +580,9 @@ class AssemblyAIStreamingEvaluator(Evaluator):
     def __init__(self, api_key: str, **kwargs):
         super().__init__(**kwargs)
         self.api_key = api_key
+        # Track timing stats across samples
+        self.ttfb_times: list[float] = []
+        self.processing_times: list[float] = []
 
     def transcribe(self, audio) -> tuple[str, float]:
         import threading
@@ -503,10 +621,19 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         transcripts = {}
         error_occurred = [None]
         session_done = threading.Event()
+        first_transcript_time = [None]
+        stream_start_time = [None]
+        final_transcript_time = [None]
 
         def on_turn(client, event):
-            if event.transcript and event.end_of_turn and event.turn_is_formatted:
-                transcripts[event.turn_order] = event.transcript
+            if event.transcript:
+                # Record time to first transcript (any transcript, not just final)
+                if first_transcript_time[0] is None and stream_start_time[0] is not None:
+                    first_transcript_time[0] = time.time()
+                # Only store final formatted turns
+                if event.end_of_turn and event.turn_is_formatted:
+                    transcripts[event.turn_order] = event.transcript
+                    final_transcript_time[0] = time.time()
 
         def on_error(client, error):
             error_occurred[0] = error
@@ -526,28 +653,68 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         client.on(StreamingEvents.Error, on_error)
         client.on(StreamingEvents.Termination, on_terminated)
 
-        start = time.time()
-
+        # Connect (not counted in processing time)
         client.connect(StreamingParameters(sample_rate=16000, format_turns=True))
 
-        try:
-            # Stream audio in chunks
-            chunk_size = 3200  # 100ms of 16kHz 16-bit audio
-            for i in range(0, len(pcm_data), chunk_size):
-                client.stream(pcm_data[i:i + chunk_size])
-                time.sleep(0.02)
-        finally:
-            # Terminate session and wait for final transcripts
-            client.disconnect(terminate=True)
+        # Start timing after connection is established
+        stream_start_time[0] = time.time()
 
+        # Stream audio in chunks
+        chunk_size = 3200  # 100ms of 16kHz 16-bit audio
+        for i in range(0, len(pcm_data), chunk_size):
+            client.stream(pcm_data[i:i + chunk_size])
+            time.sleep(0.02)
+
+        # Record time when last audio chunk was sent
+        audio_done_time = time.time()
+
+        # Terminate session and wait for final transcripts
+        client.disconnect(terminate=True)
         session_done.wait(timeout=30)
-        elapsed = time.time() - start
+
+        # Calculate timing metrics
+        ttfb = (first_transcript_time[0] - stream_start_time[0]) if first_transcript_time[0] else None
+        # Processing time = time from last audio chunk sent to final transcript received
+        # Can be negative if transcript arrives before we finish sending (real-time processing)
+        if final_transcript_time[0]:
+            processing_time = final_transcript_time[0] - audio_done_time
+            # If negative, final transcript arrived before audio finished - set to 0
+            processing_time = max(0, processing_time)
+        else:
+            processing_time = 0
+
+        # Store for aggregation
+        self.processing_times.append(processing_time)
+        if ttfb is not None:
+            self.ttfb_times.append(ttfb)
+
+        # Print timing info
+        ttfb_str = f"{ttfb * 1000:.0f}ms" if ttfb else "N/A"
+        if processing_time > 0:
+            processing_str = f"{processing_time * 1000:.0f}ms"
+        else:
+            processing_str = "0ms (real-time)"
+        print(f"  [Streaming] TTFB: {ttfb_str}, Finalization: {processing_str}")
 
         if error_occurred[0]:
             raise RuntimeError(f"Streaming error: {error_occurred[0]}")
 
         full_transcript = " ".join(transcripts[k] for k in sorted(transcripts.keys()))
-        return full_transcript, elapsed
+        # Return total elapsed time (stream start to final transcript) for consistency with other evaluators
+        total_elapsed = (final_transcript_time[0] - stream_start_time[0]) if final_transcript_time[0] else 0
+        return full_transcript, total_elapsed
+
+    def compute_metrics(self) -> dict:
+        """Compute final metrics including streaming-specific timing."""
+        metrics = super().compute_metrics()
+        # Add streaming timing stats
+        if self.ttfb_times:
+            metrics["avg_ttfb"] = sum(self.ttfb_times) / len(self.ttfb_times)
+            metrics["min_ttfb"] = min(self.ttfb_times)
+            metrics["max_ttfb"] = max(self.ttfb_times)
+        if self.processing_times:
+            metrics["avg_processing"] = sum(self.processing_times) / len(self.processing_times)
+        return metrics
 
 
 # =============================================================================
@@ -1276,6 +1443,14 @@ def print_summary(model_name: str, dataset_desc: str, metrics: dict, output_path
     print(f"Samples: {metrics['num_samples']}")
     print(f"WER: {metrics['wer']:.2f}%")
     print(f"Avg Time: {metrics['avg_time']:.2f}s")
+    # Streaming-specific metrics
+    if "avg_ttfb" in metrics:
+        print(f"\nStreaming Metrics:")
+        print(f"  Avg TTFB: {metrics['avg_ttfb'] * 1000:.0f}ms")
+        print(f"  Min TTFB: {metrics['min_ttfb'] * 1000:.0f}ms")
+        print(f"  Max TTFB: {metrics['max_ttfb'] * 1000:.0f}ms")
+    if "avg_processing" in metrics:
+        print(f"  Avg Processing: {metrics['avg_processing'] * 1000:.0f}ms")
     print(f"\nResults saved to: {output_path}")
 
 
@@ -1338,6 +1513,13 @@ def run_all_datasets(args, model_name: str):
             elif args.model.startswith("http"):
                 evaluator = EndpointEvaluator(
                     args.model,
+                    audio_field=audio_field,
+                    text_field=text_field,
+                )
+            elif args.streaming:
+                evaluator = LocalStreamingEvaluator(
+                    args.model,
+                    user_prompt=args.user_prompt,
                     audio_field=audio_field,
                     text_field=text_field,
                 )
@@ -1536,6 +1718,11 @@ def main():
         choices=["best", "universal", "slam_1", "nano"],
         help="Model for batch API (ignored for streaming)",
     )
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Enable streaming mode with TTFB/processing metrics (for local models)",
+    )
     parser.add_argument("--api-key", default=os.environ.get("ASSEMBLYAI_API_KEY"))
     parser.add_argument("--split", default="test")
     parser.add_argument("--config", default=None, help="Dataset config override")
@@ -1628,6 +1815,13 @@ def main():
     elif args.model.startswith("http"):
         evaluator = EndpointEvaluator(
             args.model,
+            audio_field=audio_field,
+            text_field=text_field,
+        )
+    elif args.streaming:
+        evaluator = LocalStreamingEvaluator(
+            args.model,
+            user_prompt=args.user_prompt,
             audio_field=audio_field,
             text_field=text_field,
         )
