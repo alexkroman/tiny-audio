@@ -10,6 +10,7 @@ Supports:
 
 import io
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass
@@ -103,6 +104,10 @@ class TextNormalizer:
     - British to American spelling ("colour" -> "color")
     - Disfluency removal ("uh", "um", "hmm")
     - Tag removal ("<inaudible>", etc.)
+
+    Additional normalizations:
+    - "okay" -> "ok"
+    - "all right" -> "alright"
     """
 
     def __init__(self):
@@ -111,7 +116,13 @@ class TextNormalizer:
 
     def normalize(self, text: str) -> str:
         """Normalize text for WER calculation."""
-        return self._normalizer(text)
+        text = self._normalizer(text)
+        # Normalize common spelling variants
+        text = text.replace("okay", "ok")
+        text = text.replace("all right", "alright")
+        text = text.replace("kinda", "kind of")
+        text = re.sub(r"'s\b", " is", text)
+        return text
 
 
 # =============================================================================
@@ -156,7 +167,8 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
     ),
     "ami": DatasetConfig(
         name="ami",
-        path="TakalaWang/AMI_ASR",
+        path="edinburghcstr/ami",
+        config="ihm",
         audio_field="audio",
         text_field="text",
     ),
@@ -226,13 +238,6 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
     ),
 }
 
-COMBINED_WEIGHTS = {
-    "loquacious": 0.50,
-    "gigaspeech": 0.10,
-    "earnings22": 0.10,
-    "ami": 0.10,
-    "tedlium": 0.10,
-}
 DIARIZATION_DATASETS = {"callhome"}
 ALIGNMENT_DATASETS = {"librispeech-alignments"}
 
@@ -255,43 +260,6 @@ def load_eval_dataset(
     )
     audio_opts = Audio(sampling_rate=16000) if decode_audio else Audio(decode=False)
     return ds.cast_column(cfg.audio_field, audio_opts)
-
-
-def load_combined_dataset(max_samples: int | None, seed: int) -> tuple[Iterator, int]:
-    """Load proportionally sampled combined dataset."""
-    import random
-
-    random.seed(seed)
-
-    total_samples = max_samples or 1000
-    samples_per_dataset = {
-        name: max(1, int(total_samples * weight)) for name, weight in COMBINED_WEIGHTS.items()
-    }
-    print(f"Loading combined dataset: {samples_per_dataset}")
-
-    all_samples = []
-    for name, num_samples in samples_per_dataset.items():
-        cfg = DATASET_REGISTRY[name]
-        validation_split = "dev" if name == "loquacious" else "validation"
-        ds = load_eval_dataset(name, validation_split).shuffle(
-            seed=seed, buffer_size=num_samples * 10
-        )
-
-        count = 0
-        for sample in ds:
-            text = sample.get(cfg.text_field, "")
-            if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
-                continue
-            all_samples.append(
-                {"audio": sample[cfg.audio_field], "text": sample[cfg.text_field], "source": name}
-            )
-            count += 1
-            if count >= num_samples:
-                break
-
-    random.shuffle(all_samples)
-    print(f"Combined dataset ready: {len(all_samples)} samples")
-    return iter(all_samples), len(all_samples)
 
 
 # =============================================================================
@@ -410,6 +378,7 @@ class LocalEvaluator(Evaluator):
         # Print generation config
         gen_config = model.generation_config
         print(f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
+              f"min_new_tokens={gen_config.min_new_tokens}, "
               f"repetition_penalty={gen_config.repetition_penalty}, "
               f"length_penalty={gen_config.length_penalty}, "
               f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}")
@@ -1061,6 +1030,7 @@ class TimestampAlignmentEvaluator(BaseAlignmentEvaluator):
         # Print generation config
         gen_config = model.generation_config
         print(f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
+              f"min_new_tokens={gen_config.min_new_tokens}, "
               f"repetition_penalty={gen_config.repetition_penalty}, "
               f"length_penalty={gen_config.length_penalty}, "
               f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}")
@@ -1497,7 +1467,7 @@ def main():
         args.dataset = "loquacious"
 
     # Validate ASR dataset choice
-    valid_asr_datasets = list(DATASET_REGISTRY.keys()) + ["combined", "all"]
+    valid_asr_datasets = list(DATASET_REGISTRY.keys()) + ["all"]
     if args.dataset not in valid_asr_datasets:
         raise ValueError(f"Unknown ASR dataset: {args.dataset}. Available: {valid_asr_datasets}")
 
@@ -1524,22 +1494,16 @@ def main():
         args.output_dir = Path(f"outputs/eval_{args.dataset}_{safe_name}")
 
     # Load dataset
-    if args.dataset == "combined":
-        dataset, total = load_combined_dataset(args.max_samples, args.seed)
-        audio_field, text_field = "audio", "text"
-        dataset_desc = f"combined (proportional, {total} samples)"
-        args.max_samples = None  # Already limited
-    else:
-        cfg = DATASET_REGISTRY[args.dataset]
-        # Use dataset's default_split if user didn't override
-        split = args.split if args.split != "test" else cfg.default_split
-        dataset = load_eval_dataset(args.dataset, split, args.config)
-        audio_field, text_field = cfg.audio_field, cfg.text_field
-        config_name = args.config or cfg.config
-        dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
+    cfg = DATASET_REGISTRY[args.dataset]
+    # Use dataset's default_split if user didn't override
+    split = args.split if args.split != "test" else cfg.default_split
+    dataset = load_eval_dataset(args.dataset, split, args.config)
+    audio_field, text_field = cfg.audio_field, cfg.text_field
+    config_name = args.config or cfg.config
+    dataset_desc = f"{cfg.path} (config: {config_name}, split: {split})"
 
-        if args.max_samples:
-            dataset = dataset.take(args.max_samples)
+    if args.max_samples:
+        dataset = dataset.take(args.max_samples)
 
     # Create evaluator
     if args.assemblyai:

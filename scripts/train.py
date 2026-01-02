@@ -57,7 +57,8 @@ class DatasetLoader:
             split=split,
             streaming=self.use_streaming,
             cache_dir=self.cache_dir,
-            num_proc=self.num_proc,  # Parallel download/processing
+            num_proc=self.num_proc,
+            trust_remote_code=True,
         )
 
         # Normalize column names

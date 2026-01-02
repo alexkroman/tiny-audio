@@ -476,4 +476,37 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
         # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
         text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+        # Post-process prediction
+        text = self._post_process_prediction(text)
         return {"text": text}
+
+    def _post_process_prediction(self, text: str) -> str:
+        """Post-process model output to fix common issues."""
+        if not text:
+            return ""
+
+        # 1. LOWERCASE
+        text = text.lower()
+
+        # 2. REMOVE REPETITIVE LOOPS
+        # If the model repeats the same phrase more than twice, cut it off.
+        words = text.split()
+        if len(words) > 10:
+            # Check for repeating n-grams (1 to 4 words long)
+            for n in range(1, 5):
+                last_sequence = words[-n:]
+                repeat_count = 0
+                idx = len(words) - n
+                while idx >= n and words[idx - n : idx] == last_sequence:
+                    repeat_count += 1
+                    idx -= n
+
+                # If more than 2 exact repetitions at the end, truncate
+                if repeat_count > 2:
+                    text = " ".join(words[: idx + n])
+                    break
+
+        # 3. STRIP WHITESPACE
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        return text

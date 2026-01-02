@@ -1,0 +1,34 @@
+# @package _global_
+# MOSA Stage 2: Continue training from mazesmazes/tiny-audio on combined dataset
+
+defaults:
+  - override /data: combined
+
+model:
+  pretrained_model_path: mazesmazes/tiny-audio
+  projector_type: mosa
+  num_experts: 4
+  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  text_model_id: Qwen/Qwen3-1.7B
+
+  # LoRA configuration
+  use_lora: true
+  lora_r: 64
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_target_modules:
+    - v_proj
+    - q_proj
+
+training:
+  output_dir: outputs/mosa_stage_2
+  hub_model_id: "mazesmazes/tiny-audio"
+  weight_decay: 0.01
+  warmup_steps: 500
+  learning_rate: 1e-5  # Lower LR for stage 2
+  per_device_train_batch_size: 14
+  per_device_eval_batch_size: 14
+  gradient_accumulation_steps: 2
+  max_steps: 20000
+  save_steps: 500
+  eval_steps: 1000

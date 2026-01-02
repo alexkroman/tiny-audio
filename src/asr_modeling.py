@@ -110,6 +110,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Set up generation config with greedy decoding defaults
         self.generation_config = self.language_model.generation_config
         self.generation_config.max_new_tokens = config.max_new_tokens
+        self.generation_config.min_new_tokens = config.min_new_tokens
         self.generation_config.num_beams = config.num_beams
         self.generation_config.do_sample = False
         # Clear sampling params (inherited from LLM) since we use greedy decoding

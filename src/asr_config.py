@@ -26,6 +26,8 @@ class ASRConfig(transformers.PretrainedConfig):
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
         projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
+        projector_num_layers: int = 2,  # Number of layers in MLP projector
+        projector_init_std: float = 0.02,  # Weight initialization std
         projector_dropout: float = 0.0,  # Dropout rate for projector layers
         # MoE-specific configuration
         num_experts: int = 4,  # Number of experts in MoE projectors
@@ -40,6 +42,7 @@ class ASRConfig(transformers.PretrainedConfig):
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_warmup_tokens: int = 10,
         max_new_tokens: Optional[int] = None,
+        min_new_tokens: Optional[int] = None,
         repetition_penalty: Optional[float] = None,
         length_penalty: Optional[float] = None,
         no_repeat_ngram_size: Optional[int] = None,
@@ -50,9 +53,10 @@ class ASRConfig(transformers.PretrainedConfig):
         generation_defaults = {
             "num_beams": 1,
             "max_new_tokens": 256,
-            "repetition_penalty": 1.0,
+            "min_new_tokens": 1,
+            "repetition_penalty": 1.1,
             "length_penalty": 1.0,
-            "no_repeat_ngram_size": 0,
+            "no_repeat_ngram_size": 3,
             "use_cache": True,
         }
 
@@ -70,10 +74,12 @@ class ASRConfig(transformers.PretrainedConfig):
         # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
         self.encoder_conv_layers = encoder_conv_layers or [(1, 3, 1), (1, 3, 2)]
         self.audio_sample_rate = audio_sample_rate
+        self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
         self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
+        self.projector_num_layers = projector_num_layers
         self.projector_dropout = projector_dropout
         # MoE-specific configuration
         self.num_experts = num_experts
@@ -92,6 +98,9 @@ class ASRConfig(transformers.PretrainedConfig):
         self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]
         self.max_new_tokens = (
             max_new_tokens if max_new_tokens is not None else generation_defaults["max_new_tokens"]
+        )
+        self.min_new_tokens = (
+            min_new_tokens if min_new_tokens is not None else generation_defaults["min_new_tokens"]
         )
         self.repetition_penalty = (
             repetition_penalty
