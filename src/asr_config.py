@@ -62,9 +62,9 @@ class ASRConfig(transformers.PretrainedConfig):
             "num_beams": 1,
             "max_new_tokens": 256,
             "min_new_tokens": 1,
-            "repetition_penalty": 1.1,
+            "repetition_penalty": 1.0,
             "length_penalty": 1.0,
-            "no_repeat_ngram_size": 3,
+            "no_repeat_ngram_size": 0,
             "use_cache": True,
         }
 

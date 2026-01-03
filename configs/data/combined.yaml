@@ -27,7 +27,7 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 2.0
+    sampling_weight: 1.0
 
   - path: fixie-ai/gigaspeech
     name: dev
@@ -47,7 +47,7 @@ datasets:
       - train
     eval_splits:
       - validation
-    sampling_weight: 2.0
+    sampling_weight: 1.0
 
   - path: speechbrain/LoquaciousSet
     name: medium
