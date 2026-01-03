@@ -348,7 +348,17 @@ def main(cfg: DictConfig) -> None:
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_config_dict, dict), "model config must be a dict"
     # Add training params that affect model behavior
-    training_model_params = ["label_smoothing", "projector_dropout", "use_specaugment"]
+    training_model_params = [
+        "label_smoothing",
+        "projector_dropout",
+        "use_specaugment",
+        "mask_time_prob",
+        "mask_time_length",
+        "mask_time_min_masks",
+        "mask_feature_prob",
+        "mask_feature_length",
+        "mask_feature_min_masks",
+    ]
     for param in training_model_params:
         if cfg.training.get(param) is not None:
             model_config_dict[param] = cfg.training[param]

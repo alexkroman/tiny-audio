@@ -41,6 +41,14 @@ class ASRConfig(transformers.PretrainedConfig):
         qformer_intermediate_size: Optional[int] = None,  # FFN size (defaults to 4x hidden)
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_warmup_tokens: int = 10,
+        # SpecAugment settings (Whisper defaults)
+        use_specaugment: bool = False,
+        mask_time_prob: float = 0.05,  # Probability of masking time steps
+        mask_time_length: int = 10,  # Max length of time mask
+        mask_time_min_masks: int = 2,  # Min number of time masks
+        mask_feature_prob: float = 0.0,  # Probability of masking frequency bins (disabled by default)
+        mask_feature_length: int = 10,  # Max length of frequency mask
+        mask_feature_min_masks: int = 0,  # Min number of frequency masks
         max_new_tokens: Optional[int] = None,
         min_new_tokens: Optional[int] = None,
         repetition_penalty: Optional[float] = None,
@@ -93,6 +101,14 @@ class ASRConfig(transformers.PretrainedConfig):
         self.qformer_intermediate_size = qformer_intermediate_size
         self.label_smoothing = label_smoothing
         self.inference_warmup_tokens = inference_warmup_tokens
+        # SpecAugment configuration
+        self.use_specaugment = use_specaugment
+        self.mask_time_prob = mask_time_prob
+        self.mask_time_length = mask_time_length
+        self.mask_time_min_masks = mask_time_min_masks
+        self.mask_feature_prob = mask_feature_prob
+        self.mask_feature_length = mask_feature_length
+        self.mask_feature_min_masks = mask_feature_min_masks
 
         # Generation parameters (use explicit value if provided, else use default)
         self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]
