@@ -51,9 +51,7 @@ def _compute_mask_indices(
         raise ValueError(f"mask_length must be >= 1, got {mask_length}")
 
     if mask_length > sequence_length:
-        raise ValueError(
-            f"mask_length {mask_length} must be <= sequence_length {sequence_length}"
-        )
+        raise ValueError(f"mask_length {mask_length} must be <= sequence_length {sequence_length}")
 
     # Compute number of masked spans per sample
     num_masked_spans = int(mask_prob * sequence_length / mask_length + torch.rand(1).item())
@@ -728,14 +726,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         thread.start()
 
         # Yield tokens as they're generated, filtering out <think>...</think> blocks
-        # SmolLM3 always starts in thinking mode, so assume we're in a think block
-        in_think_block = True
+        # Start assuming no think block - only filter when we see <think>
+        in_think_block = False
         buffer = ""
 
         for text in streamer:
             buffer += text
 
-            # Check for think block start (in case model outputs multiple think blocks)
+            # Check for think block start (in case model outputs think blocks)
             while "<think>" in buffer:
                 in_think_block = True
                 # Yield any text before <think>

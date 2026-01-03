@@ -59,7 +59,7 @@ def analyze_routing(probs, num_experts, label=""):
         f"Expert Weight Distribution (target: {TARGETS['expert_min'] * 100:.0f}-{TARGETS['expert_max'] * 100:.0f}% each):"
     )
     print(f"  {'Expert':<8} {'Mean':>7} {'Min':>7} {'Max':>7} {'Std':>7}  Distribution")
-    print(f"  {'-'*8} {'-'*7} {'-'*7} {'-'*7} {'-'*7}  {'-'*20}")
+    print(f"  {'-' * 8} {'-' * 7} {'-' * 7} {'-' * 7} {'-' * 7}  {'-' * 20}")
 
     max_prob = 0
     min_prob = 1.0
@@ -68,7 +68,6 @@ def analyze_routing(probs, num_experts, label=""):
         zip(mean_probs, min_per_expert, max_per_expert, std_per_expert)
     ):
         bar = "█" * int(mean_p * 40)
-        range_bar = f"[{min_p * 100:4.1f}-{max_p * 100:4.1f}%]"
         print(
             f"  Expert {i}: {mean_p * 100:5.1f}% {min_p * 100:5.1f}% {max_p * 100:5.1f}% {std_p * 100:5.1f}%  {bar}"
         )
@@ -79,7 +78,7 @@ def analyze_routing(probs, num_experts, label=""):
             min_prob = mean_p.item()
 
     # Per-token analysis
-    print(f"\nPer-token routing variance:")
+    print("\nPer-token routing variance:")
     total_variance = probs.var(dim=0).mean().item()
     print(f"  Avg variance across experts: {total_variance:.4f}")
     if total_variance < 0.001:

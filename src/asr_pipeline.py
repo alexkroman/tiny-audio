@@ -507,6 +507,4 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                     break
 
         # 3. STRIP WHITESPACE
-        text = re.sub(r'\s+', ' ', text).strip()
-
-        return text
+        return re.sub(r"\s+", " ", text).strip()

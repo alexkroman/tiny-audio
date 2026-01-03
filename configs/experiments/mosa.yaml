@@ -9,22 +9,22 @@ model:
   text_model_id: Qwen/Qwen3-1.7B
 
   # LoRA configuration
-  use_lora: true
-  lora_r: 64
-  lora_alpha: 32
-  lora_dropout: 0.0
-  lora_target_modules:
-    - v_proj
-    - q_proj
-
+  use_lora: false
 
 training:
   hub_model_id: "mazesmazes/tiny-audio"
-  weight_decay: 0.01
-  warmup_steps: 1000
   per_device_train_batch_size: 14
   per_device_eval_batch_size: 14
   gradient_accumulation_steps: 2
   num_train_epochs: 1
-  save_steps: 500
+  save_steps: 1000
   eval_steps: 1000
+
+  # SpecAugment (Whisper defaults)
+  use_specaugment: true
+  mask_time_prob: 0.05      # Probability of masking time steps
+  mask_time_length: 10      # Max length of time mask spans
+  mask_time_min_masks: 2    # Min number of time masks per sample
+  mask_feature_prob: 0.0    # Disabled by default in Whisper
+  mask_feature_length: 10   # Max length of frequency mask spans
+  mask_feature_min_masks: 0 # Min number of frequency masks

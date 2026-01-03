@@ -106,7 +106,7 @@ class ASRProcessor(ProcessorMixin):
             input_ids = tokenized
         else:
             # BatchEncoding or dict-like object
-            input_ids = tokenized["input_ids"] if "input_ids" in tokenized else tokenized.input_ids
+            input_ids = tokenized.get("input_ids", tokenized.input_ids)
 
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)

@@ -50,7 +50,10 @@ def setup_remote_environment(conn: Connection) -> None:
     """Install system dependencies on the remote."""
     print("\nSetting up remote environment...")
     conn.run("apt-get update -qq || true", hide=True)
-    conn.run("apt-get install -y -qq ffmpeg tmux rsync libsndfile1 ninja-build portaudio19-dev", hide=True)
+    conn.run(
+        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 ninja-build portaudio19-dev",
+        hide=True,
+    )
     print("Remote environment setup complete!")
 
 

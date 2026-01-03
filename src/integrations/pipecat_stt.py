@@ -7,11 +7,10 @@ import numpy as np
 try:
     from pipecat.frames.frames import InterimTranscriptionFrame, TranscriptionFrame
     from pipecat.services.stt_service import SegmentedSTTService
-except ImportError:
+except ImportError as err:
     raise ImportError(
-        "pipecat-ai is required for this integration. "
-        "Install with: pip install pipecat-ai[silero]"
-    )
+        "pipecat-ai is required for this integration. Install with: pip install pipecat-ai[silero]"
+    ) from err
 
 
 class TinyAudioSTTService(SegmentedSTTService):
@@ -54,7 +53,7 @@ class TinyAudioSTTService(SegmentedSTTService):
             import torch
 
             try:
-                from tiny_audio import ASRModel
+                from tiny_audio import ASRModel  # pyright: ignore[reportMissingImports]
             except ImportError:
                 # Fallback for local development
                 import sys

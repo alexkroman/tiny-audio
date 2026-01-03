@@ -4,6 +4,6 @@ try:
     from .pipecat_stt import TinyAudioSTTService
 except ImportError:
     # pipecat not installed - that's okay, make import conditional
-    TinyAudioSTTService = None  # type: ignore
+    TinyAudioSTTService = None
 
 __all__ = ["TinyAudioSTTService"]

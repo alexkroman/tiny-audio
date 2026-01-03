@@ -15,7 +15,6 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 import evaluate
 import numpy as np
@@ -121,8 +120,7 @@ class TextNormalizer:
         text = text.replace("okay", "ok")
         text = text.replace("all right", "alright")
         text = text.replace("kinda", "kind of")
-        text = re.sub(r"'s\b", " is", text)
-        return text
+        return re.sub(r"'s\b", " is", text)
 
 
 # =============================================================================
@@ -377,11 +375,13 @@ class LocalEvaluator(Evaluator):
 
         # Print generation config
         gen_config = model.generation_config
-        print(f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
-              f"min_new_tokens={gen_config.min_new_tokens}, "
-              f"repetition_penalty={gen_config.repetition_penalty}, "
-              f"length_penalty={gen_config.length_penalty}, "
-              f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}")
+        print(
+            f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
+            f"min_new_tokens={gen_config.min_new_tokens}, "
+            f"repetition_penalty={gen_config.repetition_penalty}, "
+            f"length_penalty={gen_config.length_penalty}, "
+            f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}"
+        )
 
     def transcribe(self, audio) -> tuple[str, float]:
         # Convert to pipeline-compatible format
@@ -413,6 +413,7 @@ class LocalStreamingEvaluator(Evaluator):
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
         from src.asr_modeling import ASRModel
+        from src.asr_pipeline import ASRPipeline
 
         # Determine best device and dtype
         if torch.cuda.is_available():
@@ -428,6 +429,7 @@ class LocalStreamingEvaluator(Evaluator):
         self.model = ASRModel.from_pretrained(model_path, torch_dtype=dtype).to(device)
         self.model.eval()
         self.processor = self.model.get_processor()
+        self.pipe = ASRPipeline(model=self.model)  # For post-processing
         self.user_prompt = user_prompt
         print(f"Using device: {device}, dtype: {dtype}")
 
@@ -437,11 +439,13 @@ class LocalStreamingEvaluator(Evaluator):
 
         # Print generation config
         gen_config = self.model.generation_config
-        print(f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
-              f"min_new_tokens={gen_config.min_new_tokens}, "
-              f"repetition_penalty={gen_config.repetition_penalty}, "
-              f"length_penalty={gen_config.length_penalty}, "
-              f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}")
+        print(
+            f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
+            f"min_new_tokens={gen_config.min_new_tokens}, "
+            f"repetition_penalty={gen_config.repetition_penalty}, "
+            f"length_penalty={gen_config.length_penalty}, "
+            f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}"
+        )
 
     def transcribe(self, audio) -> tuple[str, float]:
         import threading
@@ -462,6 +466,7 @@ class LocalStreamingEvaluator(Evaluator):
         # Resample to 16kHz if needed
         if sample_rate != 16000:
             import librosa
+
             audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
 
         # Process audio (ASRProcessor handles sampling_rate internally)
@@ -469,7 +474,9 @@ class LocalStreamingEvaluator(Evaluator):
             audio_array,
             return_tensors="pt",
         )
-        input_features = inputs["input_features"].to(device=self.model.device, dtype=self.model.dtype)
+        input_features = inputs["input_features"].to(
+            device=self.model.device, dtype=self.model.dtype
+        )
         audio_attention_mask = inputs["audio_attention_mask"].to(self.model.device)
 
         # Set up streamer to capture first token time
@@ -506,7 +513,11 @@ class LocalStreamingEvaluator(Evaluator):
 
         # Calculate timing metrics
         processing_time = processing_end - generation_start[0] if generation_start[0] else 0
-        ttfb = (first_token_time[0] - generation_start[0]) if first_token_time[0] and generation_start[0] else None
+        ttfb = (
+            (first_token_time[0] - generation_start[0])
+            if first_token_time[0] and generation_start[0]
+            else None
+        )
 
         # Store for aggregation
         self.processing_times.append(processing_time)
@@ -517,7 +528,9 @@ class LocalStreamingEvaluator(Evaluator):
         ttfb_str = f"{ttfb * 1000:.0f}ms" if ttfb else "N/A"
         print(f"  [Streaming] TTFB: {ttfb_str}, Processing: {processing_time * 1000:.0f}ms")
 
-        full_text = "".join(tokens).strip().lower()
+        full_text = "".join(tokens).strip()
+        # Apply pipeline post-processing (repetition truncation, etc.)
+        full_text = self.pipe._post_process_prediction(full_text)
         return full_text, processing_time
 
     def compute_metrics(self) -> dict:
@@ -615,6 +628,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         # Resample to 16kHz if needed
         if sample_rate != 16000:
             import librosa
+
             audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
 
         # Convert to 16-bit PCM bytes
@@ -672,7 +686,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         # Stream audio in chunks
         chunk_size = 3200  # 100ms of 16kHz 16-bit audio
         for i in range(0, len(pcm_data), chunk_size):
-            client.stream(pcm_data[i:i + chunk_size])
+            client.stream(pcm_data[i : i + chunk_size])
             time.sleep(0.02)
 
         # Record time when last audio chunk was sent
@@ -683,7 +697,9 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         session_done.wait(timeout=30)
 
         # Calculate timing metrics
-        ttfb = (first_transcript_time[0] - stream_start_time[0]) if first_transcript_time[0] else None
+        ttfb = (
+            (first_transcript_time[0] - stream_start_time[0]) if first_transcript_time[0] else None
+        )
         # Processing time = time from last audio chunk sent to final transcript received
         # Can be negative if transcript arrives before we finish sending (real-time processing)
         if final_transcript_time[0]:
@@ -711,7 +727,9 @@ class AssemblyAIStreamingEvaluator(Evaluator):
 
         full_transcript = " ".join(transcripts[k] for k in sorted(transcripts.keys()))
         # Return total elapsed time (stream start to final transcript) for consistency with other evaluators
-        total_elapsed = (final_transcript_time[0] - stream_start_time[0]) if final_transcript_time[0] else 0
+        total_elapsed = (
+            (final_transcript_time[0] - stream_start_time[0]) if final_transcript_time[0] else 0
+        )
         return full_transcript, total_elapsed
 
     def compute_metrics(self) -> dict:
@@ -1297,11 +1315,13 @@ class TimestampAlignmentEvaluator(BaseAlignmentEvaluator):
 
         # Print generation config
         gen_config = model.generation_config
-        print(f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
-              f"min_new_tokens={gen_config.min_new_tokens}, "
-              f"repetition_penalty={gen_config.repetition_penalty}, "
-              f"length_penalty={gen_config.length_penalty}, "
-              f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}")
+        print(
+            f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
+            f"min_new_tokens={gen_config.min_new_tokens}, "
+            f"repetition_penalty={gen_config.repetition_penalty}, "
+            f"length_penalty={gen_config.length_penalty}, "
+            f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}"
+        )
 
     def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
         """Transcribe audio and return (text, word_timestamps, inference_time)."""
@@ -1455,7 +1475,7 @@ def print_summary(model_name: str, dataset_desc: str, metrics: dict, output_path
     print(f"Avg Time: {metrics['avg_time']:.2f}s")
     # Streaming-specific metrics
     if "avg_ttfb" in metrics:
-        print(f"\nStreaming Metrics:")
+        print("\nStreaming Metrics:")
         print(f"  Avg TTFB: {metrics['avg_ttfb'] * 1000:.0f}ms")
         print(f"  Min TTFB: {metrics['min_ttfb'] * 1000:.0f}ms")
         print(f"  Max TTFB: {metrics['max_ttfb'] * 1000:.0f}ms")

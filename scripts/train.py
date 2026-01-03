@@ -8,7 +8,6 @@ from typing import Any
 import hydra
 import nltk
 import torch
-import truecase
 import wandb
 from datasets import (
     Audio,
@@ -21,6 +20,7 @@ from datasets import (
 )
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, PeftModel, get_peft_model
+import truecase
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -102,11 +102,17 @@ class DatasetLoader:
 
             ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
-        return ds
+        # Apply truecasing to all texts upfront (non-streaming only)
+        print("Preprocessing texts with truecasing...")
+
+        def apply_truecase_batch(examples):
+            return {"text": [apply_truecase(t) for t in examples["text"]]}
+
+        return ds.map(apply_truecase_batch, batched=True, batch_size=64, num_proc=self.num_proc)
 
     @staticmethod
     def _filter_generator(dataset):
-        """Generator that filters invalid samples (streaming mode)."""
+        """Generator that filters invalid samples and applies truecasing (streaming mode)."""
         for example in dataset:
             audio = example.get("audio")
             if audio is None:
@@ -123,6 +129,7 @@ class DatasetLoader:
             if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
                 continue
 
+            example["text"] = apply_truecase(text)
             yield example
 
     def load(self) -> tuple[Dataset, Dataset]:
@@ -189,6 +196,11 @@ class DatasetLoader:
         return interleave_datasets(
             datasets, probabilities=probs, stopping_strategy="first_exhausted"
         )
+
+
+def apply_truecase(text: str) -> str:
+    """Apply truecasing to text."""
+    return truecase.get_true_case(text.strip())
 
 
 class DataCollator:
@@ -266,9 +278,10 @@ class DataCollator:
             audio_token_counts.append(num_tokens)
 
         # Build messages for each sample with per-sample audio token counts
+        # Text is already preprocessed with truecasing in DatasetLoader
         text_features = []
         for f, num_audio_tokens in zip(valid_features, audio_token_counts):
-            text = truecase.get_true_case((f.get("text") or "").strip())
+            text = (f.get("text") or "").strip()
             audio_placeholder = "<audio>" * num_audio_tokens
             user_content = TRANSCRIBE_PREFIX + audio_placeholder
 

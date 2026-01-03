@@ -46,6 +46,10 @@ remote-train = "scripts.start_remote_training:cli"
 attach-remote = "scripts.attach_remote_session:cli"
 find-checkpoint = "scripts.find_checkpoint:cli"
 
+# Analysis tools
+wer-by-length = "scripts.wer_by_length:app"
+keyword-wer = "scripts.keyword_wer:app"
+
 # Development tools
 lint = "scripts.dev_tools:lint_cli"
 format = "scripts.dev_tools:format_cli"
@@ -93,6 +97,7 @@ nltk = "*"
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 fabric = ">=3.0.0"
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
+spacy = "^3.8.11"
 
 [tool.poetry.extras]
 local = ["pyaudio"]
