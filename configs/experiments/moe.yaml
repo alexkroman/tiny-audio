@@ -6,15 +6,6 @@ model:
   text_model_id: Qwen/Qwen3-1.7B
   projector_type: moe
 
-  # LoRA configuration
-  use_lora: true
-  lora_r: 64
-  lora_alpha: 32
-  lora_dropout: 0.0
-  lora_target_modules:
-    - v_proj
-    - q_proj
-
 training:
   hub_model_id: "mazesmazes/tiny-audio"
   weight_decay: 0.01

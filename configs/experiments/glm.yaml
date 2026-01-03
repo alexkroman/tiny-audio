@@ -5,15 +5,6 @@ model:
   text_model_id: Qwen/Qwen3-1.7B
   projector_type: mlp
 
-  # LoRA configuration
-  use_lora: true
-  lora_r: 64
-  lora_alpha: 32
-  lora_dropout: 0.0
-  lora_target_modules:
-    - v_proj
-    - q_proj
-
 # Use large dataset config
 data:
   datasets:

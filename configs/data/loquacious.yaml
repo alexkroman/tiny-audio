@@ -17,4 +17,3 @@ sample_rate: 16000
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
 max_eval_samples: 2000
-use_streaming: false

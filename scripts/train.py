@@ -2,25 +2,20 @@
 
 import contextlib
 from dataclasses import fields
-from pathlib import Path
 from typing import Any
 
 import hydra
 import nltk
 import torch
+import truecase
 import wandb
 from datasets import (
     Audio,
     Dataset,
-    Features,
-    IterableDataset,
-    Value,
     interleave_datasets,
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
-from peft import LoraConfig, PeftModel, get_peft_model
-import truecase
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -36,15 +31,14 @@ TRANSCRIBE_PREFIX = "Transcribe: "  # Used in DataCollator, matches ASRConfig.us
 
 
 class DatasetLoader:
-    """Loads and prepares datasets for training (streaming or non-streaming)."""
+    """Loads and prepares datasets for training."""
 
     def __init__(self, config: DictConfig):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
-        self.use_streaming = self.config.get("use_streaming", True)
-        self.num_proc = self.config.get("num_proc", 16) if not self.use_streaming else None
+        self.num_proc = self.config.get("num_proc", 16)
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
@@ -55,7 +49,6 @@ class DatasetLoader:
             dataset_path,
             name=dataset_cfg.get("name"),
             split=split,
-            streaming=self.use_streaming,
             cache_dir=self.cache_dir,
             num_proc=self.num_proc,
             trust_remote_code=True,
@@ -79,21 +72,7 @@ class DatasetLoader:
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
-        if self.use_streaming:
-            # Streaming mode: use generator to filter invalid samples
-            features = Features(
-                {
-                    "audio": Audio(sampling_rate=self.sample_rate),
-                    "text": Value("string"),
-                }
-            )
-            return IterableDataset.from_generator(
-                self._filter_generator,
-                gen_kwargs={"dataset": ds},
-                features=features,
-            )
-
-        # Non-streaming mode: filter TEDLIUM ignore markers only for TEDLIUM dataset
+        # Filter TEDLIUM ignore markers only for TEDLIUM dataset
         # Duration filtering happens in DataCollator to avoid loading all audio upfront
         if "tedlium" in dataset_path.lower():
 
@@ -102,35 +81,13 @@ class DatasetLoader:
 
             ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
-        # Apply truecasing to all texts upfront (non-streaming only)
+        # Apply truecasing to all texts upfront
         print("Preprocessing texts with truecasing...")
 
         def apply_truecase_batch(examples):
             return {"text": [apply_truecase(t) for t in examples["text"]]}
 
         return ds.map(apply_truecase_batch, batched=True, batch_size=64, num_proc=self.num_proc)
-
-    @staticmethod
-    def _filter_generator(dataset):
-        """Generator that filters invalid samples and applies truecasing (streaming mode)."""
-        for example in dataset:
-            audio = example.get("audio")
-            if audio is None:
-                continue
-
-            try:
-                if not isinstance(audio, dict) or "array" not in audio:
-                    continue
-            except Exception:
-                continue
-
-            # Skip TEDLIUM ignore markers
-            text = example.get("text", "")
-            if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
-                continue
-
-            example["text"] = apply_truecase(text)
-            yield example
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -184,12 +141,7 @@ class DatasetLoader:
             return None
         # Shuffle each dataset before interleaving for better randomization
         if shuffle:
-            if self.use_streaming:
-                # Streaming mode: use buffer-based shuffle
-                datasets = [ds.shuffle(seed=self.seed, buffer_size=100) for ds in datasets]
-            else:
-                # Non-streaming mode: shuffle entire dataset
-                datasets = [ds.shuffle(seed=self.seed) for ds in datasets]
+            datasets = [ds.shuffle(seed=self.seed) for ds in datasets]
         if len(datasets) == 1:
             return datasets[0]
         probs = [w / sum(weights) for w in weights]
@@ -302,18 +254,9 @@ class DataCollator:
 
 
 class ASRTrainer(Trainer):
-    """Trainer subclass that properly saves PEFT adapters."""
+    """Trainer subclass for ASR models."""
 
-    def _save(self, output_dir=None, state_dict=None):
-        super()._save(output_dir, state_dict)
-
-        # Save PEFT adapter to root output_dir (not checkpoint subdirs)
-        # save_embedding_layers=False to avoid saving entire embedding layer
-        # (resized for <audio> token but that embedding is never used)
-        if isinstance(getattr(self.model, "language_model", None), PeftModel):
-            root_dir = self.args.output_dir
-            self.model.language_model.save_pretrained(root_dir, save_embedding_layers=False)
-            print(f"Saved PEFT adapter to {root_dir}")
+    pass
 
 
 class PushToHubCallback(TrainerCallback):
@@ -384,59 +327,6 @@ def main(cfg: DictConfig) -> None:
         model = ASRModel(asr_config)
 
     model.config.use_cache = False
-
-    # Apply LoRA if configured
-    if cfg.model.get("use_lora"):
-        # Check if model already has PEFT adapters (e.g., from pretrained checkpoint)
-        has_peft = isinstance(model.language_model, PeftModel) or hasattr(
-            model.language_model, "peft_config"
-        )
-        if has_peft:
-            print("Model already has LoRA adapters from pretrained checkpoint")
-            # Enable training on LoRA parameters using PEFT's API
-            if isinstance(model.language_model, PeftModel):
-                # Get adapter name and set trainable
-                adapter_name = model.language_model.active_adapter
-                model.language_model.set_adapter(adapter_name)
-                for name, param in model.language_model.named_parameters():
-                    if "lora_" in name:
-                        param.requires_grad = True
-            else:
-                # Fallback for non-PeftModel with peft_config attribute
-                for name, param in model.language_model.named_parameters():
-                    if "lora_" in name:
-                        param.requires_grad = True
-        else:
-            # Handle both string ("all-linear") and list configs
-            target_modules_cfg = cfg.model.get("lora_target_modules", "all-linear")
-            if isinstance(target_modules_cfg, str):
-                target_modules = target_modules_cfg
-            else:
-                target_modules = OmegaConf.to_container(target_modules_cfg)
-
-            lora_config = LoraConfig(
-                r=cfg.model.get("lora_r", 64),
-                lora_alpha=cfg.model.get("lora_alpha", 32),
-                lora_dropout=cfg.model.get("lora_dropout", 0.0),
-                target_modules=target_modules,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-
-            # Check for existing adapter in output_dir
-            output_dir = Path(cfg.training.get("output_dir", "./outputs"))
-            adapter_config = output_dir / "adapter_config.json"
-
-            if adapter_config.exists():
-                print(f"Loading existing LoRA adapter from {output_dir}")
-                model.language_model = PeftModel.from_pretrained(
-                    model.language_model, str(output_dir), is_trainable=True
-                )
-            else:
-                print("Applying new LoRA adapter to language model")
-                model.language_model = get_peft_model(model.language_model, lora_config)
-
-        model.language_model.print_trainable_parameters()
 
     # Load datasets
     train_dataset, val_dataset = DatasetLoader(cfg).load()

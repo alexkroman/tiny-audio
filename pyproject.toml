@@ -90,7 +90,6 @@ assemblyai = "*"
 typer = ">=0.19.2"
 truecase = "*"
 trl = ">=0.26.0"
-peft = ">=0.8.0"
 torchaudio = ">=2.0.0"
 pyannote-audio = ">=3.1.0"
 nltk = "*"
@@ -151,10 +150,6 @@ disable_error_code = ["assignment", "override", "call-overload", "arg-type", "in
 
 [[tool.mypy.overrides]]
 module = "transformers.*"
-ignore_errors = true
-
-[[tool.mypy.overrides]]
-module = "peft.*"
 ignore_errors = true
 
 [tool.pyright]
