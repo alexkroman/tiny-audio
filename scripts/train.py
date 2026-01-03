@@ -7,7 +7,7 @@ from typing import Any
 import hydra
 import nltk
 import torch
-import truecase
+from punctuators.models import PunctCapSegModelONNX
 import wandb
 from datasets import (
     Audio,
@@ -81,13 +81,7 @@ class DatasetLoader:
 
             ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
-        # Apply truecasing to all texts upfront
-        print("Preprocessing texts with truecasing...")
-
-        def apply_truecase_batch(examples):
-            return {"text": [apply_truecase(t) for t in examples["text"]]}
-
-        return ds.map(apply_truecase_batch, batched=True, batch_size=64, num_proc=self.num_proc)
+        return ds
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -150,11 +144,6 @@ class DatasetLoader:
         )
 
 
-def apply_truecase(text: str) -> str:
-    """Apply truecasing to text."""
-    return truecase.get_true_case(text.strip())
-
-
 class DataCollator:
     """Collates audio and text data for training."""
 
@@ -183,6 +172,9 @@ class DataCollator:
             tokenizer=tokenizer,
             max_length=2048,
         )
+
+        # Punctuation and truecasing model (lazy loaded)
+        self.punctuator = None
 
     def _compute_encoder_output_length(self, mel_length: int) -> int:
         """Compute encoder output length using conv layer formulas."""
@@ -229,11 +221,16 @@ class DataCollator:
             num_tokens = self.projector.get_output_length(encoder_len)
             audio_token_counts.append(num_tokens)
 
+        # Apply punctuation and truecasing to texts in batch (model expects lowercase)
+        if self.punctuator is None:
+            self.punctuator = PunctCapSegModelONNX.from_pretrained("pcs_en")
+        raw_texts = [(f.get("text") or "").strip().lower() for f in valid_features]
+        results = self.punctuator.infer(raw_texts)
+        processed_texts = [" ".join(r) if r else t for t, r in zip(raw_texts, results)]
+
         # Build messages for each sample with per-sample audio token counts
-        # Text is already preprocessed with truecasing in DatasetLoader
         text_features = []
-        for f, num_audio_tokens in zip(valid_features, audio_token_counts):
-            text = (f.get("text") or "").strip()
+        for text, num_audio_tokens in zip(processed_texts, audio_token_counts):
             audio_placeholder = "<audio>" * num_audio_tokens
             user_content = TRANSCRIBE_PREFIX + audio_placeholder
 

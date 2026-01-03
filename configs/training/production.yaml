@@ -53,8 +53,8 @@ model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
 # Data loading
-dataloader_num_workers: 8
-dataloader_prefetch_factor: 3
+dataloader_num_workers: 4
+dataloader_prefetch_factor: 6
 dataloader_pin_memory: true
 dataloader_persistent_workers: true
 dataloader_drop_last: true
