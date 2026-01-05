@@ -110,7 +110,8 @@ def apply_specaugment(
     augmented = input_features.clone()
 
     # Time masking (along time dimension)
-    if mask_time_prob > 0:
+    # Apply if prob > 0 OR min_masks > 0 (to support fixed mask count with prob=0)
+    if mask_time_prob > 0 or mask_time_min_masks > 0:
         time_mask = _compute_mask_indices(
             shape=(batch_size, time_steps),
             mask_prob=mask_time_prob,
@@ -123,7 +124,8 @@ def apply_specaugment(
         augmented = augmented.masked_fill(time_mask, 0.0)
 
     # Frequency masking (along mel dimension)
-    if mask_feature_prob > 0:
+    # Apply if prob > 0 OR min_masks > 0 (to support fixed mask count with prob=0)
+    if mask_feature_prob > 0 or mask_feature_min_masks > 0:
         feature_mask = _compute_mask_indices(
             shape=(batch_size, n_mels),
             mask_prob=mask_feature_prob,

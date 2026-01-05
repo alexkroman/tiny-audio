@@ -45,7 +45,7 @@ def download_sample_audio(num_samples: int = 20):
         samples.append((audio, sr, text))
         if num_samples <= 5:
             text_preview = f"'{text[:60]}...'" if len(text) > 60 else f"'{text}'"
-            print(f"  Sample {i+1}: {len(audio) / sr:.1f}s - {text_preview}")
+            print(f"  Sample {i + 1}: {len(audio) / sr:.1f}s - {text_preview}")
 
     print(f"Loaded {len(samples)} samples")
     return samples
@@ -198,7 +198,7 @@ def check_mosa(
     per_sample_stats = []
     model_dtype = next(encoder.parameters()).dtype
 
-    for i, (audio, sr, text) in enumerate(samples):
+    for i, (audio, sr, _text) in enumerate(samples):
         # Resample to 16kHz if needed
         if sr != 16000:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
@@ -225,12 +225,14 @@ def check_mosa(
 
         # Per-sample stats
         mean_probs = probs.mean(dim=0)
-        per_sample_stats.append({
-            "sample_idx": i,
-            "num_tokens": probs.shape[0],
-            "expert_means": mean_probs.tolist(),
-            "expert_stds": probs.std(dim=0).tolist(),
-        })
+        per_sample_stats.append(
+            {
+                "sample_idx": i,
+                "num_tokens": probs.shape[0],
+                "expert_means": mean_probs.tolist(),
+                "expert_stds": probs.std(dim=0).tolist(),
+            }
+        )
 
     # Concatenate all routing probs across samples
     probs = torch.cat(all_probs, dim=0)
@@ -242,8 +244,10 @@ def check_mosa(
     shared_expert = mean_probs_all.argmax().item()
     specialist_experts = [i for i in range(num_experts) if i != shared_expert]
 
-    print(f"\nMOSA Architecture Analysis:")
-    print(f"  Shared expert: Expert {shared_expert} ({mean_probs_all[shared_expert]*100:.1f}% avg)")
+    print("\nMOSA Architecture Analysis:")
+    print(
+        f"  Shared expert: Expert {shared_expert} ({mean_probs_all[shared_expert] * 100:.1f}% avg)"
+    )
     print(f"  Specialist experts: {specialist_experts}")
 
     # Show per-sample variation if multiple samples
@@ -257,7 +261,7 @@ def check_mosa(
         for stat in per_sample_stats[:10]:  # Show first 10
             print(f"  {stat['sample_idx']:<8}", end="")
             for m in stat["expert_means"]:
-                print(f"   {m*100:5.1f}%", end="")
+                print(f"   {m * 100:5.1f}%", end="")
             print()
         if len(per_sample_stats) > 10:
             print(f"  ... and {len(per_sample_stats) - 10} more samples")
@@ -268,16 +272,20 @@ def check_mosa(
         print("\nCross-sample consistency (std of expert means across samples):")
         for e in range(num_experts):
             consistency = "consistent" if cross_sample_std[e] < 0.05 else "varies"
-            print(f"  Expert {e}: {cross_sample_std[e]*100:.1f}% std ({consistency})")
+            print(f"  Expert {e}: {cross_sample_std[e] * 100:.1f}% std ({consistency})")
 
     # Within-sample routing dynamics
     print("\nWithin-sample routing dynamics:")
     avg_within_sample_std = torch.tensor([s["expert_stds"] for s in per_sample_stats]).mean(dim=0)
     for e in range(num_experts):
         if e == shared_expert:
-            print(f"  Expert {e} (shared): {avg_within_sample_std[e]*100:.1f}% avg std within samples")
+            print(
+                f"  Expert {e} (shared): {avg_within_sample_std[e] * 100:.1f}% avg std within samples"
+            )
         else:
-            print(f"  Expert {e} (specialist): {avg_within_sample_std[e]*100:.1f}% avg std within samples")
+            print(
+                f"  Expert {e} (specialist): {avg_within_sample_std[e] * 100:.1f}% avg std within samples"
+            )
 
     # Specialist activation analysis
     print("\nSpecialist expert activation:")
@@ -285,14 +293,16 @@ def check_mosa(
         # When does this expert get > 25% routing weight?
         activation_rate = (probs[:, e] > 0.25).float().mean().item()
         peak_activation = probs[:, e].max().item()
-        print(f"  Expert {e}: activates >25% on {activation_rate*100:.1f}% of tokens, peak={peak_activation*100:.1f}%")
+        print(
+            f"  Expert {e}: activates >25% on {activation_rate * 100:.1f}% of tokens, peak={peak_activation * 100:.1f}%"
+        )
 
     print(f"\n1. ROUTER BEHAVIOR ({len(samples)} sample(s), {probs.shape[0]} tokens)")
     print("-" * 40)
 
     # Recompute logits stats from all samples
     all_logits = []
-    for (audio, sr, _) in samples:
+    for audio, sr, _ in samples:
         if sr != 16000:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
         inputs = feature_extractor(audio, sampling_rate=16000, return_tensors="pt")
@@ -365,10 +375,12 @@ def check_mosa(
         print("No issues detected.")
 
     # MOSA health summary
-    print(f"\nMOSA Health:")
+    print("\nMOSA Health:")
     print(f"  Shared expert (E{shared_expert}): {max_prob * 100:.1f}% avg routing")
     print(f"  Specialist experts: {[f'E{e}' for e in specialist_experts]}")
-    print(f"  Routing entropy: {entropy_ratio:.1%} of max (target: {TARGETS['entropy_min']:.0%}-{TARGETS['entropy_max']:.0%})")
+    print(
+        f"  Routing entropy: {entropy_ratio:.1%} of max (target: {TARGETS['entropy_min']:.0%}-{TARGETS['entropy_max']:.0%})"
+    )
 
     return len(issues) == 0
 
@@ -386,5 +398,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    success = check_mosa(args.model_id, force_download=not args.no_cache, num_samples=args.num_samples)
+    success = check_mosa(
+        args.model_id, force_download=not args.no_cache, num_samples=args.num_samples
+    )
     sys.exit(0 if success else 1)

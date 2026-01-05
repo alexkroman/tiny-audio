@@ -7,7 +7,6 @@ from typing import Any
 import hydra
 import nltk
 import torch
-from punctuators.models import PunctCapSegModelONNX
 import wandb
 from datasets import (
     Audio,
@@ -16,6 +15,7 @@ from datasets import (
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
+from punctuators.models import PunctCapSegModelONNX
 from transformers import (
     EarlyStoppingCallback,
     Trainer,

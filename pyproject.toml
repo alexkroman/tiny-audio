@@ -31,32 +31,21 @@ Documentation = "https://github.com/alexkroman/tiny-audio#readme"
 "Bug Tracker" = "https://github.com/alexkroman/tiny-audio/issues"
 
 [project.scripts]
-# Course tools
-download-samples = "scripts.download_samples:download_samples"
+# Evaluation
+eval = "scripts.eval.cli:main"
 
-# Model scripts (use: poetry run python scripts/train.py for training due to Hydra config paths)
-eval = "scripts.eval:main"
-push-to-hub = "scripts.push_to_hub:main"
-run-handler = "scripts.run_handler_local:main"
+# Analysis
+analysis = "scripts.analysis:cli"
 
-# Deployment scripts
-deploy-hf = "scripts.deploy_to_hf_space:main"
-deploy-runpod = "scripts.deploy_runpod:cli"
-remote-train = "scripts.start_remote_training:cli"
-attach-remote = "scripts.attach_remote_session:cli"
-find-checkpoint = "scripts.find_checkpoint:cli"
+# Deployment
+deploy-hf = "scripts.deploy.hf_space:main"
+run-handler = "scripts.deploy.handler_local:main"
+runpod = "scripts.deploy.runpod:cli"
 
-# Analysis tools
-wer-by-length = "scripts.wer_by_length:app"
-keyword-wer = "scripts.keyword_wer:app"
+# Hub
+push-to-hub = "scripts.hub.push:main"
 
-# Development tools
-lint = "scripts.dev_tools:lint_cli"
-format = "scripts.dev_tools:format_cli"
-type-check = "scripts.dev_tools:type_check_cli"
-test = "scripts.dev_tools:test_cli"
-check = "scripts.dev_tools:check_cli"
-dev = "scripts.dev_tools:cli"
+# Development: use `just` (install: brew install just)
 
 [tool.poetry]
 packages = [{include = "src"}]
@@ -77,8 +66,9 @@ librosa = ">=0.10.0"
 transformers = {git = "https://github.com/huggingface/transformers.git"}
 accelerate = "*"
 datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
-evaluate = "*"
 jiwer = "*"
+attrs = "*"
+rich = "*"
 wandb = "*"
 numpy = "*"
 hydra-core = "*"
@@ -155,7 +145,7 @@ ignore_errors = true
 [tool.pyright]
 include = ["src"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
-ignore = ["src/asr_pipeline.py"]  # Uses lazy-loaded torchaudio
+ignore = ["src/asr_pipeline.py", "src/integrations/pipecat_stt.py"]  # Optional deps
 typeCheckingMode = "basic"
 reportPrivateImportUsage = false
 reportOptionalMemberAccess = false

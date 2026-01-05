@@ -9,24 +9,23 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 # Add src directory to path
-src_path = Path(__file__).parent.parent / "src"
+src_path = Path(__file__).parent.parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
 # Try importing required modules
 try:
     from handler import EndpointHandler
 
-    print(f"✅ Successfully imported handler from {src_path}")
+    print(f"Successfully imported handler from {src_path}")
 except ImportError as e:
-    print(f"❌ Failed to import handler: {e}")
+    print(f"Failed to import handler: {e}")
     print(f"   Make sure handler.py exists in: {src_path}")
     sys.exit(1)
 
 
-def find_latest_model(base_dir: str = "outputs") -> Optional[str]:
+def find_latest_model(base_dir: str = "outputs") -> str | None:
     """Find the most recent saved model in outputs directory."""
     outputs_path = Path(base_dir)
     if not outputs_path.exists():
@@ -45,7 +44,7 @@ def find_latest_model(base_dir: str = "outputs") -> Optional[str]:
     return str(model_files[0].parent)
 
 
-def find_test_audio() -> Optional[str]:
+def find_test_audio() -> str | None:
     """Find a test audio file in the project."""
     # Look for test audio files in common locations
     test_paths = [
@@ -55,7 +54,7 @@ def find_test_audio() -> Optional[str]:
         "tests/test_audio.wav",
     ]
 
-    base_dir = Path(__file__).parent.parent
+    base_dir = Path(__file__).parent.parent.parent
 
     for test_path in test_paths:
         full_path = base_dir / test_path
@@ -73,7 +72,7 @@ def find_test_audio() -> Optional[str]:
 
 def test_handler(
     model_path: str,
-    audio_path: Optional[str] = None,
+    audio_path: str | None = None,
     max_new_tokens: int = 200,
     num_beams: int = 1,
     temperature: float = 1.0,
@@ -83,20 +82,20 @@ def test_handler(
     """Test the EndpointHandler with various configurations."""
 
     print("=" * 80)
-    print("🚀 HuggingFace Inference Endpoint Handler - Local Test Runner")
+    print("HuggingFace Inference Endpoint Handler - Local Test Runner")
     print("=" * 80)
 
     # Step 1: Initialize the handler
-    print(f"\n📦 Loading model from: {model_path}")
+    print(f"\nLoading model from: {model_path}")
     print("   This may take a moment on first load...")
 
     start_time = time.time()
     try:
         handler = EndpointHandler(path=model_path)
         load_time = time.time() - start_time
-        print(f"✅ Model loaded successfully in {load_time:.2f} seconds")
+        print(f"Model loaded successfully in {load_time:.2f} seconds")
     except Exception as e:
-        print(f"❌ Failed to load model: {e}")
+        print(f"Failed to load model: {e}")
         import traceback
 
         traceback.print_exc()
@@ -104,23 +103,23 @@ def test_handler(
 
     # Step 2: Find or use provided audio file
     if audio_path is None:
-        print("\n🔍 No audio file specified, searching for test audio...")
+        print("\nNo audio file specified, searching for test audio...")
         audio_path = find_test_audio()
         if audio_path:
             print(f"   Found test audio: {audio_path}")
         else:
-            print("❌ No test audio found. Please provide an audio file path.")
+            print("No test audio found. Please provide an audio file path.")
             print("   Usage: python run_handler_local.py --audio path/to/audio.wav")
             return
 
     if not Path(audio_path).exists():
-        print(f"❌ Audio file not found: {audio_path}")
+        print(f"Audio file not found: {audio_path}")
         return
 
-    print(f"\n🎵 Using audio file: {audio_path}")
+    print(f"\nUsing audio file: {audio_path}")
 
     # Step 3: Prepare the request data
-    print("\n📋 Preparing inference request...")
+    print("\nPreparing inference request...")
 
     # Basic single file test
     if not batch_test:
@@ -142,15 +141,15 @@ def test_handler(
         print(f"              temperature={temperature}, do_sample={do_sample}")
 
         # Step 4: Run inference
-        print("\n🎙️ Running transcription...")
+        print("\nRunning transcription...")
         start_time = time.time()
         try:
             result = handler(data)
             inference_time = time.time() - start_time
-            print(f"✅ Inference completed in {inference_time:.2f} seconds")
+            print(f"Inference completed in {inference_time:.2f} seconds")
 
             # Step 5: Display results
-            print("\n📝 Transcription Result:")
+            print("\nTranscription Result:")
             print("-" * 40)
             if "text" in result:
                 print(result["text"])
@@ -159,14 +158,14 @@ def test_handler(
             print("-" * 40)
 
         except Exception as e:
-            print(f"❌ Inference failed: {e}")
+            print(f"Inference failed: {e}")
             import traceback
 
             traceback.print_exc()
 
     # Batch test (if requested)
     if batch_test:
-        print("\n🔄 Testing batch processing...")
+        print("\nTesting batch processing...")
 
         # Create a batch of the same audio file
         batch_size = 3
@@ -191,10 +190,10 @@ def test_handler(
         try:
             result = handler(data)
             inference_time = time.time() - start_time
-            print(f"✅ Batch inference completed in {inference_time:.2f} seconds")
+            print(f"Batch inference completed in {inference_time:.2f} seconds")
             print(f"   Average time per sample: {inference_time / batch_size:.2f} seconds")
 
-            print("\n📝 Batch Results:")
+            print("\nBatch Results:")
             print("-" * 40)
             if "texts" in result:
                 for i, text in enumerate(result["texts"], 1):
@@ -204,12 +203,12 @@ def test_handler(
             print("-" * 40)
 
         except Exception as e:
-            print(f"❌ Batch inference failed: {e}")
+            print(f"Batch inference failed: {e}")
             import traceback
 
             traceback.print_exc()
 
-    print("\n✨ Test completed!")
+    print("\nTest completed!")
     print("=" * 80)
 
 
@@ -220,22 +219,22 @@ def main():
         epilog="""
 Examples:
   # Use the latest saved model
-  python scripts/run_handler_local.py
+  python scripts/deploy/handler_local.py
 
   # Use a specific model
-  python scripts/run_handler_local.py --model outputs/2025-09-24/10-39-34/outputs/mac_model
+  python scripts/deploy/handler_local.py --model outputs/2025-09-24/10-39-34/outputs/mac_model
 
   # Use a HuggingFace Hub model
-  python scripts/run_handler_local.py --model mazesmazes/tiny-audio
+  python scripts/deploy/handler_local.py --model mazesmazes/tiny-audio
 
   # Specify custom audio file
-  python scripts/run_handler_local.py --audio path/to/audio.wav
+  python scripts/deploy/handler_local.py --audio path/to/audio.wav
 
   # Test with beam search
-  python scripts/run_handler_local.py --num-beams 5 --max-new-tokens 256
+  python scripts/deploy/handler_local.py --num-beams 5 --max-new-tokens 256
 
   # Test batch processing
-  python scripts/run_handler_local.py --batch-test
+  python scripts/deploy/handler_local.py --batch-test
         """,
     )
 
@@ -286,7 +285,7 @@ Examples:
     # Determine model path
     model_path = args.model
     if model_path is None:
-        print("🔍 No model specified, using default HuggingFace Hub model...")
+        print("No model specified, using default HuggingFace Hub model...")
         model_path = "mazesmazes/tiny-audio"
         print(f"   Using model: {model_path}")
 

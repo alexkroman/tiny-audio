@@ -108,11 +108,13 @@ class TestApplySpecaugment:
         assert augmented.shape == sample_features.shape
 
     def test_no_augmentation_when_disabled(self, sample_features):
-        """Test that no changes when both probs are 0."""
+        """Test that no changes when both probs and min_masks are 0."""
         augmented = apply_specaugment(
             sample_features,
             mask_time_prob=0.0,
+            mask_time_min_masks=0,
             mask_feature_prob=0.0,
+            mask_feature_min_masks=0,
         )
         assert torch.allclose(augmented, sample_features)
 
@@ -156,6 +158,22 @@ class TestApplySpecaugment:
             mask_feature_min_masks=2,
         )
         # Should have zeros from both maskings
+        original_zeros = (sample_features == 0).sum()
+        augmented_zeros = (augmented == 0).sum()
+        assert augmented_zeros > original_zeros
+
+    def test_fixed_mask_count_with_zero_prob(self, sample_features):
+        """Test that min_masks applies even when prob=0.0 (fixed mask count mode)."""
+        augmented = apply_specaugment(
+            sample_features,
+            mask_time_prob=0.0,  # Zero prob
+            mask_time_length=10,
+            mask_time_min_masks=2,  # But min_masks > 0
+            mask_feature_prob=0.0,  # Zero prob
+            mask_feature_length=10,
+            mask_feature_min_masks=2,  # But min_masks > 0
+        )
+        # Should still have masking applied due to min_masks
         original_zeros = (sample_features == 0).sum()
         augmented_zeros = (augmented == 0).sum()
         assert augmented_zeros > original_zeros

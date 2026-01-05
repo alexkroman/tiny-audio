@@ -65,8 +65,8 @@ poetry run python scripts/train.py +experiments=mlp
 poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpoint=/path/to/checkpoint-XXXX
 
 # For remote training, find the latest checkpoint and resume:
-poetry run find-checkpoint <host> <port>  # prints latest checkpoint path
-poetry run remote-train <host> <port> --experiment mlp --wandb-run-id <run-id> --wandb-resume must training.resume_from_checkpoint=/path/to/checkpoint-XXXX
+poetry run runpod checkpoint <host> <port>  # prints latest checkpoint path
+poetry run runpod train <host> <port> --experiment mlp --wandb-run-id <run-id> --wandb-resume must training.resume_from_checkpoint=/path/to/checkpoint-XXXX
 ```
 
 ## How It Works: The Tiny Audio Architecture
@@ -193,43 +193,48 @@ Tiny Audio is not a SOTA ASR model. It's a **minimal, readable, hackable codebas
 ```text
 tiny-audio/
 ├── src/                      # Core library code
-│   ├── asr_modeling.py      # Model architecture
-│   ├── asr_config.py        # Model configuration
-│   ├── asr_pipeline.py      # HuggingFace pipeline integration
-│   ├── asr_processing.py    # Audio/text processing
-│   ├── projectors.py        # All projector architectures
-│   └── handler.py           # Inference handler
-├── scripts/                 # Training and utility scripts
-│   ├── train.py             # Training script (Hydra-based)
-│   ├── eval.py              # Evaluation
-│   ├── deploy_runpod.py     # Remote deployment
-│   └── ...
-├── configs/                 # Hydra configurations
-│   ├── config.yaml          # Main config
-│   ├── experiments/         # Projector presets
-│   ├── data/                # Dataset configs
-│   └── training/            # Training hyperparameters
-├── demo/                    # Gradio web interface
-└── tests/                   # Test suite
+│   ├── asr_modeling.py       # Model architecture
+│   ├── asr_config.py         # Model configuration
+│   ├── asr_pipeline.py       # HuggingFace pipeline integration
+│   ├── asr_processing.py     # Audio/text processing
+│   ├── projectors.py         # All projector architectures
+│   └── handler.py            # Inference handler
+├── scripts/                  # Training and utility scripts
+│   ├── train.py              # Training script (Hydra-based)
+│   ├── analysis.py           # WER analysis tools
+│   ├── eval/                 # Evaluation package
+│   │   ├── cli.py            # Main eval CLI
+│   │   ├── datasets.py       # Dataset configs
+│   │   └── evaluators/       # ASR, diarization, alignment
+│   ├── deploy/               # Deployment tools
+│   │   ├── runpod.py         # RunPod operations
+│   │   ├── hf_space.py       # Deploy to HF Spaces
+│   │   └── handler_local.py  # Test endpoint locally
+│   └── hub/                  # HuggingFace Hub operations
+│       └── push.py           # Push model to Hub
+├── configs/                  # Hydra configurations
+│   ├── config.yaml           # Main config
+│   ├── experiments/          # Projector presets
+│   ├── data/                 # Dataset configs
+│   └── training/             # Training hyperparameters
+├── demo/                     # Gradio web interface
+└── tests/                    # Test suite
 ```
 
 ## Development
 
 ```bash
-# Format code
-poetry run format
-
-# Run linter
-poetry run lint
-
-# Type checking
-poetry run type-check
-
-# Run tests
-poetry run test
+# Install just task runner (recommended)
+brew install just  # or: cargo install just
 
 # Run all checks
-poetry run check
+just check
+
+# Individual commands
+just lint          # Run linter (ruff)
+just format        # Format code (black + ruff)
+just type-check    # Type checking (mypy + pyright)
+just test          # Run tests (pytest)
 ```
 
 ## Contributing

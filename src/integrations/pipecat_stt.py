@@ -5,7 +5,10 @@ from typing import Optional
 import numpy as np
 
 try:
-    from pipecat.frames.frames import InterimTranscriptionFrame, TranscriptionFrame
+    from pipecat.frames.frames import (
+        InterimTranscriptionFrame,
+        TranscriptionFrame,
+    )
     from pipecat.services.stt_service import SegmentedSTTService
 except ImportError as err:
     raise ImportError(
