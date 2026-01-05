@@ -28,7 +28,7 @@ class MLPAudioProjector(nn.Module):
 
         encoder_dim = getattr(config, "encoder_dim", 768)
         llm_dim = getattr(config, "llm_dim", 2048)
-        self.k = getattr(config, "projector_pool_stride", 4)
+        self.k = getattr(config, "projector_pool_stride", 2)
 
         # Frame stacking: concat k adjacent frames then project
         # Matches GLM-ASR: in_dim -> 2*llm_dim -> llm_dim
@@ -63,12 +63,12 @@ class MLPAudioProjector(nn.Module):
 
 
 class SimpleAdapter(nn.Module):
-    """Simple 2-layer ReLU adapter (from MOSA paper)."""
+    """Simple 2-layer GELU adapter (from MOSA paper)."""
 
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.act = nn.ReLU()
+        self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -89,7 +89,7 @@ class SwiGLUExpert(nn.Module):
 
 
 class MOSAProjector(nn.Module):
-    """MOSA-Base projector: simple 2-layer router with 4 simple adapters.
+    """MOSA-Base projector: simple 2-layer ReLU router with 4 simple adapters.
 
     Based on "MOSA: Mixtures of Simple Adapters" (arXiv:2508.18998).
     Uses softmax gating over all experts (dense MoE) with only cross-entropy loss.
@@ -116,7 +116,7 @@ class MOSAProjector(nn.Module):
             nn.Linear(router_hidden, self.num_experts),
         )
 
-        # --- 2. Experts (Simple 2-layer ReLU adapters per MOSA paper) ---
+        # --- 2. Experts (Simple 2-layer GELU adapters) ---
         # Each expert: in_dim (stacked frames) -> hidden -> llm_dim
         self.experts = nn.ModuleList(
             [SimpleAdapter(in_dim, adapter_hidden, self.llm_dim) for _ in range(self.num_experts)]

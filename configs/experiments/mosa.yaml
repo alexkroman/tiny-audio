@@ -1,17 +1,18 @@
 # @package _global_
 # MOSA-Base (Mixture of Simple Adapters) projector
-# 4 experts with simple 2-layer router (per arXiv:2508.18998)
+# 4 experts with simple 2-layer GELU router (per arXiv:2508.18998)
 
 model:
   projector_type: mosa
   num_experts: 4
+  projector_pool_stride: 2
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   text_model_id: Qwen/Qwen3-1.7B
 
 training:
   hub_model_id: "mazesmazes/tiny-audio"
-  per_device_train_batch_size: 14
-  per_device_eval_batch_size: 14
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
   gradient_accumulation_steps: 2
   num_train_epochs: 1
   save_steps: 1000
@@ -20,8 +21,8 @@ training:
   # SpecAugment (Whisper defaults)
   use_specaugment: true
   mask_time_prob: 0.05      # Probability of masking time steps
-  mask_time_length: 10      # Max length of time mask spans
+  mask_time_length: 100     # Max length of time mask spans
   mask_time_min_masks: 2    # Min number of time masks per sample
-  mask_feature_prob: 0.0    # Disabled by default in Whisper
-  mask_feature_length: 10   # Max length of frequency mask spans
-  mask_feature_min_masks: 0 # Min number of frequency masks
+  mask_feature_prob: 1.0    # Disabled by default in Whisper
+  mask_feature_length: 27   # Max length of frequency mask spans
+  mask_feature_min_masks: 2 # Min number of frequency masks

@@ -3,7 +3,7 @@ output_dir: ./outputs/production_model
 
 # Optimizer
 optim: adamw_torch_fused
-learning_rate: 5.0e-4
+learning_rate: 1.0e-4
 max_grad_norm: 1.0
 warmup_steps: 2000
 lr_scheduler_type: cosine
