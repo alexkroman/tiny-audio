@@ -45,6 +45,9 @@ runpod = "scripts.deploy.runpod:cli"
 # Hub
 push-to-hub = "scripts.hub.push:main"
 
+# Debug
+check-mosa = "scripts.debug.check_mosa:main"
+
 # Development: use `just` (install: brew install just)
 
 [tool.poetry]

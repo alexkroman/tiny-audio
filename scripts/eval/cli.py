@@ -230,8 +230,8 @@ def main():
         "--datasets",
         nargs="+",
         default=["loquacious"],
-        choices=list(DATASET_REGISTRY.keys()),
-        help="Datasets to evaluate on (default: loquacious)",
+        choices=["all"] + list(DATASET_REGISTRY.keys()),
+        help="Datasets to evaluate on (default: loquacious, use 'all' for all datasets)",
     )
     parser.add_argument("--split", default="test", help="Dataset split (default: test)")
     parser.add_argument("--max-samples", type=int, default=None, help="Maximum samples to evaluate")
@@ -263,6 +263,13 @@ def main():
         "--user-prompt", type=str, default=None, help="Custom user prompt for the model"
     )
     args = parser.parse_args()
+
+    # Expand "all" to ASR datasets only (exclude diarization and alignment)
+    if "all" in args.datasets:
+        args.datasets = [
+            k for k in DATASET_REGISTRY.keys()
+            if k not in DIARIZATION_DATASETS and k not in ALIGNMENT_DATASETS
+        ]
 
     for dataset_name in args.datasets:
         console.print(f"\n[bold blue]Evaluating on: {dataset_name}[/bold blue]")

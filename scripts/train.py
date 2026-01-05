@@ -311,6 +311,7 @@ def main(cfg: DictConfig) -> None:
         "mask_feature_prob",
         "mask_feature_length",
         "mask_feature_min_masks",
+        "attn_implementation",
     ]
     for param in training_model_params:
         if cfg.training.get(param) is not None:

@@ -385,7 +385,8 @@ def check_mosa(
     return len(issues) == 0
 
 
-if __name__ == "__main__":
+def main():
+    """CLI entry point for check_mosa."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Check MOSA model for router collapse")
@@ -402,3 +403,7 @@ if __name__ == "__main__":
         args.model_id, force_download=not args.no_cache, num_samples=args.num_samples
     )
     sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    main()
