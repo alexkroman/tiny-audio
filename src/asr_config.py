@@ -61,7 +61,7 @@ class ASRConfig(transformers.PretrainedConfig):
         generation_defaults = {
             "num_beams": 1,
             "max_new_tokens": 256,
-            "min_new_tokens": 1,
+            "min_new_tokens": 0,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
             "no_repeat_ngram_size": 0,

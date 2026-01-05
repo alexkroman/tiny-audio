@@ -489,11 +489,11 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         text = text.lower()
 
         # 2. REMOVE REPETITIVE LOOPS
-        # If the model repeats the same phrase more than twice, cut it off.
+        # If the model repeats the same phrase more than twice, remove all repetitions.
         words = text.split()
         if len(words) > 10:
-            # Check for repeating n-grams (1 to 4 words long)
-            for n in range(1, 5):
+            # Check for repeating n-grams (1 to 5 words long)
+            for n in range(1, 6):
                 last_sequence = words[-n:]
                 repeat_count = 0
                 idx = len(words) - n
@@ -501,9 +501,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                     repeat_count += 1
                     idx -= n
 
-                # If more than 2 exact repetitions at the end, truncate
+                # If more than 2 exact repetitions at the end, remove all of them
                 if repeat_count > 2:
-                    text = " ".join(words[: idx + n])
+                    words = words[:idx]
+                    text = " ".join(words)
                     break
 
         # 3. STRIP WHITESPACE
