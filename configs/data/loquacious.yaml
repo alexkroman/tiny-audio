@@ -12,10 +12,8 @@ datasets:
 
 # Audio processing
 sample_rate: 16000
-max_audio_duration_seconds: 30.0
 
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
-max_eval_samples: 500
-use_streaming: false
+max_eval_samples: 2000

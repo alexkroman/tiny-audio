@@ -14,27 +14,41 @@ class ASRConfig(transformers.PretrainedConfig):
         attn_implementation: str = "flash_attention_2",
         model_dtype: str = "bfloat16",
         num_beams: Optional[int] = None,
-        system_prompt: str = "/no_think /system_override",
-        user_prompt: str = "Transcribe: <audio>",
+        system_prompt: str = "You are a helpful assistant.",
+        user_prompt: str = "Please transcribe this English audio into text: <audio>",
         encoder_dim: Optional[int] = None,
         llm_dim: Optional[int] = None,
+        # Encoder conv layers: list of (padding, kernel_size, stride) tuples
+        # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
+        encoder_conv_layers: Optional[list] = None,
         audio_sample_rate: int = 16000,
-        projector_init_std: float = 0.02,
-        projector_pool_stride: int = 2,
-        downsample_rate: int = 16,
+        projector_pool_stride: int = 4,
+        downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
-        projector_type: str = "moe",  # "moe", "swiglu", "residual", "shared_moe", "mlp"
-        projector_num_layers: int = 2,  # Number of layers (for residual projector)
-        projector_dropout: float = 0.05,  # Dropout rate for projector layers
-        projector_input_noise: float = 0.02,  # Input noise for projector
+        projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
+        projector_num_layers: int = 2,  # Number of layers in MLP projector
+        projector_init_std: float = 0.02,  # Weight initialization std
+        projector_dropout: float = 0.0,  # Dropout rate for projector layers
         # MoE-specific configuration
         num_experts: int = 4,  # Number of experts in MoE projectors
         num_experts_per_tok: int = 2,  # Top-k experts per token
         router_aux_loss_coef: float = 0.01,  # Auxiliary loss coefficient for load balancing
-        use_specaugment: bool = True,  # Apply SpecAugment during training
+        # QFormer-specific configuration (Granite defaults)
+        qformer_window_size: int = 15,  # Window size for QFormer processing
+        qformer_hidden_size: Optional[int] = None,  # QFormer hidden size (defaults to encoder_dim)
+        qformer_num_layers: int = 2,  # Number of QFormer transformer layers
+        qformer_num_heads: int = 16,  # Number of attention heads in QFormer
+        qformer_intermediate_size: Optional[int] = None,  # FFN size (defaults to 4x hidden)
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
-        inference_diversity_penalty: float = 0.0,
         inference_warmup_tokens: int = 10,
+        # SpecAugment settings (Whisper defaults)
+        use_specaugment: bool = False,
+        mask_time_prob: float = 0.05,  # Probability of masking time steps
+        mask_time_length: int = 10,  # Max length of time mask
+        mask_time_min_masks: int = 2,  # Min number of time masks
+        mask_feature_prob: float = 0.0,  # Probability of masking frequency bins (disabled by default)
+        mask_feature_length: int = 10,  # Max length of frequency mask
+        mask_feature_min_masks: int = 0,  # Min number of frequency masks
         max_new_tokens: Optional[int] = None,
         min_new_tokens: Optional[int] = None,
         repetition_penalty: Optional[float] = None,
@@ -46,7 +60,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # Set default generation parameters (greedy decoding only)
         generation_defaults = {
             "num_beams": 1,
-            "max_new_tokens": 96,
+            "max_new_tokens": 256,
             "min_new_tokens": 0,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
@@ -65,6 +79,8 @@ class ASRConfig(transformers.PretrainedConfig):
         self.user_prompt = user_prompt
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
+        # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
+        self.encoder_conv_layers = encoder_conv_layers or [(1, 3, 1), (1, 3, 2)]
         self.audio_sample_rate = audio_sample_rate
         self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
@@ -73,15 +89,26 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_type = projector_type
         self.projector_num_layers = projector_num_layers
         self.projector_dropout = projector_dropout
-        self.projector_input_noise = projector_input_noise
         # MoE-specific configuration
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
         self.router_aux_loss_coef = router_aux_loss_coef
-        self.use_specaugment = use_specaugment
+        # QFormer-specific configuration
+        self.qformer_window_size = qformer_window_size
+        self.qformer_hidden_size = qformer_hidden_size
+        self.qformer_num_layers = qformer_num_layers
+        self.qformer_num_heads = qformer_num_heads
+        self.qformer_intermediate_size = qformer_intermediate_size
         self.label_smoothing = label_smoothing
-        self.inference_diversity_penalty = inference_diversity_penalty
         self.inference_warmup_tokens = inference_warmup_tokens
+        # SpecAugment configuration
+        self.use_specaugment = use_specaugment
+        self.mask_time_prob = mask_time_prob
+        self.mask_time_length = mask_time_length
+        self.mask_time_min_masks = mask_time_min_masks
+        self.mask_feature_prob = mask_feature_prob
+        self.mask_feature_length = mask_feature_length
+        self.mask_feature_min_masks = mask_feature_min_masks
 
         # Generation parameters (use explicit value if provided, else use default)
         self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]

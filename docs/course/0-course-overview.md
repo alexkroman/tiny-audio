@@ -61,6 +61,14 @@ ______________________________________________________________________
 - Deploying a live demo to Hugging Face Spaces
 - Setting up Hugging Face Inference Endpoints
 
+### [Quick Reference Guide](./4-quick-reference.md)
+
+A one-page cheat sheet with all essential commands, hyperparameters, and troubleshooting tips.
+
+### [Glossary](./5-glossary.md)
+
+Definitions of key terms: ASR concepts, ML fundamentals, tools, and architecture components.
+
 ______________________________________________________________________
 
 ## Prerequisites

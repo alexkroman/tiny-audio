@@ -1,3 +1,5 @@
+import re
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -119,11 +121,13 @@ class ForcedAligner:
             token_char = labels[span.token]
             if token_char == "|":  # Word separator
                 if current_word_start is not None and word_idx < len(words):
-                    word_timestamps.append({
-                        "word": words[word_idx],
-                        "start": current_word_start * frame_duration,
-                        "end": current_word_end * frame_duration,
-                    })
+                    word_timestamps.append(
+                        {
+                            "word": words[word_idx],
+                            "start": current_word_start * frame_duration,
+                            "end": current_word_end * frame_duration,
+                        }
+                    )
                     word_idx += 1
                 current_word_start = None
                 current_word_end = None
@@ -134,11 +138,13 @@ class ForcedAligner:
 
         # Don't forget the last word
         if current_word_start is not None and word_idx < len(words):
-            word_timestamps.append({
-                "word": words[word_idx],
-                "start": current_word_start * frame_duration,
-                "end": current_word_end * frame_duration,
-            })
+            word_timestamps.append(
+                {
+                    "word": words[word_idx],
+                    "start": current_word_start * frame_duration,
+                    "end": current_word_end * frame_duration,
+                }
+            )
 
         return word_timestamps
 
@@ -234,11 +240,13 @@ class SpeakerDiarizer:
         # Convert to simple format
         segments = []
         for turn, _, speaker in annotation.itertracks(yield_label=True):
-            segments.append({
-                "speaker": speaker,
-                "start": turn.start,
-                "end": turn.end,
-            })
+            segments.append(
+                {
+                    "speaker": speaker,
+                    "start": turn.start,
+                    "end": turn.end,
+                }
+            )
 
         return segments
 
@@ -412,7 +420,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 }
         elif isinstance(inputs, str):
             # File path - load audio using ffmpeg (same as HF pipeline)
-            with open(inputs, "rb") as f:
+            with Path(inputs).open("rb") as f:
                 audio = ffmpeg_read(f.read(), sampling_rate=16000)
             return {"array": audio, "sampling_rate": 16000}
         elif isinstance(inputs, bytes):
@@ -440,15 +448,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # Extract audio features and is_last flag
         is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
 
-        if isinstance(model_inputs, dict):
-            input_features = model_inputs.get("input_features")
-            if input_features is not None:
-                input_features = input_features.to(self.model.device)
-        else:
-            input_features = model_inputs.to(self.model.device)
+        input_features = model_inputs["input_features"].to(self.model.device)
+        audio_attention_mask = model_inputs["attention_mask"].to(self.model.device)
 
         generated_ids = self.model.generate(
             input_features=input_features,
+            audio_attention_mask=audio_attention_mask,
             **generate_kwargs,
         )
 
@@ -469,4 +474,46 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 tokens = tokens[0]
 
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
+        # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
+        text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+        # Post-process prediction
+        text = self._post_process_prediction(text)
         return {"text": text}
+
+    def _post_process_prediction(self, text: str) -> str:
+        """Post-process model output to fix common issues."""
+        if not text:
+            return ""
+
+        original_len = len(text.split())
+
+        # 1. LOWERCASE
+        text = text.lower()
+
+        # 2. REMOVE REPETITIVE LOOPS
+        # If the model repeats the same phrase, keep only one instance.
+        words = text.split()
+        for n in range(1, min(15, len(words) // 2 + 1)):
+            last_sequence = words[-n:]
+            repeat_count = 0
+            idx = len(words) - n
+            while idx >= n and words[idx - n : idx] == last_sequence:
+                repeat_count += 1
+                idx -= n
+
+            if repeat_count >= 1:
+                words = words[: idx + n]
+                text = " ".join(words)
+                print(f"[DEBUG] Truncated repetition: {original_len} -> {len(words)} words (n={n}, repeats={repeat_count})")
+                break
+
+        # 3. COMBINE ACRONYMS
+        # Merge consecutive single letters into one word (e.g., "u s a" -> "usa")
+        text = re.sub(r"\b([a-z])((?:\s+[a-z])+)\b", lambda m: m.group(0).replace(" ", ""), text)
+
+        # 4. NORMALIZE CURRENCY
+        # Convert "eur X" to "X euros" for Whisper normalizer compatibility
+        text = re.sub(r"\beur\s+(\d+)", r"\1 euros", text)
+
+        # 5. STRIP WHITESPACE
+        return re.sub(r"\s+", " ", text).strip()

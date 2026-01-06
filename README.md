@@ -33,11 +33,11 @@ print(result["text"])
 
 ## 🎓 Learn by Building: A Free, Hands-On Course
 
-This repository is also a free, 6-hour course designed to teach you the art and science of building modern ASR systems. No black boxes. No magic. Just clean, understandable code and a clear path from raw audio to a deployed model.
+This repository is also a free, 3.5-hour course designed to teach you the art and science of building modern ASR systems. No black boxes. No magic. Just clean, understandable code and a clear path from raw audio to a deployed model.
 
 **[📚 Start the Course](docs/QUICKSTART.md)** | **[📖 See the Full Curriculum](docs/course/0-course-overview.md)**
 
-In just six hours, you will:
+In just 3.5 hours, you will:
 
 - **Understand the Architecture:** Go deep on the encoder-projector-decoder model that powers modern ASR.
 - **Master Efficient Training:** Learn how to train just the projector while leveraging frozen pretrained models.
@@ -65,8 +65,8 @@ poetry run python scripts/train.py +experiments=mlp
 poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpoint=/path/to/checkpoint-XXXX
 
 # For remote training, find the latest checkpoint and resume:
-poetry run find-checkpoint <host> <port>  # prints latest checkpoint path
-poetry run remote-train <host> <port> --experiment mlp --wandb-run-id <run-id> --wandb-resume must training.resume_from_checkpoint=/path/to/checkpoint-XXXX
+poetry run runpod checkpoint <host> <port>  # prints latest checkpoint path
+poetry run runpod train <host> <port> --experiment mlp --wandb-run-id <run-id> --wandb-resume must training.resume_from_checkpoint=/path/to/checkpoint-XXXX
 ```
 
 ## How It Works: The Tiny Audio Architecture
@@ -117,9 +117,9 @@ RMSNorm → SmolLM3-3B embeddings (2048-dim)
 ```bash
 # Projector experiments (see configs/experiments/)
 poetry run python scripts/train.py +experiments=mlp       # MLP (default)
-poetry run python scripts/train.py +experiments=moe       # MoE
-poetry run python scripts/train.py +experiments=swiglu    # SwiGLU
-poetry run python scripts/train.py +experiments=residual  # Residual
+poetry run python scripts/train.py +experiments=mosa      # MOSA (dense MoE)
+poetry run python scripts/train.py +experiments=moe       # MoE (shared + sparse)
+poetry run python scripts/train.py +experiments=qformer   # QFormer
 
 # Override any config value
 poetry run python scripts/train.py training.learning_rate=1e-4
@@ -186,50 +186,55 @@ Tiny Audio is not a SOTA ASR model. It's a **minimal, readable, hackable codebas
 - **Projector-only training** keeps encoder and decoder frozen
 - **Dependency-lite**: PyTorch, transformers, datasets, and a few essentials
 - **No magic**: Read the code and understand exactly what's happening
-- **Multiple projector types**: MLP (default), MoE, SwiGLU, Residual
+- **Multiple projector types**: MLP (default), MOSA, MoE, QFormer
 
 ## Project structure
 
 ```text
 tiny-audio/
 ├── src/                      # Core library code
-│   ├── asr_modeling.py      # Model architecture
-│   ├── asr_config.py        # Model configuration
-│   ├── asr_pipeline.py      # HuggingFace pipeline integration
-│   ├── asr_processing.py    # Audio/text processing
-│   ├── projectors.py        # All projector architectures
-│   └── handler.py           # Inference handler
-├── scripts/                 # Training and utility scripts
-│   ├── train.py             # Training script (Hydra-based)
-│   ├── eval.py              # Evaluation
-│   ├── deploy_runpod.py     # Remote deployment
-│   └── ...
-├── configs/                 # Hydra configurations
-│   ├── config.yaml          # Main config
-│   ├── experiments/         # Projector presets
-│   ├── data/                # Dataset configs
-│   └── training/            # Training hyperparameters
-├── demo/                    # Gradio web interface
-└── tests/                   # Test suite
+│   ├── asr_modeling.py       # Model architecture
+│   ├── asr_config.py         # Model configuration
+│   ├── asr_pipeline.py       # HuggingFace pipeline integration
+│   ├── asr_processing.py     # Audio/text processing
+│   ├── projectors.py         # All projector architectures
+│   └── handler.py            # Inference handler
+├── scripts/                  # Training and utility scripts
+│   ├── train.py              # Training script (Hydra-based)
+│   ├── analysis.py           # WER analysis tools
+│   ├── eval/                 # Evaluation package
+│   │   ├── cli.py            # Main eval CLI
+│   │   ├── datasets.py       # Dataset configs
+│   │   └── evaluators/       # ASR, diarization, alignment
+│   ├── deploy/               # Deployment tools
+│   │   ├── runpod.py         # RunPod operations
+│   │   ├── hf_space.py       # Deploy to HF Spaces
+│   │   └── handler_local.py  # Test endpoint locally
+│   └── hub/                  # HuggingFace Hub operations
+│       └── push.py           # Push model to Hub
+├── configs/                  # Hydra configurations
+│   ├── config.yaml           # Main config
+│   ├── experiments/          # Projector presets
+│   ├── data/                 # Dataset configs
+│   └── training/             # Training hyperparameters
+├── demo/                     # Gradio web interface
+└── tests/                    # Test suite
 ```
 
 ## Development
 
 ```bash
-# Format code
-poetry run format
-
-# Run linter
-poetry run lint
-
-# Type checking
-poetry run type-check
-
-# Run tests
-poetry run test
+# Install just task runner (recommended)
+brew install just  # or: cargo install just
 
 # Run all checks
-poetry run check
+just check
+
+# Individual commands
+just lint          # Run linter (ruff)
+just format        # Format code (black + ruff)
+just type-check    # Type checking (mypy + pyright)
+just test          # Run tests (pytest)
 ```
 
 ## Contributing

@@ -1,15 +1,16 @@
-import torch
-import numpy as np
-from datasets import load_dataset
-from src.asr_config import ASRConfig
-from src.asr_modeling import ASRModel
-import json
-import os
-import matplotlib.pyplot as plt
+import base64
+import io
+import pathlib
+
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
-import io
-import base64
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from datasets import load_dataset
+
+from src.asr_config import ASRConfig
+from src.asr_modeling import ASRModel
 
 def main():
     # --- 1. Load a single audio sample ---
@@ -125,9 +126,13 @@ def main():
     print("\nGenerating HTML report...")
     html_content = generate_observable_html(data_payload)
 
-    with open("data_trace.html", "w") as f:
+    # Save to the examples directory (next to this script)
+    script_dir = pathlib.Path(__file__).parent.resolve()
+    output_path = script_dir / "data_trace.html"
+
+    with open(output_path, "w") as f:
         f.write(html_content)
-    print(f"\n✓ Saved HTML report to 'data_trace.html'")
+    print(f"\n✓ Saved HTML report to '{output_path}'")
 
 
 def get_stats(tensor, name):

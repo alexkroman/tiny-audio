@@ -7,18 +7,15 @@ from typing import Any
 import hydra
 import nltk
 import torch
-import truecase
 import wandb
 from datasets import (
     Audio,
     Dataset,
-    Features,
-    IterableDataset,
-    Value,
     interleave_datasets,
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
+from punctuators.models import PunctCapSegModelONNX
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -34,15 +31,14 @@ TRANSCRIBE_PREFIX = "Transcribe: "  # Used in DataCollator, matches ASRConfig.us
 
 
 class DatasetLoader:
-    """Loads and prepares datasets for training (streaming or non-streaming)."""
+    """Loads and prepares datasets for training."""
 
     def __init__(self, config: DictConfig):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
-        self.use_streaming = self.config.get("use_streaming", True)
-        self.num_proc = self.config.get("num_proc", 16) if not self.use_streaming else None
+        self.num_proc = self.config.get("num_proc", 16)
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
@@ -53,9 +49,9 @@ class DatasetLoader:
             dataset_path,
             name=dataset_cfg.get("name"),
             split=split,
-            streaming=self.use_streaming,
             cache_dir=self.cache_dir,
-            num_proc=self.num_proc,  # Parallel download/processing
+            num_proc=self.num_proc,
+            trust_remote_code=True,
         )
 
         # Normalize column names
@@ -76,21 +72,7 @@ class DatasetLoader:
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
-        if self.use_streaming:
-            # Streaming mode: use generator to filter invalid samples
-            features = Features(
-                {
-                    "audio": Audio(sampling_rate=self.sample_rate),
-                    "text": Value("string"),
-                }
-            )
-            return IterableDataset.from_generator(
-                self._filter_generator,
-                gen_kwargs={"dataset": ds},
-                features=features,
-            )
-
-        # Non-streaming mode: filter TEDLIUM ignore markers only for TEDLIUM dataset
+        # Filter TEDLIUM ignore markers only for TEDLIUM dataset
         # Duration filtering happens in DataCollator to avoid loading all audio upfront
         if "tedlium" in dataset_path.lower():
 
@@ -100,27 +82,6 @@ class DatasetLoader:
             ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
         return ds
-
-    @staticmethod
-    def _filter_generator(dataset):
-        """Generator that filters invalid samples (streaming mode)."""
-        for example in dataset:
-            audio = example.get("audio")
-            if audio is None:
-                continue
-
-            try:
-                if not isinstance(audio, dict) or "array" not in audio:
-                    continue
-            except Exception:
-                continue
-
-            # Skip TEDLIUM ignore markers
-            text = example.get("text", "")
-            if isinstance(text, str) and text.strip() == "ignore_time_segment_in_scoring":
-                continue
-
-            yield example
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -153,6 +114,12 @@ class DatasetLoader:
                     val_datasets.append(self._prepare_split(d_cfg, eval_split))
                     val_weights.append(weight)
 
+        # Skip samples BEFORE combining/shuffling (for stage 2 to skip stage 1 data)
+        skip_samples = self.config.get("skip_train_samples", 0)
+        if skip_samples:
+            print(f"Skipping first {skip_samples} training samples")
+            train_datasets = [ds.skip(skip_samples) for ds in train_datasets]
+
         train_ds = self._combine_datasets(train_datasets, train_weights, shuffle=True)
         val_ds = self._combine_datasets(val_datasets, val_weights, shuffle=False)
 
@@ -168,20 +135,20 @@ class DatasetLoader:
             return None
         # Shuffle each dataset before interleaving for better randomization
         if shuffle:
-            if self.use_streaming:
-                # Streaming mode: use buffer-based shuffle
-                datasets = [ds.shuffle(seed=self.seed, buffer_size=100) for ds in datasets]
-            else:
-                # Non-streaming mode: shuffle entire dataset
-                datasets = [ds.shuffle(seed=self.seed) for ds in datasets]
+            datasets = [ds.shuffle(seed=self.seed) for ds in datasets]
         if len(datasets) == 1:
             return datasets[0]
         probs = [w / sum(weights) for w in weights]
-        return interleave_datasets(datasets, probabilities=probs)
+        return interleave_datasets(
+            datasets, probabilities=probs, stopping_strategy="first_exhausted"
+        )
 
 
 class DataCollator:
     """Collates audio and text data for training."""
+
+    # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
+    DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
 
     def __init__(
         self,
@@ -189,11 +156,15 @@ class DataCollator:
         feature_extractor: Any,
         sample_rate: int,
         system_prompt: str = None,
+        projector: Any = None,
+        encoder_conv_layers: list = None,
     ):
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
+        self.projector = projector
+        self.encoder_conv_layers = encoder_conv_layers or self.DEFAULT_ENCODER_CONV_LAYERS
 
         # Use trl's DataCollatorForChatML for label masking
         # max_length needs to accommodate audio tokens (1500 for 30s) + prompt + response
@@ -201,6 +172,16 @@ class DataCollator:
             tokenizer=tokenizer,
             max_length=2048,
         )
+
+        # Punctuation and truecasing model (lazy loaded)
+        self.punctuator = None
+
+    def _compute_encoder_output_length(self, mel_length: int) -> int:
+        """Compute encoder output length using conv layer formulas."""
+        length = mel_length
+        for padding, kernel_size, stride in self.encoder_conv_layers:
+            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
+        return length
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         # Process audio
@@ -228,20 +209,30 @@ class DataCollator:
             audio_arrays,
             sampling_rate=self.sample_rate,
             padding="max_length",
+            return_attention_mask=True,
             return_tensors="pt",
         )
 
-        # Compute number of audio tokens from mel spectrogram length
-        # Whisper encoder has stride-2, MLP projector has stride-2 = 4x total
-        mel_len = audio_out.input_features.shape[-1]
-        num_audio_tokens = mel_len // 4
-        audio_placeholder = "<audio>" * num_audio_tokens
-        user_content = TRANSCRIBE_PREFIX + audio_placeholder
+        # Compute per-sample audio token counts (like GlmAsr)
+        mel_lengths = audio_out.attention_mask.sum(dim=-1)  # Per-sample mel lengths
+        audio_token_counts = []
+        for mel_len in mel_lengths:
+            encoder_len = self._compute_encoder_output_length(int(mel_len.item()))
+            num_tokens = self.projector.get_output_length(encoder_len)
+            audio_token_counts.append(num_tokens)
 
-        # Build messages for each sample - DataCollatorForChatML handles tokenization and masking
+        # Apply punctuation and truecasing to texts in batch (model expects lowercase)
+        if self.punctuator is None:
+            self.punctuator = PunctCapSegModelONNX.from_pretrained("pcs_en")
+        raw_texts = [(f.get("text") or "").strip().lower() for f in valid_features]
+        results = self.punctuator.infer(raw_texts)
+        processed_texts = [" ".join(r) if r else t for t, r in zip(raw_texts, results)]
+
+        # Build messages for each sample with per-sample audio token counts
         text_features = []
-        for f in valid_features:
-            text = truecase.get_true_case((f.get("text") or "").strip())
+        for text, num_audio_tokens in zip(processed_texts, audio_token_counts):
+            audio_placeholder = "<audio>" * num_audio_tokens
+            user_content = TRANSCRIBE_PREFIX + audio_placeholder
 
             messages = []
             if self.system_prompt:
@@ -254,8 +245,15 @@ class DataCollator:
         # Let trl handle tokenization, label masking, and padding
         batch = self.text_collator(text_features)
         batch["input_features"] = audio_out.input_features
+        batch["audio_attention_mask"] = audio_out.attention_mask
 
         return batch
+
+
+class ASRTrainer(Trainer):
+    """Trainer subclass for ASR models."""
+
+    pass
 
 
 class PushToHubCallback(TrainerCallback):
@@ -303,7 +301,18 @@ def main(cfg: DictConfig) -> None:
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_config_dict, dict), "model config must be a dict"
     # Add training params that affect model behavior
-    training_model_params = ["label_smoothing", "projector_dropout", "use_specaugment"]
+    training_model_params = [
+        "label_smoothing",
+        "projector_dropout",
+        "use_specaugment",
+        "mask_time_prob",
+        "mask_time_length",
+        "mask_time_min_masks",
+        "mask_feature_prob",
+        "mask_feature_length",
+        "mask_feature_min_masks",
+        "attn_implementation",
+    ]
     for param in training_model_params:
         if cfg.training.get(param) is not None:
             model_config_dict[param] = cfg.training[param]
@@ -326,6 +335,8 @@ def main(cfg: DictConfig) -> None:
         feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         system_prompt=cfg.model.system_prompt,
+        projector=model.projector,
+        encoder_conv_layers=model.config.encoder_conv_layers,
     )
 
     # Setup callbacks
@@ -352,7 +363,7 @@ def main(cfg: DictConfig) -> None:
 
     # Create trainer with only valid TrainingArguments
     valid_args = get_valid_training_args(training_config)
-    trainer = Trainer(
+    trainer = ASRTrainer(
         model=model,
         args=TrainingArguments(**valid_args),
         train_dataset=train_dataset,

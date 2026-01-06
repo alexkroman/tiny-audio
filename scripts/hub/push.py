@@ -52,25 +52,25 @@ def main():
             if src.exists():
                 shutil.copy2(src, dst)
                 if filename == "handler.py":
-                    print(f"✓ Copied {src} to staging (for Inference Endpoints)")
+                    print(f"Copied {src} to staging (for Inference Endpoints)")
                 else:
-                    print(f"✓ Copied {src} to staging")
+                    print(f"Copied {src} to staging")
             else:
-                print(f"⚠ Warning: {src} not found, skipping")
+                print(f"Warning: {src} not found, skipping")
 
         # Copy MODEL_CARD.md as README.md
         model_card_src = Path("MODEL_CARD.md")
         if model_card_src.exists():
             readme_dst = temp_path / "README.md"
             shutil.copy2(model_card_src, readme_dst)
-            print(f"✓ Copied {model_card_src} as README.md to staging")
+            print(f"Copied {model_card_src} as README.md to staging")
 
         # Copy requirements.txt for model dependencies
         requirements_src = Path("requirements.txt")
         if requirements_src.exists():
             requirements_dst = temp_path / "requirements.txt"
             shutil.copy2(requirements_src, requirements_dst)
-            print(f"✓ Copied {requirements_src} to staging")
+            print(f"Copied {requirements_src} to staging")
 
         # Upload files to Hub
         print(f"\nUploading to {args.repo_id}...")
@@ -82,7 +82,7 @@ def main():
             commit_message="Update custom model files, README, and requirements",
         )
 
-        print(f"\n✅ Successfully pushed to https://huggingface.co/{args.repo_id}")
+        print(f"\nSuccessfully pushed to https://huggingface.co/{args.repo_id}")
 
 
 if __name__ == "__main__":

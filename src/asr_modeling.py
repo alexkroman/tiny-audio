@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
-from typing import Optional, Union
+from threading import Thread
+from typing import Iterator, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -10,12 +11,10 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
+    TextIteratorStreamer,
 )
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.models.whisper.modeling_whisper import (
-    _compute_mask_indices,
-)
 
 try:
     from .asr_config import ASRConfig
@@ -23,6 +22,122 @@ try:
 except ImportError:
     from asr_config import ASRConfig  # type: ignore[no-redef]
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
+
+
+def _compute_mask_indices(
+    shape: tuple[int, int],
+    mask_prob: float,
+    mask_length: int,
+    min_masks: int = 0,
+    device: torch.device = None,
+) -> torch.Tensor:
+    """Compute random mask spans for SpecAugment.
+
+    Based on transformers' _compute_mask_indices for Wav2Vec2/Whisper.
+
+    Args:
+        shape: (batch_size, sequence_length)
+        mask_prob: Probability for each token to be chosen as start of mask span
+        mask_length: Maximum length of mask span
+        min_masks: Minimum number of masks per sample
+        device: Device to create tensor on
+
+    Returns:
+        Boolean mask tensor of shape (batch_size, sequence_length)
+    """
+    batch_size, sequence_length = shape
+
+    if mask_length < 1:
+        raise ValueError(f"mask_length must be >= 1, got {mask_length}")
+
+    if mask_length > sequence_length:
+        raise ValueError(f"mask_length {mask_length} must be <= sequence_length {sequence_length}")
+
+    # Compute number of masked spans per sample
+    num_masked_spans = int(mask_prob * sequence_length / mask_length + torch.rand(1).item())
+    num_masked_spans = max(num_masked_spans, min_masks)
+
+    # Clamp to ensure we don't exceed sequence length
+    if num_masked_spans * mask_length > sequence_length:
+        num_masked_spans = sequence_length // mask_length
+
+    if num_masked_spans == 0:
+        return torch.zeros((batch_size, sequence_length), dtype=torch.bool, device=device)
+
+    # Uniformly sample span start indices
+    mask = torch.zeros((batch_size, sequence_length), dtype=torch.bool, device=device)
+
+    for i in range(batch_size):
+        # Random start indices for this sample
+        spec_aug_start_indices = torch.randint(
+            0, sequence_length - mask_length + 1, (num_masked_spans,), device=device
+        )
+
+        # Create mask spans
+        for start_idx in spec_aug_start_indices:
+            mask[i, start_idx : start_idx + mask_length] = True
+
+    return mask
+
+
+def apply_specaugment(
+    input_features: torch.Tensor,
+    mask_time_prob: float = 0.05,
+    mask_time_length: int = 10,
+    mask_time_min_masks: int = 2,
+    mask_feature_prob: float = 0.0,
+    mask_feature_length: int = 10,
+    mask_feature_min_masks: int = 0,
+) -> torch.Tensor:
+    """Apply SpecAugment to mel spectrogram features.
+
+    Args:
+        input_features: Mel spectrogram of shape (batch, n_mels, time)
+        mask_time_prob: Probability of masking time steps
+        mask_time_length: Max length of time mask
+        mask_time_min_masks: Min number of time masks
+        mask_feature_prob: Probability of masking frequency bins
+        mask_feature_length: Max length of frequency mask
+        mask_feature_min_masks: Min number of frequency masks
+
+    Returns:
+        Augmented mel spectrogram with same shape
+    """
+    batch_size, n_mels, time_steps = input_features.shape
+    device = input_features.device
+
+    # Clone to avoid modifying original
+    augmented = input_features.clone()
+
+    # Time masking (along time dimension)
+    # Apply if prob > 0 OR min_masks > 0 (to support fixed mask count with prob=0)
+    if mask_time_prob > 0 or mask_time_min_masks > 0:
+        time_mask = _compute_mask_indices(
+            shape=(batch_size, time_steps),
+            mask_prob=mask_time_prob,
+            mask_length=mask_time_length,
+            min_masks=mask_time_min_masks,
+            device=device,
+        )
+        # Expand to (batch, 1, time) for broadcasting
+        time_mask = time_mask.unsqueeze(1)
+        augmented = augmented.masked_fill(time_mask, 0.0)
+
+    # Frequency masking (along mel dimension)
+    # Apply if prob > 0 OR min_masks > 0 (to support fixed mask count with prob=0)
+    if mask_feature_prob > 0 or mask_feature_min_masks > 0:
+        feature_mask = _compute_mask_indices(
+            shape=(batch_size, n_mels),
+            mask_prob=mask_feature_prob,
+            mask_length=mask_feature_length,
+            min_masks=mask_feature_min_masks,
+            device=device,
+        )
+        # Expand to (batch, n_mels, 1) for broadcasting
+        feature_mask = feature_mask.unsqueeze(2)
+        augmented = augmented.masked_fill(feature_mask, 0.0)
+
+    return augmented
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -98,6 +213,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Set up generation config with greedy decoding defaults
         self.generation_config = self.language_model.generation_config
         self.generation_config.max_new_tokens = config.max_new_tokens
+        self.generation_config.min_new_tokens = config.min_new_tokens
         self.generation_config.num_beams = config.num_beams
         self.generation_config.do_sample = False
         # Clear sampling params (inherited from LLM) since we use greedy decoding
@@ -108,7 +224,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.generation_config.length_penalty = config.length_penalty
         self.generation_config.repetition_penalty = config.repetition_penalty
         self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
-        self.generation_config.eos_token_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+        self.generation_config.eos_token_id = [
+            self.tokenizer.convert_tokens_to_ids("<|im_end|>"),
+            self.tokenizer.convert_tokens_to_ids("<|endoftext|>"),
+        ]
         self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
         # Feature extractor for audio preprocessing
@@ -141,6 +260,22 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
             encoder = full_model.encoder
             del full_model
+        elif "glm" in config.audio_model_id.lower():
+            # GLM-ASR models use audio_tower as the encoder
+            # Requires transformers >= 5.x or installed from source
+            from transformers import AutoModelForSeq2SeqLM
+
+            full_model = AutoModelForSeq2SeqLM.from_pretrained(
+                config.audio_model_id, trust_remote_code=True, **encoder_kwargs
+            )
+            # GLM stores encoder at audio_tower (GlmAsrEncoder)
+            encoder = full_model.audio_tower
+            # Clear references to free VRAM from the LLM decoder
+            full_model.language_model = None
+            full_model.multi_modal_projector = None
+            del full_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
@@ -154,7 +289,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         decoder_kwargs = {
             "attn_implementation": config.attn_implementation,
             "trust_remote_code": True,
-            "tie_word_embeddings": True,
+            "tie_word_embeddings": False,
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
@@ -210,7 +345,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
 
         # Add audio token
-        existing_special = self.tokenizer.additional_special_tokens or []
+        existing_special = getattr(self.tokenizer, "additional_special_tokens", None) or []
         if "<audio>" not in existing_special:
             self.tokenizer.add_special_tokens(
                 {"additional_special_tokens": existing_special + ["<audio>"]}
@@ -263,92 +398,80 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         except ImportError:
             from asr_processing import ASRProcessor  # type: ignore[no-redef]
 
-        return ASRProcessor(feature_extractor=self.feature_extractor, tokenizer=self.tokenizer)
+        return ASRProcessor(
+            feature_extractor=self.feature_extractor,
+            tokenizer=self.tokenizer,
+            projector=self.projector,
+            encoder_conv_layers=self.config.encoder_conv_layers,
+        )
 
     def state_dict(self, *args, **kwargs):
         """Only save trainable projector weights."""
         return {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
 
-    def _apply_specaugment(
+    def _compute_encoder_output_lengths(
         self,
-        input_features: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        audio_attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        if not getattr(self.config, "use_specaugment", False):
-            return input_features
+        """Compute per-sample encoder output lengths using conv layer formulas.
 
-        if not self.training:
-            return input_features
+        Args:
+            audio_attention_mask: Mask indicating real vs padded mel frames (batch, mel_len)
 
-        # Input shape: (batch_size, num_mel_bins, sequence_length) for Whisper
-        batch_size, hidden_size, sequence_length = input_features.size()
+        Returns:
+            Tensor of encoder output lengths per sample (batch,)
+        """
+        # Get mel frame lengths from attention mask
+        lengths = audio_attention_mask.sum(dim=-1)
 
-        mask_time_prob = getattr(self.config, "mask_time_prob", 0.05)
-        mask_time_length = getattr(self.config, "mask_time_length", 10)
-        mask_feature_prob = getattr(self.config, "mask_feature_prob", 0.0)
-        mask_feature_length = getattr(self.config, "mask_feature_length", 10)
+        # Apply conv layer formulas: output = (input + 2*pad - (kernel-1) - 1) // stride + 1
+        for padding, kernel_size, stride in self.config.encoder_conv_layers:
+            lengths = (lengths + 2 * padding - (kernel_size - 1) - 1) // stride + 1
 
-        # Time masking
-        if mask_time_prob > 0:
-            mask_time_np = _compute_mask_indices(
-                (batch_size, sequence_length),
-                mask_prob=mask_time_prob,
-                mask_length=mask_time_length,
-                attention_mask=attention_mask,
-                min_masks=2,
-            )
-            mask_time_indices = torch.tensor(
-                mask_time_np, device=input_features.device, dtype=torch.bool
-            )
-            # Expand to cover all features: (batch, seq) -> (batch, features, seq)
-            mask_time_expanded = mask_time_indices[:, None].expand(-1, hidden_size, -1)
-            input_features = input_features.masked_fill(mask_time_expanded, 0.0)
-
-        # Feature masking
-        if mask_feature_prob > 0:
-            mask_feature_np = _compute_mask_indices(
-                (batch_size, hidden_size),
-                mask_prob=mask_feature_prob,
-                mask_length=mask_feature_length,
-                min_masks=2,
-            )
-            mask_feature_indices = torch.tensor(
-                mask_feature_np, device=input_features.device, dtype=torch.bool
-            )
-            # Expand: (batch, features) -> (batch, features, seq)
-            mask_feature_expanded = mask_feature_indices[:, :, None].expand(-1, -1, sequence_length)
-            input_features = input_features.masked_fill(mask_feature_expanded, 0.0)
-
-        return input_features
+        return lengths
 
     def _encode_audio(
         self,
         audio_features: torch.Tensor,
-        audio_attention_mask: Optional[torch.Tensor] = None,
+        audio_attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         """Encode audio and project to LLM embedding space.
 
-        Returns flattened audio embeddings of shape (total_audio_tokens, hidden_dim).
-        """
-        # Apply SpecAugment during training (before encoding)
-        audio_features = self._apply_specaugment(audio_features, audio_attention_mask)
+        Args:
+            audio_features: Mel spectrogram features (batch, n_mels, mel_len)
+            audio_attention_mask: Mask indicating real vs padded mel frames (batch, mel_len)
 
+        Returns:
+            Flattened audio embeddings of shape (total_audio_tokens, hidden_dim).
+        """
         with torch.no_grad():
-            encoder_out = self.audio_tower(
-                input_features=audio_features, attention_mask=audio_attention_mask
-            )
+            encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
+        # Compute per-sample encoder output lengths using conv formulas
+        encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
+
+        # Project to LLM space
         audio_embeds = self.projector(hidden_states)
 
-        # Flatten: (batch, seq, hidden) -> (batch * seq, hidden)
-        # This allows masked_scatter to do 1:1 replacement
-        return audio_embeds.reshape(-1, audio_embeds.shape[-1])
+        # Compute per-sample projector output lengths
+        projector_lengths = torch.tensor(
+            [self.projector.get_output_length(int(length.item())) for length in encoder_lengths],
+            device=audio_embeds.device,
+        )
+
+        # Create valid mask for variable-length samples and extract only real embeddings
+        max_len = audio_embeds.shape[1]
+        valid_mask = (
+            torch.arange(max_len, device=audio_embeds.device)[None, :] < projector_lengths[:, None]
+        )
+        return audio_embeds[valid_mask]
 
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
         input_features: Optional[torch.Tensor] = None,
+        audio_attention_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         past_key_values: Optional[torch.Tensor] = None,
@@ -356,7 +479,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
-        audio_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
@@ -365,6 +487,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
         if input_features is not None and input_ids is not None:
+            # Apply SpecAugment during training if enabled
+            if self.training and getattr(self.config, "use_specaugment", False):
+                input_features = apply_specaugment(
+                    input_features,
+                    mask_time_prob=self.config.mask_time_prob,
+                    mask_time_length=self.config.mask_time_length,
+                    mask_time_min_masks=self.config.mask_time_min_masks,
+                    mask_feature_prob=self.config.mask_feature_prob,
+                    mask_feature_length=self.config.mask_feature_length,
+                    mask_feature_min_masks=self.config.mask_feature_min_masks,
+                )
+
             # Encode audio -> flattened (total_audio_tokens, hidden_dim)
             audio_embeds = self._encode_audio(input_features, audio_attention_mask)
 
@@ -408,23 +542,27 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         return model_inputs
 
-    def _get_num_audio_tokens(self, input_features: torch.Tensor) -> int:
-        """Calculate number of audio tokens based on input shape.
+    def _get_num_audio_tokens(
+        self,
+        audio_attention_mask: torch.Tensor,
+    ) -> int:
+        """Calculate number of audio tokens based on actual audio length.
 
-        Whisper: input_features shape is (batch, n_mels, mel_len)
-        Encoder output is mel_len // 2 due to stride-2 conv
-        MLP projector adds another stride-2 for 4x total downsampling
+        Uses attention mask to get real audio length, then computes:
+        mel_frames -> encoder_frames (via conv formulas) -> projector output tokens
         """
-        mel_len = input_features.shape[-1]
-        return mel_len // 4
+        encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
+        # Use max length for batch (all samples should have same token count for generation)
+        encoder_output_len = int(encoder_lengths.max().item())
+        return int(self.projector.get_output_length(encoder_output_len))
 
     @torch.no_grad()
     def generate(
         self,
         input_ids: Optional[torch.Tensor] = None,
         input_features: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
         audio_attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         system_prompt: Optional[str] = None,
         **generate_kwargs,
     ) -> torch.Tensor:
@@ -436,6 +574,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """
         if input_features is None:
             raise ValueError("input_features required for generation")
+        if audio_attention_mask is None:
+            raise ValueError("audio_attention_mask required for generation")
 
         device = input_features.device
         batch_size = input_features.shape[0]
@@ -445,7 +585,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # If input_ids not provided, build prompt with correct number of audio tokens
         if input_ids is None:
-            num_audio_tokens = self._get_num_audio_tokens(input_features)
+            num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
             audio_placeholder = "<audio>" * num_audio_tokens
 
             system_prompt = system_prompt or self.system_prompt
@@ -455,12 +595,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": self.TRANSCRIBE_PROMPT + audio_placeholder})
 
-            input_ids = self.tokenizer.apply_chat_template(
+            chat_result = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
                 add_generation_prompt=True,
                 return_tensors="pt",
-            ).to(device)
+            )
+            input_ids = chat_result.input_ids.to(device)
 
             if input_ids.dim() == 1:
                 input_ids = input_ids.unsqueeze(0)
@@ -489,6 +630,120 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if isinstance(output, torch.Tensor):
             return output
         return output.sequences
+
+    def generate_streaming(
+        self,
+        input_features: torch.Tensor,
+        audio_attention_mask: torch.Tensor,
+        system_prompt: Optional[str] = None,
+        **generate_kwargs,
+    ) -> Iterator[str]:
+        """Generate transcription with streaming token output.
+
+        Yields partial transcript strings as tokens are generated.
+        Reduces time-to-first-word by streaming tokens as they're decoded.
+
+        Args:
+            input_features: Mel spectrogram features (batch, n_mels, mel_len)
+            audio_attention_mask: Mask for real vs padded mel frames (batch, mel_len)
+            system_prompt: Optional system prompt override
+            **generate_kwargs: Additional generation arguments
+
+        Yields:
+            Partial transcript text as each token is generated
+        """
+        device = input_features.device
+        batch_size = input_features.shape[0]
+
+        # Encode audio -> flattened embeddings
+        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+
+        # Build prompt with correct number of audio tokens
+        num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
+        audio_placeholder = "<audio>" * num_audio_tokens
+
+        system_prompt = system_prompt or self.system_prompt
+
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": self.TRANSCRIBE_PROMPT + audio_placeholder})
+
+        chat_result = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+        )
+        input_ids = chat_result.input_ids.to(device)
+
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if input_ids.shape[0] == 1 and batch_size > 1:
+            input_ids = input_ids.expand(batch_size, -1)
+
+        attention_mask = torch.ones_like(input_ids)
+
+        # Get text embeddings and replace audio tokens with audio embeddings
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
+        inputs_embeds = inputs_embeds.masked_scatter(
+            audio_token_mask.to(inputs_embeds.device),
+            audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
+        )
+
+        # Setup streamer for token-by-token output
+        streamer = TextIteratorStreamer(
+            self.tokenizer,
+            skip_prompt=True,
+            skip_special_tokens=True,
+        )
+
+        # Prepare generation kwargs
+        gen_kwargs = {
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "generation_config": self.generation_config,
+            "streamer": streamer,
+            **generate_kwargs,
+        }
+
+        # Run generation in background thread
+        thread = Thread(target=self.language_model.generate, kwargs=gen_kwargs)
+        thread.start()
+
+        # Yield tokens as they're generated, filtering out <think>...</think> blocks
+        # Start assuming no think block - only filter when we see <think>
+        in_think_block = False
+        buffer = ""
+
+        for text in streamer:
+            buffer += text
+
+            # Check for think block start (in case model outputs think blocks)
+            while "<think>" in buffer:
+                in_think_block = True
+                # Yield any text before <think>
+                before_think = buffer.split("<think>")[0]
+                if before_think:
+                    yield before_think
+                buffer = buffer.split("<think>", 1)[-1]
+
+            # Check for think block end
+            while in_think_block and "</think>" in buffer:
+                in_think_block = False
+                buffer = buffer.split("</think>", 1)[-1]
+
+            # Yield text if not in think block
+            if not in_think_block and buffer:
+                yield buffer
+                buffer = ""
+
+        # Yield any remaining buffer
+        if buffer and not in_think_block:
+            yield buffer
+
+        thread.join()
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
         """Save model, tokenizer, and processor."""
@@ -542,6 +797,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projectors module
         shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
+
+    def create_or_update_model_card(self, output_dir: Union[str, Path]):
+        """No-op for model card creation - we use MODEL_CARD.md in repo instead."""
+        pass
 
 
 # Register with transformers Auto classes

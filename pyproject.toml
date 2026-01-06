@@ -31,28 +31,24 @@ Documentation = "https://github.com/alexkroman/tiny-audio#readme"
 "Bug Tracker" = "https://github.com/alexkroman/tiny-audio/issues"
 
 [project.scripts]
-# Course tools
-download-samples = "scripts.download_samples:download_samples"
+# Evaluation
+eval = "scripts.eval.cli:main"
 
-# Model scripts (use: poetry run python scripts/train.py for training due to Hydra config paths)
-eval = "scripts.eval:main"
-push-to-hub = "scripts.push_to_hub:main"
-run-handler = "scripts.run_handler_local:main"
+# Analysis
+analysis = "scripts.analysis:cli"
 
-# Deployment scripts
-deploy-hf = "scripts.deploy_to_hf_space:main"
-deploy-runpod = "scripts.deploy_runpod:cli"
-remote-train = "scripts.start_remote_training:cli"
-attach-remote = "scripts.attach_remote_session:cli"
-find-checkpoint = "scripts.find_checkpoint:cli"
+# Deployment
+deploy-hf = "scripts.deploy.hf_space:main"
+run-handler = "scripts.deploy.handler_local:main"
+runpod = "scripts.deploy.runpod:cli"
 
-# Development tools
-lint = "scripts.dev_tools:lint"
-format = "scripts.dev_tools:format_code"
-format-md = "scripts.dev_tools:format_markdown"
-type-check = "scripts.dev_tools:type_check"
-test = "scripts.dev_tools:test"
-check = "scripts.dev_tools:check_all"
+# Hub
+push-to-hub = "scripts.hub.push:main"
+
+# Debug
+check-mosa = "scripts.debug.check_mosa:main"
+
+# Development: use `just` (install: brew install just)
 
 [tool.poetry]
 packages = [{include = "src"}]
@@ -69,11 +65,13 @@ python = ">=3.10,<3.13"
 torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
-transformers = ">=4.57.3"
+# GLM-ASR requires transformers from source (>= 5.x not yet released)
+transformers = {git = "https://github.com/huggingface/transformers.git"}
 accelerate = "*"
 datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
-evaluate = "*"
 jiwer = "*"
+attrs = "*"
+rich = "*"
 wandb = "*"
 numpy = "*"
 hydra-core = "*"
@@ -83,13 +81,24 @@ ninja = "*"
 gradio = "*"
 assemblyai = "*"
 typer = ">=0.19.2"
-truecase = "*"
+punctuators = "*"
 trl = ">=0.26.0"
 torchaudio = ">=2.0.0"
 pyannote-audio = ">=3.1.0"
 nltk = "*"
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 fabric = ">=3.0.0"
+pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
+spacy = "^3.8.11"
+
+[tool.poetry.extras]
+local = ["pyaudio"]
+
+[tool.poetry.group.local]
+optional = true
+
+[tool.poetry.group.local.dependencies]
+pyaudio = "^0.2.14"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
@@ -98,6 +107,12 @@ ruff = ">=0.1.0"
 mypy = ">=1.5.0"
 pyright = ">=1.1.0"
 mdformat = ">=0.7.0"
+
+[tool.poetry.group.pipecat]
+optional = true
+
+[tool.poetry.group.pipecat.dependencies]
+pipecat-ai = {extras = ["silero", "openai"], version = ">=0.0.40"}
 
 [tool.black]
 line-length = 100
@@ -124,20 +139,16 @@ warn_no_return = true
 follow_imports = "normal"
 ignore_missing_imports = true
 # Ignore specific error codes that are library-related
-disable_error_code = ["assignment", "override", "call-overload", "arg-type", "index", "union-attr", "call-arg", "misc", "operator"]
+disable_error_code = ["assignment", "override", "call-overload", "arg-type", "index", "union-attr", "call-arg", "misc", "operator", "attr-defined"]
 
 [[tool.mypy.overrides]]
 module = "transformers.*"
 ignore_errors = true
 
-[[tool.mypy.overrides]]
-module = "peft.*"
-ignore_errors = true
-
 [tool.pyright]
 include = ["src"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
-ignore = ["src/asr_pipeline.py"]  # Uses lazy-loaded torchaudio
+ignore = ["src/asr_pipeline.py", "src/integrations/pipecat_stt.py"]  # Optional deps
 typeCheckingMode = "basic"
 reportPrivateImportUsage = false
 reportOptionalMemberAccess = false

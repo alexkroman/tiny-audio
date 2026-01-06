@@ -280,7 +280,7 @@ You've completed the course! You now have:
 
 **Improve your model:**
 
-- Try different projector types (MLP, MoE, SwiGLU, Residual)
+- Try different projector types (MLP, MOSA, MoE, QFormer)
 - Use a larger decoder
 - Train on more diverse data
 
@@ -298,4 +298,4 @@ You've completed the course! You now have:
 
 ______________________________________________________________________
 
-[← Class 2: Training](./2-training.md)
+[← Class 2: Training](./2-training.md) | [Quick Reference →](./4-quick-reference.md)

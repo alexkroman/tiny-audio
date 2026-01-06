@@ -7,12 +7,25 @@ from transformers import AutoTokenizer, WhisperFeatureExtractor
 from scripts.train import DataCollator
 
 
+class MockProjector:
+    """Mock projector that mimics stride-2 downsampling."""
+
+    def get_output_length(self, input_length: int) -> int:
+        return input_length // 2
+
+
+@pytest.fixture
+def projector():
+    """Create a mock projector."""
+    return MockProjector()
+
+
 @pytest.fixture
 def tokenizer():
     """Load the SmolLM tokenizer with <audio> token added."""
     tok = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M-Instruct")
     # Add <audio> token like ASRModel does
-    existing_special = tok.additional_special_tokens or []
+    existing_special = getattr(tok, "additional_special_tokens", None) or []
     if "<audio>" not in existing_special:
         tok.add_special_tokens({"additional_special_tokens": existing_special + ["<audio>"]})
     return tok
@@ -25,24 +38,26 @@ def feature_extractor():
 
 
 @pytest.fixture
-def collator(tokenizer, feature_extractor):
+def collator(tokenizer, feature_extractor, projector):
     """Create DataCollator instance."""
     return DataCollator(
         tokenizer=tokenizer,
         feature_extractor=feature_extractor,
         sample_rate=16000,
         system_prompt="You are a helpful assistant.",
+        projector=projector,
     )
 
 
 @pytest.fixture
-def collator_no_system(tokenizer, feature_extractor):
+def collator_no_system(tokenizer, feature_extractor, projector):
     """Create DataCollator without system prompt."""
     return DataCollator(
         tokenizer=tokenizer,
         feature_extractor=feature_extractor,
         sample_rate=16000,
         system_prompt=None,
+        projector=projector,
     )
 
 
@@ -180,13 +195,14 @@ class TestAudioTokens:
         # Count audio tokens in input_ids
         num_audio_tokens = (batch["input_ids"] == audio_token_id).sum().item()
 
-        # Expected: mel_len // 4 (Whisper stride-2 × projector stride-2)
-        mel_len = batch["input_features"].shape[-1]
-        expected_audio_tokens = mel_len // 4
+        # Expected: real_mel_len // 4 (Whisper stride-2 × projector stride-2)
+        # Use attention mask to get actual audio length (not padded)
+        real_mel_len = batch["audio_attention_mask"].sum().item()
+        expected_audio_tokens = real_mel_len // 4
 
         assert num_audio_tokens == expected_audio_tokens, (
             f"Audio token count mismatch: got {num_audio_tokens}, "
-            f"expected {expected_audio_tokens} (mel_len={mel_len})"
+            f"expected {expected_audio_tokens} (real_mel_len={real_mel_len})"
         )
 
     def test_audio_tokens_not_just_one(self, collator, tokenizer):
@@ -260,8 +276,8 @@ class TestModelIntegration:
         from src.asr_modeling import ASRModel
 
         config = ASRConfig(
-            encoder_model_name="openai/whisper-tiny",
-            decoder_model_name="HuggingFaceTB/SmolLM2-135M-Instruct",
+            audio_model_id="openai/whisper-tiny",
+            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
             projector_type="mlp",
             model_dtype="float32",
             attn_implementation="eager",
@@ -277,6 +293,7 @@ class TestModelIntegration:
             feature_extractor=model.feature_extractor,
             sample_rate=16000,
             system_prompt=None,
+            projector=model.projector,
         )
 
         # Create two samples with different audio but same text
@@ -301,12 +318,14 @@ class TestModelIntegration:
             out1 = model(
                 input_ids=batch1["input_ids"],
                 input_features=batch1["input_features"],
+                audio_attention_mask=batch1["audio_attention_mask"],
                 labels=batch1["labels"],
                 attention_mask=batch1["attention_mask"],
             )
             out2 = model(
                 input_ids=batch2["input_ids"],
                 input_features=batch2["input_features"],
+                audio_attention_mask=batch2["audio_attention_mask"],
                 labels=batch2["labels"],
                 attention_mask=batch2["attention_mask"],
             )
@@ -327,6 +346,7 @@ class TestModelIntegration:
             feature_extractor=model.feature_extractor,
             sample_rate=16000,
             system_prompt=None,
+            projector=model.projector,
         )
 
         sample = create_sample("Test.", duration_sec=1.0)
@@ -339,7 +359,10 @@ class TestModelIntegration:
         audio_token_mask = batch["input_ids"] == model.audio_token_id
 
         # Encode audio and get what would be injected
-        audio_embeds = model._encode_audio(batch["input_features"], None)
+        audio_embeds = model._encode_audio(
+            batch["input_features"],
+            batch["audio_attention_mask"],
+        )
 
         # The audio embeddings should be different from the original <audio> token embedding
         audio_token_embed = original_embeds[audio_token_mask][0]  # First audio token's original embedding
@@ -362,6 +385,7 @@ class TestModelIntegration:
             feature_extractor=model.feature_extractor,
             sample_rate=16000,
             system_prompt=None,
+            projector=model.projector,
         )
 
         sample = create_sample("Test.", duration_sec=1.0)
@@ -371,7 +395,10 @@ class TestModelIntegration:
         num_audio_tokens = (batch["input_ids"] == model.audio_token_id).sum().item()
 
         # Get projected audio embeddings
-        audio_embeds = model._encode_audio(batch["input_features"], None)
+        audio_embeds = model._encode_audio(
+            batch["input_features"],
+            batch["audio_attention_mask"],
+        )
         num_audio_embeds = audio_embeds.shape[0]
 
         assert num_audio_tokens == num_audio_embeds, (

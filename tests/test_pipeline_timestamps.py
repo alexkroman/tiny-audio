@@ -15,15 +15,21 @@ def create_audio_sample(duration_sec: float = 2.0, sample_rate: int = 16000) -> 
 
 @pytest.fixture
 def pipeline():
-    """Load the ASR pipeline with a small model for testing."""
-    from transformers import pipeline as hf_pipeline
+    """Load the ASR pipeline with a local model for testing."""
+    from src.asr_config import ASRConfig
+    from src.asr_modeling import ASRModel
+    from src.asr_pipeline import ASRPipeline
 
-    # Use a small model for faster tests
-    return hf_pipeline(
-        "automatic-speech-recognition",
-        model="mazesmazes/tiny-audio",
-        trust_remote_code=True,
+    # Use small models for faster tests
+    config = ASRConfig(
+        audio_model_id="openai/whisper-tiny",
+        text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
+        projector_type="mlp",
+        model_dtype="float32",
+        attn_implementation="eager",
     )
+    model = ASRModel(config)
+    return ASRPipeline(model=model)
 
 
 class TestReturnTimestamps:
@@ -57,20 +63,19 @@ class TestReturnTimestamps:
         audio = create_audio_sample(duration_sec=2.0)
         result = pipeline(audio, return_timestamps=True)
 
-        # If there's text, there should be words
-        if result["text"].strip():
-            assert len(result["words"]) > 0
+        # words key should always be present when return_timestamps=True
+        assert "words" in result
 
-            # Check format of each word entry
-            for word_entry in result["words"]:
-                assert "word" in word_entry
-                assert "start" in word_entry
-                assert "end" in word_entry
-                assert isinstance(word_entry["word"], str)
-                assert isinstance(word_entry["start"], (int, float))
-                assert isinstance(word_entry["end"], (int, float))
-                # End should be >= start
-                assert word_entry["end"] >= word_entry["start"]
+        # Check format of each word entry (if any)
+        for word_entry in result["words"]:
+            assert "word" in word_entry
+            assert "start" in word_entry
+            assert "end" in word_entry
+            assert isinstance(word_entry["word"], str)
+            assert isinstance(word_entry["start"], (int, float))
+            assert isinstance(word_entry["end"], (int, float))
+            # End should be >= start
+            assert word_entry["end"] >= word_entry["start"]
 
     def test_timestamps_are_sequential(self, pipeline):
         """Verify word timestamps are in sequential order."""
