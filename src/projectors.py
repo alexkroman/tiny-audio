@@ -39,18 +39,21 @@ class MLPAudioProjector(nn.Module):
         self.linear_2 = nn.Linear(hidden_dim, llm_dim)
 
     def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length."""
-        return input_length // self.k
+        """Calculate output sequence length given input length (matches GLM-ASR)."""
+        # GLM-ASR formula: (L - merge_factor) // merge_factor + 1
+        return (input_length - self.k) // self.k + 1
 
     def forward(self, x):
         """
         x: [Batch, Seq_Len, Dim]
-        Returns: [Batch, Seq_Len // k, llm_dim]
+        Returns: [Batch, (Seq_Len - k) // k + 1, llm_dim]
         """
         batch, seq, dim = x.shape
-        # Reshape to combine k frames: [B, S, D] -> [B, -1, D*k]
-        # -1 infers sequence length, implicitly downsampling by factor k
-        x = x.reshape(batch, -1, dim * self.k)
+        # Truncate to match GLM-ASR: use (seq - k) // k + 1 frames
+        # This drops trailing frames that don't fill a complete k-frame window
+        out_len = (seq - self.k) // self.k + 1
+        x = x[:, : out_len * self.k, :]  # Truncate to exact multiple
+        x = x.reshape(batch, out_len, dim * self.k)
 
         x = self.linear_1(x)
         x = self.act(x)
@@ -126,27 +129,34 @@ class MOSAProjector(nn.Module):
         # x: (B, S, encoder_dim)
         batch_size, seq_len, dim = x.shape
 
+        # Truncate to match GLM-ASR: use (seq - k) // k + 1 frames
+        out_len = (seq_len - self.k) // self.k + 1
+        x = x[:, : out_len * self.k, :]
+
         # --- 1. Router Branch ---
         # Mean pool encoder outputs for routing decisions
-        x_pooled = x.reshape(batch_size, -1, self.k, self.encoder_dim).mean(dim=2)  # (B, S//k, D)
+        x_pooled = x.reshape(batch_size, out_len, self.k, self.encoder_dim).mean(
+            dim=2
+        )  # (B, out_len, D)
 
         # Router logits and softmax gating (dense MoE)
-        routing_weights = F.softmax(self.router(x_pooled), dim=-1)  # (B, S//k, num_experts)
+        routing_weights = F.softmax(self.router(x_pooled), dim=-1)  # (B, out_len, num_experts)
 
         # --- 2. Frame stacking for experts ---
-        # Reshape to combine k frames: [B, S, D] -> [B, S//k, D*k]
-        x_stacked = x.reshape(batch_size, -1, dim * self.k)
+        # Reshape to combine k frames: [B, S, D] -> [B, out_len, D*k]
+        x_stacked = x.reshape(batch_size, out_len, dim * self.k)
 
         # --- 3. Expert Mixture (Dense Execution) ---
         # Run all experts and compute weighted sum
         expert_outputs = torch.stack(
             [expert(x_stacked) for expert in self.experts]
-        )  # (E, B, S//k, D)
+        )  # (E, B, out_len, D)
         return torch.einsum("ebsd, bse -> bsd", expert_outputs, routing_weights)
 
     def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length."""
-        return input_length // self.k
+        """Calculate output sequence length given input length (matches GLM-ASR)."""
+        # GLM-ASR formula: (L - merge_factor) // merge_factor + 1
+        return (input_length - self.k) // self.k + 1
 
 
 # =============================================================================

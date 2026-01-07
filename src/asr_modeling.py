@@ -190,6 +190,31 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 state_dict = load_file(model_file)
                 model.load_state_dict(state_dict, strict=False)
 
+            # Load LoRA adapters if use_lora is enabled
+            if getattr(config, "use_lora", False):
+                adapter_file = cached_file(
+                    pretrained_model_name_or_path,
+                    "adapter_model.safetensors",
+                    _raise_exceptions_for_missing_entries=False,
+                    **cache_kwargs,
+                )
+                if adapter_file is not None:
+                    # Load saved adapter weights
+                    from pathlib import Path
+
+                    from peft import PeftModel
+
+                    adapter_dir = Path(adapter_file).parent
+                    # language_model is bare (not PEFT-wrapped) since we skipped _setup_lora
+                    model.language_model = PeftModel.from_pretrained(
+                        model.language_model,
+                        adapter_dir,
+                        is_trainable=True,
+                    )
+                else:
+                    # No saved adapters - initialize fresh LoRA for training
+                    model._setup_lora(config)
+
             return model
         finally:
             cls._is_loading_from_pretrained = False
@@ -233,8 +258,19 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Feature extractor for audio preprocessing
         self.feature_extractor = self._create_feature_extractor(config)
 
-        # Audio projector (trainable)
+        # Audio projector (trainable unless freeze_projector is set)
         self.projector = self._create_projector(config, target_dtype)
+
+        # Setup LoRA if enabled (Stage 2 fine-tuning)
+        # Skip if loading from pretrained - from_pretrained will handle adapter loading
+        if getattr(config, "use_lora", False) and not getattr(
+            self.__class__, "_is_loading_from_pretrained", False
+        ):
+            self._setup_lora(config)
+
+        # Freeze projector if specified (for Stage 2 LoRA-only training)
+        if getattr(config, "freeze_projector", False):
+            self.projector.requires_grad_(False)
 
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
@@ -332,6 +368,21 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Move projector to same device as language model (important when using quantization)
         device = next(self.language_model.parameters()).device
         return projector.to(device=device, dtype=dtype)
+
+    def _setup_lora(self, config: ASRConfig):
+        """Apply LoRA adapters to the language model for Stage 2 fine-tuning."""
+        from peft import LoraConfig, get_peft_model
+
+        lora_config = LoraConfig(
+            r=config.lora_rank,
+            lora_alpha=config.lora_alpha,
+            target_modules=config.lora_target_modules,
+            lora_dropout=config.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        self.language_model = get_peft_model(self.language_model, lora_config)
+        # LoRA params are trainable by default, base model stays frozen
 
     def _init_tokenizer(self, config: ASRConfig):
         """Initialize tokenizer with audio token."""
@@ -600,6 +651,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 tokenize=True,
                 add_generation_prompt=True,
                 return_tensors="pt",
+                enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
             )
             input_ids = chat_result.input_ids.to(device)
 
@@ -674,6 +726,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt",
+            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
         )
         input_ids = chat_result.input_ids.to(device)
 
@@ -772,6 +825,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Save tokenizer and feature extractor
         self.tokenizer.save_pretrained(save_dir)
         self.feature_extractor.save_pretrained(save_dir)
+
+        # Save LoRA adapters if present (creates adapter_model.safetensors and adapter_config.json)
+        if hasattr(self.language_model, "peft_config"):
+            self.language_model.save_pretrained(save_dir)
 
         # Add processor auto_map to preprocessor_config.json
         config_path = save_dir / "preprocessor_config.json"

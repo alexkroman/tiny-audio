@@ -3,10 +3,10 @@ output_dir: ./outputs/production_model
 
 # Optimizer
 optim: adamw_torch_fused
-learning_rate: .0003
+learning_rate: 2e-4
 adam_beta2: 0.95
 max_grad_norm: 1.0
-warmup_steps: 2000
+warmup_steps: 500
 lr_scheduler_type: cosine
 
 # Training
@@ -54,8 +54,8 @@ model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
 # Data loading
-dataloader_num_workers: 4
-dataloader_prefetch_factor: 12
+dataloader_num_workers: 8
+dataloader_prefetch_factor: 2
 dataloader_pin_memory: true
 dataloader_persistent_workers: true
 dataloader_drop_last: true

@@ -1,0 +1,43 @@
+# @package _global_
+# Stage 2: LoRA fine-tuning on top of trained projector
+# Based on SALMONN config (rank=8, alpha=32, q/v only)
+# Projector is frozen, only LoRA adapters are trained
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=mlp_lora
+#
+# Requires a pretrained Stage 1 model (projector trained)
+
+model:
+  projector_type: mlp
+  projector_pool_stride: 4
+  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  text_model_id: Qwen/Qwen3-0.6B
+  pretrained_model_path: "mazesmazes/tiny-audio"  # Stage 1 checkpoint
+
+  # LoRA config (SALMONN-style)
+  use_lora: true
+  lora_rank: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  lora_target_modules:
+    - q_proj
+    - v_proj
+  freeze_projector: true  # Stage 2: only train LoRA
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio"
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 4
+  num_train_epochs: 1
+  save_steps: 1000
+  eval_steps: 1000
+
+  # Lower learning rate for LoRA
+  learning_rate: 2.5e-5
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+
+  # SpecAugment (optional)
+  use_specaugment: false

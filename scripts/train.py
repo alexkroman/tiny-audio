@@ -312,6 +312,13 @@ def main(cfg: DictConfig) -> None:
         "mask_feature_length",
         "mask_feature_min_masks",
         "attn_implementation",
+        # LoRA params (Stage 2 fine-tuning)
+        "use_lora",
+        "lora_rank",
+        "lora_alpha",
+        "lora_dropout",
+        "lora_target_modules",
+        "freeze_projector",
     ]
     for param in training_model_params:
         if cfg.training.get(param) is not None:
@@ -325,6 +332,16 @@ def main(cfg: DictConfig) -> None:
         model = ASRModel(asr_config)
 
     model.config.use_cache = False
+
+    # Disable Qwen3 thinking mode by patching the chat template
+    # This is a workaround for TRL's DataCollatorForChatML not passing enable_thinking=False
+    # See: https://github.com/huggingface/trl/issues/3387
+    if model.tokenizer.chat_template and "enable_thinking" in model.tokenizer.chat_template:
+        # Replace the conditional check with a hardcoded False
+        model.tokenizer.chat_template = model.tokenizer.chat_template.replace(
+            "enable_thinking is defined and enable_thinking is false",
+            "true",  # Always disable thinking
+        )
 
     # Load datasets
     train_dataset, val_dataset = DatasetLoader(cfg).load()

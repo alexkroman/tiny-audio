@@ -99,6 +99,7 @@ class ASRProcessor(ProcessorMixin):
             tokenize=True,
             add_generation_prompt=(text is None),
             return_tensors=return_tensors,
+            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
         )
 
         # Handle both tensor and BatchEncoding returns

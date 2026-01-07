@@ -49,6 +49,13 @@ class ASRConfig(transformers.PretrainedConfig):
         mask_feature_prob: float = 0.0,  # Probability of masking frequency bins (disabled by default)
         mask_feature_length: int = 10,  # Max length of frequency mask
         mask_feature_min_masks: int = 0,  # Min number of frequency masks
+        # LoRA configuration (for Stage 2 fine-tuning)
+        use_lora: bool = False,
+        lora_rank: int = 8,  # SALMONN default
+        lora_alpha: int = 32,  # SALMONN default (scaling factor 4.0)
+        lora_dropout: float = 0.0,
+        lora_target_modules: Optional[list] = None,  # Default: ["q_proj", "v_proj"]
+        freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         max_new_tokens: Optional[int] = None,
         min_new_tokens: Optional[int] = None,
         repetition_penalty: Optional[float] = None,
@@ -109,6 +116,13 @@ class ASRConfig(transformers.PretrainedConfig):
         self.mask_feature_prob = mask_feature_prob
         self.mask_feature_length = mask_feature_length
         self.mask_feature_min_masks = mask_feature_min_masks
+        # LoRA configuration
+        self.use_lora = use_lora
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
+        self.lora_target_modules = lora_target_modules or ["q_proj", "v_proj"]
+        self.freeze_projector = freeze_projector
 
         # Generation parameters (use explicit value if provided, else use default)
         self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]

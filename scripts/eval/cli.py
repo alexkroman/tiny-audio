@@ -267,7 +267,8 @@ def main():
     # Expand "all" to ASR datasets only (exclude diarization and alignment)
     if "all" in args.datasets:
         args.datasets = [
-            k for k in DATASET_REGISTRY.keys()
+            k
+            for k in DATASET_REGISTRY
             if k not in DIARIZATION_DATASETS and k not in ALIGNMENT_DATASETS
         ]
 

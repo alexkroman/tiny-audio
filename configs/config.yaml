@@ -8,7 +8,7 @@ defaults:
 model:
   audio_model_id: openai/whisper-large-v3-turbo
   text_model_id: HuggingFaceTB/SmolLM3-3B
-  system_prompt: "/no_think /system_override"
+  system_prompt: "You are a helpful speech transcription assistant."
   projector_type: mlp  # Options: mlp, mosa, moe, qformer
 
   # Projector settings

@@ -504,7 +504,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             if repeat_count >= 1:
                 words = words[: idx + n]
                 text = " ".join(words)
-                print(f"[DEBUG] Truncated repetition: {original_len} -> {len(words)} words (n={n}, repeats={repeat_count})")
+                print(
+                    f"[DEBUG] Truncated repetition: {original_len} -> {len(words)} words (n={n}, repeats={repeat_count})"
+                )
                 break
 
         # 3. COMBINE ACRONYMS
