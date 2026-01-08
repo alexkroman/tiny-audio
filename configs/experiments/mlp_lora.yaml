@@ -1,6 +1,6 @@
 # @package _global_
 # Stage 2: LoRA fine-tuning on top of trained projector
-# q,v only with r=32 (~4.6M params)
+# All linear layers with r=64 (~40M params)
 # Projector is frozen, only LoRA adapters are trained
 #
 # Usage:
@@ -15,20 +15,25 @@ model:
   text_model_id: Qwen/Qwen3-0.6B
   pretrained_model_path: "mazesmazes/tiny-audio"  # Stage 1 checkpoint
 
-  # LoRA config (q,v only - conservative config)
+  # LoRA config (all linear layers)
   use_lora: true
   lora_rank: 64
-  lora_alpha: 32
-  lora_dropout: 0.0
+  lora_alpha: 128
+  lora_dropout: 0.05
   lora_target_modules:
     - q_proj
+    - k_proj
     - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
   freeze_projector: false
 
 training:
   hub_model_id: "mazesmazes/tiny-audio"
-  per_device_train_batch_size: 20
-  per_device_eval_batch_size: 20
+  per_device_train_batch_size: 18
+  per_device_eval_batch_size: 18
   gradient_accumulation_steps: 2
   num_train_epochs: 1
   save_steps: 500

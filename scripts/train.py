@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import contextlib
+import re
 from dataclasses import fields
 from typing import Any
 
@@ -187,6 +188,7 @@ class DataCollator:
         # Process audio
         audio_arrays = []
         valid_features = []
+        min_duration = 0.5  # Skip audio shorter than 0.5 seconds
         for f in features:
             try:
                 audio = f["audio"]["array"]
@@ -195,6 +197,9 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
+                # Skip very short audio samples
+                if len(audio) / self.sample_rate < min_duration:
+                    continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
             except Exception:
@@ -224,7 +229,12 @@ class DataCollator:
         # Apply punctuation and truecasing to texts in batch (model expects lowercase)
         if self.punctuator is None:
             self.punctuator = PunctCapSegModelONNX.from_pretrained("pcs_en")
-        raw_texts = [(f.get("text") or "").strip().lower() for f in valid_features]
+
+        def strip_html(text: str) -> str:
+            """Remove HTML tags from text."""
+            return re.sub(r"<[^>]+>", "", text)
+
+        raw_texts = [strip_html((f.get("text") or "")).strip().lower() for f in valid_features]
         results = self.punctuator.infer(raw_texts)
         processed_texts = [" ".join(r) if r else t for t, r in zip(raw_texts, results)]
 
