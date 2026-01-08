@@ -192,24 +192,24 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
             # Load LoRA adapters if use_lora is enabled
             if getattr(config, "use_lora", False):
-                adapter_file = cached_file(
+                # Check for adapter_config.json (required by PEFT to load adapters)
+                adapter_config_file = cached_file(
                     pretrained_model_name_or_path,
-                    "adapter_model.safetensors",
+                    "adapter_config.json",
                     _raise_exceptions_for_missing_entries=False,
                     **cache_kwargs,
                 )
-                if adapter_file is not None:
-                    # Load saved adapter weights
-                    from pathlib import Path
-
+                if adapter_config_file is not None:
+                    # Load saved adapter weights using the original repo_id/path
+                    # PEFT handles Hub downloads and caching internally
                     from peft import PeftModel
 
-                    adapter_dir = Path(adapter_file).parent
                     # language_model is bare (not PEFT-wrapped) since we skipped _setup_lora
                     model.language_model = PeftModel.from_pretrained(
                         model.language_model,
-                        adapter_dir,
+                        pretrained_model_name_or_path,  # Use original repo_id, not cache path
                         is_trainable=True,
+                        **cache_kwargs,
                     )
                 else:
                     # No saved adapters - initialize fresh LoRA for training
@@ -827,8 +827,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.feature_extractor.save_pretrained(save_dir)
 
         # Save LoRA adapters if present (creates adapter_model.safetensors and adapter_config.json)
+        # Don't save embedding layers - the <audio> token embedding is never used
+        # (it's replaced with projected audio embeddings before the LLM sees it)
         if hasattr(self.language_model, "peft_config"):
-            self.language_model.save_pretrained(save_dir)
+            self.language_model.save_pretrained(save_dir, save_embedding_layers=False)
 
         # Add processor auto_map to preprocessor_config.json
         config_path = save_dir / "preprocessor_config.json"

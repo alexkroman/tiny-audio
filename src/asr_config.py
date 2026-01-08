@@ -54,7 +54,7 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_rank: int = 8,  # SALMONN default
         lora_alpha: int = 32,  # SALMONN default (scaling factor 4.0)
         lora_dropout: float = 0.0,
-        lora_target_modules: Optional[list] = None,  # Default: ["q_proj", "v_proj"]
+        lora_target_modules: Optional[list] = None,  # Default: all linear layers
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         max_new_tokens: Optional[int] = None,
         min_new_tokens: Optional[int] = None,
@@ -121,7 +121,9 @@ class ASRConfig(transformers.PretrainedConfig):
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
-        self.lora_target_modules = lora_target_modules or ["q_proj", "v_proj"]
+        self.lora_target_modules = lora_target_modules or [
+            "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"
+        ]
         self.freeze_projector = freeze_projector
 
         # Generation parameters (use explicit value if provided, else use default)

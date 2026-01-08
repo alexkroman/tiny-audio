@@ -26,13 +26,3 @@ training:
 
   # SpecAugment settings
   use_specaugment: false
-
-  # Time Masking
-  mask_time_length: 100
-  mask_time_min_masks: 2
-  mask_time_prob: 0.0
-
-  # Frequency Masking
-  mask_feature_length: 27
-  mask_feature_min_masks: 2
-  mask_feature_prob: 0.0

@@ -35,7 +35,7 @@ def lora_config():
         lora_rank=8,
         lora_alpha=32,
         lora_dropout=0.0,
-        lora_target_modules=["q_proj", "v_proj"],
+        lora_target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         freeze_projector=True,
     )
 
@@ -54,7 +54,7 @@ class TestLoRAConfig:
         assert lora_config.lora_rank == 8
         assert lora_config.lora_alpha == 32
         assert lora_config.lora_dropout == 0.0
-        assert lora_config.lora_target_modules == ["q_proj", "v_proj"]
+        assert lora_config.lora_target_modules == ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
         assert lora_config.freeze_projector is True
 
     def test_default_target_modules(self):
@@ -65,7 +65,7 @@ class TestLoRAConfig:
             use_lora=True,
             lora_target_modules=None,
         )
-        assert config.lora_target_modules == ["q_proj", "v_proj"]
+        assert config.lora_target_modules == ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 
 class TestLoRAModelInitialization:
