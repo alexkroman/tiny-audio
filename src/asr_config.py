@@ -71,7 +71,7 @@ class ASRConfig(transformers.PretrainedConfig):
             "min_new_tokens": 0,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
-            "no_repeat_ngram_size": 0,
+            "no_repeat_ngram_size": 0,  # Prevent repeating 3-grams like "so so so"
             "use_cache": True,
         }
 

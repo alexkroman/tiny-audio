@@ -486,6 +486,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             return ""
 
         original_len = len(text.split())
+        original_text = text  # Keep for debug
 
         # 1. LOWERCASE
         text = text.lower()
@@ -505,8 +506,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 words = words[: idx + n]
                 text = " ".join(words)
                 print(
-                    f"[DEBUG] Truncated repetition: {original_len} -> {len(words)} words (n={n}, repeats={repeat_count})"
+                    f"[POSTPROCESS] Truncated repetition: {original_len} -> {len(words)} words (n={n}, repeats={repeat_count})"
                 )
+                print(f"[POSTPROCESS] Before: {original_text[:100]}...")
+                print(f"[POSTPROCESS] After: {text[:100]}...")
                 break
 
         # 3. COMBINE ACRONYMS

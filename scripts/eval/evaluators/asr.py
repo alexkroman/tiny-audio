@@ -10,7 +10,23 @@ import torch
 
 from scripts.eval.audio import prepare_wav_bytes
 
-from .base import Evaluator, setup_assemblyai
+from .base import Evaluator, setup_assemblyai, console
+
+
+def print_generation_config(model, model_path: str):
+    """Print generation config in a visible format."""
+    gen_config = model.generation_config
+    console.print("\n[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]")
+    console.print(f"[bold]Model:[/bold] {model_path}")
+    console.print("[bold cyan]Generation Config:[/bold cyan]")
+    console.print(f"  max_new_tokens:      {gen_config.max_new_tokens}")
+    console.print(f"  min_new_tokens:      {gen_config.min_new_tokens}")
+    console.print(f"  num_beams:           {gen_config.num_beams}")
+    console.print(f"  do_sample:           {gen_config.do_sample}")
+    console.print(f"  repetition_penalty:  {gen_config.repetition_penalty}")
+    console.print(f"  length_penalty:      {gen_config.length_penalty}")
+    console.print(f"  no_repeat_ngram_size: {gen_config.no_repeat_ngram_size}")
+    console.print("[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]\n")
 
 
 class LocalEvaluator(Evaluator):
@@ -27,14 +43,7 @@ class LocalEvaluator(Evaluator):
         self.user_prompt = user_prompt
 
         # Print generation config
-        gen_config = model.generation_config
-        print(
-            f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
-            f"min_new_tokens={gen_config.min_new_tokens}, "
-            f"repetition_penalty={gen_config.repetition_penalty}, "
-            f"length_penalty={gen_config.length_penalty}, "
-            f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}"
-        )
+        print_generation_config(model, model_path)
 
     def transcribe(self, audio) -> tuple[str, float]:
         # Convert to pipeline-compatible format
@@ -91,14 +100,7 @@ class LocalStreamingEvaluator(Evaluator):
         self.processing_times: list[float] = []
 
         # Print generation config
-        gen_config = self.model.generation_config
-        print(
-            f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
-            f"min_new_tokens={gen_config.min_new_tokens}, "
-            f"repetition_penalty={gen_config.repetition_penalty}, "
-            f"length_penalty={gen_config.length_penalty}, "
-            f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}"
-        )
+        print_generation_config(self.model, model_path)
 
     def transcribe(self, audio) -> tuple[str, float]:
         import threading
