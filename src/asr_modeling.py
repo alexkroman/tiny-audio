@@ -212,8 +212,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                         **cache_kwargs,
                     )
                 else:
-                    # No saved adapters - initialize fresh LoRA for training
-                    model._setup_lora(config)
+                    # No saved adapters - initialize fresh LLM LoRA for training
+                    from peft import LoraConfig, get_peft_model
+
+                    lora_config = LoraConfig(
+                        r=config.lora_rank,
+                        lora_alpha=config.lora_alpha,
+                        target_modules=config.lora_target_modules,
+                        lora_dropout=config.lora_dropout,
+                        bias="none",
+                        task_type="CAUSAL_LM",
+                    )
+                    model.language_model = get_peft_model(model.language_model, lora_config)
 
             return model
         finally:
@@ -382,7 +392,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             task_type="CAUSAL_LM",
         )
         self.language_model = get_peft_model(self.language_model, lora_config)
-        # LoRA params are trainable by default, base model stays frozen
 
     def _init_tokenizer(self, config: ASRConfig):
         """Initialize tokenizer with audio token."""

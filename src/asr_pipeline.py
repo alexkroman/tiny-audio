@@ -485,40 +485,16 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if not text:
             return ""
 
-        original_len = len(text.split())
-        original_text = text  # Keep for debug
-
         # 1. LOWERCASE
         text = text.lower()
 
-        # 2. REMOVE REPETITIVE LOOPS
-        # If the model repeats the same phrase, keep only one instance.
-        words = text.split()
-        for n in range(1, min(15, len(words) // 2 + 1)):
-            last_sequence = words[-n:]
-            repeat_count = 0
-            idx = len(words) - n
-            while idx >= n and words[idx - n : idx] == last_sequence:
-                repeat_count += 1
-                idx -= n
-
-            if repeat_count >= 1:
-                words = words[: idx + n]
-                text = " ".join(words)
-                print(
-                    f"[POSTPROCESS] Truncated repetition: {original_len} -> {len(words)} words (n={n}, repeats={repeat_count})"
-                )
-                print(f"[POSTPROCESS] Before: {original_text[:100]}...")
-                print(f"[POSTPROCESS] After: {text[:100]}...")
-                break
-
-        # 3. COMBINE ACRONYMS
+        # 2. COMBINE ACRONYMS
         # Merge consecutive single letters into one word (e.g., "u s a" -> "usa")
         text = re.sub(r"\b([a-z])((?:\s+[a-z])+)\b", lambda m: m.group(0).replace(" ", ""), text)
 
-        # 4. NORMALIZE CURRENCY
+        # 3. NORMALIZE CURRENCY
         # Convert "eur X" to "X euros" for Whisper normalizer compatibility
         text = re.sub(r"\beur\s+(\d+)", r"\1 euros", text)
 
-        # 5. STRIP WHITESPACE
+        # 4. STRIP WHITESPACE
         return re.sub(r"\s+", " ", text).strip()

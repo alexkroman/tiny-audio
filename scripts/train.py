@@ -234,7 +234,7 @@ class DataCollator:
             """Remove HTML tags from text."""
             return re.sub(r"<[^>]+>", "", text)
 
-        raw_texts = [strip_html((f.get("text") or "")).strip().lower() for f in valid_features]
+        raw_texts = [strip_html(f.get("text") or "").strip().lower() for f in valid_features]
         results = self.punctuator.infer(raw_texts)
         processed_texts = [" ".join(r) if r else t for t, r in zip(raw_texts, results)]
 

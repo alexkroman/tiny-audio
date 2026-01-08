@@ -1,7 +1,6 @@
 # @package _global_
 # Stage 2: LoRA fine-tuning on top of trained projector
-# All linear layers with r=64 (~40M params)
-# Projector is frozen, only LoRA adapters are trained
+# LLM LoRA: all linear layers with r=64 (~40M params)
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=mlp_lora
@@ -15,7 +14,7 @@ model:
   text_model_id: Qwen/Qwen3-0.6B
   pretrained_model_path: "mazesmazes/tiny-audio"  # Stage 1 checkpoint
 
-  # LoRA config (all linear layers)
+  # LLM LoRA config (all linear layers)
   use_lora: true
   lora_rank: 64
   lora_alpha: 128
@@ -32,6 +31,7 @@ model:
 
 training:
   hub_model_id: "mazesmazes/tiny-audio"
+  seed: 123  # Different seed to see different data ordering
   per_device_train_batch_size: 18
   per_device_eval_batch_size: 18
   gradient_accumulation_steps: 2
