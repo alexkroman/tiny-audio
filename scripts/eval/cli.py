@@ -288,6 +288,12 @@ def main():
     parser.add_argument(
         "--base-url", type=str, default=None, help="Custom API base URL (for AssemblyAI sandbox)"
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="Number of parallel workers for API evaluations (default: 1)",
+    )
     args = parser.parse_args()
 
     # Expand "all" to ASR datasets only (exclude diarization and alignment)
@@ -396,6 +402,7 @@ def main():
                     base_url=args.base_url,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
+                    num_workers=args.num_workers,
                 )
         elif args.model == "deepgram":
             api_key = os.environ.get("DEEPGRAM_API_KEY", "")
@@ -406,6 +413,7 @@ def main():
                 api_key=api_key,
                 audio_field=cfg.audio_field,
                 text_field=cfg.text_field,
+                num_workers=args.num_workers,
             )
         elif args.endpoint:
             evaluator = EndpointEvaluator(

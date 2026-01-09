@@ -252,7 +252,6 @@ class AssemblyAIEvaluator(Evaluator):
         start = time.time()
         transcript = self.transcriber.transcribe(io.BytesIO(wav_bytes))
         elapsed = time.time() - start
-        time.sleep(0.5)
         return transcript.text or "", elapsed
 
 
@@ -426,5 +425,4 @@ class DeepgramEvaluator(Evaluator):
         elapsed = time.time() - start
 
         text = response.results.channels[0].alternatives[0].transcript
-        time.sleep(0.5)  # Rate limiting
         return text, elapsed
