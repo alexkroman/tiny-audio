@@ -39,12 +39,32 @@ def save_results(
     results: list[EvalResult],
     metrics: dict,
     output_dir: str = "outputs",
+    base_url: str | None = None,
 ) -> Path:
     """Save evaluation results and metrics to a timestamped directory."""
     normalizer = TextNormalizer()
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_model_name = model_name.replace("/", "_")
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}"
+
+    # Extract short identifier from base_url (e.g., "sandbox013" from the URL)
+    url_suffix = ""
+    if base_url:
+        # Extract hostname and create a short identifier
+        from urllib.parse import urlparse
+
+        parsed = urlparse(base_url)
+        host = parsed.netloc or parsed.path
+        # Extract meaningful part (e.g., "sandbox013" from "api.sandbox013.assemblyai-labs.com")
+        parts = host.split(".")
+        for part in parts:
+            if "sandbox" in part.lower():
+                url_suffix = f"_{part}"
+                break
+        if not url_suffix and host:
+            # Fallback: use first part of hostname
+            url_suffix = f"_{parts[0]}"
+
+    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}{url_suffix}_{dataset_name}"
     result_dir.mkdir(parents=True, exist_ok=True)
 
     # Save detailed results
@@ -63,6 +83,8 @@ def save_results(
     with metrics_file.open("w") as f:
         f.write(f"Model: {model_name}\n")
         f.write(f"Dataset: {dataset_name}\n")
+        if base_url:
+            f.write(f"Base URL: {base_url}\n")
         f.write(f"Timestamp: {timestamp}\n")
         f.write("-" * 40 + "\n")
         for key, value in metrics.items():
@@ -263,6 +285,9 @@ def main():
     parser.add_argument(
         "--user-prompt", type=str, default=None, help="Custom user prompt for the model"
     )
+    parser.add_argument(
+        "--base-url", type=str, default=None, help="Custom API base URL (for AssemblyAI sandbox)"
+    )
     args = parser.parse_args()
 
     # Expand "all" to ASR datasets only (exclude diarization and alignment)
@@ -368,6 +393,7 @@ def main():
                 evaluator = AssemblyAIEvaluator(
                     api_key=api_key,
                     model=args.assemblyai_model,
+                    base_url=args.base_url,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                 )
@@ -404,7 +430,7 @@ def main():
 
         results = evaluator.evaluate(dataset, args.max_samples)
         metrics = evaluator.compute_metrics()
-        save_results(args.model, dataset_name, results, metrics, args.output_dir)
+        save_results(args.model, dataset_name, results, metrics, args.output_dir, args.base_url)
         print_asr_metrics(dataset_name, metrics)
 
 

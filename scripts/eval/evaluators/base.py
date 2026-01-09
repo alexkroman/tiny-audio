@@ -15,11 +15,15 @@ console = Console()
 ASSEMBLYAI_MODELS = {"best", "universal", "slam_1", "nano"}
 
 
-def setup_assemblyai(api_key: str, model: str, speaker_labels: bool = False):
+def setup_assemblyai(
+    api_key: str, model: str, speaker_labels: bool = False, base_url: str | None = None
+):
     """Initialize AssemblyAI transcriber with given model."""
     import assemblyai as aai
 
     aai.settings.api_key = api_key
+    if base_url:
+        aai.settings.base_url = base_url
     if model not in ASSEMBLYAI_MODELS:
         raise ValueError(f"Invalid model '{model}'. Choose from: {ASSEMBLYAI_MODELS}")
     config = aai.TranscriptionConfig(
