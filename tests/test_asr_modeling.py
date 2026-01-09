@@ -1,29 +1,26 @@
 """Tests for ASRModel."""
 
-import numpy as np
 import pytest
 import torch
 
-from src.asr_config import ASRConfig
-from src.asr_modeling import ASRModel
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel
+
+# Mark all tests in this module as slow (load ML models)
+pytestmark = pytest.mark.slow
+
+
+# Use session-scoped fixtures from conftest.py for most tests
+@pytest.fixture
+def config(base_asr_config):
+    """Alias for session-scoped base_asr_config."""
+    return base_asr_config
 
 
 @pytest.fixture
-def config():
-    """Create a minimal config for testing."""
-    return ASRConfig(
-        audio_model_id="openai/whisper-tiny",
-        text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-        projector_type="mlp",
-        model_dtype="float32",
-        attn_implementation="eager",
-    )
-
-
-@pytest.fixture
-def model(config):
-    """Create an ASRModel instance for testing."""
-    return ASRModel(config)
+def model(base_asr_model):
+    """Alias for session-scoped base_asr_model."""
+    return base_asr_model
 
 
 class TestASRModelInitialization:
@@ -71,7 +68,7 @@ class TestASRModelStateDict:
     def test_state_dict_only_projector(self, model):
         """Test that state_dict only contains projector weights."""
         state = model.state_dict()
-        for key in state.keys():
+        for key in state:
             assert key.startswith("projector."), f"Unexpected key in state dict: {key}"
 
     def test_state_dict_not_empty(self, model):
@@ -149,10 +146,7 @@ class TestASRModelForward:
             return_tensors="pt",
         )
         # Handle both BatchEncoding and plain tensor returns
-        if hasattr(chat_result, "input_ids"):
-            input_ids = chat_result.input_ids
-        else:
-            input_ids = chat_result
+        input_ids = chat_result.input_ids if hasattr(chat_result, "input_ids") else chat_result
 
         attention_mask = torch.ones_like(input_ids)
 

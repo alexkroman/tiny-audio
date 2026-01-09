@@ -1,3 +1,5 @@
+"""ASR pipeline for audio-to-text transcription with optional timestamps and diarization."""
+
 import re
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,14 @@ class ForcedAligner:
 
     @classmethod
     def get_instance(cls, device: str = "cuda"):
+        """Get or create the forced alignment model (singleton).
+
+        Args:
+            device: Device to run model on ("cuda" or "cpu")
+
+        Returns:
+            Tuple of (model, labels, dictionary)
+        """
         if cls._model is None:
             import torchaudio
 
@@ -38,8 +48,8 @@ class ForcedAligner:
         audio: np.ndarray,
         text: str,
         sample_rate: int = 16000,
-        language: str = "eng",
-        batch_size: int = 16,
+        _language: str = "eng",
+        _batch_size: int = 16,
     ) -> list[dict]:
         """Align transcript to audio and return word-level timestamps.
 
@@ -47,8 +57,8 @@ class ForcedAligner:
             audio: Audio waveform as numpy array
             text: Transcript text to align
             sample_rate: Audio sample rate (default 16000)
-            language: ISO-639-3 language code (default "eng" for English, unused)
-            batch_size: Batch size for alignment model (unused)
+            _language: ISO-639-3 language code (default "eng" for English, unused)
+            _batch_size: Batch size for alignment model (unused)
 
         Returns:
             List of dicts with 'word', 'start', 'end' keys
@@ -296,6 +306,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     model: ASRModel
 
     def __init__(self, model: ASRModel, **kwargs):
+        """Initialize ASR pipeline.
+
+        Args:
+            model: ASRModel instance for transcription
+            **kwargs: Additional arguments (feature_extractor, tokenizer, device)
+        """
         feature_extractor = kwargs.pop("feature_extractor", None)
         tokenizer = kwargs.pop("tokenizer", model.tokenizer)
 
@@ -432,6 +448,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         return None
 
     def preprocess(self, inputs, **preprocess_params):
+        """Preprocess audio inputs for the model.
+
+        Args:
+            inputs: Audio input (dict with array, file path, etc.)
+            **preprocess_params: Additional preprocessing parameters
+
+        Yields:
+            Model input dicts with input_features and attention_mask
+        """
         # Handle dict with "array" key (from datasets)
         if isinstance(inputs, dict) and "array" in inputs:
             inputs = {
@@ -445,6 +470,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             yield item
 
     def _forward(self, model_inputs, **generate_kwargs) -> dict[str, Any]:
+        """Run model forward pass to generate transcription.
+
+        Args:
+            model_inputs: Dict with input_features and attention_mask
+            **generate_kwargs: Generation parameters
+
+        Returns:
+            Dict with generated token IDs
+        """
         # Extract audio features and is_last flag
         is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
 
@@ -460,6 +494,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         return {"tokens": generated_ids, "is_last": is_last}
 
     def postprocess(self, model_outputs, **kwargs) -> dict[str, str]:
+        """Convert model output tokens to text.
+
+        Args:
+            model_outputs: Dict with 'tokens' key containing generated IDs
+            **kwargs: Additional postprocessing parameters
+
+        Returns:
+            Dict with 'text' key containing transcription
+        """
         # Handle list of outputs (from chunking)
         if isinstance(model_outputs, list):
             model_outputs = model_outputs[0] if model_outputs else {}
@@ -485,35 +528,41 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if not text:
             return ""
 
-        original_len = len(text.split())
-
         # 1. LOWERCASE
         text = text.lower()
 
-        # 2. REMOVE REPETITIVE LOOPS
-        # If the model repeats the same phrase, keep only one instance.
-        words = text.split()
-        for n in range(1, min(15, len(words) // 2 + 1)):
-            last_sequence = words[-n:]
-            repeat_count = 0
-            idx = len(words) - n
-            while idx >= n and words[idx - n : idx] == last_sequence:
-                repeat_count += 1
-                idx -= n
-
-            if repeat_count >= 1:
-                words = words[: idx + n]
-                text = " ".join(words)
-                print(f"[DEBUG] Truncated repetition: {original_len} -> {len(words)} words (n={n}, repeats={repeat_count})")
-                break
-
-        # 3. COMBINE ACRONYMS
+        # 2. COMBINE ACRONYMS
         # Merge consecutive single letters into one word (e.g., "u s a" -> "usa")
         text = re.sub(r"\b([a-z])((?:\s+[a-z])+)\b", lambda m: m.group(0).replace(" ", ""), text)
 
-        # 4. NORMALIZE CURRENCY
+        # 3. NORMALIZE CURRENCY
         # Convert "eur X" to "X euros" for Whisper normalizer compatibility
         text = re.sub(r"\beur\s+(\d+)", r"\1 euros", text)
 
+        # 4. TRUNCATE TRAILING REPEATS
+        text = self._truncate_trailing_repeats(text)
+
         # 5. STRIP WHITESPACE
         return re.sub(r"\s+", " ", text).strip()
+
+    def _truncate_trailing_repeats(self, text: str, max_ngram: int = 4) -> str:
+        """Remove trailing repeated n-grams (1-4 words)."""
+        words = text.split()
+        if len(words) < 2:
+            return text
+
+        # Keep truncating until no more trailing repeats found
+        changed = True
+        while changed:
+            changed = False
+            # Check for repeating n-grams from largest to smallest
+            for n in range(min(max_ngram, len(words) // 2), 0, -1):
+                if len(words) < n * 2:
+                    continue
+                # Check if last n words repeat the previous n words
+                if words[-n:] == words[-2 * n : -n]:
+                    words = words[:-n]  # Remove the trailing repeat
+                    changed = True
+                    break  # Restart from largest n-gram
+
+        return " ".join(words)

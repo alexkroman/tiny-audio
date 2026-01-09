@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: precommit
+        name: precommit quality gate
+        entry: poetry run precommit
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]

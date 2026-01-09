@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
+"""Training script for ASR models using Hydra configuration.
+
+This script handles:
+- Loading and preparing datasets from multiple sources
+- Creating ASR models with configurable projector types
+- Training with HuggingFace Trainer and optional WandB logging
+- Checkpoint saving and Hub pushing
+
+Usage:
+    poetry run python scripts/train.py +experiments=mlp
+    poetry run python scripts/train.py training.learning_rate=1e-4
+"""
 
 import contextlib
+import re
 from dataclasses import fields
 from typing import Any
 
@@ -24,8 +37,8 @@ from transformers import (
 )
 from trl.trainer.utils import DataCollatorForChatML
 
-from src.asr_config import ASRConfig
-from src.asr_modeling import ASRModel
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel
 
 TRANSCRIBE_PREFIX = "Transcribe: "  # Used in DataCollator, matches ASRConfig.user_prompt
 
@@ -187,6 +200,7 @@ class DataCollator:
         # Process audio
         audio_arrays = []
         valid_features = []
+        min_duration = 0.5  # Skip audio shorter than 0.5 seconds
         for f in features:
             try:
                 audio = f["audio"]["array"]
@@ -195,6 +209,9 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
+                # Skip very short audio samples
+                if len(audio) / self.sample_rate < min_duration:
+                    continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
             except Exception:
@@ -224,7 +241,12 @@ class DataCollator:
         # Apply punctuation and truecasing to texts in batch (model expects lowercase)
         if self.punctuator is None:
             self.punctuator = PunctCapSegModelONNX.from_pretrained("pcs_en")
-        raw_texts = [(f.get("text") or "").strip().lower() for f in valid_features]
+
+        def strip_html(text: str) -> str:
+            """Remove HTML tags from text."""
+            return re.sub(r"<[^>]+>", "", text)
+
+        raw_texts = [strip_html(f.get("text") or "").strip().lower() for f in valid_features]
         results = self.punctuator.infer(raw_texts)
         processed_texts = [" ".join(r) if r else t for t, r in zip(raw_texts, results)]
 
@@ -312,6 +334,13 @@ def main(cfg: DictConfig) -> None:
         "mask_feature_length",
         "mask_feature_min_masks",
         "attn_implementation",
+        # LoRA params (Stage 2 fine-tuning)
+        "use_lora",
+        "lora_rank",
+        "lora_alpha",
+        "lora_dropout",
+        "lora_target_modules",
+        "freeze_projector",
     ]
     for param in training_model_params:
         if cfg.training.get(param) is not None:
@@ -325,6 +354,16 @@ def main(cfg: DictConfig) -> None:
         model = ASRModel(asr_config)
 
     model.config.use_cache = False
+
+    # Disable Qwen3 thinking mode by patching the chat template
+    # This is a workaround for TRL's DataCollatorForChatML not passing enable_thinking=False
+    # See: https://github.com/huggingface/trl/issues/3387
+    if model.tokenizer.chat_template and "enable_thinking" in model.tokenizer.chat_template:
+        # Replace the conditional check with a hardcoded False
+        model.tokenizer.chat_template = model.tokenizer.chat_template.replace(
+            "enable_thinking is defined and enable_thinking is false",
+            "true",  # Always disable thinking
+        )
 
     # Load datasets
     train_dataset, val_dataset = DatasetLoader(cfg).load()

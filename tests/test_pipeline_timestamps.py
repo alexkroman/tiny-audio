@@ -3,6 +3,9 @@
 import numpy as np
 import pytest
 
+# Mark all tests in this module as slow (load ML models)
+pytestmark = pytest.mark.slow
+
 
 def create_audio_sample(duration_sec: float = 2.0, sample_rate: int = 16000) -> dict:
     """Create a sample audio dict with a simple tone."""
@@ -16,9 +19,9 @@ def create_audio_sample(duration_sec: float = 2.0, sample_rate: int = 16000) -> 
 @pytest.fixture
 def pipeline():
     """Load the ASR pipeline with a local model for testing."""
-    from src.asr_config import ASRConfig
-    from src.asr_modeling import ASRModel
-    from src.asr_pipeline import ASRPipeline
+    from tiny_audio.asr_config import ASRConfig
+    from tiny_audio.asr_modeling import ASRModel
+    from tiny_audio.asr_pipeline import ASRPipeline
 
     # Use small models for faster tests
     config = ASRConfig(
@@ -89,7 +92,7 @@ class TestReturnTimestamps:
             for i in range(1, len(words)):
                 # Each word should start at or after the previous word started
                 assert words[i]["start"] >= words[i - 1]["start"], (
-                    f"Words not sequential: {words[i-1]} -> {words[i]}"
+                    f"Words not sequential: {words[i - 1]} -> {words[i]}"
                 )
 
     def test_empty_transcription_returns_empty_words(self, pipeline):
@@ -113,7 +116,7 @@ class TestForcedAligner:
         """Verify aligner model is lazy-loaded."""
         pytest.importorskip("torchaudio", reason="torchaudio not installed")
 
-        from src.asr_pipeline import ForcedAligner
+        from tiny_audio.asr_pipeline import ForcedAligner
 
         # Reset class state
         ForcedAligner._model = None
@@ -137,7 +140,7 @@ class TestForcedAligner:
         """Test the align method directly."""
         pytest.importorskip("torchaudio", reason="torchaudio not installed")
 
-        from src.asr_pipeline import ForcedAligner
+        from tiny_audio.asr_pipeline import ForcedAligner
 
         # Create a simple audio array
         sample_rate = 16000
@@ -238,7 +241,7 @@ class TestSpeakerDiarizerClass:
         """Verify diarizer pipeline is lazy-loaded."""
         pytest.importorskip("pyannote.audio", reason="pyannote-audio not installed")
 
-        from src.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.asr_pipeline import SpeakerDiarizer
 
         # Reset class state
         SpeakerDiarizer._pipeline = None
@@ -251,7 +254,7 @@ class TestSpeakerDiarizerClass:
 
     def test_assign_speakers_to_words(self):
         """Test the assign_speakers_to_words method."""
-        from src.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.asr_pipeline import SpeakerDiarizer
 
         words = [
             {"word": "hello", "start": 0.0, "end": 0.5},
@@ -272,7 +275,7 @@ class TestSpeakerDiarizerClass:
 
     def test_assign_speakers_handles_gaps(self):
         """Test speaker assignment when word falls in gap between segments."""
-        from src.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.asr_pipeline import SpeakerDiarizer
 
         words = [
             {"word": "gap", "start": 1.5, "end": 1.8},  # Falls in gap
@@ -290,7 +293,7 @@ class TestSpeakerDiarizerClass:
 
     def test_assign_speakers_empty_segments(self):
         """Test speaker assignment with empty segments list."""
-        from src.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.asr_pipeline import SpeakerDiarizer
 
         words = [
             {"word": "hello", "start": 0.0, "end": 0.5},

@@ -87,7 +87,8 @@ class TestLabelMasking:
         # Find non-masked positions (excluding padding)
         pad_id = tokenizer.pad_token_id
         unmasked_positions = [
-            i for i, (label, inp) in enumerate(zip(labels, input_ids))
+            i
+            for i, (label, inp) in enumerate(zip(labels, input_ids))
             if label != -100 and inp != pad_id
         ]
 
@@ -98,8 +99,9 @@ class TestLabelMasking:
         unmasked_text = tokenizer.decode(unmasked_tokens, skip_special_tokens=True)
 
         # The transcription text should be in the unmasked portion
-        assert "hello" in unmasked_text.lower(), \
+        assert "hello" in unmasked_text.lower(), (
             f"Transcription not found in unmasked text: {unmasked_text}"
+        )
 
     def test_stop_token_is_unmasked(self, collator, tokenizer):
         """Verify that <|im_end|> stop token is included in labels."""
@@ -115,12 +117,14 @@ class TestLabelMasking:
 
         # Find <|im_end|> tokens that are unmasked
         unmasked_im_end = [
-            i for i, (label, inp) in enumerate(zip(labels, input_ids))
+            i
+            for i, (label, inp) in enumerate(zip(labels, input_ids))
             if inp == im_end_id and label == im_end_id
         ]
 
-        assert len(unmasked_im_end) > 0, \
+        assert len(unmasked_im_end) > 0, (
             "No <|im_end|> token found in labels - model won't learn to stop"
+        )
 
     def test_system_and_user_prompts_are_masked(self, collator, tokenizer):
         """Verify that system prompt and user instruction are masked (-100)."""
@@ -139,10 +143,11 @@ class TestLabelMasking:
         # Find "Transcribe" in input and verify it's masked
         transcribe_tokens = tokenizer.encode("Transcribe", add_special_tokens=False)
         for i in range(len(input_ids) - len(transcribe_tokens)):
-            if input_ids[i:i+len(transcribe_tokens)] == transcribe_tokens:
+            if input_ids[i : i + len(transcribe_tokens)] == transcribe_tokens:
                 # These positions should be masked
-                assert all(labels[i+j] == -100 for j in range(len(transcribe_tokens))), \
+                assert all(labels[i + j] == -100 for j in range(len(transcribe_tokens))), (
                     "User instruction should be masked"
+                )
                 break
 
     def test_no_system_prompt(self, collator_no_system, tokenizer):
@@ -158,8 +163,7 @@ class TestLabelMasking:
         # Should still have unmasked content
         pad_id = tokenizer.pad_token_id
         unmasked_count = sum(
-            1 for label, inp in zip(labels, input_ids)
-            if label != -100 and inp != pad_id
+            1 for label, inp in zip(labels, input_ids) if label != -100 and inp != pad_id
         )
         assert unmasked_count > 0, "No unmasked labels without system prompt"
 
@@ -176,8 +180,9 @@ class TestLabelMasking:
         # For every unmasked position, label should equal input_id
         for i, (label, input_id) in enumerate(zip(labels, input_ids)):
             if label != -100:
-                assert label == input_id, \
+                assert label == input_id, (
                     f"Label mismatch at position {i}: label={label}, input_id={input_id}"
+                )
 
 
 class TestAudioTokens:
@@ -266,23 +271,14 @@ class TestBatchProcessing:
         assert batch["input_features"].shape[1] == 80  # n_mels for Whisper
 
 
+@pytest.mark.slow
 class TestModelIntegration:
     """Integration tests verifying audio actually influences the model."""
 
     @pytest.fixture
-    def model(self):
-        """Load a small model for testing."""
-        from src.asr_config import ASRConfig
-        from src.asr_modeling import ASRModel
-
-        config = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            projector_type="mlp",
-            model_dtype="float32",
-            attn_implementation="eager",
-        )
-        return ASRModel(config)
+    def model(self, base_asr_model):
+        """Use session-scoped base_asr_model."""
+        return base_asr_model
 
     def test_different_audio_produces_different_loss(self, model):
         """Verify that different audio inputs produce different losses."""
@@ -314,6 +310,7 @@ class TestModelIntegration:
 
         model.eval()
         import torch
+
         with torch.no_grad():
             out1 = model(
                 input_ids=batch1["input_ids"],
@@ -338,8 +335,8 @@ class TestModelIntegration:
 
     def test_audio_embeddings_replace_audio_tokens(self, model):
         """Verify that <audio> token embeddings are replaced with projected audio."""
+
         from scripts.train import DataCollator
-        import torch
 
         collator = DataCollator(
             tokenizer=model.tokenizer,
@@ -365,7 +362,9 @@ class TestModelIntegration:
         )
 
         # The audio embeddings should be different from the original <audio> token embedding
-        audio_token_embed = original_embeds[audio_token_mask][0]  # First audio token's original embedding
+        audio_token_embed = original_embeds[audio_token_mask][
+            0
+        ]  # First audio token's original embedding
         projected_audio_embed = audio_embeds[0]  # First projected audio embedding
 
         # They should be different (projected audio != text embedding of <audio> token)
@@ -377,8 +376,8 @@ class TestModelIntegration:
 
     def test_all_audio_embeddings_used(self, model):
         """Verify that all projected audio embeddings are used, not just one."""
+
         from scripts.train import DataCollator
-        import torch
 
         collator = DataCollator(
             tokenizer=model.tokenizer,

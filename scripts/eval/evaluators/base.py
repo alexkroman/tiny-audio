@@ -15,11 +15,15 @@ console = Console()
 ASSEMBLYAI_MODELS = {"best", "universal", "slam_1", "nano"}
 
 
-def setup_assemblyai(api_key: str, model: str, speaker_labels: bool = False):
+def setup_assemblyai(
+    api_key: str, model: str, speaker_labels: bool = False, base_url: str | None = None
+):
     """Initialize AssemblyAI transcriber with given model."""
     import assemblyai as aai
 
     aai.settings.api_key = api_key
+    if base_url:
+        aai.settings.base_url = base_url
     if model not in ASSEMBLYAI_MODELS:
         raise ValueError(f"Invalid model '{model}'. Choose from: {ASSEMBLYAI_MODELS}")
     config = aai.TranscriptionConfig(
@@ -84,9 +88,10 @@ class AlignmentResult:
 class Evaluator:
     """Base evaluator with common evaluation loop logic."""
 
-    def __init__(self, audio_field: str = "audio", text_field: str = "text"):
+    def __init__(self, audio_field: str = "audio", text_field: str = "text", num_workers: int = 1):
         self.audio_field = audio_field
         self.text_field = text_field
+        self.num_workers = num_workers
         self.normalizer = TextNormalizer()
         self.results: list[EvalResult] = []
 
@@ -94,11 +99,30 @@ class Evaluator:
         """Transcribe audio and return (text, inference_time). Override in subclass."""
         raise NotImplementedError
 
+    def _process_sample(self, sample_data: tuple[int, dict]) -> tuple[int, EvalResult]:
+        """Process a single sample. Returns (index, result) for ordering."""
+        idx, sample = sample_data
+        reference = sample["reference"]
+        audio = sample["audio"]
+
+        try:
+            prediction, inference_time = self.transcribe(audio)
+        except Exception as e:
+            print(f"Error on sample {idx}: {e}")
+            prediction, inference_time = "", 0.0
+
+        norm_pred = self.normalizer.normalize(prediction)
+        norm_ref = self.normalizer.normalize(reference)
+        sample_wer = jiwer.wer(norm_ref, norm_pred) * 100 if norm_ref else 0.0
+
+        return idx, EvalResult(prediction, reference, sample_wer, inference_time)
+
     def evaluate(self, dataset, max_samples: int | None = None) -> list[EvalResult]:
         """Run evaluation loop on dataset."""
         self.results = []
-        processed = 0
 
+        # Collect samples first (needed for parallel processing)
+        samples_to_process = []
         for sample in dataset:
             reference = sample[self.text_field]
 
@@ -110,31 +134,82 @@ class Evaluator:
             if isinstance(reference, str) and "inaudible" in reference.lower():
                 continue
 
-            processed += 1
-            if max_samples and processed > max_samples:
+            samples_to_process.append(
+                {
+                    "audio": sample[self.audio_field],
+                    "reference": reference,
+                }
+            )
+
+            if max_samples and len(samples_to_process) >= max_samples:
                 break
 
-            try:
-                prediction, inference_time = self.transcribe(sample[self.audio_field])
-            except Exception as e:
-                print(f"Error on sample {processed}: {e}")
-                prediction, inference_time = "", 0.0
-            norm_pred = self.normalizer.normalize(prediction)
-            norm_ref = self.normalizer.normalize(reference)
-            sample_wer = jiwer.wer(norm_ref, norm_pred) * 100 if norm_ref else 0.0
+        if self.num_workers > 1:
+            self._evaluate_parallel(samples_to_process)
+        else:
+            self._evaluate_sequential(samples_to_process)
 
-            result = EvalResult(prediction, reference, sample_wer, inference_time)
+        return self.results
+
+    def _evaluate_sequential(self, samples: list[dict]) -> None:
+        """Run sequential evaluation."""
+        for idx, sample in enumerate(samples, 1):
+            _, result = self._process_sample((idx, sample))
             self.results.append(result)
 
-            print(f"Sample {processed}: WER={sample_wer:.1f}%, Time={inference_time:.2f}s")
+            norm_pred = self.normalizer.normalize(result.prediction)
+            norm_ref = self.normalizer.normalize(result.reference)
+            print(f"Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s")
             print(f"  Ref:  {norm_ref}")
             print(f"  Pred: {norm_pred}")
 
-            # Checkpoint every 100 samples
-            if processed % 100 == 0:
-                self._print_checkpoint(processed)
+            if idx % 100 == 0:
+                self._print_checkpoint(idx)
 
-        return self.results
+    def _evaluate_parallel(self, samples: list[dict]) -> None:
+        """Run parallel evaluation using thread pool."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        console.print(f"[bold]Running parallel evaluation with {self.num_workers} workers[/bold]")
+
+        # Pre-allocate results list
+        results_map: dict[int, EvalResult] = {}
+        completed = 0
+        total = len(samples)
+
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(self._process_sample, (idx, sample)): idx
+                for idx, sample in enumerate(samples, 1)
+            }
+
+            # Process as they complete
+            for future in as_completed(futures):
+                idx, result = future.result()
+                results_map[idx] = result
+                completed += 1
+
+                norm_pred = self.normalizer.normalize(result.prediction)
+                norm_ref = self.normalizer.normalize(result.reference)
+                print(
+                    f"[{completed}/{total}] Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s"
+                )
+                print(f"  Ref:  {norm_ref}")
+                print(f"  Pred: {norm_pred}")
+
+                if completed % 100 == 0:
+                    # Compute checkpoint on completed results
+                    temp_results = list(results_map.values())
+                    preds = [self.normalizer.normalize(r.prediction) for r in temp_results]
+                    refs = [self.normalizer.normalize(r.reference) for r in temp_results]
+                    corpus_wer = jiwer.wer(refs, preds) * 100
+                    console.print(
+                        f"\n[bold]CHECKPOINT @ {completed}[/bold]: WER={corpus_wer:.2f}%\n"
+                    )
+
+        # Store results in order
+        self.results = [results_map[i] for i in sorted(results_map.keys())]
 
     def _print_checkpoint(self, sample_count: int):
         """Print cumulative metrics checkpoint."""

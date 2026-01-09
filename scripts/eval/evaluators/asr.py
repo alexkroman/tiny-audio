@@ -10,7 +10,27 @@ import torch
 
 from scripts.eval.audio import prepare_wav_bytes
 
-from .base import Evaluator, setup_assemblyai
+from .base import Evaluator, console, setup_assemblyai
+
+
+def print_generation_config(model, model_path: str):
+    """Print generation config in a visible format."""
+    gen_config = model.generation_config
+    console.print(
+        "\n[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]"
+    )
+    console.print(f"[bold]Model:[/bold] {model_path}")
+    console.print("[bold cyan]Generation Config:[/bold cyan]")
+    console.print(f"  max_new_tokens:      {gen_config.max_new_tokens}")
+    console.print(f"  min_new_tokens:      {gen_config.min_new_tokens}")
+    console.print(f"  num_beams:           {gen_config.num_beams}")
+    console.print(f"  do_sample:           {gen_config.do_sample}")
+    console.print(f"  repetition_penalty:  {gen_config.repetition_penalty}")
+    console.print(f"  length_penalty:      {gen_config.length_penalty}")
+    console.print(f"  no_repeat_ngram_size: {gen_config.no_repeat_ngram_size}")
+    console.print(
+        "[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]\n"
+    )
 
 
 class LocalEvaluator(Evaluator):
@@ -18,8 +38,8 @@ class LocalEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from src.asr_modeling import ASRModel
-        from src.asr_pipeline import ASRPipeline
+        from tiny_audio.asr_modeling import ASRModel
+        from tiny_audio.asr_pipeline import ASRPipeline
 
         # Load model and use our custom pipeline
         model = ASRModel.from_pretrained(model_path)
@@ -27,14 +47,7 @@ class LocalEvaluator(Evaluator):
         self.user_prompt = user_prompt
 
         # Print generation config
-        gen_config = model.generation_config
-        print(
-            f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
-            f"min_new_tokens={gen_config.min_new_tokens}, "
-            f"repetition_penalty={gen_config.repetition_penalty}, "
-            f"length_penalty={gen_config.length_penalty}, "
-            f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}"
-        )
+        print_generation_config(model, model_path)
 
     def transcribe(self, audio) -> tuple[str, float]:
         # Convert to pipeline-compatible format
@@ -65,8 +78,8 @@ class LocalStreamingEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from src.asr_modeling import ASRModel
-        from src.asr_pipeline import ASRPipeline
+        from tiny_audio.asr_modeling import ASRModel
+        from tiny_audio.asr_pipeline import ASRPipeline
 
         # Determine best device and dtype
         if torch.cuda.is_available():
@@ -91,14 +104,7 @@ class LocalStreamingEvaluator(Evaluator):
         self.processing_times: list[float] = []
 
         # Print generation config
-        gen_config = self.model.generation_config
-        print(
-            f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
-            f"min_new_tokens={gen_config.min_new_tokens}, "
-            f"repetition_penalty={gen_config.repetition_penalty}, "
-            f"length_penalty={gen_config.length_penalty}, "
-            f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}"
-        )
+        print_generation_config(self.model, model_path)
 
     def transcribe(self, audio) -> tuple[str, float]:
         import threading
@@ -237,16 +243,15 @@ class EndpointEvaluator(Evaluator):
 class AssemblyAIEvaluator(Evaluator):
     """Evaluator for AssemblyAI API."""
 
-    def __init__(self, api_key: str, model: str = "slam_1", **kwargs):
+    def __init__(self, api_key: str, model: str = "slam_1", base_url: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        self.transcriber = setup_assemblyai(api_key, model)
+        self.transcriber = setup_assemblyai(api_key, model, base_url=base_url)
 
     def transcribe(self, audio) -> tuple[str, float]:
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
         transcript = self.transcriber.transcribe(io.BytesIO(wav_bytes))
         elapsed = time.time() - start
-        time.sleep(0.5)
         return transcript.text or "", elapsed
 
 
@@ -398,3 +403,26 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         if self.processing_times:
             metrics["avg_processing"] = sum(self.processing_times) / len(self.processing_times)
         return metrics
+
+
+class DeepgramEvaluator(Evaluator):
+    """Evaluator for Deepgram Nova 3 API."""
+
+    def __init__(self, api_key: str, **kwargs):
+        super().__init__(**kwargs)
+        from deepgram import DeepgramClient
+
+        self.client = DeepgramClient(api_key=api_key)
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        wav_bytes = prepare_wav_bytes(audio)
+        start = time.time()
+
+        response = self.client.listen.v1.media.transcribe_file(
+            request=wav_bytes,
+            model="nova-3",
+        )
+        elapsed = time.time() - start
+
+        text = response.results.channels[0].alternatives[0].transcript
+        return text, elapsed

@@ -257,8 +257,8 @@ class TimestampAlignmentEvaluator(BaseAlignmentEvaluator):
         self.user_prompt = user_prompt
 
         # Load model and pipeline
-        from src.asr_modeling import ASRModel
-        from src.asr_pipeline import ASRPipeline
+        from tiny_audio.asr_modeling import ASRModel
+        from tiny_audio.asr_pipeline import ASRPipeline
 
         model = ASRModel.from_pretrained(model_path)
         self.pipe = ASRPipeline(model=model)

@@ -24,6 +24,11 @@ class MLPAudioProjector(nn.Module):
     """2-layer MLP projector with frame-stacking downsampling (matches GLM-ASR)."""
 
     def __init__(self, config):
+        """Initialize MLP projector.
+
+        Args:
+            config: ASRConfig with encoder_dim, llm_dim, projector_pool_stride
+        """
         super().__init__()
 
         encoder_dim = getattr(config, "encoder_dim", 768)
@@ -39,18 +44,25 @@ class MLPAudioProjector(nn.Module):
         self.linear_2 = nn.Linear(hidden_dim, llm_dim)
 
     def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length."""
-        return input_length // self.k
+        """Calculate output sequence length given input length (matches GLM-ASR)."""
+        # GLM-ASR formula: (L - merge_factor) // merge_factor + 1
+        return (input_length - self.k) // self.k + 1
 
-    def forward(self, x):
-        """
-        x: [Batch, Seq_Len, Dim]
-        Returns: [Batch, Seq_Len // k, llm_dim]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Project audio features to LLM embedding space.
+
+        Args:
+            x: Audio encoder output of shape [batch, seq_len, encoder_dim]
+
+        Returns:
+            Projected features of shape [batch, (seq_len - k) // k + 1, llm_dim]
         """
         batch, seq, dim = x.shape
-        # Reshape to combine k frames: [B, S, D] -> [B, -1, D*k]
-        # -1 infers sequence length, implicitly downsampling by factor k
-        x = x.reshape(batch, -1, dim * self.k)
+        # Truncate to match GLM-ASR: use (seq - k) // k + 1 frames
+        # This drops trailing frames that don't fill a complete k-frame window
+        out_len = (seq - self.k) // self.k + 1
+        x = x[:, : out_len * self.k, :]  # Truncate to exact multiple
+        x = x.reshape(batch, out_len, dim * self.k)
 
         x = self.linear_1(x)
         x = self.act(x)
@@ -97,6 +109,11 @@ class MOSAProjector(nn.Module):
     """
 
     def __init__(self, config):
+        """Initialize MOSA projector.
+
+        Args:
+            config: ASRConfig with encoder_dim, llm_dim, num_experts, projector_pool_stride
+        """
         super().__init__()
         self.encoder_dim = getattr(config, "encoder_dim", None) or 1280
         self.llm_dim = getattr(config, "llm_dim", None) or 2048
@@ -122,31 +139,45 @@ class MOSAProjector(nn.Module):
             [SimpleAdapter(in_dim, adapter_hidden, self.llm_dim) for _ in range(self.num_experts)]
         )
 
-    def forward(self, x):
-        # x: (B, S, encoder_dim)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Project audio features using mixture of experts.
+
+        Args:
+            x: Audio encoder output of shape [batch, seq_len, encoder_dim]
+
+        Returns:
+            Projected features of shape [batch, out_len, llm_dim]
+        """
         batch_size, seq_len, dim = x.shape
+
+        # Truncate to match GLM-ASR: use (seq - k) // k + 1 frames
+        out_len = (seq_len - self.k) // self.k + 1
+        x = x[:, : out_len * self.k, :]
 
         # --- 1. Router Branch ---
         # Mean pool encoder outputs for routing decisions
-        x_pooled = x.reshape(batch_size, -1, self.k, self.encoder_dim).mean(dim=2)  # (B, S//k, D)
+        x_pooled = x.reshape(batch_size, out_len, self.k, self.encoder_dim).mean(
+            dim=2
+        )  # (B, out_len, D)
 
         # Router logits and softmax gating (dense MoE)
-        routing_weights = F.softmax(self.router(x_pooled), dim=-1)  # (B, S//k, num_experts)
+        routing_weights = F.softmax(self.router(x_pooled), dim=-1)  # (B, out_len, num_experts)
 
         # --- 2. Frame stacking for experts ---
-        # Reshape to combine k frames: [B, S, D] -> [B, S//k, D*k]
-        x_stacked = x.reshape(batch_size, -1, dim * self.k)
+        # Reshape to combine k frames: [B, S, D] -> [B, out_len, D*k]
+        x_stacked = x.reshape(batch_size, out_len, dim * self.k)
 
         # --- 3. Expert Mixture (Dense Execution) ---
         # Run all experts and compute weighted sum
         expert_outputs = torch.stack(
             [expert(x_stacked) for expert in self.experts]
-        )  # (E, B, S//k, D)
+        )  # (E, B, out_len, D)
         return torch.einsum("ebsd, bse -> bsd", expert_outputs, routing_weights)
 
     def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length."""
-        return input_length // self.k
+        """Calculate output sequence length given input length (matches GLM-ASR)."""
+        # GLM-ASR formula: (L - merge_factor) // merge_factor + 1
+        return (input_length - self.k) // self.k + 1
 
 
 # =============================================================================
@@ -255,6 +286,11 @@ class MoEAudioProjector(nn.Module):
     """MoE projector with shared expert + sparse routed experts."""
 
     def __init__(self, config):
+        """Initialize MoE projector.
+
+        Args:
+            config: ASRConfig with encoder_dim, llm_dim, num_experts, num_experts_per_tok
+        """
         super().__init__()
 
         self.k = getattr(config, "projector_pool_stride", 4)
@@ -294,6 +330,14 @@ class MoEAudioProjector(nn.Module):
         return input_length // self.k
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Project audio features using shared + sparse MoE.
+
+        Args:
+            x: Audio encoder output of shape [batch, seq_len, encoder_dim]
+
+        Returns:
+            Projected features of shape [batch, out_len, llm_dim]
+        """
         batch_size, seq_len, dim = x.size()
 
         target_dtype = self.moe.shared_expert.fc1.weight.dtype
@@ -337,6 +381,11 @@ class QFormerAudioProjector(nn.Module):
     """
 
     def __init__(self, config):
+        """Initialize QFormer projector.
+
+        Args:
+            config: ASRConfig with encoder_dim, llm_dim, qformer_* settings
+        """
         super().__init__()
 
         encoder_dim = config.encoder_dim

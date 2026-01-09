@@ -4,6 +4,16 @@ import transformers
 
 
 class ASRConfig(transformers.PretrainedConfig):
+    """Configuration class for the ASR model.
+
+    This config combines settings for:
+    - Audio encoder (Whisper)
+    - Text decoder (SmolLM/Qwen)
+    - Projector (MLP, MOSA, MoE, QFormer)
+    - Generation parameters
+    - Training options (SpecAugment, LoRA)
+    """
+
     model_type = "asr_model"
     is_composition = True
 
@@ -49,6 +59,13 @@ class ASRConfig(transformers.PretrainedConfig):
         mask_feature_prob: float = 0.0,  # Probability of masking frequency bins (disabled by default)
         mask_feature_length: int = 10,  # Max length of frequency mask
         mask_feature_min_masks: int = 0,  # Min number of frequency masks
+        # LoRA configuration (for Stage 2 fine-tuning)
+        use_lora: bool = False,
+        lora_rank: int = 8,  # SALMONN default
+        lora_alpha: int = 32,  # SALMONN default (scaling factor 4.0)
+        lora_dropout: float = 0.0,
+        lora_target_modules: Optional[list] = None,  # Default: all linear layers
+        freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         max_new_tokens: Optional[int] = None,
         min_new_tokens: Optional[int] = None,
         repetition_penalty: Optional[float] = None,
@@ -57,14 +74,25 @@ class ASRConfig(transformers.PretrainedConfig):
         use_cache: Optional[bool] = None,
         **kwargs,
     ):
+        """Initialize ASR model configuration.
+
+        Args:
+            audio_model_id: HuggingFace model ID for audio encoder (Whisper)
+            text_model_id: HuggingFace model ID for text decoder (SmolLM/Qwen)
+            attn_implementation: Attention implementation ("flash_attention_2", "sdpa", "eager")
+            model_dtype: Model dtype ("bfloat16", "float16", "float32")
+            projector_type: Projector architecture ("mlp", "mosa", "moe", "qformer")
+            use_lora: Enable LoRA adapters for Stage 2 fine-tuning
+            use_specaugment: Enable SpecAugment data augmentation
+        """
         # Set default generation parameters (greedy decoding only)
         generation_defaults = {
             "num_beams": 1,
-            "max_new_tokens": 256,
+            "max_new_tokens": 128,
             "min_new_tokens": 0,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
-            "no_repeat_ngram_size": 0,
+            "no_repeat_ngram_size": 0,  # Prevent repeating 3-grams like "so so so"
             "use_cache": True,
         }
 
@@ -109,6 +137,21 @@ class ASRConfig(transformers.PretrainedConfig):
         self.mask_feature_prob = mask_feature_prob
         self.mask_feature_length = mask_feature_length
         self.mask_feature_min_masks = mask_feature_min_masks
+        # LoRA configuration
+        self.use_lora = use_lora
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
+        self.lora_target_modules = lora_target_modules or [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
+        self.freeze_projector = freeze_projector
 
         # Generation parameters (use explicit value if provided, else use default)
         self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]

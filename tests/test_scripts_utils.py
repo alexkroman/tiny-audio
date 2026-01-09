@@ -1,9 +1,6 @@
 """Tests for scripts/utils.py shared utilities."""
 
-import tempfile
 from pathlib import Path
-
-import pytest
 
 from scripts.utils import find_model_dirs, get_project_root, parse_results_file
 
@@ -15,10 +12,7 @@ class TestParseResultsFile:
         """Test parsing a results file with a single sample."""
         results_file = tmp_path / "results.txt"
         results_file.write_text(
-            "Sample 1 - WER: 12.50%\n"
-            "Ground Truth: hello world\n"
-            "Prediction: hello word\n"
-            + "-" * 80
+            "Sample 1 - WER: 12.50%\nGround Truth: hello world\nPrediction: hello word\n" + "-" * 80
         )
 
         samples = parse_results_file(results_file)
@@ -36,12 +30,10 @@ class TestParseResultsFile:
         results_file.write_text(
             "Sample 1 - WER: 0.00%\n"
             "Ground Truth: the quick brown fox\n"
-            "Prediction: the quick brown fox\n"
-            + "-" * 80 + "\n"
+            "Prediction: the quick brown fox\n" + "-" * 80 + "\n"
             "Sample 2 - WER: 25.00%\n"
             "Ground Truth: jumps over the lazy dog\n"
-            "Prediction: jumps over the lazy cat\n"
-            + "-" * 80
+            "Prediction: jumps over the lazy cat\n" + "-" * 80
         )
 
         samples = parse_results_file(results_file)
@@ -65,12 +57,10 @@ class TestParseResultsFile:
         """Test that malformed blocks are skipped."""
         results_file = tmp_path / "results.txt"
         results_file.write_text(
-            "Some random text\n"
-            + "-" * 80 + "\n"
+            "Some random text\n" + "-" * 80 + "\n"
             "Sample 1 - WER: 10.00%\n"
             "Ground Truth: valid sample\n"
-            "Prediction: valid sample\n"
-            + "-" * 80
+            "Prediction: valid sample\n" + "-" * 80
         )
 
         samples = parse_results_file(results_file)
@@ -84,8 +74,7 @@ class TestParseResultsFile:
         results_file.write_text(
             "Sample 1 - WER: 100.00%\n"
             "Ground Truth: completely different\n"
-            "Prediction: nothing matches here at all\n"
-            + "-" * 80
+            "Prediction: nothing matches here at all\n" + "-" * 80
         )
 
         samples = parse_results_file(results_file)
