@@ -11,6 +11,7 @@ from .alignment import (
 from .asr import (
     AssemblyAIEvaluator,
     AssemblyAIStreamingEvaluator,
+    DeepgramEvaluator,
     EndpointEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
@@ -39,6 +40,7 @@ __all__ = [
     "EndpointEvaluator",
     "AssemblyAIEvaluator",
     "AssemblyAIStreamingEvaluator",
+    "DeepgramEvaluator",
     # Diarization evaluators
     "DiarizationEvaluator",
     "AssemblyAIDiarizationEvaluator",

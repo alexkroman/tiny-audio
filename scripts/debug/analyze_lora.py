@@ -19,8 +19,17 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
     state_dict = load_file(adapter_path)
 
     # Group by module type (q_proj, k_proj, etc.)
-    module_stats = defaultdict(lambda: {"A_norms": [], "B_norms": [], "combined_norms": [],
-                                         "ranks": [], "effective_ranks": [], "energy_concentrations": [], "params": 0})
+    module_stats = defaultdict(
+        lambda: {
+            "A_norms": [],
+            "B_norms": [],
+            "combined_norms": [],
+            "ranks": [],
+            "effective_ranks": [],
+            "energy_concentrations": [],
+            "params": 0,
+        }
+    )
 
     # Parse tensor names and compute stats
     lora_pairs = {}  # Map base name to (A, B) tensors
@@ -32,7 +41,15 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
         # Find module type (q_proj, k_proj, etc.)
         module_type = None
         for part in parts:
-            if part in ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]:
+            if part in [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ]:
                 module_type = part
                 break
 
@@ -61,7 +78,7 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
     total_params = 0
     all_effective_ratios = []
 
-    for base_name, pair in sorted(lora_pairs.items()):
+    for _base_name, pair in sorted(lora_pairs.items()):
         if "A" not in pair or "B" not in pair:
             continue
 
@@ -94,8 +111,8 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
         rank_utilization = effective_rank / rank if rank > 0 else 0
 
         # Also compute how much energy is in top half vs bottom half of rank
-        top_half_energy = (S_topk[:rank//2] ** 2).sum().item()
-        total_energy = (S_topk ** 2).sum().item()
+        top_half_energy = (S_topk[: rank // 2] ** 2).sum().item()
+        total_energy = (S_topk**2).sum().item()
         energy_concentration = top_half_energy / total_energy if total_energy > 0 else 0
 
         all_effective_ratios.append(rank_utilization)
@@ -115,12 +132,22 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
     print("\n" + "=" * 80)
     print("SUMMARY BY MODULE TYPE")
     print("=" * 80)
-    print(f"\n{'Module':<12} {'Count':>6} {'Params':>10} {'Avg Norm':>12} {'Eff Rank':>10} {'Rank Util':>11} {'Top50% E':>10}")
+    print(
+        f"\n{'Module':<12} {'Count':>6} {'Params':>10} {'Avg Norm':>12} {'Eff Rank':>10} {'Rank Util':>11} {'Top50% E':>10}"
+    )
     print("-" * 90)
 
     module_importance = []
 
-    for module_type in ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]:
+    for module_type in [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]:
         stats = module_stats[module_type]
         if not stats["combined_norms"]:
             continue
@@ -135,15 +162,21 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
 
         # Norm per parameter (normalized importance)
         norm_per_param = avg_norm / (params / count) if params > 0 else 0
-        module_importance.append((module_type, avg_norm, norm_per_param, rank_util, avg_energy_conc))
+        module_importance.append(
+            (module_type, avg_norm, norm_per_param, rank_util, avg_energy_conc)
+        )
 
-        print(f"{module_type:<12} {count:>6} {params:>10,} {avg_norm:>12.4f} {avg_eff_rank:>10.1f} {rank_util:>10.1%} {avg_energy_conc:>10.1%}")
+        print(
+            f"{module_type:<12} {count:>6} {params:>10,} {avg_norm:>12.4f} {avg_eff_rank:>10.1f} {rank_util:>10.1%} {avg_energy_conc:>10.1%}"
+        )
 
     # Overall stats
     print("-" * 80)
     print(f"{'TOTAL':<12} {'':<6} {total_params:>10,}")
 
-    avg_rank_util = sum(all_effective_ratios) / len(all_effective_ratios) if all_effective_ratios else 0
+    avg_rank_util = (
+        sum(all_effective_ratios) / len(all_effective_ratios) if all_effective_ratios else 0
+    )
 
     # Recommendations
     print("\n" + "=" * 80)
@@ -154,12 +187,14 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
     module_importance.sort(key=lambda x: x[2], reverse=True)
 
     print("\nModule importance (by norm per parameter):")
-    for module_type, avg_norm, norm_per_param, rank_util, energy_conc in module_importance:
+    for module_type, _avg_norm, norm_per_param, _rank_util, _energy_conc in module_importance:
         bar = "█" * int(norm_per_param * 1e6)  # Scale for visibility
         print(f"  {module_type:<12} {bar}")
 
     print(f"\nOverall effective rank utilization: {avg_rank_util:.1%}")
-    avg_energy_conc = sum(x[4] for x in module_importance) / len(module_importance) if module_importance else 0
+    avg_energy_conc = (
+        sum(x[4] for x in module_importance) / len(module_importance) if module_importance else 0
+    )
     print(f"Average energy in top 50% of ranks: {avg_energy_conc:.1%}")
 
     if avg_energy_conc > 0.95:
@@ -174,7 +209,7 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
     # Identify least important modules
     print("\nModule efficiency (norm per param, lower = less efficient):")
     module_importance.sort(key=lambda x: x[2])
-    for module_type, avg_norm, norm_per_param, rank_util, energy_conc in module_importance[:3]:
+    for module_type, _avg_norm, norm_per_param, _rank_util, energy_conc in module_importance[:3]:
         print(f"  {module_type}: {norm_per_param:.2e} (energy conc: {energy_conc:.1%})")
 
     print("\nLeast utilized modules could potentially be removed to reduce parameters.")
@@ -185,7 +220,7 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
         if "A" in first_pair:
             actual_rank = first_pair["A"].shape[0]
             print(f"\nCurrent LoRA rank: {actual_rank}")
-            print(f"Total trainable params: {total_params:,} ({total_params/1e6:.2f}M)")
+            print(f"Total trainable params: {total_params:,} ({total_params / 1e6:.2f}M)")
 
 
 def main():

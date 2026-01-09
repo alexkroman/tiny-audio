@@ -496,5 +496,30 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # Convert "eur X" to "X euros" for Whisper normalizer compatibility
         text = re.sub(r"\beur\s+(\d+)", r"\1 euros", text)
 
-        # 4. STRIP WHITESPACE
+        # 4. TRUNCATE TRAILING REPEATS
+        text = self._truncate_trailing_repeats(text)
+
+        # 5. STRIP WHITESPACE
         return re.sub(r"\s+", " ", text).strip()
+
+    def _truncate_trailing_repeats(self, text: str, max_ngram: int = 4) -> str:
+        """Remove trailing repeated n-grams (1-4 words)."""
+        words = text.split()
+        if len(words) < 2:
+            return text
+
+        # Keep truncating until no more trailing repeats found
+        changed = True
+        while changed:
+            changed = False
+            # Check for repeating n-grams from largest to smallest
+            for n in range(min(max_ngram, len(words) // 2), 0, -1):
+                if len(words) < n * 2:
+                    continue
+                # Check if last n words repeat the previous n words
+                if words[-n:] == words[-2 * n : -n]:
+                    words = words[:-n]  # Remove the trailing repeat
+                    changed = True
+                    break  # Restart from largest n-gram
+
+        return " ".join(words)

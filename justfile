@@ -5,9 +5,11 @@
 default:
     @just --list
 
-# Run ruff linter
+# Run linters (Python + YAML + TOML)
 lint:
     ruff check src scripts
+    poetry run yamllint -d relaxed configs/
+    poetry run taplo check pyproject.toml
 
 # Format code with black, ruff, and mdformat
 format:

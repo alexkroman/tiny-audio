@@ -67,7 +67,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # Set default generation parameters (greedy decoding only)
         generation_defaults = {
             "num_beams": 1,
-            "max_new_tokens": 256,
+            "max_new_tokens": 128,
             "min_new_tokens": 0,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
@@ -122,7 +122,13 @@ class ASRConfig(transformers.PretrainedConfig):
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
         self.lora_target_modules = lora_target_modules or [
-            "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
         ]
         self.freeze_projector = freeze_projector
 

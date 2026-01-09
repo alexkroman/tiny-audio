@@ -21,6 +21,7 @@ from scripts.eval.evaluators import (
     AssemblyAIDiarizationEvaluator,
     AssemblyAIEvaluator,
     AssemblyAIStreamingEvaluator,
+    DeepgramEvaluator,
     DiarizationEvaluator,
     EndpointEvaluator,
     EvalResult,
@@ -225,7 +226,7 @@ def print_alignment_metrics(dataset_name: str, metrics: dict):
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(description="Evaluate ASR models on standard datasets")
-    parser.add_argument("model", help="Model path/ID or 'assemblyai' for AssemblyAI API")
+    parser.add_argument("model", help="Model path/ID, 'assemblyai', or 'deepgram'")
     parser.add_argument(
         "--datasets",
         nargs="+",
@@ -370,6 +371,16 @@ def main():
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                 )
+        elif args.model == "deepgram":
+            api_key = os.environ.get("DEEPGRAM_API_KEY", "")
+            if not api_key:
+                console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
+                sys.exit(1)
+            evaluator = DeepgramEvaluator(
+                api_key=api_key,
+                audio_field=cfg.audio_field,
+                text_field=cfg.text_field,
+            )
         elif args.endpoint:
             evaluator = EndpointEvaluator(
                 endpoint_url=args.model,

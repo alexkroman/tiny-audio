@@ -10,13 +10,15 @@ import torch
 
 from scripts.eval.audio import prepare_wav_bytes
 
-from .base import Evaluator, setup_assemblyai, console
+from .base import Evaluator, console, setup_assemblyai
 
 
 def print_generation_config(model, model_path: str):
     """Print generation config in a visible format."""
     gen_config = model.generation_config
-    console.print("\n[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]")
+    console.print(
+        "\n[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]"
+    )
     console.print(f"[bold]Model:[/bold] {model_path}")
     console.print("[bold cyan]Generation Config:[/bold cyan]")
     console.print(f"  max_new_tokens:      {gen_config.max_new_tokens}")
@@ -26,7 +28,9 @@ def print_generation_config(model, model_path: str):
     console.print(f"  repetition_penalty:  {gen_config.repetition_penalty}")
     console.print(f"  length_penalty:      {gen_config.length_penalty}")
     console.print(f"  no_repeat_ngram_size: {gen_config.no_repeat_ngram_size}")
-    console.print("[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]\n")
+    console.print(
+        "[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]\n"
+    )
 
 
 class LocalEvaluator(Evaluator):
@@ -400,3 +404,27 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         if self.processing_times:
             metrics["avg_processing"] = sum(self.processing_times) / len(self.processing_times)
         return metrics
+
+
+class DeepgramEvaluator(Evaluator):
+    """Evaluator for Deepgram Nova 3 API."""
+
+    def __init__(self, api_key: str, **kwargs):
+        super().__init__(**kwargs)
+        from deepgram import DeepgramClient
+
+        self.client = DeepgramClient(api_key=api_key)
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        wav_bytes = prepare_wav_bytes(audio)
+        start = time.time()
+
+        response = self.client.listen.v1.media.transcribe_file(
+            request=wav_bytes,
+            model="nova-3",
+        )
+        elapsed = time.time() - start
+
+        text = response.results.channels[0].alternatives[0].transcript
+        time.sleep(0.5)  # Rate limiting
+        return text, elapsed
