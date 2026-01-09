@@ -24,6 +24,12 @@ def main():
         default="main",
         help="Branch to push to (default: main)",
     )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default=None,
+        help="Path to checkpoint directory to copy tokenizer files from",
+    )
     args = parser.parse_args()
 
     # Check for HF_TOKEN
@@ -35,6 +41,16 @@ def main():
     # Create a temporary directory for staging files
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
+
+        # Create .gitattributes to prevent tokenizer_config.json from being stored in LFS
+        # This fixes "Configuration Parsing Warning: Invalid JSON" on Hub
+        gitattributes_content = """*.safetensors filter=lfs diff=lfs merge=lfs -text
+*.bin filter=lfs diff=lfs merge=lfs -text
+tokenizer_config.json -filter -diff -merge text
+"""
+        gitattributes_path = temp_path / ".gitattributes"
+        gitattributes_path.write_text(gitattributes_content)
+        print("Created .gitattributes (excludes tokenizer_config.json from LFS)")
 
         # Copy all custom ASR Python files for trust_remote_code support
         # Include handler.py for Inference Endpoints support
@@ -71,6 +87,22 @@ def main():
             requirements_dst = temp_path / "requirements.txt"
             shutil.copy2(requirements_src, requirements_dst)
             print(f"Copied {requirements_src} to staging")
+
+        # Copy tokenizer files from checkpoint directory if provided
+        if args.checkpoint_dir:
+            checkpoint_path = Path(args.checkpoint_dir)
+            tokenizer_files = [
+                "tokenizer_config.json",
+                "tokenizer.json",
+                "special_tokens_map.json",
+                "added_tokens.json",
+            ]
+            for filename in tokenizer_files:
+                src = checkpoint_path / filename
+                if src.exists():
+                    dst = temp_path / filename
+                    shutil.copy2(src, dst)
+                    print(f"Copied {src} to staging")
 
         # Upload files to Hub
         print(f"\nUploading to {args.repo_id}...")
