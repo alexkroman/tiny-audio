@@ -9,8 +9,8 @@ import numpy as np
 import torch
 from datasets import load_dataset
 
-from src.asr_config import ASRConfig
-from src.asr_modeling import ASRModel
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel
 
 def main():
     # --- 1. Load a single audio sample ---

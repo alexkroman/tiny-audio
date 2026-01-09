@@ -1,25 +1,23 @@
 """Tests for LoRA (Stage 2) fine-tuning support."""
 
-import os
 import tempfile
+from pathlib import Path
 
 import pytest
 import torch
 
-from src.asr_config import ASRConfig
-from src.asr_modeling import ASRModel
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel
+
+# Mark all tests in this module as slow (load ML models)
+pytestmark = pytest.mark.slow
 
 
+# Use session-scoped fixtures from conftest.py
 @pytest.fixture
-def base_config():
-    """Create a minimal config without LoRA for testing."""
-    return ASRConfig(
-        audio_model_id="openai/whisper-tiny",
-        text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-        projector_type="mlp",
-        model_dtype="float32",
-        attn_implementation="eager",
-    )
+def base_config(base_asr_config):
+    """Alias for session-scoped base_asr_config."""
+    return base_asr_config
 
 
 @pytest.fixture
@@ -35,7 +33,15 @@ def lora_config():
         lora_rank=8,
         lora_alpha=32,
         lora_dropout=0.0,
-        lora_target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
         freeze_projector=True,
     )
 
@@ -54,7 +60,15 @@ class TestLoRAConfig:
         assert lora_config.lora_rank == 8
         assert lora_config.lora_alpha == 32
         assert lora_config.lora_dropout == 0.0
-        assert lora_config.lora_target_modules == ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        assert lora_config.lora_target_modules == [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
         assert lora_config.freeze_projector is True
 
     def test_default_target_modules(self):
@@ -65,7 +79,15 @@ class TestLoRAConfig:
             use_lora=True,
             lora_target_modules=None,
         )
-        assert config.lora_target_modules == ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        assert config.lora_target_modules == [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
 
 
 class TestLoRAModelInitialization:
@@ -84,7 +106,8 @@ class TestLoRAModelInitialization:
 
         # Find LoRA parameters
         lora_params = [
-            (name, param) for name, param in model.language_model.named_parameters()
+            (name, param)
+            for name, param in model.language_model.named_parameters()
             if "lora_" in name
         ]
 
@@ -99,7 +122,8 @@ class TestLoRAModelInitialization:
 
         # Find non-LoRA parameters in language model
         base_params = [
-            (name, param) for name, param in model.language_model.named_parameters()
+            (name, param)
+            for name, param in model.language_model.named_parameters()
             if "lora_" not in name
         ]
 
@@ -125,9 +149,7 @@ class TestLoRAModelInitialization:
         )
         model = ASRModel(config)
 
-        trainable_projector_params = sum(
-            1 for p in model.projector.parameters() if p.requires_grad
-        )
+        trainable_projector_params = sum(1 for p in model.projector.parameters() if p.requires_grad)
         assert trainable_projector_params > 0, "Projector should have trainable params"
 
 
@@ -140,12 +162,8 @@ class TestLoRATrainableParameters:
         model_lora = ASRModel(lora_config)
 
         # Count trainable params
-        base_trainable = sum(
-            p.numel() for p in model_base.parameters() if p.requires_grad
-        )
-        lora_trainable = sum(
-            p.numel() for p in model_lora.parameters() if p.requires_grad
-        )
+        base_trainable = sum(p.numel() for p in model_base.parameters() if p.requires_grad)
+        lora_trainable = sum(p.numel() for p in model_lora.parameters() if p.requires_grad)
 
         # Base model: projector trainable
         # LoRA model: only LoRA adapters trainable (projector frozen)
@@ -176,14 +194,13 @@ class TestLoRASaveLoad:
             model.save_pretrained(tmpdir)
 
             # Check for adapter files
-            assert os.path.exists(os.path.join(tmpdir, "adapter_model.safetensors")) or \
-                   os.path.exists(os.path.join(tmpdir, "adapter_model.bin")), \
-                   "Should save adapter weights"
-            assert os.path.exists(os.path.join(tmpdir, "adapter_config.json")), \
-                   "Should save adapter config"
+            tmppath = Path(tmpdir)
+            assert (tmppath / "adapter_model.safetensors").exists() or (
+                tmppath / "adapter_model.bin"
+            ).exists(), "Should save adapter weights"
+            assert (tmppath / "adapter_config.json").exists(), "Should save adapter config"
             # Also check projector weights
-            assert os.path.exists(os.path.join(tmpdir, "model.safetensors")), \
-                   "Should save projector weights"
+            assert (tmppath / "model.safetensors").exists(), "Should save projector weights"
 
     def test_save_load_roundtrip(self, lora_config):
         """Test that model can be saved and loaded correctly."""
@@ -223,8 +240,9 @@ class TestLoRASaveLoad:
             model.save_pretrained(tmpdir)
 
             # Should NOT have adapter files
-            assert not os.path.exists(os.path.join(tmpdir, "adapter_config.json")), \
-                   "Base model should not have adapter config"
+            assert not (Path(tmpdir) / "adapter_config.json").exists(), (
+                "Base model should not have adapter config"
+            )
 
             # Load and verify
             loaded_model = ASRModel.from_pretrained(tmpdir)
@@ -255,10 +273,7 @@ class TestLoRAForward:
             add_generation_prompt=True,
             return_tensors="pt",
         )
-        if hasattr(chat_result, "input_ids"):
-            input_ids = chat_result.input_ids
-        else:
-            input_ids = chat_result
+        input_ids = chat_result.input_ids if hasattr(chat_result, "input_ids") else chat_result
 
         attention_mask = torch.ones_like(input_ids)
         labels = input_ids.clone()
@@ -287,10 +302,9 @@ class TestLoRAForward:
         # Check LoRA params have gradients
         has_lora_grad = False
         for name, param in lora_model.language_model.named_parameters():
-            if "lora_" in name and param.grad is not None:
-                if param.grad.abs().sum() > 0:
-                    has_lora_grad = True
-                    break
+            if "lora_" in name and param.grad is not None and param.grad.abs().sum() > 0:
+                has_lora_grad = True
+                break
 
         assert has_lora_grad, "LoRA parameters should receive gradients"
 
@@ -333,7 +347,7 @@ class TestLoRAStateDict:
         model = ASRModel(lora_config)
         state = model.state_dict()
 
-        projector_keys = [k for k in state.keys() if k.startswith("projector.")]
+        projector_keys = [k for k in state if k.startswith("projector.")]
         assert len(projector_keys) > 0, "State dict should contain projector weights"
 
     def test_base_model_state_dict_unchanged(self, base_config):
@@ -341,7 +355,7 @@ class TestLoRAStateDict:
         model = ASRModel(base_config)
         state = model.state_dict()
 
-        for key in state.keys():
+        for key in state:
             assert key.startswith("projector."), f"Unexpected key: {key}"
 
 

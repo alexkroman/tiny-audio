@@ -422,7 +422,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 cfg.eos_token_id = self.tokenizer.eos_token_id
                 cfg.bos_token_id = self.tokenizer.bos_token_id
 
-    def _init_weights(self, module):
+    def _init_weights(self, _module):
         """Weight initialization (projector weights are initialized in MoEAudioProjector)."""
         pass
 

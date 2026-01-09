@@ -63,7 +63,7 @@ tokenizer_config.json -filter -diff -merge text
             "handler.py",  # For Inference Endpoints
         ]
         for filename in custom_files:
-            src = Path("src") / filename
+            src = Path("tiny_audio") / filename
             dst = temp_path / filename
             if src.exists():
                 shutil.copy2(src, dst)

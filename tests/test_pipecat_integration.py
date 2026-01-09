@@ -4,26 +4,24 @@ import numpy as np
 import pytest
 import torch
 
-from src.asr_config import ASRConfig
-from src.asr_modeling import ASRModel
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel
+
+# Mark all tests in this module as slow (load ML models)
+pytestmark = pytest.mark.slow
+
+
+# Use session-scoped fixtures from conftest.py
+@pytest.fixture
+def config(base_asr_config):
+    """Alias for session-scoped base_asr_config."""
+    return base_asr_config
 
 
 @pytest.fixture
-def config():
-    """Create a minimal config for testing."""
-    return ASRConfig(
-        audio_model_id="openai/whisper-tiny",
-        text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-        projector_type="mlp",
-        model_dtype="float32",
-        attn_implementation="eager",
-    )
-
-
-@pytest.fixture
-def model(config):
-    """Create an ASRModel instance for testing."""
-    return ASRModel(config)
+def model(base_asr_model):
+    """Alias for session-scoped base_asr_model."""
+    return base_asr_model
 
 
 @pytest.fixture
@@ -154,14 +152,14 @@ class TestPipecatSTTServiceImport:
 
     def test_integrations_module_imports(self):
         """Test that integrations module can be imported."""
-        from src import integrations
+        from tiny_audio import integrations
 
         assert hasattr(integrations, "TinyAudioSTTService")
 
     def test_pipecat_stt_available_without_pipecat(self):
         """Test that TinyAudioSTTService is None when pipecat not installed."""
         # This tests the graceful degradation in __init__.py
-        from src.integrations import TinyAudioSTTService
+        from tiny_audio.integrations import TinyAudioSTTService
 
         # If pipecat is not installed, this should be None
         # If pipecat is installed, this should be the class

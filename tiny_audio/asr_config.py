@@ -4,6 +4,16 @@ import transformers
 
 
 class ASRConfig(transformers.PretrainedConfig):
+    """Configuration class for the ASR model.
+
+    This config combines settings for:
+    - Audio encoder (Whisper)
+    - Text decoder (SmolLM/Qwen)
+    - Projector (MLP, MOSA, MoE, QFormer)
+    - Generation parameters
+    - Training options (SpecAugment, LoRA)
+    """
+
     model_type = "asr_model"
     is_composition = True
 

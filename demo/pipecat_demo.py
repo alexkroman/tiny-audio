@@ -22,15 +22,11 @@ Press Ctrl+C to stop.
 import asyncio
 import os
 import sys
-from pathlib import Path
 
 # Suppress tokenizer parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# Add src to path for local development
-src_path = Path(__file__).parent.parent / "src"
-if str(src_path) not in sys.path:
-    sys.path.insert(0, str(src_path))
+# tiny_audio package should be installed via: poetry install
 
 
 async def main():
@@ -55,7 +51,7 @@ async def main():
         sys.exit(1)
 
     # Import our STT service
-    from integrations.pipecat_stt import TinyAudioSTTService
+    from tiny_audio.integrations.pipecat_stt import TinyAudioSTTService
 
     # Check for API key
     if not os.getenv("OPENAI_API_KEY"):

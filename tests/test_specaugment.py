@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from src.asr_config import ASRConfig
-from src.asr_modeling import _compute_mask_indices, apply_specaugment
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import _compute_mask_indices, apply_specaugment
 
 
 class TestComputeMaskIndices:
@@ -23,10 +23,7 @@ class TestComputeMaskIndices:
 
     def test_mask_on_device(self):
         """Test mask is created on specified device."""
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-        else:
-            device = torch.device("cpu")
+        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
         mask = _compute_mask_indices(
             shape=(2, 50),
@@ -274,7 +271,7 @@ class TestSpecaugmentIntegration:
 
     def test_specaugment_applied_during_training(self, config_with_specaugment):
         """Test that SpecAugment is applied during training mode."""
-        from src.asr_modeling import ASRModel
+        from tiny_audio.asr_modeling import ASRModel
 
         model = ASRModel(config_with_specaugment)
         model.train()
@@ -290,10 +287,7 @@ class TestSpecaugmentIntegration:
         chat_result = model.tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
         )
-        if hasattr(chat_result, "input_ids"):
-            input_ids = chat_result.input_ids
-        else:
-            input_ids = chat_result
+        input_ids = chat_result.input_ids if hasattr(chat_result, "input_ids") else chat_result
 
         # Run forward with SpecAugment enabled
         outputs = model(
@@ -309,7 +303,7 @@ class TestSpecaugmentIntegration:
 
     def test_specaugment_not_applied_during_eval(self, config_with_specaugment):
         """Test that SpecAugment is NOT applied during eval mode."""
-        from src.asr_modeling import ASRModel
+        from tiny_audio.asr_modeling import ASRModel
 
         model = ASRModel(config_with_specaugment)
         model.eval()  # Set to eval mode
@@ -325,10 +319,7 @@ class TestSpecaugmentIntegration:
         chat_result = model.tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
         )
-        if hasattr(chat_result, "input_ids"):
-            input_ids = chat_result.input_ids
-        else:
-            input_ids = chat_result
+        input_ids = chat_result.input_ids if hasattr(chat_result, "input_ids") else chat_result
 
         # Run multiple times - in eval mode, output should be deterministic
         torch.manual_seed(42)

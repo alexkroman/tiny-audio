@@ -38,8 +38,8 @@ class LocalEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from src.asr_modeling import ASRModel
-        from src.asr_pipeline import ASRPipeline
+        from tiny_audio.asr_modeling import ASRModel
+        from tiny_audio.asr_pipeline import ASRPipeline
 
         # Load model and use our custom pipeline
         model = ASRModel.from_pretrained(model_path)
@@ -78,8 +78,8 @@ class LocalStreamingEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from src.asr_modeling import ASRModel
-        from src.asr_pipeline import ASRPipeline
+        from tiny_audio.asr_modeling import ASRModel
+        from tiny_audio.asr_pipeline import ASRPipeline
 
         # Determine best device and dtype
         if torch.cuda.is_available():

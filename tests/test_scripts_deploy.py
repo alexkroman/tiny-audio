@@ -1,10 +1,6 @@
 """Tests for scripts/deploy package."""
 
-import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 class TestRunpodCLI:

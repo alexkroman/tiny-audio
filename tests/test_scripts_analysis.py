@@ -1,7 +1,5 @@
 """Tests for scripts/analysis.py analysis tools."""
 
-import pytest
-
 from scripts.analysis import (
     WORD_TO_NUM,
     entity_in_text,
@@ -160,14 +158,17 @@ class TestAnalysisCLI:
     def test_app_exists(self):
         """Test that the typer app is properly configured."""
         from scripts.analysis import app
+
         assert app is not None
 
     def test_keyword_subcommand_exists(self):
         """Test that keyword subcommand app exists."""
         from scripts.analysis import keyword_app
+
         assert keyword_app is not None
 
     def test_cli_entry_point(self):
         """Test that cli entry point exists."""
         from scripts.analysis import cli
+
         assert callable(cli)

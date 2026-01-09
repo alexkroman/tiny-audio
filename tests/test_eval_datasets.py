@@ -116,12 +116,12 @@ class TestDiarizationDatasets:
         for name in DIARIZATION_DATASETS:
             config = DATASET_REGISTRY[name]
             assert config.speakers_field is not None, f"Missing speakers_field for {name}"
-            assert (
-                config.timestamps_start_field is not None
-            ), f"Missing timestamps_start_field for {name}"
-            assert (
-                config.timestamps_end_field is not None
-            ), f"Missing timestamps_end_field for {name}"
+            assert config.timestamps_start_field is not None, (
+                f"Missing timestamps_start_field for {name}"
+            )
+            assert config.timestamps_end_field is not None, (
+                f"Missing timestamps_end_field for {name}"
+            )
 
     def test_asr_datasets_not_in_diarization(self):
         """Test that ASR datasets are not in diarization set."""
@@ -168,9 +168,9 @@ class TestDatasetValidation:
         """Test that default splits are reasonable values."""
         valid_splits = {"test", "validation", "dev", "train", "data", "dev_clean"}
         for name, config in DATASET_REGISTRY.items():
-            assert (
-                config.default_split in valid_splits
-            ), f"Invalid split '{config.default_split}' for {name}"
+            assert config.default_split in valid_splits, (
+                f"Invalid split '{config.default_split}' for {name}"
+            )
 
     def test_weights_are_positive(self):
         """Test that all weights are positive."""

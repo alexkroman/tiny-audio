@@ -10,18 +10,14 @@ import sys
 import time
 from pathlib import Path
 
-# Add src directory to path
-src_path = Path(__file__).parent.parent.parent / "src"
-sys.path.insert(0, str(src_path))
-
 # Try importing required modules
 try:
-    from handler import EndpointHandler
+    from tiny_audio.handler import EndpointHandler
 
-    print(f"Successfully imported handler from {src_path}")
+    print("Successfully imported EndpointHandler from tiny_audio.handler")
 except ImportError as e:
     print(f"Failed to import handler: {e}")
-    print(f"   Make sure handler.py exists in: {src_path}")
+    print("   Make sure tiny_audio package is installed")
     sys.exit(1)
 
 

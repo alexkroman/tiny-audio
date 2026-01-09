@@ -9,7 +9,7 @@ class TestTruncateTrailingRepeats:
     @pytest.fixture
     def pipeline(self):
         """Create a minimal pipeline instance for testing post-processing."""
-        from src.asr_pipeline import ASRPipeline
+        from tiny_audio.asr_pipeline import ASRPipeline
 
         # Create pipeline instance without full initialization
         return object.__new__(ASRPipeline)
@@ -55,10 +55,9 @@ class TestPostProcessPrediction:
     @pytest.fixture
     def pipeline(self):
         """Create a minimal pipeline instance for testing post-processing."""
-        from src.asr_pipeline import ASRPipeline
+        from tiny_audio.asr_pipeline import ASRPipeline
 
-        pipeline = object.__new__(ASRPipeline)
-        return pipeline
+        return object.__new__(ASRPipeline)
 
     def test_lowercase(self, pipeline):
         """Test that output is lowercased."""

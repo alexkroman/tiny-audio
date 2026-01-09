@@ -88,9 +88,7 @@ class AlignmentResult:
 class Evaluator:
     """Base evaluator with common evaluation loop logic."""
 
-    def __init__(
-        self, audio_field: str = "audio", text_field: str = "text", num_workers: int = 1
-    ):
+    def __init__(self, audio_field: str = "audio", text_field: str = "text", num_workers: int = 1):
         self.audio_field = audio_field
         self.text_field = text_field
         self.num_workers = num_workers
@@ -136,10 +134,12 @@ class Evaluator:
             if isinstance(reference, str) and "inaudible" in reference.lower():
                 continue
 
-            samples_to_process.append({
-                "audio": sample[self.audio_field],
-                "reference": reference,
-            })
+            samples_to_process.append(
+                {
+                    "audio": sample[self.audio_field],
+                    "reference": reference,
+                }
+            )
 
             if max_samples and len(samples_to_process) >= max_samples:
                 break
@@ -192,7 +192,9 @@ class Evaluator:
 
                 norm_pred = self.normalizer.normalize(result.prediction)
                 norm_ref = self.normalizer.normalize(result.reference)
-                print(f"[{completed}/{total}] Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s")
+                print(
+                    f"[{completed}/{total}] Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s"
+                )
                 print(f"  Ref:  {norm_ref}")
                 print(f"  Pred: {norm_pred}")
 
@@ -202,7 +204,9 @@ class Evaluator:
                     preds = [self.normalizer.normalize(r.prediction) for r in temp_results]
                     refs = [self.normalizer.normalize(r.reference) for r in temp_results]
                     corpus_wer = jiwer.wer(refs, preds) * 100
-                    console.print(f"\n[bold]CHECKPOINT @ {completed}[/bold]: WER={corpus_wer:.2f}%\n")
+                    console.print(
+                        f"\n[bold]CHECKPOINT @ {completed}[/bold]: WER={corpus_wer:.2f}%\n"
+                    )
 
         # Store results in order
         self.results = [results_map[i] for i in sorted(results_map.keys())]

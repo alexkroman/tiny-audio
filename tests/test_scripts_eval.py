@@ -1,7 +1,5 @@
 """Tests for scripts/eval package."""
 
-import io
-
 import numpy as np
 import pytest
 import torch

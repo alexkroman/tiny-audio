@@ -63,7 +63,7 @@ class DiarizationEvaluator:
 
         import librosa
 
-        from src.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.asr_pipeline import SpeakerDiarizer
 
         # Prepare audio array - handle both decoded and raw bytes formats
         if isinstance(audio, dict):

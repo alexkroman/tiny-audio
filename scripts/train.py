@@ -25,8 +25,8 @@ from transformers import (
 )
 from trl.trainer.utils import DataCollatorForChatML
 
-from src.asr_config import ASRConfig
-from src.asr_modeling import ASRModel
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel
 
 TRANSCRIBE_PREFIX = "Transcribe: "  # Used in DataCollator, matches ASRConfig.user_prompt
 

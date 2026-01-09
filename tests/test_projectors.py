@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.projectors import (
+from tiny_audio.projectors import (
     PROJECTOR_CLASSES,
     MLPAudioProjector,
     MoEAudioProjector,
@@ -35,10 +35,10 @@ class MockConfig:
         # QFormer settings
         self.qformer_window_size = kwargs.get("qformer_window_size", 15)
         self.downsample_rate = kwargs.get("downsample_rate", 5)
-        self.qformer_hidden_size = kwargs.get("qformer_hidden_size", None)
+        self.qformer_hidden_size = kwargs.get("qformer_hidden_size")
         self.qformer_num_layers = kwargs.get("qformer_num_layers", 2)
         self.qformer_num_heads = kwargs.get("qformer_num_heads", 8)
-        self.qformer_intermediate_size = kwargs.get("qformer_intermediate_size", None)
+        self.qformer_intermediate_size = kwargs.get("qformer_intermediate_size")
 
 
 # =============================================================================
@@ -309,7 +309,7 @@ class TestProjectorRegistry:
     def test_registry_instantiation(self):
         """Test that all registered projectors can be instantiated."""
         config = MockConfig()
-        for name, cls in PROJECTOR_CLASSES.items():
+        for _name, cls in PROJECTOR_CLASSES.items():
             projector = cls(config)
             assert hasattr(projector, "forward")
             assert hasattr(projector, "get_output_length")
