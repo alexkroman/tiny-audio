@@ -28,6 +28,14 @@ class ASRProcessor(ProcessorMixin):
         projector=None,
         encoder_conv_layers: Optional[list] = None,
     ):
+        """Initialize the ASR processor.
+
+        Args:
+            feature_extractor: Audio feature extractor (WhisperFeatureExtractor)
+            tokenizer: Text tokenizer for the language model
+            projector: Audio projector module (for computing output lengths)
+            encoder_conv_layers: Conv layer specs [(pad, kernel, stride), ...]
+        """
         self.feature_extractor = feature_extractor
         self.tokenizer = tokenizer
         self.audio_token_id = tokenizer.convert_tokens_to_ids(self.AUDIO_TOKEN)

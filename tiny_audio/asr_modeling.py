@@ -154,7 +154,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     TRANSCRIBE_PROMPT = "Transcribe: "
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path: str, *args, **kwargs) -> "ASRModel":
         """Load model from pretrained, handling device placement correctly."""
         from safetensors.torch import load_file
         from transformers.utils.hub import cached_file
@@ -230,7 +230,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             cls._is_loading_from_pretrained = False
             cls._pretrained_model_path = None
 
-    def __init__(self, config: ASRConfig, **kwargs):
+    def __init__(self, config: ASRConfig, **kwargs) -> None:
         super().__init__(config)
 
         self.system_prompt = config.system_prompt
@@ -439,16 +439,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         elif hasattr(self.language_model, "gradient_checkpointing_disable") and not enable:
             self.language_model.gradient_checkpointing_disable()
 
-    def get_input_embeddings(self):
+    def get_input_embeddings(self) -> nn.Module:
         return self.language_model.get_input_embeddings()
 
-    def set_input_embeddings(self, value):
+    def set_input_embeddings(self, value: nn.Module) -> None:
         self.language_model.set_input_embeddings(value)
 
-    def get_output_embeddings(self):
+    def get_output_embeddings(self) -> nn.Module:
         return self.language_model.get_output_embeddings()
 
-    def set_output_embeddings(self, value):
+    def set_output_embeddings(self, value: nn.Module) -> None:
         self.language_model.set_output_embeddings(value)
 
     def get_processor(self):
@@ -465,7 +465,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_conv_layers=self.config.encoder_conv_layers,
         )
 
-    def state_dict(self, *args, **kwargs):
+    def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
         """Only save trainable projector weights."""
         return {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
 
@@ -807,7 +807,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         thread.join()
 
-    def save_pretrained(self, save_directory: Union[str, Path], **kwargs):
+    def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
         """Save model, tokenizer, and processor."""
         import shutil
         from pathlib import Path as PathlibPath
@@ -866,7 +866,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Copy projectors module
         shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
 
-    def create_or_update_model_card(self, output_dir: Union[str, Path]):
+    def create_or_update_model_card(self, output_dir: Union[str, Path]) -> None:
         """No-op for model card creation - we use MODEL_CARD.md in repo instead."""
         pass
 

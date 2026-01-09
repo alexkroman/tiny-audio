@@ -1,3 +1,5 @@
+"""ASR pipeline for audio-to-text transcription with optional timestamps and diarization."""
+
 import re
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,14 @@ class ForcedAligner:
 
     @classmethod
     def get_instance(cls, device: str = "cuda"):
+        """Get or create the forced alignment model (singleton).
+
+        Args:
+            device: Device to run model on ("cuda" or "cpu")
+
+        Returns:
+            Tuple of (model, labels, dictionary)
+        """
         if cls._model is None:
             import torchaudio
 
@@ -296,6 +306,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     model: ASRModel
 
     def __init__(self, model: ASRModel, **kwargs):
+        """Initialize ASR pipeline.
+
+        Args:
+            model: ASRModel instance for transcription
+            **kwargs: Additional arguments (feature_extractor, tokenizer, device)
+        """
         feature_extractor = kwargs.pop("feature_extractor", None)
         tokenizer = kwargs.pop("tokenizer", model.tokenizer)
 
@@ -432,6 +448,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         return None
 
     def preprocess(self, inputs, **preprocess_params):
+        """Preprocess audio inputs for the model.
+
+        Args:
+            inputs: Audio input (dict with array, file path, etc.)
+            **preprocess_params: Additional preprocessing parameters
+
+        Yields:
+            Model input dicts with input_features and attention_mask
+        """
         # Handle dict with "array" key (from datasets)
         if isinstance(inputs, dict) and "array" in inputs:
             inputs = {
@@ -445,6 +470,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             yield item
 
     def _forward(self, model_inputs, **generate_kwargs) -> dict[str, Any]:
+        """Run model forward pass to generate transcription.
+
+        Args:
+            model_inputs: Dict with input_features and attention_mask
+            **generate_kwargs: Generation parameters
+
+        Returns:
+            Dict with generated token IDs
+        """
         # Extract audio features and is_last flag
         is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
 
@@ -460,6 +494,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         return {"tokens": generated_ids, "is_last": is_last}
 
     def postprocess(self, model_outputs, **kwargs) -> dict[str, str]:
+        """Convert model output tokens to text.
+
+        Args:
+            model_outputs: Dict with 'tokens' key containing generated IDs
+            **kwargs: Additional postprocessing parameters
+
+        Returns:
+            Dict with 'text' key containing transcription
+        """
         # Handle list of outputs (from chunking)
         if isinstance(model_outputs, list):
             model_outputs = model_outputs[0] if model_outputs else {}

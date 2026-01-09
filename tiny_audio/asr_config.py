@@ -74,6 +74,17 @@ class ASRConfig(transformers.PretrainedConfig):
         use_cache: Optional[bool] = None,
         **kwargs,
     ):
+        """Initialize ASR model configuration.
+
+        Args:
+            audio_model_id: HuggingFace model ID for audio encoder (Whisper)
+            text_model_id: HuggingFace model ID for text decoder (SmolLM/Qwen)
+            attn_implementation: Attention implementation ("flash_attention_2", "sdpa", "eager")
+            model_dtype: Model dtype ("bfloat16", "float16", "float32")
+            projector_type: Projector architecture ("mlp", "mosa", "moe", "qformer")
+            use_lora: Enable LoRA adapters for Stage 2 fine-tuning
+            use_specaugment: Enable SpecAugment data augmentation
+        """
         # Set default generation parameters (greedy decoding only)
         generation_defaults = {
             "num_beams": 1,

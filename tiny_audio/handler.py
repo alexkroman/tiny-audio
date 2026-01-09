@@ -15,7 +15,18 @@ except ImportError:
 
 
 class EndpointHandler:
+    """HuggingFace Inference Endpoints handler for ASR model.
+
+    Handles model loading, warmup, and inference requests for deployment
+    on HuggingFace Inference Endpoints or similar services.
+    """
+
     def __init__(self, path: str = ""):
+        """Initialize the endpoint handler.
+
+        Args:
+            path: Path to model directory or HuggingFace model ID
+        """
         import os
 
         import nltk
@@ -104,6 +115,14 @@ class EndpointHandler:
             print(f"Warmup skipped due to: {e}")
 
     def __call__(self, data: Dict[str, Any]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+        """Process an inference request.
+
+        Args:
+            data: Request data containing 'inputs' (audio path/bytes) and optional 'parameters'
+
+        Returns:
+            Transcription result with 'text' key
+        """
         inputs = data.get("inputs")
         if inputs is None:
             raise ValueError("Missing 'inputs' in request data")

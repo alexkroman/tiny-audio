@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+"""Training script for ASR models using Hydra configuration.
+
+This script handles:
+- Loading and preparing datasets from multiple sources
+- Creating ASR models with configurable projector types
+- Training with HuggingFace Trainer and optional WandB logging
+- Checkpoint saving and Hub pushing
+
+Usage:
+    poetry run python scripts/train.py +experiments=mlp
+    poetry run python scripts/train.py training.learning_rate=1e-4
+"""
 
 import contextlib
 import re
