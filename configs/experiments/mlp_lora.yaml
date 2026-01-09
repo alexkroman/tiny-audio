@@ -22,7 +22,7 @@ model:
   lora_target_modules:
     - q_proj
     - v_proj
-  freeze_projector: false
+  freeze_projector: true
 
 training:
   hub_model_id: "mazesmazes/tiny-audio"
