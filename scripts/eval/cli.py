@@ -21,6 +21,8 @@ from scripts.eval.evaluators import (
     AssemblyAIDiarizationEvaluator,
     AssemblyAIEvaluator,
     AssemblyAIStreamingEvaluator,
+    DeepgramAlignmentEvaluator,
+    DeepgramDiarizationEvaluator,
     DeepgramEvaluator,
     DiarizationEvaluator,
     EndpointEvaluator,
@@ -31,6 +33,26 @@ from scripts.eval.evaluators import (
 )
 
 console = Console()
+
+
+def build_model_id(
+    provider: str, model_variant: str | None = None, api_key: str | None = None
+) -> str:
+    """Build a model identifier including provider, variant, and API key prefix.
+
+    Examples:
+        - assemblyai_slam1_abc
+        - deepgram_nova3_xyz
+        - assemblyai_abc (no variant)
+    """
+    parts = [provider]
+    if model_variant:
+        # Normalize variant name (remove underscores, hyphens for cleaner names)
+        clean_variant = model_variant.replace("_", "").replace("-", "")
+        parts.append(clean_variant)
+    if api_key:
+        parts.append(api_key[:3])
+    return "_".join(parts)
 
 
 def save_results(
@@ -234,7 +256,7 @@ def print_alignment_metrics(dataset_name: str, metrics: dict):
     table.add_column("Value", style="green")
 
     table.add_row("MAE", f"{metrics['mae'] * 1000:.1f}ms")
-    table.add_row("Alignment Rate", f"{metrics.get('alignment_rate', 0) * 100:.1f}%")
+    table.add_row("Alignment Error", f"{metrics.get('alignment_error', 0) * 100:.1f}%")
     table.add_row(
         "Words Aligned",
         f"{metrics.get('total_aligned_words', 0)}/{metrics.get('total_ref_words', 0)}",
@@ -253,8 +275,8 @@ def main():
         "--datasets",
         nargs="+",
         default=["loquacious"],
-        choices=["all"] + list(DATASET_REGISTRY.keys()),
-        help="Datasets to evaluate on (default: loquacious, use 'all' for all datasets)",
+        choices=["all", "all-full"] + list(DATASET_REGISTRY.keys()),
+        help="Datasets to evaluate on (default: loquacious, 'all' for ASR only, 'all-full' includes diarization/alignment)",
     )
     parser.add_argument("--split", default="test", help="Dataset split (default: test)")
     parser.add_argument("--max-samples", type=int, default=None, help="Maximum samples to evaluate")
@@ -303,6 +325,9 @@ def main():
             for k in DATASET_REGISTRY
             if k not in DIARIZATION_DATASETS and k not in ALIGNMENT_DATASETS
         ]
+    # Expand "all-full" to include diarization and alignment datasets too
+    elif "all-full" in args.datasets:
+        args.datasets = list(DATASET_REGISTRY.keys())
 
     for dataset_name in args.datasets:
         console.print(f"\n[bold blue]Evaluating on: {dataset_name}[/bold blue]")
@@ -313,6 +338,7 @@ def main():
         # Handle diarization datasets
         if dataset_name in DIARIZATION_DATASETS:
             dataset = load_eval_dataset(dataset_name, split, args.config, decode_audio=False)
+            model_id = args.model  # Default, override for API providers
 
             if args.model == "assemblyai":
                 api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
@@ -321,9 +347,23 @@ def main():
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
                     sys.exit(1)
+                model_id = build_model_id("assemblyai", args.assemblyai_model, api_key)
                 evaluator = AssemblyAIDiarizationEvaluator(
                     api_key=api_key,
                     model=args.assemblyai_model,
+                    audio_field=cfg.audio_field,
+                    speakers_field=cfg.speakers_field,
+                    timestamps_start_field=cfg.timestamps_start_field,
+                    timestamps_end_field=cfg.timestamps_end_field,
+                )
+            elif args.model == "deepgram":
+                api_key = os.environ.get("DEEPGRAM_API_KEY", "")
+                if not api_key:
+                    console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
+                    sys.exit(1)
+                model_id = build_model_id("deepgram", None, api_key)
+                evaluator = DeepgramDiarizationEvaluator(
+                    api_key=api_key,
                     audio_field=cfg.audio_field,
                     speakers_field=cfg.speakers_field,
                     timestamps_start_field=cfg.timestamps_start_field,
@@ -343,13 +383,14 @@ def main():
 
             results = evaluator.evaluate(dataset, args.max_samples)
             metrics = evaluator.compute_metrics()
-            save_diarization_results(args.model, dataset_name, results, metrics, args.output_dir)
+            save_diarization_results(model_id, dataset_name, results, metrics, args.output_dir)
             print_diarization_metrics(dataset_name, metrics)
             continue
 
         # Handle alignment datasets
         if dataset_name in ALIGNMENT_DATASETS:
             dataset = load_eval_dataset(dataset_name, split, args.config)
+            model_id = args.model  # Default, override for API providers
 
             if args.model == "assemblyai":
                 api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
@@ -358,9 +399,22 @@ def main():
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
                     sys.exit(1)
+                model_id = build_model_id("assemblyai", args.assemblyai_model, api_key)
                 evaluator = AssemblyAIAlignmentEvaluator(
                     api_key=api_key,
                     model=args.assemblyai_model,
+                    audio_field=cfg.audio_field,
+                    text_field=cfg.text_field,
+                    words_field=cfg.words_field,
+                )
+            elif args.model == "deepgram":
+                api_key = os.environ.get("DEEPGRAM_API_KEY", "")
+                if not api_key:
+                    console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
+                    sys.exit(1)
+                model_id = build_model_id("deepgram", None, api_key)
+                evaluator = DeepgramAlignmentEvaluator(
+                    api_key=api_key,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
@@ -376,18 +430,20 @@ def main():
 
             results = evaluator.evaluate(dataset, args.max_samples)
             metrics = evaluator.compute_metrics()
-            save_alignment_results(args.model, dataset_name, results, metrics, args.output_dir)
+            save_alignment_results(model_id, dataset_name, results, metrics, args.output_dir)
             print_alignment_metrics(dataset_name, metrics)
             continue
 
         # ASR evaluation
         dataset = load_eval_dataset(dataset_name, split, args.config)
+        model_id = args.model  # Default to args.model, override for API providers
 
         if args.model == "assemblyai":
             api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
             if not api_key:
                 console.print("[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]")
                 sys.exit(1)
+            model_id = build_model_id("assemblyai", args.assemblyai_model, api_key)
 
             if args.streaming:
                 evaluator = AssemblyAIStreamingEvaluator(
@@ -409,6 +465,7 @@ def main():
             if not api_key:
                 console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
                 sys.exit(1)
+            model_id = build_model_id("deepgram", None, api_key)
             evaluator = DeepgramEvaluator(
                 api_key=api_key,
                 audio_field=cfg.audio_field,
@@ -438,7 +495,7 @@ def main():
 
         results = evaluator.evaluate(dataset, args.max_samples)
         metrics = evaluator.compute_metrics()
-        save_results(args.model, dataset_name, results, metrics, args.output_dir, args.base_url)
+        save_results(model_id, dataset_name, results, metrics, args.output_dir, args.base_url)
         print_asr_metrics(dataset_name, metrics)
 
 

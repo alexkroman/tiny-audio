@@ -26,6 +26,7 @@ class DiarizationEvaluator:
         num_speakers: int | None = None,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        num_workers: int = 1,
     ):
         self.audio_field = audio_field
         self.speakers_field = speakers_field
@@ -35,6 +36,7 @@ class DiarizationEvaluator:
         self.num_speakers = num_speakers
         self.min_speakers = min_speakers
         self.max_speakers = max_speakers
+        self.num_workers = num_workers
         self.results: list[DiarizationResult] = []
         self.metric = DiarizationErrorRate()
 
@@ -233,4 +235,42 @@ class AssemblyAIDiarizationEvaluator(DiarizationEvaluator):
             for u in (transcript.utterances or [])
         ]
         time.sleep(0.5)
+        return segments, elapsed
+
+
+class DeepgramDiarizationEvaluator(DiarizationEvaluator):
+    """Evaluator for Deepgram Nova 3 speaker diarization."""
+
+    def __init__(self, api_key: str, **kwargs):
+        kwargs.pop("hf_token", None)
+        super().__init__(**kwargs)
+        from deepgram import DeepgramClient
+
+        self.client = DeepgramClient(api_key=api_key)
+
+    def diarize(self, audio) -> tuple[list[dict], float]:
+        """Run Deepgram diarization on audio."""
+        wav_bytes = prepare_wav_bytes(audio)
+        start = time.time()
+
+        response = self.client.listen.v1.media.transcribe_file(
+            request=wav_bytes,
+            model="nova-3",
+            diarize=True,
+            utterances=True,
+        )
+        elapsed = time.time() - start
+
+        # Extract utterances with speaker info
+        utterances = response.results.utterances or []
+        segments = [
+            {
+                "speaker": f"SPEAKER_{u.speaker}",
+                "start": u.start,
+                "end": u.end,
+            }
+            for u in utterances
+        ]
+
+        time.sleep(0.3)  # Rate limiting
         return segments, elapsed

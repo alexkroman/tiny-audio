@@ -121,8 +121,21 @@ class Evaluator:
         """Run evaluation loop on dataset."""
         self.results = []
 
-        # Collect samples first (needed for parallel processing)
+        if self.num_workers > 1:
+            # Parallel processing requires pre-collecting samples
+            samples_to_process = self._collect_samples(dataset, max_samples)
+            self._evaluate_parallel(samples_to_process)
+        else:
+            # Sequential: process lazily to avoid slow collection for streaming datasets
+            self._evaluate_sequential_lazy(dataset, max_samples)
+
+        return self.results
+
+    def _collect_samples(self, dataset, max_samples: int | None) -> list[dict]:
+        """Collect samples for parallel processing."""
         samples_to_process = []
+        target = max_samples or "all"
+        console.print(f"[dim]Collecting samples (target: {target})...[/dim]")
         for sample in dataset:
             reference = sample[self.text_field]
 
@@ -141,15 +154,49 @@ class Evaluator:
                 }
             )
 
-            if max_samples and len(samples_to_process) >= max_samples:
+            # Progress indicator during collection
+            count = len(samples_to_process)
+            if count % 50 == 0 or count == max_samples:
+                console.print(f"[dim]  Collected {count} samples...[/dim]")
+
+            if max_samples and count >= max_samples:
                 break
 
-        if self.num_workers > 1:
-            self._evaluate_parallel(samples_to_process)
-        else:
-            self._evaluate_sequential(samples_to_process)
+        console.print(
+            f"[dim]Collected {len(samples_to_process)} samples, starting evaluation...[/dim]"
+        )
+        return samples_to_process
 
-        return self.results
+    def _evaluate_sequential_lazy(self, dataset, max_samples: int | None) -> None:
+        """Run sequential evaluation lazily (no pre-collection)."""
+        idx = 0
+        for sample in dataset:
+            reference = sample[self.text_field]
+
+            # Skip TEDLIUM ignore markers
+            if isinstance(reference, str) and reference.strip() == "ignore_time_segment_in_scoring":
+                continue
+
+            # Skip samples marked as inaudible
+            if isinstance(reference, str) and "inaudible" in reference.lower():
+                continue
+
+            idx += 1
+            sample_data = {"audio": sample[self.audio_field], "reference": reference}
+            _, result = self._process_sample((idx, sample_data))
+            self.results.append(result)
+
+            norm_pred = self.normalizer.normalize(result.prediction)
+            norm_ref = self.normalizer.normalize(result.reference)
+            print(f"Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s")
+            print(f"  Ref:  {norm_ref}")
+            print(f"  Pred: {norm_pred}")
+
+            if idx % 100 == 0:
+                self._print_checkpoint(idx)
+
+            if max_samples and idx >= max_samples:
+                break
 
     def _evaluate_sequential(self, samples: list[dict]) -> None:
         """Run sequential evaluation."""
