@@ -28,12 +28,12 @@ training:
   hub_model_id: "mazesmazes/tiny-audio"
   learning_rate: 5e-5  # Lower LR for fine-tuning
   seed: 456  # Different seed for data ordering
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
+  per_device_train_batch_size: 14
+  per_device_eval_batch_size: 14
   gradient_accumulation_steps: 2
   num_train_epochs: 1
-  save_steps: 500
-  eval_steps: 500
+  save_steps: 1000
+  eval_steps: 1000
 
   # SpecAugment (optional)
   use_specaugment: false
