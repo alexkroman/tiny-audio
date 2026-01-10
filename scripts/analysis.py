@@ -137,6 +137,166 @@ def entity_itn_correct(entity_text: str, text: str) -> bool:
 # =============================================================================
 
 
+@app.command("high-wer")
+def high_wer(
+    model: str = typer.Argument(..., help="Model pattern to analyze"),
+    threshold: float = typer.Option(50.0, "--threshold", "-t", help="WER threshold (percent)"),
+    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
+    exclude: list[str] = typer.Option([], help="Patterns to exclude"),
+    latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
+    output_file: Path = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
+):
+    """Output ground truth and predictions for samples with WER above threshold."""
+    model_dirs = find_model_dirs(outputs_dir, model, exclude, latest=latest)
+    results_files = [d / "results.txt" for d in model_dirs if (d / "results.txt").exists()]
+
+    if not results_files:
+        console.print(f"[red]No results files found for pattern '{model}'[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"Found {len(results_files)} results files for '{model}'")
+    console.print(f"Filtering samples with WER >= {threshold}%\n")
+
+    high_wer_samples = []
+
+    for results_file in sorted(results_files):
+        # Extract dataset name from directory
+        dir_name = results_file.parent.name
+        parts = dir_name.split("_")
+        dataset = parts[-1] if parts else "unknown"
+
+        samples = parse_results_file(results_file)
+        for sample in samples:
+            if sample["wer"] >= threshold:
+                high_wer_samples.append(
+                    {
+                        "dataset": dataset,
+                        "sample_num": sample["sample_num"],
+                        "wer": sample["wer"],
+                        "ground_truth": sample["ground_truth"],
+                        "prediction": sample["prediction"],
+                    }
+                )
+
+    # Sort by WER descending
+    high_wer_samples.sort(key=lambda x: x["wer"], reverse=True)
+
+    console.print(f"Found {len(high_wer_samples)} samples with WER >= {threshold}%\n")
+
+    # Build output
+    lines = []
+    lines.append(f"# High WER Samples (>= {threshold}%)")
+    lines.append(f"# Model: {model}")
+    lines.append(f"# Total: {len(high_wer_samples)} samples\n")
+
+    for sample in high_wer_samples:
+        lines.append("-" * 80)
+        lines.append(
+            f"Dataset: {sample['dataset']} | Sample: {sample['sample_num']} | WER: {sample['wer']:.1f}%"
+        )
+        lines.append(f"Ground Truth: {sample['ground_truth']}")
+        lines.append(f"Prediction:   {sample['prediction']}")
+
+    lines.append("-" * 80)
+    output_text = "\n".join(lines)
+
+    if output_file:
+        output_file.write_text(output_text)
+        console.print(f"Saved to [bold]{output_file}[/bold]")
+    else:
+        console.print(output_text)
+
+
+@app.command("entity-errors")
+def entity_errors(
+    model: str = typer.Argument(..., help="Model pattern to analyze"),
+    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
+    exclude: list[str] = typer.Option([], help="Patterns to exclude"),
+    latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
+    entity_type: str = typer.Option(
+        "", "--type", "-t", help="Filter by entity type (e.g., PERSON, ORG)"
+    ),
+    output_file: Path = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
+):
+    """Output samples where entities were missed in the prediction."""
+    # Load keywords file
+    keywords_path = Path(KEYWORDS_FILE)
+    if not keywords_path.exists():
+        console.print(f"[red]Keywords file not found: {keywords_path}[/red]")
+        console.print("Run 'analysis extract-entities' first to generate it.")
+        raise typer.Exit(1)
+
+    keywords = json.loads(keywords_path.read_text())
+    ref_entities = {ref["text"]: ref["entities"] for ref in keywords["references"]}
+
+    model_dirs = find_model_dirs(outputs_dir, model, exclude, latest=latest)
+    results_files = [d / "results.txt" for d in model_dirs if (d / "results.txt").exists()]
+
+    if not results_files:
+        console.print(f"[red]No results files found for pattern '{model}'[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"Found {len(results_files)} results files for '{model}'")
+    if entity_type:
+        console.print(f"Filtering for entity type: {entity_type}")
+
+    error_samples = []
+
+    for results_file in sorted(results_files):
+        dir_name = results_file.parent.name
+        parts = dir_name.split("_")
+        dataset = parts[-1] if parts else "unknown"
+
+        samples = parse_results_file(results_file)
+        for sample in samples:
+            gt = sample["ground_truth"]
+            pred = sample["prediction"]
+            if gt in ref_entities:
+                entities = ref_entities[gt]
+                # Filter by entity type if specified
+                if entity_type:
+                    entities = [e for e in entities if e["label"].upper() == entity_type.upper()]
+                # Find entities that are missing from prediction
+                missing_entities = [e for e in entities if not entity_in_text(e["text"], pred)]
+                if missing_entities:
+                    error_samples.append(
+                        {
+                            "dataset": dataset,
+                            "sample_num": sample["sample_num"],
+                            "ground_truth": gt,
+                            "prediction": pred,
+                            "missing_entities": missing_entities,
+                        }
+                    )
+
+    console.print(f"Found {len(error_samples)} samples with missing entities\n")
+
+    # Build output
+    lines = []
+    lines.append("# Entity Errors (Missing Entities)")
+    lines.append(f"# Model: {model}")
+    if entity_type:
+        lines.append(f"# Entity Type: {entity_type}")
+    lines.append(f"# Total: {len(error_samples)} samples\n")
+
+    for sample in error_samples:
+        entity_strs = [f"{e['text']} ({e['label']})" for e in sample["missing_entities"]]
+        lines.append("-" * 80)
+        lines.append(f"Dataset: {sample['dataset']} | Sample: {sample['sample_num']}")
+        lines.append(f"Missing: {', '.join(entity_strs)}")
+        lines.append(f"Ground Truth: {sample['ground_truth']}")
+        lines.append(f"Prediction:   {sample['prediction']}")
+
+    lines.append("-" * 80)
+    output_text = "\n".join(lines)
+
+    if output_file:
+        output_file.write_text(output_text)
+        console.print(f"Saved to [bold]{output_file}[/bold]")
+    else:
+        console.print(output_text)
+
+
 @app.command("extract-entities")
 def extract_entities(
     model: str = typer.Option("", help="Model pattern to extract from (empty for all)"),

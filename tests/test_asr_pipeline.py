@@ -15,7 +15,9 @@ class TestPostProcessPrediction:
 
         # Create a minimal mock to call the method
         class MockPipeline:
+            HALLUCINATION_PATTERNS = ASRPipeline.HALLUCINATION_PATTERNS
             _truncate_trailing_repeats = ASRPipeline._truncate_trailing_repeats
+            _truncate_character_repetitions = ASRPipeline._truncate_character_repetitions
             _post_process_prediction = ASRPipeline._post_process_prediction
 
         return MockPipeline()
@@ -40,6 +42,17 @@ class TestPostProcessPrediction:
         result = post_process._post_process_prediction("hello world world world")
         assert result == "hello world"
 
+    def test_character_repetition_truncation(self, post_process):
+        """Excessive character repetitions should be truncated."""
+        # Simulate hallucination like "uhhhhhhhhhh"
+        result = post_process._post_process_prediction("hello uhhhhhhhhhhhhhhhhhhhhhh")
+        assert result == "hello uhhh"
+
+    def test_character_repetition_multiple(self, post_process):
+        """Multiple words with repetitions should all be truncated."""
+        result = post_process._post_process_prediction("yessssss noooooo")
+        assert result == "yesss nooo"
+
     def test_whitespace_normalization(self, post_process):
         """Multiple spaces should be collapsed."""
         result = post_process._post_process_prediction("hello   world")
@@ -48,6 +61,11 @@ class TestPostProcessPrediction:
     def test_empty_string(self, post_process):
         """Empty string should return empty."""
         result = post_process._post_process_prediction("")
+        assert result == ""
+
+    def test_hallucination_pattern_deleted(self, post_process):
+        """Known hallucination patterns should be deleted entirely."""
+        result = post_process._post_process_prediction("and gt and gt")
         assert result == ""
 
     def test_combined_processing(self, post_process):

@@ -523,6 +523,13 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         text = self._post_process_prediction(text)
         return {"text": text}
 
+    # Known hallucination patterns that should be deleted entirely
+    HALLUCINATION_PATTERNS = frozenset(
+        [
+            "and gt and gt",
+        ]
+    )
+
     def _post_process_prediction(self, text: str) -> str:
         """Post-process model output to fix common issues."""
         if not text:
@@ -531,22 +538,29 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # 1. LOWERCASE
         text = text.lower()
 
-        # 2. COMBINE ACRONYMS
+        # 2. CHECK FOR KNOWN HALLUCINATIONS (delete entirely)
+        if text.strip() in self.HALLUCINATION_PATTERNS:
+            return ""
+
+        # 3. COMBINE ACRONYMS
         # Merge consecutive single letters into one word (e.g., "u s a" -> "usa")
         text = re.sub(r"\b([a-z])((?:\s+[a-z])+)\b", lambda m: m.group(0).replace(" ", ""), text)
 
-        # 3. NORMALIZE CURRENCY
+        # 4. NORMALIZE CURRENCY
         # Convert "eur X" to "X euros" for Whisper normalizer compatibility
         text = re.sub(r"\beur\s+(\d+)", r"\1 euros", text)
 
-        # 4. TRUNCATE TRAILING REPEATS
+        # 5. TRUNCATE CHARACTER REPETITIONS (e.g., "uhhhhhh" -> "uhh")
+        text = self._truncate_character_repetitions(text)
+
+        # 6. TRUNCATE TRAILING REPEATS (word-level)
         text = self._truncate_trailing_repeats(text)
 
-        # 5. STRIP WHITESPACE
+        # 7. STRIP WHITESPACE
         return re.sub(r"\s+", " ", text).strip()
 
-    def _truncate_trailing_repeats(self, text: str, max_ngram: int = 4) -> str:
-        """Remove trailing repeated n-grams (1-4 words)."""
+    def _truncate_trailing_repeats(self, text: str, max_ngram: int = 10) -> str:
+        """Remove trailing repeated n-grams (1-10 words)."""
         words = text.split()
         if len(words) < 2:
             return text
@@ -566,3 +580,25 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                     break  # Restart from largest n-gram
 
         return " ".join(words)
+
+    def _truncate_character_repetitions(self, text: str, max_repeats: int = 3) -> str:
+        """Remove excessive character repetitions (e.g., 'uhhhhhh' -> 'uhh').
+
+        Handles hallucinations where the model outputs the same character many times,
+        like "uhhhhhhhhhhhhhhhhhhhhhhhhh" at the end of a prediction.
+
+        Args:
+            text: Input text to clean
+            max_repeats: Maximum allowed consecutive repetitions of a character
+
+        Returns:
+            Text with character repetitions truncated
+        """
+        if not text:
+            return text
+
+        # Replace any character repeated more than max_repeats times with max_repeats
+        # Pattern: any character followed by itself N+ times
+        pattern = rf"(.)\1{{{max_repeats},}}"
+        replacement = r"\1" * max_repeats
+        return re.sub(pattern, replacement, text)
