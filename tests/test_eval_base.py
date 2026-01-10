@@ -76,6 +76,24 @@ class TestDiarizationResult:
         assert result.false_alarm_raw == 0.0
 
 
+class TestDiarizationEvaluator:
+    """Tests for DiarizationEvaluator class."""
+
+    def test_init_num_workers_default(self):
+        """Test that num_workers defaults to 1."""
+        from scripts.eval.evaluators.diarization import DiarizationEvaluator
+
+        evaluator = DiarizationEvaluator()
+        assert evaluator.num_workers == 1
+
+    def test_init_num_workers_custom(self):
+        """Test that custom num_workers is accepted."""
+        from scripts.eval.evaluators.diarization import DiarizationEvaluator
+
+        evaluator = DiarizationEvaluator(num_workers=4)
+        assert evaluator.num_workers == 4
+
+
 class TestAlignmentResult:
     """Tests for AlignmentResult dataclass."""
 
@@ -95,6 +113,24 @@ class TestAlignmentResult:
         )
         assert len(result.pred_starts) == 3
         assert result.num_aligned_words == 3
+
+
+class TestBaseAlignmentEvaluator:
+    """Tests for BaseAlignmentEvaluator class."""
+
+    def test_init_num_workers_default(self):
+        """Test that num_workers defaults to 1."""
+        from scripts.eval.evaluators.alignment import BaseAlignmentEvaluator
+
+        evaluator = BaseAlignmentEvaluator()
+        assert evaluator.num_workers == 1
+
+    def test_init_num_workers_custom(self):
+        """Test that custom num_workers is accepted."""
+        from scripts.eval.evaluators.alignment import BaseAlignmentEvaluator
+
+        evaluator = BaseAlignmentEvaluator(num_workers=4)
+        assert evaluator.num_workers == 4
 
 
 class TestEvaluator:

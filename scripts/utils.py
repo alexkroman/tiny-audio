@@ -43,7 +43,10 @@ def parse_results_file(results_path: Path) -> list[dict]:
 
 
 def find_model_dirs(
-    outputs_dir: Path, model_pattern: str, exclude: list[str] | None = None
+    outputs_dir: Path,
+    model_pattern: str,
+    exclude: list[str] | None = None,
+    latest: bool = False,
 ) -> list[Path]:
     """Find output directories matching a model pattern.
 
@@ -51,11 +54,12 @@ def find_model_dirs(
         outputs_dir: Base directory containing evaluation outputs.
         model_pattern: Pattern to match in directory names.
         exclude: List of patterns to exclude from matching.
+        latest: If True, only return the most recent run per dataset.
 
     Returns:
         Sorted list of matching directory paths.
     """
-    exclude = exclude or []
+    exclude = [ex for ex in (exclude or []) if ex]  # Filter out empty strings
     dirs = []
     for d in outputs_dir.iterdir():
         if not d.is_dir():
@@ -64,6 +68,19 @@ def find_model_dirs(
             ex.lower() in d.name.lower() for ex in exclude
         ):
             dirs.append(d)
+
+    if latest:
+        # Group by dataset and keep only most recent (dirs are sorted by timestamp in name)
+        latest_by_dataset: dict[str, Path] = {}
+        for d in sorted(dirs, reverse=True):  # Sort descending by name (timestamp first)
+            # Extract dataset from dir name: <timestamp>_<model>_<dataset>
+            parts = d.name.split("_")
+            if len(parts) >= 3:
+                dataset = parts[-1]  # Last part is dataset
+                if dataset not in latest_by_dataset:
+                    latest_by_dataset[dataset] = d
+        dirs = list(latest_by_dataset.values())
+
     return sorted(dirs)
 
 

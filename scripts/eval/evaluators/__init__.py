@@ -5,6 +5,7 @@ from scripts.eval.audio import TextNormalizer
 from .alignment import (
     AssemblyAIAlignmentEvaluator,
     BaseAlignmentEvaluator,
+    DeepgramAlignmentEvaluator,
     TimestampAlignmentEvaluator,
     align_words_to_reference,
 )
@@ -23,7 +24,11 @@ from .base import (
     Evaluator,
     setup_assemblyai,
 )
-from .diarization import AssemblyAIDiarizationEvaluator, DiarizationEvaluator
+from .diarization import (
+    AssemblyAIDiarizationEvaluator,
+    DeepgramDiarizationEvaluator,
+    DiarizationEvaluator,
+)
 
 __all__ = [
     # Result types
@@ -44,9 +49,11 @@ __all__ = [
     # Diarization evaluators
     "DiarizationEvaluator",
     "AssemblyAIDiarizationEvaluator",
+    "DeepgramDiarizationEvaluator",
     # Alignment evaluators
     "BaseAlignmentEvaluator",
     "TimestampAlignmentEvaluator",
     "AssemblyAIAlignmentEvaluator",
+    "DeepgramAlignmentEvaluator",
     "align_words_to_reference",
 ]

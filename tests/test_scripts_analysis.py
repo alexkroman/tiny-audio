@@ -161,12 +161,6 @@ class TestAnalysisCLI:
 
         assert app is not None
 
-    def test_keyword_subcommand_exists(self):
-        """Test that keyword subcommand app exists."""
-        from scripts.analysis import keyword_app
-
-        assert keyword_app is not None
-
     def test_cli_entry_point(self):
         """Test that cli entry point exists."""
         from scripts.analysis import cli

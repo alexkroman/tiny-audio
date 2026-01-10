@@ -76,10 +76,12 @@ class BaseAlignmentEvaluator:
         audio_field: str = "audio",
         text_field: str = "transcript",
         words_field: str = "words",
+        num_workers: int = 1,
     ):
         self.audio_field = audio_field
         self.text_field = text_field
         self.words_field = words_field
+        self.num_workers = num_workers
         self.normalizer = TextNormalizer()
         self.results: list[AlignmentResult] = []
 
@@ -320,3 +322,51 @@ class AssemblyAIAlignmentEvaluator(BaseAlignmentEvaluator):
         ]
         time.sleep(0.5)
         return transcript.text or "", words, elapsed
+
+
+class DeepgramAlignmentEvaluator(BaseAlignmentEvaluator):
+    """Evaluator for word-level timestamp alignment accuracy using Deepgram Nova 3."""
+
+    def __init__(
+        self,
+        api_key: str,
+        audio_field: str = "audio",
+        text_field: str = "transcript",
+        words_field: str = "words",
+        num_workers: int = 1,
+    ):
+        super().__init__(audio_field, text_field, words_field, num_workers)
+        from deepgram import DeepgramClient
+
+        self.client = DeepgramClient(api_key=api_key)
+
+    def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
+        """Transcribe audio and return (text, word_timestamps, inference_time)."""
+        wav_bytes = prepare_wav_bytes(audio)
+        start = time.time()
+
+        response = self.client.listen.v1.media.transcribe_file(
+            request=wav_bytes,
+            model="nova-3",
+            smart_format=True,
+        )
+        elapsed = time.time() - start
+
+        # Extract transcript text
+        channel = response.results.channels[0]
+        text = channel.alternatives[0].transcript if channel.alternatives else ""
+
+        # Extract word-level timestamps
+        words = []
+        if channel.alternatives and channel.alternatives[0].words:
+            for w in channel.alternatives[0].words:
+                words.append(
+                    {
+                        "word": w.word,
+                        "start": w.start,
+                        "end": w.end,
+                    }
+                )
+
+        time.sleep(0.3)  # Rate limiting
+        return text, words, elapsed

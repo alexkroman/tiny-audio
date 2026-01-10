@@ -2,10 +2,11 @@
 """Analysis tools for ASR evaluation results.
 
 Commands:
-    by-length    - WER breakdown by utterance length
-    keyword      - Named entity/keyword WER analysis
+    extract-entities - Extract named entities from reference texts for comparison
+    compare          - Generate comprehensive comparison tables for multiple models
 """
 
+import contextlib
 import json
 import re
 from collections import defaultdict
@@ -107,105 +108,42 @@ def entity_in_text(entity_text: str, text: str) -> bool:
     return False
 
 
+# Entity types that should be checked for ITN (Inverse Text Normalization)
+ITN_ENTITY_TYPES = {"CARDINAL", "DATE", "TIME", "MONEY", "PERCENT", "ORDINAL", "QUANTITY"}
+
+
+def entity_itn_correct(entity_text: str, text: str) -> bool:
+    """Check if entity appears with correct formatting (ITN accuracy).
+
+    This is stricter than entity_in_text - checks for exact formatted match.
+    Example: "$25" should appear as "$25", not "twenty five dollars".
+    """
+    # Case-insensitive but format-preserving check
+    entity_lower = entity_text.lower()
+    text_lower = text.lower()
+
+    # Direct substring match (preserves formatting like $, %, :, etc.)
+    if entity_lower in text_lower:
+        return True
+
+    # Check with minor punctuation variations (e.g., "3:00" vs "3.00")
+    entity_normalized = entity_lower.replace(":", ".").replace(",", "")
+    text_normalized = text_lower.replace(":", ".").replace(",", "")
+    return entity_normalized in text_normalized
+
+
 # =============================================================================
-# by-length command
+# extract-entities command
 # =============================================================================
 
 
-@app.command("by-length")
-def by_length(
-    model: str = typer.Argument(..., help="Model name pattern to match"),
+@app.command("extract-entities")
+def extract_entities(
+    model: str = typer.Option("", help="Model pattern to extract from (empty for all)"),
     outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
-    max_words: int = typer.Option(10, help="Max word count to show individually"),
-    exclude: list[str] = typer.Option([], help="Patterns to exclude from matching"),
-):
-    """Calculate WER broken down by reference utterance length."""
-    if not outputs_dir.exists():
-        console.print(f"[red]Error: {outputs_dir} does not exist[/red]")
-        raise typer.Exit(1)
-
-    model_dirs = find_model_dirs(outputs_dir, model, exclude)
-    if not model_dirs:
-        console.print(f"[red]No output directories found matching '{model}'[/red]")
-        raise typer.Exit(1)
-
-    console.print(f"Found {len(model_dirs)} directories matching '{model}'")
-
-    # Collect all samples
-    all_samples = []
-    for dir_path in model_dirs:
-        results_file = dir_path / "results.txt"
-        if results_file.exists():
-            samples = parse_results_file(results_file)
-            for s in samples:
-                s["dataset"] = dir_path.name.split("_")[1]
-            all_samples.extend(samples)
-
-    if not all_samples:
-        console.print("[red]No samples found in results files[/red]")
-        raise typer.Exit(1)
-
-    # Group by word count
-    by_wc = defaultdict(list)
-    for s in all_samples:
-        wc = min(s["word_count"], max_words + 1)
-        by_wc[wc].append(s)
-
-    # Build table
-    table = Table(title=f"WER by Utterance Length: {model}")
-    table.add_column("Words", style="cyan")
-    table.add_column("Count", justify="right")
-    table.add_column("WER", justify="right")
-    table.add_column("Perfect", justify="right")
-    table.add_column("Failures", justify="right")
-
-    for wc in sorted(by_wc.keys()):
-        samples = by_wc[wc]
-        n = len(samples)
-        avg_wer = sum(s["wer"] for s in samples) / n
-        perfect = sum(1 for s in samples if s["wer"] == 0)
-        failures = sum(1 for s in samples if s["wer"] == 100)
-        label = f"{wc}" if wc <= max_words else f"{max_words}+"
-        table.add_row(
-            label,
-            str(n),
-            f"{avg_wer:.1f}%",
-            f"{perfect} ({perfect / n * 100:.1f}%)",
-            f"{failures} ({failures / n * 100:.1f}%)",
-        )
-
-    # Total row
-    n = len(all_samples)
-    avg_wer = sum(s["wer"] for s in all_samples) / n
-    perfect = sum(1 for s in all_samples if s["wer"] == 0)
-    failures = sum(1 for s in all_samples if s["wer"] == 100)
-    table.add_row(
-        "[bold]Total[/bold]",
-        f"[bold]{n}[/bold]",
-        f"[bold]{avg_wer:.1f}%[/bold]",
-        f"[bold]{perfect} ({perfect / n * 100:.1f}%)[/bold]",
-        f"[bold]{failures} ({failures / n * 100:.1f}%)[/bold]",
-    )
-
-    console.print(table)
-
-
-# =============================================================================
-# keyword commands
-# =============================================================================
-
-keyword_app = typer.Typer(help="Named entity/keyword WER analysis")
-app.add_typer(keyword_app, name="keyword")
-
-
-@keyword_app.command("extract")
-def keyword_extract(
-    model: str = typer.Option("tiny-audio", help="Model pattern to extract from"),
-    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
-    exclude: list[str] = typer.Option(
-        ["glm", "moe", "mosa", "qformer", "swiglu", "stage2"], help="Patterns to exclude"
-    ),
+    exclude: list[str] = typer.Option([], help="Patterns to exclude"),
     min_count: int = typer.Option(20, help="Minimum entity count to include a type"),
+    latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
 ):
     """Extract named entities from reference texts and save to keywords.json."""
     import spacy
@@ -213,7 +151,7 @@ def keyword_extract(
     console.print("Loading spaCy model...")
     nlp = spacy.load("en_core_web_sm")
 
-    model_dirs = find_model_dirs(outputs_dir, model, exclude)
+    model_dirs = find_model_dirs(outputs_dir, model, exclude, latest=latest)
     results_files = [d / "results.txt" for d in model_dirs if (d / "results.txt").exists()]
     console.print(f"Found {len(results_files)} results files")
 
@@ -221,7 +159,6 @@ def keyword_extract(
     entity_counts = defaultdict(int)
 
     for results_file in sorted(results_files):
-        dataset = results_file.parent.name.split("_")[1]
         samples = parse_results_file(results_file)
 
         for sample in samples:
@@ -237,10 +174,9 @@ def keyword_extract(
                     }
                     for ent in doc.ents
                 ]
-                all_references[gt] = {"entities": entities, "datasets": []}
+                all_references[gt] = {"entities": entities}
                 for ent in entities:
                     entity_counts[ent["label"]] += 1
-            all_references[gt]["datasets"].append(dataset)
 
     valid_types = {t for t, c in entity_counts.items() if c >= min_count}
 
@@ -253,7 +189,6 @@ def keyword_extract(
             {
                 "text": gt,
                 "entities": [e for e in data["entities"] if e["label"] in valid_types],
-                "datasets": list(set(data["datasets"])),
             }
             for gt, data in all_references.items()
             if any(e["label"] in valid_types for e in data["entities"])
@@ -269,90 +204,505 @@ def keyword_extract(
     console.print(f"Saved to [bold]{keywords_path}[/bold]")
 
 
-@keyword_app.command("calculate")
-def keyword_calculate(
-    model: str = typer.Argument(..., help="Model name pattern to match"),
-    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
-    exclude: list[str] = typer.Option([], help="Patterns to exclude from matching"),
-    by_type: bool = typer.Option(False, "--by-type", help="Show breakdown by entity type"),
-):
-    """Calculate keyword WER for a model using pre-extracted entities."""
-    keywords_path = Path(KEYWORDS_FILE)
-    if not keywords_path.exists():
-        console.print(f"[red]Keywords file not found: {keywords_path}[/red]")
-        console.print("Run 'analysis keyword extract' first")
-        raise typer.Exit(1)
+# =============================================================================
+# compare command - comprehensive model comparison
+# =============================================================================
 
-    keywords = json.loads(keywords_path.read_text())
-    ref_entities = {ref["text"]: ref["entities"] for ref in keywords["references"]}
+# Canonical dataset order for comparison tables
+DATASET_ORDER = [
+    "earnings22",
+    "peoples",
+    "ami",
+    "gigaspeech",
+    "commonvoice",
+    "loquacious",
+    "librispeech-other",
+    "tedlium",
+    "librispeech",
+    "english-dialects-irish",
+    "english-dialects-scottish",
+    "english-dialects-welsh",
+    "english-dialects-northern",
+    "edacc",
+    "switchboard",
+]
 
-    model_dirs = find_model_dirs(outputs_dir, model, exclude)
+# Short names for display
+DATASET_SHORT_NAMES = {
+    "earnings22": "Earnings22",
+    "peoples": "Peoples",
+    "ami": "AMI",
+    "gigaspeech": "Gigaspeech",
+    "commonvoice": "CV",
+    "loquacious": "Loquacious",
+    "librispeech-other": "LS Other",
+    "tedlium": "Tedlium",
+    "librispeech": "LS Clean",
+    "english-dialects-irish": "Irish",
+    "english-dialects-scottish": "Scottish",
+    "english-dialects-welsh": "Welsh",
+    "english-dialects-northern": "Northern",
+    "edacc": "EDACC",
+    "switchboard": "Switchboard",
+}
+
+
+def extract_model_display_name(model_dirs: list[Path], model_pattern: str) -> str:
+    """Extract a display name from folder names, including model variant if present.
+
+    Folder format for API providers: {timestamp}_{provider}_{variant}_{apikey}_{dataset}
+    Example: 20260109_193505_assemblyai_slam1_abc_earnings22 -> "assemblyai slam1"
+
+    For local models: {timestamp}_{model_name}_{dataset}
+    Example: 20260109_193505_tiny-audio_earnings22 -> "tiny-audio"
+    """
     if not model_dirs:
-        console.print(f"[red]No output directories found matching '{model}'[/red]")
-        raise typer.Exit(1)
+        return model_pattern
 
-    console.print(f"Found {len(model_dirs)} directories matching '{model}'")
+    # Look at the first directory to extract the model name
+    dir_name = model_dirs[0].name
+    parts = dir_name.split("_")
 
-    results_by_type = defaultdict(lambda: {"found": 0, "total": 0})
-    misses = []
+    # Need at least: timestamp, time, provider/model, dataset
+    if len(parts) < 4:
+        return model_pattern
 
-    for dir_path in sorted(model_dirs):
+    # Skip timestamp parts (date_time) and get the rest
+    # Format: date_time_provider_variant_apikey_dataset OR date_time_model_dataset
+    remaining_parts = parts[2:]  # Skip date and time
+
+    # Check if this looks like an API provider format (has apikey - 3 chars before dataset)
+    # API format: [provider, variant, apikey, dataset]
+    # Local format: [model, dataset] or [model, part, dataset]
+
+    if len(remaining_parts) >= 4:
+        # Could be API format: provider_variant_apikey_dataset
+        # Check if second-to-last part looks like a short API key prefix (3 chars)
+        potential_apikey = remaining_parts[-2]
+        if len(potential_apikey) == 3 and potential_apikey.isalnum():
+            # API provider format - extract provider and variant
+            provider = remaining_parts[0]
+            variant = remaining_parts[1] if len(remaining_parts) > 3 else None
+            if variant and variant != potential_apikey:
+                return f"{provider} {variant}"
+            return provider
+
+    # Local model format - just use the model pattern as-is
+    return model_pattern
+
+
+def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[str]) -> dict:
+    """Collect all metrics for a model across datasets."""
+    import jiwer
+
+    model_dirs = find_model_dirs(outputs_dir, model_pattern, exclude, latest=True)
+
+    # Extract display name from folder structure
+    display_name = extract_model_display_name(model_dirs, model_pattern)
+
+    metrics = {
+        "display_name": display_name,
+        "datasets": {},
+        "by_length": defaultdict(lambda: {"samples": [], "wers": []}),
+        "diarization": None,
+        "alignment": None,
+        "entity_errors": defaultdict(lambda: {"found": 0, "total": 0}),
+        "itn_errors": defaultdict(lambda: {"correct": 0, "total": 0}),
+    }
+
+    all_refs = []
+    all_preds = []
+    all_latencies = []
+
+    # Load keywords for entity analysis
+    keywords_path = Path(KEYWORDS_FILE)
+    ref_entities = {}
+    if keywords_path.exists():
+        keywords = json.loads(keywords_path.read_text())
+        ref_entities = {ref["text"]: ref["entities"] for ref in keywords["references"]}
+
+    for dir_path in model_dirs:
         results_file = dir_path / "results.txt"
+        metrics_file = dir_path / "metrics.txt"
+
+        # Extract dataset name
+        dir_name = dir_path.name
+        parts = dir_name.split("_")
+        dataset = parts[-1]
+
+        # Check for diarization/alignment results
+        if dataset == "diarization" and len(parts) > 1:
+            dataset = parts[-2]
+            if metrics_file.exists():
+                metrics["diarization"] = parse_metrics_file(metrics_file)
+            continue
+        if dataset == "alignment" and len(parts) > 1:
+            dataset = parts[-2]
+            if metrics_file.exists():
+                metrics["alignment"] = parse_metrics_file(metrics_file)
+            continue
+
         if not results_file.exists():
             continue
 
+        ds_metrics = {"refs": [], "preds": [], "avg_time": None, "wer": None}
+
+        # Parse metrics.txt
+        if metrics_file.exists():
+            for line in metrics_file.read_text().splitlines():
+                if line.startswith("avg_time:"):
+                    try:
+                        ds_metrics["avg_time"] = float(line.split(":")[1].strip())
+                        all_latencies.append(ds_metrics["avg_time"])
+                    except ValueError:
+                        pass
+                elif line.startswith("wer:"):
+                    with contextlib.suppress(ValueError):
+                        ds_metrics["wer"] = float(line.split(":")[1].strip())
+
+        # Parse results
         for sample in parse_results_file(results_file):
-            gt, pred = sample["ground_truth"], sample["prediction"]
-            if gt in ref_entities:
-                for entity in ref_entities[gt]:
-                    found = entity_in_text(entity["text"], pred)
-                    results_by_type[entity["label"]]["total"] += 1
-                    if found:
-                        results_by_type[entity["label"]]["found"] += 1
-                    else:
-                        misses.append(
-                            {"entity": entity["text"], "type": entity["label"], "pred": pred}
-                        )
+            ref = normalize_text(sample["ground_truth"])
+            pred = normalize_text(sample["prediction"])
+            gt_raw = sample["ground_truth"]
+            pred_raw = sample["prediction"]
 
-    total_found = sum(r["found"] for r in results_by_type.values())
-    total_entities = sum(r["total"] for r in results_by_type.values())
+            if ref:
+                ds_metrics["refs"].append(ref)
+                ds_metrics["preds"].append(pred)
+                all_refs.append(ref)
+                all_preds.append(pred)
 
-    if total_entities == 0:
-        console.print("[red]No entities found in model outputs[/red]")
+                # Track by word count
+                word_count = len(ref.split())
+                wer = sample.get("wer", 0)
+                metrics["by_length"][word_count]["samples"].append(sample)
+                metrics["by_length"][word_count]["wers"].append(wer)
+
+                # Track entity errors and ITN errors
+                if gt_raw in ref_entities:
+                    for entity in ref_entities[gt_raw]:
+                        entity_type = entity["label"]
+                        entity_text = entity["text"]
+
+                        # Entity detection (normalized)
+                        found = entity_in_text(entity_text, pred_raw)
+                        metrics["entity_errors"][entity_type]["total"] += 1
+                        if found:
+                            metrics["entity_errors"][entity_type]["found"] += 1
+
+                        # ITN accuracy (format preservation)
+                        if entity_type in ITN_ENTITY_TYPES:
+                            metrics["itn_errors"][entity_type]["total"] += 1
+                            if entity_itn_correct(entity_text, pred_raw):
+                                metrics["itn_errors"][entity_type]["correct"] += 1
+
+        # Calculate detailed error breakdown
+        if ds_metrics["refs"]:
+            output = jiwer.process_words(ds_metrics["refs"], ds_metrics["preds"])
+            total = output.hits + output.substitutions + output.deletions
+            if total > 0:
+                ds_metrics["wer_calculated"] = (
+                    (output.substitutions + output.deletions + output.insertions) / total * 100
+                )
+                ds_metrics["ins_rate"] = output.insertions / total * 100
+                ds_metrics["del_rate"] = output.deletions / total * 100
+                ds_metrics["sub_rate"] = output.substitutions / total * 100
+
+        metrics["datasets"][dataset] = ds_metrics
+
+    # Calculate corpus-level metrics
+    if all_refs:
+        output = jiwer.process_words(all_refs, all_preds)
+        total = output.hits + output.substitutions + output.deletions
+        if total > 0:
+            metrics["corpus_wer"] = (
+                (output.substitutions + output.deletions + output.insertions) / total * 100
+            )
+            metrics["corpus_ins_rate"] = output.insertions / total * 100
+
+    if all_latencies:
+        metrics["avg_latency"] = sum(all_latencies) / len(all_latencies)
+
+    return metrics
+
+
+def parse_metrics_file(metrics_file: Path) -> dict:
+    """Parse a metrics.txt file into a dictionary."""
+    result = {}
+    for line in metrics_file.read_text().splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            key = key.strip().lower().replace(" ", "_")
+            value = value.strip()
+            try:
+                result[key] = float(value)
+            except ValueError:
+                result[key] = value
+    return result
+
+
+@app.command("compare")
+def compare(
+    models: list[str] = typer.Argument(..., help="Model patterns to compare"),
+    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
+    exclude: list[str] = typer.Option([], help="Patterns to exclude from matching"),
+):
+    """Generate comprehensive comparison tables for multiple models."""
+
+    if not models:
+        console.print("[red]Please provide at least one model pattern[/red]")
         raise typer.Exit(1)
 
-    # Results table
-    table = Table(title=f"Keyword WER: {model}")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
-    table.add_row("Total entities", str(total_entities))
-    table.add_row(
-        "Correctly transcribed", f"{total_found} ({total_found / total_entities * 100:.1f}%)"
-    )
-    table.add_row("Keyword WER", f"{100 - total_found / total_entities * 100:.1f}%")
-    console.print(table)
+    # Collect metrics for all models
+    model_metrics = {}
+    for model in models:
+        console.print(f"Collecting metrics for '{model}'...")
+        model_metrics[model] = collect_model_metrics(model, outputs_dir, exclude)
 
-    if by_type:
-        type_table = Table(title="By Entity Type")
-        type_table.add_column("Type", style="cyan")
-        type_table.add_column("Found", justify="right")
-        type_table.add_column("Total", justify="right")
-        type_table.add_column("Accuracy", justify="right")
-        type_table.add_column("WER", justify="right")
+    # Get all datasets present across models
+    all_datasets = set()
+    for m in model_metrics.values():
+        all_datasets.update(m["datasets"].keys())
 
-        for etype in sorted(results_by_type.keys(), key=lambda x: -results_by_type[x]["total"]):
-            stats = results_by_type[etype]
-            acc = stats["found"] / stats["total"] * 100 if stats["total"] > 0 else 0
-            type_table.add_row(
-                etype, str(stats["found"]), str(stats["total"]), f"{acc:.1f}%", f"{100 - acc:.1f}%"
-            )
-        console.print(type_table)
+    # Order datasets according to canonical order
+    ordered_datasets = [d for d in DATASET_ORDER if d in all_datasets]
+    ordered_datasets += [d for d in sorted(all_datasets) if d not in DATASET_ORDER]
 
-    if misses:
-        console.print("\n[bold]Sample missed entities (up to 10):[/bold]")
-        for miss in misses[:10]:
-            console.print(f"  [{miss['type']}] '{miss['entity']}'")
-            console.print(f"    [dim]Pred: {miss['pred'][:80]}...[/dim]")
+    # === Latency Table ===
+    console.print("\n")
+    latency_table = Table(title="Latency (ms)")
+    latency_table.add_column("Model", style="cyan")
+    latency_table.add_column("Average", justify="right", style="bold")
+    for ds in ordered_datasets:
+        latency_table.add_column(DATASET_SHORT_NAMES.get(ds, ds), justify="right")
+
+    for model, data in model_metrics.items():
+        display_name = data.get("display_name", model)
+        row = [display_name]
+        avg_lat = data.get("avg_latency")
+        row.append(f"{avg_lat * 1000:.0f}" if avg_lat else "-")
+        for ds in ordered_datasets:
+            ds_data = data["datasets"].get(ds, {})
+            lat = ds_data.get("avg_time")
+            row.append(f"{lat * 1000:.0f}" if lat else "-")
+        latency_table.add_row(*row)
+
+    console.print(latency_table)
+
+    # === WER Table ===
+    console.print("\n")
+    wer_table = Table(title="Accuracy by WER")
+    wer_table.add_column("Model", style="cyan")
+    wer_table.add_column("Corpus WER", justify="right", style="bold")
+    for ds in ordered_datasets:
+        wer_table.add_column(DATASET_SHORT_NAMES.get(ds, ds), justify="right")
+
+    for model, data in model_metrics.items():
+        display_name = data.get("display_name", model)
+        row = [display_name]
+        corpus_wer = data.get("corpus_wer")
+        row.append(f"{corpus_wer:.2f}%" if corpus_wer else "-")
+        for ds in ordered_datasets:
+            ds_data = data["datasets"].get(ds, {})
+            wer = ds_data.get("wer_calculated") or ds_data.get("wer")
+            row.append(f"{wer:.2f}%" if wer else "-")
+        wer_table.add_row(*row)
+
+    console.print(wer_table)
+
+    # === Insertion Rate Table ===
+    console.print("\n")
+    ins_table = Table(title="Insertion Rate (Hallucination Proxy)")
+    ins_table.add_column("Model", style="cyan")
+    ins_table.add_column("Corpus", justify="right", style="bold")
+    for ds in ordered_datasets:
+        ins_table.add_column(DATASET_SHORT_NAMES.get(ds, ds), justify="right")
+
+    for model, data in model_metrics.items():
+        display_name = data.get("display_name", model)
+        row = [display_name]
+        avg_ins = data.get("corpus_ins_rate")
+        row.append(f"{avg_ins:.2f}%" if avg_ins else "-")
+        for ds in ordered_datasets:
+            ds_data = data["datasets"].get(ds, {})
+            ins = ds_data.get("ins_rate")
+            row.append(f"{ins:.2f}%" if ins else "-")
+        ins_table.add_row(*row)
+
+    console.print(ins_table)
+
+    # === WER by Word Count Table ===
+    console.print("\n")
+    wc_table = Table(title="WER by Word Count")
+    wc_table.add_column("Model", style="cyan")
+    wc_table.add_column("Corpus", justify="right", style="bold")
+    for i in range(1, 11):
+        wc_table.add_column(f"{i} word{'s' if i > 1 else ''}", justify="right")
+
+    for model, data in model_metrics.items():
+        display_name = data.get("display_name", model)
+        corpus_wer = data.get("corpus_wer")
+        row = [display_name]
+        row.append(f"{corpus_wer:.2f}%" if corpus_wer else "-")
+        for wc in range(1, 11):
+            wc_data = data["by_length"].get(wc, {})
+            wers = wc_data.get("wers", [])
+            if wers:
+                avg_wer = sum(wers) / len(wers)
+                row.append(f"{avg_wer:.1f}%")
+            else:
+                row.append("-")
+        wc_table.add_row(*row)
+
+    console.print(wc_table)
+
+    # === Diarization Table ===
+    has_diarization = any(m.get("diarization") for m in model_metrics.values())
+    if has_diarization:
+        console.print("\n")
+        diar_table = Table(title="Diarization")
+        diar_table.add_column("Model", style="cyan")
+        diar_table.add_column("DER", justify="right")
+        diar_table.add_column("Confusion", justify="right")
+        diar_table.add_column("Missed", justify="right")
+        diar_table.add_column("False Alarm", justify="right")
+
+        for model, data in model_metrics.items():
+            display_name = data.get("display_name", model)
+            diar = data.get("diarization", {})
+            if diar:
+                diar_table.add_row(
+                    display_name,
+                    f"{diar.get('der', 0):.2f}%",
+                    f"{diar.get('confusion', 0):.2f}%",
+                    f"{diar.get('missed', 0):.2f}%",
+                    f"{diar.get('false_alarm', 0):.2f}%",
+                )
+            else:
+                diar_table.add_row(display_name, "-", "-", "-", "-")
+
+        console.print(diar_table)
+
+    # === Alignment Table ===
+    has_alignment = any(m.get("alignment") for m in model_metrics.values())
+    if has_alignment:
+        console.print("\n")
+        align_table = Table(title="Timestamp Alignment")
+        align_table.add_column("Model", style="cyan")
+        align_table.add_column("MAE (ms)", justify="right")
+        align_table.add_column("Alignment Error", justify="right")
+
+        for model, data in model_metrics.items():
+            display_name = data.get("display_name", model)
+            align = data.get("alignment", {})
+            if align:
+                mae = align.get("mae", 0)
+                align_err = align.get("alignment_error", 0)
+                align_table.add_row(
+                    display_name,
+                    f"{mae * 1000:.1f}",
+                    f"{align_err * 100:.2f}%",
+                )
+            else:
+                align_table.add_row(display_name, "-", "-")
+
+        console.print(align_table)
+
+    # === Entity Errors Table ===
+    # Get all entity types across models
+    all_entity_types = set()
+    for m in model_metrics.values():
+        all_entity_types.update(m["entity_errors"].keys())
+
+    if all_entity_types:
+        # Order entity types by frequency
+        entity_type_order = [
+            "CARDINAL",
+            "DATE",
+            "GPE",
+            "PERSON",
+            "ORG",
+            "NORP",
+            "ORDINAL",
+            "TIME",
+            "QUANTITY",
+            "LOC",
+            "MONEY",
+            "PERCENT",
+        ]
+        ordered_entity_types = [t for t in entity_type_order if t in all_entity_types]
+        ordered_entity_types += [t for t in sorted(all_entity_types) if t not in entity_type_order]
+
+        console.print("\n")
+        entity_table = Table(title="Missed Entity Errors")
+        entity_table.add_column("Model", style="cyan")
+        entity_table.add_column("Average", justify="right", style="bold")
+        for etype in ordered_entity_types:
+            entity_table.add_column(etype, justify="right")
+
+        for model, data in model_metrics.items():
+            display_name = data.get("display_name", model)
+            row = [display_name]
+            # Calculate average entity error rate
+            total_found = sum(e["found"] for e in data["entity_errors"].values())
+            total_entities = sum(e["total"] for e in data["entity_errors"].values())
+            if total_entities > 0:
+                avg_err = (total_entities - total_found) / total_entities * 100
+                row.append(f"{avg_err:.2f}%")
+            else:
+                row.append("-")
+
+            for etype in ordered_entity_types:
+                stats = data["entity_errors"].get(etype, {"found": 0, "total": 0})
+                if stats["total"] > 0:
+                    err = (stats["total"] - stats["found"]) / stats["total"] * 100
+                    row.append(f"{err:.2f}%")
+                else:
+                    row.append("-")
+            entity_table.add_row(*row)
+
+        console.print(entity_table)
+
+    # === ITN Formatting Errors Table ===
+    all_itn_types = set()
+    for m in model_metrics.values():
+        all_itn_types.update(m["itn_errors"].keys())
+
+    if all_itn_types:
+        itn_type_order = ["CARDINAL", "DATE", "TIME", "MONEY", "PERCENT", "ORDINAL", "QUANTITY"]
+        ordered_itn_types = [t for t in itn_type_order if t in all_itn_types]
+        ordered_itn_types += [t for t in sorted(all_itn_types) if t not in itn_type_order]
+
+        console.print("\n")
+        itn_table = Table(title="ITN Formatting Errors")
+        itn_table.add_column("Model", style="cyan")
+        itn_table.add_column("Average", justify="right", style="bold")
+        for itype in ordered_itn_types:
+            itn_table.add_column(itype, justify="right")
+
+        for model, data in model_metrics.items():
+            display_name = data.get("display_name", model)
+            row = [display_name]
+            # Calculate average ITN error rate
+            total_correct = sum(e["correct"] for e in data["itn_errors"].values())
+            total_itn = sum(e["total"] for e in data["itn_errors"].values())
+            if total_itn > 0:
+                avg_itn_err = (total_itn - total_correct) / total_itn * 100
+                row.append(f"{avg_itn_err:.2f}%")
+            else:
+                row.append("-")
+
+            for itype in ordered_itn_types:
+                stats = data["itn_errors"].get(itype, {"correct": 0, "total": 0})
+                if stats["total"] > 0:
+                    err = (stats["total"] - stats["correct"]) / stats["total"] * 100
+                    row.append(f"{err:.2f}%")
+                else:
+                    row.append("-")
+            itn_table.add_row(*row)
+
+        console.print(itn_table)
 
 
 def cli():

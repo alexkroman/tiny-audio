@@ -327,5 +327,162 @@ class TestProcessorIntegration:
         assert processor.encoder_conv_layers == model.config.encoder_conv_layers
 
 
+# ============================================================================
+# Unit tests that don't require loading models (fast tests)
+# ============================================================================
+
+
+class TestASRModelConstants:
+    """Tests for ASRModel class constants (no model loading required)."""
+
+    def test_transcribe_prompt_defined(self):
+        """TRANSCRIBE_PROMPT should be defined."""
+        assert hasattr(ASRModel, "TRANSCRIBE_PROMPT")
+        assert "Transcribe" in ASRModel.TRANSCRIBE_PROMPT
+
+    def test_config_class_set(self):
+        """config_class should be ASRConfig."""
+        assert ASRModel.config_class is ASRConfig
+
+    def test_main_input_name(self):
+        """main_input_name should be input_features."""
+        assert ASRModel.main_input_name == "input_features"
+
+    def test_supports_flash_attention(self):
+        """Should support flash attention 2."""
+        assert ASRModel._supports_flash_attn_2 is True
+
+    def test_supports_gradient_checkpointing(self):
+        """Should support gradient checkpointing."""
+        assert ASRModel.supports_gradient_checkpointing is True
+
+
+class TestInitWeights:
+    """Tests for ASRModel._init_weights method (no model loading)."""
+
+    def test_init_weights_is_noop(self):
+        """_init_weights should be a no-op (projectors handle their own init)."""
+        from unittest.mock import MagicMock
+
+        model = object.__new__(ASRModel)
+        module = MagicMock()
+
+        # Should not raise and should not modify module
+        model._init_weights(module)
+
+        # Module should not be modified
+        module.assert_not_called()
+
+
+class TestCreateOrUpdateModelCard:
+    """Tests for ASRModel.create_or_update_model_card (no model loading)."""
+
+    def test_is_noop(self, tmp_path):
+        """create_or_update_model_card should be a no-op."""
+        model = object.__new__(ASRModel)
+
+        # Should not create any files
+        model.create_or_update_model_card(tmp_path)
+
+        # No model card should be created
+        assert not (tmp_path / "README.md").exists()
+
+
+class TestComputeEncoderOutputLengthsUnit:
+    """Unit tests for _compute_encoder_output_lengths (no model loading)."""
+
+    @pytest.fixture
+    def mock_model(self):
+        """Create a minimal mock model with the method."""
+        from unittest.mock import MagicMock
+
+        model = object.__new__(ASRModel)
+        model.config = MagicMock()
+        # Default Whisper conv layers: [(pad, kernel, stride), ...]
+        model.config.encoder_conv_layers = [(1, 3, 1), (1, 3, 2)]
+
+        return model
+
+    def test_single_sample(self, mock_model):
+        """Should compute correct length for single sample."""
+        attention_mask = torch.ones(1, 100)
+
+        result = mock_model._compute_encoder_output_lengths(attention_mask)
+
+        # Layer 1: (100 + 2 - 2 - 1) // 1 + 1 = 100
+        # Layer 2: (100 + 2 - 2 - 1) // 2 + 1 = 50
+        assert result.item() == 50
+
+    def test_batch_samples_different_lengths(self, mock_model):
+        """Should compute correct lengths for batch with different lengths."""
+        mask = torch.zeros(2, 100)
+        mask[0, :100] = 1  # 100 frames
+        mask[1, :50] = 1  # 50 frames
+
+        result = mock_model._compute_encoder_output_lengths(mask)
+
+        assert result[0].item() == 50
+        assert result[1].item() == 25
+
+
+class TestSetGradientCheckpointing:
+    """Tests for _set_gradient_checkpointing (no model loading)."""
+
+    @pytest.fixture
+    def mock_model_with_llm(self):
+        """Create mock model with language model."""
+        from unittest.mock import MagicMock
+
+        model = object.__new__(ASRModel)
+        model.language_model = MagicMock()
+
+        return model
+
+    def test_enable_with_new_api(self, mock_model_with_llm):
+        """Should use gradient_checkpointing_enable when available."""
+        model = mock_model_with_llm
+        # Remove old API
+        del model.language_model._set_gradient_checkpointing
+
+        model._set_gradient_checkpointing(enable=True)
+
+        model.language_model.gradient_checkpointing_enable.assert_called_once()
+
+    def test_disable_with_new_api(self, mock_model_with_llm):
+        """Should use gradient_checkpointing_disable when disabling."""
+        model = mock_model_with_llm
+        del model.language_model._set_gradient_checkpointing
+
+        model._set_gradient_checkpointing(enable=False)
+
+        model.language_model.gradient_checkpointing_disable.assert_called_once()
+
+
+class TestStateDictUnit:
+    """Unit tests for state_dict (no model loading)."""
+
+    @pytest.fixture
+    def mock_model_with_projector(self):
+        """Create mock model with projector state."""
+        from unittest.mock import MagicMock
+
+        model = object.__new__(ASRModel)
+        model.projector = MagicMock()
+        model.projector.state_dict.return_value = {
+            "linear.weight": torch.randn(256, 128),
+            "linear.bias": torch.randn(256),
+        }
+
+        return model
+
+    def test_only_saves_projector_weights(self, mock_model_with_projector):
+        """state_dict should only include projector weights."""
+        result = mock_model_with_projector.state_dict()
+
+        assert all(k.startswith("projector.") for k in result)
+        assert "projector.linear.weight" in result
+        assert "projector.linear.bias" in result
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
