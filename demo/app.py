@@ -96,14 +96,8 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         if audio is None:
             return "Please provide audio input", "", ""
 
-        # Update model's transcribe prompt
-        if transcribe_prompt and transcribe_prompt.strip():
-            model.TRANSCRIBE_PROMPT = transcribe_prompt.strip()
-        else:
-            model.TRANSCRIBE_PROMPT = DEFAULT_TRANSCRIBE_PROMPT
-
         # Build kwargs
-        kwargs = {}
+        kwargs = {"user_prompt": transcribe_prompt.strip() if transcribe_prompt else None}
         if show_timestamps:
             kwargs["return_timestamps"] = True
         if show_diarization:

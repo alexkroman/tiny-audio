@@ -200,7 +200,6 @@ class DataCollator:
         # Process audio
         audio_arrays = []
         valid_features = []
-        min_duration = 0.5  # Skip audio shorter than 0.5 seconds
         for f in features:
             try:
                 audio = f["audio"]["array"]
@@ -209,9 +208,6 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
-                # Skip very short audio samples
-                if len(audio) / self.sample_rate < min_duration:
-                    continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
             except Exception:
@@ -246,9 +242,69 @@ class DataCollator:
             """Remove HTML tags from text."""
             return re.sub(r"<[^>]+>", "", text)
 
-        raw_texts = [strip_html(f.get("text") or "").strip().lower() for f in valid_features]
+        def preprocess_for_pcs(text: str) -> str:
+            """Prepare text for PunctCapSeg by handling symbols it doesn't understand.
+
+            PunctCapSeg converts %, :, /, #, -, &, ¥, ¢, ° to <unk>. We use word placeholders
+            that PunctCapSeg will pass through, then convert back after.
+            """
+            # % -> percent
+            result = re.sub(r"(\d)%", r"\1 percent", text)
+            # : in times -> oclock placeholder
+            result = re.sub(r"(\d):(\d)", r"\1 oclock \2", result)
+            # / in dates/fractions -> slashdate placeholder (apply twice for consecutive)
+            result = re.sub(r"(\d)/(\d)", r"\1 slashdate \2", result)
+            result = re.sub(r"(\d)/(\d)", r"\1 slashdate \2", result)
+            # # -> numbersign
+            result = re.sub(r"#(\d)", r"numbersign \1", result)
+            # & -> ampersand (common in Q&A, R&D, etc.)
+            result = re.sub(r"(\w)&(\w)", r"\1 ampersand \2", result)
+            # ¥ (Yen) -> yensign, ¢ (cent) -> centsign
+            result = re.sub(r"¥(\d)", r"yensign \1", result)
+            result = re.sub(r"(\d)¢", r"\1 centsign", result)
+            # ° (degree) -> degreesign (e.g., 72°F, 45°)
+            result = re.sub(r"(\d)°", r"\1 degreesign", result)
+            # Hyphens in compound words -> hyphenword placeholder
+            # Match word-word patterns (e.g., wi-fi, e-mail, co-founder)
+            # Apply multiple times for multi-hyphen words (state-of-the-art)
+            for _ in range(5):
+                result = re.sub(r"(\w+)-(\w+)", r"\1 hyphenword \2", result)
+            return result
+
+        def postprocess_from_pcs(text: str) -> str:
+            """Convert placeholders back to their original symbols."""
+            result = re.sub(r"(\d)\s*percent\b", r"\1%", text, flags=re.IGNORECASE)
+            result = re.sub(r"(\d)[,\s]*oclock[,\s]*(\d)", r"\1:\2", result, flags=re.IGNORECASE)
+            # Apply slash restoration multiple times for consecutive patterns
+            for _ in range(3):
+                result = re.sub(
+                    r"(\d)[,\s]*slashdate[,\s]*(\d)", r"\1/\2", result, flags=re.IGNORECASE
+                )
+            result = re.sub(r"numbersign\s*(\d)", r"#\1", result, flags=re.IGNORECASE)
+            result = re.sub(r"(\w)\s*ampersand\s*(\w)", r"\1&\2", result, flags=re.IGNORECASE)
+            result = re.sub(r"yensign\s*(\d)", r"¥\1", result, flags=re.IGNORECASE)
+            result = re.sub(r"(\d)\s*centsign", r"\1¢", result, flags=re.IGNORECASE)
+            result = re.sub(r"(\d)\s*degreesign", r"\1°", result, flags=re.IGNORECASE)
+            # Handle hyphenword with optional punctuation/whitespace between
+            # Apply multiple times for multi-hyphen words (state-of-the-art)
+            for _ in range(5):
+                result = re.sub(
+                    r"(\w+)[,\s]*hyphenword[,\s]*(\w+)", r"\1-\2", result, flags=re.IGNORECASE
+                )
+            # Fix country abbreviations: U.S. -> US, U.S.A. -> USA, U.K. -> UK
+            # PunctCapSeg adds periods which cause WER issues after normalization
+            result = re.sub(r"\bU\.S\.A\.?", "USA", result)
+            result = re.sub(r"\bU\.S\.?", "US", result)
+            return re.sub(r"\bU\.K\.?", "UK", result)
+
+        raw_texts = [
+            preprocess_for_pcs(strip_html(f.get("text") or "").strip().lower())
+            for f in valid_features
+        ]
         results = self.punctuator.infer(raw_texts)
-        processed_texts = [" ".join(r) if r else t for t, r in zip(raw_texts, results)]
+        processed_texts = [
+            postprocess_from_pcs(" ".join(r) if r else t) for t, r in zip(raw_texts, results)
+        ]
 
         # Build messages for each sample with per-sample audio token counts
         text_features = []

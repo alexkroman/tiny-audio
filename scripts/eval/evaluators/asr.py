@@ -38,39 +38,22 @@ class LocalEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from tiny_audio.asr_modeling import ASRModel
-        from tiny_audio.asr_pipeline import ASRPipeline
+        from transformers import pipeline
 
-        # Load model and use our custom pipeline
-        model = ASRModel.from_pretrained(model_path)
-        self.pipe = ASRPipeline(model=model)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_path,
+            trust_remote_code=True,
+        )
         self.user_prompt = user_prompt
 
-        # Print generation config
-        print_generation_config(model, model_path)
+        print_generation_config(self.pipe.model, model_path)
 
     def transcribe(self, audio) -> tuple[str, float]:
-        # Convert to pipeline-compatible format
-        if isinstance(audio, dict) and "array" in audio and "raw" not in audio:
-            # Standard HF datasets format: "array" -> "raw"
-            audio = {"raw": audio["array"], "sampling_rate": audio["sampling_rate"]}
-        elif not isinstance(audio, (str, dict)) or (isinstance(audio, dict) and "raw" not in audio):
-            # For other formats (AudioDecoder, bytes, etc.), convert to WAV file
-            wav_bytes = prepare_wav_bytes(audio)
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-                temp_file.write(wav_bytes)
-                audio = temp_file.name
-
         start = time.time()
-        if self.user_prompt:
-            result = self.pipe(audio, user_prompt=self.user_prompt)
-        else:
-            result = self.pipe(audio)
+        result = self.pipe(audio, user_prompt=self.user_prompt)
         elapsed = time.time() - start
-
-        if isinstance(result, dict):
-            return result.get("text", ""), elapsed
-        return str(result), elapsed
+        return result.get("text", "") if isinstance(result, dict) else str(result), elapsed
 
 
 class LocalStreamingEvaluator(Evaluator):
@@ -78,24 +61,29 @@ class LocalStreamingEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from tiny_audio.asr_modeling import ASRModel
-        from tiny_audio.asr_pipeline import ASRPipeline
+        from transformers import pipeline
 
         # Determine best device and dtype
         if torch.cuda.is_available():
-            device = "cuda"
+            device = 0
             dtype = torch.bfloat16
         elif torch.backends.mps.is_available():
             device = "mps"
-            dtype = torch.float16  # MPS doesn't support bfloat16
+            dtype = torch.float16
         else:
-            device = "cpu"
+            device = -1
             dtype = torch.float32
 
-        self.model = ASRModel.from_pretrained(model_path, torch_dtype=dtype).to(device)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_path,
+            trust_remote_code=True,
+            device=device,
+            torch_dtype=dtype,
+        )
+        self.model = self.pipe.model
         self.model.eval()
         self.processor = self.model.get_processor()
-        self.pipe = ASRPipeline(model=self.model)  # For post-processing
         self.user_prompt = user_prompt
         print(f"Using device: {device}, dtype: {dtype}")
 

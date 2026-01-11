@@ -258,15 +258,16 @@ class TimestampAlignmentEvaluator(BaseAlignmentEvaluator):
         super().__init__(audio_field, text_field, words_field)
         self.user_prompt = user_prompt
 
-        # Load model and pipeline
-        from tiny_audio.asr_modeling import ASRModel
-        from tiny_audio.asr_pipeline import ASRPipeline
+        from transformers import pipeline
 
-        model = ASRModel.from_pretrained(model_path)
-        self.pipe = ASRPipeline(model=model)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_path,
+            trust_remote_code=True,
+        )
 
         # Print generation config
-        gen_config = model.generation_config
+        gen_config = self.pipe.model.generation_config
         print(
             f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
             f"min_new_tokens={gen_config.min_new_tokens}, "

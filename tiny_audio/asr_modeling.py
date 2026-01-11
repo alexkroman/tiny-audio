@@ -763,14 +763,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 with adapter_config_path.open() as f:
                     adapter_config = json.load(f)
 
-                # Use repo_id if provided, otherwise use the save directory name
-                # (which becomes the repo ID when pushed to hub)
-                repo_id = kwargs.get("repo_id") or kwargs.get("push_to_hub_model_id")
+                # Use repo_id from kwargs or config - never use checkpoint directory name
+                repo_id = (
+                    kwargs.get("repo_id")
+                    or kwargs.get("push_to_hub_model_id")
+                    or getattr(self.config, "pretrained_model_path", None)
+                )
                 if repo_id:
                     adapter_config["base_model_name_or_path"] = repo_id
-                else:
-                    # Fallback: use save_dir name (works when save_dir matches repo structure)
-                    adapter_config["base_model_name_or_path"] = save_dir.name
 
                 with adapter_config_path.open("w") as f:
                     json.dump(adapter_config, f, indent=2)

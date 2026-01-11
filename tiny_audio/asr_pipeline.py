@@ -332,6 +332,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         kwargs.pop("min_speakers", None)
         kwargs.pop("max_speakers", None)
         kwargs.pop("hf_token", None)
+        kwargs.pop("user_prompt", None)
 
         return super()._sanitize_parameters(**kwargs)
 
@@ -346,6 +347,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             inputs: Audio input (file path, dict with array/sampling_rate, etc.)
             return_timestamps: If True, return word-level timestamps using forced alignment
             return_speakers: If True, return speaker labels for each word
+            user_prompt: Custom transcription prompt (default: "Transcribe: ")
             num_speakers: Exact number of speakers (if known, for diarization)
             min_speakers: Minimum number of speakers (for diarization)
             max_speakers: Maximum number of speakers (for diarization)
@@ -359,6 +361,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # Extract our params before super().__call__ (which will also call _sanitize_parameters)
         return_timestamps = kwargs.pop("return_timestamps", False)
         return_speakers = kwargs.pop("return_speakers", False)
+        user_prompt = kwargs.pop("user_prompt", None)
         diarization_params = {
             "num_speakers": kwargs.pop("num_speakers", None),
             "min_speakers": kwargs.pop("min_speakers", None),
@@ -368,6 +371,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         if return_speakers:
             return_timestamps = True
+
+        # Set custom user prompt if provided
+        original_prompt = None
+        if user_prompt:
+            original_prompt = self.model.TRANSCRIBE_PROMPT
+            self.model.TRANSCRIBE_PROMPT = user_prompt
 
         # Store audio for timestamp alignment and diarization
         if return_timestamps or return_speakers:
@@ -416,6 +425,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         # Clean up
         self._current_audio = None
+        if original_prompt is not None:
+            self.model.TRANSCRIBE_PROMPT = original_prompt
 
         return result
 
