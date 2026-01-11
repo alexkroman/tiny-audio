@@ -225,6 +225,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     )
                     model.language_model = get_peft_model(model.language_model, lora_config)
 
+                    # Clear base_model_name_or_path so PEFT doesn't save a reference
+                    # to the base LLM. See _setup_lora for details.
+                    model.language_model.peft_config["default"].base_model_name_or_path = None
+
             return model
         finally:
             cls._is_loading_from_pretrained = False
@@ -392,6 +396,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             task_type="CAUSAL_LM",
         )
         self.language_model = get_peft_model(self.language_model, lora_config)
+
+        # Clear base_model_name_or_path so PEFT doesn't save a reference to the
+        # base LLM (e.g. Qwen). This prevents pipeline() from redirecting to the
+        # wrong model. The correct path gets set during save_pretrained/push_to_hub.
+        self.language_model.peft_config["default"].base_model_name_or_path = None
 
     def _init_tokenizer(self, config: ASRConfig):
         """Initialize tokenizer with audio token."""
@@ -841,6 +850,27 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if hasattr(self.language_model, "peft_config"):
             self.language_model.save_pretrained(save_dir, save_embedding_layers=False)
 
+            # Fix adapter_config.json to point base_model_name_or_path to the repo itself
+            # This prevents transformers pipeline() from redirecting to the base LLM repo
+            # (like Qwen) which breaks feature extractor loading for multimodal models.
+            # See: https://huggingface.co/ibm-granite/granite-speech-3.3-2b for reference
+            adapter_config_path = save_dir / "adapter_config.json"
+            if adapter_config_path.exists():
+                with adapter_config_path.open() as f:
+                    adapter_config = json.load(f)
+
+                # Use repo_id if provided, otherwise use the save directory name
+                # (which becomes the repo ID when pushed to hub)
+                repo_id = kwargs.get("repo_id") or kwargs.get("push_to_hub_model_id")
+                if repo_id:
+                    adapter_config["base_model_name_or_path"] = repo_id
+                else:
+                    # Fallback: use save_dir name (works when save_dir matches repo structure)
+                    adapter_config["base_model_name_or_path"] = save_dir.name
+
+                with adapter_config_path.open("w") as f:
+                    json.dump(adapter_config, f, indent=2)
+
         # Add processor auto_map to preprocessor_config.json
         config_path = save_dir / "preprocessor_config.json"
         if config_path.exists():
@@ -865,6 +895,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projectors module
         shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
+
+    def push_to_hub(self, repo_id: str, **kwargs) -> str:
+        """Push model to HuggingFace Hub, ensuring adapter_config points to repo."""
+        # Call parent's push_to_hub with repo_id in kwargs so save_pretrained can use it
+        return super().push_to_hub(repo_id, repo_id=repo_id, **kwargs)
 
     def create_or_update_model_card(self, output_dir: Union[str, Path]) -> None:
         """No-op for model card creation - we use MODEL_CARD.md in repo instead."""

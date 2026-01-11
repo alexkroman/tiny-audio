@@ -25,7 +25,6 @@ class ASRConfig(transformers.PretrainedConfig):
         model_dtype: str = "bfloat16",
         num_beams: Optional[int] = None,
         system_prompt: str = "You are a helpful assistant.",
-        user_prompt: str = "Please transcribe this English audio into text: <audio>",
         encoder_dim: Optional[int] = None,
         llm_dim: Optional[int] = None,
         # Encoder conv layers: list of (padding, kernel_size, stride) tuples
@@ -104,7 +103,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.attn_implementation = attn_implementation
         self.model_dtype = model_dtype
         self.system_prompt = system_prompt
-        self.user_prompt = user_prompt
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
         # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
@@ -205,6 +203,10 @@ class ASRConfig(transformers.PretrainedConfig):
                 self.audio_config = config_class(**self.audio_config)
 
         super().__init__(**kwargs)
+
+        # Point encoder to audio_config so pipeline uses correct feature extractor
+        # The pipeline looks for config.encoder._name_or_path for feature extractor
+        self.encoder = self.audio_config
 
         self.auto_map = {
             "AutoConfig": "asr_config.ASRConfig",

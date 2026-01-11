@@ -27,7 +27,7 @@ model:
 training:
   hub_model_id: "mazesmazes/tiny-audio"
   learning_rate: 5e-5  # Lower LR for fine-tuning
-  seed: 456  # Different seed for data ordering
+  seed: 878  # Different seed for data ordering
   per_device_train_batch_size: 14
   per_device_eval_batch_size: 14
   gradient_accumulation_steps: 2
@@ -35,5 +35,11 @@ training:
   save_steps: 1000
   eval_steps: 1000
 
-  # SpecAugment (optional)
-  use_specaugment: false
+  # SpecAugment for Stage 3 fine-tuning
+  use_specaugment: true
+  mask_time_prob: 0.1  # 10% of time steps masked
+  mask_time_length: 15  # Max length of time mask
+  mask_time_min_masks: 2  # Min number of time masks
+  mask_feature_prob: 0.05  # 5% of frequency bins masked
+  mask_feature_length: 10  # Max length of frequency mask
+  mask_feature_min_masks: 2  # Min number of frequency masks
