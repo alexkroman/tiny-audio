@@ -50,14 +50,12 @@ class ASRConfig(transformers.PretrainedConfig):
         qformer_intermediate_size: Optional[int] = None,  # FFN size (defaults to 4x hidden)
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_warmup_tokens: int = 10,
-        # SpecAugment settings (Whisper defaults)
+        # SpecAugment settings
         use_specaugment: bool = False,
-        mask_time_prob: float = 0.05,  # Probability of masking time steps
-        mask_time_length: int = 10,  # Max length of time mask
-        mask_time_min_masks: int = 2,  # Min number of time masks
-        mask_feature_prob: float = 0.0,  # Probability of masking frequency bins (disabled by default)
-        mask_feature_length: int = 10,  # Max length of frequency mask
-        mask_feature_min_masks: int = 0,  # Min number of frequency masks
+        num_time_masks: int = 2,
+        time_mask_length: int = 10,
+        num_freq_masks: int = 0,
+        freq_mask_length: int = 10,
         # LoRA configuration (for Stage 2 fine-tuning)
         use_lora: bool = False,
         lora_rank: int = 8,  # SALMONN default
@@ -129,12 +127,10 @@ class ASRConfig(transformers.PretrainedConfig):
         self.inference_warmup_tokens = inference_warmup_tokens
         # SpecAugment configuration
         self.use_specaugment = use_specaugment
-        self.mask_time_prob = mask_time_prob
-        self.mask_time_length = mask_time_length
-        self.mask_time_min_masks = mask_time_min_masks
-        self.mask_feature_prob = mask_feature_prob
-        self.mask_feature_length = mask_feature_length
-        self.mask_feature_min_masks = mask_feature_min_masks
+        self.num_time_masks = num_time_masks
+        self.time_mask_length = time_mask_length
+        self.num_freq_masks = num_freq_masks
+        self.freq_mask_length = freq_mask_length
         # LoRA configuration
         self.use_lora = use_lora
         self.lora_rank = lora_rank

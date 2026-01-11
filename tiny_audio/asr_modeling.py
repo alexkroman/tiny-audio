@@ -24,120 +24,26 @@ except ImportError:
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
-def _compute_mask_indices(
-    shape: tuple[int, int],
-    mask_prob: float,
-    mask_length: int,
-    min_masks: int = 0,
-    device: torch.device = None,
-) -> torch.Tensor:
-    """Compute random mask spans for SpecAugment.
-
-    Based on transformers' _compute_mask_indices for Wav2Vec2/Whisper.
-
-    Args:
-        shape: (batch_size, sequence_length)
-        mask_prob: Probability for each token to be chosen as start of mask span
-        mask_length: Maximum length of mask span
-        min_masks: Minimum number of masks per sample
-        device: Device to create tensor on
-
-    Returns:
-        Boolean mask tensor of shape (batch_size, sequence_length)
-    """
-    batch_size, sequence_length = shape
-
-    if mask_length < 1:
-        raise ValueError(f"mask_length must be >= 1, got {mask_length}")
-
-    if mask_length > sequence_length:
-        raise ValueError(f"mask_length {mask_length} must be <= sequence_length {sequence_length}")
-
-    # Compute number of masked spans per sample
-    num_masked_spans = int(mask_prob * sequence_length / mask_length + torch.rand(1).item())
-    num_masked_spans = max(num_masked_spans, min_masks)
-
-    # Clamp to ensure we don't exceed sequence length
-    if num_masked_spans * mask_length > sequence_length:
-        num_masked_spans = sequence_length // mask_length
-
-    if num_masked_spans == 0:
-        return torch.zeros((batch_size, sequence_length), dtype=torch.bool, device=device)
-
-    # Uniformly sample span start indices
-    mask = torch.zeros((batch_size, sequence_length), dtype=torch.bool, device=device)
-
-    for i in range(batch_size):
-        # Random start indices for this sample
-        spec_aug_start_indices = torch.randint(
-            0, sequence_length - mask_length + 1, (num_masked_spans,), device=device
-        )
-
-        # Create mask spans
-        for start_idx in spec_aug_start_indices:
-            mask[i, start_idx : start_idx + mask_length] = True
-
-    return mask
+from torchaudio.transforms import FrequencyMasking, TimeMasking
 
 
 def apply_specaugment(
-    input_features: torch.Tensor,
-    mask_time_prob: float = 0.05,
-    mask_time_length: int = 10,
-    mask_time_min_masks: int = 2,
-    mask_feature_prob: float = 0.0,
-    mask_feature_length: int = 10,
-    mask_feature_min_masks: int = 0,
+    x: torch.Tensor,
+    num_time_masks: int = 2,
+    time_mask_length: int = 10,
+    num_freq_masks: int = 0,
+    freq_mask_length: int = 10,
 ) -> torch.Tensor:
-    """Apply SpecAugment to mel spectrogram features.
-
-    Args:
-        input_features: Mel spectrogram of shape (batch, n_mels, time)
-        mask_time_prob: Probability of masking time steps
-        mask_time_length: Max length of time mask
-        mask_time_min_masks: Min number of time masks
-        mask_feature_prob: Probability of masking frequency bins
-        mask_feature_length: Max length of frequency mask
-        mask_feature_min_masks: Min number of frequency masks
-
-    Returns:
-        Augmented mel spectrogram with same shape
-    """
-    batch_size, n_mels, time_steps = input_features.shape
-    device = input_features.device
-
-    # Clone to avoid modifying original
-    augmented = input_features.clone()
-
-    # Time masking (along time dimension)
-    # Apply if prob > 0 OR min_masks > 0 (to support fixed mask count with prob=0)
-    if mask_time_prob > 0 or mask_time_min_masks > 0:
-        time_mask = _compute_mask_indices(
-            shape=(batch_size, time_steps),
-            mask_prob=mask_time_prob,
-            mask_length=mask_time_length,
-            min_masks=mask_time_min_masks,
-            device=device,
-        )
-        # Expand to (batch, 1, time) for broadcasting
-        time_mask = time_mask.unsqueeze(1)
-        augmented = augmented.masked_fill(time_mask, 0.0)
-
-    # Frequency masking (along mel dimension)
-    # Apply if prob > 0 OR min_masks > 0 (to support fixed mask count with prob=0)
-    if mask_feature_prob > 0 or mask_feature_min_masks > 0:
-        feature_mask = _compute_mask_indices(
-            shape=(batch_size, n_mels),
-            mask_prob=mask_feature_prob,
-            mask_length=mask_feature_length,
-            min_masks=mask_feature_min_masks,
-            device=device,
-        )
-        # Expand to (batch, n_mels, 1) for broadcasting
-        feature_mask = feature_mask.unsqueeze(2)
-        augmented = augmented.masked_fill(feature_mask, 0.0)
-
-    return augmented
+    """Apply SpecAugment using torchaudio. Input shape: (batch, n_mels, time)."""
+    if num_time_masks > 0:
+        tm = TimeMasking(time_mask_param=time_mask_length, iid_masks=True)
+        for _ in range(num_time_masks):
+            x = tm(x)
+    if num_freq_masks > 0:
+        fm = FrequencyMasking(freq_mask_param=freq_mask_length, iid_masks=True)
+        for _ in range(num_freq_masks):
+            x = fm(x)
+    return x
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -560,12 +466,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if self.training and getattr(self.config, "use_specaugment", False):
                 input_features = apply_specaugment(
                     input_features,
-                    mask_time_prob=self.config.mask_time_prob,
-                    mask_time_length=self.config.mask_time_length,
-                    mask_time_min_masks=self.config.mask_time_min_masks,
-                    mask_feature_prob=self.config.mask_feature_prob,
-                    mask_feature_length=self.config.mask_feature_length,
-                    mask_feature_min_masks=self.config.mask_feature_min_masks,
+                    num_time_masks=self.config.num_time_masks,
+                    time_mask_length=self.config.time_mask_length,
+                    num_freq_masks=self.config.num_freq_masks,
+                    freq_mask_length=self.config.freq_mask_length,
                 )
 
             # Encode audio -> flattened (total_audio_tokens, hidden_dim)

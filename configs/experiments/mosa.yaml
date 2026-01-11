@@ -28,13 +28,7 @@ training:
 
   # SpecAugment settings
   use_specaugment: true
-
-  # Time Masking
-  mask_time_length: 100       # (T) Max length of time mask
-  mask_time_min_masks: 2      # (m_T) Exact number of time masks
-  mask_time_prob: 0.0         # Set to 0 to enforce fixed count (min_masks) only
-
-  # Frequency Masking
-  mask_feature_length: 27     # (F) Max length of freq mask
-  mask_feature_min_masks: 2   # (m_F) Exact number of freq masks
-  mask_feature_prob: 0.0      # Set to 0 to enforce fixed count (min_masks) only
+  num_time_masks: 2
+  time_mask_length: 100
+  num_freq_masks: 2
+  freq_mask_length: 27

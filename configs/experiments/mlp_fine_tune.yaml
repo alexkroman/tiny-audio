@@ -37,9 +37,7 @@ training:
 
   # SpecAugment for Stage 3 fine-tuning
   use_specaugment: true
-  mask_time_prob: 0.1  # 10% of time steps masked
-  mask_time_length: 15  # Max length of time mask
-  mask_time_min_masks: 2  # Min number of time masks
-  mask_feature_prob: 0.05  # 5% of frequency bins masked
-  mask_feature_length: 10  # Max length of frequency mask
-  mask_feature_min_masks: 2  # Min number of frequency masks
+  num_time_masks: 2
+  time_mask_length: 15
+  num_freq_masks: 2
+  freq_mask_length: 10
