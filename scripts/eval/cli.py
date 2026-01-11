@@ -35,24 +35,14 @@ from scripts.eval.evaluators import (
 console = Console()
 
 
-def build_model_id(
-    provider: str, model_variant: str | None = None, api_key: str | None = None
-) -> str:
-    """Build a model identifier including provider, variant, and API key prefix.
+def get_model_name(model_path: str) -> str:
+    """Extract model name from a HuggingFace model path.
 
     Examples:
-        - assemblyai_slam1_abc
-        - deepgram_nova3_xyz
-        - assemblyai_abc (no variant)
+        - mazesmazes/tiny-audio -> tiny-audio
+        - /path/to/checkpoint -> checkpoint
     """
-    parts = [provider]
-    if model_variant:
-        # Normalize variant name (remove underscores, hyphens for cleaner names)
-        clean_variant = model_variant.replace("_", "").replace("-", "")
-        parts.append(clean_variant)
-    if api_key:
-        parts.append(api_key[:3])
-    return "_".join(parts)
+    return model_path.rstrip("/").split("/")[-1]
 
 
 def save_results(
@@ -338,8 +328,6 @@ def main():
         # Handle diarization datasets
         if dataset_name in DIARIZATION_DATASETS:
             dataset = load_eval_dataset(dataset_name, split, args.config, decode_audio=False)
-            model_id = args.model  # Default, override for API providers
-
             if args.model == "assemblyai":
                 api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
                 if not api_key:
@@ -347,7 +335,7 @@ def main():
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
                     sys.exit(1)
-                model_id = build_model_id("assemblyai", args.assemblyai_model, api_key)
+                model_id = args.assemblyai_model.replace("_", "-")
                 evaluator = AssemblyAIDiarizationEvaluator(
                     api_key=api_key,
                     model=args.assemblyai_model,
@@ -361,7 +349,7 @@ def main():
                 if not api_key:
                     console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
                     sys.exit(1)
-                model_id = build_model_id("deepgram", None, api_key)
+                model_id = "nova-3"
                 evaluator = DeepgramDiarizationEvaluator(
                     api_key=api_key,
                     audio_field=cfg.audio_field,
@@ -370,6 +358,7 @@ def main():
                     timestamps_end_field=cfg.timestamps_end_field,
                 )
             else:
+                model_id = get_model_name(args.model)
                 evaluator = DiarizationEvaluator(
                     audio_field=cfg.audio_field,
                     speakers_field=cfg.speakers_field,
@@ -390,7 +379,6 @@ def main():
         # Handle alignment datasets
         if dataset_name in ALIGNMENT_DATASETS:
             dataset = load_eval_dataset(dataset_name, split, args.config)
-            model_id = args.model  # Default, override for API providers
 
             if args.model == "assemblyai":
                 api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
@@ -399,7 +387,7 @@ def main():
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
                     sys.exit(1)
-                model_id = build_model_id("assemblyai", args.assemblyai_model, api_key)
+                model_id = args.assemblyai_model.replace("_", "-")
                 evaluator = AssemblyAIAlignmentEvaluator(
                     api_key=api_key,
                     model=args.assemblyai_model,
@@ -412,7 +400,7 @@ def main():
                 if not api_key:
                     console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
                     sys.exit(1)
-                model_id = build_model_id("deepgram", None, api_key)
+                model_id = "nova-3"
                 evaluator = DeepgramAlignmentEvaluator(
                     api_key=api_key,
                     audio_field=cfg.audio_field,
@@ -420,6 +408,7 @@ def main():
                     words_field=cfg.words_field,
                 )
             else:
+                model_id = get_model_name(args.model)
                 evaluator = TimestampAlignmentEvaluator(
                     model_path=args.model,
                     audio_field=cfg.audio_field,
@@ -436,22 +425,23 @@ def main():
 
         # ASR evaluation
         dataset = load_eval_dataset(dataset_name, split, args.config)
-        model_id = args.model  # Default to args.model, override for API providers
 
         if args.model == "assemblyai":
             api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
             if not api_key:
                 console.print("[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]")
                 sys.exit(1)
-            model_id = build_model_id("assemblyai", args.assemblyai_model, api_key)
 
             if args.streaming:
+                model_id = "universal-streaming"
                 evaluator = AssemblyAIStreamingEvaluator(
                     api_key=api_key,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
+                    num_workers=args.num_workers,
                 )
             else:
+                model_id = args.assemblyai_model.replace("_", "-")
                 evaluator = AssemblyAIEvaluator(
                     api_key=api_key,
                     model=args.assemblyai_model,
@@ -465,7 +455,7 @@ def main():
             if not api_key:
                 console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
                 sys.exit(1)
-            model_id = build_model_id("deepgram", None, api_key)
+            model_id = "nova-3"
             evaluator = DeepgramEvaluator(
                 api_key=api_key,
                 audio_field=cfg.audio_field,
@@ -473,12 +463,14 @@ def main():
                 num_workers=args.num_workers,
             )
         elif args.endpoint:
+            model_id = get_model_name(args.model)
             evaluator = EndpointEvaluator(
                 endpoint_url=args.model,
                 audio_field=cfg.audio_field,
                 text_field=cfg.text_field,
             )
         elif args.streaming:
+            model_id = get_model_name(args.model)
             evaluator = LocalStreamingEvaluator(
                 model_path=args.model,
                 audio_field=cfg.audio_field,
@@ -486,6 +478,7 @@ def main():
                 user_prompt=args.user_prompt,
             )
         else:
+            model_id = get_model_name(args.model)
             evaluator = LocalEvaluator(
                 model_path=args.model,
                 audio_field=cfg.audio_field,

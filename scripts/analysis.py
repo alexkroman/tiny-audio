@@ -27,6 +27,33 @@ KEYWORDS_FILE = "outputs/keywords.json"
 # Shared utilities
 # =============================================================================
 
+
+def extract_dataset_name(dir_name: str) -> str:
+    """Extract dataset name from output directory name.
+
+    Handles formats:
+      - {timestamp}_{model}_{dataset} -> dataset
+      - {timestamp}_{model}_{dataset}_diarization -> dataset
+      - {timestamp}_{model}_{dataset}_alignment -> dataset
+    """
+    parts = dir_name.split("_")
+    if not parts:
+        return "unknown"
+    dataset = parts[-1]
+    if dataset in ("diarization", "alignment") and len(parts) > 1:
+        dataset = parts[-2]
+    return dataset
+
+
+def extract_model_name(dir_name: str) -> str:
+    """Extract model name from output directory name.
+
+    Format: {timestamp}_{model}_{dataset}[_suffix]
+    """
+    parts = dir_name.split("_")
+    return parts[2] if len(parts) >= 3 else "unknown"
+
+
 WORD_TO_NUM = {
     "zero": "0",
     "one": "1",
@@ -160,10 +187,7 @@ def high_wer(
     high_wer_samples = []
 
     for results_file in sorted(results_files):
-        # Extract dataset name from directory
-        dir_name = results_file.parent.name
-        parts = dir_name.split("_")
-        dataset = parts[-1] if parts else "unknown"
+        dataset = extract_dataset_name(results_file.parent.name)
 
         samples = parse_results_file(results_file)
         for sample in samples:
@@ -243,9 +267,7 @@ def entity_errors(
     error_samples = []
 
     for results_file in sorted(results_files):
-        dir_name = results_file.parent.name
-        parts = dir_name.split("_")
-        dataset = parts[-1] if parts else "unknown"
+        dataset = extract_dataset_name(results_file.parent.name)
 
         samples = parse_results_file(results_file)
         for sample in samples:
@@ -407,50 +429,6 @@ DATASET_SHORT_NAMES = {
 }
 
 
-def extract_model_display_name(model_dirs: list[Path], model_pattern: str) -> str:
-    """Extract a display name from folder names, including model variant if present.
-
-    Folder format for API providers: {timestamp}_{provider}_{variant}_{apikey}_{dataset}
-    Example: 20260109_193505_assemblyai_slam1_abc_earnings22 -> "assemblyai slam1"
-
-    For local models: {timestamp}_{model_name}_{dataset}
-    Example: 20260109_193505_tiny-audio_earnings22 -> "tiny-audio"
-    """
-    if not model_dirs:
-        return model_pattern
-
-    # Look at the first directory to extract the model name
-    dir_name = model_dirs[0].name
-    parts = dir_name.split("_")
-
-    # Need at least: timestamp, time, provider/model, dataset
-    if len(parts) < 4:
-        return model_pattern
-
-    # Skip timestamp parts (date_time) and get the rest
-    # Format: date_time_provider_variant_apikey_dataset OR date_time_model_dataset
-    remaining_parts = parts[2:]  # Skip date and time
-
-    # Check if this looks like an API provider format (has apikey - 3 chars before dataset)
-    # API format: [provider, variant, apikey, dataset]
-    # Local format: [model, dataset] or [model, part, dataset]
-
-    if len(remaining_parts) >= 4:
-        # Could be API format: provider_variant_apikey_dataset
-        # Check if second-to-last part looks like a short API key prefix (3 chars)
-        potential_apikey = remaining_parts[-2]
-        if len(potential_apikey) == 3 and potential_apikey.isalnum():
-            # API provider format - extract provider and variant
-            provider = remaining_parts[0]
-            variant = remaining_parts[1] if len(remaining_parts) > 3 else None
-            if variant and variant != potential_apikey:
-                return f"{provider} {variant}"
-            return provider
-
-    # Local model format - just use the model pattern as-is
-    return model_pattern
-
-
 def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[str]) -> dict:
     """Collect all metrics for a model across datasets."""
     import jiwer
@@ -458,7 +436,7 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
     model_dirs = find_model_dirs(outputs_dir, model_pattern, exclude, latest=True)
 
     # Extract display name from folder structure
-    display_name = extract_model_display_name(model_dirs, model_pattern)
+    display_name = extract_model_name(model_dirs[0].name) if model_dirs else model_pattern
 
     metrics = {
         "display_name": display_name,
@@ -484,23 +462,19 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
     for dir_path in model_dirs:
         results_file = dir_path / "results.txt"
         metrics_file = dir_path / "metrics.txt"
-
-        # Extract dataset name
         dir_name = dir_path.name
-        parts = dir_name.split("_")
-        dataset = parts[-1]
 
-        # Check for diarization/alignment results
-        if dataset == "diarization" and len(parts) > 1:
-            dataset = parts[-2]
+        # Check for diarization/alignment results (special handling)
+        if dir_name.endswith("_diarization"):
             if metrics_file.exists():
                 metrics["diarization"] = parse_metrics_file(metrics_file)
             continue
-        if dataset == "alignment" and len(parts) > 1:
-            dataset = parts[-2]
+        if dir_name.endswith("_alignment"):
             if metrics_file.exists():
                 metrics["alignment"] = parse_metrics_file(metrics_file)
             continue
+
+        dataset = extract_dataset_name(dir_name)
 
         if not results_file.exists():
             continue
@@ -654,7 +628,7 @@ def compare(
     console.print("\n")
     wer_table = Table(title="Accuracy by WER")
     wer_table.add_column("Model", style="cyan")
-    wer_table.add_column("Corpus WER", justify="right", style="bold")
+    wer_table.add_column("Corpus", justify="right", style="bold")
     for ds in ordered_datasets:
         wer_table.add_column(DATASET_SHORT_NAMES.get(ds, ds), justify="right")
 

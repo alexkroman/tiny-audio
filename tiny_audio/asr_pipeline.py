@@ -215,7 +215,8 @@ class SpeakerDiarizer:
         # Prepare audio input
         if isinstance(audio, np.ndarray):
             # pyannote expects {"waveform": tensor, "sample_rate": int}
-            waveform = torch.from_numpy(audio).unsqueeze(0)  # Add channel dim
+            # Copy array to ensure it's writable (avoids PyTorch warning)
+            waveform = torch.from_numpy(audio.copy()).unsqueeze(0)  # Add channel dim
             if waveform.dim() == 1:
                 waveform = waveform.unsqueeze(0)
             audio_input = {"waveform": waveform, "sample_rate": sample_rate}

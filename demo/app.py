@@ -23,7 +23,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import gradio as gr
 import torch
-from transformers import pipeline
+from transformers import AutoModel, AutoProcessor
+
+from tiny_audio.asr_pipeline import ASRPipeline
 
 # Default transcribe prompt (matches training)
 DEFAULT_TRANSCRIBE_PROMPT = "Transcribe: "
@@ -54,6 +56,33 @@ def format_words_with_timestamps(words):
     return "\n".join(lines)
 
 
+def format_words_with_speakers(words):
+    """Format words grouped by speaker."""
+    if not words:
+        return ""
+
+    lines = []
+    current_speaker = None
+    current_words = []
+
+    for w in words:
+        speaker = w.get("speaker", "Unknown")
+        if speaker != current_speaker:
+            # Output previous speaker's words
+            if current_words:
+                lines.append(f"{current_speaker}: {' '.join(current_words)}")
+            current_speaker = speaker
+            current_words = [w["word"]]
+        else:
+            current_words.append(w["word"])
+
+    # Output last speaker's words
+    if current_words:
+        lines.append(f"{current_speaker}: {' '.join(current_words)}")
+
+    return "\n".join(lines)
+
+
 def format_speaker_segments(segments):
     """Format speaker segments as readable text."""
     if not segments:
@@ -73,32 +102,31 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
 
     # Determine device
     if torch.cuda.is_available():
-        device = 0
+        device = torch.device("cuda")
     elif torch.backends.mps.is_available():
-        device = "mps"
+        device = torch.device("mps")
     else:
-        device = -1
+        device = torch.device("cpu")
 
-    # Load pipeline
-    pipe = pipeline(
-        "automatic-speech-recognition",
-        model=model_path,
-        trust_remote_code=True,
-        device=device,
-    )
-
-    # Get the underlying model for streaming
-    model = pipe.model
-    feature_extractor = pipe.feature_extractor
+    # Load model and create pipeline explicitly to ensure ASRPipeline is used
+    model = AutoModel.from_pretrained(model_path, trust_remote_code=True).to(device)
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    feature_extractor = processor.feature_extractor
+    pipe = ASRPipeline(model=model, feature_extractor=feature_extractor)
 
     def process_audio(audio, show_timestamps, show_diarization, transcribe_prompt):
         """Process audio file for transcription."""
         if audio is None:
-            return "Please provide audio input", "", ""
+            return "Please provide audio input"
 
         # Build kwargs
-        kwargs = {"user_prompt": transcribe_prompt.strip() if transcribe_prompt else None}
-        if show_timestamps:
+        kwargs = {}
+        # Only pass user_prompt if different from default
+        prompt = transcribe_prompt.strip() if transcribe_prompt else None
+        if prompt and prompt != DEFAULT_TRANSCRIBE_PROMPT:
+            kwargs["user_prompt"] = prompt
+        # Always get timestamps if diarization is requested (needed to assign speakers to words)
+        if show_timestamps or show_diarization:
             kwargs["return_timestamps"] = True
         if show_diarization:
             kwargs["return_speakers"] = True
@@ -106,159 +134,62 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         # Transcribe the audio
         result = pipe(audio, **kwargs)
 
-        # Format outputs
-        transcript = result.get("text", "")
-
-        # Format timestamps
+        # Return timestamps (with speaker labels if diarization also enabled)
         if show_timestamps and "words" in result:
-            timestamps_text = format_words_with_timestamps(result["words"])
-        elif "timestamp_error" in result:
-            timestamps_text = f"Error: {result['timestamp_error']}"
-        else:
-            timestamps_text = ""
+            return format_words_with_timestamps(result["words"])
+        elif show_timestamps and "timestamp_error" in result:
+            return f"Error: {result['timestamp_error']}"
 
-        # Format diarization
-        if show_diarization and "speaker_segments" in result:
-            diarization_text = format_speaker_segments(result["speaker_segments"])
-        elif "diarization_error" in result:
-            diarization_text = f"Error: {result['diarization_error']}"
-        else:
-            diarization_text = ""
+        # Return diarization only (words with speakers, no timestamps shown)
+        if show_diarization and "words" in result:
+            return format_words_with_speakers(result["words"])
+        elif show_diarization and "diarization_error" in result:
+            return f"Error: {result['diarization_error']}"
 
-        return transcript, timestamps_text, diarization_text
+        # Default: return transcript
+        return result.get("text", "")
 
-    def transcribe_streaming(audio, transcribe_prompt):
-        """Stream transcription word by word."""
-        if audio is None:
-            yield "Please provide audio input"
-            return
-
-        # Load and preprocess audio
-        import librosa
-
-        audio_array, _ = librosa.load(audio, sr=16000)
-
-        # Get features
-        inputs = feature_extractor(
-            audio_array,
-            sampling_rate=16000,
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
-
-        # Move to model's device
-        model_device = next(model.parameters()).device
-        input_features = inputs.input_features.to(model_device)
-        attention_mask = inputs.attention_mask.to(model_device)
-
-        # Set transcribe prompt
-        if transcribe_prompt and transcribe_prompt.strip():
-            model.TRANSCRIBE_PROMPT = transcribe_prompt.strip()
-        else:
-            model.TRANSCRIBE_PROMPT = DEFAULT_TRANSCRIBE_PROMPT
-
-        # Stream generation
-        accumulated = ""
-        try:
-            for chunk in model.generate_streaming(
-                input_features=input_features,
-                audio_attention_mask=attention_mask,
-            ):
-                accumulated += chunk
-                yield accumulated
-        except Exception as e:
-            yield f"Error during streaming: {e}"
-
-        # Final yield with complete text
-        if accumulated:
-            yield accumulated
-
-    # Create Gradio interface with tabs
+    # Create Gradio interface
     with gr.Blocks(title="Tiny Audio") as demo:
         gr.Markdown("# Tiny Audio")
-        gr.Markdown("Speech recognition with streaming, word timestamps, and speaker diarization.")
+        gr.Markdown("Speech recognition with word timestamps and speaker diarization.")
 
-        with gr.Tabs():
-            # Standard transcription tab
-            with gr.TabItem("Standard"):
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        audio_input = gr.Audio(
-                            sources=["microphone", "upload"],
-                            type="filepath",
-                            label="Audio Input",
-                        )
-
-                        with gr.Row():
-                            show_timestamps = gr.Checkbox(
-                                label="Word Timestamps",
-                                value=False,
-                            )
-                            show_diarization = gr.Checkbox(
-                                label="Speaker Diarization",
-                                value=False,
-                            )
-
-                        process_btn = gr.Button("Transcribe", variant="primary")
-
-                    with gr.Column(scale=3):
-                        output_text = gr.Textbox(
-                            label="Transcript",
-                            lines=5,
-                        )
-                        timestamps_output = gr.Textbox(
-                            label="Word Timestamps",
-                            lines=8,
-                        )
-                        diarization_output = gr.Textbox(
-                            label="Speaker Segments",
-                            lines=5,
-                        )
-
-            # Streaming transcription tab
-            with gr.TabItem("Streaming"):
-                gr.Markdown("Watch your words appear in real-time as the model transcribes.")
+        with gr.Row():
+            with gr.Column(scale=2):
+                audio_input = gr.Audio(
+                    sources=["microphone"],
+                    type="filepath",
+                    label="Audio Input",
+                )
 
                 with gr.Row():
-                    with gr.Column(scale=2):
-                        streaming_audio_input = gr.Audio(
-                            sources=["microphone", "upload"],
-                            type="filepath",
-                            label="Audio Input",
-                        )
-                        stream_btn = gr.Button("Start Streaming", variant="primary")
+                    show_timestamps = gr.Checkbox(
+                        label="Word Timestamps",
+                        value=False,
+                    )
+                    show_diarization = gr.Checkbox(
+                        label="Speaker Diarization",
+                        value=False,
+                    )
 
-                    with gr.Column(scale=3):
-                        streaming_output = gr.Textbox(
-                            label="Live Transcript",
-                            lines=10,
-                            placeholder="Words will appear here as they are transcribed...",
-                        )
+                transcribe_prompt_input = gr.Textbox(
+                    label="Prompt",
+                    value=DEFAULT_TRANSCRIBE_PROMPT,
+                    lines=1,
+                )
+                process_btn = gr.Button("Transcribe", variant="primary")
 
-        # Advanced options (shared across tabs)
-        with gr.Accordion("Advanced Options", open=False):
-            transcribe_prompt_input = gr.Textbox(
-                label="Transcribe Prompt",
-                value=DEFAULT_TRANSCRIBE_PROMPT,
-                lines=1,
-                placeholder="Enter a custom transcribe prompt...",
-            )
-            gr.Markdown(
-                "*The transcribe prompt is sent to the model before the audio. "
-                "The default matches the prompt used during training.*"
-            )
+            with gr.Column(scale=3):
+                output_text = gr.Textbox(
+                    label="Transcript",
+                    lines=12,
+                )
 
         # Wire up events
         process_btn.click(
             fn=process_audio,
             inputs=[audio_input, show_timestamps, show_diarization, transcribe_prompt_input],
-            outputs=[output_text, timestamps_output, diarization_output],
-        )
-
-        stream_btn.click(
-            fn=transcribe_streaming,
-            inputs=[streaming_audio_input, transcribe_prompt_input],
-            outputs=[streaming_output],
+            outputs=[output_text],
         )
 
     return demo
