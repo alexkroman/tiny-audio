@@ -294,9 +294,12 @@ def validate_datasets(datasets: list[str]) -> list[str]:
     return datasets
 
 
-@app.command()
+@app.callback(invoke_without_command=True)
 def main(
-    model: Annotated[str, typer.Argument(help="Model path/ID, 'assemblyai', or 'deepgram'")],
+    ctx: typer.Context,
+    model: Annotated[
+        Optional[str], typer.Argument(help="Model path/ID, 'assemblyai', or 'deepgram'")
+    ] = None,
     datasets: Annotated[
         Optional[list[str]],
         typer.Option(
@@ -350,6 +353,13 @@ def main(
     ] = 1,
 ):
     """Evaluate ASR models on standard datasets."""
+    # If a subcommand was invoked or no model provided, skip
+    if ctx.invoked_subcommand is not None:
+        return
+    if model is None:
+        console.print(ctx.get_help())
+        raise typer.Exit(0)
+
     # Default to loquacious if no datasets specified
     if datasets is None:
         datasets = ["loquacious"]

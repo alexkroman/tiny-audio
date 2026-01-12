@@ -16,6 +16,7 @@ class TestPostProcessPrediction:
         # Create a minimal mock to call the method
         class MockPipeline:
             HALLUCINATION_PATTERNS = ASRPipeline.HALLUCINATION_PATTERNS
+            HALLUCINATION_REGEXES = ASRPipeline.HALLUCINATION_REGEXES
             _truncate_trailing_repeats = ASRPipeline._truncate_trailing_repeats
             _truncate_character_repetitions = ASRPipeline._truncate_character_repetitions
             _post_process_prediction = ASRPipeline._post_process_prediction
@@ -72,6 +73,22 @@ class TestPostProcessPrediction:
         """All processing steps should work together."""
         result = post_process._post_process_prediction("The U S A costs EUR 50 fifty fifty")
         assert result == "the usa costs 50 euros fifty"
+
+    def test_repeating_decimal_hallucination(self, post_process):
+        """Repeating decimal patterns should be detected as hallucinations."""
+        # Full hallucination output - should return empty
+        result = post_process._post_process_prediction("12.93242424242424242424")
+        assert result == ""
+
+    def test_repeating_digit_hallucination(self, post_process):
+        """Repeating digit sequences should be detected."""
+        result = post_process._post_process_prediction("242424242424242424")
+        assert result == ""
+
+    def test_single_char_hallucination(self, post_process):
+        """Single character 'n' should be removed as hallucination."""
+        result = post_process._post_process_prediction("n")
+        assert result == ""
 
 
 class TestExtractAudio:

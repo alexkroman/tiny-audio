@@ -48,10 +48,10 @@ WER = (Substitutions + Insertions + Deletions) / Total Reference Words
 poetry run ta eval your-username/your-model --max-samples 500
 
 # Domain-specific
-poetry run ta eval your-username/your-model --dataset earnings22 --max-samples 100
+poetry run ta eval your-username/your-model -d earnings22 --max-samples 100
 
 # Meetings
-poetry run ta eval your-username/your-model --dataset ami --max-samples 100
+poetry run ta eval your-username/your-model -d ami --max-samples 100
 ```
 
 **Output:**

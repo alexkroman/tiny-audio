@@ -80,7 +80,7 @@ poetry run python -c "import torch; print(f'PyTorch {torch.__version__}')"
 **Launch demo:**
 
 ```bash
-poetry run ta demo main --model mazesmazes/tiny-audio
+poetry run ta demo --model mazesmazes/tiny-audio
 ```
 
 Open [http://localhost:7860](http://localhost:7860). Try recording or uploading audio.

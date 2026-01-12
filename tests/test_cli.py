@@ -46,7 +46,7 @@ class TestSubcommandHelp:
             (["deploy"], ["hf", "handler", "runpod"]),
             (["hub"], ["push"]),
             (["debug"], ["check-mosa", "analyze-lora"]),
-            (["demo"], ["main"]),
+            (["demo"], ["model", "port"]),
             (["dev"], ["lint", "format", "test"]),
         ],
     )
@@ -77,8 +77,6 @@ class TestNestedCommands:
             # Analysis subcommands
             (["analysis", "high-wer"], "threshold"),
             (["analysis", "compare"], "models"),
-            # Demo subcommands
-            (["demo", "main"], "port"),
             # Dev subcommands
             (["dev", "lint"], "linter"),
             (["dev", "format"], "format"),
@@ -149,7 +147,6 @@ class TestCLIStructure:
             ["analysis", "compare"],
             ["dev", "lint"],
             ["dev", "test"],
-            ["demo", "main"],
         ],
     )
     def test_nested_commands_accessible(self, cmd_path):

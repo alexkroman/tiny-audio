@@ -192,8 +192,9 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
     return demo
 
 
-@app.command()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     model: Annotated[
         str,
         typer.Option("--model", "-m", help="HuggingFace Hub model ID"),
@@ -202,6 +203,8 @@ def main(
     share: Annotated[bool, typer.Option("--share", "-s", help="Create public share link")] = False,
 ):
     """Launch ASR Gradio demo."""
+    if ctx.invoked_subcommand is not None:
+        return
     demo = create_demo(model)
     demo.launch(server_port=port, share=share, server_name="0.0.0.0")
 

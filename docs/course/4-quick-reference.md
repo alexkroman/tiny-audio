@@ -13,10 +13,10 @@ ______________________________________________________________________
 poetry install
 
 # Run the demo
-poetry run ta demo main --model mazesmazes/tiny-audio
+poetry run ta demo --model mazesmazes/tiny-audio
 
 # Evaluate a model
-poetry run ta eval your-username/your-model --dataset loquacious --max-samples 100
+poetry run ta eval your-username/your-model -d loquacious --max-samples 100
 
 # Visualize data flow
 poetry run python docs/course/examples/trace_data.py
@@ -98,9 +98,9 @@ ______________________________________________________________________
 
 | Dataset | Command | What it tests |
 |---------|---------|---------------|
-| LoquaciousSet | `--dataset loquacious` | General benchmark |
-| Earnings22 | `--dataset earnings22` | Financial domain |
-| AMI | `--dataset ami` | Meeting transcription |
+| LoquaciousSet | `-d loquacious` | General benchmark |
+| Earnings22 | `-d earnings22` | Financial domain |
+| AMI | `-d ami` | Meeting transcription |
 
 ______________________________________________________________________
 

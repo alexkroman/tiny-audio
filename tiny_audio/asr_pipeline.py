@@ -545,8 +545,17 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     HALLUCINATION_PATTERNS = frozenset(
         [
             "and gt and gt",
+            "n",  # Single character noise
         ]
     )
+
+    # Regex patterns for hallucinations (compiled for efficiency)
+    HALLUCINATION_REGEXES = [
+        # Repeating decimal hallucinations (e.g., "12.93242424242424")
+        re.compile(r"\d+\.\d*?(\d{2,})\1{3,}"),
+        # Very long repeated digit sequences (e.g., "242424242424")
+        re.compile(r"(\d{2,})\1{4,}"),
+    ]
 
     def _post_process_prediction(self, text: str) -> str:
         """Post-process model output to fix common issues."""
@@ -560,21 +569,30 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if text.strip() in self.HALLUCINATION_PATTERNS:
             return ""
 
-        # 3. COMBINE ACRONYMS
+        # 3. CHECK FOR REGEX-BASED HALLUCINATIONS
+        for pattern in self.HALLUCINATION_REGEXES:
+            if pattern.search(text):
+                # If hallucination is the entire output, return empty
+                if pattern.fullmatch(text.strip()):
+                    return ""
+                # Otherwise remove the hallucinated portion
+                text = pattern.sub("", text)
+
+        # 4. COMBINE ACRONYMS
         # Merge consecutive single letters into one word (e.g., "u s a" -> "usa")
         text = re.sub(r"\b([a-z])((?:\s+[a-z])+)\b", lambda m: m.group(0).replace(" ", ""), text)
 
-        # 4. NORMALIZE CURRENCY
+        # 5. NORMALIZE CURRENCY
         # Convert "eur X" to "X euros" for Whisper normalizer compatibility
         text = re.sub(r"\beur\s+(\d+)", r"\1 euros", text)
 
-        # 5. TRUNCATE CHARACTER REPETITIONS (e.g., "uhhhhhh" -> "uhh")
+        # 6. TRUNCATE CHARACTER REPETITIONS (e.g., "uhhhhhh" -> "uhh")
         text = self._truncate_character_repetitions(text)
 
-        # 6. TRUNCATE TRAILING REPEATS (word-level)
+        # 7. TRUNCATE TRAILING REPEATS (word-level)
         text = self._truncate_trailing_repeats(text)
 
-        # 7. STRIP WHITESPACE
+        # 8. STRIP WHITESPACE
         return re.sub(r"\s+", " ", text).strip()
 
     def _truncate_trailing_repeats(self, text: str, max_ngram: int = 10) -> str:
