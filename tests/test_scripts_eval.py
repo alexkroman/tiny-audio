@@ -1,10 +1,12 @@
-"""Tests for scripts/eval package."""
+"""Tests for scripts/eval package.
 
-import numpy as np
+Note: Audio utility tests (audio_to_wav_bytes, prepare_wav_bytes, TextNormalizer)
+are in test_eval_audio.py to avoid duplication.
+"""
+
 import pytest
-import torch
 
-from scripts.eval.audio import TextNormalizer, audio_to_wav_bytes, prepare_wav_bytes
+from scripts.eval.audio import TextNormalizer
 from scripts.eval.datasets import (
     ALIGNMENT_DATASETS,
     DATASET_REGISTRY,
@@ -18,111 +20,6 @@ from scripts.eval.evaluators import (
     Evaluator,
 )
 from scripts.eval.evaluators.alignment import align_words_to_reference
-
-
-class TestAudioToWavBytes:
-    """Tests for audio_to_wav_bytes function."""
-
-    def test_numpy_array(self):
-        """Test conversion of numpy array to WAV bytes."""
-        audio = np.random.randn(16000).astype(np.float32)
-        wav_bytes = audio_to_wav_bytes(audio, 16000)
-
-        assert isinstance(wav_bytes, bytes)
-        assert len(wav_bytes) > 0
-        # WAV header starts with "RIFF"
-        assert wav_bytes[:4] == b"RIFF"
-
-    def test_torch_tensor(self):
-        """Test conversion of torch tensor to WAV bytes."""
-        audio = torch.randn(16000)
-        wav_bytes = audio_to_wav_bytes(audio, 16000)
-
-        assert isinstance(wav_bytes, bytes)
-        assert wav_bytes[:4] == b"RIFF"
-
-    def test_stereo_to_mono(self):
-        """Test that stereo audio is squeezed to mono."""
-        audio = np.random.randn(1, 16000).astype(np.float32)
-        wav_bytes = audio_to_wav_bytes(audio, 16000)
-
-        assert isinstance(wav_bytes, bytes)
-        assert len(wav_bytes) > 0
-
-
-class TestPrepareWavBytes:
-    """Tests for prepare_wav_bytes function."""
-
-    def test_dict_with_array(self):
-        """Test conversion of dict with array and sampling_rate."""
-        audio_dict = {
-            "array": np.random.randn(16000).astype(np.float32),
-            "sampling_rate": 16000,
-        }
-        wav_bytes = prepare_wav_bytes(audio_dict)
-
-        assert isinstance(wav_bytes, bytes)
-        assert wav_bytes[:4] == b"RIFF"
-
-    def test_dict_with_bytes(self):
-        """Test passthrough of dict with bytes."""
-        # Create valid WAV bytes first
-        audio = np.random.randn(16000).astype(np.float32)
-        original_bytes = audio_to_wav_bytes(audio, 16000)
-
-        audio_dict = {"bytes": original_bytes}
-        result = prepare_wav_bytes(audio_dict)
-
-        assert result == original_bytes
-
-    def test_unsupported_format(self):
-        """Test that unsupported formats raise ValueError."""
-        with pytest.raises(ValueError, match="Unsupported audio format"):
-            prepare_wav_bytes("just a string")
-
-        with pytest.raises(ValueError, match="Unsupported audio format"):
-            prepare_wav_bytes(12345)
-
-
-class TestTextNormalizer:
-    """Tests for TextNormalizer class."""
-
-    @pytest.fixture
-    def normalizer(self):
-        """Create a TextNormalizer instance."""
-        return TextNormalizer()
-
-    def test_lowercase(self, normalizer):
-        """Test that text is lowercased."""
-        result = normalizer.normalize("Hello World")
-        assert result == result.lower()
-
-    def test_okay_to_ok(self, normalizer):
-        """Test okay -> ok normalization."""
-        result = normalizer.normalize("That is okay with me")
-        assert "ok" in result
-        assert "okay" not in result
-
-    def test_alright_normalization(self, normalizer):
-        """Test all right -> alright normalization."""
-        result = normalizer.normalize("All right then")
-        assert "alright" in result
-
-    def test_kinda_normalization(self, normalizer):
-        """Test kinda -> kind of normalization."""
-        result = normalizer.normalize("I kinda like it")
-        assert "kind of" in result
-
-    def test_possessive_expansion(self, normalizer):
-        """Test 's -> is expansion."""
-        result = normalizer.normalize("He's going home")
-        # The result should contain "is" instead of "'s"
-        assert "is" in result
-
-    def test_empty_string(self, normalizer):
-        """Test empty string normalization."""
-        result = normalizer.normalize("")
-        assert result == ""
 
 
 class TestDatasetConfig:
