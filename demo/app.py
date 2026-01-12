@@ -10,6 +10,7 @@ Gradio app for ASR model with support for:
 """
 
 import os
+from typing import Annotated
 
 # Fix OpenMP environment variable if invalid
 if not os.environ.get("OMP_NUM_THREADS", "").isdigit():
@@ -22,10 +23,12 @@ os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import gradio as gr
-import torch
+import typer
 from transformers import AutoModel, AutoProcessor
 
 from tiny_audio.asr_pipeline import ASRPipeline
+
+app = typer.Typer(help="ASR Gradio Demo")
 
 # Default transcribe prompt (matches training)
 DEFAULT_TRANSCRIBE_PROMPT = "Transcribe: "
@@ -100,16 +103,10 @@ def format_speaker_segments(segments):
 def create_demo(model_path="mazesmazes/tiny-audio"):
     """Create Gradio demo interface using transformers pipeline."""
 
-    # Determine device
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-
-    # Load model and create pipeline explicitly to ensure ASRPipeline is used
-    model = AutoModel.from_pretrained(model_path, trust_remote_code=True).to(device)
+    # Load model with automatic device placement
+    model = AutoModel.from_pretrained(
+        model_path, trust_remote_code=True, device_map="auto", torch_dtype="auto"
+    )
     processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     feature_extractor = processor.feature_extractor
     pipe = ASRPipeline(model=model, feature_extractor=feature_extractor)
@@ -195,20 +192,19 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
     return demo
 
 
+@app.command()
+def main(
+    model: Annotated[
+        str,
+        typer.Option("--model", "-m", help="HuggingFace Hub model ID"),
+    ] = os.environ.get("MODEL_ID", "mazesmazes/tiny-audio"),
+    port: Annotated[int, typer.Option("--port", "-p", help="Server port")] = 7860,
+    share: Annotated[bool, typer.Option("--share", "-s", help="Create public share link")] = False,
+):
+    """Launch ASR Gradio demo."""
+    demo = create_demo(model)
+    demo.launch(server_port=port, share=share, server_name="0.0.0.0")
+
+
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="ASR Gradio Demo")
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=os.environ.get("MODEL_ID", "mazesmazes/tiny-audio"),
-        help="HuggingFace Hub model ID",
-    )
-    parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--share", action="store_true")
-
-    args = parser.parse_args()
-
-    demo = create_demo(args.model)
-    demo.launch(server_port=args.port, share=args.share, server_name="0.0.0.0")
+    app()

@@ -85,7 +85,7 @@ class LocalStreamingEvaluator(Evaluator):
         self.model.eval()
         self.processor = self.model.get_processor()
         self.user_prompt = user_prompt
-        print(f"Using device: {device}, dtype: {dtype}")
+        console.print(f"[dim]Using device: {device}, dtype: {dtype}[/dim]")
 
         # Track timing stats
         self.ttfb_times: list[float] = []
@@ -173,7 +173,9 @@ class LocalStreamingEvaluator(Evaluator):
 
         # Print timing info
         ttfb_str = f"{ttfb * 1000:.0f}ms" if ttfb else "N/A"
-        print(f"  [Streaming] TTFB: {ttfb_str}, Processing: {processing_time * 1000:.0f}ms")
+        console.print(
+            f"  [dim][Streaming] TTFB: {ttfb_str}, Processing: {processing_time * 1000:.0f}ms[/dim]"
+        )
 
         full_text = "".join(tokens).strip()
         # Apply pipeline post-processing (repetition truncation, etc.)

@@ -200,8 +200,8 @@ def install_dependencies(conn: Connection) -> None:
         python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || \
             pip install --user torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128
 
-        # Install accelerate and peft
-        pip install --user accelerate peft
+        # Install peft for LoRA support
+        pip install --user peft
 
         # Export and install dependencies (excluding torch to preserve system version)
         cd /workspace
@@ -212,8 +212,7 @@ def install_dependencies(conn: Connection) -> None:
         pip install --user -e . --no-deps
 
         # Verify
-        which accelerate
-        python -c "import accelerate; print('accelerate', accelerate.__version__)"
+        python -c "import torch; print('torch', torch.__version__, 'cuda:', torch.cuda.is_available())"
     """
 
     conn.run(f"bash -c '{setup_commands}'", hide=False)
@@ -294,7 +293,7 @@ export TORCH_DYNAMO_ALLOW_UNSPEC_INT_ON_NN_MODULE=1
 export TORCH_CUDA_GRAPHS_ENABLED=0
 
 cd /workspace
-accelerate launch --config_file configs/accelerate/a40.yaml -m scripts.train +experiments={experiment} {extra_args_str}
+python -m scripts.train +experiments={experiment} {extra_args_str}
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then

@@ -79,7 +79,7 @@ class TestBuildTrainingScript:
         assert "#!/bin/bash" in script
         assert "mlp" in script
         assert "test_token" in script
-        assert "accelerate launch" in script
+        assert "python -m scripts.train" in script
 
     def test_script_with_wandb(self):
         """Test training script with W&B settings."""
@@ -137,17 +137,17 @@ class TestHfSpaceCLI:
 
         assert callable(main)
 
-    def test_deploy_to_space_exists(self):
-        """Test that deploy_to_space function exists."""
-        from scripts.deploy.hf_space import deploy_to_space
+    def test_deploy_exists(self):
+        """Test that deploy function exists."""
+        from scripts.deploy.hf_space import deploy
 
-        assert callable(deploy_to_space)
+        assert callable(deploy)
 
-    def test_run_command_exists(self):
-        """Test that run_command function exists."""
-        from scripts.deploy.hf_space import run_command
+    def test_extract_repo_id_exists(self):
+        """Test that extract_repo_id function exists."""
+        from scripts.deploy.hf_space import extract_repo_id
 
-        assert callable(run_command)
+        assert callable(extract_repo_id)
 
 
 class TestHandlerLocalCLI:

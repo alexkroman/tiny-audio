@@ -10,7 +10,7 @@ from pyannote.metrics.diarization import DiarizationErrorRate
 
 from scripts.eval.audio import prepare_wav_bytes
 
-from .base import DiarizationResult, setup_assemblyai
+from .base import DiarizationResult, console, setup_assemblyai
 
 
 class DiarizationEvaluator:
@@ -152,7 +152,7 @@ class DiarizationEvaluator:
                 )
                 self.results.append(result)
 
-                print(
+                console.print(
                     f"Sample {processed}: DER={result.der:.1f}% "
                     f"(conf={result.confusion:.1f}%, miss={result.missed:.1f}%, fa={result.false_alarm:.1f}%) "
                     f"Time={inference_time:.2f}s "
@@ -160,7 +160,7 @@ class DiarizationEvaluator:
                 )
 
             except Exception as e:
-                print(f"Error on sample {processed}: {e}")
+                console.print(f"[red]Error on sample {processed}: {e}[/red]")
                 # Skip failed samples - don't add to results to avoid polluting corpus metrics
                 continue
 
@@ -173,12 +173,12 @@ class DiarizationEvaluator:
     def _print_checkpoint(self, sample_count: int):
         """Print cumulative metrics checkpoint."""
         metrics = self.compute_metrics()
-        print(f"\n{'=' * 60}")
-        print(
-            f"CHECKPOINT @ {sample_count}: DER={metrics['der']:.2f}% "
+        console.print(f"\n[bold]{'=' * 60}[/bold]")
+        console.print(
+            f"[bold]CHECKPOINT @ {sample_count}:[/bold] DER={metrics['der']:.2f}% "
             f"(conf={metrics['confusion']:.2f}%, miss={metrics['missed']:.2f}%, fa={metrics['false_alarm']:.2f}%)"
         )
-        print(f"{'=' * 60}\n")
+        console.print(f"[bold]{'=' * 60}[/bold]\n")
 
     def compute_metrics(self) -> dict:
         """Compute final corpus-level metrics."""

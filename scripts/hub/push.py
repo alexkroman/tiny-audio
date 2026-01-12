@@ -1,40 +1,44 @@
 #!/usr/bin/env python3
 """Push custom model files to Hugging Face Hub."""
 
-import argparse
 import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Annotated, Optional
 
+import typer
 from huggingface_hub import HfApi
+from rich.console import Console
+
+app = typer.Typer(help="Push model files to Hugging Face Hub")
+console = Console()
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Push model files to Hugging Face Hub")
-    parser.add_argument(
-        "--repo-id",
-        type=str,
-        default="mazesmazes/tiny-audio",
-        help="Hugging Face repository ID (default: mazesmazes/tiny-audio)",
-    )
-    parser.add_argument(
-        "--branch",
-        type=str,
-        default="main",
-        help="Branch to push to (default: main)",
-    )
-    parser.add_argument(
-        "--checkpoint-dir",
-        type=str,
-        default=None,
-        help="Path to checkpoint directory to copy tokenizer files from",
-    )
-    args = parser.parse_args()
-
+@app.command()
+def main(
+    repo_id: Annotated[
+        str,
+        typer.Option("--repo-id", "-r", help="Hugging Face repository ID"),
+    ] = "mazesmazes/tiny-audio",
+    branch: Annotated[
+        str,
+        typer.Option("--branch", "-b", help="Branch to push to"),
+    ] = "main",
+    checkpoint_dir: Annotated[
+        Optional[str],
+        typer.Option(
+            "--checkpoint-dir",
+            "-c",
+            help="Path to checkpoint directory to copy tokenizer files from",
+        ),
+    ] = None,
+):
+    """Push model files to Hugging Face Hub."""
     # Check for HF_TOKEN
     if not os.environ.get("HF_TOKEN"):
-        raise ValueError("HF_TOKEN environment variable must be set")
+        console.print("[red]Error: HF_TOKEN environment variable must be set[/red]")
+        raise typer.Exit(1)
 
     api = HfApi(token=os.environ["HF_TOKEN"])
 
@@ -50,7 +54,7 @@ tokenizer_config.json -filter -diff -merge text
 """
         gitattributes_path = temp_path / ".gitattributes"
         gitattributes_path.write_text(gitattributes_content)
-        print("Created .gitattributes (excludes tokenizer_config.json from LFS)")
+        console.print("Created .gitattributes (excludes tokenizer_config.json from LFS)")
 
         # Copy all custom ASR Python files for trust_remote_code support
         # Include handler.py for Inference Endpoints support
@@ -68,29 +72,29 @@ tokenizer_config.json -filter -diff -merge text
             if src.exists():
                 shutil.copy2(src, dst)
                 if filename == "handler.py":
-                    print(f"Copied {src} to staging (for Inference Endpoints)")
+                    console.print(f"Copied {src} to staging (for Inference Endpoints)")
                 else:
-                    print(f"Copied {src} to staging")
+                    console.print(f"Copied {src} to staging")
             else:
-                print(f"Warning: {src} not found, skipping")
+                console.print(f"[yellow]Warning: {src} not found, skipping[/yellow]")
 
         # Copy MODEL_CARD.md as README.md
         model_card_src = Path("MODEL_CARD.md")
         if model_card_src.exists():
             readme_dst = temp_path / "README.md"
             shutil.copy2(model_card_src, readme_dst)
-            print(f"Copied {model_card_src} as README.md to staging")
+            console.print(f"Copied {model_card_src} as README.md to staging")
 
         # Copy requirements.txt for model dependencies
         requirements_src = Path("requirements.txt")
         if requirements_src.exists():
             requirements_dst = temp_path / "requirements.txt"
             shutil.copy2(requirements_src, requirements_dst)
-            print(f"Copied {requirements_src} to staging")
+            console.print(f"Copied {requirements_src} to staging")
 
         # Copy tokenizer files from checkpoint directory if provided
-        if args.checkpoint_dir:
-            checkpoint_path = Path(args.checkpoint_dir)
+        if checkpoint_dir:
+            checkpoint_path = Path(checkpoint_dir)
             tokenizer_files = [
                 "tokenizer_config.json",
                 "tokenizer.json",
@@ -102,20 +106,20 @@ tokenizer_config.json -filter -diff -merge text
                 if src.exists():
                     dst = temp_path / filename
                     shutil.copy2(src, dst)
-                    print(f"Copied {src} to staging")
+                    console.print(f"Copied {src} to staging")
 
         # Upload files to Hub
-        print(f"\nUploading to {args.repo_id}...")
+        console.print(f"\nUploading to {repo_id}...")
         api.upload_folder(
             folder_path=temp_dir,
-            repo_id=args.repo_id,
+            repo_id=repo_id,
             repo_type="model",
-            revision=args.branch,
+            revision=branch,
             commit_message="Update custom model files, README, and requirements",
         )
 
-        print(f"\nSuccessfully pushed to https://huggingface.co/{args.repo_id}")
+        console.print(f"\n[green]Successfully pushed to https://huggingface.co/{repo_id}[/green]")
 
 
 if __name__ == "__main__":
-    main()
+    app()

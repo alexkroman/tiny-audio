@@ -24,26 +24,7 @@ except ImportError:
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
-from torchaudio.transforms import FrequencyMasking, TimeMasking
-
-
-def apply_specaugment(
-    x: torch.Tensor,
-    num_time_masks: int = 2,
-    time_mask_length: int = 10,
-    num_freq_masks: int = 0,
-    freq_mask_length: int = 10,
-) -> torch.Tensor:
-    """Apply SpecAugment using torchaudio. Input shape: (batch, n_mels, time)."""
-    if num_time_masks > 0:
-        tm = TimeMasking(time_mask_param=time_mask_length, iid_masks=True)
-        for _ in range(num_time_masks):
-            x = tm(x)
-    if num_freq_masks > 0:
-        fm = FrequencyMasking(freq_mask_param=freq_mask_length, iid_masks=True)
-        for _ in range(num_freq_masks):
-            x = fm(x)
-    return x
+from torchaudio.transforms import SpecAugment
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -192,6 +173,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if getattr(config, "freeze_projector", False):
             self.projector.requires_grad_(False)
 
+        # SpecAugment for data augmentation during training
+        if getattr(config, "use_specaugment", False):
+            self.spec_augment = SpecAugment(
+                n_time_masks=config.num_time_masks,
+                time_mask_param=config.time_mask_length,
+                n_freq_masks=config.num_freq_masks,
+                freq_mask_param=config.freq_mask_length,
+            )
+        else:
+            self.spec_augment = None
+
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
@@ -230,8 +222,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             full_model.language_model = None
             full_model.multi_modal_projector = None
             del full_model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
@@ -463,14 +453,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         if input_features is not None and input_ids is not None:
             # Apply SpecAugment during training if enabled
-            if self.training and getattr(self.config, "use_specaugment", False):
-                input_features = apply_specaugment(
-                    input_features,
-                    num_time_masks=self.config.num_time_masks,
-                    time_mask_length=self.config.time_mask_length,
-                    num_freq_masks=self.config.num_freq_masks,
-                    freq_mask_length=self.config.freq_mask_length,
-                )
+            if self.training and self.spec_augment is not None:
+                input_features = self.spec_augment(input_features)
 
             # Encode audio -> flattened (total_audio_tokens, hidden_dim)
             audio_embeds = self._encode_audio(input_features, audio_attention_mask)

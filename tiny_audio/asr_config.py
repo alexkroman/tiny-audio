@@ -7,8 +7,8 @@ class ASRConfig(transformers.PretrainedConfig):
     """Configuration class for the ASR model.
 
     This config combines settings for:
-    - Audio encoder (Whisper)
-    - Text decoder (SmolLM/Qwen)
+    - Audio encoder (GLM-ASR/Whisper)
+    - Text decoder (Qwen)
     - Projector (MLP, MOSA, MoE, QFormer)
     - Generation parameters
     - Training options (SpecAugment, LoRA)
@@ -19,8 +19,8 @@ class ASRConfig(transformers.PretrainedConfig):
 
     def __init__(
         self,
-        audio_model_id: str = "openai/whisper-large-v3-turbo",
-        text_model_id: str = "HuggingFaceTB/SmolLM3-3B",
+        audio_model_id: str = "zai-org/GLM-ASR-Nano-2512",
+        text_model_id: str = "Qwen/Qwen3-0.6B",
         attn_implementation: str = "flash_attention_2",
         model_dtype: str = "bfloat16",
         num_beams: Optional[int] = None,
@@ -74,8 +74,8 @@ class ASRConfig(transformers.PretrainedConfig):
         """Initialize ASR model configuration.
 
         Args:
-            audio_model_id: HuggingFace model ID for audio encoder (Whisper)
-            text_model_id: HuggingFace model ID for text decoder (SmolLM/Qwen)
+            audio_model_id: HuggingFace model ID for audio encoder (GLM-ASR/Whisper)
+            text_model_id: HuggingFace model ID for text decoder (Qwen)
             attn_implementation: Attention implementation ("flash_attention_2", "sdpa", "eager")
             model_dtype: Model dtype ("bfloat16", "float16", "float32")
             projector_type: Projector architecture ("mlp", "mosa", "moe", "qformer")

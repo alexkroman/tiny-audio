@@ -14,6 +14,15 @@ except ImportError:
     from asr_modeling import ASRModel  # type: ignore[no-redef]
 
 
+def _get_device() -> str:
+    """Get best available device for non-transformers models."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 class ForcedAligner:
     """Lazy-loaded forced aligner for word-level timestamps using torchaudio wav2vec2."""
 
@@ -66,7 +75,7 @@ class ForcedAligner:
         import torchaudio
         from torchaudio.functional import forced_align, merge_tokens
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = _get_device()
         model, labels, dictionary = cls.get_instance(device)
 
         # Convert audio to tensor (copy to ensure array is writable)
@@ -179,11 +188,8 @@ class SpeakerDiarizer:
                 "pyannote/speaker-diarization-3.1",
             )
 
-            # Move to GPU if available
-            if torch.cuda.is_available():
-                cls._pipeline.to(torch.device("cuda"))
-            elif torch.backends.mps.is_available():
-                cls._pipeline.to(torch.device("mps"))
+            # Move to best available device
+            cls._pipeline.to(torch.device(_get_device()))
 
         return cls._pipeline
 

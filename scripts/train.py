@@ -42,6 +42,47 @@ from tiny_audio.asr_modeling import ASRModel
 
 TRANSCRIBE_PREFIX = "Transcribe: "  # Used in DataCollator, matches ASRConfig.user_prompt
 
+# Symbol mappings for PunctCapSeg preprocessing/postprocessing
+# PunctCapSeg converts these symbols to <unk>, so we use word placeholders
+_PCS_SYMBOL_MAP = [
+    # (pre_pattern, pre_replace, post_pattern, post_replace)
+    (r"(\d)%", r"\1 percent", r"(\d)\s*percent\b", r"\1%"),
+    (r"(\d):(\d)", r"\1 oclock \2", r"(\d)[,\s]*oclock[,\s]*(\d)", r"\1:\2"),
+    (r"(\d)/(\d)", r"\1 slashdate \2", r"(\d)[,\s]*slashdate[,\s]*(\d)", r"\1/\2"),
+    (r"#(\d)", r"numbersign \1", r"numbersign\s*(\d)", r"#\1"),
+    (r"(\w)&(\w)", r"\1 ampersand \2", r"(\w)\s*ampersand\s*(\w)", r"\1&\2"),
+    (r"¥(\d)", r"yensign \1", r"yensign\s*(\d)", r"¥\1"),
+    (r"(\d)¢", r"\1 centsign", r"(\d)\s*centsign", r"\1¢"),
+    (r"(\d)°", r"\1 degreesign", r"(\d)\s*degreesign", r"\1°"),
+    (r"(\w+)-(\w+)", r"\1 hyphenword \2", r"(\w+)[,\s]*hyphenword[,\s]*(\w+)", r"\1-\2"),
+]
+
+
+def _preprocess_for_pcs(text: str) -> str:
+    """Replace symbols with word placeholders before PunctCapSeg."""
+    for pre_pat, pre_repl, _, _ in _PCS_SYMBOL_MAP:
+        # Apply multiple times for consecutive patterns (dates, hyphens)
+        for _ in range(5):
+            new_text = re.sub(pre_pat, pre_repl, text)
+            if new_text == text:
+                break
+            text = new_text
+    return text
+
+
+def _postprocess_from_pcs(text: str) -> str:
+    """Convert placeholders back to symbols after PunctCapSeg."""
+    for _, _, post_pat, post_repl in _PCS_SYMBOL_MAP:
+        for _ in range(5):
+            new_text = re.sub(post_pat, post_repl, text, flags=re.IGNORECASE)
+            if new_text == text:
+                break
+            text = new_text
+    # Fix country abbreviations added by PunctCapSeg
+    text = re.sub(r"\bU\.S\.A\.?", "USA", text)
+    text = re.sub(r"\bU\.S\.?", "US", text)
+    return re.sub(r"\bU\.K\.?", "UK", text)
+
 
 class DatasetLoader:
     """Loads and prepares datasets for training."""
@@ -238,72 +279,13 @@ class DataCollator:
         if self.punctuator is None:
             self.punctuator = PunctCapSegModelONNX.from_pretrained("pcs_en")
 
-        def strip_html(text: str) -> str:
-            """Remove HTML tags from text."""
-            return re.sub(r"<[^>]+>", "", text)
-
-        def preprocess_for_pcs(text: str) -> str:
-            """Prepare text for PunctCapSeg by handling symbols it doesn't understand.
-
-            PunctCapSeg converts %, :, /, #, -, &, ¥, ¢, ° to <unk>. We use word placeholders
-            that PunctCapSeg will pass through, then convert back after.
-            """
-            # % -> percent
-            result = re.sub(r"(\d)%", r"\1 percent", text)
-            # : in times -> oclock placeholder
-            result = re.sub(r"(\d):(\d)", r"\1 oclock \2", result)
-            # / in dates/fractions -> slashdate placeholder (apply twice for consecutive)
-            result = re.sub(r"(\d)/(\d)", r"\1 slashdate \2", result)
-            result = re.sub(r"(\d)/(\d)", r"\1 slashdate \2", result)
-            # # -> numbersign
-            result = re.sub(r"#(\d)", r"numbersign \1", result)
-            # & -> ampersand (common in Q&A, R&D, etc.)
-            result = re.sub(r"(\w)&(\w)", r"\1 ampersand \2", result)
-            # ¥ (Yen) -> yensign, ¢ (cent) -> centsign
-            result = re.sub(r"¥(\d)", r"yensign \1", result)
-            result = re.sub(r"(\d)¢", r"\1 centsign", result)
-            # ° (degree) -> degreesign (e.g., 72°F, 45°)
-            result = re.sub(r"(\d)°", r"\1 degreesign", result)
-            # Hyphens in compound words -> hyphenword placeholder
-            # Match word-word patterns (e.g., wi-fi, e-mail, co-founder)
-            # Apply multiple times for multi-hyphen words (state-of-the-art)
-            for _ in range(5):
-                result = re.sub(r"(\w+)-(\w+)", r"\1 hyphenword \2", result)
-            return result
-
-        def postprocess_from_pcs(text: str) -> str:
-            """Convert placeholders back to their original symbols."""
-            result = re.sub(r"(\d)\s*percent\b", r"\1%", text, flags=re.IGNORECASE)
-            result = re.sub(r"(\d)[,\s]*oclock[,\s]*(\d)", r"\1:\2", result, flags=re.IGNORECASE)
-            # Apply slash restoration multiple times for consecutive patterns
-            for _ in range(3):
-                result = re.sub(
-                    r"(\d)[,\s]*slashdate[,\s]*(\d)", r"\1/\2", result, flags=re.IGNORECASE
-                )
-            result = re.sub(r"numbersign\s*(\d)", r"#\1", result, flags=re.IGNORECASE)
-            result = re.sub(r"(\w)\s*ampersand\s*(\w)", r"\1&\2", result, flags=re.IGNORECASE)
-            result = re.sub(r"yensign\s*(\d)", r"¥\1", result, flags=re.IGNORECASE)
-            result = re.sub(r"(\d)\s*centsign", r"\1¢", result, flags=re.IGNORECASE)
-            result = re.sub(r"(\d)\s*degreesign", r"\1°", result, flags=re.IGNORECASE)
-            # Handle hyphenword with optional punctuation/whitespace between
-            # Apply multiple times for multi-hyphen words (state-of-the-art)
-            for _ in range(5):
-                result = re.sub(
-                    r"(\w+)[,\s]*hyphenword[,\s]*(\w+)", r"\1-\2", result, flags=re.IGNORECASE
-                )
-            # Fix country abbreviations: U.S. -> US, U.S.A. -> USA, U.K. -> UK
-            # PunctCapSeg adds periods which cause WER issues after normalization
-            result = re.sub(r"\bU\.S\.A\.?", "USA", result)
-            result = re.sub(r"\bU\.S\.?", "US", result)
-            return re.sub(r"\bU\.K\.?", "UK", result)
-
         raw_texts = [
-            preprocess_for_pcs(strip_html(f.get("text") or "").strip().lower())
+            _preprocess_for_pcs(re.sub(r"<[^>]+>", "", f.get("text") or "").strip().lower())
             for f in valid_features
         ]
         results = self.punctuator.infer(raw_texts)
         processed_texts = [
-            postprocess_from_pcs(" ".join(r) if r else t) for t, r in zip(raw_texts, results)
+            _postprocess_from_pcs(" ".join(r) if r else t) for t, r in zip(raw_texts, results)
         ]
 
         # Build messages for each sample with per-sample audio token counts
@@ -363,8 +345,6 @@ def get_valid_training_args(config: dict) -> dict:
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
     nltk.download("punkt_tab", quiet=True)
 
     # Initialize wandb

@@ -13,33 +13,33 @@ ______________________________________________________________________
 poetry install
 
 # Run the demo
-poetry run python demo/gradio/app.py --model mazesmazes/tiny-audio
+poetry run ta demo main --model mazesmazes/tiny-audio
 
 # Evaluate a model
-poetry run eval your-username/your-model --dataset loquacious --max-samples 100
+poetry run ta eval your-username/your-model --dataset loquacious --max-samples 100
 
 # Visualize data flow
 poetry run python docs/course/examples/trace_data.py
 
 # Run all checks (lint, type-check, test)
-poetry run check
+poetry run ta dev check
 ```
 
 ### Training (Cloud GPU)
 
 ```bash
 # Deploy to RunPod
-poetry run deploy-runpod <HOST> <PORT>
+poetry run ta deploy runpod deploy <HOST> <PORT>
 
 # Start training
 export HF_TOKEN='hf_your_token'
-poetry run remote-train <HOST> <PORT> --experiment my_experiment
+poetry run ta deploy runpod train <HOST> <PORT> --experiment my_experiment
 
 # Attach to running session
-poetry run attach-remote <HOST> <PORT>
+poetry run ta deploy runpod attach <HOST> <PORT>
 
 # Find latest checkpoint
-poetry run find-checkpoint <HOST> <PORT>
+poetry run ta deploy runpod checkpoint <HOST> <PORT>
 ```
 
 ### Training (Local)

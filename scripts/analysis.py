@@ -54,64 +54,12 @@ def extract_model_name(dir_name: str) -> str:
     return parts[2] if len(parts) >= 3 else "unknown"
 
 
-WORD_TO_NUM = {
-    "zero": "0",
-    "one": "1",
-    "two": "2",
-    "three": "3",
-    "four": "4",
-    "five": "5",
-    "six": "6",
-    "seven": "7",
-    "eight": "8",
-    "nine": "9",
-    "ten": "10",
-    "eleven": "11",
-    "twelve": "12",
-    "thirteen": "13",
-    "fourteen": "14",
-    "fifteen": "15",
-    "sixteen": "16",
-    "seventeen": "17",
-    "eighteen": "18",
-    "nineteen": "19",
-    "twenty": "20",
-    "thirty": "30",
-    "forty": "40",
-    "fifty": "50",
-    "sixty": "60",
-    "seventy": "70",
-    "eighty": "80",
-    "ninety": "90",
-    "hundred": "100",
-    "thousand": "1000",
-    "million": "1000000",
-    "billion": "1000000000",
-    "first": "1st",
-    "second": "2nd",
-    "third": "3rd",
-    "fourth": "4th",
-    "fifth": "5th",
-    "sixth": "6th",
-    "seventh": "7th",
-    "eighth": "8th",
-    "ninth": "9th",
-    "tenth": "10th",
-}
-
-
 def normalize_text(text: str) -> str:
     """Normalize text for comparison."""
     text = text.lower()
     text = text.replace("%", " percent").replace("per cent", "percent")
     text = re.sub(r"[^\w\s]", "", text)
     return re.sub(r"\s+", " ", text).strip()
-
-
-def normalize_numbers(text: str) -> str:
-    """Convert number words to digits for flexible matching."""
-    text = normalize_text(text)
-    return " ".join(WORD_TO_NUM.get(w, w) for w in text.split())
 
 
 def entity_in_text(entity_text: str, text: str) -> bool:
@@ -121,13 +69,9 @@ def entity_in_text(entity_text: str, text: str) -> bool:
     if norm_entity in norm_text:
         return True
 
-    num_entity = normalize_numbers(entity_text)
-    num_text = normalize_numbers(text)
-    if num_entity in num_text:
-        return True
-
-    entity_words = num_entity.split()
-    text_words = num_text.split()
+    # Check word-by-word match
+    entity_words = norm_entity.split()
+    text_words = norm_text.split()
     if len(entity_words) <= len(text_words):
         for i in range(len(text_words) - len(entity_words) + 1):
             if text_words[i : i + len(entity_words)] == entity_words:
@@ -837,11 +781,6 @@ def compare(
             itn_table.add_row(*row)
 
         console.print(itn_table)
-
-
-def cli():
-    """Entry point for pyproject.toml."""
-    app()
 
 
 if __name__ == "__main__":

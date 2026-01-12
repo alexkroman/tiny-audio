@@ -31,38 +31,9 @@ Documentation = "https://github.com/alexkroman/tiny-audio#readme"
 "Bug Tracker" = "https://github.com/alexkroman/tiny-audio/issues"
 
 [project.scripts]
-# Evaluation
-eval = "scripts.eval.cli:main"
-
-# Analysis
-analysis = "scripts.analysis:cli"
-
-# Deployment
-deploy-hf = "scripts.deploy.hf_space:main"
-run-handler = "scripts.deploy.handler_local:main"
-runpod = "scripts.deploy.runpod:cli"
-
-# Hub
-push-to-hub = "scripts.hub.push:main"
-
-# Debug
-check-mosa = "scripts.debug.check_mosa:main"
-
-# Development
-lint = "scripts.dev:lint"
-format = "scripts.dev:format"
-type-check = "scripts.dev:type_check"
-test = "scripts.dev:test"
-test-slow = "scripts.dev:test_slow"
-test-all = "scripts.dev:test_all"
-coverage = "scripts.dev:coverage"
-check = "scripts.dev:check"
-build = "scripts.dev:build"
-precommit = "scripts.dev:precommit"
-install-hooks = "scripts.dev:install_hooks"
-security = "scripts.dev:security"
-dead-code = "scripts.dev:dead_code"
-docstrings = "scripts.dev:docstrings"
+# Unified CLI entry points
+tiny-audio = "scripts.cli:app"
+ta = "scripts.cli:app"
 
 [tool.poetry]
 packages = [
@@ -84,7 +55,6 @@ soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
 # GLM-ASR requires transformers from source (>= 5.x not yet released)
 transformers = {git = "https://github.com/huggingface/transformers.git"}
-accelerate = "*"
 datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
 jiwer = "*"
 attrs = "*"
@@ -192,19 +162,14 @@ python_files = "test_*.py *_test.py"
 python_classes = "Test*"
 python_functions = "test_*"
 
-# Default options - skip slow tests unless explicitly included
-addopts = "-v -s --tb=short -m 'not slow'"
+# Default options
+addopts = "-v -s --tb=short"
 
 # Test paths
 testpaths = ["tests"]
 
 # Ignore directories
 norecursedirs = ["outputs", ".venv", "venv", ".git", "__pycache__", "*.egg-info"]
-
-# Custom markers
-markers = [
-    "slow: tests that load ML models (skip by default, run with: pytest -m slow)",
-]
 
 # Filter out third-party warnings
 filterwarnings = [
