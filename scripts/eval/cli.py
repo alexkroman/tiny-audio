@@ -298,7 +298,8 @@ def validate_datasets(datasets: list[str]) -> list[str]:
 def main(
     ctx: typer.Context,
     model: Annotated[
-        Optional[str], typer.Argument(help="Model path/ID, 'assemblyai', or 'deepgram'")
+        Optional[str],
+        typer.Option("--model", "-m", help="Model path/ID, 'assemblyai', or 'deepgram'"),
     ] = None,
     datasets: Annotated[
         Optional[list[str]],
@@ -353,12 +354,15 @@ def main(
     ] = 1,
 ):
     """Evaluate ASR models on standard datasets."""
-    # If a subcommand was invoked or no model provided, skip
+    # If a subcommand was invoked, skip
     if ctx.invoked_subcommand is not None:
         return
+
+    # Require model when running directly
     if model is None:
-        console.print(ctx.get_help())
-        raise typer.Exit(0)
+        console.print("[red]Error: --model / -m is required[/red]")
+        console.print("Example: ta eval -m assemblyai -d loquacious")
+        raise typer.Exit(1)
 
     # Default to loquacious if no datasets specified
     if datasets is None:

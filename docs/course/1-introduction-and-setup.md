@@ -88,7 +88,7 @@ Open [http://localhost:7860](http://localhost:7860). Try recording or uploading 
 **Run evaluation:**
 
 ```bash
-poetry run ta eval mazesmazes/tiny-audio --max-samples 100
+poetry run ta eval -m mazesmazes/tiny-audio -n 100
 ```
 
 Output shows Word Error Rate (WER) for each sample. Lower is better.

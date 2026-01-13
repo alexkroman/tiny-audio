@@ -45,13 +45,13 @@ WER = (Substitutions + Insertions + Deletions) / Total Reference Words
 
 ```bash
 # Primary benchmark
-poetry run ta eval your-username/your-model --max-samples 500
+poetry run ta eval -m your-username/your-model -n 500
 
 # Domain-specific
-poetry run ta eval your-username/your-model -d earnings22 --max-samples 100
+poetry run ta eval -m your-username/your-model -d earnings22 -n 100
 
 # Meetings
-poetry run ta eval your-username/your-model -d ami --max-samples 100
+poetry run ta eval -m your-username/your-model -d ami -n 100
 ```
 
 **Output:**

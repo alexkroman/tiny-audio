@@ -16,7 +16,7 @@ poetry install
 poetry run ta demo --model mazesmazes/tiny-audio
 
 # Evaluate a model
-poetry run ta eval your-username/your-model -d loquacious --max-samples 100
+poetry run ta eval -m your-username/your-model -d loquacious -n 100
 
 # Visualize data flow
 poetry run python docs/course/examples/trace_data.py

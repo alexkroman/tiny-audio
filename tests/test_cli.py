@@ -41,7 +41,7 @@ class TestSubcommandHelp:
     @pytest.mark.parametrize(
         "cmd,expected_keywords",
         [
-            (["eval"], ["model"]),
+            (["eval"], ["--model", "-m"]),
             (["analysis"], ["high-wer", "compare"]),
             (["deploy"], ["hf", "handler", "runpod"]),
             (["hub"], ["push"]),
@@ -121,10 +121,10 @@ class TestDevCommands:
 class TestEvalCommand:
     """Tests specific to eval command behavior."""
 
-    def test_eval_no_args_shows_usage(self):
-        """Test that eval without args shows usage."""
+    def test_eval_no_args_shows_error(self):
+        """Test that eval without model shows helpful error."""
         result = runner.invoke(app, ["eval"])
-        assert "Usage:" in result.output or "Missing argument" in result.output
+        assert "--model" in result.output or "-m" in result.output
 
 
 class TestCLIStructure:

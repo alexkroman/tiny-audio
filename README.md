@@ -65,7 +65,7 @@ poetry run python scripts/train.py training.learning_rate=1e-4
 ## Evaluation
 
 ```bash
-poetry run ta eval mazesmazes/tiny-audio --max-samples 100
+poetry run ta eval -m mazesmazes/tiny-audio -n 100
 ```
 
 ## Project Structure
