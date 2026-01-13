@@ -34,6 +34,7 @@ Train only ~12M parameters instead of billions. Publish to Hugging Face. Deploy 
 - Cloud GPU setup (RunPod)
 - Training metrics and monitoring
 - Hydra configuration
+- Multi-stage training with LoRA
 - Cost management
 
 ### [Class 3: Evaluation and Deployment](./3-evaluation-and-deployment.md)
@@ -41,6 +42,7 @@ Train only ~12M parameters instead of billions. Publish to Hugging Face. Deploy 
 
 - Word Error Rate (WER)
 - Multi-dataset evaluation
+- Error analysis and debugging
 - Deploy to Hugging Face Spaces
 
 ### [Quick Reference](./4-quick-reference.md)

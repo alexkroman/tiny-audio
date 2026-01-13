@@ -91,17 +91,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     # PEFT handles Hub downloads and caching internally
                     from peft import PeftModel
 
-                    # language_model is bare (not PEFT-wrapped) since we skipped _setup_lora
                     model.language_model = PeftModel.from_pretrained(
                         model.language_model,
-                        pretrained_model_name_or_path,  # Use original repo_id, not cache path
+                        pretrained_model_name_or_path,
                         is_trainable=True,
                         **cache_kwargs,
                     )
-
-                    # Clear base_model_name_or_path to prevent HF pipeline from redirecting
-                    # to the base LLM (e.g., Qwen) when loading feature extractor
-                    model.language_model.peft_config["default"].base_model_name_or_path = None
                 else:
                     # No saved adapters - initialize fresh LLM LoRA for training
                     from peft import LoraConfig, get_peft_model
@@ -115,10 +110,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                         task_type="CAUSAL_LM",
                     )
                     model.language_model = get_peft_model(model.language_model, lora_config)
-
-                    # Clear base_model_name_or_path so PEFT doesn't save a reference
-                    # to the base LLM. See _setup_lora for details.
-                    model.language_model.peft_config["default"].base_model_name_or_path = None
 
             return model
         finally:
@@ -296,11 +287,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             task_type="CAUSAL_LM",
         )
         self.language_model = get_peft_model(self.language_model, lora_config)
-
-        # Clear base_model_name_or_path so PEFT doesn't save a reference to the
-        # base LLM (e.g. Qwen). This prevents pipeline() from redirecting to the
-        # wrong model. The correct path gets set during save_pretrained/push_to_hub.
-        self.language_model.peft_config["default"].base_model_name_or_path = None
 
     def _init_tokenizer(self, config: ASRConfig):
         """Initialize tokenizer with audio token."""
@@ -751,14 +737,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 with adapter_config_path.open() as f:
                     adapter_config = json.load(f)
 
-                # Use repo_id if available, otherwise clear to prevent redirect
+                # Use repo_id if available, otherwise clear to prevent redirect.
+                # Use empty string instead of None to avoid str(None) -> "None" bug
+                # in some transformers/PEFT versions.
                 repo_id = (
                     kwargs.get("repo_id")
                     or kwargs.get("push_to_hub_model_id")
                     or getattr(self.config, "pretrained_model_path", None)
+                    or ""  # Use empty string instead of None
                 )
-                # Always update - either set to repo_id or clear it
-                adapter_config["base_model_name_or_path"] = repo_id  # None if no repo_id
+                adapter_config["base_model_name_or_path"] = repo_id
 
                 with adapter_config_path.open("w") as f:
                     json.dump(adapter_config, f, indent=2)
@@ -789,8 +777,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
 
     def push_to_hub(self, repo_id: str, **kwargs) -> str:
-        """Push model to HuggingFace Hub, ensuring adapter_config points to repo."""
-        # Call parent's push_to_hub with repo_id in kwargs so save_pretrained can use it
+        """Push model to HuggingFace Hub, ensuring adapter_config points to repo.
+
+        IMPORTANT: Sets base_model_name_or_path in adapter_config.json to repo_id
+        so that transformers pipeline() can load the model correctly. Without this,
+        the pipeline tries to load from "None" which fails.
+        """
+        # Store repo_id in config so save_pretrained can access it
+        self.config.pretrained_model_path = repo_id
+        # Call parent's push_to_hub with repo_id in kwargs
         return super().push_to_hub(repo_id, repo_id=repo_id, **kwargs)
 
     def create_or_update_model_card(self, output_dir: Union[str, Path]) -> None:

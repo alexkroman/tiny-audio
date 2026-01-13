@@ -10,7 +10,7 @@
 
 ### How Training Works
 
-1. **Downloads models**: GLM-ASR encoder + Qwen decoder from Hugging Face
+1. **Downloads models**: GLM-ASR encoder + Qwen3 decoder from Hugging Face
 2. **Streams data**: Training data streams (no terabyte downloads)
 3. **Trains projector**: Only the MLP projector trains; encoder and decoder frozen
 4. **Saves checkpoints**: Every 1,000 steps to Hugging Face
@@ -30,6 +30,18 @@
 - Steps 1600+: Gradual improvement
 
 This is normal. Don't panic if it seems broken for the first hour.
+
+### Multi-Stage Training
+
+For best results, training happens in stages:
+
+| Stage | What trains | Config | Purpose |
+|-------|-------------|--------|---------|
+| **Stage 1** | Projector only | `+experiments=mlp` | Learn audio→text mapping |
+| **Stage 2** | LoRA adapters only | `+experiments=mlp_lora` | Fine-tune language model |
+| **Stage 3** | Projector + LoRA | `+experiments=mlp_fine_tune` | Joint optimization |
+
+Most users only need Stage 1. Stages 2 and 3 can improve accuracy but require more time.
 
 ---
 
@@ -67,6 +79,9 @@ cp configs/experiments/mlp.yaml configs/experiments/my_experiment.yaml
 Edit `my_experiment.yaml`:
 
 ```yaml
+model:
+  projector_type: mlp
+
 training:
   hub_model_id: "your-username/tiny-audio-yourname"  # CHANGE THIS
 ```
@@ -123,15 +138,90 @@ Always terminate when done. Re-deploy takes 5-10 minutes.
 
 ---
 
+## Local Training (Optional)
+
+If you have a local GPU (24GB+ VRAM):
+
+```bash
+# Quick test (10 steps)
+poetry run python scripts/train.py +experiments=mlp training.max_steps=10
+
+# Full training
+poetry run python scripts/train.py +experiments=mlp
+
+# Override settings
+poetry run python scripts/train.py +experiments=mlp training.learning_rate=1e-4
+
+# Resume from checkpoint
+poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpoint=/path/to/checkpoint-XXXX
+```
+
+---
+
 ## Projector Types
 
-| Type | Description | Speed |
-|------|-------------|-------|
-| `mlp` | 2-layer MLP with 4x downsampling | Fast |
-| `mosa` | Dense MoE, all 4 experts contribute | Slow |
-| `moe` | Shared + sparse routed experts | Medium |
+| Type | Description | Speed | VRAM |
+|------|-------------|-------|------|
+| `mlp` | 2-layer MLP with frame stacking | Fast | Low |
+| `mosa` | Dense MoE, all experts contribute | Slow | High |
+| `moe` | Shared + sparse routed experts | Medium | Medium |
+| `qformer` | QFormer with learnable queries | Slow | High |
 
 Start with `mlp`. Try others after you have a baseline.
+
+```bash
+# Different projectors
+poetry run python scripts/train.py +experiments=mlp
+poetry run python scripts/train.py +experiments=mosa
+poetry run python scripts/train.py +experiments=moe
+poetry run python scripts/train.py +experiments=qformer
+```
+
+---
+
+## Advanced: Multi-Stage Training with LoRA
+
+After Stage 1 training, you can optionally fine-tune the language model with LoRA:
+
+**Stage 2: Train LoRA adapters (freeze projector)**
+
+```bash
+poetry run python scripts/train.py +experiments=mlp_lora \
+    training.resume_from_checkpoint=/path/to/stage1-checkpoint
+```
+
+**Stage 3: Fine-tune both projector and LoRA**
+
+```bash
+poetry run python scripts/train.py +experiments=mlp_fine_tune \
+    training.resume_from_checkpoint=/path/to/stage2-checkpoint
+```
+
+LoRA adds ~1-2M trainable parameters to the language model without full fine-tuning.
+
+---
+
+## Configuration Reference
+
+### Key Training Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `training.max_steps` | 50000 | Total training steps |
+| `training.learning_rate` | 1e-4 | Learning rate |
+| `training.per_device_train_batch_size` | 4 | Batch size per GPU |
+| `training.gradient_accumulation_steps` | 4 | Effective batch = batch_size * accumulation |
+| `training.warmup_steps` | 1000 | LR warmup steps |
+| `training.save_steps` | 1000 | Checkpoint frequency |
+
+### Key Model Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `model.audio_model_id` | `zai-org/GLM-ASR-Nano-2512` | Audio encoder |
+| `model.text_model_id` | `Qwen/Qwen3-0.6B` | Language model |
+| `model.projector_type` | `mlp` | Projector architecture |
+| `model.projector_pool_stride` | 5 | Frame stacking factor |
 
 ---
 
@@ -140,7 +230,8 @@ Start with `mlp`. Try others after you have a baseline.
 1. Only the projector trains (~12M params)
 2. Loss drops dramatically around step 1500 ("the cliff")
 3. Monitor eval loss for overfitting
-4. **Terminate RunPod instances when done**
+4. Multi-stage training with LoRA can improve accuracy
+5. **Terminate RunPod instances when done**
 
 ---
 

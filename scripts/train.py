@@ -396,6 +396,10 @@ def main(cfg: DictConfig) -> None:
 
     model.config.use_cache = False
 
+    # Store hub_model_id in config so save_pretrained() can set base_model_name_or_path correctly
+    if hub_model_id := cfg.training.get("hub_model_id"):
+        model.config.pretrained_model_path = hub_model_id
+
     # Disable Qwen3 thinking mode by patching the chat template
     # This is a workaround for TRL's DataCollatorForChatML not passing enable_thinking=False
     # See: https://github.com/huggingface/trl/issues/3387
@@ -456,7 +460,12 @@ def main(cfg: DictConfig) -> None:
     trainer.save_model()
 
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
-        trainer.push_to_hub(commit_message="Training complete - final model")
+        # Use model's push_to_hub which properly sets base_model_name_or_path in adapter_config.json
+        trainer.model.push_to_hub(
+            cfg.training.hub_model_id,
+            commit_message="Training complete - final model",
+            private=cfg.training.get("hub_private_repo", False),
+        )
 
 
 if __name__ == "__main__":
