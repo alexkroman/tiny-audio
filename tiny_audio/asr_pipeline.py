@@ -545,7 +545,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     HALLUCINATION_PATTERNS = frozenset(
         [
             "and gt and gt",
+            "and gt",
+            "gt and gt",
             "n",  # Single character noise
+            "and",  # Common short hallucination
         ]
     )
 

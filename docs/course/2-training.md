@@ -53,7 +53,7 @@ cd tiny-audio
 git pull origin main
 
 # Deploy to RunPod
-poetry run ta deploy runpod deploy <HOST> <PORT>
+poetry run ta runpod deploy <HOST> <PORT>
 ```
 
 Takes 5-10 minutes. Re-run whenever you make local changes.
@@ -74,14 +74,14 @@ training:
 Re-deploy to sync:
 
 ```bash
-poetry run ta deploy runpod deploy <HOST> <PORT> --skip-setup
+poetry run ta runpod deploy <HOST> <PORT> --skip-setup
 ```
 
 ### Exercise 4: Start Training (10 min)
 
 ```bash
 export HF_TOKEN='hf_your_token_here'
-poetry run ta deploy runpod train <HOST> <PORT> --experiment my_experiment
+poetry run ta runpod train <HOST> <PORT> --experiment my_experiment
 ```
 
 When prompted for W&B, press **2** and paste your key from [wandb.ai/authorize](https://wandb.ai/authorize).
@@ -99,7 +99,7 @@ Step 25/20000 | Loss: 8.34 | Grad Norm: 45.2 | LR: 1e-4 | ETA: 20hr
 ```bash
 # Detach: Ctrl+B, then D
 # Reattach:
-poetry run ta deploy runpod attach <HOST> <PORT>
+poetry run ta runpod attach <HOST> <PORT>
 ```
 
 **Monitor in W&B** at [wandb.ai](https://wandb.ai):

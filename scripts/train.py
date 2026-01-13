@@ -13,6 +13,7 @@ Usage:
 """
 
 import contextlib
+import html
 import re
 from dataclasses import fields
 from typing import Any
@@ -135,7 +136,11 @@ class DatasetLoader:
 
             ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
-        return ds
+        # Filter short transcripts (<2 words) to avoid noisy backchannels like "yeah", "ok"
+        def filter_short_transcripts(text):
+            return len(text.split()) >= 2
+
+        return ds.filter(filter_short_transcripts, num_proc=self.num_proc, input_columns="text")
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -280,7 +285,9 @@ class DataCollator:
             self.punctuator = PunctCapSegModelONNX.from_pretrained("pcs_en")
 
         raw_texts = [
-            _preprocess_for_pcs(re.sub(r"<[^>]+>", "", f.get("text") or "").strip().lower())
+            _preprocess_for_pcs(
+                re.sub(r"<[^>]+>", "", html.unescape(f.get("text") or "")).strip().lower()
+            )
             for f in valid_features
         ]
         results = self.punctuator.infer(raw_texts)

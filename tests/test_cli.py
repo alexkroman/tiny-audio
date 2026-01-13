@@ -19,7 +19,7 @@ class TestMainCLI:
         """Test that --help shows all registered commands."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        expected_commands = ["eval", "analysis", "deploy", "hub", "debug", "demo", "dev"]
+        expected_commands = ["eval", "analysis", "deploy", "push", "runpod", "debug", "demo", "dev"]
         for cmd in expected_commands:
             assert cmd in result.output, f"Expected '{cmd}' in help output"
 
@@ -43,11 +43,12 @@ class TestSubcommandHelp:
         [
             (["eval"], ["--model", "-m"]),
             (["analysis"], ["high-wer", "compare"]),
-            (["deploy"], ["hf", "handler", "runpod"]),
-            (["hub"], ["push"]),
+            (["deploy"], ["repo-id"]),  # Now a direct command
+            (["push"], ["repo-id"]),  # Now a direct command
+            (["runpod"], ["deploy", "train", "attach"]),  # Top-level command
             (["debug"], ["check-mosa", "analyze-lora"]),
             (["demo"], ["model", "port"]),
-            (["dev"], ["lint", "format", "test"]),
+            (["dev"], ["lint", "format", "test", "handler"]),
         ],
     )
     def test_subcommand_help(self, cmd, expected_keywords):
@@ -64,13 +65,11 @@ class TestNestedCommands:
     @pytest.mark.parametrize(
         "cmd_path,expected_keyword",
         [
-            # Deploy subcommands
-            (["deploy", "hf"], "repo-id"),
-            (["deploy", "handler"], "model"),
-            (["deploy", "runpod"], "deploy"),
-            (["deploy", "runpod", "train"], "host"),
-            # Hub subcommands
-            (["hub", "push"], "repo-id"),
+            # Runpod subcommands (now top-level)
+            (["runpod", "deploy"], "host"),
+            (["runpod", "train"], "host"),
+            (["runpod", "attach"], "host"),
+            (["runpod", "checkpoint"], "host"),
             # Debug subcommands
             (["debug", "check-mosa"], "model"),
             (["debug", "analyze-lora"], "repo"),
@@ -82,6 +81,7 @@ class TestNestedCommands:
             (["dev", "format"], "format"),
             (["dev", "test"], "test"),
             (["dev", "build"], "build"),
+            (["dev", "handler"], "model"),
         ],
     )
     def test_nested_command_help(self, cmd_path, expected_keyword):
@@ -113,6 +113,7 @@ class TestDevCommands:
             "security",
             "dead-code",
             "docstrings",
+            "handler",
         ]
         for cmd in expected_commands:
             assert cmd in result.output, f"Expected '{cmd}' in dev --help output"
@@ -133,20 +134,24 @@ class TestCLIStructure:
     @pytest.mark.parametrize(
         "cmd_path",
         [
-            ["deploy", "hf"],
-            ["deploy", "handler"],
-            ["deploy", "runpod"],
-            ["deploy", "runpod", "deploy"],
-            ["deploy", "runpod", "train"],
-            ["deploy", "runpod", "attach"],
-            ["deploy", "runpod", "checkpoint"],
-            ["hub", "push"],
+            # Top-level commands (now direct)
+            ["deploy"],
+            ["push"],
+            # Runpod subcommands
+            ["runpod", "deploy"],
+            ["runpod", "train"],
+            ["runpod", "attach"],
+            ["runpod", "checkpoint"],
+            # Debug subcommands
             ["debug", "check-mosa"],
             ["debug", "analyze-lora"],
+            # Analysis subcommands
             ["analysis", "high-wer"],
             ["analysis", "compare"],
+            # Dev subcommands
             ["dev", "lint"],
             ["dev", "test"],
+            ["dev", "handler"],
         ],
     )
     def test_nested_commands_accessible(self, cmd_path):

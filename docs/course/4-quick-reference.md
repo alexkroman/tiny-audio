@@ -29,17 +29,17 @@ poetry run ta dev check
 
 ```bash
 # Deploy to RunPod
-poetry run ta deploy runpod deploy <HOST> <PORT>
+poetry run ta runpod deploy <HOST> <PORT>
 
 # Start training
 export HF_TOKEN='hf_your_token'
-poetry run ta deploy runpod train <HOST> <PORT> --experiment my_experiment
+poetry run ta runpod train <HOST> <PORT> --experiment my_experiment
 
 # Attach to running session
-poetry run ta deploy runpod attach <HOST> <PORT>
+poetry run ta runpod attach <HOST> <PORT>
 
 # Find latest checkpoint
-poetry run ta deploy runpod checkpoint <HOST> <PORT>
+poetry run ta runpod checkpoint <HOST> <PORT>
 ```
 
 ### Training (Local)

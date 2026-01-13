@@ -98,6 +98,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                         is_trainable=True,
                         **cache_kwargs,
                     )
+
+                    # Clear base_model_name_or_path to prevent HF pipeline from redirecting
+                    # to the base LLM (e.g., Qwen) when loading feature extractor
+                    model.language_model.peft_config["default"].base_model_name_or_path = None
                 else:
                     # No saved adapters - initialize fresh LLM LoRA for training
                     from peft import LoraConfig, get_peft_model
@@ -738,23 +742,23 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if hasattr(self.language_model, "peft_config"):
             self.language_model.save_pretrained(save_dir, save_embedding_layers=False)
 
-            # Fix adapter_config.json to point base_model_name_or_path to the repo itself
-            # This prevents transformers pipeline() from redirecting to the base LLM repo
-            # (like Qwen) which breaks feature extractor loading for multimodal models.
-            # See: https://huggingface.co/ibm-granite/granite-speech-3.3-2b for reference
+            # Clear base_model_name_or_path in adapter_config.json to prevent HF pipeline
+            # from redirecting to the base LLM repo (like Qwen) which breaks feature
+            # extractor loading for multimodal models. If a repo_id is provided, use that
+            # so the model can be loaded directly from the Hub.
             adapter_config_path = save_dir / "adapter_config.json"
             if adapter_config_path.exists():
                 with adapter_config_path.open() as f:
                     adapter_config = json.load(f)
 
-                # Use repo_id from kwargs or config - never use checkpoint directory name
+                # Use repo_id if available, otherwise clear to prevent redirect
                 repo_id = (
                     kwargs.get("repo_id")
                     or kwargs.get("push_to_hub_model_id")
                     or getattr(self.config, "pretrained_model_path", None)
                 )
-                if repo_id:
-                    adapter_config["base_model_name_or_path"] = repo_id
+                # Always update - either set to repo_id or clear it
+                adapter_config["base_model_name_or_path"] = repo_id  # None if no repo_id
 
                 with adapter_config_path.open("w") as f:
                     json.dump(adapter_config, f, indent=2)

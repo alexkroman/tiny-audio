@@ -212,7 +212,7 @@ def install_dependencies(conn: Connection) -> None:
         pip install --user -e . --no-deps
 
         # Verify
-        python -c "import torch; print('torch', torch.__version__, 'cuda:', torch.cuda.is_available())"
+        python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
     """
 
     conn.run(f"bash -c '{setup_commands}'", hide=False)

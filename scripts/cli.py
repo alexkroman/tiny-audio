@@ -8,8 +8,9 @@ Usage:
 Commands:
     eval        Evaluate ASR models on datasets
     analysis    WER analysis and comparison tools
-    deploy      Deploy to HF Space, test handlers, RunPod training
-    hub         HuggingFace Hub operations
+    runpod      Remote training on RunPod
+    deploy      Deploy demo to HuggingFace Space
+    push        Push model to HuggingFace Hub
     debug       Debug and analysis tools
     demo        Launch Gradio demo
     dev         Development commands (lint, test, format, etc.)
@@ -36,15 +37,20 @@ def register_subcommands():
 
     app.add_typer(analysis_app, name="analysis", help="WER analysis and comparison tools")
 
-    # Deploy
-    from scripts.deploy.cli import app as deploy_app
+    # RunPod (top-level for remote training)
+    from scripts.deploy.runpod import app as runpod_app
 
-    app.add_typer(deploy_app, name="deploy", help="Deployment tools (HF Space, RunPod, handler)")
+    app.add_typer(runpod_app, name="runpod", help="Remote training on RunPod")
 
-    # Hub
-    from scripts.hub.cli import app as hub_app
+    # Deploy (direct command for HF Space)
+    from scripts.deploy.hf_space import deploy as hf_deploy
 
-    app.add_typer(hub_app, name="hub", help="HuggingFace Hub operations")
+    app.command(name="deploy", help="Deploy demo to HuggingFace Space")(hf_deploy)
+
+    # Push (direct command for HF Hub)
+    from scripts.hub.push import main as push_command
+
+    app.command(name="push", help="Push model to HuggingFace Hub")(push_command)
 
     # Debug
     from scripts.debug.cli import app as debug_app

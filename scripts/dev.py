@@ -16,6 +16,7 @@ Commands:
     dead-code    Find dead/unused code with vulture
     docstrings   Check docstring coverage with interrogate
     install-hooks Install pre-commit hooks
+    handler      Test inference endpoint handler locally
 """
 
 import subprocess
@@ -173,6 +174,15 @@ def docstrings():
     """Check docstring coverage with interrogate."""
     raise typer.Exit(run("interrogate", "tiny_audio", "-v", "--fail-under", "50"))
 
+
+def _register_handler():
+    """Register handler subcommand (lazy import)."""
+    from scripts.deploy.handler_local import test as handler_test
+
+    app.command(name="handler", help="Test inference endpoint handler locally")(handler_test)
+
+
+_register_handler()
 
 if __name__ == "__main__":
     app()
