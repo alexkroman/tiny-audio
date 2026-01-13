@@ -37,7 +37,6 @@ def deploy(
     demo_dir: Path = typer.Option(
         Path("demo"),
         "--demo-dir",
-        "-d",
         help="Path to demo directory",
     ),
     delete_existing: bool = typer.Option(

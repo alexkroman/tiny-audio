@@ -77,8 +77,10 @@ Results saved to `outputs/eval_*/results.txt`. Review high-WER samples to find p
 **Deploy:**
 
 ```bash
-poetry run ta deploy hf --repo-id your-username/tiny-audio-demo --model your-username/your-model
+poetry run ta deploy hf --repo-id your-username/tiny-audio-demo
 ```
+
+The Space will use the default model. To use your own model, edit `demo/app.py` before deploying.
 
 Space builds in 2-3 minutes. Share the link!
 

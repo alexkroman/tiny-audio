@@ -112,13 +112,15 @@ def entity_itn_correct(entity_text: str, text: str) -> bool:
 def high_wer(
     model: str = typer.Argument(..., help="Model pattern to analyze"),
     threshold: float = typer.Option(50.0, "--threshold", "-t", help="WER threshold (percent)"),
-    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
+    output_dir: Path = typer.Option(
+        Path("outputs"), "--output-dir", help="Directory containing eval results"
+    ),
     exclude: list[str] = typer.Option([], help="Patterns to exclude"),
     latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
     output_file: Path = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
 ):
     """Output ground truth and predictions for samples with WER above threshold."""
-    model_dirs = find_model_dirs(outputs_dir, model, exclude, latest=latest)
+    model_dirs = find_model_dirs(output_dir, model, exclude, latest=latest)
     results_files = [d / "results.txt" for d in model_dirs if (d / "results.txt").exists()]
 
     if not results_files:
@@ -178,7 +180,9 @@ def high_wer(
 @app.command("entity-errors")
 def entity_errors(
     model: str = typer.Argument(..., help="Model pattern to analyze"),
-    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
+    output_dir: Path = typer.Option(
+        Path("outputs"), "--output-dir", help="Directory containing eval results"
+    ),
     exclude: list[str] = typer.Option([], help="Patterns to exclude"),
     latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
     entity_type: str = typer.Option(
@@ -197,7 +201,7 @@ def entity_errors(
     keywords = json.loads(keywords_path.read_text())
     ref_entities = {ref["text"]: ref["entities"] for ref in keywords["references"]}
 
-    model_dirs = find_model_dirs(outputs_dir, model, exclude, latest=latest)
+    model_dirs = find_model_dirs(output_dir, model, exclude, latest=latest)
     results_files = [d / "results.txt" for d in model_dirs if (d / "results.txt").exists()]
 
     if not results_files:
@@ -266,7 +270,9 @@ def entity_errors(
 @app.command("extract-entities")
 def extract_entities(
     model: str = typer.Option("", help="Model pattern to extract from (empty for all)"),
-    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
+    output_dir: Path = typer.Option(
+        Path("outputs"), "--output-dir", help="Directory containing eval results"
+    ),
     exclude: list[str] = typer.Option([], help="Patterns to exclude"),
     min_count: int = typer.Option(20, help="Minimum entity count to include a type"),
     latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
@@ -277,7 +283,7 @@ def extract_entities(
     console.print("Loading spaCy model...")
     nlp = spacy.load("en_core_web_sm")
 
-    model_dirs = find_model_dirs(outputs_dir, model, exclude, latest=latest)
+    model_dirs = find_model_dirs(output_dir, model, exclude, latest=latest)
     results_files = [d / "results.txt" for d in model_dirs if (d / "results.txt").exists()]
     console.print(f"Found {len(results_files)} results files")
 
@@ -523,7 +529,9 @@ def parse_metrics_file(metrics_file: Path) -> dict:
 @app.command("compare")
 def compare(
     models: list[str] = typer.Argument(..., help="Model patterns to compare"),
-    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
+    output_dir: Path = typer.Option(
+        Path("outputs"), "--output-dir", help="Directory containing eval results"
+    ),
     exclude: list[str] = typer.Option([], help="Patterns to exclude from matching"),
 ):
     """Generate comprehensive comparison tables for multiple models."""
@@ -536,7 +544,7 @@ def compare(
     model_metrics = {}
     for model in models:
         console.print(f"Collecting metrics for '{model}'...")
-        model_metrics[model] = collect_model_metrics(model, outputs_dir, exclude)
+        model_metrics[model] = collect_model_metrics(model, output_dir, exclude)
 
     # Get all datasets present across models
     all_datasets = set()
