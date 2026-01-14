@@ -178,8 +178,6 @@ class LocalStreamingEvaluator(Evaluator):
         )
 
         full_text = "".join(tokens).strip()
-        # Apply pipeline post-processing (repetition truncation, etc.)
-        full_text = self.pipe._post_process_prediction(full_text)
         return full_text, processing_time
 
     def compute_metrics(self) -> dict:

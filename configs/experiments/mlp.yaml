@@ -13,19 +13,22 @@ model:
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   text_model_id: Qwen/Qwen3-0.6B
 
-  # LLM LoRA config (same as Stage 2)
+  # LLM LoRA config
   use_lora: true
-  lora_rank: 64
-  lora_alpha: 128
-  lora_dropout: 0.05
+  lora_rank: 32
+  lora_alpha: 64  # Maintain 2.0 scaling factor
+  lora_dropout: 0.0
   lora_target_modules:
     - q_proj
+    - k_proj
     - v_proj
+    - o_proj
   freeze_projector: false  # Jointly train projector + LoRA
 
 training:
   hub_model_id: "mazesmazes/tiny-audio"
-  learning_rate: 2e-4  # Lower LR for fine-tuning
+  learning_rate: 1e-3  # Higher LR to train projector
+  warmup_steps: 1000  # Reduced from 2000
   seed: 42  # Different seed for data ordering
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
@@ -36,6 +39,6 @@ training:
 
   use_specaugment: true
   num_time_masks: 2
-  time_mask_length: 100  # T=100 from original SpecAugment paper (LibriSpeech policy)
+  time_mask_length: 50  # Reduced from 100 for faster convergence
   num_freq_masks: 2
-  freq_mask_length: 43  # F=27 scaled for 128 mel bins (original: 27/80 = 34%)
+  freq_mask_length: 27  # Reduced from 43 (~20% of 128 mel bins)

@@ -534,110 +534,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             if tokens.dim() > 1:
                 tokens = tokens[0]
 
+        # Filter out eos tokens that the tokenizer doesn't recognize as special
+        # (generation_config.eos_token_id may differ from tokenizer.eos_token_id)
+        if hasattr(self, "model") and hasattr(self.model, "generation_config"):
+            eos_ids = self.model.generation_config.eos_token_id
+            if eos_ids is not None:
+                eos_set = set(eos_ids) if isinstance(eos_ids, list) else {eos_ids}
+                tokens = [t for t in tokens.tolist() if t not in eos_set]
+
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
         # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
         text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
-        # Post-process prediction
-        text = self._post_process_prediction(text)
         return {"text": text}
-
-    # Known hallucination patterns that should be deleted entirely
-    HALLUCINATION_PATTERNS = frozenset(
-        [
-            "and gt and gt",
-            "and gt",
-            "gt and gt",
-            "n",  # Single character noise
-            "and",  # Common short hallucination
-        ]
-    )
-
-    # Regex patterns for hallucinations (compiled for efficiency)
-    HALLUCINATION_REGEXES = [
-        # Repeating decimal hallucinations (e.g., "12.93242424242424")
-        re.compile(r"\d+\.\d*?(\d{2,})\1{3,}"),
-        # Very long repeated digit sequences (e.g., "242424242424")
-        re.compile(r"(\d{2,})\1{4,}"),
-    ]
-
-    def _post_process_prediction(self, text: str) -> str:
-        """Post-process model output to fix common issues."""
-        if not text:
-            return ""
-
-        # 1. LOWERCASE
-        text = text.lower()
-
-        # 2. CHECK FOR KNOWN HALLUCINATIONS (delete entirely)
-        if text.strip() in self.HALLUCINATION_PATTERNS:
-            return ""
-
-        # 3. CHECK FOR REGEX-BASED HALLUCINATIONS
-        for pattern in self.HALLUCINATION_REGEXES:
-            if pattern.search(text):
-                # If hallucination is the entire output, return empty
-                if pattern.fullmatch(text.strip()):
-                    return ""
-                # Otherwise remove the hallucinated portion
-                text = pattern.sub("", text)
-
-        # 4. COMBINE ACRONYMS
-        # Merge consecutive single letters into one word (e.g., "u s a" -> "usa")
-        text = re.sub(r"\b([a-z])((?:\s+[a-z])+)\b", lambda m: m.group(0).replace(" ", ""), text)
-
-        # 5. NORMALIZE CURRENCY
-        # Convert "eur X" to "X euros" for Whisper normalizer compatibility
-        text = re.sub(r"\beur\s+(\d+)", r"\1 euros", text)
-
-        # 6. TRUNCATE CHARACTER REPETITIONS (e.g., "uhhhhhh" -> "uhh")
-        text = self._truncate_character_repetitions(text)
-
-        # 7. TRUNCATE TRAILING REPEATS (word-level)
-        text = self._truncate_trailing_repeats(text)
-
-        # 8. STRIP WHITESPACE
-        return re.sub(r"\s+", " ", text).strip()
-
-    def _truncate_trailing_repeats(self, text: str, max_ngram: int = 10) -> str:
-        """Remove trailing repeated n-grams (1-10 words)."""
-        words = text.split()
-        if len(words) < 2:
-            return text
-
-        # Keep truncating until no more trailing repeats found
-        changed = True
-        while changed:
-            changed = False
-            # Check for repeating n-grams from largest to smallest
-            for n in range(min(max_ngram, len(words) // 2), 0, -1):
-                if len(words) < n * 2:
-                    continue
-                # Check if last n words repeat the previous n words
-                if words[-n:] == words[-2 * n : -n]:
-                    words = words[:-n]  # Remove the trailing repeat
-                    changed = True
-                    break  # Restart from largest n-gram
-
-        return " ".join(words)
-
-    def _truncate_character_repetitions(self, text: str, max_repeats: int = 3) -> str:
-        """Remove excessive character repetitions (e.g., 'uhhhhhh' -> 'uhh').
-
-        Handles hallucinations where the model outputs the same character many times,
-        like "uhhhhhhhhhhhhhhhhhhhhhhhhh" at the end of a prediction.
-
-        Args:
-            text: Input text to clean
-            max_repeats: Maximum allowed consecutive repetitions of a character
-
-        Returns:
-            Text with character repetitions truncated
-        """
-        if not text:
-            return text
-
-        # Replace any character repeated more than max_repeats times with max_repeats
-        # Pattern: any character followed by itself N+ times
-        pattern = rf"(.)\1{{{max_repeats},}}"
-        replacement = r"\1" * max_repeats
-        return re.sub(pattern, replacement, text)
