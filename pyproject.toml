@@ -23,7 +23,6 @@ classifiers = [
 ]
 requires-python = ">=3.10,<3.13"
 dynamic = ["dependencies"]
-dependencies = ["spectralcluster (>=0.2.22,<0.3.0)"]
 
 [project.urls]
 Homepage = "https://github.com/alexkroman/tiny-audio"
@@ -80,6 +79,8 @@ bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 fabric = ">=3.0.0"
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
 spacy = "^3.8.11"
+spectralcluster = ">=0.2.22,<0.3.0"
+ten-vad = ">=1.0.6"
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]

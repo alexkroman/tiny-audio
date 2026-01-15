@@ -297,8 +297,8 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
     STEP_SIZE = 0.5  # seconds (50% overlap)
 
     # VAD hysteresis parameters (segment-level approximation)
-    VAD_MIN_DURATION = 0.1  # Remove segments shorter than this (reduces FA)
-    VAD_MAX_GAP = 0.3  # Fill gaps shorter than this (reduces Miss)
+    VAD_MIN_DURATION = 0.08  # Remove segments shorter than this (reduces FA)
+    VAD_MAX_GAP = 0.5  # Fill gaps shorter than this (reduces Miss)
 
     def __init__(
         self,
@@ -320,8 +320,8 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
             from ten_vad import TenVad
 
             console.print("Loading TEN-VAD model...")
-            # Optimal threshold for balanced missed/FA
-            cls._ten_vad_model = TenVad(hop_size=256, threshold=0.30)  # Original threshold
+            # Lower threshold to reduce missed speech
+            cls._ten_vad_model = TenVad(hop_size=256, threshold=0.25)
         return cls._ten_vad_model
 
     @classmethod
