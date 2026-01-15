@@ -17,28 +17,33 @@ model:
   use_lora: true
   lora_rank: 32
   lora_alpha: 64  # Maintain 2.0 scaling factor
-  lora_dropout: 0.0
+  lora_dropout: 0.1
   lora_target_modules:
     - q_proj
     - k_proj
     - v_proj
     - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
   freeze_projector: false  # Jointly train projector + LoRA
 
 training:
   hub_model_id: "mazesmazes/tiny-audio"
-  learning_rate: 1e-3  # Higher LR to train projector
+  learning_rate: 3e-4  # Higher LR to train projector
+  weight_decay: 0.01
   warmup_steps: 1000  # Reduced from 2000
   seed: 42  # Different seed for data ordering
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   num_train_epochs: 1
-  save_steps: 2000
-  eval_steps: 2000
+  save_steps: 1000
+  eval_steps: 1000
 
+  # SpecAugment: LibriSpeech Double (LD) setting
   use_specaugment: true
   num_time_masks: 2
-  time_mask_length: 50  # Reduced from 100 for faster convergence
+  time_mask_length: 100
   num_freq_masks: 2
-  freq_mask_length: 27  # Reduced from 43 (~20% of 128 mel bins)
+  freq_mask_length: 27

@@ -23,6 +23,7 @@ classifiers = [
 ]
 requires-python = ">=3.10,<3.13"
 dynamic = ["dependencies"]
+dependencies = ["spectralcluster (>=0.2.22,<0.3.0)"]
 
 [project.urls]
 Homepage = "https://github.com/alexkroman/tiny-audio"

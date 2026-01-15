@@ -28,6 +28,7 @@ from scripts.eval.evaluators import (
     DiarizationEvaluator,
     EndpointEvaluator,
     EvalResult,
+    LocalDiarizationEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
     TimestampAlignmentEvaluator,
@@ -408,6 +409,18 @@ def main(
                     speakers_field=cfg.speakers_field,
                     timestamps_start_field=cfg.timestamps_start_field,
                     timestamps_end_field=cfg.timestamps_end_field,
+                )
+            elif model == "local":
+                # Local diarization using TEN-VAD + ERes2NetV2
+                model_id = "local"
+                evaluator = LocalDiarizationEvaluator(
+                    audio_field=cfg.audio_field,
+                    speakers_field=cfg.speakers_field,
+                    timestamps_start_field=cfg.timestamps_start_field,
+                    timestamps_end_field=cfg.timestamps_end_field,
+                    num_speakers=num_speakers,
+                    min_speakers=min_speakers or 2,
+                    max_speakers=max_speakers or 3,
                 )
             else:
                 model_id = get_model_name(model)

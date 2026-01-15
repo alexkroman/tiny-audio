@@ -7286,6 +7286,23 @@ files = [
 ]
 
 [[package]]
+name = "spectralcluster"
+version = "0.2.22"
+description = "Spectral Clustering"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "spectralcluster-0.2.22-py3-none-any.whl", hash = "sha256:70037a1c3bf65f31efac55fa5675cb68b3af3490464cbefc0d2f1eab5b2d3231"},
+    {file = "spectralcluster-0.2.22.tar.gz", hash = "sha256:730d8ddd8e65e1eefa87a6e2fe46cc6cb65e6462ae878ace9d1e04d63624c8c4"},
+]
+
+[package.dependencies]
+numpy = "*"
+scikit-learn = "*"
+scipy = "*"
+
+[[package]]
 name = "sqlalchemy"
 version = "2.0.45"
 description = "Database Abstraction Library"
@@ -8871,4 +8888,4 @@ local = ["pyaudio"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "82af59eee6802ecf8a33ebf62c1a6d6524cf65a0d03f87488be4c9db23cc19e6"
+content-hash = "6159bc203e46547aa591e9342d46f413b8d88327445f5baf915925f687c0b305"

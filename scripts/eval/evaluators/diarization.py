@@ -38,7 +38,8 @@ class DiarizationEvaluator:
         self.max_speakers = max_speakers
         self.num_workers = num_workers
         self.results: list[DiarizationResult] = []
-        self.metric = DiarizationErrorRate()
+        # Standard collar of 0.25s for boundary tolerance
+        self.metric = DiarizationErrorRate(collar=0.25)
 
     def _build_reference_annotation(self, sample: dict) -> Annotation:
         """Build pyannote Annotation from dataset sample."""
@@ -274,3 +275,345 @@ class DeepgramDiarizationEvaluator(DiarizationEvaluator):
 
         time.sleep(0.3)  # Rate limiting
         return segments, elapsed
+
+
+class LocalDiarizationEvaluator(DiarizationEvaluator):
+    """Local diarization evaluator using TEN-VAD + ERes2NetV2 + spectral clustering.
+
+    Pipeline:
+    1. TEN-VAD detects speech segments
+    2. Sliding window (1.0s, 0.5s overlap) for uniform embedding extraction
+    3. ERes2NetV2 extracts speaker embeddings per window
+    4. Spectral clustering with eigenvalue gap for auto speaker detection
+    5. Post-processing merges adjacent same-speaker windows
+    """
+
+    _ten_vad_model = None
+    _eres2netv2_model = None
+    _clusterer = None
+
+    # Sliding window parameters
+    WINDOW_SIZE = 1.0  # seconds
+    STEP_SIZE = 0.5  # seconds (50% overlap)
+
+    # VAD hysteresis parameters (segment-level approximation)
+    VAD_MIN_DURATION = 0.1  # Remove segments shorter than this (reduces FA)
+    VAD_MAX_GAP = 0.3  # Fill gaps shorter than this (reduces Miss)
+
+    def __init__(
+        self,
+        num_speakers: int | None = None,
+        min_speakers: int = 2,
+        max_speakers: int = 10,
+        **kwargs,
+    ):
+        kwargs.pop("hf_token", None)
+        super().__init__(**kwargs)
+        self.num_speakers = num_speakers
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
+
+    @classmethod
+    def _get_ten_vad_model(cls):
+        """Lazy-load TEN-VAD model (singleton)."""
+        if cls._ten_vad_model is None:
+            from ten_vad import TenVad
+
+            console.print("Loading TEN-VAD model...")
+            # Optimal threshold for balanced missed/FA
+            cls._ten_vad_model = TenVad(hop_size=256, threshold=0.30)  # Original threshold
+        return cls._ten_vad_model
+
+    @classmethod
+    def _get_eres2netv2_model(cls):
+        """Lazy-load ERes2NetV2 speaker embedding model (singleton)."""
+        if cls._eres2netv2_model is None:
+            from modelscope.pipelines import pipeline
+            from modelscope.utils.constant import Tasks
+
+            console.print("Loading ERes2NetV2 speaker embedding model...")
+            sv_pipeline = pipeline(
+                task=Tasks.speaker_verification, model="iic/speech_eres2netv2_sv_zh-cn_16k-common"
+            )
+            cls._eres2netv2_model = sv_pipeline.model
+        return cls._eres2netv2_model
+
+    def _get_clusterer(self):
+        """Get speaker clusterer instance."""
+        if self._clusterer is None:
+            from .clustering import SpeakerClusterer
+
+            self._clusterer = SpeakerClusterer(
+                min_num_spks=self.min_speakers,
+                max_num_spks=self.max_speakers,
+            )
+        return self._clusterer
+
+    def _get_speech_segments(self, audio_array: np.ndarray, sample_rate: int = 16000) -> list[dict]:
+        """Get speech segments using TEN-VAD (frame-by-frame processing)."""
+        vad_model = self._get_ten_vad_model()
+
+        # Convert to int16 as required by TEN-VAD
+        if audio_array.dtype != np.int16:
+            audio_int16 = (audio_array * 32767).astype(np.int16)
+        else:
+            audio_int16 = audio_array
+
+        # Process frame by frame (256 samples per frame = 16ms at 16kHz)
+        hop_size = 256
+        frame_duration = hop_size / sample_rate  # 16ms
+        speech_frames = []
+
+        for i in range(0, len(audio_int16) - hop_size, hop_size):
+            frame = audio_int16[i : i + hop_size]
+            _, is_speech = vad_model.process(frame)
+            speech_frames.append(is_speech)
+
+        # Convert frame-level decisions to segments
+        segments = []
+        in_speech = False
+        start_idx = 0
+
+        for i, is_speech in enumerate(speech_frames):
+            if is_speech and not in_speech:
+                start_idx = i
+                in_speech = True
+            elif not is_speech and in_speech:
+                start_time = start_idx * frame_duration
+                end_time = i * frame_duration
+                segments.append(
+                    {
+                        "start": start_time,
+                        "end": end_time,
+                        "start_sample": int(start_time * sample_rate),
+                        "end_sample": int(end_time * sample_rate),
+                    }
+                )
+                in_speech = False
+
+        # Handle trailing speech
+        if in_speech:
+            start_time = start_idx * frame_duration
+            end_time = len(speech_frames) * frame_duration
+            segments.append(
+                {
+                    "start": start_time,
+                    "end": end_time,
+                    "start_sample": int(start_time * sample_rate),
+                    "end_sample": int(end_time * sample_rate),
+                }
+            )
+
+        # Apply hysteresis post-processing
+        return self._apply_vad_hysteresis(segments)
+
+    def _apply_vad_hysteresis(self, segments: list[dict]) -> list[dict]:
+        """Apply hysteresis-like post-processing to VAD segments.
+
+        This approximates pyannote's hysteresis thresholding at the segment level:
+        - Fill short gaps between segments (simulates low offset threshold)
+        - Remove very short segments (simulates high onset threshold)
+
+        Args:
+            segments: List of VAD segments with start/end times
+
+        Returns:
+            Post-processed segments
+        """
+        if not segments:
+            return segments
+
+        # Sort by start time
+        segments = sorted(segments, key=lambda x: x["start"])
+
+        # Step 1: Fill short gaps (merge segments that are close together)
+        merged = [segments[0].copy()]
+        for seg in segments[1:]:
+            gap = seg["start"] - merged[-1]["end"]
+            if gap <= self.VAD_MAX_GAP:
+                # Fill the gap by extending previous segment
+                merged[-1]["end"] = seg["end"]
+                merged[-1]["end_sample"] = seg["end_sample"]
+            else:
+                merged.append(seg.copy())
+
+        # Step 2: Remove segments shorter than min_duration
+        return [seg for seg in merged if (seg["end"] - seg["start"]) >= self.VAD_MIN_DURATION]
+
+    def _extract_embeddings(
+        self, audio_array: np.ndarray, segments: list[dict], sample_rate: int
+    ) -> tuple[np.ndarray, list[dict]]:
+        """Extract embeddings using ERes2NetV2 model from 3D-Speaker."""
+        import torch
+
+        speaker_model = self._get_eres2netv2_model()
+        embeddings = []
+        window_segments = []
+
+        window_samples = int(self.WINDOW_SIZE * sample_rate)
+        step_samples = int(self.STEP_SIZE * sample_rate)
+
+        for seg in segments:
+            seg_start = seg["start_sample"]
+            seg_end = seg["end_sample"]
+            seg_len = seg_end - seg_start
+
+            # Generate window chunks
+            if seg_len <= window_samples:
+                chunks = [(seg_start, seg_end)]
+            else:
+                chunks = []
+                current = seg_start
+                while current + window_samples <= seg_end:
+                    chunks.append((current, current + window_samples))
+                    current += step_samples
+                if current < seg_end and (seg_end - current) > (window_samples // 2):
+                    chunks.append((seg_end - window_samples, seg_end))
+
+            for c_start, c_end in chunks:
+                chunk_audio = audio_array[c_start:c_end]
+
+                if len(chunk_audio) < window_samples // 2:
+                    chunk_audio = np.pad(chunk_audio, (0, window_samples // 2 - len(chunk_audio)))
+
+                # ERes2NetV2 expects raw audio tensor
+                with torch.no_grad():
+                    audio_tensor = torch.from_numpy(chunk_audio.astype(np.float32)).unsqueeze(0)
+                    embedding = speaker_model(audio_tensor).squeeze(0).cpu().numpy()
+
+                    # Handle NaN/inf values
+                    if not np.isfinite(embedding).all():
+                        embedding = np.nan_to_num(embedding, nan=0.0, posinf=1.0, neginf=-1.0)
+
+                    # Normalize embedding
+                    norm = np.linalg.norm(embedding)
+                    if norm > 1e-8:
+                        embedding = embedding / norm
+                    else:
+                        # Skip near-zero embeddings (likely silence)
+                        continue
+
+                    embeddings.append(embedding)
+                    window_segments.append(
+                        {"start": c_start / sample_rate, "end": c_end / sample_rate}
+                    )
+
+        return np.array(embeddings) if embeddings else np.array([]), window_segments
+
+    def _cluster_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
+        """Cluster embeddings using spectral clustering."""
+        clusterer = self._get_clusterer()
+        return clusterer(embeddings, self.num_speakers)
+
+    def _postprocess_segments(self, window_segments: list[dict], labels: np.ndarray) -> list[dict]:
+        """Post-process diarization segments with merging and overlap distribution.
+
+        Simplified from FunASR speaker_utils.py - removed smoothing step which
+        was causing missed speech by reassigning short segments.
+        """
+        if not window_segments or len(labels) == 0:
+            return []
+
+        # Step 1: Correct labels (re-index sequentially)
+        labels = self._correct_labels(labels)
+
+        # Step 2: Create initial segments
+        segments = []
+        for i in range(len(window_segments)):
+            segments.append(
+                [
+                    window_segments[i]["start"],
+                    window_segments[i]["end"],
+                    int(labels[i]),
+                ]
+            )
+
+        # Step 3: Merge consecutive same-speaker segments
+        segments = self._merge_sequential(segments)
+
+        # Step 4: Distribute overlapping regions at midpoint
+        for i in range(1, len(segments)):
+            if segments[i - 1][1] > segments[i][0] + 1e-4:
+                midpoint = (segments[i][0] + segments[i - 1][1]) / 2
+                segments[i][0] = midpoint
+                segments[i - 1][1] = midpoint
+
+        # Step 5: Convert to output format
+        return [
+            {
+                "speaker": f"SPEAKER_{seg[2]}",
+                "start": round(seg[0], 2),
+                "end": round(seg[1], 2),
+            }
+            for seg in segments
+        ]
+
+    def _correct_labels(self, labels: np.ndarray) -> np.ndarray:
+        """Re-index labels sequentially starting from 0."""
+        id_map = {}
+        new_labels = []
+        next_id = 0
+        for label in labels:
+            if label not in id_map:
+                id_map[label] = next_id
+                next_id += 1
+            new_labels.append(id_map[label])
+        return np.array(new_labels)
+
+    def _merge_sequential(self, segments: list) -> list:
+        """Merge consecutive segments with same speaker."""
+        if not segments:
+            return []
+
+        result = [segments[0].copy()]
+        for i in range(1, len(segments)):
+            # Same speaker and no gap -> merge
+            if segments[i][2] == result[-1][2] and segments[i][0] <= result[-1][1]:
+                result[-1][1] = max(result[-1][1], segments[i][1])
+            else:
+                result.append(segments[i].copy())
+        return result
+
+    def diarize(self, audio) -> tuple[list[dict], float]:
+        """Run VAD + speaker embedding + clustering diarization."""
+        import librosa
+
+        if isinstance(audio, dict):
+            if "array" in audio:
+                audio_array = audio["array"]
+                sample_rate = audio.get("sampling_rate", 16000)
+            elif "bytes" in audio:
+                audio_array, sample_rate = librosa.load(io.BytesIO(audio["bytes"]), sr=16000)
+            else:
+                raise ValueError(f"Unsupported audio dict format: {audio.keys()}")
+        else:
+            raise ValueError(f"Unsupported audio format: {type(audio)}")
+
+        if sample_rate != 16000:
+            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
+            sample_rate = 16000
+
+        audio_array = audio_array.astype(np.float32)
+
+        start = time.time()
+
+        # Step 1: VAD
+        segments = self._get_speech_segments(audio_array, sample_rate)
+        if not segments:
+            return [], time.time() - start
+
+        # Step 2: Extract embeddings
+        embeddings, window_segments = self._extract_embeddings(audio_array, segments, sample_rate)
+        if len(embeddings) == 0:
+            return [], time.time() - start
+
+        # Step 3: Cluster
+        labels = self._cluster_embeddings(embeddings)
+
+        # Step 4: Post-process segments (merge, smooth, distribute overlaps)
+        output_segments = self._postprocess_segments(window_segments, labels)
+
+        elapsed = time.time() - start
+        output_segments.sort(key=lambda x: x["start"])
+
+        return output_segments, elapsed
