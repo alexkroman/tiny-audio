@@ -13,12 +13,14 @@ from rich.table import Table
 from scripts.eval.audio import TextNormalizer
 from scripts.eval.datasets import (
     ALIGNMENT_DATASETS,
+    CLASSIFICATION_DATASETS,
     DATASET_REGISTRY,
     DIARIZATION_DATASETS,
     load_eval_dataset,
 )
 from scripts.eval.evaluators import (
     AssemblyAIAlignmentEvaluator,
+    AssemblyAIClassificationEvaluator,
     AssemblyAIDiarizationEvaluator,
     AssemblyAIEvaluator,
     AssemblyAIStreamingEvaluator,
@@ -28,6 +30,7 @@ from scripts.eval.evaluators import (
     DiarizationEvaluator,
     EndpointEvaluator,
     EvalResult,
+    LocalClassificationEvaluator,
     LocalDiarizationEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
@@ -273,6 +276,61 @@ def print_alignment_metrics(dataset_name: str, metrics: dict):
     console.print(table)
 
 
+def save_classification_results(
+    model_name: str,
+    dataset_name: str,
+    results,
+    metrics: dict,
+    output_dir: str = "outputs",
+) -> Path:
+    """Save classification evaluation results and metrics."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    safe_model_name = model_name.replace("/", "_")
+    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_classification"
+    result_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save detailed results
+    results_file = result_dir / "results.txt"
+    with results_file.open("w") as f:
+        for i, r in enumerate(results, 1):
+            status = "CORRECT" if r.correct else "WRONG"
+            f.write(f"Sample {i} - {status}\n")
+            f.write(f"Reference: {r.reference}\n")
+            f.write(f"Prediction: {r.prediction}\n")
+            f.write(f"Raw Output: {r.raw_output[:200]}\n")
+            f.write("-" * 80 + "\n")
+
+    # Save summary metrics
+    metrics_file = result_dir / "metrics.txt"
+    with metrics_file.open("w") as f:
+        f.write(f"Model: {model_name}\n")
+        f.write(f"Dataset: {dataset_name}\n")
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write("-" * 40 + "\n")
+        for key, value in metrics.items():
+            if isinstance(value, float):
+                f.write(f"{key}: {value:.4f}\n")
+            else:
+                f.write(f"{key}: {value}\n")
+
+    console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
+    return result_dir
+
+
+def print_classification_metrics(dataset_name: str, metrics: dict):
+    """Print classification metrics using rich table."""
+    table = Table(title=f"Results: {dataset_name}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+
+    table.add_row("Accuracy", f"{metrics['accuracy']:.2f}%")
+    table.add_row("Correct", f"{metrics['num_correct']}/{metrics['num_samples']}")
+    table.add_row("Samples", str(metrics["num_samples"]))
+    table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
+
+    console.print(table)
+
+
 def validate_datasets(datasets: list[str]) -> list[str]:
     """Validate and expand dataset names."""
     for ds in datasets:
@@ -500,6 +558,46 @@ def main(
             metrics = evaluator.compute_metrics()
             save_alignment_results(model_id, dataset_name, results, metrics, output_dir)
             print_alignment_metrics(dataset_name, metrics)
+            continue
+
+        # Handle classification datasets
+        if dataset_name in CLASSIFICATION_DATASETS:
+            dataset = load_eval_dataset(dataset_name, actual_split, config)
+
+            if model == "assemblyai":
+                api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
+                if not api_key:
+                    console.print(
+                        "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
+                    )
+                    raise typer.Exit(1)
+                model_id = assemblyai_model.value.replace("_", "-")
+                evaluator = AssemblyAIClassificationEvaluator(
+                    api_key=api_key,
+                    model=assemblyai_model.value,
+                    base_url=base_url,
+                    audio_field=cfg.audio_field,
+                    label_field=cfg.label_field,
+                    instruction_field=cfg.instruction_field,
+                    valid_labels=cfg.valid_labels,
+                    default_instruction=user_prompt,
+                    num_workers=num_workers,
+                )
+            else:
+                model_id = get_model_name(model)
+                evaluator = LocalClassificationEvaluator(
+                    model_path=model,
+                    audio_field=cfg.audio_field,
+                    label_field=cfg.label_field,
+                    instruction_field=cfg.instruction_field,
+                    valid_labels=cfg.valid_labels,
+                    default_instruction=user_prompt,
+                )
+
+            results = evaluator.evaluate(dataset, max_samples)
+            metrics = evaluator.compute_metrics()
+            save_classification_results(model_id, dataset_name, results, metrics, output_dir)
+            print_classification_metrics(dataset_name, metrics)
             continue
 
         # ASR evaluation
