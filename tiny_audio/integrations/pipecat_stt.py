@@ -53,6 +53,8 @@ class TinyAudioSTTService(SegmentedSTTService):
     def _ensure_model(self):
         """Lazy-load the model on first use."""
         if self._model is None:
+            import torch
+
             try:
                 from tiny_audio import ASRModel  # pyright: ignore[reportMissingImports]
             except ImportError:
@@ -65,15 +67,19 @@ class TinyAudioSTTService(SegmentedSTTService):
                     sys.path.insert(0, str(src_path))
                 from asr_modeling import ASRModel
 
-            # Load model with automatic device placement
-            self._model = ASRModel.from_pretrained(
-                self._model_id, device_map="auto", torch_dtype="auto"
-            )
-            self._model.eval()
-
-            # Get device from model
+            # Determine device: MPS > CUDA > CPU
             if self._device is None:
-                self._device = next(self._model.parameters()).device
+                if torch.backends.mps.is_available():
+                    self._device = torch.device("mps")
+                elif torch.cuda.is_available():
+                    self._device = torch.device("cuda")
+                else:
+                    self._device = torch.device("cpu")
+
+            # Load model and move to device
+            self._model = ASRModel.from_pretrained(self._model_id)
+            self._model.to(self._device)
+            self._model.eval()
 
     async def run_stt(self, audio: bytes):
         """Transcribe audio segment, yielding interim results if streaming enabled.
