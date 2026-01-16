@@ -168,143 +168,13 @@ class ForcedAligner:
         return word_timestamps
 
 
-class SpeakerDiarizer:
-    """Lazy-loaded speaker diarization using pyannote-audio."""
+try:
+    from .diarization import SpeakerDiarizer
+except ImportError:
+    from diarization import SpeakerDiarizer  # type: ignore[no-redef]
 
-    _pipeline = None
-
-    @classmethod
-    def get_instance(cls, hf_token: str | None = None):
-        """Get or create the diarization pipeline.
-
-        Args:
-            hf_token: HuggingFace token with access to pyannote models.
-                     Can also be set via HF_TOKEN environment variable.
-        """
-        if cls._pipeline is None:
-            from pyannote.audio import Pipeline
-
-            cls._pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-            )
-
-            # Move to best available device
-            cls._pipeline.to(torch.device(_get_device()))
-
-        return cls._pipeline
-
-    @classmethod
-    def diarize(
-        cls,
-        audio: np.ndarray | str,
-        sample_rate: int = 16000,
-        num_speakers: int | None = None,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        hf_token: str | None = None,
-    ) -> list[dict]:
-        """Run speaker diarization on audio.
-
-        Args:
-            audio: Audio waveform as numpy array or path to audio file
-            sample_rate: Audio sample rate (default 16000)
-            num_speakers: Exact number of speakers (if known)
-            min_speakers: Minimum number of speakers
-            max_speakers: Maximum number of speakers
-            hf_token: HuggingFace token for pyannote models
-
-        Returns:
-            List of dicts with 'speaker', 'start', 'end' keys
-        """
-        pipeline = cls.get_instance(hf_token)
-
-        # Prepare audio input
-        if isinstance(audio, np.ndarray):
-            # pyannote expects {"waveform": tensor, "sample_rate": int}
-            # Copy array to ensure it's writable (avoids PyTorch warning)
-            waveform = torch.from_numpy(audio.copy()).unsqueeze(0)  # Add channel dim
-            if waveform.dim() == 1:
-                waveform = waveform.unsqueeze(0)
-            audio_input = {"waveform": waveform, "sample_rate": sample_rate}
-        else:
-            # File path
-            audio_input = audio
-
-        # Run diarization
-        diarization_args = {}
-        if num_speakers is not None:
-            diarization_args["num_speakers"] = num_speakers
-        if min_speakers is not None:
-            diarization_args["min_speakers"] = min_speakers
-        if max_speakers is not None:
-            diarization_args["max_speakers"] = max_speakers
-
-        diarization = pipeline(audio_input, **diarization_args)
-
-        # Handle different pyannote return types
-        # pyannote 3.x returns DiarizeOutput dataclass, older versions return Annotation
-        if hasattr(diarization, "itertracks"):
-            annotation = diarization
-        elif hasattr(diarization, "speaker_diarization"):
-            # pyannote 3.x DiarizeOutput dataclass
-            annotation = diarization.speaker_diarization
-        elif isinstance(diarization, tuple):
-            # Some versions return (annotation, embeddings) tuple
-            annotation = diarization[0]
-        else:
-            raise TypeError(f"Unexpected diarization output type: {type(diarization)}")
-
-        # Convert to simple format
-        segments = []
-        for turn, _, speaker in annotation.itertracks(yield_label=True):
-            segments.append(
-                {
-                    "speaker": speaker,
-                    "start": turn.start,
-                    "end": turn.end,
-                }
-            )
-
-        return segments
-
-    @classmethod
-    def assign_speakers_to_words(
-        cls,
-        words: list[dict],
-        speaker_segments: list[dict],
-    ) -> list[dict]:
-        """Assign speaker labels to words based on timestamp overlap.
-
-        Args:
-            words: List of word dicts with 'word', 'start', 'end' keys
-            speaker_segments: List of speaker dicts with 'speaker', 'start', 'end' keys
-
-        Returns:
-            Words list with 'speaker' key added to each word
-        """
-        for word in words:
-            word_mid = (word["start"] + word["end"]) / 2
-
-            # Find the speaker segment that contains this word's midpoint
-            best_speaker = None
-            for seg in speaker_segments:
-                if seg["start"] <= word_mid <= seg["end"]:
-                    best_speaker = seg["speaker"]
-                    break
-
-            # If no exact match, find closest segment
-            if best_speaker is None and speaker_segments:
-                min_dist = float("inf")
-                for seg in speaker_segments:
-                    seg_mid = (seg["start"] + seg["end"]) / 2
-                    dist = abs(word_mid - seg_mid)
-                    if dist < min_dist:
-                        min_dist = dist
-                        best_speaker = seg["speaker"]
-
-            word["speaker"] = best_speaker
-
-        return words
+# Re-export for backwards compatibility
+__all__ = ["ForcedAligner", "SpeakerDiarizer", "ASRPipeline"]
 
 
 class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
@@ -340,6 +210,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         kwargs.pop("max_speakers", None)
         kwargs.pop("hf_token", None)
         kwargs.pop("user_prompt", None)
+        kwargs.pop("diarization_backend", None)
 
         return super()._sanitize_parameters(**kwargs)
 
@@ -359,6 +230,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             min_speakers: Minimum number of speakers (for diarization)
             max_speakers: Maximum number of speakers (for diarization)
             hf_token: HuggingFace token for pyannote models (or set HF_TOKEN env var)
+            diarization_backend: Backend for diarization ("pyannote" or "local")
             **kwargs: Additional arguments passed to the pipeline
 
         Returns:
@@ -374,6 +246,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             "min_speakers": kwargs.pop("min_speakers", None),
             "max_speakers": kwargs.pop("max_speakers", None),
             "hf_token": kwargs.pop("hf_token", None),
+            "backend": kwargs.pop("diarization_backend", "pyannote"),
         }
 
         if return_speakers:

@@ -411,7 +411,7 @@ def main(
                     timestamps_end_field=cfg.timestamps_end_field,
                 )
             elif model == "local":
-                # Local diarization using TEN-VAD + ERes2NetV2
+                # Local diarization using TEN-VAD + ERes2NetV2 + spectral clustering
                 model_id = "local"
                 evaluator = LocalDiarizationEvaluator(
                     audio_field=cfg.audio_field,
@@ -422,7 +422,21 @@ def main(
                     min_speakers=min_speakers or 2,
                     max_speakers=max_speakers or 3,
                 )
+            elif model == "pyannote":
+                # Pyannote diarization (requires HF token with model access)
+                model_id = "pyannote"
+                evaluator = DiarizationEvaluator(
+                    audio_field=cfg.audio_field,
+                    speakers_field=cfg.speakers_field,
+                    timestamps_start_field=cfg.timestamps_start_field,
+                    timestamps_end_field=cfg.timestamps_end_field,
+                    hf_token=hf_token,
+                    num_speakers=num_speakers,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                )
             else:
+                # Default to pyannote for other model paths
                 model_id = get_model_name(model)
                 evaluator = DiarizationEvaluator(
                     audio_field=cfg.audio_field,

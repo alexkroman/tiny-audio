@@ -111,7 +111,7 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
     feature_extractor = processor.feature_extractor
     pipe = ASRPipeline(model=model, feature_extractor=feature_extractor)
 
-    def process_audio(audio, show_timestamps, show_diarization, transcribe_prompt):
+    def process_audio(audio, show_timestamps, show_diarization, diarization_backend, transcribe_prompt):
         """Process audio file for transcription."""
         if audio is None:
             return "Please provide audio input"
@@ -127,6 +127,7 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
             kwargs["return_timestamps"] = True
         if show_diarization:
             kwargs["return_speakers"] = True
+            kwargs["diarization_backend"] = diarization_backend
 
         # Transcribe the audio
         result = pipe(audio, **kwargs)
@@ -168,6 +169,12 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
                         label="Speaker Diarization",
                         value=False,
                     )
+                    diarization_backend = gr.Dropdown(
+                        choices=["local", "pyannote"],
+                        value="local",
+                        label="Diarization Backend",
+                        info="local: TEN-VAD + ERes2NetV2 (no token needed), pyannote: requires HF token",
+                    )
 
                 transcribe_prompt_input = gr.Textbox(
                     label="Prompt",
@@ -185,7 +192,7 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         # Wire up events
         process_btn.click(
             fn=process_audio,
-            inputs=[audio_input, show_timestamps, show_diarization, transcribe_prompt_input],
+            inputs=[audio_input, show_timestamps, show_diarization, diarization_backend, transcribe_prompt_input],
             outputs=[output_text],
         )
 

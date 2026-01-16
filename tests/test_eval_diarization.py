@@ -9,7 +9,7 @@ class TestSpeakerClusterer:
 
     def test_empty_embeddings(self):
         """Test handling of empty embeddings."""
-        from scripts.eval.evaluators.clustering import SpeakerClusterer
+        from tiny_audio.diarization import SpeakerClusterer
 
         clusterer = SpeakerClusterer()
         labels = clusterer(np.array([]).reshape(0, 192))
@@ -17,7 +17,7 @@ class TestSpeakerClusterer:
 
     def test_single_embedding(self):
         """Test single embedding returns label 0."""
-        from scripts.eval.evaluators.clustering import SpeakerClusterer
+        from tiny_audio.diarization import SpeakerClusterer
 
         clusterer = SpeakerClusterer()
         labels = clusterer(np.random.randn(1, 192))
@@ -26,7 +26,7 @@ class TestSpeakerClusterer:
 
     def test_few_embeddings_returns_zeros(self):
         """Test fewer than 6 embeddings returns all zeros."""
-        from scripts.eval.evaluators.clustering import SpeakerClusterer
+        from tiny_audio.diarization import SpeakerClusterer
 
         clusterer = SpeakerClusterer()
         labels = clusterer(np.random.randn(5, 192))
@@ -35,7 +35,7 @@ class TestSpeakerClusterer:
 
     def test_oracle_num_speakers(self):
         """Test with oracle number of speakers."""
-        from scripts.eval.evaluators.clustering import SpeakerClusterer
+        from tiny_audio.diarization import SpeakerClusterer
 
         clusterer = SpeakerClusterer()
         # Create 2 distinct clusters
@@ -54,9 +54,7 @@ class TestLocalDiarizationEvaluator:
     @pytest.fixture
     def mock_vad_model(self, mocker):
         """Set up VAD mock."""
-        mock_vad = mocker.patch(
-            "scripts.eval.evaluators.diarization.LocalDiarizationEvaluator._get_ten_vad_model"
-        )
+        mock_vad = mocker.patch("tiny_audio.diarization.LocalSpeakerDiarizer._get_ten_vad_model")
         mock_model = mocker.MagicMock()
         mock_model.process.return_value = (None, True)  # TEN-VAD returns (frame, is_speech)
         mock_vad.return_value = mock_model
@@ -66,7 +64,7 @@ class TestLocalDiarizationEvaluator:
     def mock_speaker_model(self, mocker):
         """Set up speaker model mock."""
         mock_speaker = mocker.patch(
-            "scripts.eval.evaluators.diarization.LocalDiarizationEvaluator._get_eres2netv2_model"
+            "tiny_audio.diarization.LocalSpeakerDiarizer._get_eres2netv2_model"
         )
         mock_model = mocker.MagicMock()
         # ERes2NetV2 returns a tensor from forward pass
@@ -78,10 +76,8 @@ class TestLocalDiarizationEvaluator:
 
     @pytest.fixture
     def mock_clusterer(self, mocker):
-        """Set up clusterer mock."""
-        mock_cluster = mocker.patch(
-            "scripts.eval.evaluators.diarization.LocalDiarizationEvaluator._get_clusterer"
-        )
+        """Set up clusterer mock - mock the entire SpeakerClusterer class."""
+        mock_cluster = mocker.patch("tiny_audio.diarization.SpeakerClusterer")
         mock_obj = mocker.MagicMock()
         mock_obj.return_value = np.array([0, 0])
         mock_cluster.return_value = mock_obj
