@@ -296,12 +296,16 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
     WINDOW_SIZE = 1.0  # seconds
     STEP_SIZE = 0.25  # seconds (75% overlap)
 
-    # GPU Optimization - process multiple windows at once
-    BATCH_SIZE = 64
-
     # VAD hysteresis parameters (segment-level approximation)
     VAD_MIN_DURATION = 0.15  # Remove segments shorter than this (reduces FA)
     VAD_MAX_GAP = 0.40  # Fill gaps shorter than this (reduces Miss)
+
+    # VAD segment dilation (collar) - captures breath and unvoiced consonants
+    VAD_PAD_ONSET = 0.05  # 50ms before speech
+    VAD_PAD_OFFSET = 0.05  # 50ms after speech
+
+    # Internal resolution for voting
+    VOTING_RATE = 0.01  # 10ms resolution
 
     def __init__(
         self,
@@ -469,19 +473,22 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
                 merged.append(seg.copy())
 
         # Step 2: Remove segments shorter than min_duration
-        return [seg for seg in merged if (seg["end"] - seg["start"]) >= self.VAD_MIN_DURATION]
+        filtered = [seg for seg in merged if (seg["end"] - seg["start"]) >= self.VAD_MIN_DURATION]
+
+        # Step 3: Dilate segments (add collar to capture breath and unvoiced consonants)
+        # VAD cuts can chop off speaker identity info at segment edges
+        for seg in filtered:
+            seg["start"] = max(0.0, seg["start"] - self.VAD_PAD_ONSET)
+            seg["end"] = seg["end"] + self.VAD_PAD_OFFSET
+            seg["start_sample"] = int(seg["start"] * 16000)  # Assuming 16kHz
+            seg["end_sample"] = int(seg["end"] * 16000)
+
+        return filtered
 
     def _extract_embeddings(
         self, audio_array: np.ndarray, segments: list[dict], sample_rate: int
     ) -> tuple[np.ndarray, list[dict]]:
-        """Extract embeddings using GPU-optimized processing.
-
-        Note: The modelscope ERes2NetV2 wrapper doesn't support true batching
-        (it collapses batch dimension internally). We optimize by:
-        1. Pre-computing all audio chunks (vectorized)
-        2. Converting to tensor once (not per-iteration)
-        3. Processing on GPU with minimal Python overhead
-        """
+        """Extract speaker embeddings using sliding windows over speech segments."""
         import torch
 
         speaker_model = self._get_eres2netv2_model()
@@ -490,189 +497,169 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
         window_samples = int(self.WINDOW_SIZE * sample_rate)
         step_samples = int(self.STEP_SIZE * sample_rate)
 
-        # 1. Prepare all audio chunks first (CPU work, vectorized)
-        audio_chunks = []
+        embeddings = []
         window_segments = []
 
-        for seg in segments:
-            seg_start = seg["start_sample"]
-            seg_end = seg["end_sample"]
-            seg_len = seg_end - seg_start
-
-            # Generate start indices for this segment
-            if seg_len <= window_samples:
-                starts = [seg_start]
-                ends = [seg_end]
-            else:
-                # Vectorized generation of sliding windows
-                starts = list(range(seg_start, seg_end - window_samples + 1, step_samples))
-                ends = [s + window_samples for s in starts]
-
-                # Handle remainder
-                if ends and ends[-1] < seg_end and (seg_end - ends[-1]) > (window_samples // 2):
-                    starts.append(seg_end - window_samples)
-                    ends.append(seg_end)
-
-            for c_start, c_end in zip(starts, ends):
-                chunk = audio_array[c_start:c_end]
-
-                # Pad if necessary to ensure uniform size
-                if len(chunk) < window_samples:
-                    chunk = np.pad(chunk, (0, window_samples - len(chunk)))
-                elif len(chunk) > window_samples:
-                    chunk = chunk[:window_samples]
-
-                audio_chunks.append(chunk)
-                window_segments.append({"start": c_start / sample_rate, "end": c_end / sample_rate})
-
-        if not audio_chunks:
-            return np.array([]), []
-
-        # 2. Process embeddings (modelscope model doesn't support true batching)
-        embeddings = []
-        valid_indices = []
-
-        # Convert all chunks to tensor once (faster than per-iteration conversion)
-        all_audio_tensor = torch.from_numpy(np.array(audio_chunks)).float()
-
         with torch.no_grad():
-            for i in range(len(all_audio_tensor)):
-                # Get single chunk and add batch dimension
-                audio_tensor = all_audio_tensor[i : i + 1].to(device)
+            for seg in segments:
+                seg_start = seg["start_sample"]
+                seg_end = seg["end_sample"]
+                seg_len = seg_end - seg_start
 
-                # Forward pass
-                embedding = speaker_model.forward(audio_tensor).squeeze(0).cpu().numpy()
+                # Generate window positions
+                if seg_len <= window_samples:
+                    starts = [seg_start]
+                    ends = [seg_end]
+                else:
+                    starts = list(range(seg_start, seg_end - window_samples + 1, step_samples))
+                    ends = [s + window_samples for s in starts]
 
-                # Handle NaN/inf values
-                if not np.isfinite(embedding).all():
-                    continue
+                    # Cover tail if >10% of window remains
+                    if ends and ends[-1] < seg_end:
+                        remainder = seg_end - ends[-1]
+                        if remainder > (window_samples * 0.1):
+                            starts.append(seg_end - window_samples)
+                            ends.append(seg_end)
 
-                # Normalize embedding
-                norm = np.linalg.norm(embedding)
-                if norm > 1e-8:
-                    embedding = embedding / norm
-                    embeddings.append(embedding)
-                    valid_indices.append(i)
+                for c_start, c_end in zip(starts, ends):
+                    chunk = audio_array[c_start:c_end]
+
+                    # Pad short chunks with reflection (preserves spectral characteristics)
+                    if len(chunk) < window_samples:
+                        pad_width = window_samples - len(chunk)
+                        chunk = np.pad(chunk, (0, pad_width), mode="reflect")
+
+                    # Convert to tensor and process
+                    chunk_tensor = torch.from_numpy(chunk).float().unsqueeze(0).to(device)
+                    embedding = speaker_model.forward(chunk_tensor).squeeze(0).cpu().numpy()
+
+                    # Validate and normalize
+                    if not np.isfinite(embedding).all():
+                        continue
+                    norm = np.linalg.norm(embedding)
+                    if norm > 1e-8:
+                        embeddings.append(embedding / norm)
+                        window_segments.append(
+                            {"start": c_start / sample_rate, "end": c_end / sample_rate}
+                        )
 
         if embeddings:
-            final_embeddings = np.array(embeddings)
-            final_window_segments = [window_segments[i] for i in valid_indices]
-            return final_embeddings, final_window_segments
+            return np.array(embeddings), window_segments
 
         return np.array([]), []
 
     def _cluster_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
-        """Cluster embeddings using spectral clustering with label smoothing."""
-        from scipy.ndimage import median_filter
-
+        """Cluster embeddings using spectral clustering."""
         if embeddings.shape[0] == 0:
             return np.array([])
 
         clusterer = self._get_clusterer()
-        raw_labels = clusterer(embeddings, self.num_speakers)
+        return clusterer(embeddings, self.num_speakers)
 
-        # Median filter to smooth out rapid label flickering (A-A-B-A-A -> A-A-A-A-A)
-        if len(raw_labels) >= 3:
-            return median_filter(raw_labels, size=3)
-        return raw_labels
+    def _postprocess_segments(
+        self, window_segments: list[dict], labels: np.ndarray, total_duration: float
+    ) -> list[dict]:
+        """Post-process using Frame-Level Consensus Voting.
 
-    def _postprocess_segments(self, window_segments: list[dict], labels: np.ndarray) -> list[dict]:
-        """Post-process diarization segments using window centers.
-
-        Instead of midpoint cuts on overlapping windows, we trust the window center
-        timestamps. Each label applies to its window's center, and we extend segments
-        until the label changes. This handles boundaries more naturally with high
-        overlap (75%).
-
-        Important: Handles silence gaps correctly - if VAD detected a gap between
-        windows, we don't bridge it (which would create false alarms).
+        This replaces the midpoint cut logic. We create a timeline at 10ms resolution.
+        Every sliding window casts a 'vote' for its predicted speaker across its entire duration.
+        The speaker with the most votes at any given 10ms frame wins.
         """
         if not window_segments or len(labels) == 0:
             return []
 
-        # Ensure lengths match (in case embedding filtering dropped some)
-        if len(window_segments) != len(labels):
-            min_len = min(len(window_segments), len(labels))
-            window_segments = window_segments[:min_len]
-            labels = labels[:min_len]
+        # 1. Correct labels to be contiguous 0..N
+        unique_labels = np.unique(labels)
+        label_map = {old: new for new, old in enumerate(unique_labels)}
+        clean_labels = np.array([label_map[lbl] for lbl in labels])
+        num_speakers = len(unique_labels)
 
-        labels = self._correct_labels(labels)
+        if num_speakers == 0:
+            return []
 
-        # If windows are further apart than this, don't link them (VAD detected silence)
-        # Since step_size is 0.25s, a gap > 0.5s implies a VAD break
-        max_link_gap = 0.5
+        # 2. Create Voting Grid (10ms resolution)
+        num_frames = int(np.ceil(total_duration / self.VOTING_RATE)) + 1
+        votes = np.zeros((num_frames, num_speakers), dtype=np.float32)
 
-        window_centers = [(ws["start"] + ws["end"]) / 2 for ws in window_segments]
+        # 3. Accumulate votes from each window
+        for win, label in zip(window_segments, clean_labels):
+            start_frame = int(win["start"] / self.VOTING_RATE)
+            end_frame = int(win["end"] / self.VOTING_RATE)
+            end_frame = min(end_frame, num_frames)
+            if start_frame < end_frame:
+                votes[start_frame:end_frame, label] += 1.0
 
-        segments = []
-        current_label = int(labels[0])
-        segment_start = window_segments[0]["start"]
-        last_valid_end = window_segments[0]["end"]
+        # 4. Determine Winner per Frame
+        frame_speakers = np.argmax(votes, axis=1)
+        max_votes = np.max(votes, axis=1)
 
-        for i in range(1, len(labels)):
-            this_label = int(labels[i])
-            prev_end = window_segments[i - 1]["end"]
-            curr_start = window_segments[i]["start"]
-            gap = curr_start - prev_end
+        # 5. Convert Frames back to Segments
+        final_segments = []
+        current_speaker = -1
+        seg_start = 0.0
 
-            # Scenario 1: Large gap (Silence detected by VAD)
-            if gap > max_link_gap:
-                # Close previous segment at its natural end
-                segments.append([segment_start, last_valid_end, current_label])
-                # Start new segment at current window's start
-                segment_start = curr_start
-                current_label = this_label
+        for f in range(num_frames):
+            speaker = frame_speakers[f]
+            score = max_votes[f]
 
-            # Scenario 2: Contiguous speech, label changed
-            elif this_label != current_label:
-                # Boundary is midpoint between centers
-                boundary = (window_centers[i - 1] + window_centers[i]) / 2
-                segments.append([segment_start, boundary, current_label])
-                segment_start = boundary
-                current_label = this_label
+            # Treat zero votes as silence
+            if score == 0:
+                speaker = -1
 
-            # Scenario 3: Same label, contiguous - continue extending
+            if speaker != current_speaker:
+                if current_speaker != -1:
+                    final_segments.append(
+                        {
+                            "speaker": f"SPEAKER_{current_speaker}",
+                            "start": seg_start,
+                            "end": f * self.VOTING_RATE,
+                        }
+                    )
+                current_speaker = speaker
+                seg_start = f * self.VOTING_RATE
 
-            # Always update the valid end time
-            last_valid_end = window_segments[i]["end"]
+        # Close last segment
+        if current_speaker != -1:
+            final_segments.append(
+                {
+                    "speaker": f"SPEAKER_{current_speaker}",
+                    "start": seg_start,
+                    "end": num_frames * self.VOTING_RATE,
+                }
+            )
 
-        # Close final segment
-        segments.append([segment_start, last_valid_end, current_label])
+        # 6. Merge short segments to reduce flicker
+        return self._merge_short_segments(final_segments)
 
-        return [
-            {
-                "speaker": f"SPEAKER_{seg[2]}",
-                "start": round(seg[0], 2),
-                "end": round(seg[1], 2),
-            }
-            for seg in segments
-        ]
-
-    def _correct_labels(self, labels: np.ndarray) -> np.ndarray:
-        """Re-index labels sequentially starting from 0."""
-        id_map = {}
-        new_labels = []
-        next_id = 0
-        for label in labels:
-            if label not in id_map:
-                id_map[label] = next_id
-                next_id += 1
-            new_labels.append(id_map[label])
-        return np.array(new_labels)
-
-    def _merge_sequential(self, segments: list) -> list:
-        """Merge consecutive segments with same speaker."""
+    def _merge_short_segments(self, segments: list[dict], min_dur: float = 0.15) -> list[dict]:
+        """Merge extremely short segments into neighbors to reduce DER confusion."""
         if not segments:
             return []
 
-        result = [segments[0].copy()]
-        for i in range(1, len(segments)):
-            # Same speaker and no gap -> merge
-            if segments[i][2] == result[-1][2] and segments[i][0] <= result[-1][1]:
-                result[-1][1] = max(result[-1][1], segments[i][1])
+        clean = []
+        for seg in segments:
+            dur = seg["end"] - seg["start"]
+            if dur < min_dur:
+                # If same speaker as last and close, extend
+                if (
+                    clean
+                    and clean[-1]["speaker"] == seg["speaker"]
+                    and seg["start"] - clean[-1]["end"] < 0.1
+                ):
+                    clean[-1]["end"] = seg["end"]
+                continue
+
+            # If same speaker as previous and close, merge
+            if (
+                clean
+                and clean[-1]["speaker"] == seg["speaker"]
+                and seg["start"] - clean[-1]["end"] < 0.5
+            ):
+                clean[-1]["end"] = seg["end"]
             else:
-                result.append(segments[i].copy())
-        return result
+                clean.append(seg)
+
+        return clean
 
     def diarize(self, audio) -> tuple[list[dict], float]:
         """Run VAD + speaker embedding + clustering diarization."""
@@ -694,6 +681,7 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
             sample_rate = 16000
 
         audio_array = audio_array.astype(np.float32)
+        total_duration = len(audio_array) / sample_rate
 
         start = time.time()
 
@@ -710,10 +698,8 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
         # Step 3: Cluster
         labels = self._cluster_embeddings(embeddings)
 
-        # Step 4: Post-process segments (merge, smooth, distribute overlaps)
-        output_segments = self._postprocess_segments(window_segments, labels)
+        # Step 4: Consensus voting post-processing
+        output_segments = self._postprocess_segments(window_segments, labels, total_duration)
 
         elapsed = time.time() - start
-        output_segments.sort(key=lambda x: x["start"])
-
         return output_segments, elapsed
