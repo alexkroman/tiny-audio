@@ -3,7 +3,7 @@ repos:
     hooks:
       - id: precommit
         name: precommit quality gate
-        entry: poetry run precommit
+        entry: poetry run ta dev precommit
         language: system
         pass_filenames: false
         stages: [pre-commit]

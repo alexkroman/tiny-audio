@@ -5,7 +5,7 @@ import time
 
 from scripts.eval.audio import TextNormalizer, prepare_wav_bytes
 
-from .base import AlignmentResult, setup_assemblyai
+from .base import AlignmentResult, console, setup_assemblyai
 
 
 def align_words_to_reference(
@@ -112,15 +112,15 @@ class BaseAlignmentEvaluator:
                     sample[self.audio_field]
                 )
             except Exception as e:
-                print(f"Error on sample {processed}: {e}")
+                console.print(f"[red]Error on sample {processed}: {e}[/red]")
                 continue
 
             # Align predicted words to reference words
             aligned_pairs = align_words_to_reference(pred_words, ref_words, self.normalizer)
 
             if not aligned_pairs:
-                print(
-                    f"Sample {processed}: No words aligned (ref={len(ref_words)}, pred={len(pred_words)})"
+                console.print(
+                    f"[yellow]Sample {processed}: No words aligned (ref={len(ref_words)}, pred={len(pred_words)})[/yellow]"
                 )
                 result = AlignmentResult(
                     pred_starts=[],
@@ -168,7 +168,7 @@ class BaseAlignmentEvaluator:
             mae_end = sum(abs(p - r) for p, r in zip(pred_ends, ref_ends)) / len(pred_ends)
             mae_combined = (mae_start + mae_end) / 2
 
-            print(
+            console.print(
                 f"Sample {processed}: MAE={mae_combined * 1000:.1f}ms, "
                 f"Aligned={len(aligned_pairs)}/{len(ref_words)} words, "
                 f"Time={inference_time:.2f}s"
@@ -183,12 +183,12 @@ class BaseAlignmentEvaluator:
     def _print_checkpoint(self, sample_count: int):
         """Print cumulative metrics checkpoint."""
         metrics = self.compute_metrics()
-        print(f"\n{'=' * 60}")
-        print(
-            f"CHECKPOINT @ {sample_count}: MAE={metrics['mae'] * 1000:.1f}ms, "
+        console.print(f"\n[bold]{'=' * 60}[/bold]")
+        console.print(
+            f"[bold]CHECKPOINT @ {sample_count}:[/bold] MAE={metrics['mae'] * 1000:.1f}ms, "
             f"Alignment Error={metrics['alignment_error'] * 100:.1f}%"
         )
-        print(f"{'=' * 60}\n")
+        console.print(f"[bold]{'=' * 60}[/bold]\n")
 
     def compute_metrics(self) -> dict:
         """Compute final corpus-level metrics."""
@@ -258,21 +258,22 @@ class TimestampAlignmentEvaluator(BaseAlignmentEvaluator):
         super().__init__(audio_field, text_field, words_field)
         self.user_prompt = user_prompt
 
-        # Load model and pipeline
-        from tiny_audio.asr_modeling import ASRModel
-        from tiny_audio.asr_pipeline import ASRPipeline
+        from transformers import pipeline
 
-        model = ASRModel.from_pretrained(model_path)
-        self.pipe = ASRPipeline(model=model)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_path,
+            trust_remote_code=True,
+        )
 
         # Print generation config
-        gen_config = model.generation_config
-        print(
-            f"Generation config: max_new_tokens={gen_config.max_new_tokens}, "
+        gen_config = self.pipe.model.generation_config
+        console.print(
+            f"[dim]Generation config: max_new_tokens={gen_config.max_new_tokens}, "
             f"min_new_tokens={gen_config.min_new_tokens}, "
             f"repetition_penalty={gen_config.repetition_penalty}, "
             f"length_penalty={gen_config.length_penalty}, "
-            f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}"
+            f"no_repeat_ngram_size={gen_config.no_repeat_ngram_size}[/dim]"
         )
 
     def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:

@@ -7,8 +7,8 @@ class ASRConfig(transformers.PretrainedConfig):
     """Configuration class for the ASR model.
 
     This config combines settings for:
-    - Audio encoder (Whisper)
-    - Text decoder (SmolLM/Qwen)
+    - Audio encoder (GLM-ASR/Whisper)
+    - Text decoder (Qwen)
     - Projector (MLP, MOSA, MoE, QFormer)
     - Generation parameters
     - Training options (SpecAugment, LoRA)
@@ -19,13 +19,12 @@ class ASRConfig(transformers.PretrainedConfig):
 
     def __init__(
         self,
-        audio_model_id: str = "openai/whisper-large-v3-turbo",
-        text_model_id: str = "HuggingFaceTB/SmolLM3-3B",
+        audio_model_id: str = "zai-org/GLM-ASR-Nano-2512",
+        text_model_id: str = "Qwen/Qwen3-0.6B",
         attn_implementation: str = "flash_attention_2",
         model_dtype: str = "bfloat16",
         num_beams: Optional[int] = None,
         system_prompt: str = "You are a helpful assistant.",
-        user_prompt: str = "Please transcribe this English audio into text: <audio>",
         encoder_dim: Optional[int] = None,
         llm_dim: Optional[int] = None,
         # Encoder conv layers: list of (padding, kernel_size, stride) tuples
@@ -51,14 +50,12 @@ class ASRConfig(transformers.PretrainedConfig):
         qformer_intermediate_size: Optional[int] = None,  # FFN size (defaults to 4x hidden)
         label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
         inference_warmup_tokens: int = 10,
-        # SpecAugment settings (Whisper defaults)
+        # SpecAugment settings
         use_specaugment: bool = False,
-        mask_time_prob: float = 0.05,  # Probability of masking time steps
-        mask_time_length: int = 10,  # Max length of time mask
-        mask_time_min_masks: int = 2,  # Min number of time masks
-        mask_feature_prob: float = 0.0,  # Probability of masking frequency bins (disabled by default)
-        mask_feature_length: int = 10,  # Max length of frequency mask
-        mask_feature_min_masks: int = 0,  # Min number of frequency masks
+        num_time_masks: int = 2,
+        time_mask_length: int = 10,
+        num_freq_masks: int = 0,
+        freq_mask_length: int = 10,
         # LoRA configuration (for Stage 2 fine-tuning)
         use_lora: bool = False,
         lora_rank: int = 8,  # SALMONN default
@@ -77,8 +74,8 @@ class ASRConfig(transformers.PretrainedConfig):
         """Initialize ASR model configuration.
 
         Args:
-            audio_model_id: HuggingFace model ID for audio encoder (Whisper)
-            text_model_id: HuggingFace model ID for text decoder (SmolLM/Qwen)
+            audio_model_id: HuggingFace model ID for audio encoder (GLM-ASR/Whisper)
+            text_model_id: HuggingFace model ID for text decoder (Qwen)
             attn_implementation: Attention implementation ("flash_attention_2", "sdpa", "eager")
             model_dtype: Model dtype ("bfloat16", "float16", "float32")
             projector_type: Projector architecture ("mlp", "mosa", "moe", "qformer")
@@ -104,7 +101,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.attn_implementation = attn_implementation
         self.model_dtype = model_dtype
         self.system_prompt = system_prompt
-        self.user_prompt = user_prompt
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
         # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
@@ -131,12 +127,10 @@ class ASRConfig(transformers.PretrainedConfig):
         self.inference_warmup_tokens = inference_warmup_tokens
         # SpecAugment configuration
         self.use_specaugment = use_specaugment
-        self.mask_time_prob = mask_time_prob
-        self.mask_time_length = mask_time_length
-        self.mask_time_min_masks = mask_time_min_masks
-        self.mask_feature_prob = mask_feature_prob
-        self.mask_feature_length = mask_feature_length
-        self.mask_feature_min_masks = mask_feature_min_masks
+        self.num_time_masks = num_time_masks
+        self.time_mask_length = time_mask_length
+        self.num_freq_masks = num_freq_masks
+        self.freq_mask_length = freq_mask_length
         # LoRA configuration
         self.use_lora = use_lora
         self.lora_rank = lora_rank
@@ -205,6 +199,10 @@ class ASRConfig(transformers.PretrainedConfig):
                 self.audio_config = config_class(**self.audio_config)
 
         super().__init__(**kwargs)
+
+        # Point encoder to audio_config so pipeline uses correct feature extractor
+        # The pipeline looks for config.encoder._name_or_path for feature extractor
+        self.encoder = self.audio_config
 
         self.auto_map = {
             "AutoConfig": "asr_config.ASRConfig",

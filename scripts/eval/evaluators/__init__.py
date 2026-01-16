@@ -28,6 +28,7 @@ from .diarization import (
     AssemblyAIDiarizationEvaluator,
     DeepgramDiarizationEvaluator,
     DiarizationEvaluator,
+    LocalDiarizationEvaluator,
 )
 
 __all__ = [
@@ -50,6 +51,7 @@ __all__ = [
     "DiarizationEvaluator",
     "AssemblyAIDiarizationEvaluator",
     "DeepgramDiarizationEvaluator",
+    "LocalDiarizationEvaluator",
     # Alignment evaluators
     "BaseAlignmentEvaluator",
     "TimestampAlignmentEvaluator",

@@ -13,6 +13,7 @@ Usage:
 """
 
 import contextlib
+import html
 import re
 from dataclasses import fields
 from typing import Any
@@ -41,6 +42,47 @@ from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
 TRANSCRIBE_PREFIX = "Transcribe: "  # Used in DataCollator, matches ASRConfig.user_prompt
+
+# Symbol mappings for PunctCapSeg preprocessing/postprocessing
+# PunctCapSeg converts these symbols to <unk>, so we use word placeholders
+_PCS_SYMBOL_MAP = [
+    # (pre_pattern, pre_replace, post_pattern, post_replace)
+    (r"(\d)%", r"\1 percent", r"(\d)\s*percent\b", r"\1%"),
+    (r"(\d):(\d)", r"\1 oclock \2", r"(\d)[,\s]*oclock[,\s]*(\d)", r"\1:\2"),
+    (r"(\d)/(\d)", r"\1 slashdate \2", r"(\d)[,\s]*slashdate[,\s]*(\d)", r"\1/\2"),
+    (r"#(\d)", r"numbersign \1", r"numbersign\s*(\d)", r"#\1"),
+    (r"(\w)&(\w)", r"\1 ampersand \2", r"(\w)\s*ampersand\s*(\w)", r"\1&\2"),
+    (r"¥(\d)", r"yensign \1", r"yensign\s*(\d)", r"¥\1"),
+    (r"(\d)¢", r"\1 centsign", r"(\d)\s*centsign", r"\1¢"),
+    (r"(\d)°", r"\1 degreesign", r"(\d)\s*degreesign", r"\1°"),
+    (r"(\w+)-(\w+)", r"\1 hyphenword \2", r"(\w+)[,\s]*hyphenword[,\s]*(\w+)", r"\1-\2"),
+]
+
+
+def _preprocess_for_pcs(text: str) -> str:
+    """Replace symbols with word placeholders before PunctCapSeg."""
+    for pre_pat, pre_repl, _, _ in _PCS_SYMBOL_MAP:
+        # Apply multiple times for consecutive patterns (dates, hyphens)
+        for _ in range(5):
+            new_text = re.sub(pre_pat, pre_repl, text)
+            if new_text == text:
+                break
+            text = new_text
+    return text
+
+
+def _postprocess_from_pcs(text: str) -> str:
+    """Convert placeholders back to symbols after PunctCapSeg."""
+    for _, _, post_pat, post_repl in _PCS_SYMBOL_MAP:
+        for _ in range(5):
+            new_text = re.sub(post_pat, post_repl, text, flags=re.IGNORECASE)
+            if new_text == text:
+                break
+            text = new_text
+    # Fix country abbreviations added by PunctCapSeg
+    text = re.sub(r"\bU\.S\.A\.?", "USA", text)
+    text = re.sub(r"\bU\.S\.?", "US", text)
+    return re.sub(r"\bU\.K\.?", "UK", text)
 
 
 class DatasetLoader:
@@ -94,7 +136,11 @@ class DatasetLoader:
 
             ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
-        return ds
+        # Filter short transcripts (<2 words) to avoid noisy backchannels like "yeah", "ok"
+        def filter_short_transcripts(text):
+            return len(text.split()) >= 2
+
+        return ds.filter(filter_short_transcripts, num_proc=self.num_proc, input_columns="text")
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -200,7 +246,6 @@ class DataCollator:
         # Process audio
         audio_arrays = []
         valid_features = []
-        min_duration = 0.5  # Skip audio shorter than 0.5 seconds
         for f in features:
             try:
                 audio = f["audio"]["array"]
@@ -209,9 +254,6 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
-                # Skip very short audio samples
-                if len(audio) / self.sample_rate < min_duration:
-                    continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
             except Exception:
@@ -242,13 +284,16 @@ class DataCollator:
         if self.punctuator is None:
             self.punctuator = PunctCapSegModelONNX.from_pretrained("pcs_en")
 
-        def strip_html(text: str) -> str:
-            """Remove HTML tags from text."""
-            return re.sub(r"<[^>]+>", "", text)
-
-        raw_texts = [strip_html(f.get("text") or "").strip().lower() for f in valid_features]
+        raw_texts = [
+            _preprocess_for_pcs(
+                re.sub(r"<[^>]+>", "", html.unescape(f.get("text") or "")).strip().lower()
+            )
+            for f in valid_features
+        ]
         results = self.punctuator.infer(raw_texts)
-        processed_texts = [" ".join(r) if r else t for t, r in zip(raw_texts, results)]
+        processed_texts = [
+            _postprocess_from_pcs(" ".join(r) if r else t) for t, r in zip(raw_texts, results)
+        ]
 
         # Build messages for each sample with per-sample audio token counts
         text_features = []
@@ -307,8 +352,6 @@ def get_valid_training_args(config: dict) -> dict:
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
     nltk.download("punkt_tab", quiet=True)
 
     # Initialize wandb
@@ -327,12 +370,10 @@ def main(cfg: DictConfig) -> None:
         "label_smoothing",
         "projector_dropout",
         "use_specaugment",
-        "mask_time_prob",
-        "mask_time_length",
-        "mask_time_min_masks",
-        "mask_feature_prob",
-        "mask_feature_length",
-        "mask_feature_min_masks",
+        "num_time_masks",
+        "time_mask_length",
+        "num_freq_masks",
+        "freq_mask_length",
         "attn_implementation",
         # LoRA params (Stage 2 fine-tuning)
         "use_lora",
@@ -354,6 +395,10 @@ def main(cfg: DictConfig) -> None:
         model = ASRModel(asr_config)
 
     model.config.use_cache = False
+
+    # Store hub_model_id in config so save_pretrained() can set base_model_name_or_path correctly
+    if hub_model_id := cfg.training.get("hub_model_id"):
+        model.config.pretrained_model_path = hub_model_id
 
     # Disable Qwen3 thinking mode by patching the chat template
     # This is a workaround for TRL's DataCollatorForChatML not passing enable_thinking=False
@@ -415,7 +460,12 @@ def main(cfg: DictConfig) -> None:
     trainer.save_model()
 
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
-        trainer.push_to_hub(commit_message="Training complete - final model")
+        # Use model's push_to_hub which properly sets base_model_name_or_path in adapter_config.json
+        trainer.model.push_to_hub(
+            cfg.training.hub_model_id,
+            commit_message="Training complete - final model",
+            private=cfg.training.get("hub_private_repo", False),
+        )
 
 
 if __name__ == "__main__":

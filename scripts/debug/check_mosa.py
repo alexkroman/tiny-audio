@@ -5,11 +5,17 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from typing import Annotated
 
 import torch
 import torch.nn.functional as functional
+import typer
 from huggingface_hub import snapshot_download
+from rich.console import Console
 from safetensors.torch import load_file
+
+app = typer.Typer(help="Check MOSA model for router collapse")
+console = Console()
 
 # Target metrics for end of training (4-expert dense MoE per MOSA-Base)
 # Note: MOSA paper shows one expert often becomes "shared" with higher weight
@@ -27,7 +33,9 @@ def download_sample_audio(num_samples: int = 20):
     """Download sample audio files for testing."""
     from datasets import load_dataset
 
-    print(f"Downloading {num_samples} sample(s) from hf-internal-testing/librispeech_asr_dummy...")
+    console.print(
+        f"Downloading {num_samples} sample(s) from hf-internal-testing/librispeech_asr_dummy..."
+    )
     ds = load_dataset(
         "hf-internal-testing/librispeech_asr_dummy",
         "clean",
@@ -45,28 +53,28 @@ def download_sample_audio(num_samples: int = 20):
         samples.append((audio, sr, text))
         if num_samples <= 5:
             text_preview = f"'{text[:60]}...'" if len(text) > 60 else f"'{text}'"
-            print(f"  Sample {i + 1}: {len(audio) / sr:.1f}s - {text_preview}")
+            console.print(f"  Sample {i + 1}: {len(audio) / sr:.1f}s - {text_preview}")
 
-    print(f"Loaded {len(samples)} samples")
+    console.print(f"Loaded {len(samples)} samples")
     return samples
 
 
 def analyze_routing(probs, num_experts, label=""):
     """Analyze routing probabilities and print stats."""
     if label:
-        print(f"\n{label}")
-        print("-" * 40)
+        console.print(f"\n{label}")
+        console.print("-" * 40)
 
     mean_probs = probs.mean(dim=0)
     min_per_expert = probs.min(dim=0).values
     max_per_expert = probs.max(dim=0).values
     std_per_expert = probs.std(dim=0)
 
-    print(
+    console.print(
         f"Expert Weight Distribution (target: {TARGETS['expert_min'] * 100:.0f}-{TARGETS['expert_max'] * 100:.0f}% each):"
     )
-    print(f"  {'Expert':<8} {'Mean':>7} {'Min':>7} {'Max':>7} {'Std':>7}  Distribution")
-    print(f"  {'-' * 8} {'-' * 7} {'-' * 7} {'-' * 7} {'-' * 7}  {'-' * 20}")
+    console.print(f"  {'Expert':<8} {'Mean':>7} {'Min':>7} {'Max':>7} {'Std':>7}  Distribution")
+    console.print(f"  {'-' * 8} {'-' * 7} {'-' * 7} {'-' * 7} {'-' * 7}  {'-' * 20}")
 
     max_prob = 0
     min_prob = 1.0
@@ -75,7 +83,7 @@ def analyze_routing(probs, num_experts, label=""):
         zip(mean_probs, min_per_expert, max_per_expert, std_per_expert)
     ):
         bar = "█" * int(mean_p * 40)
-        print(
+        console.print(
             f"  Expert {i}: {mean_p * 100:5.1f}% {min_p * 100:5.1f}% {max_p * 100:5.1f}% {std_p * 100:5.1f}%  {bar}"
         )
         if mean_p > max_prob:
@@ -85,15 +93,15 @@ def analyze_routing(probs, num_experts, label=""):
             min_prob = mean_p.item()
 
     # Per-token analysis
-    print("\nPer-token routing variance:")
+    console.print("\nPer-token routing variance:")
     total_variance = probs.var(dim=0).mean().item()
-    print(f"  Avg variance across experts: {total_variance:.4f}")
+    console.print(f"  Avg variance across experts: {total_variance:.4f}")
     if total_variance < 0.001:
-        print("  -> Very low variance: router gives similar weights to all tokens")
+        console.print("  -> Very low variance: router gives similar weights to all tokens")
     elif total_variance < 0.01:
-        print("  -> Low variance: router starting to differentiate")
+        console.print("  -> Low variance: router starting to differentiate")
     else:
-        print("  -> Good variance: router differentiates between tokens")
+        console.print("  -> Good variance: router differentiates between tokens")
 
     # Entropy
     entropy = -(probs * (probs + 1e-10).log()).sum(dim=-1)
@@ -113,12 +121,12 @@ def analyze_routing(probs, num_experts, label=""):
     else:
         entropy_status = "very uniform (early training)"
 
-    print(
+    console.print(
         f"\nRouting entropy: {entropy.mean():.4f} / {max_entropy:.4f} ({entropy_ratio:.1%} of max)"
     )
-    print(f"  Std across tokens: {entropy_std:.1%}")
-    print(f"  Target range: {TARGETS['entropy_min']:.0%}-{TARGETS['entropy_max']:.0%}")
-    print(f"  -> {entropy_status}")
+    console.print(f"  Std across tokens: {entropy_std:.1%}")
+    console.print(f"  Target range: {TARGETS['entropy_min']:.0%}-{TARGETS['entropy_max']:.0%}")
+    console.print(f"  -> {entropy_status}")
 
     return max_prob, min_prob, dominant_expert, entropy_ratio
 
@@ -132,9 +140,9 @@ def check_mosa(
     import librosa
     from transformers import AutoFeatureExtractor, AutoModel
 
-    print("=" * 80)
-    print(f"MOSA Health Check: {model_id}")
-    print("=" * 80)
+    console.print("=" * 80)
+    console.print(f"[bold]MOSA Health Check: {model_id}[/bold]")
+    console.print("=" * 80)
 
     # Download latest model
     if force_download:
@@ -143,10 +151,10 @@ def check_mosa(
         )
         if cache_path.exists():
             shutil.rmtree(cache_path)
-            print("Cleared cache, downloading fresh...")
+            console.print("Cleared cache, downloading fresh...")
 
     path = snapshot_download(model_id)
-    print(f"Model path: {path}")
+    console.print(f"Model path: {path}")
 
     weights = load_file(f"{path}/model.safetensors")
 
@@ -157,10 +165,10 @@ def check_mosa(
         key_w = f"projector.router.{i}.weight"
         key_b = f"projector.router.{i}.bias"
         if key_w not in weights:
-            print(f"ERROR: Router layer {i} not found. Available keys:")
+            console.print(f"[red]ERROR: Router layer {i} not found. Available keys:[/red]")
             for k in sorted(weights.keys()):
                 if "router" in k or "projector" in k:
-                    print(f"  {k}")
+                    console.print(f"  {k}")
             raise KeyError(f"Missing {key_w} - is this a MOSA model?")
         w = weights[key_w].float()
         b = weights[key_b].float()
@@ -177,16 +185,16 @@ def check_mosa(
     encoder_dim = router_layers[0][0].shape[1]
 
     # Download sample audio
-    print()
+    console.print()
     samples = download_sample_audio(num_samples)
 
     # Get encoder model from config
     config_path = Path(path) / "config.json"
     with config_path.open() as f:
         config = json.load(f)
-    encoder_id = config.get("audio_model_id", "openai/whisper-large-v3-turbo")
+    encoder_id = config.get("audio_model_id", "zai-org/GLM-ASR-Nano-2512")
 
-    print(f"\nLoading encoder: {encoder_id}")
+    console.print(f"\nLoading encoder: {encoder_id}")
     encoder = AutoModel.from_pretrained(encoder_id, trust_remote_code=True)
     encoder.eval()
 
@@ -236,69 +244,69 @@ def check_mosa(
 
     # Concatenate all routing probs across samples
     probs = torch.cat(all_probs, dim=0)
-    print(f"\nProcessed {len(samples)} samples, {probs.shape[0]} total tokens")
-    print(f"Router expects: {encoder_dim}-dim input, {num_experts} experts")
+    console.print(f"\nProcessed {len(samples)} samples, {probs.shape[0]} total tokens")
+    console.print(f"Router expects: {encoder_dim}-dim input, {num_experts} experts")
 
     # Identify shared expert (highest mean usage) per MOSA architecture
     mean_probs_all = probs.mean(dim=0)
     shared_expert = mean_probs_all.argmax().item()
     specialist_experts = [i for i in range(num_experts) if i != shared_expert]
 
-    print("\nMOSA Architecture Analysis:")
-    print(
+    console.print("\nMOSA Architecture Analysis:")
+    console.print(
         f"  Shared expert: Expert {shared_expert} ({mean_probs_all[shared_expert] * 100:.1f}% avg)"
     )
-    print(f"  Specialist experts: {specialist_experts}")
+    console.print(f"  Specialist experts: {specialist_experts}")
 
     # Show per-sample variation if multiple samples
     if len(samples) > 1:
-        print("\nPer-sample expert distribution (mean %):")
-        print(f"  {'Sample':<8}", end="")
+        console.print("\nPer-sample expert distribution (mean %):")
+        header = f"  {'Sample':<8}"
         for e in range(num_experts):
             label = f"E{e}*" if e == shared_expert else f"E{e}"
-            print(f" {label:>7}", end="")
-        print()
+            header += f" {label:>7}"
+        console.print(header)
         for stat in per_sample_stats[:10]:  # Show first 10
-            print(f"  {stat['sample_idx']:<8}", end="")
+            line = f"  {stat['sample_idx']:<8}"
             for m in stat["expert_means"]:
-                print(f"   {m * 100:5.1f}%", end="")
-            print()
+                line += f"   {m * 100:5.1f}%"
+            console.print(line)
         if len(per_sample_stats) > 10:
-            print(f"  ... and {len(per_sample_stats) - 10} more samples")
+            console.print(f"  ... and {len(per_sample_stats) - 10} more samples")
 
         # Cross-sample variance
         expert_means_per_sample = torch.tensor([s["expert_means"] for s in per_sample_stats])
         cross_sample_std = expert_means_per_sample.std(dim=0)
-        print("\nCross-sample consistency (std of expert means across samples):")
+        console.print("\nCross-sample consistency (std of expert means across samples):")
         for e in range(num_experts):
             consistency = "consistent" if cross_sample_std[e] < 0.05 else "varies"
-            print(f"  Expert {e}: {cross_sample_std[e] * 100:.1f}% std ({consistency})")
+            console.print(f"  Expert {e}: {cross_sample_std[e] * 100:.1f}% std ({consistency})")
 
     # Within-sample routing dynamics
-    print("\nWithin-sample routing dynamics:")
+    console.print("\nWithin-sample routing dynamics:")
     avg_within_sample_std = torch.tensor([s["expert_stds"] for s in per_sample_stats]).mean(dim=0)
     for e in range(num_experts):
         if e == shared_expert:
-            print(
+            console.print(
                 f"  Expert {e} (shared): {avg_within_sample_std[e] * 100:.1f}% avg std within samples"
             )
         else:
-            print(
+            console.print(
                 f"  Expert {e} (specialist): {avg_within_sample_std[e] * 100:.1f}% avg std within samples"
             )
 
     # Specialist activation analysis
-    print("\nSpecialist expert activation:")
+    console.print("\nSpecialist expert activation:")
     for e in specialist_experts:
         # When does this expert get > 25% routing weight?
         activation_rate = (probs[:, e] > 0.25).float().mean().item()
         peak_activation = probs[:, e].max().item()
-        print(
+        console.print(
             f"  Expert {e}: activates >25% on {activation_rate * 100:.1f}% of tokens, peak={peak_activation * 100:.1f}%"
         )
 
-    print(f"\n1. ROUTER BEHAVIOR ({len(samples)} sample(s), {probs.shape[0]} tokens)")
-    print("-" * 40)
+    console.print(f"\n1. ROUTER BEHAVIOR ({len(samples)} sample(s), {probs.shape[0]} tokens)")
+    console.print("-" * 40)
 
     # Recompute logits stats from all samples
     all_logits = []
@@ -319,18 +327,18 @@ def check_mosa(
         all_logits.append(forward_router(x_real))
     logits = torch.cat(all_logits, dim=0)
 
-    print(f"Logit mean: {logits.mean():.4f}, std: {logits.std():.4f}")
-    print(f"Logit range: [{logits.min():.4f}, {logits.max():.4f}]")
+    console.print(f"Logit mean: {logits.mean():.4f}, std: {logits.std():.4f}")
+    console.print(f"Logit range: [{logits.min():.4f}, {logits.max():.4f}]")
 
     logit_exploded = logits.std() > 100
     if logit_exploded:
-        print("WARNING: Router logits have exploded!")
+        console.print("[red]WARNING: Router logits have exploded![/red]")
 
     max_prob, min_prob, dominant_expert, entropy_ratio = analyze_routing(probs, num_experts)
 
     # Expert differentiation
-    print("\n2. EXPERT DIFFERENTIATION")
-    print("-" * 40)
+    console.print("\n2. EXPERT DIFFERENTIATION")
+    console.print("-" * 40)
 
     if "projector.experts.0.gate_proj.weight" in weights:
         expert_weights = [
@@ -343,7 +351,7 @@ def check_mosa(
             for i in range(num_experts)
         ]
     else:
-        print("Unknown expert architecture")
+        console.print("Unknown expert architecture")
         expert_weights = None
 
     if expert_weights:
@@ -351,14 +359,14 @@ def check_mosa(
         flat_norm = flat / flat.norm(dim=1, keepdim=True)
         cosine_sim = flat_norm @ flat_norm.T
         avg_sim = (cosine_sim.sum() - num_experts) / (num_experts * (num_experts - 1))
-        print(f"Average pairwise cosine similarity: {avg_sim:.6f}")
+        console.print(f"Average pairwise cosine similarity: {avg_sim:.6f}")
         if avg_sim > 0.5:
-            print("WARNING: Experts are converging (losing diversity)")
+            console.print("[yellow]WARNING: Experts are converging (losing diversity)[/yellow]")
 
     # Summary
-    print("\n" + "=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
+    console.print("\n" + "=" * 80)
+    console.print("[bold]SUMMARY[/bold]")
+    console.print("=" * 80)
 
     # Check for critical issues (MOSA-aware)
     issues = []
@@ -368,42 +376,42 @@ def check_mosa(
         issues.append(f"Low routing entropy ({entropy_ratio:.1%}) - router may be collapsed")
 
     if issues:
-        print("ISSUES DETECTED:")
+        console.print("[red]ISSUES DETECTED:[/red]")
         for issue in issues:
-            print(f"  - {issue}")
+            console.print(f"  - {issue}")
     else:
-        print("No issues detected.")
+        console.print("[green]No issues detected.[/green]")
 
     # MOSA health summary
-    print("\nMOSA Health:")
-    print(f"  Shared expert (E{shared_expert}): {max_prob * 100:.1f}% avg routing")
-    print(f"  Specialist experts: {[f'E{e}' for e in specialist_experts]}")
-    print(
+    console.print("\nMOSA Health:")
+    console.print(f"  Shared expert (E{shared_expert}): {max_prob * 100:.1f}% avg routing")
+    console.print(f"  Specialist experts: {[f'E{e}' for e in specialist_experts]}")
+    console.print(
         f"  Routing entropy: {entropy_ratio:.1%} of max (target: {TARGETS['entropy_min']:.0%}-{TARGETS['entropy_max']:.0%})"
     )
 
     return len(issues) == 0
 
 
-def main():
-    """CLI entry point for check_mosa."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Check MOSA model for router collapse")
-    parser.add_argument(
-        "model_id", nargs="?", default="mazesmazes/tiny-audio", help="HuggingFace model ID"
-    )
-    parser.add_argument("--no-cache", action="store_true", help="Use cached model if available")
-    parser.add_argument(
-        "-n", "--num-samples", type=int, default=20, help="Number of audio samples to process"
-    )
-    args = parser.parse_args()
-
-    success = check_mosa(
-        args.model_id, force_download=not args.no_cache, num_samples=args.num_samples
-    )
+@app.command()
+def main(
+    model_id: Annotated[
+        str,
+        typer.Argument(help="HuggingFace model ID"),
+    ] = "mazesmazes/tiny-audio",
+    no_cache: Annotated[
+        bool,
+        typer.Option("--no-cache", help="Use cached model if available"),
+    ] = False,
+    num_samples: Annotated[
+        int,
+        typer.Option("-n", "--num-samples", help="Number of audio samples to process"),
+    ] = 20,
+):
+    """Check MOSA model for router collapse."""
+    success = check_mosa(model_id, force_download=not no_cache, num_samples=num_samples)
     sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":
-    main()
+    app()

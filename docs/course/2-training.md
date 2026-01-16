@@ -1,219 +1,76 @@
 # Class 2: Training
 
-**Duration**: 1 hour (15 min intro + 45 min hands-on)
+*1 hour (15 min intro + 45 min hands-on)*
 
-**Goal**: Set up a cloud training environment, configure an experiment, and launch your first training run.
+**Goal**: Set up cloud training, configure an experiment, and launch training.
 
-## Learning Objectives
+---
 
-By the end of this class, you will:
+## Part A: Lecture (15 min)
 
-- Set up RunPod for cloud GPU training
-- Understand training metrics (loss, gradient norm, learning rate)
-- Configure experiments using Hydra YAML files
-- Launch and monitor a training run
-- Know when to cancel and restart training
-- **Terminate unused instances to avoid charges**
+### How Training Works
 
-## Prerequisites
+1. **Downloads models**: GLM-ASR encoder + Qwen3 decoder from Hugging Face
+2. **Streams data**: Training data streams (no terabyte downloads)
+3. **Trains projector**: Only the MLP projector trains; encoder and decoder frozen
+4. **Saves checkpoints**: Every 1,000 steps to Hugging Face
 
-Before starting, ensure you have:
+### Key Metrics
 
-- Completed Class 1 (environment setup)
-- RunPod account with SSH key configured
-- Hugging Face token with **write** permissions
-- Weights & Biases account
+| Metric | What to look for |
+|--------|------------------|
+| **Training Loss** | Should decrease over time |
+| **Eval Loss** | Should decrease; rising = overfitting |
+| **Gradient Norm** | Starts high (40+), drops to <10 |
 
-______________________________________________________________________
+### The "Cliff" Phenomenon
 
-## PART A: LECTURE (15 min)
+- Steps 0-1500: Model outputs gibberish
+- Steps 1500-1600: Suddenly clicks—goes from nothing to decent ASR
+- Steps 1600+: Gradual improvement
 
-### 1. Why RunPod? (5 min)
+This is normal. Don't panic if it seems broken for the first hour.
 
-Tiny Audio trains locally on a MacBook (MPS driver), but it's slow. I typically:
+### Multi-Stage Training
 
-1. Test changes locally to verify they don't break anything
-1. Deploy to RunPod for real training
+For best results, training happens in stages:
 
-RunPod provides:
+| Stage | What trains | Config | Purpose |
+|-------|-------------|--------|---------|
+| **Stage 1** | Projector only | `+experiments=mlp` | Learn audio→text mapping |
+| **Stage 2** | LoRA adapters only | `+experiments=mlp_lora` | Fine-tune language model |
+| **Stage 3** | Projector + LoRA | `+experiments=mlp_fine_tune` | Joint optimization |
 
-- Easy access to powerful GPUs (A40 with 40GB VRAM)
-- Simple UI for managing instances
-- Pay-as-you-go (~$0.40/hour for A40)
-- Ability to scale to multiple GPUs
+Most users only need Stage 1. Stages 2 and 3 can improve accuracy but require more time.
 
-**Cost**: A full training run takes ~20 hours and costs ~$8-12. For this class, even a few hours produces a working model.
+---
 
-### 2. How Training Works (5 min)
+## Part B: Hands-On (45 min)
 
-When you start a training run:
+### Exercise 1: Set Up RunPod (10 min)
 
-1. **Downloads models**: Whisper encoder (~3GB) and SmolLM3 decoder (~6GB) from Hugging Face
-1. **Streams data**: Training data streams from Hugging Face (no terabyte downloads needed)
-1. **Trains MLP projector**: Only the MLP projector trains; encoder and decoder stay frozen
-1. **Saves checkpoints**: Every 500 steps, model saves to Hugging Face (resume if something crashes)
+1. Sign up at [runpod.io](https://runpod.io)
+2. Add SSH key (Settings → SSH Public Keys):
+   ```bash
+   ssh-keygen -t ed25519 -C "your_email@example.com"
+   cat ~/.ssh/id_ed25519.pub
+   ```
+3. Deploy an **NVIDIA A40** with **RunPod PyTorch 2.x** template
+4. Note the **host** and **port** from pod details
 
-### 3. Key Metrics (5 min)
-
-During training, you'll see:
-
-| Metric | What it means | What to look for |
-|--------|---------------|------------------|
-| **Training Loss** | How well the model fits training data | Should decrease over time |
-| **Eval Loss** | Performance on unseen data (every 1,000 steps) | Should also decrease; if it rises while training loss falls, you're overfitting |
-| **Gradient Norm** | Size of updates the optimizer wants to make | Starts high (40+), should drop to \<10 |
-| **Learning Rate** | How big updates are allowed to be | Usually constant or scheduled decay |
-
-**The "Cliff" Phenomenon**
-
-With multimodal models, you often see a dramatic cliff in training loss:
-
-- **Steps 0-1500**: Model outputs complete gibberish
-- **Steps 1500-1600**: Something clicks—within ~20 steps, it goes from nothing to decent ASR
-- **Steps 1600+**: Gradual improvement
-
-This is normal! Don't panic if your model seems broken for the first hour.
-
-______________________________________________________________________
-
-## PART B: HANDS-ON WORKSHOP (45 min)
-
-## Exercise 1: Set Up RunPod (10 min)
-
-### Goal
-
-Create a RunPod account and deploy an A40 GPU instance.
-
-### Instructions
-
-**Step 1: Sign up for RunPod**
-
-Go to [runpod.io](https://runpod.io) and create an account (or use an invite link if provided).
-
-**Step 2: Add your SSH key**
-
-Go to **Settings → SSH Public Keys**.
-
-If you don't have an SSH key:
-
-```bash
-ssh-keygen -t ed25519 -C "your_email@example.com"
-```
-
-Copy your public key:
-
-```bash
-cat ~/.ssh/id_ed25519.pub
-```
-
-Paste into RunPod and click "Update".
-
-**Step 3: Deploy an A40 instance**
-
-1. Click **Deploy**
-1. Select **NVIDIA A40** (Featured GPUs)
-   - Cheapest with good availability
-   - 40GB VRAM
-   - ~$0.40/hour
-1. Choose **RunPod PyTorch 2.x** template
-1. GPU count: **1**
-1. Uncheck "Start Jupyter Notebook" (unless you want it)
-1. Ensure "SSH Terminal Access" is checked
-1. Click **Deploy**
-
-**Important**: Don't create "Savings Plans"—use on-demand only.
-
-**Step 4: Get connection details**
-
-Once running, click the pod to expand details. Note the **host** and **port** (e.g., `ssh.runpod.io` and `22115`).
-
-### Success Checkpoint
-
-- [ ] RunPod account with SSH key
-- [ ] A40 pod deployed and running
-- [ ] Have host and port for SSH
-
-______________________________________________________________________
-
-## Exercise 2: Deploy Your Code (10 min)
-
-### Goal
-
-Sync your local project to RunPod and install dependencies.
-
-### Instructions
-
-**Step 1: Get latest code**
+### Exercise 2: Deploy Your Code (10 min)
 
 ```bash
 cd tiny-audio
 git pull origin main
-poetry install  # If you haven't already
+
+# Deploy to RunPod
+poetry run ta runpod deploy <HOST> <PORT>
 ```
 
-**Step 2: Run the deploy script**
+Takes 5-10 minutes. Re-run whenever you make local changes.
 
-```bash
-poetry run deploy-runpod <HOST> <PORT>
-```
-
-Example:
-
-```bash
-poetry run deploy-runpod ssh.runpod.io 22115
-```
-
-**What this script does** (I spent more time on this than the model code!):
-
-1. Tests SSH connection
-1. Syncs project files with `rsync`
-1. Installs system dependencies
-1. Installs Flash Attention (NVIDIA optimization)
-1. Installs Hugging Face Accelerate (multi-GPU support)
-1. Installs Python dependencies
-
-Takes 5-10 minutes. Output:
-
-```
-Testing SSH connection...
-SSH connection successful!
-
-Syncing project files...
-Project synced successfully!
-
-Installing dependencies...
-Python dependencies installed successfully!
-
-🚀 Deployment finished!
-```
-
-**Re-run this script** every time you make local changes.
-
-### Troubleshooting
-
-- **SSH fails**: Verify your public key is in RunPod settings
-- **Dependency errors**: Script is safe to re-run; it picks up where it left off
-
-### Success Checkpoint
-
-- [ ] Deploy script completed
-- [ ] Files synced to `/workspace/` on the pod
-
-______________________________________________________________________
-
-## Exercise 3: Configure Your Experiment (10 min)
-
-### Goal
-
-Create your own experiment configuration.
-
-### Instructions
-
-**Step 1: Understand the config system**
-
-Most changes are **config changes, not code changes**. Configs are YAML files in `configs/experiments/`.
-
-**Step 2: Create your config**
+### Exercise 3: Configure Experiment (10 min)
 
 ```bash
 cp configs/experiments/mlp.yaml configs/experiments/my_experiment.yaml
@@ -222,211 +79,160 @@ cp configs/experiments/mlp.yaml configs/experiments/my_experiment.yaml
 Edit `my_experiment.yaml`:
 
 ```yaml
-# REQUIRED: Change to YOUR Hugging Face username
-training:
-  hub_model_id: "your-username/tiny-audio-yourname"
+model:
+  projector_type: mlp
 
-# Optional: Experiment with these
-# training:
-#   max_steps: 10000       # Fewer steps = faster (default: 15000)
-#   per_device_train_batch_size: 8  # Higher = faster, but uses more VRAM
-#   learning_rate: 1e-3    # How aggressive updates are
+training:
+  hub_model_id: "your-username/tiny-audio-yourname"  # CHANGE THIS
 ```
 
-**Key hyperparameters** (see [Quick Reference](./4-quick-reference.md#key-hyperparameters) for full list):
-
-- `max_steps`: Training duration (default 15,000; 5,000 is enough to test)
-- `per_device_train_batch_size`: Samples per step (default 14)
-- `learning_rate`: Update aggressiveness (default 1e-3)
-- `projector_type`: Projector architecture (see below)
-
-**Projector architectures:**
-
-| Type | Description | VRAM | Training Speed |
-|------|-------------|------|----------------|
-| `mlp` | 2-layer MLP with frame stacking (4x downsampling) | Low | Fast |
-| `mosa` | Dense MoE with 4 experts, all contribute to each prediction | High | Slow |
-| `moe` | Shared expert + sparse routed experts (top-k) | Medium | Medium |
-| `qformer` | QFormer with learnable queries, BLIP-2 style | Medium | Medium |
-
-**Note:** The `mosa` and `moe` configs use different base models (GLM-ASR encoder, Qwen decoder) and include LoRA fine-tuning of the decoder. See `configs/experiments/` for details.
-
-**Recommendation**: Start with `mlp` for your first run. It's the fastest to train and produces good results. Try other architectures after you have a working baseline.
-
-**Step 3: Re-deploy**
+Re-deploy to sync:
 
 ```bash
-poetry run deploy-runpod <HOST> <PORT>
+poetry run ta runpod deploy <HOST> <PORT> --skip-setup
 ```
 
-### Success Checkpoint
-
-- [ ] Created your experiment config
-- [ ] Changed `hub_model_id` to your Hugging Face account
-- [ ] Re-deployed to sync
-
-______________________________________________________________________
-
-## Exercise 4: Start Training (10 min)
-
-### Goal
-
-Launch training and understand the output.
-
-### Instructions
-
-**Step 1: Set your Hugging Face token**
-
-Get a token with **write** permissions from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens):
+### Exercise 4: Start Training (10 min)
 
 ```bash
 export HF_TOKEN='hf_your_token_here'
+poetry run ta runpod train <HOST> <PORT> --experiment my_experiment
 ```
 
-**Step 2: Start training**
+When prompted for W&B, press **2** and paste your key from [wandb.ai/authorize](https://wandb.ai/authorize).
+
+**Output:**
+
+```
+Step 25/20000 | Loss: 8.34 | Grad Norm: 45.2 | LR: 1e-4 | ETA: 20hr
+```
+
+### Exercise 5: Monitor and Manage (5 min)
+
+**Detach/Reattach:**
 
 ```bash
-poetry run remote-train <HOST> <PORT> --experiment my_experiment
+# Detach: Ctrl+B, then D
+# Reattach:
+poetry run ta runpod attach <HOST> <PORT>
 ```
 
-**Step 3: Set up Weights & Biases**
+**Monitor in W&B** at [wandb.ai](https://wandb.ai):
+- `train/loss` should decrease
+- `eval/loss` should also decrease (rising = overfitting)
 
-When prompted:
-
-1. Press **2** to log in with API key
-1. Paste your key from [wandb.ai/authorize](https://wandb.ai/authorize)
-1. It creates a project and starts logging
-
-**Step 4: Watch training start**
-
-You'll see:
-
-```
-Downloading Whisper encoder... (1.6GB)
-Downloading SmolLM3 decoder... (10GB)
-Streaming training data...
-
-Training ~12,000,000 parameters
-Step 25/20000 | Loss: 8.34 | Grad Norm: 45.2 | LR: 1e-4 | Time: 2min | ETA: 20hr
-```
-
-**Understanding output:**
-
-- `Loss`: Should decrease (high at first is normal)
-- `Grad Norm`: Starts 40+, should drop to \<10 in a few hundred steps
-- `ETA`: Estimated time remaining
-
-### Success Checkpoint
-
-- [ ] Training started
-- [ ] Loss values appearing
-- [ ] W&B logging working
-
-______________________________________________________________________
-
-## Exercise 5: Monitor and Manage (5 min)
-
-### Goal
-
-Learn to monitor training and manage costs.
-
-### Detach/Reattach
-
-Training runs in `tmux`, so you can disconnect safely:
-
-```bash
-# Detach: Press Ctrl+B, then D
-
-# Reattach later:
-poetry run attach-remote <HOST> <PORT>
-```
-
-### Monitor in RunPod
-
-Click your pod to see telemetry:
-
-| Metric | Target | Problem if exceeded |
-|--------|--------|---------------------|
-| VRAM | 80-90% | 100% = CUDA OOM crash |
-| GPU Util | 100% | \<100% = bottleneck somewhere |
-| RAM | \<100% | 100% = crash |
-
-### Monitor in Weights & Biases
-
-At [wandb.ai](https://wandb.ai):
-
-- **train/loss**: Should steadily decrease
-- **eval/loss**: Every 1,000 steps; both should decrease
-
-**Warning sign**: Eval loss goes up while training loss goes down = overfitting. Cancel and adjust.
-
-### When to Cancel
-
-Press `Ctrl+C` in tmux to stop. Cancel if:
-
-- Loss isn't decreasing after several hundred steps
-- Eval loss starts going up
-- You want to change hyperparameters
-
-**After canceling:**
-
-1. **Start fresh**: Change config, restart
-1. **Resume from checkpoint**: Uncomment `pretrained_model_path` in your config
+**When to cancel** (Ctrl+C):
+- Loss not decreasing after several hundred steps
+- Eval loss rising while training loss falls
 
 ### CRITICAL: Terminate Unused Instances
 
-**RunPod charges by the hour whether you're using the GPU or not!**
-
-When done:
+**RunPod charges by the hour whether you're using it or not!**
 
 | Action | Effect |
 |--------|--------|
 | **Stop** | Pauses billing, keeps data |
 | **Terminate** | Stops billing, deletes data |
 
-**If you close your laptop and forget, you keep getting charged.**
+Always terminate when done. Re-deploy takes 5-10 minutes.
 
-Always terminate when you're done. You can re-deploy in 5-10 minutes.
+---
 
-### Success Checkpoint
+## Local Training (Optional)
 
-- [ ] Can detach/reattach to training
-- [ ] Can view metrics in W&B
-- [ ] Know when to cancel
-- [ ] **Pod terminated or stopped when done**
+If you have a local GPU (24GB+ VRAM):
 
-______________________________________________________________________
+```bash
+# Quick test (10 steps)
+poetry run python scripts/train.py +experiments=mlp training.max_steps=10
 
-## What's Next
+# Full training
+poetry run python scripts/train.py +experiments=mlp
 
-During training (several hours to a day):
+# Override settings
+poetry run python scripts/train.py +experiments=mlp training.learning_rate=1e-4
 
-1. **Check in periodically**: View loss in W&B, reattach to see output
-1. **Run evaluation**: Test WER locally (Class 3)
-1. **Run the demo**: Load your checkpoint to "vibe test" it
+# Resume from checkpoint
+poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpoint=/path/to/checkpoint-XXXX
+```
 
-Every 1,000 steps, your model saves to Hugging Face. You can evaluate or demo any checkpoint.
+---
 
-## Experimentation Ideas
+## Projector Types
 
-Once you have a working pipeline:
+| Type | Description | Speed | VRAM |
+|------|-------------|-------|------|
+| `mlp` | 2-layer MLP with frame stacking | Fast | Low |
+| `mosa` | Dense MoE, all experts contribute | Slow | High |
+| `moe` | Shared + sparse routed experts | Medium | Medium |
+| `qformer` | QFormer with learnable queries | Slow | High |
 
-**Easy wins:**
+Start with `mlp`. Try others after you have a baseline.
 
-- Try different projector types (MLP, MOSA, MoE, QFormer)
-- Adjust learning rate and batch size
+```bash
+# Different projectors
+poetry run python scripts/train.py +experiments=mlp
+poetry run python scripts/train.py +experiments=mosa
+poetry run python scripts/train.py +experiments=moe
+poetry run python scripts/train.py +experiments=qformer
+```
 
-**Interesting experiments:**
+---
 
-- Swap decoder to a larger LLM
-- Multilingual datasets
-- Other tasks: emotion detection, audio description
+## Advanced: Multi-Stage Training with LoRA
 
-**Advanced:**
+After Stage 1 training, you can optionally fine-tune the language model with LoRA:
 
-- Fine-tune from checkpoint on domain-specific data (medical, legal)
-- Multi-task training
+**Stage 2: Train LoRA adapters (freeze projector)**
 
-______________________________________________________________________
+```bash
+poetry run python scripts/train.py +experiments=mlp_lora \
+    training.resume_from_checkpoint=/path/to/stage1-checkpoint
+```
 
-[← Class 1: Introduction](./1-introduction-and-setup.md) | [Class 3: Evaluation →](./3-evaluation-and-deployment.md)
+**Stage 3: Fine-tune both projector and LoRA**
+
+```bash
+poetry run python scripts/train.py +experiments=mlp_fine_tune \
+    training.resume_from_checkpoint=/path/to/stage2-checkpoint
+```
+
+LoRA adds ~1-2M trainable parameters to the language model without full fine-tuning.
+
+---
+
+## Configuration Reference
+
+### Key Training Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `training.max_steps` | 50000 | Total training steps |
+| `training.learning_rate` | 1e-4 | Learning rate |
+| `training.per_device_train_batch_size` | 4 | Batch size per GPU |
+| `training.gradient_accumulation_steps` | 4 | Effective batch = batch_size * accumulation |
+| `training.warmup_steps` | 1000 | LR warmup steps |
+| `training.save_steps` | 1000 | Checkpoint frequency |
+
+### Key Model Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `model.audio_model_id` | `zai-org/GLM-ASR-Nano-2512` | Audio encoder |
+| `model.text_model_id` | `Qwen/Qwen3-0.6B` | Language model |
+| `model.projector_type` | `mlp` | Projector architecture |
+| `model.projector_pool_stride` | 5 | Frame stacking factor |
+
+---
+
+## Key Takeaways
+
+1. Only the projector trains (~12M params)
+2. Loss drops dramatically around step 1500 ("the cliff")
+3. Monitor eval loss for overfitting
+4. Multi-stage training with LoRA can improve accuracy
+5. **Terminate RunPod instances when done**
+
+---
+
+[← Class 1](./1-introduction-and-setup.md) | [Class 3: Evaluation →](./3-evaluation-and-deployment.md)

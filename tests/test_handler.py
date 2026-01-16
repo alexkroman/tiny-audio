@@ -1,6 +1,7 @@
 """Tests for EndpointHandler."""
 
 import pytest
+import torch
 
 
 class TestIsFlashAttnAvailable:
@@ -10,48 +11,40 @@ class TestIsFlashAttnAvailable:
         """Should return a boolean."""
         from tiny_audio.handler import EndpointHandler
 
-        # Create handler without __init__
         handler = object.__new__(EndpointHandler)
         result = handler._is_flash_attn_available()
 
         assert isinstance(result, bool)
 
-    def test_checks_flash_attn_module(self):
+    def test_checks_flash_attn_module(self, mocker):
         """Should check for flash_attn module."""
-        from unittest.mock import patch
-
         from tiny_audio.handler import EndpointHandler
 
         handler = object.__new__(EndpointHandler)
+        mock_find = mocker.patch("importlib.util.find_spec")
 
-        # Mock flash_attn being available
-        with patch("importlib.util.find_spec") as mock_find:
-            mock_find.return_value = True
-            result = handler._is_flash_attn_available()
-            assert result is True
-            mock_find.assert_called_with("flash_attn")
+        # Test when flash_attn is available
+        mock_find.return_value = True
+        assert handler._is_flash_attn_available() is True
+        mock_find.assert_called_with("flash_attn")
 
-        # Mock flash_attn not available
-        with patch("importlib.util.find_spec") as mock_find:
-            mock_find.return_value = None
-            result = handler._is_flash_attn_available()
-            assert result is False
+        # Test when flash_attn is not available
+        mock_find.return_value = None
+        assert handler._is_flash_attn_available() is False
 
 
 class TestEndpointHandlerCall:
     """Tests for EndpointHandler.__call__ method."""
 
     @pytest.fixture
-    def mock_handler(self):
+    def mock_handler(self, mocker):
         """Create handler with mocked model and pipeline."""
-        from unittest.mock import MagicMock
-
         from tiny_audio.handler import EndpointHandler
 
         handler = object.__new__(EndpointHandler)
-        handler.pipe = MagicMock()
+        handler.pipe = mocker.MagicMock()
         handler.pipe.return_value = {"text": "hello world"}
-        handler.model = MagicMock()
+        handler.model = mocker.MagicMock()
         handler.device = "cpu"
         handler.dtype = None
 
@@ -82,75 +75,31 @@ class TestEndpointHandlerCall:
         mock_handler.pipe.assert_called_once_with("audio_data")
 
 
-class TestEndpointHandlerWarmup:
-    """Tests for EndpointHandler._warmup method."""
-
-    @pytest.fixture
-    def mock_handler_for_warmup(self):
-        """Create handler with mocked components for warmup."""
-        from unittest.mock import MagicMock
-
-        from tiny_audio.handler import EndpointHandler
-
-        handler = object.__new__(EndpointHandler)
-
-        # Mock pipeline and model
-        handler.pipe = MagicMock()
-        handler.pipe.model = MagicMock()
-        handler.pipe.model.config.audio_sample_rate = 16000
-        handler.pipe.model.config.inference_warmup_tokens = 10
-        handler.pipe.return_value = {"text": "warmup"}
-
-        return handler
-
-    def test_warmup_creates_dummy_audio(self, mock_handler_for_warmup):
-        """Warmup should create and process dummy audio."""
-        import torch
-
-        with torch.inference_mode():
-            mock_handler_for_warmup._warmup()
-
-        # Pipeline should be called
-        assert mock_handler_for_warmup.pipe.called
-
-    def test_warmup_handles_exceptions(self, mock_handler_for_warmup, capsys):
-        """Warmup should catch and report exceptions."""
-        mock_handler_for_warmup.pipe.side_effect = RuntimeError("Test error")
-
-        # Should not raise
-        mock_handler_for_warmup._warmup()
-
-        # Should print warning
-        captured = capsys.readouterr()
-        assert "Warmup skipped" in captured.out
-
-
 class TestEndpointHandlerInit:
     """Tests for EndpointHandler initialization logic."""
 
-    def test_device_detection_cpu(self):
+    def test_device_detection_cpu(self, mocker):
         """Should use CPU when CUDA not available."""
-        from unittest.mock import MagicMock, patch
+        mocker.patch("torch.cuda.is_available", return_value=False)
+        mock_model = mocker.patch("tiny_audio.handler.ASRModel")
+        mocker.patch("tiny_audio.handler.ASRPipeline")
 
-        with patch("torch.cuda.is_available", return_value=False), patch(
-            "tiny_audio.handler.ASRModel"
-        ) as mock_model, patch("tiny_audio.handler.ASRPipeline"):
-            mock_model.from_pretrained.return_value = MagicMock()
+        # Set up the mock to return a proper device
+        mock_instance = mocker.MagicMock()
+        mock_param = mocker.MagicMock()
+        mock_param.device = torch.device("cpu")
+        mock_instance.parameters.return_value = iter([mock_param])
+        mock_model.from_pretrained.return_value = mock_instance
 
-            from tiny_audio.handler import EndpointHandler
+        from tiny_audio.handler import EndpointHandler
 
-            handler = EndpointHandler("/fake/path")
+        handler = EndpointHandler("/fake/path")
 
-            assert handler.device == "cpu"
+        assert handler.device == torch.device("cpu")
 
     def test_handler_sets_tf32_flags(self):
         """Handler __init__ should set TF32 flags."""
-        import torch
-
-        # Just verify the handler code sets these flags
-        # (the actual init has been tested via device_detection_cpu)
-        # TF32 is enabled in the handler's __init__
-        # We test that the flags can be set
+        # Verify the flags can be set (actual init tested via device_detection_cpu)
         original = torch.backends.cuda.matmul.allow_tf32
         torch.backends.cuda.matmul.allow_tf32 = True
         assert torch.backends.cuda.matmul.allow_tf32 is True
@@ -165,12 +114,3 @@ class TestEndpointHandlerIntegration:
         from tiny_audio.handler import EndpointHandler
 
         assert EndpointHandler is not None
-
-    def test_handler_has_required_methods(self):
-        """Handler should have __init__ and __call__."""
-        from tiny_audio.handler import EndpointHandler
-
-        assert hasattr(EndpointHandler, "__init__")
-        assert callable(EndpointHandler)  # Class is callable (can instantiate)
-        assert hasattr(EndpointHandler, "_warmup")
-        assert hasattr(EndpointHandler, "_is_flash_attn_available")

@@ -38,39 +38,22 @@ class LocalEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from tiny_audio.asr_modeling import ASRModel
-        from tiny_audio.asr_pipeline import ASRPipeline
+        from transformers import pipeline
 
-        # Load model and use our custom pipeline
-        model = ASRModel.from_pretrained(model_path)
-        self.pipe = ASRPipeline(model=model)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_path,
+            trust_remote_code=True,
+        )
         self.user_prompt = user_prompt
 
-        # Print generation config
-        print_generation_config(model, model_path)
+        print_generation_config(self.pipe.model, model_path)
 
     def transcribe(self, audio) -> tuple[str, float]:
-        # Convert to pipeline-compatible format
-        if isinstance(audio, dict) and "array" in audio and "raw" not in audio:
-            # Standard HF datasets format: "array" -> "raw"
-            audio = {"raw": audio["array"], "sampling_rate": audio["sampling_rate"]}
-        elif not isinstance(audio, (str, dict)) or (isinstance(audio, dict) and "raw" not in audio):
-            # For other formats (AudioDecoder, bytes, etc.), convert to WAV file
-            wav_bytes = prepare_wav_bytes(audio)
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-                temp_file.write(wav_bytes)
-                audio = temp_file.name
-
         start = time.time()
-        if self.user_prompt:
-            result = self.pipe(audio, user_prompt=self.user_prompt)
-        else:
-            result = self.pipe(audio)
+        result = self.pipe(audio, user_prompt=self.user_prompt)
         elapsed = time.time() - start
-
-        if isinstance(result, dict):
-            return result.get("text", ""), elapsed
-        return str(result), elapsed
+        return result.get("text", "") if isinstance(result, dict) else str(result), elapsed
 
 
 class LocalStreamingEvaluator(Evaluator):
@@ -78,26 +61,31 @@ class LocalStreamingEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from tiny_audio.asr_modeling import ASRModel
-        from tiny_audio.asr_pipeline import ASRPipeline
+        from transformers import pipeline
 
         # Determine best device and dtype
         if torch.cuda.is_available():
-            device = "cuda"
+            device = 0
             dtype = torch.bfloat16
         elif torch.backends.mps.is_available():
             device = "mps"
-            dtype = torch.float16  # MPS doesn't support bfloat16
+            dtype = torch.float16
         else:
-            device = "cpu"
+            device = -1
             dtype = torch.float32
 
-        self.model = ASRModel.from_pretrained(model_path, torch_dtype=dtype).to(device)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_path,
+            trust_remote_code=True,
+            device=device,
+            torch_dtype=dtype,
+        )
+        self.model = self.pipe.model
         self.model.eval()
         self.processor = self.model.get_processor()
-        self.pipe = ASRPipeline(model=self.model)  # For post-processing
         self.user_prompt = user_prompt
-        print(f"Using device: {device}, dtype: {dtype}")
+        console.print(f"[dim]Using device: {device}, dtype: {dtype}[/dim]")
 
         # Track timing stats
         self.ttfb_times: list[float] = []
@@ -185,11 +173,11 @@ class LocalStreamingEvaluator(Evaluator):
 
         # Print timing info
         ttfb_str = f"{ttfb * 1000:.0f}ms" if ttfb else "N/A"
-        print(f"  [Streaming] TTFB: {ttfb_str}, Processing: {processing_time * 1000:.0f}ms")
+        console.print(
+            f"  [dim][Streaming] TTFB: {ttfb_str}, Processing: {processing_time * 1000:.0f}ms[/dim]"
+        )
 
         full_text = "".join(tokens).strip()
-        # Apply pipeline post-processing (repetition truncation, etc.)
-        full_text = self.pipe._post_process_prediction(full_text)
         return full_text, processing_time
 
     def compute_metrics(self) -> dict:
@@ -256,26 +244,65 @@ class AssemblyAIEvaluator(Evaluator):
 
 
 class AssemblyAIStreamingEvaluator(Evaluator):
-    """Evaluator for AssemblyAI Streaming API (Universal-Streaming model)."""
+    """Evaluator for AssemblyAI Streaming API (Universal-Streaming model).
+
+    Reuses a single websocket connection across all samples for efficiency.
+    """
 
     def __init__(self, api_key: str, **kwargs):
         super().__init__(**kwargs)
         self.api_key = api_key
-        # Track timing stats across samples
-        self.ttfb_times: list[float] = []
-        self.processing_times: list[float] = []
+        self._client = None
+        self._transcripts = {}
+        self._error = None
+        self._turn_done = None
 
-    def transcribe(self, audio) -> tuple[str, float]:
-        import threading
+    def _ensure_connected(self):
+        """Lazily connect to the streaming API on first use."""
+        if self._client is not None:
+            return
 
-        import numpy as np
-        import soundfile as sf
         from assemblyai.streaming.v3 import (
             StreamingClient,
             StreamingClientOptions,
             StreamingEvents,
             StreamingParameters,
         )
+
+        self._client = StreamingClient(
+            StreamingClientOptions(
+                api_key=self.api_key,
+                api_host="streaming.assemblyai.com",
+            )
+        )
+
+        def on_turn(_client, event):
+            if event.transcript and event.end_of_turn and event.turn_is_formatted:
+                self._transcripts[event.turn_order] = event.transcript
+                if self._turn_done:
+                    self._turn_done.set()
+
+        def on_error(_client, error):
+            self._error = error
+            if self._turn_done:
+                self._turn_done.set()
+
+        def on_terminated(_client, _event):
+            if self._turn_done:
+                self._turn_done.set()
+
+        self._client.on(StreamingEvents.Turn, on_turn)
+        self._client.on(StreamingEvents.Error, on_error)
+        self._client.on(StreamingEvents.Termination, on_terminated)
+        self._client.connect(StreamingParameters(sample_rate=16000, format_turns=True))
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        import threading
+
+        import numpy as np
+        import soundfile as sf
+
+        self._ensure_connected()
 
         # Convert audio to raw PCM bytes (16kHz, 16-bit mono)
         if isinstance(audio, dict) and "array" in audio:
@@ -301,108 +328,42 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         else:
             pcm_data = audio_array
 
-        # State for this transcription
-        transcripts = {}
-        error_occurred = [None]
-        session_done = threading.Event()
-        first_transcript_time = [None]
-        stream_start_time = [None]
-        final_transcript_time = [None]
+        # Reset state for this transcription
+        self._transcripts = {}
+        self._error = None
+        self._turn_done = threading.Event()
 
-        def on_turn(client, event):
-            if event.transcript:
-                # Record time to first transcript (any transcript, not just final)
-                if first_transcript_time[0] is None and stream_start_time[0] is not None:
-                    first_transcript_time[0] = time.time()
-                # Only store final formatted turns
-                if event.end_of_turn and event.turn_is_formatted:
-                    transcripts[event.turn_order] = event.transcript
-                    final_transcript_time[0] = time.time()
-
-        def on_error(client, error):
-            error_occurred[0] = error
-            session_done.set()
-
-        def on_terminated(client, event):
-            session_done.set()
-
-        # Create new session for each sample
-        client = StreamingClient(
-            StreamingClientOptions(
-                api_key=self.api_key,
-                api_host="streaming.assemblyai.com",
-            )
-        )
-        client.on(StreamingEvents.Turn, on_turn)
-        client.on(StreamingEvents.Error, on_error)
-        client.on(StreamingEvents.Termination, on_terminated)
-
-        # Connect (not counted in processing time)
-        client.connect(StreamingParameters(sample_rate=16000, format_turns=True))
-
-        # Start timing after connection is established
-        stream_start_time[0] = time.time()
+        start_time = time.time()
 
         # Stream audio in chunks
         chunk_size = 3200  # 100ms of 16kHz 16-bit audio
         for i in range(0, len(pcm_data), chunk_size):
-            client.stream(pcm_data[i : i + chunk_size])
+            self._client.stream(pcm_data[i : i + chunk_size])
             time.sleep(0.02)
 
-        # Record time when last audio chunk was sent
-        audio_done_time = time.time()
+        # End session and wait for final transcript
+        self._client.disconnect(terminate=True)
+        self._turn_done.wait(timeout=30)
 
-        # Terminate session and wait for final transcripts
-        client.disconnect(terminate=True)
-        session_done.wait(timeout=30)
+        # Must reconnect for next sample
+        self._client = None
 
-        # Calculate timing metrics
-        ttfb = (
-            (first_transcript_time[0] - stream_start_time[0]) if first_transcript_time[0] else None
-        )
-        # Processing time = time from last audio chunk sent to final transcript received
-        # Can be negative if transcript arrives before we finish sending (real-time processing)
-        if final_transcript_time[0]:
-            processing_time = final_transcript_time[0] - audio_done_time
-            # If negative, final transcript arrived before audio finished - set to 0
-            processing_time = max(0, processing_time)
-        else:
-            processing_time = 0
+        elapsed = time.time() - start_time
 
-        # Store for aggregation
-        self.processing_times.append(processing_time)
-        if ttfb is not None:
-            self.ttfb_times.append(ttfb)
+        if self._error:
+            raise RuntimeError(f"Streaming error: {self._error}")
 
-        # Print timing info
-        ttfb_str = f"{ttfb * 1000:.0f}ms" if ttfb else "N/A"
-        if processing_time > 0:
-            processing_str = f"{processing_time * 1000:.0f}ms"
-        else:
-            processing_str = "0ms (real-time)"
-        print(f"  [Streaming] TTFB: {ttfb_str}, Finalization: {processing_str}")
+        full_transcript = " ".join(self._transcripts[k] for k in sorted(self._transcripts.keys()))
+        return full_transcript, elapsed
 
-        if error_occurred[0]:
-            raise RuntimeError(f"Streaming error: {error_occurred[0]}")
+    def close(self):
+        """Close the streaming connection."""
+        if self._client:
+            self._client.disconnect(terminate=True)
+            self._client = None
 
-        full_transcript = " ".join(transcripts[k] for k in sorted(transcripts.keys()))
-        # Return total elapsed time (stream start to final transcript) for consistency with other evaluators
-        total_elapsed = (
-            (final_transcript_time[0] - stream_start_time[0]) if final_transcript_time[0] else 0
-        )
-        return full_transcript, total_elapsed
-
-    def compute_metrics(self) -> dict:
-        """Compute final metrics including streaming-specific timing."""
-        metrics = super().compute_metrics()
-        # Add streaming timing stats
-        if self.ttfb_times:
-            metrics["avg_ttfb"] = sum(self.ttfb_times) / len(self.ttfb_times)
-            metrics["min_ttfb"] = min(self.ttfb_times)
-            metrics["max_ttfb"] = max(self.ttfb_times)
-        if self.processing_times:
-            metrics["avg_processing"] = sum(self.processing_times) / len(self.processing_times)
-        return metrics
+    def __del__(self):
+        self.close()
 
 
 class DeepgramEvaluator(Evaluator):

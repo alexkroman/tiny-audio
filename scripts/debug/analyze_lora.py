@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """Analyze LoRA adapter weights to determine training effectiveness per module."""
 
-import argparse
 from collections import defaultdict
+from typing import Annotated
 
 import torch
+import typer
 from huggingface_hub import hf_hub_download
+from rich.console import Console
 from safetensors.torch import load_file
+
+app = typer.Typer(help="Analyze LoRA adapter weights")
+console = Console()
 
 
 def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
     """Download and analyze LoRA adapter weights."""
 
-    print(f"Downloading adapter from {repo_id}...")
+    console.print(f"Downloading adapter from {repo_id}...")
     adapter_path = hf_hub_download(repo_id=repo_id, filename="adapter_model.safetensors")  # nosec B615
 
-    print(f"Loading weights from {adapter_path}...")
+    console.print(f"Loading weights from {adapter_path}...")
     state_dict = load_file(adapter_path)
 
     # Group by module type (q_proj, k_proj, etc.)
@@ -71,9 +76,9 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
             lora_pairs[base_name]["module_type"] = module_type
 
     # Analyze each LoRA pair
-    print("\n" + "=" * 80)
-    print("PER-LAYER ANALYSIS")
-    print("=" * 80)
+    console.print("\n" + "=" * 80)
+    console.print("[bold]PER-LAYER ANALYSIS[/bold]")
+    console.print("=" * 80)
 
     total_params = 0
     all_effective_ratios = []
@@ -129,13 +134,13 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
         module_stats[module_type]["params"] += params
 
     # Print summary by module type
-    print("\n" + "=" * 80)
-    print("SUMMARY BY MODULE TYPE")
-    print("=" * 80)
-    print(
+    console.print("\n" + "=" * 80)
+    console.print("[bold]SUMMARY BY MODULE TYPE[/bold]")
+    console.print("=" * 80)
+    console.print(
         f"\n{'Module':<12} {'Count':>6} {'Params':>10} {'Avg Norm':>12} {'Eff Rank':>10} {'Rank Util':>11} {'Top50% E':>10}"
     )
-    print("-" * 90)
+    console.print("-" * 90)
 
     module_importance = []
 
@@ -166,70 +171,73 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
             (module_type, avg_norm, norm_per_param, rank_util, avg_energy_conc)
         )
 
-        print(
+        console.print(
             f"{module_type:<12} {count:>6} {params:>10,} {avg_norm:>12.4f} {avg_eff_rank:>10.1f} {rank_util:>10.1%} {avg_energy_conc:>10.1%}"
         )
 
     # Overall stats
-    print("-" * 80)
-    print(f"{'TOTAL':<12} {'':<6} {total_params:>10,}")
+    console.print("-" * 80)
+    console.print(f"{'TOTAL':<12} {'':<6} {total_params:>10,}")
 
     avg_rank_util = (
         sum(all_effective_ratios) / len(all_effective_ratios) if all_effective_ratios else 0
     )
 
     # Recommendations
-    print("\n" + "=" * 80)
-    print("ANALYSIS & RECOMMENDATIONS")
-    print("=" * 80)
+    console.print("\n" + "=" * 80)
+    console.print("[bold]ANALYSIS & RECOMMENDATIONS[/bold]")
+    console.print("=" * 80)
 
     # Sort by normalized importance
     module_importance.sort(key=lambda x: x[2], reverse=True)
 
-    print("\nModule importance (by norm per parameter):")
+    console.print("\nModule importance (by norm per parameter):")
     for module_type, _avg_norm, norm_per_param, _rank_util, _energy_conc in module_importance:
         bar = "█" * int(norm_per_param * 1e6)  # Scale for visibility
-        print(f"  {module_type:<12} {bar}")
+        console.print(f"  {module_type:<12} {bar}")
 
-    print(f"\nOverall effective rank utilization: {avg_rank_util:.1%}")
+    console.print(f"\nOverall effective rank utilization: {avg_rank_util:.1%}")
     avg_energy_conc = (
         sum(x[4] for x in module_importance) / len(module_importance) if module_importance else 0
     )
-    print(f"Average energy in top 50% of ranks: {avg_energy_conc:.1%}")
+    console.print(f"Average energy in top 50% of ranks: {avg_energy_conc:.1%}")
 
     if avg_energy_conc > 0.95:
-        print("  → Energy highly concentrated in top ranks. Could try LOWER rank.")
+        console.print("  → Energy highly concentrated in top ranks. Could try LOWER rank.")
     elif avg_energy_conc > 0.85:
-        print("  → Energy moderately concentrated. Current rank is reasonable.")
+        console.print("  → Energy moderately concentrated. Current rank is reasonable.")
     elif avg_energy_conc > 0.70:
-        print("  → Energy spread across ranks. Current rank is well-utilized.")
+        console.print("  → Energy spread across ranks. Current rank is well-utilized.")
     else:
-        print("  → Energy evenly distributed. May benefit from HIGHER rank.")
+        console.print("  → Energy evenly distributed. May benefit from HIGHER rank.")
 
     # Identify least important modules
-    print("\nModule efficiency (norm per param, lower = less efficient):")
+    console.print("\nModule efficiency (norm per param, lower = less efficient):")
     module_importance.sort(key=lambda x: x[2])
     for module_type, _avg_norm, norm_per_param, _rank_util, energy_conc in module_importance[:3]:
-        print(f"  {module_type}: {norm_per_param:.2e} (energy conc: {energy_conc:.1%})")
+        console.print(f"  {module_type}: {norm_per_param:.2e} (energy conc: {energy_conc:.1%})")
 
-    print("\nLeast utilized modules could potentially be removed to reduce parameters.")
+    console.print("\nLeast utilized modules could potentially be removed to reduce parameters.")
 
     # Get rank from first pair
     if lora_pairs:
         first_pair = next(iter(lora_pairs.values()))
         if "A" in first_pair:
             actual_rank = first_pair["A"].shape[0]
-            print(f"\nCurrent LoRA rank: {actual_rank}")
-            print(f"Total trainable params: {total_params:,} ({total_params / 1e6:.2f}M)")
+            console.print(f"\nCurrent LoRA rank: {actual_rank}")
+            console.print(f"Total trainable params: {total_params:,} ({total_params / 1e6:.2f}M)")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Analyze LoRA adapter weights")
-    parser.add_argument("--repo", default="mazesmazes/tiny-audio", help="HuggingFace repo ID")
-    args = parser.parse_args()
-
-    analyze_lora_adapter(args.repo)
+@app.command()
+def main(
+    repo_id: Annotated[
+        str,
+        typer.Option("--repo-id", "-r", help="HuggingFace model ID"),
+    ] = "mazesmazes/tiny-audio",
+):
+    """Analyze LoRA adapter weights."""
+    analyze_lora_adapter(repo_id)
 
 
 if __name__ == "__main__":
-    main()
+    app()

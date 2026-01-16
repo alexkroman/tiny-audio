@@ -88,10 +88,10 @@ class TestFindModelDirs:
 
     def test_find_matching_dirs(self, tmp_path: Path):
         """Test finding directories that match a pattern."""
-        # Create test directories
-        (tmp_path / "20240101_tiny-audio_librispeech").mkdir()
-        (tmp_path / "20240102_tiny-audio_commonvoice").mkdir()
-        (tmp_path / "20240103_whisper_librispeech").mkdir()
+        # Create test directories with expected format: timestamp_time_model_dataset
+        (tmp_path / "20240101_120000_tiny-audio_librispeech").mkdir()
+        (tmp_path / "20240102_130000_tiny-audio_commonvoice").mkdir()
+        (tmp_path / "20240103_140000_whisper_librispeech").mkdir()
 
         dirs = find_model_dirs(tmp_path, "tiny-audio")
 
@@ -100,9 +100,9 @@ class TestFindModelDirs:
 
     def test_find_with_exclude(self, tmp_path: Path):
         """Test finding directories with exclusion patterns."""
-        (tmp_path / "20240101_tiny-audio_librispeech").mkdir()
-        (tmp_path / "20240102_tiny-audio_moe_librispeech").mkdir()
-        (tmp_path / "20240103_tiny-audio_mosa_librispeech").mkdir()
+        (tmp_path / "20240101_120000_tiny-audio_librispeech").mkdir()
+        (tmp_path / "20240102_130000_tiny-audio-moe_librispeech").mkdir()
+        (tmp_path / "20240103_140000_tiny-audio-mosa_librispeech").mkdir()
 
         dirs = find_model_dirs(tmp_path, "tiny-audio", exclude=["moe", "mosa"])
 
@@ -112,8 +112,8 @@ class TestFindModelDirs:
 
     def test_find_case_insensitive(self, tmp_path: Path):
         """Test that pattern matching is case-insensitive."""
-        (tmp_path / "Tiny-Audio_test").mkdir()
-        (tmp_path / "TINY-AUDIO_test2").mkdir()
+        (tmp_path / "20240101_120000_Tiny-Audio_test").mkdir()
+        (tmp_path / "20240102_130000_TINY-AUDIO_test2").mkdir()
 
         dirs = find_model_dirs(tmp_path, "tiny-audio")
 
@@ -121,8 +121,8 @@ class TestFindModelDirs:
 
     def test_find_no_matches(self, tmp_path: Path):
         """Test when no directories match."""
-        (tmp_path / "whisper_librispeech").mkdir()
-        (tmp_path / "wav2vec_commonvoice").mkdir()
+        (tmp_path / "20240101_120000_whisper_librispeech").mkdir()
+        (tmp_path / "20240102_130000_wav2vec_commonvoice").mkdir()
 
         dirs = find_model_dirs(tmp_path, "tiny-audio")
 
@@ -131,7 +131,7 @@ class TestFindModelDirs:
     def test_find_ignores_files(self, tmp_path: Path):
         """Test that regular files are ignored."""
         (tmp_path / "tiny-audio_results.txt").write_text("test")
-        (tmp_path / "tiny-audio_dir").mkdir()
+        (tmp_path / "20240101_120000_tiny-audio_dir").mkdir()
 
         dirs = find_model_dirs(tmp_path, "tiny-audio")
 
@@ -140,13 +140,17 @@ class TestFindModelDirs:
 
     def test_find_returns_sorted(self, tmp_path: Path):
         """Test that results are sorted."""
-        (tmp_path / "c_tiny-audio").mkdir()
-        (tmp_path / "a_tiny-audio").mkdir()
-        (tmp_path / "b_tiny-audio").mkdir()
+        (tmp_path / "20240103_140000_tiny-audio_c").mkdir()
+        (tmp_path / "20240101_120000_tiny-audio_a").mkdir()
+        (tmp_path / "20240102_130000_tiny-audio_b").mkdir()
 
         dirs = find_model_dirs(tmp_path, "tiny-audio")
 
-        assert [d.name for d in dirs] == ["a_tiny-audio", "b_tiny-audio", "c_tiny-audio"]
+        assert len(dirs) == 3
+        # Sorted by name (which sorts by timestamp)
+        assert "20240101" in dirs[0].name
+        assert "20240102" in dirs[1].name
+        assert "20240103" in dirs[2].name
 
 
 class TestGetProjectRoot:

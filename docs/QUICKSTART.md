@@ -1,52 +1,42 @@
-# Quick Start Guide
+# Quick Start
 
-Get started with Tiny Audio in 5 minutes.
-
-## Option 1: Use the Pre-trained Model
+## Use the Model
 
 ```python
 from transformers import pipeline
 
-pipe = pipeline("automatic-speech-recognition",
-                model="mazesmazes/tiny-audio",
-                trust_remote_code=True)
-
-result = pipe("path/to/audio.wav")
-print(result["text"])
+pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+print(pipe("audio.wav")["text"])
 ```
 
-## Option 2: Train Your Own Model
-
-See the [full course](course/0-course-overview.md) for hands-on training (3.5 hours, ~$12).
-
-Quick version:
+## Train Your Own
 
 ```bash
-# Clone and install
-git clone https://github.com/alexkroman/tiny-audio.git
-cd tiny-audio
+git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
 poetry install
 
-# Test locally (runs for ~2 minutes)
+# Quick test (~5 min)
 poetry run python scripts/train.py +experiments=mlp data.max_train_samples=100 training.max_steps=10
 
-# Full training (requires A40 GPU, ~24 hours)
-export HF_TOKEN='your-token'
+# Full training (~24 hours on A40)
 poetry run python scripts/train.py +experiments=mlp
 ```
 
 ## Projector Types
 
-| Type | Command | Description |
-|------|---------|-------------|
-| `mlp` | `+experiments=mlp` | Default, fastest training |
-| `mosa` | `+experiments=mosa` | Dense MoE, better accuracy |
-| `moe` | `+experiments=moe` | Shared + sparse experts |
-| `qformer` | `+experiments=qformer` | QFormer with learnable queries |
+| Type | Command | Notes |
+|------|---------|-------|
+| MLP | `+experiments=mlp` | Default, fastest |
+| MOSA | `+experiments=mosa` | Dense MoE |
+| MoE | `+experiments=moe` | Sparse experts |
+
+## Evaluate
+
+```bash
+poetry run ta eval -m mazesmazes/tiny-audio -n 100
+```
 
 ## Next Steps
 
-- [Course Overview](course/0-course-overview.md) - Full 3.5-hour curriculum
-- [Quick Reference](course/4-quick-reference.md) - Command cheat sheet
-- [README](../README.md) - Project overview and architecture
-- [Glossary](course/5-glossary.md) - Key terminology explained
+- [Full Course](course/0-course-overview.md) — 3.5 hours, build ASR from scratch
+- [Quick Reference](course/4-quick-reference.md) — Command cheat sheet

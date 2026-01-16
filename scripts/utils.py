@@ -42,6 +42,35 @@ def parse_results_file(results_path: Path) -> list[dict]:
     return samples
 
 
+def _extract_model_from_dir(dir_name: str) -> str:
+    """Extract model name from directory name.
+
+    Format: {timestamp}_{model}_{dataset}[_suffix]
+    Returns the model portion, handling multi-part model names.
+    """
+    parts = dir_name.split("_")
+    if len(parts) < 3:
+        return dir_name
+
+    # Skip timestamp (first 2 parts: date + time)
+    # Last part(s) are dataset + optional suffix (diarization, alignment)
+    # Everything in between is the model name
+    suffix_parts = {"diarization", "alignment"}
+    end_idx = len(parts)
+
+    # Remove suffix if present
+    if parts[-1] in suffix_parts:
+        end_idx -= 1
+
+    # The part before suffix/end is the dataset, everything between timestamp and dataset is model
+    # Format: YYYYMMDD_HHMMSS_model_dataset or YYYYMMDD_HHMMSS_model-name_dataset
+    if end_idx >= 3:
+        # Model is at index 2 (after date_time)
+        return parts[2]
+
+    return dir_name
+
+
 def find_model_dirs(
     outputs_dir: Path,
     model_pattern: str,
@@ -52,7 +81,7 @@ def find_model_dirs(
 
     Args:
         outputs_dir: Base directory containing evaluation outputs.
-        model_pattern: Pattern to match in directory names.
+        model_pattern: Pattern to match model name exactly (not substring).
         exclude: List of patterns to exclude from matching.
         latest: If True, only return the most recent run per dataset.
 
@@ -64,7 +93,9 @@ def find_model_dirs(
     for d in outputs_dir.iterdir():
         if not d.is_dir():
             continue
-        if model_pattern.lower() in d.name.lower() and not any(
+        # Extract model name from directory and match exactly
+        model_name = _extract_model_from_dir(d.name)
+        if model_name.lower() == model_pattern.lower() and not any(
             ex.lower() in d.name.lower() for ex in exclude
         ):
             dirs.append(d)

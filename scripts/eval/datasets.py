@@ -90,55 +90,6 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         audio_field="audio",
         text_field="text",
     ),
-    # British Isles dialects - tests accent robustness (Irish, Scottish, Welsh, etc.)
-    "english-dialects-irish": DatasetConfig(
-        name="english-dialects-irish",
-        path="ylacombe/english_dialects",
-        config="irish_male",
-        audio_field="audio",
-        text_field="text",
-        default_split="train",
-    ),
-    "english-dialects-scottish": DatasetConfig(
-        name="english-dialects-scottish",
-        path="ylacombe/english_dialects",
-        config="scottish_male",
-        audio_field="audio",
-        text_field="text",
-        default_split="train",
-    ),
-    "english-dialects-welsh": DatasetConfig(
-        name="english-dialects-welsh",
-        path="ylacombe/english_dialects",
-        config="welsh_male",
-        audio_field="audio",
-        text_field="text",
-        default_split="train",
-    ),
-    "english-dialects-northern": DatasetConfig(
-        name="english-dialects-northern",
-        path="ylacombe/english_dialects",
-        config="northern_male",
-        audio_field="audio",
-        text_field="text",
-        default_split="train",
-    ),
-    # Edinburgh Accented Speech - 25 different accents
-    "edacc": DatasetConfig(
-        name="edacc",
-        path="edinburghcstr/edacc",
-        audio_field="audio",
-        text_field="text",
-        default_split="test",
-    ),
-    # Spontaneous conversational speech - disfluencies, hesitations, natural speech
-    "switchboard": DatasetConfig(
-        name="switchboard",
-        path="hhoangphuoc/switchboard",
-        audio_field="audio",
-        text_field="transcript",
-        default_split="test",
-    ),
     # Diarization datasets
     "callhome": DatasetConfig(
         name="callhome",

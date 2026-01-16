@@ -2,182 +2,103 @@
 """
 Deploy the demo application to a Hugging Face Space.
 
-This script creates a clean deployment of only the necessary demo files
-(app.py, requirements.txt, README.md) and optionally the wav_outputs directory
-to a Hugging Face Space, avoiding the upload of the entire repository.
+This script uploads the demo files (app.py, requirements.txt, README.md)
+and optionally the wav_outputs directory to a Hugging Face Space.
 
 Usage:
     poetry run deploy-hf
-    poetry run deploy-hf --space-url https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE
-    poetry run deploy-hf --force
+    poetry run deploy-hf --repo-id YOUR_USERNAME/YOUR_SPACE
+    poetry run deploy-hf --delete-existing
 """
 
-import argparse
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 
+import typer
+from huggingface_hub import HfApi, upload_folder
 
-def run_command(
-    cmd: list[str], cwd: Path | None = None, check: bool = True
-) -> subprocess.CompletedProcess:
-    """Run a shell command and return the result."""
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
-
-    if check and result.returncode != 0:
-        print(f"Error: {result.stderr}")
-        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
-
-    return result
+app = typer.Typer(help="Deploy demo to Hugging Face Space")
 
 
-def deploy_to_space(
-    space_url: str = "https://huggingface.co/spaces/mazesmazes/tiny-audio",
-    force: bool = False,
-    demo_dir: Path = Path("demo"),
-) -> None:
+def extract_repo_id(repo_id_or_url: str) -> str:
+    """Extract repo_id from a URL or return as-is if already a repo_id."""
+    if repo_id_or_url.startswith("https://huggingface.co/spaces/"):
+        return repo_id_or_url.replace("https://huggingface.co/spaces/", "").rstrip("/")
+    return repo_id_or_url
+
+
+@app.command()
+def deploy(
+    repo_id: str = typer.Option(
+        "mazesmazes/tiny-audio",
+        "--repo-id",
+        "-r",
+        help="HuggingFace Space repo ID (e.g., username/space-name)",
+    ),
+    demo_dir: Path = typer.Option(
+        Path("demo"),
+        "--demo-dir",
+        help="Path to demo directory",
+    ),
+    delete_existing: bool = typer.Option(
+        False,
+        "--delete-existing",
+        help="Delete files in Space that are not in demo_dir",
+    ),
+    private: bool = typer.Option(
+        False,
+        "--private",
+        help="Create Space as private (if creating new)",
+    ),
+):
     """Deploy demo files to a Hugging Face Space."""
-    # Check if git lfs is installed
-    git_lfs_check = run_command(["git", "lfs", "version"], check=False)
-    if git_lfs_check.returncode != 0:
-        print("\nGit LFS is not installed.")
-        print("   Please install Git LFS to deploy audio files:")
-        print("   - macOS: brew install git-lfs")
-        print("   - Ubuntu/Debian: sudo apt-get install git-lfs")
-        print("   - Windows: Download from https://git-lfs.github.com/")
-        raise SystemExit(1)
+    repo_id = extract_repo_id(repo_id)
 
     # Validate demo directory
     if not demo_dir.exists():
-        raise FileNotFoundError(f"Demo directory not found: {demo_dir}")
+        raise typer.BadParameter(f"Demo directory not found: {demo_dir}")
 
     required_files = ["app.py", "requirements.txt", "README.md"]
-    for file in required_files:
-        if not (demo_dir / file).exists():
-            raise FileNotFoundError(f"Required file not found: {demo_dir / file}")
+    missing = [f for f in required_files if not (demo_dir / f).exists()]
+    if missing:
+        raise typer.BadParameter(f"Required files not found: {', '.join(missing)}")
 
-    print(f"\nDeploying to Hugging Face Space: {space_url}")
-    print(f"Demo directory: {demo_dir.absolute()}")
+    typer.echo(f"\nDeploying to Hugging Face Space: {repo_id}")
+    typer.echo(f"Demo directory: {demo_dir.absolute()}")
 
-    # Create temporary directory for deployment
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        print(f"\nCreating temporary deployment directory: {temp_path}")
+    api = HfApi()
 
-        # Copy demo files to temp directory
-        print("\nCopying demo files...")
-        for file in required_files:
-            src = demo_dir / file
-            dst = temp_path / file
-            shutil.copy2(src, dst)
-            print(f"  Copied {file}")
+    # Create Space if it doesn't exist
+    try:
+        api.repo_info(repo_id=repo_id, repo_type="space")
+        typer.echo(f"Space '{repo_id}' exists, uploading files...")
+    except Exception:
+        typer.echo(f"Creating new Space '{repo_id}'...")
+        api.create_repo(
+            repo_id=repo_id,
+            repo_type="space",
+            space_sdk="gradio",
+            private=private,
+        )
 
-        # Copy wav_outputs directory if it exists
-        wav_outputs_src = demo_dir / "wav_outputs"
-        if wav_outputs_src.exists() and wav_outputs_src.is_dir():
-            print("\nCopying wav_outputs directory...")
-            wav_outputs_dst = temp_path / "wav_outputs"
-            shutil.copytree(wav_outputs_src, wav_outputs_dst)
-            print(
-                f"  Copied wav_outputs directory with {len(list(wav_outputs_src.rglob('*')))} files"
-            )
+    # Upload the demo folder
+    typer.echo("\nUploading files...")
+    upload_folder(
+        folder_path=str(demo_dir),
+        repo_id=repo_id,
+        repo_type="space",
+        delete_patterns=["*"] if delete_existing else None,
+        commit_message="Deploy demo to HF Space",
+    )
 
-        # Initialize git repository
-        print("\nInitializing git repository...")
-        run_command(["git", "init"], cwd=temp_path)
-        run_command(["git", "config", "user.email", "noreply@example.com"], cwd=temp_path)
-        run_command(["git", "config", "user.name", "HF Space Deploy"], cwd=temp_path)
-
-        # Set up Git LFS for binary files
-        print("\nSetting up Git LFS for binary files...")
-        run_command(["git", "lfs", "install"], cwd=temp_path)
-        run_command(["git", "lfs", "track", "*.wav"], cwd=temp_path)
-        run_command(["git", "lfs", "track", "*.mp3"], cwd=temp_path)
-        run_command(["git", "lfs", "track", "*.flac"], cwd=temp_path)
-        run_command(["git", "lfs", "track", "*.m4a"], cwd=temp_path)
-        run_command(["git", "lfs", "track", "*.ogg"], cwd=temp_path)
-
-        # Add .gitattributes (created by git lfs track)
-        if (temp_path / ".gitattributes").exists():
-            run_command(["git", "add", ".gitattributes"], cwd=temp_path)
-
-        # Add and commit files
-        print("\nCommitting files...")
-        run_command(["git", "add", "."], cwd=temp_path)
-        run_command(["git", "commit", "-m", "Deploy demo to HF Space"], cwd=temp_path)
-
-        # Add remote and push
-        print(f"\nAdding remote: {space_url}")
-        run_command(["git", "remote", "add", "origin", space_url], cwd=temp_path)
-
-        # Push to space
-        push_cmd = ["git", "push", "origin", "main"]
-        if force:
-            push_cmd.append("--force")
-            print("\nForce pushing to Space (overwriting existing content)...")
-        else:
-            print("\nPushing to Space...")
-
-        result = run_command(push_cmd, cwd=temp_path, check=False)
-
-        if result.returncode != 0:
-            if "failed to push some refs" in result.stderr and not force:
-                print("\nPush failed: Space already has content.")
-                print("   Use --force to overwrite existing content.")
-                raise SystemExit(1)
-            print(f"\nPush failed: {result.stderr}")
-            raise SystemExit(1)
-
-        print("\nSuccessfully deployed to Hugging Face Space!")
-        print(f"Your Space will be available at: {space_url.replace('.git', '')}")
-        print("\nNote: The Space may take a few minutes to build and become available.")
+    typer.echo("\nSuccessfully deployed to Hugging Face Space!")
+    typer.echo(f"Your Space is available at: https://huggingface.co/spaces/{repo_id}")
+    typer.echo("\nNote: The Space may take a few minutes to build and become available.")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Deploy demo application to a Hugging Face Space",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Deploy to default space
-  %(prog)s
-
-  # Deploy to custom space
-  %(prog)s --space-url https://huggingface.co/spaces/username/my-space
-
-  # Force push (overwrite existing)
-  %(prog)s --force
-        """,
-    )
-
-    parser.add_argument(
-        "--space-url",
-        type=str,
-        default="https://huggingface.co/spaces/mazesmazes/tiny-audio",
-        help="URL of the Hugging Face Space (default: mazesmazes/tiny-audio)",
-    )
-
-    parser.add_argument(
-        "--force", action="store_true", help="Force push to overwrite existing Space content"
-    )
-
-    parser.add_argument(
-        "--demo-dir",
-        type=Path,
-        default=Path("demo"),
-        help="Path to demo directory (default: demo)",
-    )
-
-    args = parser.parse_args()
-
-    try:
-        deploy_to_space(space_url=args.space_url, force=args.force, demo_dir=args.demo_dir)
-    except Exception as e:
-        print(f"\nDeployment failed: {e}")
-        raise SystemExit(1) from e
+    """Entry point for pyproject.toml scripts."""
+    app()
 
 
 if __name__ == "__main__":
-    main()
+    app()

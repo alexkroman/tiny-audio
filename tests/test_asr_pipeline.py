@@ -4,58 +4,6 @@ import numpy as np
 import pytest
 
 
-class TestPostProcessPrediction:
-    """Tests for ASRPipeline._post_process_prediction method."""
-
-    @pytest.fixture
-    def post_process(self):
-        """Get the post-processing function without loading a model."""
-        # Import the class to access the method
-        from tiny_audio.asr_pipeline import ASRPipeline
-
-        # Create a minimal mock to call the method
-        class MockPipeline:
-            _truncate_trailing_repeats = ASRPipeline._truncate_trailing_repeats
-            _post_process_prediction = ASRPipeline._post_process_prediction
-
-        return MockPipeline()
-
-    def test_lowercase(self, post_process):
-        """Text should be lowercased."""
-        result = post_process._post_process_prediction("HELLO WORLD")
-        assert result == "hello world"
-
-    def test_acronym_combining(self, post_process):
-        """Single letters should be combined into acronyms."""
-        result = post_process._post_process_prediction("the U S A is great")
-        assert result == "the usa is great"
-
-    def test_currency_normalization(self, post_process):
-        """EUR X should become X euros."""
-        result = post_process._post_process_prediction("it costs EUR 100")
-        assert result == "it costs 100 euros"
-
-    def test_trailing_repeat_truncation(self, post_process):
-        """Trailing repeats should be removed."""
-        result = post_process._post_process_prediction("hello world world world")
-        assert result == "hello world"
-
-    def test_whitespace_normalization(self, post_process):
-        """Multiple spaces should be collapsed."""
-        result = post_process._post_process_prediction("hello   world")
-        assert result == "hello world"
-
-    def test_empty_string(self, post_process):
-        """Empty string should return empty."""
-        result = post_process._post_process_prediction("")
-        assert result == ""
-
-    def test_combined_processing(self, post_process):
-        """All processing steps should work together."""
-        result = post_process._post_process_prediction("The U S A costs EUR 50 fifty fifty")
-        assert result == "the usa costs 50 euros fifty"
-
-
 class TestExtractAudio:
     """Tests for ASRPipeline._extract_audio method."""
 

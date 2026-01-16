@@ -1,102 +1,68 @@
 # Class 3: Evaluation and Deployment
 
-**Duration**: 1 hour (15 min lecture + 45 min hands-on)
+*1 hour (15 min lecture + 45 min hands-on)*
 
-**Goal**: Evaluate your model's performance and deploy a public demo.
+**Goal**: Evaluate your model, analyze errors, and deploy a public demo.
 
-## Learning Objectives
+---
 
-By the end of this class, you will:
+## Part A: Lecture (15 min)
 
-- Understand Word Error Rate (WER) and how to interpret it
-- Evaluate your model on multiple datasets
-- Deploy a live demo to Hugging Face Spaces
-- Set up Hugging Face Inference Endpoints (optional)
-
-______________________________________________________________________
-
-## PART A: LECTURE (15 min)
-
-### 1. Understanding WER (5 min)
-
-The industry-standard metric for ASR is **Word Error Rate (WER)**.
-
-**Formula:**
+### Word Error Rate (WER)
 
 ```
 WER = (Substitutions + Insertions + Deletions) / Total Reference Words
 ```
 
-**Example:**
-
-| | |
-|---|---|
-| Reference | "hello world" |
-| Prediction | "hello there world" |
-| Error | 1 insertion ("there") |
-| WER | 1/2 = 50% |
-
-**Interpretation:**
-
 | WER | Quality |
 |-----|---------|
-| < 5% | Excellent (commercial systems) |
+| < 5% | Excellent (commercial) |
 | 5-10% | Very good |
 | 10-20% | Good (our target) |
 | > 30% | Poor |
 
-**Important**: WER is quantitative. Always do qualitative "vibe testing" too—run the demo and listen to outputs on different audio types.
-
-### 2. Evaluation Datasets (5 min)
-
-Different datasets test different capabilities:
+### Evaluation Datasets
 
 | Dataset | What it tests |
 |---------|---------------|
-| **LoquaciousSet** | General benchmark (diverse speech) |
-| **Earnings22** | Financial domain (company names, financial terms) |
-| **AMI** | Meetings (multi-speaker, conversational) |
-| **LibriSpeech** | Read audiobooks (clean speech) |
+| **LoquaciousSet** | General benchmark (default) |
+| **Earnings22** | Financial domain, earnings calls |
+| **AMI** | Multi-speaker meetings |
+| **LibriSpeech** | Clean read speech |
 
-Testing on multiple datasets reveals where your model excels and struggles.
+### Error Analysis
 
-### 3. Deployment Options (5 min)
+Understanding *why* your model fails is as important as measuring WER:
+
+- **High-WER samples**: Which audio clips fail?
+- **Entity errors**: Names, numbers, technical terms
+- **Pattern detection**: Accents, noise, domain-specific issues
+
+### Deployment Options
 
 | Option | Cost | Use case |
 |--------|------|----------|
-| **HF Spaces** | Free | Interactive demos, portfolio |
-| **HF Inference Endpoints** | Paid | Production APIs, autoscaling |
-| **Self-hosted** | Varies | Full control, requires DevOps |
+| **HF Spaces** | Free | Interactive demos |
+| **HF Inference Endpoints** | Paid | Production APIs |
+| **Local server** | Self-hosted | Privacy, custom deployment |
 
-We'll set up a Space (free demo) and optionally an Inference Endpoint.
+---
 
-______________________________________________________________________
+## Part B: Hands-On (45 min)
 
-## PART B: HANDS-ON WORKSHOP (45 min)
-
-## Exercise 1: Evaluate Your Model (15 min)
-
-### Goal
-
-Get quantitative performance metrics across multiple datasets.
-
-### Instructions
-
-**Step 1: Evaluate on LoquaciousSet (benchmark)**
-
-This is the primary benchmark:
+### Exercise 1: Basic Evaluation (10 min)
 
 ```bash
-poetry run eval your-username/your-model --dataset loquacious --max-samples 500
+# Evaluate on default dataset (LoquaciousSet)
+poetry run ta eval -m your-username/your-model -n 500
+
+# Evaluate on specific datasets
+poetry run ta eval -m your-username/your-model -d earnings22 -n 100
+poetry run ta eval -m your-username/your-model -d ami -n 100
+
+# Evaluate multiple datasets at once
+poetry run ta eval -m your-username/your-model -d loquacious -d earnings22 -n 100
 ```
-
-**What this does:**
-
-- Streams audio from Hugging Face (no huge downloads)
-- Runs inference on each sample
-- Normalizes text (Whisper normalizer: capitalization, numbers, contractions)
-- Computes WER
-- Saves results to `outputs/eval_loquacious_*/results.txt`
 
 **Output:**
 
@@ -104,198 +70,174 @@ poetry run eval your-username/your-model --dataset loquacious --max-samples 500
 Sample 1: WER = 8.33%, Time = 1.23s
   Ref:  The quick brown fox jumps over the lazy dog
   Pred: The quick brown fox jumps over the lazy dog
-
-Sample 2: WER = 15.00%, Time = 1.45s
-  Ref:  She sells seashells by the seashore
-  Pred: She sells sea shells by the sea shore
 ...
-================================================================================
 CHECKPOINT @ 100 samples:
   Corpus WER: 12.45%
-  Avg Time/Sample: 1.35s
-================================================================================
 ```
 
-**Record your final Corpus WER!**
+Results saved to `outputs/eval_*/results.json`.
 
-**Step 2: Evaluate on Earnings22 (domain-specific)**
+### Exercise 2: Error Analysis (15 min)
+
+**Find high-error samples:**
 
 ```bash
-poetry run eval your-username/your-model --dataset earnings22 --max-samples 100
+# Find samples with WER > 30%
+poetry run ta analysis high-wer your-username/your-model --threshold 30
+
+# Find samples with WER > 50%
+poetry run ta analysis high-wer your-username/your-model --threshold 50
 ```
 
-**Step 3: Evaluate on AMI (meetings)**
+This helps identify:
+- Audio quality issues
+- Accent/dialect challenges
+- Domain-specific vocabulary gaps
+
+**Compare models:**
 
 ```bash
-poetry run eval your-username/your-model --dataset ami --max-samples 100
+# Compare your model against others
+poetry run ta analysis compare your-model mazesmazes/tiny-audio
+
+# Compare multiple models
+poetry run ta analysis compare model1 model2 model3
 ```
 
-**Step 4: Compare with AssemblyAI (optional)**
-
-If you have an API key:
+**Find entity errors:**
 
 ```bash
-export ASSEMBLYAI_API_KEY='your_key'
-
-poetry run eval --assemblyai --assemblyai-model slam_1 --dataset loquacious --max-samples 100
+# Extract named entities that were transcribed incorrectly
+poetry run ta analysis entity-errors your-username/your-model
 ```
 
-### Analyzing Results
-
-Look at `outputs/eval_*/results.txt`. Ask:
-
-- Which samples have high WER? Why?
-- Are there patterns (accents, noise, specific words)?
-- How does performance vary across datasets?
-
-### Success Checkpoint
-
-- [ ] Evaluated on LoquaciousSet (500 samples)
-- [ ] Recorded your WER score
-- [ ] Tried at least one other dataset
-- [ ] Reviewed detailed results
-
-______________________________________________________________________
-
-## Exercise 2: Deploy to Hugging Face Spaces (15 min)
-
-### Goal
-
-Create a live demo anyone can use.
-
-### Instructions
-
-**Step 1: Create a Space**
-
-1. Go to [huggingface.co](https://huggingface.co)
-1. Click your profile → **New Space**
-1. Configure:
-   - **Name**: `tiny-audio-demo`
-   - **License**: MIT
-   - **SDK**: Gradio
-   - **Hardware**: CPU basic (free)
-1. Click **Create Space**
-
-**Step 2: Deploy with the script**
+**Debug model health:**
 
 ```bash
-poetry run python scripts/deploy_to_hf_space.py \
-    --space-url https://huggingface.co/spaces/your-username/tiny-audio-demo \
-    --force
+# Check if MOSA model is healthy
+poetry run ta debug check-mosa your-username/your-model
+
+# Analyze LoRA adapter weights
+poetry run ta debug analyze-lora your-username/your-model
 ```
 
-**What this does:**
+### Exercise 3: Deploy to Hugging Face Spaces (10 min)
 
-- Copies `demo/gradio/app.py`, `requirements.txt`, `README.md`
-- Sets up Git LFS for audio files
-- Pushes to your Space
+**Create Space:**
 
-**Step 3: Configure your model**
+1. Go to [huggingface.co](https://huggingface.co) → New Space
+2. Name: `tiny-audio-demo`, SDK: Gradio, Hardware: CPU basic (free)
 
-Set your model ID using an environment variable:
+**Deploy:**
 
-1. Go to your Space
-1. Click **Settings** → **Variables and secrets**
-1. Click **New variable**
-1. Add:
-   - **Name**: `MODEL_ID`
-   - **Value**: `your-username/your-model-name`
-1. Click **Save**
+```bash
+poetry run ta deploy --repo-id your-username/tiny-audio-demo
+```
 
-Space rebuilds automatically (2-3 minutes).
+The Space will use the default model. To use your own model, edit the deployment config.
 
-**Step 4: Test**
+Space builds in 2-3 minutes. Share the link!
 
-- Upload audio files
-- Record from microphone
-- Share the link!
+**Run local demo:**
 
-### Success Checkpoint
+```bash
+# Test locally before deploying
+poetry run ta demo --model your-username/your-model --port 7860
+```
 
-- [ ] Created Hugging Face Space
-- [ ] Deployed with script
-- [ ] Updated model ID
-- [ ] Demo working
+### Exercise 4: Push Model to Hub (5 min)
 
-______________________________________________________________________
+```bash
+# Push your trained model
+poetry run ta push --repo-id your-username/your-model-name
+```
 
-## Exercise 3: Set Up Inference Endpoints (10 min)
+This uploads:
+- `config.json` - Model configuration
+- `model.safetensors` - Projector weights
+- `tokenizer.json` - Tokenizer files
 
-### Goal
+### Exercise 5: Inference Endpoints (5 min)
 
-Understand production deployment options.
-
-### Option A: Free Serverless (Limited)
-
-Your public model already has free inference:
+**Free serverless** (rate limited):
 
 ```python
 from huggingface_hub import InferenceClient
 
 client = InferenceClient()
-result = client.automatic_speech_recognition(
-    "audio.wav",
-    model="your-username/your-model"
-)
+result = client.automatic_speech_recognition("audio.wav", model="your-username/your-model")
 print(result["text"])
 ```
 
-**Limitations**: Rate limited, cold starts, not for production.
+**Dedicated endpoint** (paid, production):
 
-### Option B: Dedicated Endpoint (Paid)
+1. Go to your model → Deploy → Inference Endpoints
+2. Configure GPU and scaling
+3. Create endpoint
 
-For production:
+---
 
-1. Go to your model on Hugging Face
-1. Click **Deploy** → **Inference Endpoints**
-1. Configure region, GPU type, scaling
-1. Click **Create Endpoint**
+## Advanced Evaluation
 
-**Test with eval script:**
+### Comparing with Commercial APIs
 
 ```bash
-poetry run python scripts/eval.py \
-    "https://your-endpoint.endpoints.huggingface.cloud" \
-    --dataset loquacious \
-    --max-samples 10
+# Compare against AssemblyAI
+export ASSEMBLYAI_API_KEY='your_key'
+poetry run ta eval -m assemblyai --assemblyai-model universal -d loquacious -n 100 -w 4
+
+# Compare against Deepgram
+export DEEPGRAM_API_KEY='your_key'
+poetry run ta eval -m deepgram -d loquacious -n 100
 ```
 
-### Success Checkpoint
+### Batch Evaluation
 
-- [ ] Understand serverless vs dedicated
-- [ ] (Optional) Created endpoint
-- [ ] Know how to test endpoints
+```bash
+# Evaluate with multiple workers (faster for API-based models)
+poetry run ta eval -m your-model -n 1000 -w 8
+```
 
-______________________________________________________________________
+### Output Formats
+
+```bash
+# Save detailed results
+poetry run ta eval -m your-model -n 100 -o ./my_results
+
+# Results include:
+# - results.json: Full results with predictions
+# - summary.txt: WER statistics
+# - errors.csv: High-error samples for analysis
+```
+
+---
+
+## Debugging Poor Performance
+
+| Symptom | Likely Cause | Solution |
+|---------|--------------|----------|
+| High WER on all samples | Undertrained | Train longer, check loss curve |
+| High WER on specific domain | Domain gap | Fine-tune on domain data |
+| High WER on accented speech | Training data bias | Add diverse training data |
+| Gibberish output | Model corrupted | Check checkpoint, retrain |
+| Repeated words | Generation config | Check `no_repeat_ngram_size` |
+
+---
 
 ## Congratulations!
 
-You've completed the course! You now have:
+You now have:
+- A trained ASR model on Hugging Face
+- Evaluation results across datasets
+- Error analysis tools
+- A live demo anyone can use
 
-- ✅ A trained ASR model on Hugging Face
-- ✅ Evaluation results across multiple datasets
-- ✅ A live demo anyone can use
-
-### What's Next?
-
-**Improve your model:**
-
-- Try different projector types (MLP, MOSA, MoE, QFormer)
-- Use a larger decoder
-- Train on more diverse data
-
-**Extend the project:**
-
-- Add multilingual support
-- Train other tasks (emotion, audio description)
+**Next steps:**
+- Try different projector types (mosa, moe)
+- Multi-stage training with LoRA
+- Train on domain-specific data
 - Build a real application
 
-**Share your work:**
+---
 
-- Write a blog post
-- Present at a meetup
-- Contribute back to the repo
-
-______________________________________________________________________
-
-[← Class 2: Training](./2-training.md) | [Quick Reference →](./4-quick-reference.md)
+[← Class 2](./2-training.md) | [Quick Reference →](./4-quick-reference.md)

@@ -1,13 +1,41 @@
-"""Development commands for tiny-audio."""
+#!/usr/bin/env python3
+"""Development commands for tiny-audio.
+
+Commands:
+    lint         Run linters (Poetry + Python + YAML + TOML)
+    format       Format code with black, ruff, and mdformat
+    type-check   Run type checkers (mypy and pyright)
+    test         Run fast pytest tests (skips slow model-loading tests)
+    test-slow    Run only slow pytest tests
+    test-all     Run all pytest tests
+    coverage     Run tests with coverage report
+    check        Run all checks (lint + type-check + security + docstrings)
+    build        Build package (wheel and sdist)
+    precommit    Pre-commit quality gate
+    security     Run security checks with bandit
+    dead-code    Find dead/unused code with vulture
+    docstrings   Check docstring coverage with interrogate
+    install-hooks Install pre-commit hooks
+    handler      Test inference endpoint handler locally
+"""
 
 import subprocess
-import sys
 from pathlib import Path
+
+import typer
+from rich.console import Console
+
+app = typer.Typer(
+    name="dev",
+    help="Development commands (lint, test, format, etc.)",
+    no_args_is_help=True,
+)
+console = Console()
 
 
 def run(*args: str) -> int:
     """Run a command and return exit code."""
-    print(f"$ {' '.join(args)}")
+    console.print(f"[dim]$ {' '.join(args)}[/dim]")
     return subprocess.call(args)
 
 
@@ -20,7 +48,8 @@ def run_all(*commands: list[str]) -> int:
     return 0
 
 
-def lint() -> None:
+@app.command()
+def lint():
     """Run linters (Poetry + Python + YAML + TOML)."""
     code = run_all(
         ["poetry", "check"],
@@ -28,10 +57,11 @@ def lint() -> None:
         ["yamllint", "-d", "relaxed", "configs/"],
         ["taplo", "check", "pyproject.toml"],
     )
-    sys.exit(code)
+    raise typer.Exit(code)
 
 
-def format() -> None:
+@app.command("format")
+def format_code():
     """Format code with black, ruff, and mdformat."""
     run("black", "tiny_audio", "scripts", "tests")
     run("ruff", "format", "tiny_audio", "scripts", "tests")
@@ -47,33 +77,26 @@ def format() -> None:
         run("mdformat", *md_files)
 
 
-def type_check() -> None:
+@app.command("type-check")
+def type_check():
     """Run type checkers (mypy and pyright)."""
     code = run_all(
         ["mypy", "tiny_audio"],
         ["pyright", "tiny_audio"],
     )
-    sys.exit(code)
+    raise typer.Exit(code)
 
 
-def test() -> None:
-    """Run fast pytest tests (skips slow model-loading tests)."""
-    sys.exit(run("pytest", "-v"))
+@app.command()
+def test():
+    """Run pytest tests."""
+    raise typer.Exit(run("pytest", "-v"))
 
 
-def test_slow() -> None:
-    """Run only slow pytest tests (model-loading tests)."""
-    sys.exit(run("pytest", "-v", "-m", "slow"))
-
-
-def test_all() -> None:
-    """Run all pytest tests including slow ones."""
-    sys.exit(run("pytest", "-v", "-m", ""))
-
-
-def coverage() -> None:
+@app.command()
+def coverage():
     """Run tests with coverage report."""
-    sys.exit(
+    raise typer.Exit(
         run(
             "pytest",
             "--cov=tiny_audio",
@@ -84,7 +107,8 @@ def coverage() -> None:
     )
 
 
-def check() -> None:
+@app.command()
+def check():
     """Run all checks (lint + type-check + security + docstrings)."""
     code = run_all(
         ["poetry", "check"],
@@ -96,18 +120,20 @@ def check() -> None:
         ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"],
         ["interrogate", "tiny_audio", "--fail-under", "50"],
     )
-    sys.exit(code)
+    raise typer.Exit(code)
 
 
-def build() -> None:
+@app.command()
+def build():
     """Build package (wheel and sdist)."""
-    sys.exit(run("poetry", "build"))
+    raise typer.Exit(run("poetry", "build"))
 
 
-def precommit() -> None:
+@app.command()
+def precommit():
     """Pre-commit quality gate (format, lint, type-check, security, docstrings, test, build)."""
     # Format first (doesn't fail)
-    format()
+    format_code()
 
     # Then run all checks
     code = run_all(
@@ -122,24 +148,41 @@ def precommit() -> None:
         ["pytest", "-v"],
         ["poetry", "build"],
     )
-    sys.exit(code)
+    raise typer.Exit(code)
 
 
-def install_hooks() -> None:
+@app.command("install-hooks")
+def install_hooks():
     """Install pre-commit hooks."""
-    sys.exit(run("pre-commit", "install"))
+    raise typer.Exit(run("pre-commit", "install"))
 
 
-def security() -> None:
+@app.command()
+def security():
     """Run security checks with bandit."""
-    sys.exit(run("bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"))
+    raise typer.Exit(run("bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"))
 
 
-def dead_code() -> None:
+@app.command("dead-code")
+def dead_code():
     """Find dead/unused code with vulture."""
-    sys.exit(run("vulture", "tiny_audio", "scripts", "--min-confidence", "80"))
+    raise typer.Exit(run("vulture", "tiny_audio", "scripts", "--min-confidence", "80"))
 
 
-def docstrings() -> None:
+@app.command()
+def docstrings():
     """Check docstring coverage with interrogate."""
-    sys.exit(run("interrogate", "tiny_audio", "-v", "--fail-under", "50"))
+    raise typer.Exit(run("interrogate", "tiny_audio", "-v", "--fail-under", "50"))
+
+
+def _register_handler():
+    """Register handler subcommand (lazy import)."""
+    from scripts.deploy.handler_local import test as handler_test
+
+    app.command(name="handler", help="Test inference endpoint handler locally")(handler_test)
+
+
+_register_handler()
+
+if __name__ == "__main__":
+    app()

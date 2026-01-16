@@ -10,7 +10,7 @@ from pyannote.metrics.diarization import DiarizationErrorRate
 
 from scripts.eval.audio import prepare_wav_bytes
 
-from .base import DiarizationResult, setup_assemblyai
+from .base import DiarizationResult, console, setup_assemblyai
 
 
 class DiarizationEvaluator:
@@ -38,7 +38,8 @@ class DiarizationEvaluator:
         self.max_speakers = max_speakers
         self.num_workers = num_workers
         self.results: list[DiarizationResult] = []
-        self.metric = DiarizationErrorRate()
+        # Standard collar of 0.25s for boundary tolerance
+        self.metric = DiarizationErrorRate(collar=0.25)
 
     def _build_reference_annotation(self, sample: dict) -> Annotation:
         """Build pyannote Annotation from dataset sample."""
@@ -152,7 +153,7 @@ class DiarizationEvaluator:
                 )
                 self.results.append(result)
 
-                print(
+                console.print(
                     f"Sample {processed}: DER={result.der:.1f}% "
                     f"(conf={result.confusion:.1f}%, miss={result.missed:.1f}%, fa={result.false_alarm:.1f}%) "
                     f"Time={inference_time:.2f}s "
@@ -160,7 +161,7 @@ class DiarizationEvaluator:
                 )
 
             except Exception as e:
-                print(f"Error on sample {processed}: {e}")
+                console.print(f"[red]Error on sample {processed}: {e}[/red]")
                 # Skip failed samples - don't add to results to avoid polluting corpus metrics
                 continue
 
@@ -173,12 +174,12 @@ class DiarizationEvaluator:
     def _print_checkpoint(self, sample_count: int):
         """Print cumulative metrics checkpoint."""
         metrics = self.compute_metrics()
-        print(f"\n{'=' * 60}")
-        print(
-            f"CHECKPOINT @ {sample_count}: DER={metrics['der']:.2f}% "
+        console.print(f"\n[bold]{'=' * 60}[/bold]")
+        console.print(
+            f"[bold]CHECKPOINT @ {sample_count}:[/bold] DER={metrics['der']:.2f}% "
             f"(conf={metrics['confusion']:.2f}%, miss={metrics['missed']:.2f}%, fa={metrics['false_alarm']:.2f}%)"
         )
-        print(f"{'=' * 60}\n")
+        console.print(f"[bold]{'=' * 60}[/bold]\n")
 
     def compute_metrics(self) -> dict:
         """Compute final corpus-level metrics."""
@@ -273,4 +274,55 @@ class DeepgramDiarizationEvaluator(DiarizationEvaluator):
         ]
 
         time.sleep(0.3)  # Rate limiting
+        return segments, elapsed
+
+
+class LocalDiarizationEvaluator(DiarizationEvaluator):
+    """Local diarization evaluator using TEN-VAD + ERes2NetV2 + spectral clustering.
+
+    Uses the LocalSpeakerDiarizer from tiny_audio.diarization for the actual
+    diarization logic. This class wraps it for the evaluation framework.
+    """
+
+    def __init__(
+        self,
+        num_speakers: int | None = None,
+        min_speakers: int = 2,
+        max_speakers: int = 10,
+        **kwargs,
+    ):
+        kwargs.pop("hf_token", None)
+        super().__init__(**kwargs)
+        self.num_speakers = num_speakers
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
+
+    def diarize(self, audio) -> tuple[list[dict], float]:
+        """Run local diarization using tiny_audio.diarization.LocalSpeakerDiarizer."""
+        import librosa
+
+        from tiny_audio.diarization import LocalSpeakerDiarizer
+
+        if isinstance(audio, dict):
+            if "array" in audio:
+                audio_array = audio["array"]
+                sample_rate = audio.get("sampling_rate", 16000)
+            elif "bytes" in audio:
+                audio_array, sample_rate = librosa.load(io.BytesIO(audio["bytes"]), sr=16000)
+            else:
+                raise ValueError(f"Unsupported audio dict format: {audio.keys()}")
+        else:
+            raise ValueError(f"Unsupported audio format: {type(audio)}")
+
+        start = time.time()
+
+        segments = LocalSpeakerDiarizer.diarize(
+            audio_array,
+            sample_rate=sample_rate,
+            num_speakers=self.num_speakers,
+            min_speakers=self.min_speakers,
+            max_speakers=self.max_speakers,
+        )
+
+        elapsed = time.time() - start
         return segments, elapsed

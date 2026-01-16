@@ -24,120 +24,7 @@ except ImportError:
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
-def _compute_mask_indices(
-    shape: tuple[int, int],
-    mask_prob: float,
-    mask_length: int,
-    min_masks: int = 0,
-    device: torch.device = None,
-) -> torch.Tensor:
-    """Compute random mask spans for SpecAugment.
-
-    Based on transformers' _compute_mask_indices for Wav2Vec2/Whisper.
-
-    Args:
-        shape: (batch_size, sequence_length)
-        mask_prob: Probability for each token to be chosen as start of mask span
-        mask_length: Maximum length of mask span
-        min_masks: Minimum number of masks per sample
-        device: Device to create tensor on
-
-    Returns:
-        Boolean mask tensor of shape (batch_size, sequence_length)
-    """
-    batch_size, sequence_length = shape
-
-    if mask_length < 1:
-        raise ValueError(f"mask_length must be >= 1, got {mask_length}")
-
-    if mask_length > sequence_length:
-        raise ValueError(f"mask_length {mask_length} must be <= sequence_length {sequence_length}")
-
-    # Compute number of masked spans per sample
-    num_masked_spans = int(mask_prob * sequence_length / mask_length + torch.rand(1).item())
-    num_masked_spans = max(num_masked_spans, min_masks)
-
-    # Clamp to ensure we don't exceed sequence length
-    if num_masked_spans * mask_length > sequence_length:
-        num_masked_spans = sequence_length // mask_length
-
-    if num_masked_spans == 0:
-        return torch.zeros((batch_size, sequence_length), dtype=torch.bool, device=device)
-
-    # Uniformly sample span start indices
-    mask = torch.zeros((batch_size, sequence_length), dtype=torch.bool, device=device)
-
-    for i in range(batch_size):
-        # Random start indices for this sample
-        spec_aug_start_indices = torch.randint(
-            0, sequence_length - mask_length + 1, (num_masked_spans,), device=device
-        )
-
-        # Create mask spans
-        for start_idx in spec_aug_start_indices:
-            mask[i, start_idx : start_idx + mask_length] = True
-
-    return mask
-
-
-def apply_specaugment(
-    input_features: torch.Tensor,
-    mask_time_prob: float = 0.05,
-    mask_time_length: int = 10,
-    mask_time_min_masks: int = 2,
-    mask_feature_prob: float = 0.0,
-    mask_feature_length: int = 10,
-    mask_feature_min_masks: int = 0,
-) -> torch.Tensor:
-    """Apply SpecAugment to mel spectrogram features.
-
-    Args:
-        input_features: Mel spectrogram of shape (batch, n_mels, time)
-        mask_time_prob: Probability of masking time steps
-        mask_time_length: Max length of time mask
-        mask_time_min_masks: Min number of time masks
-        mask_feature_prob: Probability of masking frequency bins
-        mask_feature_length: Max length of frequency mask
-        mask_feature_min_masks: Min number of frequency masks
-
-    Returns:
-        Augmented mel spectrogram with same shape
-    """
-    batch_size, n_mels, time_steps = input_features.shape
-    device = input_features.device
-
-    # Clone to avoid modifying original
-    augmented = input_features.clone()
-
-    # Time masking (along time dimension)
-    # Apply if prob > 0 OR min_masks > 0 (to support fixed mask count with prob=0)
-    if mask_time_prob > 0 or mask_time_min_masks > 0:
-        time_mask = _compute_mask_indices(
-            shape=(batch_size, time_steps),
-            mask_prob=mask_time_prob,
-            mask_length=mask_time_length,
-            min_masks=mask_time_min_masks,
-            device=device,
-        )
-        # Expand to (batch, 1, time) for broadcasting
-        time_mask = time_mask.unsqueeze(1)
-        augmented = augmented.masked_fill(time_mask, 0.0)
-
-    # Frequency masking (along mel dimension)
-    # Apply if prob > 0 OR min_masks > 0 (to support fixed mask count with prob=0)
-    if mask_feature_prob > 0 or mask_feature_min_masks > 0:
-        feature_mask = _compute_mask_indices(
-            shape=(batch_size, n_mels),
-            mask_prob=mask_feature_prob,
-            mask_length=mask_feature_length,
-            min_masks=mask_feature_min_masks,
-            device=device,
-        )
-        # Expand to (batch, n_mels, 1) for broadcasting
-        feature_mask = feature_mask.unsqueeze(2)
-        augmented = augmented.masked_fill(feature_mask, 0.0)
-
-    return augmented
+from torchaudio.transforms import SpecAugment
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -204,10 +91,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     # PEFT handles Hub downloads and caching internally
                     from peft import PeftModel
 
-                    # language_model is bare (not PEFT-wrapped) since we skipped _setup_lora
                     model.language_model = PeftModel.from_pretrained(
                         model.language_model,
-                        pretrained_model_name_or_path,  # Use original repo_id, not cache path
+                        pretrained_model_name_or_path,
                         is_trainable=True,
                         **cache_kwargs,
                     )
@@ -282,6 +168,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if getattr(config, "freeze_projector", False):
             self.projector.requires_grad_(False)
 
+        # SpecAugment for data augmentation during training
+        if getattr(config, "use_specaugment", False):
+            self.spec_augment = SpecAugment(
+                n_time_masks=config.num_time_masks,
+                time_mask_param=config.time_mask_length,
+                n_freq_masks=config.num_freq_masks,
+                freq_mask_param=config.freq_mask_length,
+            )
+        else:
+            self.spec_augment = None
+
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
@@ -320,8 +217,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             full_model.language_model = None
             full_model.multi_modal_projector = None
             del full_model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
@@ -548,16 +443,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         if input_features is not None and input_ids is not None:
             # Apply SpecAugment during training if enabled
-            if self.training and getattr(self.config, "use_specaugment", False):
-                input_features = apply_specaugment(
-                    input_features,
-                    mask_time_prob=self.config.mask_time_prob,
-                    mask_time_length=self.config.mask_time_length,
-                    mask_time_min_masks=self.config.mask_time_min_masks,
-                    mask_feature_prob=self.config.mask_feature_prob,
-                    mask_feature_length=self.config.mask_feature_length,
-                    mask_feature_min_masks=self.config.mask_feature_min_masks,
-                )
+            if self.training and self.spec_augment is not None:
+                input_features = self.spec_augment(input_features)
 
             # Encode audio -> flattened (total_audio_tokens, hidden_dim)
             audio_embeds = self._encode_audio(input_features, audio_attention_mask)
@@ -841,6 +728,29 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if hasattr(self.language_model, "peft_config"):
             self.language_model.save_pretrained(save_dir, save_embedding_layers=False)
 
+            # Clear base_model_name_or_path in adapter_config.json to prevent HF pipeline
+            # from redirecting to the base LLM repo (like Qwen) which breaks feature
+            # extractor loading for multimodal models. If a repo_id is provided, use that
+            # so the model can be loaded directly from the Hub.
+            adapter_config_path = save_dir / "adapter_config.json"
+            if adapter_config_path.exists():
+                with adapter_config_path.open() as f:
+                    adapter_config = json.load(f)
+
+                # Use repo_id if available, otherwise clear to prevent redirect.
+                # Use empty string instead of None to avoid str(None) -> "None" bug
+                # in some transformers/PEFT versions.
+                repo_id = (
+                    kwargs.get("repo_id")
+                    or kwargs.get("push_to_hub_model_id")
+                    or getattr(self.config, "pretrained_model_path", None)
+                    or ""  # Use empty string instead of None
+                )
+                adapter_config["base_model_name_or_path"] = repo_id
+
+                with adapter_config_path.open("w") as f:
+                    json.dump(adapter_config, f, indent=2)
+
         # Add processor auto_map to preprocessor_config.json
         config_path = save_dir / "preprocessor_config.json"
         if config_path.exists():
@@ -865,6 +775,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projectors module
         shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
+
+    def push_to_hub(self, repo_id: str, **kwargs) -> str:
+        """Push model to HuggingFace Hub, ensuring adapter_config points to repo.
+
+        IMPORTANT: Sets base_model_name_or_path in adapter_config.json to repo_id
+        so that transformers pipeline() can load the model correctly. Without this,
+        the pipeline tries to load from "None" which fails.
+        """
+        # Store repo_id in config so save_pretrained can access it
+        self.config.pretrained_model_path = repo_id
+        # Call parent's push_to_hub with repo_id in kwargs
+        return super().push_to_hub(repo_id, repo_id=repo_id, **kwargs)
 
     def create_or_update_model_card(self, output_dir: Union[str, Path]) -> None:
         """No-op for model card creation - we use MODEL_CARD.md in repo instead."""

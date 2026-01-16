@@ -198,21 +198,6 @@ class Evaluator:
             if max_samples and idx >= max_samples:
                 break
 
-    def _evaluate_sequential(self, samples: list[dict]) -> None:
-        """Run sequential evaluation."""
-        for idx, sample in enumerate(samples, 1):
-            _, result = self._process_sample((idx, sample))
-            self.results.append(result)
-
-            norm_pred = self.normalizer.normalize(result.prediction)
-            norm_ref = self.normalizer.normalize(result.reference)
-            print(f"Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s")
-            print(f"  Ref:  {norm_ref}")
-            print(f"  Pred: {norm_pred}")
-
-            if idx % 100 == 0:
-                self._print_checkpoint(idx)
-
     def _evaluate_parallel(self, samples: list[dict]) -> None:
         """Run parallel evaluation using thread pool."""
         from concurrent.futures import ThreadPoolExecutor, as_completed

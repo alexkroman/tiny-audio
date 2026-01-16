@@ -4,262 +4,379 @@
 
 # Tiny Audio
 
-## Train Your Own Speech Recognition Model in 24 Hours for $12
+**Train your own speech recognition model in 24 hours for $12**
 
-This isn't just another ASR model. This is a launchpad. A minimal, hackable, and deeply understandable codebase that empowers you to build, train, and deploy your own speech recognition system from scratch. In a single day, on a single GPU, for the price of a few coffees.
-
-Tiny Audio combines the power of massive pretrained models (Whisper encoder + SmolLM3 decoder) with an efficient projector-only training approach, allowing you to create a high-quality, custom ASR model that is truly yours.
+A minimal, hackable ASR codebase. Connect a frozen audio encoder to a frozen LLM via a trainable projector (~12M params). That's it.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
-[![Hugging Face Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Model](https://img.shields.io/badge/%F0%9F%A4%97-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 
-## Talk to It
+## Try It
 
-Experience the magic firsthand. Try the live demo on Hugging Face Spaces, or run it yourself with just a few lines of Python.
-
-**[🚀 Live Demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)**
+**[Live Demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)**
 
 ```python
 from transformers import pipeline
 
-pipe = pipeline("automatic-speech-recognition",
-                model="mazesmazes/tiny-audio",
-                trust_remote_code=True)
-
-result = pipe("path/to/audio.wav")
-print(result["text"])
+pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+print(pipe("audio.wav")["text"])
 ```
 
-## 🎓 Learn by Building: A Free, Hands-On Course
+## Quick Start
 
-This repository is also a free, 3.5-hour course designed to teach you the art and science of building modern ASR systems. No black boxes. No magic. Just clean, understandable code and a clear path from raw audio to a deployed model.
-
-**[📚 Start the Course](docs/QUICKSTART.md)** | **[📖 See the Full Curriculum](docs/course/0-course-overview.md)**
-
-In just 3.5 hours, you will:
-
-- **Understand the Architecture:** Go deep on the encoder-projector-decoder model that powers modern ASR.
-- **Master Efficient Training:** Learn how to train just the projector while leveraging frozen pretrained models.
-- **Train Your Own Model:** Get your hands dirty and train a model from scratch on a real-world dataset.
-- **Deploy and Share:** Push your model to the Hugging Face Hub, write a professional model card, and share your work with the world.
-
-## Quick Start: Train Your Own Model
-
-Ready to build? You can train your own model in just a few steps.
+### Installation
 
 ```bash
-# 1. Clone the repo and install dependencies
-git clone https://github.com/alexkroman/tiny-audio.git
-cd tiny-audio
+# Clone and install
+git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
 poetry install
 
-# 2. Run a quick test to make sure everything is working (~5 minutes)
-poetry run python scripts/train.py +experiments=mlp data.max_train_samples=100 training.max_steps=10
-
-# 3. Start the full training (~24 hours on an A40 GPU)
-export HF_TOKEN='your-hugging-face-token' # Get from hf.co/settings/tokens
-poetry run python scripts/train.py +experiments=mlp
-
-# 4. Resume training from a checkpoint (if training was interrupted)
-poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpoint=/path/to/checkpoint-XXXX
-
-# For remote training, find the latest checkpoint and resume:
-poetry run runpod checkpoint <host> <port>  # prints latest checkpoint path
-poetry run runpod train <host> <port> --experiment mlp --wandb-run-id <run-id> --wandb-resume must training.resume_from_checkpoint=/path/to/checkpoint-XXXX
+# Or install from PyPI (inference only)
+pip install tiny-audio
 ```
 
-## How It Works: The Tiny Audio Architecture
+### Basic Inference
 
-Tiny Audio is built on a simple, powerful idea: combine the best pretrained models for audio and language, and efficiently teach them to work together.
+```python
+from transformers import pipeline
 
-1. **The Ear (Audio Encoder):** We start with `openai/whisper-large-v3-turbo`, a state-of-the-art model that has already learned to understand the nuances of human speech. We keep this frozen, leveraging its pretrained knowledge.
-1. **The Bridge (MLP Audio Projector):** This is a simple Multi-Layer Perceptron (MLP) projector that acts as a translator, converting the audio features from the encoder into a format the language model can understand. It uses convolutional downsampling (4x compression) followed by two linear layers. This is the only component we train.
-1. **The Brain (Language Model):** We use `HuggingFaceTB/SmolLM3-3B`, a powerful yet efficient language model that already knows how to generate coherent text. We keep this frozen as well, relying on its language understanding capabilities.
+# Load model
+pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
 
-By keeping both the encoder and decoder frozen and only training the projector, we achieve efficiency without sacrificing quality.
+# Transcribe audio file
+result = pipe("audio.wav")
+print(result["text"])
 
-### Key Concepts
+# Transcribe from URL
+result = pipe("https://example.com/audio.mp3")
 
-- **Convolutional Downsampling**: Two 1D conv layers with stride 2 each (4x compression) reduce the audio sequence length while preserving temporal information
-- **16kHz Audio**: Industry standard sample rate that captures human speech frequency range while being computationally efficient
-- **Projector-only Training**: The encoder and decoder are already excellent at their jobs from pretraining—we only need to teach them how to communicate
-
-### MLP Projector Architecture
-
-```
-Whisper embeddings (1280-dim)
-    ↓
-Conv1D (stride 2) → Conv1D (stride 2)  [4x compression]
-    ↓
-Linear (1280 → 2048) → GELU → Linear (2048 → 2048)
-    ↓
-RMSNorm → SmolLM3-3B embeddings (2048-dim)
+# Transcribe numpy array (16kHz)
+import numpy as np
+audio = np.random.randn(16000)  # 1 second of audio
+result = pipe(audio)
 ```
 
-**Why this works:**
+### Streaming Inference
 
-- Fast training (~24 hours on A40) with no gradients for frozen models
-- Cheap (~$12 for a full run)
-- Leverages pretrained knowledge from both audio and language domains
-- Memory efficient—runs on a single A40 40GB GPU
+```python
+from tiny_audio import ASRModel, ASRProcessor
 
-## Training details
+model = ASRModel.from_pretrained("mazesmazes/tiny-audio")
+processor = ASRProcessor.from_pretrained("mazesmazes/tiny-audio")
 
-**Dataset**: LoquaciousSet (25,000 hours) - a diverse corpus combining CommonVoice, VoxPopuli, Libriheavy, People's Speech, and YODAS. Hundreds of thousands of speakers with varied accents, speech types, and acoustic conditions.
+# Stream tokens as they're generated
+for token in model.generate_streaming(audio_features):
+    print(token, end="", flush=True)
+```
 
-**Hardware**: Single NVIDIA A40 40GB works great.
+### Word-Level Timestamps
 
-**Time & Cost**: ~24 hours on A40 = ~$12 depending on your provider
+```python
+# Enable timestamps in pipeline
+result = pipe("audio.wav", return_timestamps="word")
 
-**Configuration**: Hydra configs with easy overrides:
+# Returns: {"text": "hello world", "chunks": [{"text": "hello", "start": 0.0, "end": 0.5}, ...]}
+```
+
+## Train Your Own
+
+### Quick Test
 
 ```bash
-# Projector experiments (see configs/experiments/)
-poetry run python scripts/train.py +experiments=mlp       # MLP (default)
-poetry run python scripts/train.py +experiments=mosa      # MOSA (dense MoE)
-poetry run python scripts/train.py +experiments=moe       # MoE (shared + sparse)
-poetry run python scripts/train.py +experiments=qformer   # QFormer
-
-# Override any config value
-poetry run python scripts/train.py training.learning_rate=1e-4
-poetry run python scripts/train.py training.per_device_train_batch_size=5
+# Verify setup (~5 min)
+poetry run python scripts/train.py +experiments=mlp data.max_train_samples=100 training.max_steps=10
 ```
 
-Training logs to Weights & Biases, saves checkpoints to `outputs/`, and pushes the final model to HuggingFace.
+### Full Training
+
+```bash
+# Standard training (~24 hours on A40)
+poetry run python scripts/train.py +experiments=mlp
+
+# With custom learning rate
+poetry run python scripts/train.py +experiments=mlp training.learning_rate=1e-4
+
+# Resume from checkpoint
+poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpoint=/path/to/checkpoint-XXXX
+```
+
+### Projector Types
+
+```bash
+poetry run python scripts/train.py +experiments=mlp      # Simple MLP (~12M params)
+poetry run python scripts/train.py +experiments=mosa     # Dense mixture of experts
+poetry run python scripts/train.py +experiments=moe      # Sparse routed experts
+poetry run python scripts/train.py +experiments=qformer  # Transformer with learnable queries
+```
+
+### Multi-Stage Training with LoRA
+
+```bash
+# Stage 1: Train projector only (default)
+poetry run python scripts/train.py +experiments=mlp
+
+# Stage 2: Freeze projector, train LoRA adapters on LLM
+poetry run python scripts/train.py +experiments=mlp_lora
+
+# Stage 3: Fine-tune both projector and LoRA
+poetry run python scripts/train.py +experiments=mlp_fine_tune
+```
+
+## Architecture
+
+```
+Audio (16kHz) → GLM-ASR Encoder (frozen) → MLP Projector (trained) → Qwen3 (frozen) → Text
+```
+
+Only the projector trains. The encoder and decoder stay frozen, leveraging their pretrained knowledge.
+
+| Component | Params | Status |
+|-----------|--------|--------|
+| GLM-ASR Encoder | ~600M | Frozen |
+| MLP Projector | ~12M | **Trained** |
+| Qwen3-0.6B | ~600M | Frozen |
+
+### How It Works
+
+1. **Audio Encoder**: GLM-ASR converts raw audio to frame-level embeddings
+1. **Projector**: Bridges the modality gap by projecting audio embeddings to text embedding space
+1. **Language Model**: Qwen3 generates text conditioned on the projected audio
+
+The projector uses frame stacking to reduce sequence length: `output_len = (input_len - k) // k + 1` where k is the pooling stride.
 
 ## Evaluation
 
-Evaluate your model (or any other ASR model) on the LoquaciousSet benchmark:
-
 ```bash
-# Evaluate on 100 samples (quick check)
-poetry run eval mazesmazes/tiny-audio --max-samples 100
+# Evaluate on default dataset
+poetry run ta eval -m mazesmazes/tiny-audio -n 100
 
-# Full evaluation
-poetry run eval mazesmazes/tiny-audio
+# Evaluate on specific dataset
+poetry run ta eval -m mazesmazes/tiny-audio -d loquacious -n 1000
+
+# Compare with other models
+poetry run ta eval -m assemblyai --assemblyai-model universal -d loquacious -n 100
+
+# WER analysis
+poetry run ta analysis high-wer mazesmazes/tiny-audio --threshold 30
+poetry run ta analysis compare model1 model2
 ```
 
-Results are measured in Word Error Rate (WER) - lower is better. Detailed predictions are saved to `outputs/eval_*/results.txt` so you can see exactly where your model succeeds or fails.
+## CLI Reference
 
-## Leaderboard
-
-Contributors who have trained and evaluated Tiny Audio models:
-
-| Rank | Contributor | WER | Git Hash | Date |
-|------|------------|-----|----------|------|
-| 🥇 | [@alexkroman](https://github.com/alexkroman) | **12.14** | [`5a5f3a0`](https://github.com/alexkroman/tiny-audio/commit/5a5f3a055d2e5722d9473f3a1c2fb883eab7ad9c) | 2025-10-23 |
-
-Want to see your name here? Train a model, evaluate it on LoquaciousSet, and submit a PR with your results!
-
-**To reproduce or generate your own WER score:**
+All commands available via `tiny-audio` (or `ta` for short):
 
 ```bash
-# Evaluate on 500 samples
-poetry run eval mazesmazes/tiny-audio --max-samples 500
-
-# Or evaluate your own model
-poetry run eval your-username/your-model-name
-
-# Quick test on 100 samples
-poetry run eval mazesmazes/tiny-audio --max-samples 100
+poetry run ta --help  # Show all commands
 ```
 
-## Training Curves
+| Command | Description |
+|---------|-------------|
+| `ta eval` | Evaluate ASR models on datasets |
+| `ta analysis` | WER analysis (high-wer, entity-errors, compare) |
+| `ta deploy` | Deploy demo to HuggingFace Space |
+| `ta push` | Push model to HuggingFace Hub |
+| `ta demo` | Launch local Gradio demo |
+| `ta debug` | Debug utilities (check-mosa, analyze-lora) |
+| `ta runpod` | Remote training on RunPod |
+| `ta dev` | Development tools (lint, format, test, etc.) |
 
-Watch the model learn in real-time. Training loss decreases steadily while evaluation loss shows strong generalization:
+### Common Options
 
-<div align="center">
-  <img src="https://raw.githubusercontent.com/alexkroman/tiny-audio/main/public/train_loss.png" alt="Training Loss" width="45%" />
-  <img src="https://raw.githubusercontent.com/alexkroman/tiny-audio/main/public/eval_loss.png" alt="Evaluation Loss" width="45%" />
-</div>
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--model` | `-m` | HuggingFace model ID |
+| `--datasets` | `-d` | Datasets to evaluate |
+| `--max-samples` | `-n` | Maximum samples |
+| `--output-dir` | `-o` | Output directory |
+| `--num-workers` | `-w` | Parallel workers |
 
-*Left: Training loss over 50k steps. Right: Evaluation loss showing consistent improvement without overfitting.*
+## Configuration
 
-All training runs are logged to [Weights & Biases](https://wandb.ai) for detailed monitoring and experiment tracking.
+Configuration uses [Hydra](https://hydra.cc/). Override any value with `key=value` syntax:
 
-## What makes this repo different?
+```bash
+# Override model settings
+poetry run python scripts/train.py model.projector_type=moe
 
-Tiny Audio is not a SOTA ASR model. It's a **minimal, readable, hackable codebase** designed to train ASR models start to end.
+# Override training settings
+poetry run python scripts/train.py training.learning_rate=1e-4 training.batch_size=8
 
-- **~1000 lines of core code** across 7 files in `src/`
-- **Projector-only training** keeps encoder and decoder frozen
-- **Dependency-lite**: PyTorch, transformers, datasets, and a few essentials
-- **No magic**: Read the code and understand exactly what's happening
-- **Multiple projector types**: MLP (default), MOSA, MoE, QFormer
+# Override data settings
+poetry run python scripts/train.py data.max_train_samples=10000
+```
 
-## Project structure
+### Config Files
 
-```text
+```
+configs/
+├── config.yaml           # Main config (imports data + training)
+├── experiments/          # Projector presets
+│   ├── mlp.yaml          # Simple MLP
+│   ├── mosa.yaml         # Dense MoE
+│   ├── moe.yaml          # Sparse MoE
+│   ├── qformer.yaml      # Transformer
+│   ├── mlp_lora.yaml     # Stage 2: LoRA only
+│   └── mlp_fine_tune.yaml # Stage 3: Projector + LoRA
+├── data/
+│   └── loquacious.yaml   # Dataset config
+└── training/
+    └── production.yaml   # Training hyperparameters
+```
+
+### Key Config Parameters
+
+```yaml
+model:
+  audio_model_id: "zai-org/GLM-ASR-Nano-2512"  # Audio encoder
+  text_model_id: "Qwen/Qwen3-0.6B"              # Language model
+  projector_type: mlp                           # mlp, mosa, moe, qformer
+
+training:
+  learning_rate: 1e-4
+  batch_size: 4
+  max_steps: 50000
+  warmup_steps: 1000
+```
+
+## Project Structure
+
+```
 tiny-audio/
-├── src/                      # Core library code
-│   ├── asr_modeling.py       # Model architecture
-│   ├── asr_config.py         # Model configuration
-│   ├── asr_pipeline.py       # HuggingFace pipeline integration
-│   ├── asr_processing.py     # Audio/text processing
-│   ├── projectors.py         # All projector architectures
-│   └── handler.py            # Inference handler
-├── scripts/                  # Training and utility scripts
-│   ├── train.py              # Training script (Hydra-based)
-│   ├── analysis.py           # WER analysis tools
-│   ├── eval/                 # Evaluation package
-│   │   ├── cli.py            # Main eval CLI
-│   │   ├── datasets.py       # Dataset configs
-│   │   └── evaluators/       # ASR, diarization, alignment
-│   ├── deploy/               # Deployment tools
-│   │   ├── runpod.py         # RunPod operations
-│   │   ├── hf_space.py       # Deploy to HF Spaces
-│   │   └── handler_local.py  # Test endpoint locally
-│   └── hub/                  # HuggingFace Hub operations
-│       └── push.py           # Push model to Hub
-├── configs/                  # Hydra configurations
-│   ├── config.yaml           # Main config
-│   ├── experiments/          # Projector presets
-│   ├── data/                 # Dataset configs
-│   └── training/             # Training hyperparameters
-├── demo/                     # Gradio web interface
-└── tests/                    # Test suite
+├── tiny_audio/              # Core library
+│   ├── asr_modeling.py      # ASRModel: encoder + projector + decoder
+│   ├── asr_config.py        # ASRConfig: all model settings
+│   ├── asr_pipeline.py      # HuggingFace pipeline for inference
+│   ├── asr_processing.py    # ASRProcessor: audio/text preprocessing
+│   ├── projectors.py        # All projector architectures
+│   ├── handler.py           # HF Inference Endpoints handler
+│   └── integrations/        # Voice agent integrations
+├── scripts/
+│   ├── train.py             # Training script (Hydra)
+│   ├── cli.py               # Unified CLI entry point
+│   ├── dev.py               # Development utilities
+│   ├── analysis.py          # WER analysis tools
+│   ├── eval/                # Evaluation framework
+│   │   ├── evaluators/      # ASR, diarization, alignment
+│   │   └── datasets.py      # Dataset loading
+│   ├── deploy/              # HF Space deployment
+│   ├── hub/                 # HF Hub integration
+│   └── debug/               # Debug utilities
+├── configs/                 # Hydra configuration
+├── tests/                   # Test suite
+└── docs/                    # Documentation and course
 ```
 
 ## Development
 
+### Setup
+
 ```bash
-# Install just task runner (recommended)
-brew install just  # or: cargo install just
-
-# Run all checks
-just check
-
-# Individual commands
-just lint          # Run linter (ruff)
-just format        # Format code (black + ruff)
-just type-check    # Type checking (mypy + pyright)
-just test          # Run tests (pytest)
+git clone https://github.com/alexkroman/tiny-audio.git
+cd tiny-audio
+poetry install
 ```
 
-## Contributing
+### Running Tests
 
-Tiny Audio is nowhere finished. The goal is to make ASR training accessible on budgets < $100 while keeping the codebase small, readable, and hackable. Contributions that align with this philosophy are welcome - please open an issue to discuss major changes.
+```bash
+poetry run ta dev test                    # Run all tests
+poetry run pytest tests/test_projectors.py -v  # Single file
+poetry run pytest -k "test_forward" -v    # By name pattern
+```
+
+### Code Quality
+
+```bash
+poetry run ta dev format      # Format code (black, isort)
+poetry run ta dev lint        # Lint (ruff, black --check)
+poetry run ta dev type-check  # Type check (mypy, pyright)
+poetry run ta dev precommit   # Full quality gate
+```
+
+### Adding a New Projector
+
+1. Add your projector class to `tiny_audio/projectors.py`:
+
+```python
+class MyProjector(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int, config):
+        super().__init__()
+        # Your architecture here
+
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
+        # Return projected features
+        return x
+
+    def get_output_length(self, input_length: int) -> int:
+        # Return output sequence length given input length
+        return input_length
+```
+
+2. Register it in the `PROJECTOR_CLASSES` dict in `projectors.py`:
+
+```python
+PROJECTOR_CLASSES = {
+    "mlp": MLPAudioProjector,
+    "mosa": MOSAProjector,
+    "moe": MoEAudioProjector,
+    "qformer": QFormerAudioProjector,
+    "my_projector": MyProjector,  # Add here
+}
+```
+
+3. Create an experiment config `configs/experiments/my_projector.yaml`:
+
+```yaml
+model:
+  projector_type: my_projector
+```
+
+4. Train: `poetry run python scripts/train.py +experiments=my_projector`
+
+### Adding a New Dataset
+
+1. Add a config file `configs/data/my_dataset.yaml`:
+
+```yaml
+dataset_name: "your-org/your-dataset"
+dataset_split: "train"
+audio_column: "audio"
+text_column: "text"
+```
+
+2. Train with your dataset: `poetry run python scripts/train.py data=my_dataset`
+
+### Key Files to Understand
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
+| `asr_modeling.py` | Core model class | Adding model features, changing forward pass |
+| `asr_config.py` | Configuration | Adding new config parameters |
+| `projectors.py` | Projector architectures | Adding new projector types |
+| `asr_processing.py` | Audio/text preprocessing | Changing input processing |
+| `train.py` | Training loop | Modifying training behavior |
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `HF_TOKEN` | HuggingFace API token (for private models/pushing) |
+| `WANDB_API_KEY` | Weights & Biases API key |
+| `WANDB_RUN_ID` | Resume a specific W&B run |
+| `ASSEMBLYAI_API_KEY` | For AssemblyAI evaluation comparison |
+
+## Learn More
+
+- **[Free 3.5-hour course](docs/course/0-course-overview.md)** — Build ASR from scratch
+- **[Quick Start Guide](docs/QUICKSTART.md)** — Detailed setup instructions
+- **[Model Card](MODEL_CARD.md)** — Model documentation template
 
 ## Acknowledgments
 
-- [Whisper](https://huggingface.co/openai/whisper-large-v3-turbo) by OpenAI for audio encoding
-- [SmolLM3-3B](https://huggingface.co/HuggingFaceTB/SmolLM3-3B) by Hugging Face for language modeling
-- [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) by SpeechBrain for training data
-
-## Citation
-
-If you use Tiny Audio in your research, please cite:
-
-```bibtex
-@software{kroman2025tinyaudio,
-  author = {Kroman, Alex},
-  title = {Tiny Audio: Train your own speech recognition model in 24 hours},
-  year = {2025},
-  publisher = {GitHub},
-  url = {https://github.com/alexkroman/tiny-audio}
-}
-```
+- [GLM-ASR](https://huggingface.co/zai-org/GLM-ASR-Nano-2512) for audio encoding
+- [Qwen3](https://huggingface.co/Qwen/Qwen3-0.6B) for language modeling
+- [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) for training data
 
 ## License
 

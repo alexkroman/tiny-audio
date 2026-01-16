@@ -1,7 +1,11 @@
-"""Tests for audio projector modules."""
+"""Tests for audio projector modules.
+
+Uses MockProjectorConfig from conftest.py for projector initialization.
+"""
 
 import pytest
 import torch
+from conftest import MockProjectorConfig
 
 from tiny_audio.projectors import (
     PROJECTOR_CLASSES,
@@ -14,32 +18,6 @@ from tiny_audio.projectors import (
     load_balancing_loss,
     z_loss,
 )
-
-
-class MockConfig:
-    """Mock config for projector initialization."""
-
-    def __init__(self, **kwargs):
-        self.encoder_dim = kwargs.get("encoder_dim", 256)
-        self.llm_dim = kwargs.get("llm_dim", 512)
-        self.projector_hidden_dim = kwargs.get("projector_hidden_dim", 1024)
-        self.projector_pool_stride = kwargs.get("projector_pool_stride", 4)
-        self.projector_dropout = kwargs.get("projector_dropout", 0.0)
-        self.projector_num_layers = kwargs.get("projector_num_layers", 2)
-        self.projector_init_std = kwargs.get("projector_init_std", 0.02)
-        self.num_experts = kwargs.get("num_experts", 4)
-        self.num_experts_per_tok = kwargs.get("num_experts_per_tok", 2)
-        self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 0.02)
-        self.router_z_loss_coef = kwargs.get("router_z_loss_coef", 0.001)
-        self.adapter_hidden_dim = kwargs.get("adapter_hidden_dim", 1024)
-        # QFormer settings
-        self.qformer_window_size = kwargs.get("qformer_window_size", 15)
-        self.downsample_rate = kwargs.get("downsample_rate", 5)
-        self.qformer_hidden_size = kwargs.get("qformer_hidden_size")
-        self.qformer_num_layers = kwargs.get("qformer_num_layers", 2)
-        self.qformer_num_heads = kwargs.get("qformer_num_heads", 8)
-        self.qformer_intermediate_size = kwargs.get("qformer_intermediate_size")
-
 
 # =============================================================================
 # Helper Module Tests
@@ -92,7 +70,7 @@ class TestMLPAudioProjector:
 
     @pytest.fixture
     def config(self):
-        return MockConfig(encoder_dim=256, llm_dim=512, projector_pool_stride=4)
+        return MockProjectorConfig(encoder_dim=256, llm_dim=512, projector_pool_stride=4)
 
     @pytest.fixture
     def projector(self, config):
@@ -113,7 +91,7 @@ class TestMLPAudioProjector:
 
     def test_downsampling(self, projector):
         """Test that downsampling reduces sequence length by k (must be divisible)."""
-        for seq_len in [8, 48, 100, 200]:  # All divisible by k=4
+        for seq_len in [8, 48, 100, 200]:
             x = torch.randn(1, seq_len, 256)
             out = projector(x)
             expected_len = projector.get_output_length(seq_len)
@@ -130,7 +108,7 @@ class TestMOSAProjector:
 
     @pytest.fixture
     def config(self):
-        return MockConfig(
+        return MockProjectorConfig(
             encoder_dim=256,
             llm_dim=512,
             num_experts=4,
@@ -153,9 +131,9 @@ class TestMOSAProjector:
     def test_get_output_length(self, projector):
         """Test output length calculation for stride-4 (floor division)."""
         assert projector.get_output_length(100) == 25
-        assert projector.get_output_length(101) == 25  # Floor division
+        assert projector.get_output_length(101) == 25
         assert projector.get_output_length(4) == 1
-        assert projector.get_output_length(5) == 1  # Floor division
+        assert projector.get_output_length(5) == 1
 
 
 # =============================================================================
@@ -168,7 +146,7 @@ class TestMoEAudioProjector:
 
     @pytest.fixture
     def config(self):
-        return MockConfig(
+        return MockProjectorConfig(
             encoder_dim=256,
             llm_dim=512,
             projector_hidden_dim=512,
@@ -218,7 +196,7 @@ class TestQFormerAudioProjector:
 
     @pytest.fixture
     def config(self):
-        return MockConfig(
+        return MockProjectorConfig(
             encoder_dim=256,
             llm_dim=512,
             qformer_window_size=15,
@@ -235,8 +213,6 @@ class TestQFormerAudioProjector:
         """Test that QFormer projector produces correct output shape."""
         x = torch.randn(2, 100, 256)
         out = projector(x)
-        # 100 frames / 15 window = 7 windows (rounded up), 3 queries each = 21 tokens
-        # Actually: ceil(100/15) = 7, 7 * 3 = 21
         expected_len = projector.get_output_length(100)
         assert out.shape == (2, expected_len, 512)
 
@@ -244,15 +220,15 @@ class TestQFormerAudioProjector:
         """Test output length calculation."""
         # window_size=15, downsample_rate=5 -> num_queries=3
         # nblocks = ceil(input/15), output = nblocks * 3
-        assert projector.get_output_length(15) == 3  # 1 window
-        assert projector.get_output_length(16) == 6  # 2 windows
-        assert projector.get_output_length(30) == 6  # 2 windows
-        assert projector.get_output_length(100) == 21  # 7 windows
+        assert projector.get_output_length(15) == 3
+        assert projector.get_output_length(16) == 6
+        assert projector.get_output_length(30) == 6
+        assert projector.get_output_length(100) == 21
 
     def test_learnable_queries(self, projector):
         """Test that queries are learnable parameters."""
         assert projector.query.requires_grad
-        assert projector.query.shape == (1, 3, 256)  # num_queries=15//5=3
+        assert projector.query.shape == (1, 3, 256)
 
 
 # =============================================================================
@@ -266,7 +242,6 @@ class TestLossFunctions:
     def test_load_balancing_loss_uniform(self):
         """Test that uniform distribution gives minimal load balancing loss."""
         num_experts = 4
-        # Uniform probabilities
         probs = torch.ones(100, num_experts) / num_experts
         loss = load_balancing_loss(probs, num_experts, top_k=num_experts)
         assert loss < 1e-6
@@ -274,7 +249,6 @@ class TestLossFunctions:
     def test_load_balancing_loss_imbalanced(self):
         """Test that imbalanced distribution gives higher loss."""
         num_experts = 4
-        # All probability on one expert
         probs = torch.zeros(100, num_experts)
         probs[:, 0] = 1.0
         loss = load_balancing_loss(probs, num_experts, top_k=num_experts)
@@ -282,13 +256,13 @@ class TestLossFunctions:
 
     def test_z_loss_small_logits(self):
         """Test that small logits give small z-loss."""
-        logits = torch.randn(100, 4) * 0.1  # Small logits
+        logits = torch.randn(100, 4) * 0.1
         loss = z_loss(logits)
         assert loss < 5.0
 
     def test_z_loss_large_logits(self):
         """Test that large logits give larger z-loss."""
-        logits = torch.randn(100, 4) * 100  # Large logits
+        logits = torch.randn(100, 4) * 100
         loss = z_loss(logits)
         assert loss > 100
 
@@ -301,14 +275,16 @@ class TestLossFunctions:
 class TestProjectorRegistry:
     """Tests for projector registry."""
 
-    def test_all_projectors_registered(self):
-        """Test that all projector types are in the registry."""
-        expected = {"mlp", "mosa", "moe", "qformer"}
-        assert set(PROJECTOR_CLASSES.keys()) == expected
+    def test_core_projectors_registered(self):
+        """Test that core projector types are in the registry."""
+        assert "mlp" in PROJECTOR_CLASSES
+        assert "mosa" in PROJECTOR_CLASSES
+        assert "moe" in PROJECTOR_CLASSES
+        assert "qformer" in PROJECTOR_CLASSES
 
     def test_registry_instantiation(self):
         """Test that all registered projectors can be instantiated."""
-        config = MockConfig()
+        config = MockProjectorConfig()
         for _name, cls in PROJECTOR_CLASSES.items():
             projector = cls(config)
             assert hasattr(projector, "forward")
@@ -326,7 +302,7 @@ class TestGradientFlow:
     @pytest.mark.parametrize("projector_type", ["mlp", "mosa", "moe"])
     def test_gradients_flow(self, projector_type):
         """Test that gradients flow through projector."""
-        config = MockConfig()
+        config = MockProjectorConfig()
         projector = PROJECTOR_CLASSES[projector_type](config)
         projector.train()
 

@@ -1,11 +1,12 @@
 """CLI for ASR, diarization, and alignment evaluation."""
 
-import argparse
 import os
-import sys
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
+from typing import Annotated, Optional
 
+import typer
 from rich.console import Console
 from rich.table import Table
 
@@ -27,32 +28,37 @@ from scripts.eval.evaluators import (
     DiarizationEvaluator,
     EndpointEvaluator,
     EvalResult,
+    LocalDiarizationEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
     TimestampAlignmentEvaluator,
 )
 
+app = typer.Typer(help="Evaluate ASR models on standard datasets")
 console = Console()
 
 
-def build_model_id(
-    provider: str, model_variant: str | None = None, api_key: str | None = None
-) -> str:
-    """Build a model identifier including provider, variant, and API key prefix.
+class AssemblyAIModel(str, Enum):
+    """AssemblyAI model options."""
+
+    best = "best"
+    universal = "universal"
+    slam_1 = "slam_1"
+    nano = "nano"
+
+
+# Valid dataset choices
+VALID_DATASETS = ["all", "all-full"] + list(DATASET_REGISTRY.keys())
+
+
+def get_model_name(model_path: str) -> str:
+    """Extract model name from a HuggingFace model path.
 
     Examples:
-        - assemblyai_slam1_abc
-        - deepgram_nova3_xyz
-        - assemblyai_abc (no variant)
+        - mazesmazes/tiny-audio -> tiny-audio
+        - /path/to/checkpoint -> checkpoint
     """
-    parts = [provider]
-    if model_variant:
-        # Normalize variant name (remove underscores, hyphens for cleaner names)
-        clean_variant = model_variant.replace("_", "").replace("-", "")
-        parts.append(clean_variant)
-    if api_key:
-        parts.append(api_key[:3])
-    return "_".join(parts)
+    return model_path.rstrip("/").split("/")[-1]
 
 
 def save_results(
@@ -267,101 +273,136 @@ def print_alignment_metrics(dataset_name: str, metrics: dict):
     console.print(table)
 
 
-def main():
-    """Main CLI entry point."""
-    parser = argparse.ArgumentParser(description="Evaluate ASR models on standard datasets")
-    parser.add_argument("model", help="Model path/ID, 'assemblyai', or 'deepgram'")
-    parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=["loquacious"],
-        choices=["all", "all-full"] + list(DATASET_REGISTRY.keys()),
-        help="Datasets to evaluate on (default: loquacious, 'all' for ASR only, 'all-full' includes diarization/alignment)",
-    )
-    parser.add_argument("--split", default="test", help="Dataset split (default: test)")
-    parser.add_argument("--max-samples", type=int, default=None, help="Maximum samples to evaluate")
-    parser.add_argument("--endpoint", action="store_true", help="Use HF Inference Endpoint")
-    parser.add_argument(
-        "--assemblyai-model",
-        default="slam_1",
-        choices=["best", "universal", "slam_1", "nano"],
-        help="AssemblyAI model (default: slam_1)",
-    )
-    parser.add_argument(
-        "--streaming", action="store_true", help="Use streaming evaluation (for local or AAI)"
-    )
-    parser.add_argument("--hf-token", default=None, help="HuggingFace token for diarization models")
-    parser.add_argument(
-        "--num-speakers", type=int, default=None, help="Number of speakers (for diarization)"
-    )
-    parser.add_argument(
-        "--min-speakers", type=int, default=None, help="Min speakers (for diarization)"
-    )
-    parser.add_argument(
-        "--max-speakers", type=int, default=None, help="Max speakers (for diarization)"
-    )
-    parser.add_argument(
-        "--config", default=None, help="Dataset config override (e.g., 'en' for CommonVoice)"
-    )
-    parser.add_argument("--output-dir", default="outputs", help="Output directory for results")
-    parser.add_argument(
-        "--user-prompt", type=str, default=None, help="Custom user prompt for the model"
-    )
-    parser.add_argument(
-        "--base-url", type=str, default=None, help="Custom API base URL (for AssemblyAI sandbox)"
-    )
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=1,
-        help="Number of parallel workers for API evaluations (default: 1)",
-    )
-    args = parser.parse_args()
+def validate_datasets(datasets: list[str]) -> list[str]:
+    """Validate and expand dataset names."""
+    for ds in datasets:
+        if ds not in VALID_DATASETS:
+            console.print(f"[red]Error: Invalid dataset '{ds}'[/red]")
+            console.print(f"Valid choices: {', '.join(VALID_DATASETS)}")
+            raise typer.Exit(1)
 
     # Expand "all" to ASR datasets only (exclude diarization and alignment)
-    if "all" in args.datasets:
-        args.datasets = [
+    if "all" in datasets:
+        return [
             k
             for k in DATASET_REGISTRY
             if k not in DIARIZATION_DATASETS and k not in ALIGNMENT_DATASETS
         ]
     # Expand "all-full" to include diarization and alignment datasets too
-    elif "all-full" in args.datasets:
-        args.datasets = list(DATASET_REGISTRY.keys())
+    if "all-full" in datasets:
+        return list(DATASET_REGISTRY.keys())
 
-    for dataset_name in args.datasets:
+    return datasets
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    model: Annotated[
+        Optional[str],
+        typer.Option("--model", "-m", help="Model path/ID, 'assemblyai', or 'deepgram'"),
+    ] = None,
+    datasets: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--datasets",
+            "-d",
+            help="Datasets to evaluate on ('all' for ASR only, 'all-full' includes diarization/alignment)",
+        ),
+    ] = None,
+    split: Annotated[str, typer.Option(help="Dataset split")] = "test",
+    max_samples: Annotated[
+        Optional[int], typer.Option("--max-samples", "-n", help="Maximum samples to evaluate")
+    ] = None,
+    endpoint: Annotated[
+        bool, typer.Option("--endpoint", "-e", help="Use HF Inference Endpoint")
+    ] = False,
+    assemblyai_model: Annotated[
+        AssemblyAIModel, typer.Option("--assemblyai-model", help="AssemblyAI model")
+    ] = AssemblyAIModel.slam_1,
+    streaming: Annotated[
+        bool, typer.Option("--streaming", "-s", help="Use streaming evaluation (for local or AAI)")
+    ] = False,
+    hf_token: Annotated[
+        Optional[str], typer.Option("--hf-token", help="HuggingFace token for diarization models")
+    ] = None,
+    num_speakers: Annotated[
+        Optional[int], typer.Option("--num-speakers", help="Number of speakers (for diarization)")
+    ] = None,
+    min_speakers: Annotated[
+        Optional[int], typer.Option("--min-speakers", help="Min speakers (for diarization)")
+    ] = None,
+    max_speakers: Annotated[
+        Optional[int], typer.Option("--max-speakers", help="Max speakers (for diarization)")
+    ] = None,
+    config: Annotated[
+        Optional[str],
+        typer.Option("--config", "-c", help="Dataset config override (e.g., 'en' for CommonVoice)"),
+    ] = None,
+    output_dir: Annotated[
+        str, typer.Option("--output-dir", "-o", help="Output directory for results")
+    ] = "outputs",
+    user_prompt: Annotated[
+        Optional[str], typer.Option("--user-prompt", help="Custom user prompt for the model")
+    ] = None,
+    base_url: Annotated[
+        Optional[str],
+        typer.Option("--base-url", help="Custom API base URL (for AssemblyAI sandbox)"),
+    ] = None,
+    num_workers: Annotated[
+        int,
+        typer.Option("--num-workers", "-w", help="Number of parallel workers for API evaluations"),
+    ] = 1,
+):
+    """Evaluate ASR models on standard datasets."""
+    # If a subcommand was invoked, skip
+    if ctx.invoked_subcommand is not None:
+        return
+
+    # Require model when running directly
+    if model is None:
+        console.print("[red]Error: --model / -m is required[/red]")
+        console.print("Example: ta eval -m assemblyai -d loquacious")
+        raise typer.Exit(1)
+
+    # Default to loquacious if no datasets specified
+    if datasets is None:
+        datasets = ["loquacious"]
+
+    # Validate and expand datasets
+    datasets = validate_datasets(datasets)
+
+    for dataset_name in datasets:
         console.print(f"\n[bold blue]Evaluating on: {dataset_name}[/bold blue]")
 
         cfg = DATASET_REGISTRY[dataset_name]
-        split = cfg.default_split if args.split == "test" else args.split
+        actual_split = cfg.default_split if split == "test" else split
 
         # Handle diarization datasets
         if dataset_name in DIARIZATION_DATASETS:
-            dataset = load_eval_dataset(dataset_name, split, args.config, decode_audio=False)
-            model_id = args.model  # Default, override for API providers
-
-            if args.model == "assemblyai":
+            dataset = load_eval_dataset(dataset_name, actual_split, config, decode_audio=False)
+            if model == "assemblyai":
                 api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
                 if not api_key:
                     console.print(
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
-                    sys.exit(1)
-                model_id = build_model_id("assemblyai", args.assemblyai_model, api_key)
+                    raise typer.Exit(1)
+                model_id = assemblyai_model.value.replace("_", "-")
                 evaluator = AssemblyAIDiarizationEvaluator(
                     api_key=api_key,
-                    model=args.assemblyai_model,
+                    model=assemblyai_model.value,
                     audio_field=cfg.audio_field,
                     speakers_field=cfg.speakers_field,
                     timestamps_start_field=cfg.timestamps_start_field,
                     timestamps_end_field=cfg.timestamps_end_field,
                 )
-            elif args.model == "deepgram":
+            elif model == "deepgram":
                 api_key = os.environ.get("DEEPGRAM_API_KEY", "")
                 if not api_key:
                     console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
-                    sys.exit(1)
-                model_id = build_model_id("deepgram", None, api_key)
+                    raise typer.Exit(1)
+                model_id = "nova-3"
                 evaluator = DeepgramDiarizationEvaluator(
                     api_key=api_key,
                     audio_field=cfg.audio_field,
@@ -369,50 +410,76 @@ def main():
                     timestamps_start_field=cfg.timestamps_start_field,
                     timestamps_end_field=cfg.timestamps_end_field,
                 )
-            else:
+            elif model == "local":
+                # Local diarization using TEN-VAD + ERes2NetV2 + spectral clustering
+                model_id = "local"
+                evaluator = LocalDiarizationEvaluator(
+                    audio_field=cfg.audio_field,
+                    speakers_field=cfg.speakers_field,
+                    timestamps_start_field=cfg.timestamps_start_field,
+                    timestamps_end_field=cfg.timestamps_end_field,
+                    num_speakers=num_speakers,
+                    min_speakers=min_speakers or 2,
+                    max_speakers=max_speakers or 3,
+                )
+            elif model == "pyannote":
+                # Pyannote diarization (requires HF token with model access)
+                model_id = "pyannote"
                 evaluator = DiarizationEvaluator(
                     audio_field=cfg.audio_field,
                     speakers_field=cfg.speakers_field,
                     timestamps_start_field=cfg.timestamps_start_field,
                     timestamps_end_field=cfg.timestamps_end_field,
-                    hf_token=args.hf_token,
-                    num_speakers=args.num_speakers,
-                    min_speakers=args.min_speakers,
-                    max_speakers=args.max_speakers,
+                    hf_token=hf_token,
+                    num_speakers=num_speakers,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                )
+            else:
+                # Default to pyannote for other model paths
+                model_id = get_model_name(model)
+                evaluator = DiarizationEvaluator(
+                    audio_field=cfg.audio_field,
+                    speakers_field=cfg.speakers_field,
+                    timestamps_start_field=cfg.timestamps_start_field,
+                    timestamps_end_field=cfg.timestamps_end_field,
+                    hf_token=hf_token,
+                    num_speakers=num_speakers,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
                 )
 
-            results = evaluator.evaluate(dataset, args.max_samples)
+            results = evaluator.evaluate(dataset, max_samples)
             metrics = evaluator.compute_metrics()
-            save_diarization_results(model_id, dataset_name, results, metrics, args.output_dir)
+            save_diarization_results(model_id, dataset_name, results, metrics, output_dir)
             print_diarization_metrics(dataset_name, metrics)
             continue
 
         # Handle alignment datasets
         if dataset_name in ALIGNMENT_DATASETS:
-            dataset = load_eval_dataset(dataset_name, split, args.config)
-            model_id = args.model  # Default, override for API providers
+            dataset = load_eval_dataset(dataset_name, actual_split, config)
 
-            if args.model == "assemblyai":
+            if model == "assemblyai":
                 api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
                 if not api_key:
                     console.print(
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
-                    sys.exit(1)
-                model_id = build_model_id("assemblyai", args.assemblyai_model, api_key)
+                    raise typer.Exit(1)
+                model_id = assemblyai_model.value.replace("_", "-")
                 evaluator = AssemblyAIAlignmentEvaluator(
                     api_key=api_key,
-                    model=args.assemblyai_model,
+                    model=assemblyai_model.value,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
                 )
-            elif args.model == "deepgram":
+            elif model == "deepgram":
                 api_key = os.environ.get("DEEPGRAM_API_KEY", "")
                 if not api_key:
                     console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
-                    sys.exit(1)
-                model_id = build_model_id("deepgram", None, api_key)
+                    raise typer.Exit(1)
+                model_id = "nova-3"
                 evaluator = DeepgramAlignmentEvaluator(
                     api_key=api_key,
                     audio_field=cfg.audio_field,
@@ -420,84 +487,89 @@ def main():
                     words_field=cfg.words_field,
                 )
             else:
+                model_id = get_model_name(model)
                 evaluator = TimestampAlignmentEvaluator(
-                    model_path=args.model,
+                    model_path=model,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
-                    user_prompt=args.user_prompt,
+                    user_prompt=user_prompt,
                 )
 
-            results = evaluator.evaluate(dataset, args.max_samples)
+            results = evaluator.evaluate(dataset, max_samples)
             metrics = evaluator.compute_metrics()
-            save_alignment_results(model_id, dataset_name, results, metrics, args.output_dir)
+            save_alignment_results(model_id, dataset_name, results, metrics, output_dir)
             print_alignment_metrics(dataset_name, metrics)
             continue
 
         # ASR evaluation
-        dataset = load_eval_dataset(dataset_name, split, args.config)
-        model_id = args.model  # Default to args.model, override for API providers
+        dataset = load_eval_dataset(dataset_name, actual_split, config)
 
-        if args.model == "assemblyai":
+        if model == "assemblyai":
             api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
             if not api_key:
                 console.print("[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]")
-                sys.exit(1)
-            model_id = build_model_id("assemblyai", args.assemblyai_model, api_key)
+                raise typer.Exit(1)
 
-            if args.streaming:
+            if streaming:
+                model_id = "universal-streaming"
                 evaluator = AssemblyAIStreamingEvaluator(
                     api_key=api_key,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
+                    num_workers=num_workers,
                 )
             else:
+                model_id = assemblyai_model.value.replace("_", "-")
                 evaluator = AssemblyAIEvaluator(
                     api_key=api_key,
-                    model=args.assemblyai_model,
-                    base_url=args.base_url,
+                    model=assemblyai_model.value,
+                    base_url=base_url,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
-                    num_workers=args.num_workers,
+                    num_workers=num_workers,
                 )
-        elif args.model == "deepgram":
+        elif model == "deepgram":
             api_key = os.environ.get("DEEPGRAM_API_KEY", "")
             if not api_key:
                 console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
-                sys.exit(1)
-            model_id = build_model_id("deepgram", None, api_key)
+                raise typer.Exit(1)
+            model_id = "nova-3"
             evaluator = DeepgramEvaluator(
                 api_key=api_key,
                 audio_field=cfg.audio_field,
                 text_field=cfg.text_field,
-                num_workers=args.num_workers,
+                num_workers=num_workers,
             )
-        elif args.endpoint:
+        elif endpoint:
+            model_id = get_model_name(model)
             evaluator = EndpointEvaluator(
-                endpoint_url=args.model,
+                endpoint_url=model,
                 audio_field=cfg.audio_field,
                 text_field=cfg.text_field,
             )
-        elif args.streaming:
+        elif streaming:
+            model_id = get_model_name(model)
             evaluator = LocalStreamingEvaluator(
-                model_path=args.model,
+                model_path=model,
                 audio_field=cfg.audio_field,
                 text_field=cfg.text_field,
-                user_prompt=args.user_prompt,
+                user_prompt=user_prompt,
             )
         else:
+            model_id = get_model_name(model)
             evaluator = LocalEvaluator(
-                model_path=args.model,
+                model_path=model,
                 audio_field=cfg.audio_field,
                 text_field=cfg.text_field,
-                user_prompt=args.user_prompt,
+                user_prompt=user_prompt,
             )
 
-        results = evaluator.evaluate(dataset, args.max_samples)
+        results = evaluator.evaluate(dataset, max_samples)
         metrics = evaluator.compute_metrics()
-        save_results(model_id, dataset_name, results, metrics, args.output_dir, args.base_url)
+        save_results(model_id, dataset_name, results, metrics, output_dir, base_url)
         print_asr_metrics(dataset_name, metrics)
 
 
 if __name__ == "__main__":
-    main()
+    app()

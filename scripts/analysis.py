@@ -27,50 +27,31 @@ KEYWORDS_FILE = "outputs/keywords.json"
 # Shared utilities
 # =============================================================================
 
-WORD_TO_NUM = {
-    "zero": "0",
-    "one": "1",
-    "two": "2",
-    "three": "3",
-    "four": "4",
-    "five": "5",
-    "six": "6",
-    "seven": "7",
-    "eight": "8",
-    "nine": "9",
-    "ten": "10",
-    "eleven": "11",
-    "twelve": "12",
-    "thirteen": "13",
-    "fourteen": "14",
-    "fifteen": "15",
-    "sixteen": "16",
-    "seventeen": "17",
-    "eighteen": "18",
-    "nineteen": "19",
-    "twenty": "20",
-    "thirty": "30",
-    "forty": "40",
-    "fifty": "50",
-    "sixty": "60",
-    "seventy": "70",
-    "eighty": "80",
-    "ninety": "90",
-    "hundred": "100",
-    "thousand": "1000",
-    "million": "1000000",
-    "billion": "1000000000",
-    "first": "1st",
-    "second": "2nd",
-    "third": "3rd",
-    "fourth": "4th",
-    "fifth": "5th",
-    "sixth": "6th",
-    "seventh": "7th",
-    "eighth": "8th",
-    "ninth": "9th",
-    "tenth": "10th",
-}
+
+def extract_dataset_name(dir_name: str) -> str:
+    """Extract dataset name from output directory name.
+
+    Handles formats:
+      - {timestamp}_{model}_{dataset} -> dataset
+      - {timestamp}_{model}_{dataset}_diarization -> dataset
+      - {timestamp}_{model}_{dataset}_alignment -> dataset
+    """
+    parts = dir_name.split("_")
+    if not parts:
+        return "unknown"
+    dataset = parts[-1]
+    if dataset in ("diarization", "alignment") and len(parts) > 1:
+        dataset = parts[-2]
+    return dataset
+
+
+def extract_model_name(dir_name: str) -> str:
+    """Extract model name from output directory name.
+
+    Format: {timestamp}_{model}_{dataset}[_suffix]
+    """
+    parts = dir_name.split("_")
+    return parts[2] if len(parts) >= 3 else "unknown"
 
 
 def normalize_text(text: str) -> str:
@@ -81,12 +62,6 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def normalize_numbers(text: str) -> str:
-    """Convert number words to digits for flexible matching."""
-    text = normalize_text(text)
-    return " ".join(WORD_TO_NUM.get(w, w) for w in text.split())
-
-
 def entity_in_text(entity_text: str, text: str) -> bool:
     """Check if entity appears in text (normalized comparison)."""
     norm_entity = normalize_text(entity_text)
@@ -94,13 +69,9 @@ def entity_in_text(entity_text: str, text: str) -> bool:
     if norm_entity in norm_text:
         return True
 
-    num_entity = normalize_numbers(entity_text)
-    num_text = normalize_numbers(text)
-    if num_entity in num_text:
-        return True
-
-    entity_words = num_entity.split()
-    text_words = num_text.split()
+    # Check word-by-word match
+    entity_words = norm_entity.split()
+    text_words = norm_text.split()
     if len(entity_words) <= len(text_words):
         for i in range(len(text_words) - len(entity_words) + 1):
             if text_words[i : i + len(entity_words)] == entity_words:
@@ -137,10 +108,171 @@ def entity_itn_correct(entity_text: str, text: str) -> bool:
 # =============================================================================
 
 
+@app.command("high-wer")
+def high_wer(
+    model: str = typer.Argument(..., help="Model pattern to analyze"),
+    threshold: float = typer.Option(50.0, "--threshold", "-t", help="WER threshold (percent)"),
+    output_dir: Path = typer.Option(
+        Path("outputs"), "--output-dir", help="Directory containing eval results"
+    ),
+    exclude: list[str] = typer.Option([], help="Patterns to exclude"),
+    latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
+    output_file: Path = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
+):
+    """Output ground truth and predictions for samples with WER above threshold."""
+    model_dirs = find_model_dirs(output_dir, model, exclude, latest=latest)
+    results_files = [d / "results.txt" for d in model_dirs if (d / "results.txt").exists()]
+
+    if not results_files:
+        console.print(f"[red]No results files found for pattern '{model}'[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"Found {len(results_files)} results files for '{model}'")
+    console.print(f"Filtering samples with WER >= {threshold}%\n")
+
+    high_wer_samples = []
+
+    for results_file in sorted(results_files):
+        dataset = extract_dataset_name(results_file.parent.name)
+
+        samples = parse_results_file(results_file)
+        for sample in samples:
+            if sample["wer"] >= threshold:
+                high_wer_samples.append(
+                    {
+                        "dataset": dataset,
+                        "sample_num": sample["sample_num"],
+                        "wer": sample["wer"],
+                        "ground_truth": sample["ground_truth"],
+                        "prediction": sample["prediction"],
+                    }
+                )
+
+    # Sort by WER descending
+    high_wer_samples.sort(key=lambda x: x["wer"], reverse=True)
+
+    console.print(f"Found {len(high_wer_samples)} samples with WER >= {threshold}%\n")
+
+    # Build output
+    lines = []
+    lines.append(f"# High WER Samples (>= {threshold}%)")
+    lines.append(f"# Model: {model}")
+    lines.append(f"# Total: {len(high_wer_samples)} samples\n")
+
+    for sample in high_wer_samples:
+        lines.append("-" * 80)
+        lines.append(
+            f"Dataset: {sample['dataset']} | Sample: {sample['sample_num']} | WER: {sample['wer']:.1f}%"
+        )
+        lines.append(f"Ground Truth: {sample['ground_truth']}")
+        lines.append(f"Prediction:   {sample['prediction']}")
+
+    lines.append("-" * 80)
+    output_text = "\n".join(lines)
+
+    if output_file:
+        output_file.write_text(output_text)
+        console.print(f"Saved to [bold]{output_file}[/bold]")
+    else:
+        console.print(output_text)
+
+
+@app.command("entity-errors")
+def entity_errors(
+    model: str = typer.Argument(..., help="Model pattern to analyze"),
+    output_dir: Path = typer.Option(
+        Path("outputs"), "--output-dir", help="Directory containing eval results"
+    ),
+    exclude: list[str] = typer.Option([], help="Patterns to exclude"),
+    latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
+    entity_type: str = typer.Option(
+        "", "--type", "-t", help="Filter by entity type (e.g., PERSON, ORG)"
+    ),
+    output_file: Path = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
+):
+    """Output samples where entities were missed in the prediction."""
+    # Load keywords file
+    keywords_path = Path(KEYWORDS_FILE)
+    if not keywords_path.exists():
+        console.print(f"[red]Keywords file not found: {keywords_path}[/red]")
+        console.print("Run 'analysis extract-entities' first to generate it.")
+        raise typer.Exit(1)
+
+    keywords = json.loads(keywords_path.read_text())
+    ref_entities = {ref["text"]: ref["entities"] for ref in keywords["references"]}
+
+    model_dirs = find_model_dirs(output_dir, model, exclude, latest=latest)
+    results_files = [d / "results.txt" for d in model_dirs if (d / "results.txt").exists()]
+
+    if not results_files:
+        console.print(f"[red]No results files found for pattern '{model}'[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"Found {len(results_files)} results files for '{model}'")
+    if entity_type:
+        console.print(f"Filtering for entity type: {entity_type}")
+
+    error_samples = []
+
+    for results_file in sorted(results_files):
+        dataset = extract_dataset_name(results_file.parent.name)
+
+        samples = parse_results_file(results_file)
+        for sample in samples:
+            gt = sample["ground_truth"]
+            pred = sample["prediction"]
+            if gt in ref_entities:
+                entities = ref_entities[gt]
+                # Filter by entity type if specified
+                if entity_type:
+                    entities = [e for e in entities if e["label"].upper() == entity_type.upper()]
+                # Find entities that are missing from prediction
+                missing_entities = [e for e in entities if not entity_in_text(e["text"], pred)]
+                if missing_entities:
+                    error_samples.append(
+                        {
+                            "dataset": dataset,
+                            "sample_num": sample["sample_num"],
+                            "ground_truth": gt,
+                            "prediction": pred,
+                            "missing_entities": missing_entities,
+                        }
+                    )
+
+    console.print(f"Found {len(error_samples)} samples with missing entities\n")
+
+    # Build output
+    lines = []
+    lines.append("# Entity Errors (Missing Entities)")
+    lines.append(f"# Model: {model}")
+    if entity_type:
+        lines.append(f"# Entity Type: {entity_type}")
+    lines.append(f"# Total: {len(error_samples)} samples\n")
+
+    for sample in error_samples:
+        entity_strs = [f"{e['text']} ({e['label']})" for e in sample["missing_entities"]]
+        lines.append("-" * 80)
+        lines.append(f"Dataset: {sample['dataset']} | Sample: {sample['sample_num']}")
+        lines.append(f"Missing: {', '.join(entity_strs)}")
+        lines.append(f"Ground Truth: {sample['ground_truth']}")
+        lines.append(f"Prediction:   {sample['prediction']}")
+
+    lines.append("-" * 80)
+    output_text = "\n".join(lines)
+
+    if output_file:
+        output_file.write_text(output_text)
+        console.print(f"Saved to [bold]{output_file}[/bold]")
+    else:
+        console.print(output_text)
+
+
 @app.command("extract-entities")
 def extract_entities(
     model: str = typer.Option("", help="Model pattern to extract from (empty for all)"),
-    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
+    output_dir: Path = typer.Option(
+        Path("outputs"), "--output-dir", help="Directory containing eval results"
+    ),
     exclude: list[str] = typer.Option([], help="Patterns to exclude"),
     min_count: int = typer.Option(20, help="Minimum entity count to include a type"),
     latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
@@ -151,7 +283,7 @@ def extract_entities(
     console.print("Loading spaCy model...")
     nlp = spacy.load("en_core_web_sm")
 
-    model_dirs = find_model_dirs(outputs_dir, model, exclude, latest=latest)
+    model_dirs = find_model_dirs(output_dir, model, exclude, latest=latest)
     results_files = [d / "results.txt" for d in model_dirs if (d / "results.txt").exists()]
     console.print(f"Found {len(results_files)} results files")
 
@@ -247,50 +379,6 @@ DATASET_SHORT_NAMES = {
 }
 
 
-def extract_model_display_name(model_dirs: list[Path], model_pattern: str) -> str:
-    """Extract a display name from folder names, including model variant if present.
-
-    Folder format for API providers: {timestamp}_{provider}_{variant}_{apikey}_{dataset}
-    Example: 20260109_193505_assemblyai_slam1_abc_earnings22 -> "assemblyai slam1"
-
-    For local models: {timestamp}_{model_name}_{dataset}
-    Example: 20260109_193505_tiny-audio_earnings22 -> "tiny-audio"
-    """
-    if not model_dirs:
-        return model_pattern
-
-    # Look at the first directory to extract the model name
-    dir_name = model_dirs[0].name
-    parts = dir_name.split("_")
-
-    # Need at least: timestamp, time, provider/model, dataset
-    if len(parts) < 4:
-        return model_pattern
-
-    # Skip timestamp parts (date_time) and get the rest
-    # Format: date_time_provider_variant_apikey_dataset OR date_time_model_dataset
-    remaining_parts = parts[2:]  # Skip date and time
-
-    # Check if this looks like an API provider format (has apikey - 3 chars before dataset)
-    # API format: [provider, variant, apikey, dataset]
-    # Local format: [model, dataset] or [model, part, dataset]
-
-    if len(remaining_parts) >= 4:
-        # Could be API format: provider_variant_apikey_dataset
-        # Check if second-to-last part looks like a short API key prefix (3 chars)
-        potential_apikey = remaining_parts[-2]
-        if len(potential_apikey) == 3 and potential_apikey.isalnum():
-            # API provider format - extract provider and variant
-            provider = remaining_parts[0]
-            variant = remaining_parts[1] if len(remaining_parts) > 3 else None
-            if variant and variant != potential_apikey:
-                return f"{provider} {variant}"
-            return provider
-
-    # Local model format - just use the model pattern as-is
-    return model_pattern
-
-
 def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[str]) -> dict:
     """Collect all metrics for a model across datasets."""
     import jiwer
@@ -298,7 +386,7 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
     model_dirs = find_model_dirs(outputs_dir, model_pattern, exclude, latest=True)
 
     # Extract display name from folder structure
-    display_name = extract_model_display_name(model_dirs, model_pattern)
+    display_name = extract_model_name(model_dirs[0].name) if model_dirs else model_pattern
 
     metrics = {
         "display_name": display_name,
@@ -324,23 +412,19 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
     for dir_path in model_dirs:
         results_file = dir_path / "results.txt"
         metrics_file = dir_path / "metrics.txt"
-
-        # Extract dataset name
         dir_name = dir_path.name
-        parts = dir_name.split("_")
-        dataset = parts[-1]
 
-        # Check for diarization/alignment results
-        if dataset == "diarization" and len(parts) > 1:
-            dataset = parts[-2]
+        # Check for diarization/alignment results (special handling)
+        if dir_name.endswith("_diarization"):
             if metrics_file.exists():
                 metrics["diarization"] = parse_metrics_file(metrics_file)
             continue
-        if dataset == "alignment" and len(parts) > 1:
-            dataset = parts[-2]
+        if dir_name.endswith("_alignment"):
             if metrics_file.exists():
                 metrics["alignment"] = parse_metrics_file(metrics_file)
             continue
+
+        dataset = extract_dataset_name(dir_name)
 
         if not results_file.exists():
             continue
@@ -445,7 +529,9 @@ def parse_metrics_file(metrics_file: Path) -> dict:
 @app.command("compare")
 def compare(
     models: list[str] = typer.Argument(..., help="Model patterns to compare"),
-    outputs_dir: Path = typer.Option(Path("outputs"), help="Directory containing eval results"),
+    output_dir: Path = typer.Option(
+        Path("outputs"), "--output-dir", help="Directory containing eval results"
+    ),
     exclude: list[str] = typer.Option([], help="Patterns to exclude from matching"),
 ):
     """Generate comprehensive comparison tables for multiple models."""
@@ -458,7 +544,7 @@ def compare(
     model_metrics = {}
     for model in models:
         console.print(f"Collecting metrics for '{model}'...")
-        model_metrics[model] = collect_model_metrics(model, outputs_dir, exclude)
+        model_metrics[model] = collect_model_metrics(model, output_dir, exclude)
 
     # Get all datasets present across models
     all_datasets = set()
@@ -494,7 +580,7 @@ def compare(
     console.print("\n")
     wer_table = Table(title="Accuracy by WER")
     wer_table.add_column("Model", style="cyan")
-    wer_table.add_column("Corpus WER", justify="right", style="bold")
+    wer_table.add_column("Corpus", justify="right", style="bold")
     for ds in ordered_datasets:
         wer_table.add_column(DATASET_SHORT_NAMES.get(ds, ds), justify="right")
 
@@ -703,11 +789,6 @@ def compare(
             itn_table.add_row(*row)
 
         console.print(itn_table)
-
-
-def cli():
-    """Entry point for pyproject.toml."""
-    app()
 
 
 if __name__ == "__main__":
