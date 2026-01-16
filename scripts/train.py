@@ -36,7 +36,7 @@ from transformers import (
     TrainerCallback,
     TrainingArguments,
 )
-from trl.trainer.utils import DataCollatorForChatML
+from trl.experimental.utils import DataCollatorForChatML
 
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
