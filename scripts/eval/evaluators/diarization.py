@@ -294,11 +294,14 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
 
     # Sliding window parameters
     WINDOW_SIZE = 1.0  # seconds
-    STEP_SIZE = 0.5  # seconds (50% overlap)
+    STEP_SIZE = 0.25  # seconds (75% overlap)
+
+    # GPU Optimization - process multiple windows at once
+    BATCH_SIZE = 64
 
     # VAD hysteresis parameters (segment-level approximation)
-    VAD_MIN_DURATION = 0.08  # Remove segments shorter than this (reduces FA)
-    VAD_MAX_GAP = 0.5  # Fill gaps shorter than this (reduces Miss)
+    VAD_MIN_DURATION = 0.15  # Remove segments shorter than this (reduces FA)
+    VAD_MAX_GAP = 0.40  # Fill gaps shorter than this (reduces Miss)
 
     def __init__(
         self,
@@ -320,9 +323,28 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
             from ten_vad import TenVad
 
             console.print("Loading TEN-VAD model...")
-            # Lower threshold to reduce missed speech
-            cls._ten_vad_model = TenVad(hop_size=256, threshold=0.25)
+            # Balanced threshold
+            cls._ten_vad_model = TenVad(hop_size=256, threshold=0.28)
         return cls._ten_vad_model
+
+    _device = None
+
+    @classmethod
+    def _get_device(cls):
+        """Get the best available device (MPS for MacBook, CUDA, or CPU)."""
+        if cls._device is None:
+            import torch
+
+            if torch.backends.mps.is_available():
+                cls._device = torch.device("mps")
+                console.print("Using MPS (Metal) GPU acceleration")
+            elif torch.cuda.is_available():
+                cls._device = torch.device("cuda")
+                console.print("Using CUDA GPU acceleration")
+            else:
+                cls._device = torch.device("cpu")
+                console.print("Using CPU (no GPU available)")
+        return cls._device
 
     @classmethod
     def _get_eres2netv2_model(cls):
@@ -336,6 +358,14 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
                 task=Tasks.speaker_verification, model="iic/speech_eres2netv2_sv_zh-cn_16k-common"
             )
             cls._eres2netv2_model = sv_pipeline.model
+
+            # Move model to GPU if available
+            device = cls._get_device()
+            cls._eres2netv2_model = cls._eres2netv2_model.to(device)
+            # Also set the model's internal device attribute (not updated by .to())
+            cls._eres2netv2_model.device = device
+            cls._eres2netv2_model.eval()
+
         return cls._eres2netv2_model
 
     def _get_clusterer(self):
@@ -354,8 +384,9 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
         vad_model = self._get_ten_vad_model()
 
         # Convert to int16 as required by TEN-VAD
+        # CLIP to prevent integer overflow wrapping (values > 1.0 would overflow)
         if audio_array.dtype != np.int16:
-            audio_int16 = (audio_array * 32767).astype(np.int16)
+            audio_int16 = (np.clip(audio_array, -1.0, 1.0) * 32767).astype(np.int16)
         else:
             audio_int16 = audio_array
 
@@ -443,102 +474,171 @@ class LocalDiarizationEvaluator(DiarizationEvaluator):
     def _extract_embeddings(
         self, audio_array: np.ndarray, segments: list[dict], sample_rate: int
     ) -> tuple[np.ndarray, list[dict]]:
-        """Extract embeddings using ERes2NetV2 model from 3D-Speaker."""
+        """Extract embeddings using GPU-optimized processing.
+
+        Note: The modelscope ERes2NetV2 wrapper doesn't support true batching
+        (it collapses batch dimension internally). We optimize by:
+        1. Pre-computing all audio chunks (vectorized)
+        2. Converting to tensor once (not per-iteration)
+        3. Processing on GPU with minimal Python overhead
+        """
         import torch
 
         speaker_model = self._get_eres2netv2_model()
-        embeddings = []
-        window_segments = []
+        device = self._get_device()
 
         window_samples = int(self.WINDOW_SIZE * sample_rate)
         step_samples = int(self.STEP_SIZE * sample_rate)
+
+        # 1. Prepare all audio chunks first (CPU work, vectorized)
+        audio_chunks = []
+        window_segments = []
 
         for seg in segments:
             seg_start = seg["start_sample"]
             seg_end = seg["end_sample"]
             seg_len = seg_end - seg_start
 
-            # Generate window chunks
+            # Generate start indices for this segment
             if seg_len <= window_samples:
-                chunks = [(seg_start, seg_end)]
+                starts = [seg_start]
+                ends = [seg_end]
             else:
-                chunks = []
-                current = seg_start
-                while current + window_samples <= seg_end:
-                    chunks.append((current, current + window_samples))
-                    current += step_samples
-                if current < seg_end and (seg_end - current) > (window_samples // 2):
-                    chunks.append((seg_end - window_samples, seg_end))
+                # Vectorized generation of sliding windows
+                starts = list(range(seg_start, seg_end - window_samples + 1, step_samples))
+                ends = [s + window_samples for s in starts]
 
-            for c_start, c_end in chunks:
-                chunk_audio = audio_array[c_start:c_end]
+                # Handle remainder
+                if ends and ends[-1] < seg_end and (seg_end - ends[-1]) > (window_samples // 2):
+                    starts.append(seg_end - window_samples)
+                    ends.append(seg_end)
 
-                if len(chunk_audio) < window_samples // 2:
-                    chunk_audio = np.pad(chunk_audio, (0, window_samples // 2 - len(chunk_audio)))
+            for c_start, c_end in zip(starts, ends):
+                chunk = audio_array[c_start:c_end]
 
-                # ERes2NetV2 expects raw audio tensor
-                with torch.no_grad():
-                    audio_tensor = torch.from_numpy(chunk_audio.astype(np.float32)).unsqueeze(0)
-                    embedding = speaker_model(audio_tensor).squeeze(0).cpu().numpy()
+                # Pad if necessary to ensure uniform size
+                if len(chunk) < window_samples:
+                    chunk = np.pad(chunk, (0, window_samples - len(chunk)))
+                elif len(chunk) > window_samples:
+                    chunk = chunk[:window_samples]
 
-                    # Handle NaN/inf values
-                    if not np.isfinite(embedding).all():
-                        embedding = np.nan_to_num(embedding, nan=0.0, posinf=1.0, neginf=-1.0)
+                audio_chunks.append(chunk)
+                window_segments.append({"start": c_start / sample_rate, "end": c_end / sample_rate})
 
-                    # Normalize embedding
-                    norm = np.linalg.norm(embedding)
-                    if norm > 1e-8:
-                        embedding = embedding / norm
-                    else:
-                        # Skip near-zero embeddings (likely silence)
-                        continue
+        if not audio_chunks:
+            return np.array([]), []
 
+        # 2. Process embeddings (modelscope model doesn't support true batching)
+        embeddings = []
+        valid_indices = []
+
+        # Convert all chunks to tensor once (faster than per-iteration conversion)
+        all_audio_tensor = torch.from_numpy(np.array(audio_chunks)).float()
+
+        with torch.no_grad():
+            for i in range(len(all_audio_tensor)):
+                # Get single chunk and add batch dimension
+                audio_tensor = all_audio_tensor[i : i + 1].to(device)
+
+                # Forward pass
+                embedding = speaker_model.forward(audio_tensor).squeeze(0).cpu().numpy()
+
+                # Handle NaN/inf values
+                if not np.isfinite(embedding).all():
+                    continue
+
+                # Normalize embedding
+                norm = np.linalg.norm(embedding)
+                if norm > 1e-8:
+                    embedding = embedding / norm
                     embeddings.append(embedding)
-                    window_segments.append(
-                        {"start": c_start / sample_rate, "end": c_end / sample_rate}
-                    )
+                    valid_indices.append(i)
 
-        return np.array(embeddings) if embeddings else np.array([]), window_segments
+        if embeddings:
+            final_embeddings = np.array(embeddings)
+            final_window_segments = [window_segments[i] for i in valid_indices]
+            return final_embeddings, final_window_segments
+
+        return np.array([]), []
 
     def _cluster_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
-        """Cluster embeddings using spectral clustering."""
+        """Cluster embeddings using spectral clustering with label smoothing."""
+        from scipy.ndimage import median_filter
+
+        if embeddings.shape[0] == 0:
+            return np.array([])
+
         clusterer = self._get_clusterer()
-        return clusterer(embeddings, self.num_speakers)
+        raw_labels = clusterer(embeddings, self.num_speakers)
+
+        # Median filter to smooth out rapid label flickering (A-A-B-A-A -> A-A-A-A-A)
+        if len(raw_labels) >= 3:
+            return median_filter(raw_labels, size=3)
+        return raw_labels
 
     def _postprocess_segments(self, window_segments: list[dict], labels: np.ndarray) -> list[dict]:
-        """Post-process diarization segments with merging and overlap distribution.
+        """Post-process diarization segments using window centers.
 
-        Simplified from FunASR speaker_utils.py - removed smoothing step which
-        was causing missed speech by reassigning short segments.
+        Instead of midpoint cuts on overlapping windows, we trust the window center
+        timestamps. Each label applies to its window's center, and we extend segments
+        until the label changes. This handles boundaries more naturally with high
+        overlap (75%).
+
+        Important: Handles silence gaps correctly - if VAD detected a gap between
+        windows, we don't bridge it (which would create false alarms).
         """
         if not window_segments or len(labels) == 0:
             return []
 
-        # Step 1: Correct labels (re-index sequentially)
+        # Ensure lengths match (in case embedding filtering dropped some)
+        if len(window_segments) != len(labels):
+            min_len = min(len(window_segments), len(labels))
+            window_segments = window_segments[:min_len]
+            labels = labels[:min_len]
+
         labels = self._correct_labels(labels)
 
-        # Step 2: Create initial segments
+        # If windows are further apart than this, don't link them (VAD detected silence)
+        # Since step_size is 0.25s, a gap > 0.5s implies a VAD break
+        max_link_gap = 0.5
+
+        window_centers = [(ws["start"] + ws["end"]) / 2 for ws in window_segments]
+
         segments = []
-        for i in range(len(window_segments)):
-            segments.append(
-                [
-                    window_segments[i]["start"],
-                    window_segments[i]["end"],
-                    int(labels[i]),
-                ]
-            )
+        current_label = int(labels[0])
+        segment_start = window_segments[0]["start"]
+        last_valid_end = window_segments[0]["end"]
 
-        # Step 3: Merge consecutive same-speaker segments
-        segments = self._merge_sequential(segments)
+        for i in range(1, len(labels)):
+            this_label = int(labels[i])
+            prev_end = window_segments[i - 1]["end"]
+            curr_start = window_segments[i]["start"]
+            gap = curr_start - prev_end
 
-        # Step 4: Distribute overlapping regions at midpoint
-        for i in range(1, len(segments)):
-            if segments[i - 1][1] > segments[i][0] + 1e-4:
-                midpoint = (segments[i][0] + segments[i - 1][1]) / 2
-                segments[i][0] = midpoint
-                segments[i - 1][1] = midpoint
+            # Scenario 1: Large gap (Silence detected by VAD)
+            if gap > max_link_gap:
+                # Close previous segment at its natural end
+                segments.append([segment_start, last_valid_end, current_label])
+                # Start new segment at current window's start
+                segment_start = curr_start
+                current_label = this_label
 
-        # Step 5: Convert to output format
+            # Scenario 2: Contiguous speech, label changed
+            elif this_label != current_label:
+                # Boundary is midpoint between centers
+                boundary = (window_centers[i - 1] + window_centers[i]) / 2
+                segments.append([segment_start, boundary, current_label])
+                segment_start = boundary
+                current_label = this_label
+
+            # Scenario 3: Same label, contiguous - continue extending
+
+            # Always update the valid end time
+            last_valid_end = window_segments[i]["end"]
+
+        # Close final segment
+        segments.append([segment_start, last_valid_end, current_label])
+
         return [
             {
                 "speaker": f"SPEAKER_{seg[2]}",

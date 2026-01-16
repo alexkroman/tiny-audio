@@ -135,8 +135,12 @@ class SpeakerClusterer:
         return self._merge_small_clusters(labels, embeddings)
 
     def _merge_small_clusters(self, labels: np.ndarray, embeddings: np.ndarray) -> np.ndarray:
-        """Merge small clusters into nearest large cluster."""
+        """Merge small clusters into nearest large cluster if similar enough."""
         from scipy.spatial.distance import cdist
+
+        # Cosine distance threshold (0.0=identical, 2.0=opposite)
+        # Only merge if small cluster is similar enough to a large cluster
+        merge_threshold = 0.4
 
         labels = labels.copy()
 
@@ -167,10 +171,13 @@ class SpeakerClusterer:
 
         # Find nearest large cluster for each small cluster
         centroids_dist = cdist(large_centroids, small_centroids, metric="cosine")
-        nearest_large = np.argmin(centroids_dist, axis=0)
+        nearest_large_idx = np.argmin(centroids_dist, axis=0)
+        nearest_dists = np.min(centroids_dist, axis=0)
 
-        # Reassign small clusters to nearest large cluster
+        # Reassign small clusters only if similar enough to nearest large cluster
         for i, small_k in enumerate(small_clusters):
-            labels[labels == small_k] = large_clusters[nearest_large[i]]
+            if nearest_dists[i] < merge_threshold:
+                labels[labels == small_k] = large_clusters[nearest_large_idx[i]]
+            # Else: leave it alone, it's a distinct short speaker
 
         return labels
