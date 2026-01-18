@@ -64,6 +64,7 @@ tokenizer_config.json -filter -diff -merge text
             "asr_processing.py",
             "asr_pipeline.py",
             "projectors.py",
+            "diarization.py",
             "handler.py",  # For Inference Endpoints
         ]
         for filename in custom_files:

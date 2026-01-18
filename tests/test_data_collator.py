@@ -138,14 +138,22 @@ class TestLabelMasking:
 
         # Decode full input to verify structure
         full_text = tokenizer.decode(input_ids, skip_special_tokens=False)
-        assert "Transcribe:" in full_text, "User instruction not in input"
+        # Check that one of the transcribe prompts is in the text
+        from scripts.train import TRANSCRIBE_PROMPTS
 
-        # Find "Transcribe" in input and verify it's masked
-        transcribe_tokens = tokenizer.encode("Transcribe", add_special_tokens=False)
-        for i in range(len(input_ids) - len(transcribe_tokens)):
-            if input_ids[i : i + len(transcribe_tokens)] == transcribe_tokens:
+        matched_prompt = None
+        for prompt in TRANSCRIBE_PROMPTS:
+            if prompt in full_text:
+                matched_prompt = prompt
+                break
+        assert matched_prompt is not None, f"User instruction not in input. Got: {full_text}"
+
+        # Find the prompt in input and verify it's masked
+        prompt_tokens = tokenizer.encode(matched_prompt, add_special_tokens=False)
+        for i in range(len(input_ids) - len(prompt_tokens)):
+            if input_ids[i : i + len(prompt_tokens)] == prompt_tokens:
                 # These positions should be masked
-                assert all(labels[i + j] == -100 for j in range(len(transcribe_tokens))), (
+                assert all(labels[i + j] == -100 for j in range(len(prompt_tokens))), (
                     "User instruction should be masked"
                 )
                 break

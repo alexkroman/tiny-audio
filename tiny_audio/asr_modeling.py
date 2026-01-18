@@ -38,7 +38,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
 
-    TRANSCRIBE_PROMPT = "Transcribe: "
+    TRANSCRIBE_PROMPT = "Transcribe speech to text"  # Audio tokens come BEFORE this
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: str, *args, **kwargs) -> "ASRModel":
@@ -186,7 +186,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """Create the appropriate feature extractor for the audio encoder."""
         from transformers import AutoFeatureExtractor
 
-        return AutoFeatureExtractor.from_pretrained(config.audio_model_id)
+        feature_extractor = AutoFeatureExtractor.from_pretrained(config.audio_model_id)
+        # Disable padding by default - use actual audio length
+        feature_extractor.padding = False
+        return feature_extractor
 
     @classmethod
     def _load_audio_encoder(cls, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
@@ -540,7 +543,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             messages: list[dict[str, str]] = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": self.TRANSCRIBE_PROMPT + audio_placeholder})
+            # Audio BEFORE prompt for proper causal attention
+            messages.append(
+                {"role": "user", "content": audio_placeholder + " " + self.TRANSCRIBE_PROMPT}
+            )
 
             chat_result = self.tokenizer.apply_chat_template(
                 messages,
@@ -615,7 +621,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": self.TRANSCRIBE_PROMPT + audio_placeholder})
+        # Audio BEFORE prompt for proper causal attention
+        messages.append(
+            {"role": "user", "content": audio_placeholder + " " + self.TRANSCRIBE_PROMPT}
+        )
 
         chat_result = self.tokenizer.apply_chat_template(
             messages,
@@ -775,6 +784,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projectors module
         shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
+        # Copy diarization module
+        shutil.copy(src_dir / "diarization.py", save_dir / "diarization.py")
 
     def push_to_hub(self, repo_id: str, **kwargs) -> str:
         """Push model to HuggingFace Hub, ensuring adapter_config points to repo.

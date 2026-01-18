@@ -14,7 +14,6 @@ from tiny_audio.projectors import (
     MOSAProjector,
     QFormerAudioProjector,
     SimpleAdapter,
-    SwiGLUExpert,
     load_balancing_loss,
     z_loss,
 )
@@ -40,24 +39,6 @@ class TestSimpleAdapter:
         x = torch.randn(2, 10, 256, dtype=torch.float32)
         out = adapter(x)
         assert out.dtype == torch.float32
-
-
-class TestSwiGLUExpert:
-    """Tests for SwiGLUExpert module."""
-
-    def test_forward_shape(self):
-        """Test that SwiGLUExpert produces correct output shape."""
-        expert = SwiGLUExpert(input_dim=256, hidden_dim=512, output_dim=128)
-        x = torch.randn(2, 10, 256)
-        out = expert(x)
-        assert out.shape == (2, 10, 128)
-
-    def test_no_bias(self):
-        """Test that SwiGLUExpert has no biases."""
-        expert = SwiGLUExpert(input_dim=256, hidden_dim=512, output_dim=128)
-        assert expert.gate_proj.bias is None
-        assert expert.up_proj.bias is None
-        assert expert.down_proj.bias is None
 
 
 # =============================================================================
@@ -129,11 +110,14 @@ class TestMOSAProjector:
         assert out.shape == (2, 25, 512)
 
     def test_get_output_length(self, projector):
-        """Test output length calculation for stride-4 (floor division)."""
+        """Test output length calculation for Conv1d downsampling (4x reduction)."""
+        # Conv1d formula: out = (in + 2*pad - kernel) // stride + 1
+        # With kernel=3, stride=2, pad=1: out = (in - 1) // 2 + 1
+        # Applied twice for 4x total reduction
         assert projector.get_output_length(100) == 25
-        assert projector.get_output_length(101) == 25
+        assert projector.get_output_length(101) == 26
         assert projector.get_output_length(4) == 1
-        assert projector.get_output_length(5) == 1
+        assert projector.get_output_length(5) == 2
 
 
 # =============================================================================

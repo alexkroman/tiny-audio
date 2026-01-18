@@ -13,13 +13,11 @@ Usage:
 """
 
 import contextlib
-import html
-import re
+import random
 from dataclasses import fields
 from typing import Any
 
 import hydra
-import nltk
 import torch
 import wandb
 from datasets import (
@@ -29,7 +27,6 @@ from datasets import (
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
-from punctuators.models import PunctCapSegModelONNX
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -41,48 +38,13 @@ from trl.experimental.utils import DataCollatorForChatML
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
-TRANSCRIBE_PREFIX = "Transcribe: "  # Used in DataCollator, matches ASRConfig.user_prompt
-
-# Symbol mappings for PunctCapSeg preprocessing/postprocessing
-# PunctCapSeg converts these symbols to <unk>, so we use word placeholders
-_PCS_SYMBOL_MAP = [
-    # (pre_pattern, pre_replace, post_pattern, post_replace)
-    (r"(\d)%", r"\1 percent", r"(\d)\s*percent\b", r"\1%"),
-    (r"(\d):(\d)", r"\1 oclock \2", r"(\d)[,\s]*oclock[,\s]*(\d)", r"\1:\2"),
-    (r"(\d)/(\d)", r"\1 slashdate \2", r"(\d)[,\s]*slashdate[,\s]*(\d)", r"\1/\2"),
-    (r"#(\d)", r"numbersign \1", r"numbersign\s*(\d)", r"#\1"),
-    (r"(\w)&(\w)", r"\1 ampersand \2", r"(\w)\s*ampersand\s*(\w)", r"\1&\2"),
-    (r"¥(\d)", r"yensign \1", r"yensign\s*(\d)", r"¥\1"),
-    (r"(\d)¢", r"\1 centsign", r"(\d)\s*centsign", r"\1¢"),
-    (r"(\d)°", r"\1 degreesign", r"(\d)\s*degreesign", r"\1°"),
-    (r"(\w+)-(\w+)", r"\1 hyphenword \2", r"(\w+)[,\s]*hyphenword[,\s]*(\w+)", r"\1-\2"),
+# Transcription prompts (randomly selected during training)
+# Audio tokens come BEFORE the prompt for proper causal attention
+TRANSCRIBE_PROMPTS = [
+    "Repeat the above",
+    "Transcribe speech to text",
+    "Transcribe audio to text",
 ]
-
-
-def _preprocess_for_pcs(text: str) -> str:
-    """Replace symbols with word placeholders before PunctCapSeg."""
-    for pre_pat, pre_repl, _, _ in _PCS_SYMBOL_MAP:
-        # Apply multiple times for consecutive patterns (dates, hyphens)
-        for _ in range(5):
-            new_text = re.sub(pre_pat, pre_repl, text)
-            if new_text == text:
-                break
-            text = new_text
-    return text
-
-
-def _postprocess_from_pcs(text: str) -> str:
-    """Convert placeholders back to symbols after PunctCapSeg."""
-    for _, _, post_pat, post_repl in _PCS_SYMBOL_MAP:
-        for _ in range(5):
-            new_text = re.sub(post_pat, post_repl, text, flags=re.IGNORECASE)
-            if new_text == text:
-                break
-            text = new_text
-    # Fix country abbreviations added by PunctCapSeg
-    text = re.sub(r"\bU\.S\.A\.?", "USA", text)
-    text = re.sub(r"\bU\.S\.?", "US", text)
-    return re.sub(r"\bU\.K\.?", "UK", text)
 
 
 class DatasetLoader:
@@ -122,8 +84,8 @@ class DatasetLoader:
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        # Remove extra columns, keep only audio and text
-        extra_cols = [c for c in (ds.column_names or []) if c not in {"audio", "text"}]
+        # Remove extra columns, keep only audio, text, and duration (for group_by_length)
+        extra_cols = [c for c in (ds.column_names or []) if c not in {"audio", "text", "duration"}]
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
@@ -136,11 +98,7 @@ class DatasetLoader:
 
             ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
-        # Filter short transcripts (<2 words) to avoid noisy backchannels like "yeah", "ok"
-        def filter_short_transcripts(text):
-            return len(text.split()) >= 2
-
-        return ds.filter(filter_short_transcripts, num_proc=self.num_proc, input_columns="text")
+        return ds
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -232,9 +190,6 @@ class DataCollator:
             max_length=2048,
         )
 
-        # Punctuation and truecasing model (lazy loaded)
-        self.punctuator = None
-
     def _compute_encoder_output_length(self, mel_length: int) -> int:
         """Compute encoder output length using conv layer formulas."""
         length = mel_length
@@ -267,7 +222,7 @@ class DataCollator:
         audio_out = self.feature_extractor(
             audio_arrays,
             sampling_rate=self.sample_rate,
-            padding="max_length",
+            padding="longest",  # Pad to longest in batch, not fixed 30s
             return_attention_mask=True,
             return_tensors="pt",
         )
@@ -280,26 +235,16 @@ class DataCollator:
             num_tokens = self.projector.get_output_length(encoder_len)
             audio_token_counts.append(num_tokens)
 
-        # Apply punctuation and truecasing to texts in batch (model expects lowercase)
-        if self.punctuator is None:
-            self.punctuator = PunctCapSegModelONNX.from_pretrained("pcs_en")
-
-        raw_texts = [
-            _preprocess_for_pcs(
-                re.sub(r"<[^>]+>", "", html.unescape(f.get("text") or "")).strip().lower()
-            )
-            for f in valid_features
-        ]
-        results = self.punctuator.infer(raw_texts)
-        processed_texts = [
-            _postprocess_from_pcs(" ".join(r) if r else t) for t, r in zip(raw_texts, results)
-        ]
+        # Lowercase all training texts
+        processed_texts = [(f.get("text") or "").strip().lower() for f in valid_features]
 
         # Build messages for each sample with per-sample audio token counts
         text_features = []
         for text, num_audio_tokens in zip(processed_texts, audio_token_counts):
             audio_placeholder = "<audio>" * num_audio_tokens
-            user_content = TRANSCRIBE_PREFIX + audio_placeholder
+            prompt = random.choice(TRANSCRIBE_PROMPTS)
+            # Audio BEFORE prompt for proper causal attention (matches Auden)
+            user_content = audio_placeholder + " " + prompt
 
             messages = []
             if self.system_prompt:
@@ -320,7 +265,29 @@ class DataCollator:
 class ASRTrainer(Trainer):
     """Trainer subclass for ASR models."""
 
-    pass
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """Compute loss with proper label shifting for causal LM.
+
+        HuggingFace Trainer's label_smoother checks MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+        to decide whether to shift labels. Since ASRModel isn't in that mapping,
+        it incorrectly uses shift_labels=False, causing misaligned predictions.
+        This override forces shift_labels=True for correct causal LM behavior.
+        """
+        # Pop labels if using label smoothing (matches Trainer behavior)
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs.pop("labels")
+        else:
+            labels = None
+
+        outputs = model(**inputs)
+
+        if labels is not None:
+            # Force shift_labels=True since ASRModel is a causal LM
+            loss = self.label_smoother(outputs, labels, shift_labels=True)
+        else:
+            loss = outputs.loss
+
+        return (loss, outputs) if return_outputs else loss
 
 
 class PushToHubCallback(TrainerCallback):
@@ -352,8 +319,6 @@ def get_valid_training_args(config: dict) -> dict:
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
-    nltk.download("punkt_tab", quiet=True)
-
     # Initialize wandb
     if cfg.training.get("report_to") == "wandb":
         wandb.init(

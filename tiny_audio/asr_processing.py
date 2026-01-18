@@ -17,7 +17,7 @@ class ASRProcessor(ProcessorMixin):
     feature_extractor_class = "AutoFeatureExtractor"
     tokenizer_class = "AutoTokenizer"
     AUDIO_TOKEN = "<audio>"
-    TRANSCRIBE_PROMPT = "Transcribe: "
+    TRANSCRIBE_PROMPT = "Transcribe speech to text"
     # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
     DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
 
@@ -89,10 +89,11 @@ class ASRProcessor(ProcessorMixin):
         else:
             num_audio_tokens = 0
 
-        # Build prompt with audio token placeholders
-        user_content = self.TRANSCRIBE_PROMPT
+        # Build prompt with audio token placeholders (audio BEFORE prompt)
         if num_audio_tokens > 0:
-            user_content += self.AUDIO_TOKEN * num_audio_tokens
+            user_content = self.AUDIO_TOKEN * num_audio_tokens + " " + self.TRANSCRIBE_PROMPT
+        else:
+            user_content = self.TRANSCRIBE_PROMPT
 
         messages = []
         if system_prompt:

@@ -33,10 +33,10 @@ class MLPAudioProjector(nn.Module):
 
         encoder_dim = getattr(config, "encoder_dim", 768)
         llm_dim = getattr(config, "llm_dim", 2048)
-        self.k = getattr(config, "projector_pool_stride", 2)
+        self.k = getattr(config, "projector_pool_stride", 4)
 
         # Frame stacking: concat k adjacent frames then project
-        # Matches GLM-ASR: in_dim -> 2*llm_dim -> llm_dim
+        # Hidden dim uses 2x expansion like GLM-ASR's GlmAsrMultiModalProjector
         in_dim = encoder_dim * self.k
         hidden_dim = llm_dim * 2
         self.linear_1 = nn.Linear(in_dim, hidden_dim)
@@ -87,56 +87,51 @@ class SimpleAdapter(nn.Module):
         return self.fc2(self.act(self.fc1(x)))
 
 
-class SwiGLUExpert(nn.Module):
-    """SwiGLU expert (gated MLP with SiLU activation)."""
-
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
-        super().__init__()
-        self.gate_proj = nn.Linear(input_dim, hidden_dim, bias=False)
-        self.up_proj = nn.Linear(input_dim, hidden_dim, bias=False)
-        self.down_proj = nn.Linear(hidden_dim, output_dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
-
-
 class MOSAProjector(nn.Module):
     """MOSA-Base projector: simple 2-layer ReLU router with 4 simple adapters.
 
     Based on "MOSA: Mixtures of Simple Adapters" (arXiv:2508.18998).
     Uses softmax gating over all experts (dense MoE) with only cross-entropy loss.
-    Uses frame-stacking for downsampling (like MLP projector).
+    Uses Conv1d for downsampling (2 layers, stride 2 each = 4x total).
     """
 
     def __init__(self, config):
         """Initialize MOSA projector.
 
         Args:
-            config: ASRConfig with encoder_dim, llm_dim, num_experts, projector_pool_stride
+            config: ASRConfig with encoder_dim, llm_dim, num_experts
         """
         super().__init__()
         self.encoder_dim = getattr(config, "encoder_dim", None) or 1280
         self.llm_dim = getattr(config, "llm_dim", None) or 2048
-        self.k = getattr(config, "projector_pool_stride", 4)
         self.num_experts = getattr(config, "num_experts", None) or 4  # MOSA-Base uses 4
         adapter_hidden = getattr(config, "adapter_hidden_dim", None) or 4096
-
-        # Frame stacking: concat k adjacent frames then project
-        in_dim = self.encoder_dim * self.k
-
-        # --- 1. Simple Router (MOSA-Base: 2 layers with ReLU) ---
-        # Maps encoder_dim -> 512 -> num_experts
         router_hidden = getattr(config, "router_hidden_dim", None) or 512
+
+        # --- 1. Conv1d Downsampler (4x reduction) ---
+        # 2 layers of stride-2 convolution
+        self.downsampler = nn.Sequential(
+            nn.Conv1d(self.encoder_dim, self.encoder_dim, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
+            nn.Conv1d(self.encoder_dim, self.llm_dim, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
+        )
+
+        # --- 2. Simple Router (MOSA-Base: 2 layers with ReLU) ---
+        # Takes downsampled features (llm_dim) -> 512 -> num_experts
         self.router = nn.Sequential(
-            nn.Linear(self.encoder_dim, router_hidden),
+            nn.Linear(self.llm_dim, router_hidden),
             nn.ReLU(),
             nn.Linear(router_hidden, self.num_experts),
         )
 
-        # --- 2. Experts (Simple 2-layer GELU adapters) ---
-        # Each expert: in_dim (stacked frames) -> hidden -> llm_dim
+        # --- 3. Experts (Simple 2-layer GELU adapters) ---
+        # Each expert: llm_dim -> hidden -> llm_dim (much smaller than frame-stacking)
         self.experts = nn.ModuleList(
-            [SimpleAdapter(in_dim, adapter_hidden, self.llm_dim) for _ in range(self.num_experts)]
+            [
+                SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim)
+                for _ in range(self.num_experts)
+            ]
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -148,36 +143,26 @@ class MOSAProjector(nn.Module):
         Returns:
             Projected features of shape [batch, out_len, llm_dim]
         """
-        batch_size, seq_len, dim = x.shape
+        # --- 1. Conv1d Downsampling ---
+        # Permute for Conv1d: [B, S, D] -> [B, D, S]
+        x = x.transpose(1, 2)
+        x = self.downsampler(x)
+        # Permute back: [B, D, S] -> [B, S, D]
+        x = x.transpose(1, 2)
 
-        # Truncate to match GLM-ASR: use (seq - k) // k + 1 frames
-        out_len = (seq_len - self.k) // self.k + 1
-        x = x[:, : out_len * self.k, :]
-
-        # --- 1. Router Branch ---
-        # Mean pool encoder outputs for routing decisions
-        x_pooled = x.reshape(batch_size, out_len, self.k, self.encoder_dim).mean(
-            dim=2
-        )  # (B, out_len, D)
-
-        # Router logits and softmax gating (dense MoE)
-        routing_weights = F.softmax(self.router(x_pooled), dim=-1)  # (B, out_len, num_experts)
-
-        # --- 2. Frame stacking for experts ---
-        # Reshape to combine k frames: [B, S, D] -> [B, out_len, D*k]
-        x_stacked = x.reshape(batch_size, out_len, dim * self.k)
+        # --- 2. Routing ---
+        routing_weights = F.softmax(self.router(x), dim=-1)  # (B, out_len, num_experts)
 
         # --- 3. Expert Mixture (Dense Execution) ---
-        # Run all experts and compute weighted sum
-        expert_outputs = torch.stack(
-            [expert(x_stacked) for expert in self.experts]
-        )  # (E, B, out_len, D)
+        expert_outputs = torch.stack([expert(x) for expert in self.experts])  # (E, B, out_len, D)
         return torch.einsum("ebsd, bse -> bsd", expert_outputs, routing_weights)
 
     def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length (matches GLM-ASR)."""
-        # GLM-ASR formula: (L - merge_factor) // merge_factor + 1
-        return (input_length - self.k) // self.k + 1
+        """Calculate output sequence length after Conv1d downsampling (4x reduction)."""
+        # Conv1d with stride 2, kernel 3, padding 1: out = (in + 2*1 - 3) // 2 + 1 = (in - 1) // 2 + 1
+        # Applied twice for 4x total reduction
+        after_conv1 = (input_length + 2 * 1 - 3) // 2 + 1
+        return (after_conv1 + 2 * 1 - 3) // 2 + 1
 
 
 # =============================================================================
