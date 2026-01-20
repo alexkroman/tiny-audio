@@ -339,12 +339,14 @@ def validate_datasets(datasets: list[str]) -> list[str]:
             console.print(f"Valid choices: {', '.join(VALID_DATASETS)}")
             raise typer.Exit(1)
 
-    # Expand "all" to ASR datasets only (exclude diarization and alignment)
+    # Expand "all" to ASR datasets only (exclude diarization, alignment, and classification)
     if "all" in datasets:
         return [
             k
             for k in DATASET_REGISTRY
-            if k not in DIARIZATION_DATASETS and k not in ALIGNMENT_DATASETS
+            if k not in DIARIZATION_DATASETS
+            and k not in ALIGNMENT_DATASETS
+            and k not in CLASSIFICATION_DATASETS
         ]
     # Expand "all-full" to include diarization and alignment datasets too
     if "all-full" in datasets:
