@@ -353,17 +353,18 @@ class TestSiftModeSelection:
         )
 
     def test_mixed_mode_returns_valid_modes(self, collator):
-        """Test that mixed mode selects from all three SIFT modes."""
+        """Test that mixed mode selects from all four SIFT modes."""
         modes_seen = set()
         for _ in range(100):
             mode = collator._select_sift_mode()
             modes_seen.add(mode)
 
         assert modes_seen == {
+            "transcription",
             "sift_s",
             "sift_ssp",
             "sit_ssp",
-        }, f"Expected all three modes, got: {modes_seen}"
+        }, f"Expected all four modes, got: {modes_seen}"
 
     def test_specific_mode_returns_same(self, tokenizer, feature_extractor, projector):
         """Test that specific SIFT mode is always returned."""

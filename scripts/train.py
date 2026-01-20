@@ -13,9 +13,12 @@ Usage:
 """
 
 import contextlib
+import os
 import random
 from dataclasses import fields
 from typing import Any
+
+os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
 
 import hydra
 import torch
@@ -336,8 +339,9 @@ class MultiTaskDataCollator(DataCollator):
     Extends DataCollator with task selection and weighted sampling.
     Supports SIFT training using preprocessed sift_response column.
 
-    SIFT modes (1/3 each when mixed):
-    - sift_s: Semantic only (just transcription, no system message)
+    SIFT modes (1/4 each when mixed):
+    - transcription: Standard transcription with prompts (like mlp.yaml)
+    - sift_s: Semantic only (just transcription, no system message, no prompt)
     - sift_ssp: Preprocessed sift_response with system message, no instruction
     - sit_ssp: Preprocessed sift_response with system message + instruction
     """
@@ -351,7 +355,7 @@ class MultiTaskDataCollator(DataCollator):
         system_prompt: str = None,
         projector: Any = None,
         encoder_conv_layers: list = None,
-        sift_mode: str = None,  # None, "sift_s", "sift_ssp", "sit_ssp", or "mixed"
+        sift_mode: str = None,  # None, "transcription", "sift_s", "sift_ssp", "sit_ssp", or "mixed"
     ):
         super().__init__(
             tokenizer=tokenizer,
@@ -382,8 +386,8 @@ class MultiTaskDataCollator(DataCollator):
     def _select_sift_mode(self) -> str:
         """Select SIFT mode for this sample (for mixed mode)."""
         if self.sift_mode == "mixed":
-            # 1/3 each: sift_s, sift_ssp, sit_ssp (matches Azeros)
-            return random.choice(["sift_s", "sift_ssp", "sit_ssp"])
+            # 1/4 each: transcription, sift_s, sift_ssp, sit_ssp
+            return random.choice(["transcription", "sift_s", "sift_ssp", "sit_ssp"])
         return self.sift_mode
 
     def _select_task(self, sample: dict) -> tuple[str, str, str, bool]:
@@ -395,6 +399,10 @@ class MultiTaskDataCollator(DataCollator):
         """
         mode = self._select_sift_mode()
 
+        if mode == "transcription":
+            # Standard transcription with prompts (like mlp.yaml)
+            text = (sample.get("text") or "").strip().lower()
+            return ("transcription", random.choice(TRANSCRIBE_PROMPTS), text, False)
         if mode == "sift_s":
             # Semantic only - no system message, no instruction, just transcript
             text = (sample.get("text") or "").strip()

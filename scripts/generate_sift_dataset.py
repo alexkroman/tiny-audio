@@ -14,25 +14,29 @@ Usage:
 """
 
 import argparse
+import os
+import re
 from dataclasses import dataclass
 
+# Enable fast HuggingFace transfers (must be set before importing HF libraries)
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+
 import torch
-from datasets import Dataset, DatasetDict, load_dataset
+from datasets import Audio, Dataset, DatasetDict, Value, load_dataset
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 # System message for paralinguistic-aware responses
 SIFT_SYSTEM_MESSAGE = (
-    "You are a powerful virtual human who is capable of perceiving both text and speech inputs "
-    "and generate precise natural responses. "
-    "Speech inputs will be wrapped by <audio> and </audio> tags, containing both the text transcription "
-    "and paralinguistic information. "
-    "You must always pretend that you can indeed hear the input audios. "
-    "NEVER mention that any metadata is provided through texts, and only use them in your response when necessary."
+    "You are a speech perception system that describes audio content in third person. "
+    "Audio input is provided in <audio> tags with transcription and speaker characteristics. "
+    "Describe what is being said and how, using phrases like 'A person is saying...' or 'Someone says...'. "
+    "Do NOT use first person ('I hear'). Do NOT echo metadata directly ('the emotion is X'). "
+    "Naturally incorporate the speaker's tone and emotion into your description."
 )
 
 # Instruction for SIT mode
-SIFT_INSTRUCTION = "Describe all information you can hear."
+SIFT_INSTRUCTION = "Describe the audio in 1-2 sentences using third person."
 
 
 @dataclass
@@ -50,21 +54,26 @@ class DatasetConfig:
     age_field: str | None = None
     weight: float = 1.0
     max_samples: int | None = None  # Per-dataset sample limit (overrides --max-samples)
+    streaming: bool = False  # Most datasets need full download to work properly
+    emotion_map: dict | None = None  # Map numeric labels to emotion strings
 
 
+# Emotion label mappings for datasets with numeric labels
+CREMA_D_EMOTIONS = {0: "anger", 1: "disgust", 2: "fear", 3: "happy", 4: "neutral", 5: "sad"}
 # HuggingFace datasets with paralinguistic labels (English only)
 DATASET_CONFIGS = [
-    # CREMA-D: emotion, gender, age, text (sentence)
+    # CREMA-D: emotion + text (gender/age not in this dataset version)
     DatasetConfig(
-        name="crema-d",
+        name="crema_d",
         hf_path="myleslinder/crema-d",
         split="train",
         audio_field="audio",
         text_field="sentence",  # Spoken sentence
         emotion_field="label",
-        gender_field="Sex",
-        age_field="Age",
+        gender_field=None,
+        age_field=None,
         weight=2.0,
+        emotion_map=CREMA_D_EMOTIONS,
     ),
     # RAVDESS: emotion, gender, text
     DatasetConfig(
@@ -76,18 +85,6 @@ DATASET_CONFIGS = [
         emotion_field="emotion",
         gender_field="speaker_gender",
         age_field=None,
-        weight=2.0,
-    ),
-    # TESS: emotion, age, text
-    DatasetConfig(
-        name="tess",
-        hf_path="myleslinder/tess",
-        split="train",
-        audio_field="audio",
-        text_field="text",  # "Say the word X"
-        emotion_field="label",
-        gender_field=None,  # All female speakers
-        age_field="speaker_age",  # Age in years (e.g., 64)
         weight=2.0,
     ),
     # MELD: emotion (from TV show Friends)
@@ -121,10 +118,10 @@ DATASET_CONFIGS = [
 ]
 
 
-def age_to_group(age: str | int | None) -> str:
-    """Convert numeric age to age group."""
+def age_to_group(age: str | int | None) -> str | None:
+    """Convert numeric age to age group. Returns None for missing/invalid values."""
     if age is None:
-        return "?"
+        return None
     try:
         age_int = int(age)
         if 0 < age_int < 18:
@@ -135,21 +132,21 @@ def age_to_group(age: str | int | None) -> str:
             return "middle-age adult"
         if 60 < age_int < 200:
             return "senior"
-        return "?"
+        return None
     except (ValueError, TypeError):
         # Already a string like "young adult"
         if isinstance(age, str) and age.lower() not in ("", "na", "null", "unk", "unknown", "nan"):
             return age.lower()
-        return "?"
+        return None
 
 
-def normalize_label(value: str | None) -> str:
-    """Normalize a label value, returning '?' for missing/invalid values."""
+def normalize_label(value: str | None) -> str | None:
+    """Normalize a label value. Returns None for missing/invalid values."""
     if value is None:
-        return "?"
+        return None
     value_str = str(value).lower().strip()
     if value_str in ("", "na", "null", "unk", "unknown", "nan", "none"):
-        return "?"
+        return None
     return value_str
 
 
@@ -157,9 +154,9 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
     """Extract paralinguistic metadata from a sample."""
     metadata = {
         "text": "",
-        "emotion": "?",
-        "gender": "?",
-        "age": "?",
+        "emotion": None,
+        "gender": None,
+        "age": None,
     }
 
     # Extract text transcription
@@ -170,7 +167,12 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
 
     # Extract emotion
     if config.emotion_field and config.emotion_field in sample:
-        metadata["emotion"] = normalize_label(sample[config.emotion_field])
+        raw_emotion = sample[config.emotion_field]
+        # Map numeric labels to emotion strings if mapping provided
+        if config.emotion_map and isinstance(raw_emotion, int):
+            metadata["emotion"] = config.emotion_map.get(raw_emotion)
+        else:
+            metadata["emotion"] = normalize_label(raw_emotion)
 
     # Extract gender
     if config.gender_field and config.gender_field in sample:
@@ -198,8 +200,8 @@ def build_prompt(metadata: dict) -> tuple[str, str]:
     # Build paralinguistic metadata
     para_parts = []
     for key in ["age", "gender", "emotion"]:
-        value = metadata.get(key, "?")
-        if value != "?":
+        value = metadata.get(key)
+        if value is not None:
             para_parts.append(f"{key}: {value}")
 
     # Format input with audio tags
@@ -244,6 +246,7 @@ def generate_responses(
             messages,
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=False,  # Disable Qwen3 thinking mode
         )
         prompts.append(prompt)
 
@@ -257,8 +260,7 @@ def generate_responses(
     ).to(model.device)
 
     # Generate
-    outputs = model.generate(
-        **inputs,
+    generation_config = GenerationConfig(
         max_new_tokens=max_new_tokens,
         do_sample=False,
         temperature=None,
@@ -267,12 +269,19 @@ def generate_responses(
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
+    outputs = model.generate(**inputs, generation_config=generation_config)
 
     # Decode only new tokens
     responses = []
+    # Pattern to strip thinking tags from Qwen3 responses
+    thinking_pattern = re.compile(r"<think>.*?</think>", re.DOTALL)
+
     for input_ids, output_ids in zip(inputs.input_ids, outputs):
         new_tokens = output_ids[len(input_ids) :]
         response = tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+        # Strip thinking tags
+        response = thinking_pattern.sub("", response)
 
         # Check for truncation
         eos_token_id = tokenizer.eos_token_id
@@ -299,15 +308,31 @@ def process_dataset(
 
     # Load dataset
     if config.hf_config:
-        ds = load_dataset(config.hf_path, config.hf_config, split=config.split, streaming=True)
+        ds = load_dataset(
+            config.hf_path,
+            config.hf_config,
+            split=config.split,
+            streaming=config.streaming,
+            trust_remote_code=True,
+            num_proc=12,
+        )
     else:
-        ds = load_dataset(config.hf_path, split=config.split, streaming=True)
+        ds = load_dataset(
+            config.hf_path,
+            split=config.split,
+            streaming=config.streaming,
+            trust_remote_code=True,
+            num_proc=12,
+        )
 
     # Collect samples
-    # Per-dataset max_samples takes priority over global max_samples
-    effective_max = config.max_samples if config.max_samples is not None else max_samples
+    # Use minimum of config max_samples and global max_samples (CLI can override)
+    if config.max_samples is not None and max_samples is not None:
+        effective_max = min(config.max_samples, max_samples)
+    else:
+        effective_max = config.max_samples or max_samples
     samples = []
-    for sample in tqdm(ds, desc=f"Loading {config.name}"):
+    for sample in tqdm(ds, desc=f"Loading {config.name}", total=effective_max):
         # Filter by duration if audio is decoded
         audio = sample.get(config.audio_field)
         if audio and isinstance(audio, dict) and "array" in audio:
@@ -360,11 +385,33 @@ def process_dataset(
         "source_dataset": [config.name] * len(all_responses),
     }
 
-    # Include audio if available
+    # Include audio and compute duration if available
     if config.audio_field:
-        output_data["audio"] = [s.get(config.audio_field) for s in samples[: len(all_responses)]]
+        audio_data = [s.get(config.audio_field) for s in samples[: len(all_responses)]]
+        output_data["audio"] = audio_data
+        # Compute duration for group_by_length training
+        durations = []
+        for audio in audio_data:
+            if audio and isinstance(audio, dict) and "array" in audio:
+                sr = audio.get("sampling_rate", 16000)
+                durations.append(len(audio["array"]) / sr)
+            else:
+                durations.append(0.0)
+        output_data["duration"] = durations
 
-    return Dataset.from_dict(output_data)
+    dataset = Dataset.from_dict(output_data)
+
+    # Cast columns to consistent types across all datasets
+    # This ensures DatasetDict can combine datasets with different None patterns
+    dataset = dataset.cast_column("emotion", Value("string"))
+    dataset = dataset.cast_column("gender", Value("string"))
+    dataset = dataset.cast_column("age", Value("string"))
+
+    # Cast audio column to proper Audio type
+    if "audio" in dataset.column_names:
+        dataset = dataset.cast_column("audio", Audio(sampling_rate=16000))
+
+    return dataset
 
 
 def main():
@@ -380,14 +427,14 @@ def main():
     parser.add_argument(
         "--model-name",
         type=str,
-        default="Qwen/Qwen3-1.7B",
+        default="Qwen/Qwen3-4B",
         help="LLM model for response generation",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=32,
-        help="Batch size for generation (32 recommended for A40 48GB)",
+        default=64,
+        help="Batch size for generation (64 recommended for A40 48GB)",
     )
     parser.add_argument(
         "--max-samples",
@@ -440,7 +487,7 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        torch_dtype=torch.float16,
+        dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
         device_map="auto",
     )
@@ -476,7 +523,10 @@ def main():
                     dataset_dict.push_to_hub(args.output_repo, private=False)
 
         except Exception as e:
+            import traceback
+
             print(f"Error processing {config.name}: {e}")
+            traceback.print_exc()
             continue
 
     # Final push
