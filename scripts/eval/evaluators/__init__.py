@@ -19,17 +19,10 @@ from .asr import (
 )
 from .base import (
     AlignmentResult,
-    ClassificationResult,
     DiarizationResult,
     EvalResult,
     Evaluator,
     setup_assemblyai,
-)
-from .classification import (
-    AssemblyAIClassificationEvaluator,
-    BaseClassificationEvaluator,
-    LocalClassificationEvaluator,
-    extract_label,
 )
 from .diarization import (
     AssemblyAIDiarizationEvaluator,
@@ -43,7 +36,6 @@ __all__ = [
     "EvalResult",
     "DiarizationResult",
     "AlignmentResult",
-    "ClassificationResult",
     # Base
     "Evaluator",
     "TextNormalizer",
@@ -66,9 +58,4 @@ __all__ = [
     "AssemblyAIAlignmentEvaluator",
     "DeepgramAlignmentEvaluator",
     "align_words_to_reference",
-    # Classification evaluators
-    "BaseClassificationEvaluator",
-    "LocalClassificationEvaluator",
-    "AssemblyAIClassificationEvaluator",
-    "extract_label",
 ]

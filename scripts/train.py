@@ -46,16 +46,34 @@ TRANSCRIBE_PROMPTS = [
     "Transcribe audio to text",
 ]
 
+# Task prompts; config can override per-task
+TASK_PROMPTS = {
+    "transcription": TRANSCRIBE_PROMPTS,
+    "speaker_id": ["Who is speaking?", "Identify the speaker"],
+}
+
+# Task weights for multi-task training
+DEFAULT_TASK_WEIGHTS = {
+    "transcription": 1.0,
+    "speaker_id": 1.0,
+}
+
 
 class DatasetLoader:
     """Loads and prepares datasets for training."""
 
-    def __init__(self, config: DictConfig):
+    # Task-specific column mappings (target -> possible source column names)
+    TASK_COLUMNS = {
+        "speaker": ["speaker_column", "speaker_id", "speaker"],
+    }
+
+    def __init__(self, config: DictConfig, multitask_enabled: bool = False):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
         self.num_proc = self.config.get("num_proc", 16)
+        self.multitask_enabled = multitask_enabled
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
@@ -71,7 +89,7 @@ class DatasetLoader:
             trust_remote_code=True,
         )
 
-        # Normalize column names
+        # Normalize column names for audio and text
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
             "audio": dataset_cfg.get("audio_column", "audio"),
@@ -84,8 +102,45 @@ class DatasetLoader:
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        # Remove extra columns, keep only audio, text, and duration (for group_by_length)
-        extra_cols = [c for c in (ds.column_names or []) if c not in {"audio", "text", "duration"}]
+        # Handle multi-task columns
+        if self.multitask_enabled:
+            supported_tasks = list(dataset_cfg.get("tasks", ["transcription"]))
+            # Map task columns from config-specified names to standard names
+            task_col_map = {}
+            for target, source_options in self.TASK_COLUMNS.items():
+                # Check config for explicit column name
+                for opt in source_options:
+                    source = dataset_cfg.get(opt)
+                    if source and source in ds.column_names:
+                        task_col_map[target] = source
+                        break
+                    if opt in ds.column_names:
+                        task_col_map[target] = opt
+                        break
+
+            # Rename task columns to standard names
+            for target, source in task_col_map.items():
+                if source != target and source in ds.column_names:
+                    if target in ds.column_names:
+                        ds = ds.remove_columns([target])
+                    ds = ds.rename_column(source, target)
+
+            # Add supported_tasks column
+            ds = ds.map(
+                lambda _: {"_supported_tasks": supported_tasks},
+                num_proc=self.num_proc,
+            )
+
+            # Keep audio, text, duration, task columns, and _supported_tasks
+            keep_cols = {"audio", "text", "duration", "_supported_tasks"}
+            keep_cols.update(self.TASK_COLUMNS.keys())
+            extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
+        else:
+            # Remove extra columns, keep only audio, text, and duration (for group_by_length)
+            extra_cols = [
+                c for c in (ds.column_names or []) if c not in {"audio", "text", "duration"}
+            ]
+
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
@@ -262,6 +317,172 @@ class DataCollator:
         return batch
 
 
+# SIFT system message for multi-task training
+# Describes the model's capabilities without requiring specific tag formats
+SIFT_SYSTEM_MESSAGE = (
+    "You are a powerful virtual human who is capable of perceiving speech inputs "
+    "and generating precise natural responses. "
+    "You can understand both what is being said and how it is being said, "
+    "including the speaker's emotion, age, and gender."
+)
+
+# SIFT instruction for sit_ssp mode (matches Azeros)
+SIFT_INSTRUCTION = "Describe all information you can hear."
+
+
+class MultiTaskDataCollator(DataCollator):
+    """Collates audio and text data for multi-task training.
+
+    Extends DataCollator with task selection and weighted sampling.
+    Supports SIFT training using preprocessed sift_response column.
+
+    SIFT modes (1/3 each when mixed):
+    - sift_s: Semantic only (just transcription, no system message)
+    - sift_ssp: Preprocessed sift_response with system message, no instruction
+    - sit_ssp: Preprocessed sift_response with system message + instruction
+    """
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        feature_extractor: Any,
+        sample_rate: int,
+        task_config: dict,
+        system_prompt: str = None,
+        projector: Any = None,
+        encoder_conv_layers: list = None,
+        sift_mode: str = None,  # None, "sift_s", "sift_ssp", "sit_ssp", or "mixed"
+    ):
+        super().__init__(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=sample_rate,
+            system_prompt=system_prompt,
+            projector=projector,
+            encoder_conv_layers=encoder_conv_layers,
+        )
+        self.task_config = task_config
+        self.sift_mode = sift_mode
+
+        # Use SIFT system message for paralinguistic tasks
+        if sift_mode in ("sift_ssp", "sit_ssp", "mixed"):
+            self.system_prompt = SIFT_SYSTEM_MESSAGE
+
+        # Extract task weights from config
+        self.task_weights = {
+            name: cfg.get("weight", DEFAULT_TASK_WEIGHTS.get(name, 1.0))
+            for name, cfg in task_config.items()
+        }
+        # Extract task prompts from config (with fallback to defaults)
+        self.task_prompts = {
+            name: list(cfg.get("prompts", TASK_PROMPTS.get(name, [])))
+            for name, cfg in task_config.items()
+        }
+
+    def _select_sift_mode(self) -> str:
+        """Select SIFT mode for this sample (for mixed mode)."""
+        if self.sift_mode == "mixed":
+            # 1/3 each: sift_s, sift_ssp, sit_ssp (matches Azeros)
+            return random.choice(["sift_s", "sift_ssp", "sit_ssp"])
+        return self.sift_mode
+
+    def _select_task(self, sample: dict) -> tuple[str, str, str, bool]:
+        """Select a task for this sample based on SIFT mode.
+
+        Returns (task_name, prompt, response_text, use_system_prompt).
+
+        Requires preprocessed dataset with 'sift_response' column.
+        """
+        mode = self._select_sift_mode()
+
+        if mode == "sift_s":
+            # Semantic only - no system message, no instruction, just transcript
+            text = (sample.get("text") or "").strip()
+            return ("transcription", "", text, False)
+        if mode == "sift_ssp":
+            # Preprocessed paralinguistic response, no instruction
+            response = (sample.get("sift_response") or "").strip()
+            if not response:
+                # Fallback to transcript if no sift_response
+                response = (sample.get("text") or "").strip()
+            return ("sift", "", response, True)
+        if mode == "sit_ssp":
+            # Preprocessed paralinguistic response with instruction
+            response = (sample.get("sift_response") or "").strip()
+            if not response:
+                response = (sample.get("text") or "").strip()
+            return ("sift", SIFT_INSTRUCTION, response, True)
+
+        # Fallback
+        text = (sample.get("text") or "").strip().lower()
+        return ("transcription", random.choice(TRANSCRIBE_PROMPTS), text, False)
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        # Process audio (same as parent)
+        audio_arrays = []
+        valid_features = []
+        for f in features:
+            try:
+                audio = f["audio"]["array"]
+                if hasattr(audio, "numpy"):
+                    audio = audio.numpy()
+                audio = audio.squeeze()
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=0)
+                audio_arrays.append(audio)
+                valid_features.append(f)
+            except Exception:
+                continue
+            finally:
+                f["audio"] = None
+
+        if not audio_arrays:
+            raise ValueError("No valid audio samples in batch")
+
+        audio_out = self.feature_extractor(
+            audio_arrays,
+            sampling_rate=self.sample_rate,
+            padding="longest",
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+
+        # Compute per-sample audio token counts
+        mel_lengths = audio_out.attention_mask.sum(dim=-1)
+        audio_token_counts = []
+        for mel_len in mel_lengths:
+            encoder_len = self._compute_encoder_output_length(int(mel_len.item()))
+            num_tokens = self.projector.get_output_length(encoder_len)
+            audio_token_counts.append(num_tokens)
+
+        # Build messages for each sample with task selection
+        text_features = []
+        task_ids = []  # Track which task was selected for each sample
+        for f, num_audio_tokens in zip(valid_features, audio_token_counts):
+            task_name, prompt, response, use_system_prompt = self._select_task(f)
+            task_ids.append(task_name)
+
+            audio_placeholder = "<audio>" * num_audio_tokens
+            # Only add space before prompt if prompt is non-empty
+            user_content = audio_placeholder + (" " + prompt if prompt else "")
+
+            messages = []
+            if use_system_prompt and self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": user_content})
+            messages.append({"role": "assistant", "content": response})
+
+            text_features.append({"messages": messages})
+
+        # Let trl handle tokenization, label masking, and padding
+        batch = self.text_collator(text_features)
+        batch["input_features"] = audio_out.input_features
+        batch["audio_attention_mask"] = audio_out.attention_mask
+        batch["task_ids"] = task_ids  # Pass task IDs for weighted loss
+
+        return batch
+
+
 class ASRTrainer(Trainer):
     """Trainer subclass for ASR models."""
 
@@ -288,6 +509,85 @@ class ASRTrainer(Trainer):
             loss = outputs.loss
 
         return (loss, outputs) if return_outputs else loss
+
+
+class MultiTaskASRTrainer(ASRTrainer):
+    """Trainer subclass for multi-task ASR training with weighted loss.
+
+    Applies per-task weights to compute a weighted average loss,
+    matching Auden's multi-task training approach.
+    """
+
+    def __init__(self, task_weights: dict = None, **kwargs):
+        super().__init__(**kwargs)
+        self.task_weights = task_weights or DEFAULT_TASK_WEIGHTS
+        # Track per-task losses for logging
+        self._task_loss_accum = {}
+        self._task_count_accum = {}
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """Compute weighted loss across tasks.
+
+        Each sample's loss is weighted by its task weight.
+        Per-task losses are tracked for WandB logging.
+        """
+        # Extract task_ids before model forward (not a model input)
+        task_ids = inputs.pop("task_ids", None)
+
+        # Pop labels if using label smoothing (matches Trainer behavior)
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs.pop("labels")
+        else:
+            labels = None
+
+        outputs = model(**inputs)
+
+        if labels is not None:
+            # Force shift_labels=True since ASRModel is a causal LM
+            loss = self.label_smoother(outputs, labels, shift_labels=True)
+        else:
+            loss = outputs.loss
+
+        # Apply task weights if we have task_ids
+        if task_ids is not None and loss is not None:
+            # Get weights for each sample in the batch
+            weights = torch.tensor(
+                [self.task_weights.get(t, 1.0) for t in task_ids],
+                device=loss.device,
+                dtype=loss.dtype,
+            )
+            # Weight the loss (assuming batch reduction)
+            weighted_loss = loss * weights.mean()
+
+            # Track per-task losses for logging
+            for task_name in set(task_ids):
+                task_mask = [1 if t == task_name else 0 for t in task_ids]
+                task_count = sum(task_mask)
+                if task_count > 0:
+                    if task_name not in self._task_loss_accum:
+                        self._task_loss_accum[task_name] = 0.0
+                        self._task_count_accum[task_name] = 0
+                    # Approximate per-task loss contribution
+                    self._task_loss_accum[task_name] += loss.item() * task_count
+                    self._task_count_accum[task_name] += task_count
+
+            loss = weighted_loss
+
+        return (loss, outputs) if return_outputs else loss
+
+    def log(self, logs: dict, start_time: float | None = None):
+        """Override log to add per-task loss metrics."""
+        # Add per-task losses to logs
+        for task_name, total_loss in self._task_loss_accum.items():
+            count = self._task_count_accum.get(task_name, 1)
+            if count > 0:
+                logs[f"train_loss_{task_name}"] = total_loss / count
+
+        # Reset accumulators after logging
+        self._task_loss_accum = {}
+        self._task_count_accum = {}
+
+        super().log(logs, start_time)
 
 
 class PushToHubCallback(TrainerCallback):
@@ -319,6 +619,16 @@ def get_valid_training_args(config: dict) -> dict:
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
+    # Check HF_TOKEN is set if pushing to hub
+    if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
+        import os
+
+        if not os.environ.get("HF_TOKEN"):
+            raise ValueError(
+                "HF_TOKEN environment variable is required when push_to_hub is enabled. "
+                "Set it with: export HF_TOKEN=your_token"
+            )
+
     # Initialize wandb
     if cfg.training.get("report_to") == "wandb":
         wandb.init(
@@ -375,18 +685,35 @@ def main(cfg: DictConfig) -> None:
             "true",  # Always disable thinking
         )
 
-    # Load datasets
-    train_dataset, val_dataset = DatasetLoader(cfg).load()
+    # Check if multi-task training is enabled
+    multitask_enabled = cfg.get("multitask", {}).get("enabled", False)
 
-    # Create data collator
-    data_collator = DataCollator(
-        tokenizer=model.tokenizer,
-        feature_extractor=model.feature_extractor,
-        sample_rate=cfg.data.sample_rate,
-        system_prompt=cfg.model.system_prompt,
-        projector=model.projector,
-        encoder_conv_layers=model.config.encoder_conv_layers,
-    )
+    # Load datasets
+    train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
+
+    # Create data collator (multi-task or standard)
+    if multitask_enabled:
+        task_config = dict(cfg.multitask.get("tasks", {}))
+        sift_mode = cfg.multitask.get("sift_mode")
+        data_collator = MultiTaskDataCollator(
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
+            sample_rate=cfg.data.sample_rate,
+            task_config=task_config,
+            system_prompt=cfg.model.system_prompt,
+            projector=model.projector,
+            encoder_conv_layers=model.config.encoder_conv_layers,
+            sift_mode=sift_mode,
+        )
+    else:
+        data_collator = DataCollator(
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
+            sample_rate=cfg.data.sample_rate,
+            system_prompt=cfg.model.system_prompt,
+            projector=model.projector,
+            encoder_conv_layers=model.config.encoder_conv_layers,
+        )
 
     # Setup callbacks
     callbacks = []
@@ -412,14 +739,30 @@ def main(cfg: DictConfig) -> None:
 
     # Create trainer with only valid TrainingArguments
     valid_args = get_valid_training_args(training_config)
-    trainer = ASRTrainer(
-        model=model,
-        args=TrainingArguments(**valid_args),
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        data_collator=data_collator,
-        callbacks=callbacks,
-    )
+    if multitask_enabled:
+        # Extract task weights for the trainer
+        task_weights = {
+            name: task_cfg.get("weight", DEFAULT_TASK_WEIGHTS.get(name, 1.0))
+            for name, task_cfg in task_config.items()
+        }
+        trainer = MultiTaskASRTrainer(
+            task_weights=task_weights,
+            model=model,
+            args=TrainingArguments(**valid_args),
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
+            data_collator=data_collator,
+            callbacks=callbacks,
+        )
+    else:
+        trainer = ASRTrainer(
+            model=model,
+            args=TrainingArguments(**valid_args),
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
+            data_collator=data_collator,
+            callbacks=callbacks,
+        )
 
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
     trainer.save_model()

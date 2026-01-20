@@ -22,10 +22,6 @@ class DatasetConfig:
     timestamps_end_field: str | None = None
     # Alignment-specific
     words_field: str | None = None
-    # Classification-specific
-    label_field: str | None = None
-    instruction_field: str | None = None
-    valid_labels: list[str] | None = None
 
 
 DATASET_REGISTRY: dict[str, DatasetConfig] = {
@@ -115,38 +111,10 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         default_split="dev_clean",
         words_field="words",
     ),
-    # Classification datasets
-    "sentiment-meld": DatasetConfig(
-        name="sentiment-meld",
-        path="DynamicSuperb/SpeechSentimentAnalysis_MELD",
-        audio_field="audio",
-        text_field="transcription",
-        label_field="label",
-        instruction_field="instruction",
-        valid_labels=["Positive", "Negative", "Neutral"],
-    ),
-    "emotion-ravdess": DatasetConfig(
-        name="emotion-ravdess",
-        path="DynamicSuperb/EmotionalSpeechAudioClassification_RAVDESS-EmotionalSound",
-        audio_field="audio",
-        label_field="label",
-        instruction_field="instruction",
-        valid_labels=[
-            "neutral",
-            "calm",
-            "happy",
-            "sad",
-            "angry",
-            "fearful",
-            "disgust",
-            "surprised",
-        ],
-    ),
 }
 
 DIARIZATION_DATASETS = {"callhome"}
 ALIGNMENT_DATASETS = {"librispeech-alignments"}
-CLASSIFICATION_DATASETS = {"sentiment-meld", "emotion-ravdess"}
 
 
 def load_eval_dataset(

@@ -80,17 +80,6 @@ class AlignmentResult:
     predicted_text: str
 
 
-@attrs.define
-class ClassificationResult:
-    """Result of a single classification evaluation."""
-
-    prediction: str
-    reference: str
-    correct: bool
-    time: float
-    raw_output: str = ""
-
-
 # =============================================================================
 # Base Evaluator
 # =============================================================================

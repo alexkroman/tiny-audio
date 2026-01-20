@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 from transformers import AutoTokenizer, WhisperFeatureExtractor
 
-from scripts.train import DataCollator
+from scripts.train import (
+    SIFT_INSTRUCTION,
+    DataCollator,
+    MultiTaskDataCollator,
+)
 
 
 class MockProjector:
@@ -277,6 +281,289 @@ class TestBatchProcessing:
         # Whisper expects (batch, n_mels, time)
         assert len(batch["input_features"].shape) == 3
         assert batch["input_features"].shape[1] == 80  # n_mels for Whisper
+
+
+class TestMultiTaskDataCollator:
+    """Tests for MultiTaskDataCollator SIFT modes with preprocessed dataset."""
+
+    @pytest.fixture
+    def task_config(self):
+        """Basic task configuration."""
+        return {
+            "transcription": {"weight": 1.0},
+            "sift": {"weight": 1.0},
+        }
+
+    @pytest.fixture
+    def multitask_collator(self, tokenizer, feature_extractor, projector, task_config):
+        """Create MultiTaskDataCollator without SIFT mode."""
+        return MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            task_config=task_config,
+            projector=projector,
+            sift_mode=None,
+        )
+
+    @pytest.fixture
+    def sift_collator(self, tokenizer, feature_extractor, projector, task_config):
+        """Create MultiTaskDataCollator with mixed SIFT mode."""
+        return MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            task_config=task_config,
+            projector=projector,
+            sift_mode="mixed",
+        )
+
+    def create_multitask_sample(
+        self,
+        text: str = "hello world",
+        sift_response: str = None,
+        duration_sec: float = 1.0,
+        sample_rate: int = 16000,
+    ):
+        """Create a sample with metadata for multitask training."""
+        num_samples = int(duration_sec * sample_rate)
+        audio_array = np.random.randn(num_samples).astype(np.float32) * 0.1
+        sample = {
+            "audio": {"array": audio_array, "sampling_rate": sample_rate},
+            "text": text,
+        }
+        if sift_response:
+            sample["sift_response"] = sift_response
+        return sample
+
+
+class TestSiftModeSelection:
+    """Test SIFT mode selection logic."""
+
+    @pytest.fixture
+    def collator(self, tokenizer, feature_extractor, projector):
+        """Create a collator with mixed SIFT mode."""
+        return MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            task_config={},
+            projector=projector,
+            sift_mode="mixed",
+        )
+
+    def test_mixed_mode_returns_valid_modes(self, collator):
+        """Test that mixed mode selects from all three SIFT modes."""
+        modes_seen = set()
+        for _ in range(100):
+            mode = collator._select_sift_mode()
+            modes_seen.add(mode)
+
+        assert modes_seen == {
+            "sift_s",
+            "sift_ssp",
+            "sit_ssp",
+        }, f"Expected all three modes, got: {modes_seen}"
+
+    def test_specific_mode_returns_same(self, tokenizer, feature_extractor, projector):
+        """Test that specific SIFT mode is always returned."""
+        for mode in ["sift_s", "sift_ssp", "sit_ssp"]:
+            collator = MultiTaskDataCollator(
+                tokenizer=tokenizer,
+                feature_extractor=feature_extractor,
+                sample_rate=16000,
+                task_config={},
+                projector=projector,
+                sift_mode=mode,
+            )
+            for _ in range(10):
+                assert collator._select_sift_mode() == mode
+
+
+class TestSiftTaskSelection:
+    """Test _select_task behavior for different SIFT modes with preprocessed data."""
+
+    def create_sample(
+        self,
+        text="hello world",
+        sift_response="A happy female speaker says: hello world",
+    ):
+        """Create a sample with preprocessed sift_response."""
+        return {
+            "text": text,
+            "sift_response": sift_response,
+        }
+
+    def test_sift_s_returns_transcript_no_system_prompt(
+        self, tokenizer, feature_extractor, projector
+    ):
+        """Test sift_s mode returns transcript with no system prompt."""
+        collator = MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            task_config={},
+            projector=projector,
+            sift_mode="sift_s",
+        )
+
+        sample = self.create_sample(text="hello world")
+        task_name, prompt, response, use_system_prompt = collator._select_task(sample)
+
+        assert task_name == "transcription"
+        assert prompt == ""  # No prompt for sift_s
+        assert response == "hello world"
+        assert use_system_prompt is False
+
+    def test_sift_ssp_returns_preprocessed_response_with_system_prompt(
+        self, tokenizer, feature_extractor, projector
+    ):
+        """Test sift_ssp mode returns preprocessed sift_response with system prompt."""
+        collator = MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            task_config={},
+            projector=projector,
+            sift_mode="sift_ssp",
+        )
+
+        sample = self.create_sample(sift_response="A happy speaker says: hello")
+        task_name, prompt, response, use_system_prompt = collator._select_task(sample)
+
+        assert task_name == "sift"
+        assert prompt == ""  # No instruction for sift_ssp
+        assert response == "A happy speaker says: hello"  # From preprocessed column
+        assert use_system_prompt is True
+
+    def test_sit_ssp_returns_preprocessed_response_with_instruction(
+        self, tokenizer, feature_extractor, projector
+    ):
+        """Test sit_ssp mode returns preprocessed sift_response with instruction."""
+        collator = MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            task_config={},
+            projector=projector,
+            sift_mode="sit_ssp",
+        )
+
+        sample = self.create_sample(sift_response="A happy speaker says: hello")
+        task_name, prompt, response, use_system_prompt = collator._select_task(sample)
+
+        assert task_name == "sift"
+        assert prompt == SIFT_INSTRUCTION  # Has instruction
+        assert response == "A happy speaker says: hello"  # From preprocessed column
+        assert use_system_prompt is True
+
+    def test_sift_ssp_falls_back_to_text_if_no_sift_response(
+        self, tokenizer, feature_extractor, projector
+    ):
+        """Test sift_ssp falls back to text if sift_response is missing."""
+        collator = MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            task_config={},
+            projector=projector,
+            sift_mode="sift_ssp",
+        )
+
+        sample = {"text": "fallback text"}  # No sift_response
+        task_name, _, response, use_system_prompt = collator._select_task(sample)
+
+        assert task_name == "sift"
+        assert response == "fallback text"  # Falls back to text
+        assert use_system_prompt is True
+
+
+class TestSiftMessageBuilding:
+    """Test that messages are built correctly for each SIFT mode."""
+
+    def create_audio_sample(
+        self,
+        text="test",
+        sift_response="A happy speaker says: test",
+        duration_sec=1.0,
+        sample_rate=16000,
+    ):
+        """Create a sample with audio and preprocessed sift_response."""
+        num_samples = int(duration_sec * sample_rate)
+        audio_array = np.random.randn(num_samples).astype(np.float32) * 0.1
+        return {
+            "audio": {"array": audio_array, "sampling_rate": sample_rate},
+            "text": text,
+            "sift_response": sift_response,
+        }
+
+    def test_sift_s_message_has_no_system_prompt(self, tokenizer, feature_extractor, projector):
+        """Test sift_s builds message without system prompt."""
+        collator = MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            task_config={},
+            projector=projector,
+            sift_mode="sift_s",
+        )
+
+        samples = [self.create_audio_sample()]
+        batch = collator(samples)
+
+        # Decode to check structure
+        decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
+
+        # Should NOT contain system message
+        assert "powerful virtual human" not in decoded
+        # Should contain transcript
+        assert "test" in decoded.lower()
+
+    def test_sift_ssp_message_has_system_prompt_no_instruction(
+        self, tokenizer, feature_extractor, projector
+    ):
+        """Test sift_ssp builds message with system prompt but no instruction."""
+        collator = MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            task_config={},
+            projector=projector,
+            sift_mode="sift_ssp",
+        )
+
+        samples = [self.create_audio_sample()]
+        batch = collator(samples)
+
+        decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
+
+        # Should contain system message
+        assert "powerful virtual human" in decoded
+        # Should NOT contain instruction
+        assert SIFT_INSTRUCTION not in decoded
+
+    def test_sit_ssp_message_has_system_prompt_and_instruction(
+        self, tokenizer, feature_extractor, projector
+    ):
+        """Test sit_ssp builds message with system prompt and instruction."""
+        collator = MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            task_config={},
+            projector=projector,
+            sift_mode="sit_ssp",
+        )
+
+        samples = [self.create_audio_sample()]
+        batch = collator(samples)
+
+        decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
+
+        # Should contain system message
+        assert "powerful virtual human" in decoded
+        # Should contain instruction
+        assert SIFT_INSTRUCTION in decoded
 
 
 if __name__ == "__main__":

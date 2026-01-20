@@ -1,0 +1,79 @@
+# Multitask dataset configuration for SIFT training
+# Combines LoquaciousSet (ASR) with paralinguistic datasets
+#
+# Generate SIFT data first with: ta runpod sift <host> <port>
+# (outputs to mazesmazes/sift-audio by default)
+#
+# Dataset columns:
+#   - audio: audio data
+#   - text: transcription
+#   - sift_response: LLM-generated response
+#   - emotion, gender, age: paralinguistic labels
+
+datasets:
+  # LoquaciousSet: ASR + gender metadata
+  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
+    name: loquacious
+    audio_column: audio
+    text_column: text
+    sift_response_column: sift_response
+    gender_column: gender
+    train_splits:
+      - train
+    sampling_weight: 1.0
+
+  # CREMA-D: emotion + gender + age + text
+  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
+    name: crema-d
+    audio_column: audio
+    text_column: text
+    sift_response_column: sift_response
+    emotion_column: emotion
+    gender_column: gender
+    age_column: age
+    train_splits:
+      - train
+    sampling_weight: 2.0
+
+  # RAVDESS: emotion + gender + text
+  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
+    name: ravdess
+    audio_column: audio
+    text_column: text
+    sift_response_column: sift_response
+    emotion_column: emotion
+    gender_column: gender
+    train_splits:
+      - train
+    sampling_weight: 2.0
+
+  # TESS: emotion + age + text (all female speakers)
+  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
+    name: tess
+    audio_column: audio
+    text_column: text
+    sift_response_column: sift_response
+    emotion_column: emotion
+    age_column: age
+    train_splits:
+      - train
+    sampling_weight: 2.0
+
+  # MELD: emotion + text (TV show Friends dialogue)
+  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
+    name: meld
+    audio_column: audio
+    text_column: text
+    sift_response_column: sift_response
+    emotion_column: emotion
+    train_splits:
+      - train
+    sampling_weight: 2.0
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+max_train_samples: null
+max_eval_samples: 2000

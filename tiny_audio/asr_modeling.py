@@ -703,6 +703,57 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         thread.join()
 
+    @torch.no_grad()
+    def generate_text_only(
+        self,
+        messages: list[dict[str, str]],
+        max_new_tokens: int = 256,
+        **generate_kwargs,
+    ) -> str:
+        """Generate text using only the LLM (no audio encoding).
+
+        Used for SIFT-style response generation from metadata prompts.
+
+        Args:
+            messages: List of chat messages [{"role": "user", "content": "..."}]
+            max_new_tokens: Maximum tokens to generate
+            **generate_kwargs: Additional generation arguments
+
+        Returns:
+            Generated text response
+        """
+        device = next(self.language_model.parameters()).device
+
+        # Apply chat template
+        input_ids = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            enable_thinking=False,
+        ).to(device)
+
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+
+        attention_mask = torch.ones_like(input_ids)
+
+        # Generate using language model directly
+        output = self.language_model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+            **generate_kwargs,
+        )
+
+        # Decode only the new tokens
+        new_tokens = output[0, input_ids.shape[1] :]
+        response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
+        return response.strip()
+
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
         """Save model, tokenizer, and processor."""
         import shutil
@@ -796,8 +847,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """
         # Store repo_id in config so save_pretrained can access it
         self.config.pretrained_model_path = repo_id
-        # Call parent's push_to_hub with repo_id in kwargs
-        return super().push_to_hub(repo_id, repo_id=repo_id, **kwargs)
+        # Call parent's push_to_hub
+        return super().push_to_hub(repo_id, **kwargs)
 
     def create_or_update_model_card(self, output_dir: Union[str, Path]) -> None:
         """No-op for model card creation - we use MODEL_CARD.md in repo instead."""

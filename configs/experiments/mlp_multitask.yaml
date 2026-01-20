@@ -1,0 +1,67 @@
+# @package _global_
+# Multitask training with MLP projector
+# Trains on ASR (LoquaciousSet) + Paralinguistic datasets (CREMA-D, RAVDESS, etc.)
+# Uses SIFT modes: sift_s (semantic), sift_ssp (paralinguistic), sit_ssp (instruction)
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=mlp_multitask
+#
+# Prerequisites:
+#   1. Generate SIFT dataset: ta runpod sift <host> <port>
+#      (defaults to mazesmazes/sift-audio)
+#   2. Or set SIFT_DATASET_REPO env var to override
+
+defaults:
+  - override /data: multitask
+
+model:
+  projector_type: mlp
+  projector_pool_stride: 4
+  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  text_model_id: Qwen/Qwen3-1.7B
+
+# Multitask configuration
+multitask:
+  enabled: true
+  # SIFT mode: "mixed" randomly selects between the 3 modes (1/3 each)
+  # - sift_s: Semantic only (transcription without system message)
+  # - sift_ssp: System message + paralinguistic metadata (no instruction)
+  # - sit_ssp: System message + instruction + paralinguistic metadata
+  sift_mode: mixed
+
+  # Task configuration with weights
+  # Higher weights = task sampled more frequently / weighted more in loss
+  tasks:
+    transcription:
+      weight: 1.0
+      prompts:
+        - "Transcribe this audio"
+        - "What is being said?"
+        - "Transcribe speech to text"
+        - "Transcribe audio to text"
+    sift:
+      weight: 2.0  # Weight paralinguistic tasks higher
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-multitask"
+  learning_rate: 2e-3
+  warmup_steps: 1000
+  lr_scheduler_type: polynomial
+  lr_scheduler_kwargs:
+    power: 0.5
+  seed: 42
+  per_device_train_batch_size: 12  # Slightly smaller for mixed data
+  per_device_eval_batch_size: 12
+  gradient_accumulation_steps: 1
+  num_train_epochs: 4
+  save_steps: 10000
+  eval_steps: 10000
+
+  label_smoothing_factor: 0.1
+  weight_decay: 0.0
+
+  use_specaugment: true
+  num_time_masks: 1
+  time_mask_length: 100
+  num_freq_masks: 1
+  freq_mask_length: 27
