@@ -669,7 +669,7 @@ def main(
     model_name: Annotated[
         str, typer.Option(help="LLM model for response generation")
     ] = "Qwen/Qwen3-8B",
-    batch_size: Annotated[int, typer.Option(help="Batch size for generation")] = 512,
+    batch_size: Annotated[int, typer.Option(help="Batch size for generation")] = 256,
     max_samples: Annotated[
         int | None, typer.Option(help="Max samples per dataset (for testing)")
     ] = None,
@@ -678,7 +678,7 @@ def main(
         int, typer.Option(help="Number of instruction-response pairs per audio sample")
     ] = 3,
     datasets: Annotated[list[str] | None, typer.Option(help="Specific datasets to process")] = None,
-    num_proc: Annotated[int, typer.Option(help="Number of CPU processes for preprocessing")] = 32,
+    num_proc: Annotated[int, typer.Option(help="Number of CPU processes for preprocessing")] = 12,
     push_every: Annotated[int, typer.Option(help="Push to hub every N datasets")] = 1,
 ):
     """Generate SIFT datasets for paralinguistic training."""

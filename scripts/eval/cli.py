@@ -22,11 +22,15 @@ from scripts.eval.evaluators import (
     AssemblyAIAlignmentEvaluator,
     AssemblyAIDiarizationEvaluator,
     AssemblyAIEvaluator,
+    AssemblyAIMMAUEvaluator,
     AssemblyAIStreamingEvaluator,
     DeepgramAlignmentEvaluator,
     DeepgramDiarizationEvaluator,
     DeepgramEvaluator,
     DiarizationEvaluator,
+    ElevenLabsAlignmentEvaluator,
+    ElevenLabsDiarizationEvaluator,
+    ElevenLabsEvaluator,
     EndpointEvaluator,
     EvalResult,
     LocalDiarizationEvaluator,
@@ -472,6 +476,7 @@ def main(
                     speakers_field=cfg.speakers_field,
                     timestamps_start_field=cfg.timestamps_start_field,
                     timestamps_end_field=cfg.timestamps_end_field,
+                    num_workers=num_workers,
                 )
             elif model == "deepgram":
                 api_key = os.environ.get("DEEPGRAM_API_KEY", "")
@@ -485,6 +490,23 @@ def main(
                     speakers_field=cfg.speakers_field,
                     timestamps_start_field=cfg.timestamps_start_field,
                     timestamps_end_field=cfg.timestamps_end_field,
+                    num_workers=num_workers,
+                )
+            elif model == "elevenlabs":
+                api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+                if not api_key:
+                    console.print(
+                        "[red]Error: ELEVENLABS_API_KEY environment variable not set[/red]"
+                    )
+                    raise typer.Exit(1)
+                model_id = "scribe-v2"
+                evaluator = ElevenLabsDiarizationEvaluator(
+                    api_key=api_key,
+                    audio_field=cfg.audio_field,
+                    speakers_field=cfg.speakers_field,
+                    timestamps_start_field=cfg.timestamps_start_field,
+                    timestamps_end_field=cfg.timestamps_end_field,
+                    num_workers=num_workers,
                 )
             elif model == "local":
                 # Local diarization using TEN-VAD + ERes2NetV2 + spectral clustering
@@ -497,6 +519,7 @@ def main(
                     num_speakers=num_speakers,
                     min_speakers=min_speakers or 2,
                     max_speakers=max_speakers or 3,
+                    num_workers=num_workers,
                 )
             elif model == "pyannote":
                 # Pyannote diarization (requires HF token with model access)
@@ -510,6 +533,7 @@ def main(
                     num_speakers=num_speakers,
                     min_speakers=min_speakers,
                     max_speakers=max_speakers,
+                    num_workers=num_workers,
                 )
             else:
                 # Default to pyannote for other model paths
@@ -523,6 +547,7 @@ def main(
                     num_speakers=num_speakers,
                     min_speakers=min_speakers,
                     max_speakers=max_speakers,
+                    num_workers=num_workers,
                 )
 
             results = evaluator.evaluate(dataset, max_samples)
@@ -562,6 +587,20 @@ def main(
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
                 )
+            elif model == "elevenlabs":
+                api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+                if not api_key:
+                    console.print(
+                        "[red]Error: ELEVENLABS_API_KEY environment variable not set[/red]"
+                    )
+                    raise typer.Exit(1)
+                model_id = "scribe-v2"
+                evaluator = ElevenLabsAlignmentEvaluator(
+                    api_key=api_key,
+                    audio_field=cfg.audio_field,
+                    text_field=cfg.text_field,
+                    words_field=cfg.words_field,
+                )
             else:
                 model_id = get_model_name(model)
                 evaluator = TimestampAlignmentEvaluator(
@@ -584,17 +623,36 @@ def main(
 
             dataset = hf_load_dataset(cfg.path, split=actual_split, streaming=True)
 
-            model_id = get_model_name(model)
-            evaluator = MMAUEvaluator(
-                model_path=model,
-                audio_field=cfg.audio_field,
-                question_field=cfg.question_field,
-                answer_field=cfg.answer_field,
-                choices_field=cfg.choices_field,
-                category_field=cfg.category_field,
-                user_prompt=user_prompt,
-                num_workers=num_workers,
-            )
+            if model == "assemblyai":
+                api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
+                if not api_key:
+                    console.print(
+                        "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
+                    )
+                    raise typer.Exit(1)
+                model_id = assemblyai_model.value.replace("_", "-")
+                evaluator = AssemblyAIMMAUEvaluator(
+                    api_key=api_key,
+                    model=assemblyai_model.value,
+                    audio_field=cfg.audio_field,
+                    question_field=cfg.question_field,
+                    answer_field=cfg.answer_field,
+                    choices_field=cfg.choices_field,
+                    category_field=cfg.category_field,
+                    num_workers=num_workers,
+                )
+            else:
+                model_id = get_model_name(model)
+                evaluator = MMAUEvaluator(
+                    model_path=model,
+                    audio_field=cfg.audio_field,
+                    question_field=cfg.question_field,
+                    answer_field=cfg.answer_field,
+                    choices_field=cfg.choices_field,
+                    category_field=cfg.category_field,
+                    user_prompt=user_prompt,
+                    num_workers=num_workers,
+                )
 
             results = evaluator.evaluate(dataset, max_samples)
             metrics = evaluator.compute_metrics()
@@ -636,6 +694,18 @@ def main(
                 raise typer.Exit(1)
             model_id = "nova-3"
             evaluator = DeepgramEvaluator(
+                api_key=api_key,
+                audio_field=cfg.audio_field,
+                text_field=cfg.text_field,
+                num_workers=num_workers,
+            )
+        elif model == "elevenlabs":
+            api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+            if not api_key:
+                console.print("[red]Error: ELEVENLABS_API_KEY environment variable not set[/red]")
+                raise typer.Exit(1)
+            model_id = "scribe-v2"
+            evaluator = ElevenLabsEvaluator(
                 api_key=api_key,
                 audio_field=cfg.audio_field,
                 text_field=cfg.text_field,

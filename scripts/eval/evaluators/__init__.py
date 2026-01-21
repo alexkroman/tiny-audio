@@ -6,6 +6,7 @@ from .alignment import (
     AssemblyAIAlignmentEvaluator,
     BaseAlignmentEvaluator,
     DeepgramAlignmentEvaluator,
+    ElevenLabsAlignmentEvaluator,
     TimestampAlignmentEvaluator,
     align_words_to_reference,
 )
@@ -13,6 +14,7 @@ from .asr import (
     AssemblyAIEvaluator,
     AssemblyAIStreamingEvaluator,
     DeepgramEvaluator,
+    ElevenLabsEvaluator,
     EndpointEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
@@ -28,9 +30,11 @@ from .diarization import (
     AssemblyAIDiarizationEvaluator,
     DeepgramDiarizationEvaluator,
     DiarizationEvaluator,
+    ElevenLabsDiarizationEvaluator,
     LocalDiarizationEvaluator,
 )
 from .mcq import (
+    AssemblyAIMMAUEvaluator,
     MCQResult,
     MMAUEvaluator,
 )
@@ -51,18 +55,22 @@ __all__ = [
     "AssemblyAIEvaluator",
     "AssemblyAIStreamingEvaluator",
     "DeepgramEvaluator",
+    "ElevenLabsEvaluator",
     # Diarization evaluators
     "DiarizationEvaluator",
     "AssemblyAIDiarizationEvaluator",
     "DeepgramDiarizationEvaluator",
+    "ElevenLabsDiarizationEvaluator",
     "LocalDiarizationEvaluator",
     # Alignment evaluators
     "BaseAlignmentEvaluator",
     "TimestampAlignmentEvaluator",
     "AssemblyAIAlignmentEvaluator",
     "DeepgramAlignmentEvaluator",
+    "ElevenLabsAlignmentEvaluator",
     "align_words_to_reference",
     # MCQ evaluators
     "MCQResult",
     "MMAUEvaluator",
+    "AssemblyAIMMAUEvaluator",
 ]

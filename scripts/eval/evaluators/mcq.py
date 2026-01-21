@@ -1,11 +1,14 @@
 """MCQ (Multiple Choice Question) evaluators for audio understanding benchmarks."""
 
+import io
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import attrs
 from rich.console import Console
+
+from scripts.eval.audio import prepare_wav_bytes
 
 console = Console()
 
@@ -237,6 +240,9 @@ class MMAUEvaluator:
 
                 status = "✓" if result.correct else "✗"
                 print(f"[{completed}/{total}] Sample {idx}: {status} Time={result.time:.2f}s")
+                print(f"  Q: {result.question}")
+                print(f"  Pred: {result.prediction[:100]}")
+                print(f"  Match: {result.matched_choice} | Ref: {result.reference}")
 
                 if completed % 100 == 0:
                     temp_results = list(results_map.values())
@@ -281,3 +287,56 @@ class MMAUEvaluator:
             "num_samples": total,
             "category_accuracy": category_acc,
         }
+
+
+class AssemblyAIMMAUEvaluator(MMAUEvaluator):
+    """Evaluator for MMAU benchmark using AssemblyAI SLAM model with prompt support."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "slam_1",
+        audio_field: str = "context",
+        question_field: str = "instruction",
+        answer_field: str = "answer",
+        choices_field: str = "choices",
+        category_field: str = "other_attributes",
+        num_workers: int = 1,
+    ):
+        # Don't call parent __init__ fully - we override the pipeline
+        self.audio_field = audio_field
+        self.question_field = question_field
+        self.answer_field = answer_field
+        self.choices_field = choices_field
+        self.category_field = category_field
+        self.user_prompt = None
+        self.num_workers = num_workers
+        self.results: list[MCQResult] = []
+
+        self.api_key = api_key
+        self.model = model
+
+    def answer_question(self, audio: dict, question: str, choices: list[str]) -> tuple[str, float]:
+        """Answer a question about audio using AssemblyAI with prompt."""
+        import assemblyai as aai
+
+        aai.settings.api_key = self.api_key
+
+        # Format prompt with question and choices
+        choices_str = "\n".join(choices)
+        prompt = f"{question}\n{choices_str}\n\nRespond with only the letter of the correct answer (A, B, C, or D)."
+
+        # Create config with prompt (undocumented but supported)
+        config = aai.TranscriptionConfig(
+            speech_model=getattr(aai.types.SpeechModel, self.model),
+            prompt=prompt,
+        )
+        transcriber = aai.Transcriber(config=config)
+
+        wav_bytes = prepare_wav_bytes(audio)
+        start = time.time()
+        transcript = transcriber.transcribe(io.BytesIO(wav_bytes))
+        elapsed = time.time() - start
+
+        time.sleep(0.5)  # Rate limiting
+        return transcript.text or "", elapsed

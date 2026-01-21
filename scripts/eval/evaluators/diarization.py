@@ -99,75 +99,102 @@ class DiarizationEvaluator:
 
         return segments, elapsed
 
+    def _process_sample(self, sample: dict, sample_idx: int) -> DiarizationResult | None:
+        """Process a single sample and return result or None on error."""
+        try:
+            # Get reference annotation
+            reference = self._build_reference_annotation(sample)
+
+            # Build UEM (evaluation region) from reference extent
+            uem = Timeline([reference.get_timeline().extent()])
+
+            # Run diarization
+            segments, inference_time = self.diarize(sample[self.audio_field])
+            hypothesis = self._build_hypothesis_annotation(segments)
+
+            # Compute DER with detailed components
+            details = self.metric(reference, hypothesis, uem=uem, detailed=True)
+
+            # Extract raw values for corpus calculation
+            total = details["total"]
+            confusion_raw = details["confusion"]
+            missed_raw = details["missed detection"]
+            false_alarm_raw = details["false alarm"]
+
+            # Compute per-sample percentages
+            if total > 0:
+                der = (confusion_raw + missed_raw + false_alarm_raw) / total
+                confusion = confusion_raw / total
+                missed = missed_raw / total
+                false_alarm = false_alarm_raw / total
+            else:
+                der = confusion = missed = false_alarm = 0.0
+
+            result = DiarizationResult(
+                der=der * 100,
+                confusion=confusion * 100,
+                missed=missed * 100,
+                false_alarm=false_alarm * 100,
+                time=inference_time,
+                num_speakers_ref=len(set(sample[self.speakers_field])),
+                num_speakers_hyp=len({seg["speaker"] for seg in segments}),
+                total=total,
+                confusion_raw=confusion_raw,
+                missed_raw=missed_raw,
+                false_alarm_raw=false_alarm_raw,
+            )
+
+            console.print(
+                f"Sample {sample_idx}: DER={result.der:.1f}% "
+                f"(conf={result.confusion:.1f}%, miss={result.missed:.1f}%, fa={result.false_alarm:.1f}%) "
+                f"Time={inference_time:.2f}s "
+                f"Speakers: ref={result.num_speakers_ref}, hyp={result.num_speakers_hyp}"
+            )
+
+            return result
+
+        except Exception as e:
+            console.print(f"[red]Error on sample {sample_idx}: {e}[/red]")
+            return None
+
     def evaluate(self, dataset, max_samples: int | None = None) -> list[DiarizationResult]:
         """Run diarization evaluation loop on dataset."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         self.results = []
-        processed = 0
 
-        for sample in dataset:
-            processed += 1
-            if max_samples and processed > max_samples:
+        # Collect samples up to max_samples
+        samples = []
+        for i, sample in enumerate(dataset):
+            if max_samples and i >= max_samples:
                 break
+            samples.append((sample, i + 1))
 
-            try:
-                # Get reference annotation
-                reference = self._build_reference_annotation(sample)
+        if self.num_workers > 1:
+            # Parallel processing
+            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                futures = {
+                    executor.submit(self._process_sample, sample, idx): idx
+                    for sample, idx in samples
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result is not None:
+                        self.results.append(result)
 
-                # Build UEM (evaluation region) from reference extent
-                uem = Timeline([reference.get_timeline().extent()])
+                    # Checkpoint every 50 samples
+                    if len(self.results) % 50 == 0 and len(self.results) > 0:
+                        self._print_checkpoint(len(self.results))
+        else:
+            # Sequential processing
+            for sample, idx in samples:
+                result = self._process_sample(sample, idx)
+                if result is not None:
+                    self.results.append(result)
 
-                # Run diarization
-                segments, inference_time = self.diarize(sample[self.audio_field])
-                hypothesis = self._build_hypothesis_annotation(segments)
-
-                # Compute DER with detailed components
-                details = self.metric(reference, hypothesis, uem=uem, detailed=True)
-
-                # Extract raw values for corpus calculation
-                total = details["total"]
-                confusion_raw = details["confusion"]
-                missed_raw = details["missed detection"]
-                false_alarm_raw = details["false alarm"]
-
-                # Compute per-sample percentages
-                if total > 0:
-                    der = (confusion_raw + missed_raw + false_alarm_raw) / total
-                    confusion = confusion_raw / total
-                    missed = missed_raw / total
-                    false_alarm = false_alarm_raw / total
-                else:
-                    der = confusion = missed = false_alarm = 0.0
-
-                result = DiarizationResult(
-                    der=der * 100,
-                    confusion=confusion * 100,
-                    missed=missed * 100,
-                    false_alarm=false_alarm * 100,
-                    time=inference_time,
-                    num_speakers_ref=len(set(sample[self.speakers_field])),
-                    num_speakers_hyp=len({seg["speaker"] for seg in segments}),
-                    total=total,
-                    confusion_raw=confusion_raw,
-                    missed_raw=missed_raw,
-                    false_alarm_raw=false_alarm_raw,
-                )
-                self.results.append(result)
-
-                console.print(
-                    f"Sample {processed}: DER={result.der:.1f}% "
-                    f"(conf={result.confusion:.1f}%, miss={result.missed:.1f}%, fa={result.false_alarm:.1f}%) "
-                    f"Time={inference_time:.2f}s "
-                    f"Speakers: ref={result.num_speakers_ref}, hyp={result.num_speakers_hyp}"
-                )
-
-            except Exception as e:
-                console.print(f"[red]Error on sample {processed}: {e}[/red]")
-                # Skip failed samples - don't add to results to avoid polluting corpus metrics
-                continue
-
-            # Checkpoint every 50 samples
-            if processed % 50 == 0:
-                self._print_checkpoint(processed)
+                # Checkpoint every 50 samples
+                if len(self.results) % 50 == 0 and len(self.results) > 0:
+                    self._print_checkpoint(len(self.results))
 
         return self.results
 
@@ -272,6 +299,78 @@ class DeepgramDiarizationEvaluator(DiarizationEvaluator):
             }
             for u in utterances
         ]
+
+        time.sleep(0.3)  # Rate limiting
+        return segments, elapsed
+
+
+class ElevenLabsDiarizationEvaluator(DiarizationEvaluator):
+    """Evaluator for ElevenLabs Scribe speaker diarization."""
+
+    def __init__(self, api_key: str, model: str = "scribe_v2", **kwargs):
+        kwargs.pop("hf_token", None)
+        super().__init__(**kwargs)
+        from elevenlabs.client import ElevenLabs
+
+        self.client = ElevenLabs(api_key=api_key)
+        self.model = model
+
+    def diarize(self, audio) -> tuple[list[dict], float]:
+        """Run ElevenLabs diarization on audio."""
+        wav_bytes = prepare_wav_bytes(audio)
+        start = time.time()
+
+        transcription = self.client.speech_to_text.convert(
+            file=io.BytesIO(wav_bytes),
+            model_id=self.model,
+            diarize=True,
+        )
+        elapsed = time.time() - start
+
+        # Extract segments from word-level speaker_ids
+        # Group consecutive words by speaker_id
+        segments = []
+        words = getattr(transcription, "words", []) or []
+
+        current_speaker = None
+        segment_start = None
+        segment_end = None
+
+        for word in words:
+            speaker_id = getattr(word, "speaker_id", None)
+            word_start = getattr(word, "start", None)
+            word_end = getattr(word, "end", None)
+
+            if speaker_id is None or word_start is None or word_end is None:
+                continue
+
+            if speaker_id != current_speaker:
+                # Save previous segment
+                if current_speaker is not None and segment_start is not None:
+                    segments.append(
+                        {
+                            "speaker": f"SPEAKER_{current_speaker}",
+                            "start": segment_start,
+                            "end": segment_end,
+                        }
+                    )
+                # Start new segment
+                current_speaker = speaker_id
+                segment_start = word_start
+                segment_end = word_end
+            else:
+                # Extend current segment
+                segment_end = word_end
+
+        # Don't forget the last segment
+        if current_speaker is not None and segment_start is not None:
+            segments.append(
+                {
+                    "speaker": f"SPEAKER_{current_speaker}",
+                    "start": segment_start,
+                    "end": segment_end,
+                }
+            )
 
         time.sleep(0.3)  # Rate limiting
         return segments, elapsed
