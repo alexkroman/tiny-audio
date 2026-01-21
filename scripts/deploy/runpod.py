@@ -2,11 +2,12 @@
 """
 Unified CLI for RunPod operations.
 
-Consolidates deployment, training, session management, and checkpoint discovery.
+Consolidates deployment, training, evaluation, session management, and checkpoint discovery.
 
 Usage:
     runpod deploy <host> <port>          # Deploy code to remote
     runpod train <host> <port>           # Start training in tmux
+    runpod eval <host> <port> -m <model> # Run evaluation in tmux
     runpod attach <host> <port>          # Attach to running session
     runpod checkpoint <host> <port>      # Find latest checkpoint
 """
@@ -515,9 +516,7 @@ def sift(
     session_name: str | None = typer.Option(
         None, "--session-name", "-s", help="Custom tmux session name"
     ),
-    batch_size: int = typer.Option(
-        32, "--batch-size", "-b", help="Batch size for generation (32 recommended for A40)"
-    ),
+    batch_size: int = typer.Option(1024, "--batch-size", "-b", help="Batch size for generation"),
     max_samples: int | None = typer.Option(
         None, "--max-samples", "-n", help="Max samples per dataset"
     ),
@@ -581,6 +580,182 @@ def sift(
         sys.exit(1)
 
     print(f"\nSIFT generation started in session '{session_name}'.")
+    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
+
+    if not no_attach:
+        time.sleep(2)
+        attach_tmux_session(host, port, session_name)
+
+
+# =============================================================================
+# Eval Command
+# =============================================================================
+
+
+def build_eval_script(
+    hf_token: str,
+    model: str,
+    datasets: list[str],
+    max_samples: int | None,
+    assemblyai_api_key: str | None,
+    assemblyai_model: str,
+    num_workers: int,
+    streaming: bool,
+    extra_args: list[str] | None,
+) -> str:
+    """Generate the eval script content."""
+    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
+    datasets_arg = f"--datasets {' '.join(datasets)}" if datasets else ""
+    streaming_arg = "--streaming" if streaming else ""
+    workers_arg = f"--num-workers {num_workers}" if num_workers > 1 else ""
+    assemblyai_model_arg = f"--assemblyai-model {assemblyai_model}"
+    extra_args_str = " ".join(extra_args) if extra_args else ""
+
+    assemblyai_export = ""
+    if assemblyai_api_key:
+        assemblyai_export = f'export ASSEMBLYAI_API_KEY="{assemblyai_api_key}"'
+
+    return f"""#!/bin/bash
+# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
+
+ulimit -n 65536
+pip install hf_transfer modelscope --quiet --root-user-action=ignore
+export PATH="/root/.local/bin:$PATH"
+export HF_HOME=/workspace/.cache/huggingface
+export HF_DATASETS_CACHE=/workspace/datasets
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_TOKEN="{hf_token}"
+{assemblyai_export}
+
+# GPU optimizations
+export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+cd /workspace
+
+python -m scripts.eval.cli \\
+    --model {model} \\
+    {datasets_arg} \\
+    {max_samples_arg} \\
+    {assemblyai_model_arg} \\
+    {workers_arg} \\
+    {streaming_arg} \\
+    --output-dir /workspace/outputs \\
+    {extra_args_str}
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "===== Evaluation Completed Successfully ====="
+else
+    echo "===== Evaluation Failed with exit code: $EXIT_CODE ====="
+fi
+
+echo "Eval script finished. Session will remain active for inspection."
+sleep infinity
+"""
+
+
+@app.command()
+def eval(
+    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
+    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
+    model: str = typer.Option(..., "--model", "-m", help="Model path/ID or 'assemblyai'"),
+    datasets: Annotated[
+        list[str] | None,
+        typer.Option("--datasets", "-d", help="Datasets to evaluate on"),
+    ] = None,
+    max_samples: int | None = typer.Option(
+        None, "--max-samples", "-n", help="Max samples per dataset"
+    ),
+    assemblyai_model: str = typer.Option(
+        "slam_1", "--assemblyai-model", help="AssemblyAI model (best, universal, slam_1, nano)"
+    ),
+    num_workers: int = typer.Option(
+        1, "--num-workers", "-w", help="Number of parallel workers for API evaluations"
+    ),
+    streaming: bool = typer.Option(False, "--streaming", "-s", help="Use streaming evaluation"),
+    session_name: str | None = typer.Option(
+        None, "--session-name", help="Custom tmux session name"
+    ),
+    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
+    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+    extra_args: Annotated[
+        list[str] | None,
+        typer.Argument(help="Extra arguments passed to eval script"),
+    ] = None,
+):
+    """Run ASR evaluation on a remote RunPod instance.
+
+    Examples:
+        runpod eval host port -m mazesmazes/tiny-audio -d loquacious
+        runpod eval host port -m assemblyai --assemblyai-model slam_1 -d loquacious -w 4
+    """
+    conn = get_connection(host, port)
+
+    if not test_connection(conn):
+        sys.exit(1)
+
+    # Generate session name if not provided
+    if session_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        model_short = model.split("/")[-1] if "/" in model else model
+        session_name = f"eval_{model_short}_{timestamp}"
+
+    if force:
+        print(f"Killing existing session '{session_name}' if present...")
+        kill_tmux_session(conn, session_name)
+
+    # Get environment variables
+    hf_token = os.environ.get("HF_TOKEN", "")
+    assemblyai_api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
+
+    if not hf_token:
+        print("Warning: HF_TOKEN environment variable not set.")
+    if model == "assemblyai" and not assemblyai_api_key:
+        print(
+            "Warning: ASSEMBLYAI_API_KEY environment variable not set (required for assemblyai model)."
+        )
+
+    # Default datasets
+    if datasets is None:
+        datasets = ["loquacious"]
+
+    # Build and upload script
+    script_content = build_eval_script(
+        hf_token,
+        model,
+        datasets,
+        max_samples,
+        assemblyai_api_key,
+        assemblyai_model,
+        num_workers,
+        streaming,
+        extra_args,
+    )
+    script_path = f"/tmp/eval_{session_name}.sh"
+
+    print(f"\nStarting eval session '{session_name}'...")
+    print(f"Model: {model}")
+    print(f"Datasets: {', '.join(datasets)}")
+    if max_samples:
+        print(f"Max samples: {max_samples}")
+    if num_workers > 1:
+        print(f"Workers: {num_workers}")
+    if streaming:
+        print("Streaming mode enabled")
+
+    # Write script to remote
+    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
+    conn.run(f"chmod +x {script_path}", hide=True)
+
+    # Start tmux session
+    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    if not result.ok:
+        print(f"Failed to start tmux session: {result.stderr}")
+        sys.exit(1)
+
+    print(f"\nEvaluation started in session '{session_name}'.")
     print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
 
     if not no_attach:

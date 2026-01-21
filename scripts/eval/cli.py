@@ -15,6 +15,7 @@ from scripts.eval.datasets import (
     ALIGNMENT_DATASETS,
     DATASET_REGISTRY,
     DIARIZATION_DATASETS,
+    MCQ_DATASETS,
     load_eval_dataset,
 )
 from scripts.eval.evaluators import (
@@ -31,6 +32,8 @@ from scripts.eval.evaluators import (
     LocalDiarizationEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
+    MCQResult,
+    MMAUEvaluator,
     TimestampAlignmentEvaluator,
 )
 
@@ -273,6 +276,77 @@ def print_alignment_metrics(dataset_name: str, metrics: dict):
     console.print(table)
 
 
+def save_mcq_results(
+    model_name: str,
+    dataset_name: str,
+    results: list[MCQResult],
+    metrics: dict,
+    output_dir: str = "outputs",
+) -> Path:
+    """Save MCQ evaluation results and metrics."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    safe_model_name = model_name.replace("/", "_")
+    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_mcq"
+    result_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save detailed results
+    results_file = result_dir / "results.txt"
+    with results_file.open("w") as f:
+        for i, r in enumerate(results, 1):
+            status = "✓" if r.correct else "✗"
+            f.write(f"Sample {i} [{status}]\n")
+            f.write(f"  Category: {r.category}\n")
+            f.write(f"  Question: {r.question}\n")
+            f.write(f"  Choices: {r.choices}\n")
+            f.write(f"  Prediction: {r.prediction}\n")
+            f.write(f"  Matched: {r.matched_choice}\n")
+            f.write(f"  Reference: {r.reference}\n")
+            f.write(f"  Time: {r.time:.2f}s\n")
+            f.write("-" * 80 + "\n")
+
+    # Save summary metrics
+    metrics_file = result_dir / "metrics.txt"
+    with metrics_file.open("w") as f:
+        f.write(f"Model: {model_name}\n")
+        f.write(f"Dataset: {dataset_name}\n")
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Accuracy: {metrics['accuracy']:.2f}%\n")
+        f.write(f"Correct: {metrics['correct']}/{metrics['total']}\n")
+        f.write(f"Avg Time: {metrics['avg_time']:.2f}s\n")
+        f.write(f"Num Samples: {metrics['num_samples']}\n")
+        f.write("-" * 40 + "\n")
+        f.write("Per-Category Accuracy:\n")
+        for cat, acc in sorted(metrics.get("category_accuracy", {}).items()):
+            f.write(f"  {cat}: {acc:.2f}%\n")
+
+    console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
+    return result_dir
+
+
+def print_mcq_metrics(dataset_name: str, metrics: dict):
+    """Print MCQ metrics using rich table."""
+    table = Table(title=f"Results: {dataset_name}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+
+    table.add_row("Accuracy", f"{metrics['accuracy']:.2f}%")
+    table.add_row("Correct", f"{metrics['correct']}/{metrics['total']}")
+    table.add_row("Samples", str(metrics["num_samples"]))
+    table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
+
+    console.print(table)
+
+    # Print per-category breakdown if available
+    if "category_accuracy" in metrics and metrics["category_accuracy"]:
+        cat_table = Table(title="Per-Category Accuracy")
+        cat_table.add_column("Category", style="cyan")
+        cat_table.add_column("Accuracy", style="green")
+        for cat, acc in sorted(metrics["category_accuracy"].items()):
+            cat_table.add_row(cat, f"{acc:.2f}%")
+        console.print(cat_table)
+
+
 def validate_datasets(datasets: list[str]) -> list[str]:
     """Validate and expand dataset names."""
     for ds in datasets:
@@ -281,14 +355,16 @@ def validate_datasets(datasets: list[str]) -> list[str]:
             console.print(f"Valid choices: {', '.join(VALID_DATASETS)}")
             raise typer.Exit(1)
 
-    # Expand "all" to ASR datasets only (exclude diarization, alignment)
+    # Expand "all" to ASR datasets only (exclude diarization, alignment, MCQ)
     if "all" in datasets:
         return [
             k
             for k in DATASET_REGISTRY
-            if k not in DIARIZATION_DATASETS and k not in ALIGNMENT_DATASETS
+            if k not in DIARIZATION_DATASETS
+            and k not in ALIGNMENT_DATASETS
+            and k not in MCQ_DATASETS
         ]
-    # Expand "all-full" to include diarization and alignment datasets too
+    # Expand "all-full" to include diarization, alignment, and MCQ datasets too
     if "all-full" in datasets:
         return list(DATASET_REGISTRY.keys())
 
@@ -500,6 +576,30 @@ def main(
             metrics = evaluator.compute_metrics()
             save_alignment_results(model_id, dataset_name, results, metrics, output_dir)
             print_alignment_metrics(dataset_name, metrics)
+            continue
+
+        # Handle MCQ datasets (audio understanding benchmarks)
+        if dataset_name in MCQ_DATASETS:
+            from datasets import load_dataset as hf_load_dataset
+
+            dataset = hf_load_dataset(cfg.path, split=actual_split, streaming=True)
+
+            model_id = get_model_name(model)
+            evaluator = MMAUEvaluator(
+                model_path=model,
+                audio_field=cfg.audio_field,
+                question_field=cfg.question_field,
+                answer_field=cfg.answer_field,
+                choices_field=cfg.choices_field,
+                category_field=cfg.category_field,
+                user_prompt=user_prompt,
+                num_workers=num_workers,
+            )
+
+            results = evaluator.evaluate(dataset, max_samples)
+            metrics = evaluator.compute_metrics()
+            save_mcq_results(model_id, dataset_name, results, metrics, output_dir)
+            print_mcq_metrics(dataset_name, metrics)
             continue
 
         # ASR evaluation

@@ -89,19 +89,6 @@ DATASET_CONFIGS = [
         age_field=None,
         weight=2.0,
     ),
-    # MELD: emotion (from TV show Friends)
-    # Note: Uses trust_remote_code=True
-    DatasetConfig(
-        name="meld",
-        hf_path="ajyy/MELD_audio",
-        split="train",
-        audio_field="audio",
-        text_field="text",  # Dialogue text
-        emotion_field="emotion",
-        gender_field=None,
-        age_field=None,
-        weight=2.0,
-    ),
     # TESS: emotion + gender (all female speakers)
     # 2,800 samples with 7 emotion classes
     DatasetConfig(
@@ -310,6 +297,7 @@ def process_dataset(
     config: DatasetConfig,
     pipe,
     tokenizer,
+    batch_size: int,
     max_samples: int | None,
     max_new_tokens: int,
     num_proc: int = 32,
@@ -344,14 +332,22 @@ def process_dataset(
     def is_valid_duration(example):
         try:
             audio = example.get(audio_field)
-            if audio and isinstance(audio, dict) and "array" in audio:
-                duration = len(audio["array"]) / audio.get("sampling_rate", 16000)
+            if audio is None:
+                return False
+            # Check duration if audio is decoded
+            if isinstance(audio, dict) and "array" in audio:
+                arr = audio["array"]
+                if arr is None or len(arr) == 0:
+                    return False
+                duration = len(arr) / audio.get("sampling_rate", 16000)
                 return 1.0 < duration <= 30.0
-            return True  # Keep if audio not decoded yet
-        except (FileNotFoundError, OSError):
+            # If audio exists but not decoded yet, keep it
+            return audio is not None
+        except Exception:
             return False
 
-    ds = ds.filter(is_valid_duration, num_proc=num_proc, desc=f"Filtering {config.name}")
+    # Filter with single process
+    ds = ds.filter(is_valid_duration, num_proc=1, desc=f"Filtering {config.name}")
 
     if len(ds) == 0:
         print(f"  No valid samples found in {config.name}")
@@ -415,6 +411,7 @@ def process_dataset(
         pipe(
             KeyDataset(ds, "prompt"),
             generation_config=generation_config,
+            batch_size=batch_size,
             return_full_text=False,
         ),
         total=len(ds),
@@ -438,7 +435,12 @@ def process_dataset(
 
     ds = ds.map(compute_duration, batched=True, num_proc=num_proc)
 
-    # Rename and select final columns
+    # Remove original columns that would conflict with our renamed columns
+    conflict_cols = [c for c in ["text", "emotion", "gender", "age"] if c in ds.column_names]
+    if conflict_cols:
+        ds = ds.remove_columns(conflict_cols)
+
+    # Rename meta columns to final names
     ds = ds.rename_columns(
         {
             "meta_text": "text",
@@ -468,6 +470,7 @@ def process_dataset(
     ds = ds.cast_column("emotion", Value("string"))
     ds = ds.cast_column("gender", Value("string"))
     ds = ds.cast_column("age", Value("string"))
+    ds = ds.cast_column("duration", Value("float64"))
     return ds.cast_column("audio", Audio(sampling_rate=16000))
 
 
@@ -482,6 +485,7 @@ def main(
     model_name: Annotated[
         str, typer.Option(help="LLM model for response generation")
     ] = "Qwen/Qwen3-4B",
+    batch_size: Annotated[int, typer.Option(help="Batch size for generation")] = 512,
     max_samples: Annotated[
         int | None, typer.Option(help="Max samples per dataset (for testing)")
     ] = None,
@@ -530,6 +534,7 @@ def main(
                 config=config,
                 pipe=pipe,
                 tokenizer=tokenizer,
+                batch_size=batch_size,
                 max_samples=max_samples,
                 max_new_tokens=max_new_tokens,
                 num_proc=num_proc,

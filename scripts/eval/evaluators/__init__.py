@@ -30,6 +30,10 @@ from .diarization import (
     DiarizationEvaluator,
     LocalDiarizationEvaluator,
 )
+from .mcq import (
+    MCQResult,
+    MMAUEvaluator,
+)
 
 __all__ = [
     # Result types
@@ -58,4 +62,7 @@ __all__ = [
     "AssemblyAIAlignmentEvaluator",
     "DeepgramAlignmentEvaluator",
     "align_words_to_reference",
+    # MCQ evaluators
+    "MCQResult",
+    "MMAUEvaluator",
 ]

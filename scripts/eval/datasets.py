@@ -22,6 +22,11 @@ class DatasetConfig:
     timestamps_end_field: str | None = None
     # Alignment-specific
     words_field: str | None = None
+    # MCQ-specific (for audio understanding benchmarks)
+    question_field: str | None = None
+    answer_field: str | None = None
+    choices_field: str | None = None
+    category_field: str | None = None
 
 
 DATASET_REGISTRY: dict[str, DatasetConfig] = {
@@ -111,10 +116,22 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         default_split="dev_clean",
         words_field="words",
     ),
+    # MCQ (audio understanding) datasets
+    "mmau": DatasetConfig(
+        name="mmau",
+        path="gamma-lab-umd/MMAU-test-mini",
+        audio_field="context",  # Audio embedded as dict with array/sampling_rate
+        text_field="answer",
+        question_field="instruction",
+        answer_field="answer",
+        choices_field="choices",
+        category_field="other_attributes",  # JSON string with category info
+    ),
 }
 
 DIARIZATION_DATASETS = {"callhome"}
 ALIGNMENT_DATASETS = {"librispeech-alignments"}
+MCQ_DATASETS = {"mmau"}
 
 
 def load_eval_dataset(
