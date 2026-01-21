@@ -13,10 +13,12 @@ Usage:
     ta runpod sift <host> <port> --output-repo user/sift-dataset
 """
 
-import argparse
 import os
 import re
 from dataclasses import dataclass
+from typing import Annotated
+
+import typer
 
 # Enable fast HuggingFace transfers (must be set before importing HF libraries)
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
@@ -24,7 +26,8 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 import torch
 from datasets import Audio, Dataset, DatasetDict, Value, load_dataset
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from transformers import AutoTokenizer, GenerationConfig, pipeline
+from transformers.pipelines.pt_utils import KeyDataset
 
 # System message for paralinguistic-aware responses
 SIFT_SYSTEM_MESSAGE = (
@@ -54,7 +57,6 @@ class DatasetConfig:
     age_field: str | None = None
     weight: float = 1.0
     max_samples: int | None = None  # Per-dataset sample limit (overrides --max-samples)
-    streaming: bool = False  # Most datasets need full download to work properly
     emotion_map: dict | None = None  # Map numeric labels to emotion strings
 
 
@@ -99,6 +101,46 @@ DATASET_CONFIGS = [
         gender_field=None,
         age_field=None,
         weight=2.0,
+    ),
+    # TESS: emotion + gender (all female speakers)
+    # 2,800 samples with 7 emotion classes
+    DatasetConfig(
+        name="tess",
+        hf_path="AbstractTTS/TESS",
+        split="train",
+        audio_field="audio",
+        text_field="transcription",
+        emotion_field="emotion",
+        gender_field="gender",
+        age_field=None,
+        weight=2.0,
+    ),
+    # SAVEE: emotion + gender (all male speakers)
+    # 480 samples with 7 emotion classes
+    DatasetConfig(
+        name="savee",
+        hf_path="AbstractTTS/SAVEE",
+        split="train",
+        audio_field="audio",
+        text_field="transcription",
+        emotion_field="emotion",
+        gender_field="gender",
+        age_field=None,
+        weight=2.0,
+    ),
+    # ESD English: emotion + gender (male and female)
+    # 17,500 samples with 5 emotion classes
+    DatasetConfig(
+        name="esd",
+        hf_path="AbstractTTS/ESD_english",
+        split="train",
+        audio_field="audio",
+        text_field="transcription",
+        emotion_field="emotion",
+        gender_field="gender",
+        age_field=None,
+        weight=2.0,
+        max_samples=5000,  # Limit since it's large
     ),
     # LoquaciousSet: ASR dataset with gender metadata
     # Limited to 10k samples since it's much larger than paralinguistic datasets
@@ -150,6 +192,47 @@ def normalize_label(value: str | None) -> str | None:
     return value_str
 
 
+# Emotion label normalization mapping
+# Maps various dataset-specific labels to consistent canonical forms
+EMOTION_NORMALIZATION = {
+    # Anger variants
+    "angry": "angry",
+    "anger": "angry",
+    # Happiness variants
+    "happy": "happy",
+    "happiness": "happy",
+    # Sadness variants
+    "sad": "sad",
+    "sadness": "sad",
+    # Surprise variants
+    "surprise": "surprise",
+    "surprised": "surprise",
+    "pleasant surprise": "surprise",
+    # Standard labels (no change needed)
+    "neutral": "neutral",
+    "fear": "fear",
+    "disgust": "disgust",
+}
+
+
+def normalize_emotion(value: str | None) -> str | None:
+    """Normalize emotion labels to consistent canonical forms.
+
+    Different datasets use different labels for the same emotion:
+    - TESS: angry, happy, sad, pleasant surprise
+    - SAVEE: anger, happiness, sadness, surprise
+    - CREMA-D: anger, happy, sad
+
+    This normalizes them to: angry, happy, sad, surprise, neutral, fear, disgust
+    """
+    if value is None:
+        return None
+    value_lower = str(value).lower().strip()
+    if value_lower in ("", "na", "null", "unk", "unknown", "nan", "none"):
+        return None
+    return EMOTION_NORMALIZATION.get(value_lower, value_lower)
+
+
 def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
     """Extract paralinguistic metadata from a sample."""
     metadata = {
@@ -170,9 +253,10 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         raw_emotion = sample[config.emotion_field]
         # Map numeric labels to emotion strings if mapping provided
         if config.emotion_map and isinstance(raw_emotion, int):
-            metadata["emotion"] = config.emotion_map.get(raw_emotion)
+            mapped = config.emotion_map.get(raw_emotion)
+            metadata["emotion"] = normalize_emotion(mapped)
         else:
-            metadata["emotion"] = normalize_label(raw_emotion)
+            metadata["emotion"] = normalize_emotion(raw_emotion)
 
     # Extract gender
     if config.gender_field and config.gender_field in sample:
@@ -222,280 +306,219 @@ def build_prompt(metadata: dict) -> tuple[str, str]:
     return input_text, user_content
 
 
-@torch.no_grad()
-def generate_responses(
-    samples: list[dict],
-    configs: list[DatasetConfig],
-    model,
-    tokenizer,
-    max_new_tokens: int = 256,
-) -> list[str]:
-    """Generate SIFT responses for a batch of samples."""
-    # Build prompts
-    prompts = []
-    for sample, config in zip(samples, configs):
-        metadata = extract_metadata(sample, config)
-        _, user_content = build_prompt(metadata)
-
-        messages = [
-            {"role": "system", "content": SIFT_SYSTEM_MESSAGE},
-            {"role": "user", "content": user_content},
-        ]
-
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,  # Disable Qwen3 thinking mode
-        )
-        prompts.append(prompt)
-
-    # Tokenize
-    inputs = tokenizer(
-        prompts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=2048,
-    ).to(model.device)
-
-    # Generate
-    generation_config = GenerationConfig(
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        temperature=None,
-        top_p=None,
-        top_k=None,
-        pad_token_id=tokenizer.pad_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-    )
-    outputs = model.generate(**inputs, generation_config=generation_config)
-
-    # Decode only new tokens
-    responses = []
-    # Pattern to strip thinking tags from Qwen3 responses
-    thinking_pattern = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-    for input_ids, output_ids in zip(inputs.input_ids, outputs):
-        new_tokens = output_ids[len(input_ids) :]
-        response = tokenizer.decode(new_tokens, skip_special_tokens=True)
-
-        # Strip thinking tags
-        response = thinking_pattern.sub("", response)
-
-        # Check for truncation
-        eos_token_id = tokenizer.eos_token_id
-        eos_ids = set(eos_token_id) if isinstance(eos_token_id, list) else {eos_token_id}
-
-        if not any(tok_id in eos_ids for tok_id in new_tokens.tolist()):
-            response += " <|truncated|>"
-
-        responses.append(response.strip())
-
-    return responses
-
-
 def process_dataset(
     config: DatasetConfig,
-    model,
+    pipe,
     tokenizer,
-    batch_size: int,
     max_samples: int | None,
     max_new_tokens: int,
+    num_proc: int = 32,
 ) -> Dataset | None:
-    """Process a single dataset and generate SIFT responses."""
+    """Process a single dataset and generate SIFT responses using datasets.map()."""
     print(f"\nProcessing {config.name}...")
 
     # Load dataset
-    if config.hf_config:
-        ds = load_dataset(
-            config.hf_path,
-            config.hf_config,
-            split=config.split,
-            streaming=config.streaming,
-            trust_remote_code=True,
-            num_proc=12,
-        )
-    else:
-        ds = load_dataset(
-            config.hf_path,
-            split=config.split,
-            streaming=config.streaming,
-            trust_remote_code=True,
-            num_proc=12,
-        )
+    ds = load_dataset(
+        config.hf_path,
+        name=config.hf_config,
+        split=config.split,
+        trust_remote_code=True,
+    )
 
-    # Collect samples
-    # Use minimum of config max_samples and global max_samples (CLI can override)
+    # Limit samples first (faster than filtering all)
     if config.max_samples is not None and max_samples is not None:
         effective_max = min(config.max_samples, max_samples)
+    elif config.max_samples is not None:
+        effective_max = config.max_samples
+    elif max_samples is not None:
+        effective_max = max_samples
     else:
-        effective_max = config.max_samples or max_samples
-    samples = []
-    for sample in tqdm(ds, desc=f"Loading {config.name}", total=effective_max):
-        # Filter by duration if audio is decoded
-        audio = sample.get(config.audio_field)
-        if audio and isinstance(audio, dict) and "array" in audio:
-            duration = len(audio["array"]) / audio.get("sampling_rate", 16000)
-            if not (1.0 < duration <= 30.0):
-                continue
+        effective_max = None
 
-        samples.append(sample)
-        if effective_max and len(samples) >= effective_max:
-            break
+    if effective_max and len(ds) > effective_max:
+        ds = ds.select(range(effective_max))
 
-    if not samples:
+    # Filter by duration using ds.filter()
+    audio_field = config.audio_field
+
+    def is_valid_duration(example):
+        try:
+            audio = example.get(audio_field)
+            if audio and isinstance(audio, dict) and "array" in audio:
+                duration = len(audio["array"]) / audio.get("sampling_rate", 16000)
+                return 1.0 < duration <= 30.0
+            return True  # Keep if audio not decoded yet
+        except (FileNotFoundError, OSError):
+            return False
+
+    ds = ds.filter(is_valid_duration, num_proc=num_proc, desc=f"Filtering {config.name}")
+
+    if len(ds) == 0:
         print(f"  No valid samples found in {config.name}")
         return None
 
-    print(f"  Loaded {len(samples)} samples")
+    print(f"  Loaded {len(ds)} samples")
 
-    # Generate responses in batches
-    all_responses = []
-    all_metadata = []
+    # Extract metadata and build prompts
+    def prepare_examples(examples):
+        """Extract metadata and build prompts for batch."""
+        num_examples = len(examples[config.audio_field])
+        prompts = []
+        metadata_lists = {"text": [], "emotion": [], "gender": [], "age": []}
 
-    for i in tqdm(range(0, len(samples), batch_size), desc=f"Generating {config.name}"):
-        batch = samples[i : i + batch_size]
-        batch_configs = [config] * len(batch)
-
-        responses = generate_responses(
-            batch,
-            batch_configs,
-            model,
-            tokenizer,
-            max_new_tokens=max_new_tokens,
-        )
-
-        for sample, response in zip(batch, responses):
+        for i in range(num_examples):
+            # Build sample dict for extract_metadata
+            sample = {k: examples[k][i] for k in examples}
             metadata = extract_metadata(sample, config)
-            all_responses.append(response)
-            all_metadata.append(metadata)
 
-        # Clear CUDA cache periodically
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # Store metadata
+            for key in metadata_lists:
+                metadata_lists[key].append(metadata[key])
 
-    # Build output dataset
-    output_data = {
-        "text": [m["text"] for m in all_metadata],
-        "emotion": [m["emotion"] for m in all_metadata],
-        "gender": [m["gender"] for m in all_metadata],
-        "age": [m["age"] for m in all_metadata],
-        "sift_response": all_responses,
-        "source_dataset": [config.name] * len(all_responses),
-    }
+            # Build prompt
+            _, user_content = build_prompt(metadata)
+            messages = [
+                {"role": "system", "content": SIFT_SYSTEM_MESSAGE},
+                {"role": "user", "content": user_content},
+            ]
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            prompts.append(prompt)
 
-    # Include audio and compute duration if available
-    if config.audio_field:
-        audio_data = [s.get(config.audio_field) for s in samples[: len(all_responses)]]
-        output_data["audio"] = audio_data
-        # Compute duration for group_by_length training
+        return {
+            "prompt": prompts,
+            "meta_text": metadata_lists["text"],
+            "meta_emotion": metadata_lists["emotion"],
+            "meta_gender": metadata_lists["gender"],
+            "meta_age": metadata_lists["age"],
+        }
+
+    # Apply transformations
+    print("  Preparing prompts...")
+    ds = ds.map(prepare_examples, batched=True, num_proc=num_proc, desc="Preparing")
+
+    # Generate responses using pipeline with dataset (more efficient than .map())
+    print("  Generating responses...")
+    thinking_pattern = re.compile(r"<think>.*?</think>", re.DOTALL)
+    generation_config = GenerationConfig(
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+    )
+
+    # Use KeyDataset to iterate efficiently over the prompt column
+    responses = []
+    for out in tqdm(
+        pipe(
+            KeyDataset(ds, "prompt"),
+            generation_config=generation_config,
+            return_full_text=False,
+        ),
+        total=len(ds),
+        desc="Generating",
+    ):
+        text = thinking_pattern.sub("", out[0]["generated_text"]).strip()
+        responses.append(text)
+
+    ds = ds.add_column("sift_response", responses)
+
+    # Compute duration from audio
+    def compute_duration(examples):
         durations = []
-        for audio in audio_data:
+        for audio in examples[config.audio_field]:
             if audio and isinstance(audio, dict) and "array" in audio:
                 sr = audio.get("sampling_rate", 16000)
                 durations.append(len(audio["array"]) / sr)
             else:
                 durations.append(0.0)
-        output_data["duration"] = durations
+        return {"duration": durations}
 
-    dataset = Dataset.from_dict(output_data)
+    ds = ds.map(compute_duration, batched=True, num_proc=num_proc)
 
-    # Cast columns to consistent types across all datasets
-    # This ensures DatasetDict can combine datasets with different None patterns
-    dataset = dataset.cast_column("emotion", Value("string"))
-    dataset = dataset.cast_column("gender", Value("string"))
-    dataset = dataset.cast_column("age", Value("string"))
+    # Rename and select final columns
+    ds = ds.rename_columns(
+        {
+            "meta_text": "text",
+            "meta_emotion": "emotion",
+            "meta_gender": "gender",
+            "meta_age": "age",
+        }
+    )
+    ds = ds.add_column("source_dataset", [config.name] * len(ds))
 
-    # Cast audio column to proper Audio type
-    if "audio" in dataset.column_names:
-        dataset = dataset.cast_column("audio", Audio(sampling_rate=16000))
+    # Keep only needed columns
+    keep_cols = [
+        "audio",
+        "text",
+        "emotion",
+        "gender",
+        "age",
+        "sift_response",
+        "source_dataset",
+        "duration",
+    ]
+    remove_cols = [c for c in ds.column_names if c not in keep_cols]
+    if remove_cols:
+        ds = ds.remove_columns(remove_cols)
 
-    return dataset
+    # Cast columns to consistent types
+    ds = ds.cast_column("emotion", Value("string"))
+    ds = ds.cast_column("gender", Value("string"))
+    ds = ds.cast_column("age", Value("string"))
+    return ds.cast_column("audio", Audio(sampling_rate=16000))
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate SIFT datasets for paralinguistic training"
-    )
-    parser.add_argument(
-        "--output-repo",
-        type=str,
-        default="mazesmazes/sift-audio",
-        help="HuggingFace repo ID for output",
-    )
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        default="Qwen/Qwen3-4B",
-        help="LLM model for response generation",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=64,
-        help="Batch size for generation (64 recommended for A40 48GB)",
-    )
-    parser.add_argument(
-        "--max-samples",
-        type=int,
-        default=None,
-        help="Max samples per dataset (for testing)",
-    )
-    parser.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=256,
-        help="Max new tokens for generation",
-    )
-    parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=None,
-        help="Specific datasets to process (default: all)",
-    )
-    parser.add_argument(
-        "--compile",
-        action="store_true",
-        help="Use torch.compile for faster inference",
-    )
-    parser.add_argument(
-        "--push-every",
-        type=int,
-        default=1,
-        help="Push to hub every N datasets (default: 1)",
-    )
-    args = parser.parse_args()
+app = typer.Typer(help="Generate SIFT datasets for paralinguistic training")
 
+
+@app.command()
+def main(
+    output_repo: Annotated[
+        str, typer.Option(help="HuggingFace repo ID for output")
+    ] = "mazesmazes/sift-audio",
+    model_name: Annotated[
+        str, typer.Option(help="LLM model for response generation")
+    ] = "Qwen/Qwen3-4B",
+    max_samples: Annotated[
+        int | None, typer.Option(help="Max samples per dataset (for testing)")
+    ] = None,
+    max_new_tokens: Annotated[int, typer.Option(help="Max new tokens for generation")] = 256,
+    datasets: Annotated[list[str] | None, typer.Option(help="Specific datasets to process")] = None,
+    num_proc: Annotated[int, typer.Option(help="Number of CPU processes for preprocessing")] = 32,
+    push_every: Annotated[int, typer.Option(help="Push to hub every N datasets")] = 1,
+):
+    """Generate SIFT datasets for paralinguistic training."""
     # Filter datasets if specified
     configs = DATASET_CONFIGS
-    if args.datasets:
-        configs = [c for c in configs if c.name in args.datasets]
+    if datasets:
+        configs = [c for c in configs if c.name in datasets]
         if not configs:
-            print(f"No matching datasets found. Available: {[c.name for c in DATASET_CONFIGS]}")
-            return
+            typer.echo(
+                f"No matching datasets found. Available: {[c.name for c in DATASET_CONFIGS]}"
+            )
+            raise typer.Exit(1)
 
-    print(f"Processing {len(configs)} datasets")
-    print(f"Model: {args.model_name}")
-    print(f"Output: {args.output_repo}")
+    typer.echo(f"Processing {len(configs)} datasets")
+    typer.echo(f"Model: {model_name}")
+    typer.echo(f"Output: {output_repo}")
 
-    # Load model
-    print(f"\nLoading model {args.model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, padding_side="left")
+    # Load tokenizer and create pipeline
+    typer.echo(f"\nLoading model {model_name}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
+    pipe = pipeline(
+        "text-generation",
+        model=model_name,
+        tokenizer=tokenizer,
         dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
         device_map="auto",
+        model_kwargs={"attn_implementation": "flash_attention_2"},
     )
-    model.eval()
-
-    if args.compile:
-        print("Compiling model with torch.compile...")
-        model = torch.compile(model)
 
     # Process each dataset
     all_datasets = {}
@@ -505,11 +528,11 @@ def main():
         try:
             ds = process_dataset(
                 config=config,
-                model=model,
+                pipe=pipe,
                 tokenizer=tokenizer,
-                batch_size=args.batch_size,
-                max_samples=args.max_samples,
-                max_new_tokens=args.max_new_tokens,
+                max_samples=max_samples,
+                max_new_tokens=max_new_tokens,
+                num_proc=num_proc,
             )
 
             if ds is not None:
@@ -517,27 +540,27 @@ def main():
                 datasets_processed += 1
 
                 # Push periodically
-                if datasets_processed % args.push_every == 0:
-                    print(f"\nPushing {len(all_datasets)} splits to {args.output_repo}...")
+                if datasets_processed % push_every == 0:
+                    typer.echo(f"\nPushing {len(all_datasets)} splits to {output_repo}...")
                     dataset_dict = DatasetDict(all_datasets)
-                    dataset_dict.push_to_hub(args.output_repo, private=False)
+                    dataset_dict.push_to_hub(output_repo, private=False)
 
         except Exception as e:
             import traceback
 
-            print(f"Error processing {config.name}: {e}")
+            typer.echo(f"Error processing {config.name}: {e}")
             traceback.print_exc()
             continue
 
     # Final push
     if all_datasets:
-        print(f"\nFinal push: {len(all_datasets)} splits to {args.output_repo}...")
+        typer.echo(f"\nFinal push: {len(all_datasets)} splits to {output_repo}...")
         dataset_dict = DatasetDict(all_datasets)
-        dataset_dict.push_to_hub(args.output_repo, private=False)
-        print("Done!")
+        dataset_dict.push_to_hub(output_repo, private=False)
+        typer.echo("Done!")
     else:
-        print("No datasets were successfully processed.")
+        typer.echo("No datasets were successfully processed.")
 
 
 if __name__ == "__main__":
-    main()
+    app()

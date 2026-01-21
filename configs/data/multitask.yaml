@@ -48,6 +48,45 @@ datasets:
       - meld
     sampling_weight: 2.0
 
+  # TESS: emotion + gender (all female, 7 emotion classes)
+  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
+    audio_column: audio
+    text_column: text
+    sift_response_column: sift_response
+    emotion_column: emotion
+    gender_column: gender
+    train_splits:
+      - tess
+    eval_splits:
+      - tess
+    sampling_weight: 2.0
+
+  # SAVEE: emotion + gender (all male, 7 emotion classes)
+  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
+    audio_column: audio
+    text_column: text
+    sift_response_column: sift_response
+    emotion_column: emotion
+    gender_column: gender
+    train_splits:
+      - savee
+    eval_splits:
+      - savee
+    sampling_weight: 2.0
+
+  # ESD: emotion + gender (male and female, 5 emotion classes)
+  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
+    audio_column: audio
+    text_column: text
+    sift_response_column: sift_response
+    emotion_column: emotion
+    gender_column: gender
+    train_splits:
+      - esd
+    eval_splits:
+      - esd
+    sampling_weight: 2.0
+
 # Audio processing
 sample_rate: 16000
 
