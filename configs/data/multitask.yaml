@@ -1,91 +1,21 @@
 # Multitask dataset configuration for SIFT training
-# Combines LoquaciousSet (ASR) with paralinguistic datasets
-#
-# Generate SIFT data first with: ta runpod sift <host> <port>
-# (outputs to mazesmazes/sift-audio by default)
-#
-# Dataset columns:
-#   - audio: audio data
-#   - text: transcription
-#   - sift_response: LLM-generated response
-#   - emotion, gender, age: paralinguistic labels
+# Uses pre-generated sift_instruction and sift_response columns from sift-audio dataset
 
 datasets:
-  # CREMA-D: emotion + text (also used for eval)
-  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
+  - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
-    sift_response_column: sift_response
-    emotion_column: emotion
     train_splits:
       - crema_d
+      - ravdess
+      - tess
+      - savee
+      - esd
+      - loquacious
+      - podcast
     eval_splits:
       - crema_d
-    sampling_weight: 2.0
-
-  # RAVDESS: emotion + gender + text
-  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
-    audio_column: audio
-    text_column: text
-    sift_response_column: sift_response
-    emotion_column: emotion
-    gender_column: gender
-    train_splits:
-      - ravdess
-    eval_splits:
-      - ravdess
-    sampling_weight: 2.0
-
-  # MELD: emotion + text (TV show Friends dialogue)
-  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
-    audio_column: audio
-    text_column: text
-    sift_response_column: sift_response
-    emotion_column: emotion
-    train_splits:
-      - meld
-    eval_splits:
-      - meld
-    sampling_weight: 2.0
-
-  # TESS: emotion + gender (all female, 7 emotion classes)
-  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
-    audio_column: audio
-    text_column: text
-    sift_response_column: sift_response
-    emotion_column: emotion
-    gender_column: gender
-    train_splits:
-      - tess
-    eval_splits:
-      - tess
-    sampling_weight: 2.0
-
-  # SAVEE: emotion + gender (all male, 7 emotion classes)
-  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
-    audio_column: audio
-    text_column: text
-    sift_response_column: sift_response
-    emotion_column: emotion
-    gender_column: gender
-    train_splits:
-      - savee
-    eval_splits:
-      - savee
-    sampling_weight: 2.0
-
-  # ESD: emotion + gender (male and female, 5 emotion classes)
-  - path: ${oc.env:SIFT_DATASET_REPO,mazesmazes/sift-audio}
-    audio_column: audio
-    text_column: text
-    sift_response_column: sift_response
-    emotion_column: emotion
-    gender_column: gender
-    train_splits:
-      - esd
-    eval_splits:
-      - esd
-    sampling_weight: 2.0
+    sampling_weight: 1.0
 
 # Audio processing
 sample_rate: 16000
@@ -93,4 +23,4 @@ sample_rate: 16000
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_train_samples: null
-max_eval_samples: null  # Use all available samples
+max_eval_samples: 2000

@@ -35,12 +35,13 @@ def extract_dataset_name(dir_name: str) -> str:
       - {timestamp}_{model}_{dataset} -> dataset
       - {timestamp}_{model}_{dataset}_diarization -> dataset
       - {timestamp}_{model}_{dataset}_alignment -> dataset
+      - {timestamp}_{model}_{dataset}_mcq -> dataset
     """
     parts = dir_name.split("_")
     if not parts:
         return "unknown"
     dataset = parts[-1]
-    if dataset in ("diarization", "alignment") and len(parts) > 1:
+    if dataset in ("diarization", "alignment", "mcq") and len(parts) > 1:
         dataset = parts[-2]
     return dataset
 
@@ -359,6 +360,9 @@ DATASET_ORDER = [
     "switchboard",
 ]
 
+# Datasets to exclude from comparison tables
+EXCLUDED_DATASETS = {"classification"}
+
 # Short names for display
 DATASET_SHORT_NAMES = {
     "earnings22": "Earnings22",
@@ -394,6 +398,7 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
         "by_length": defaultdict(lambda: {"samples": [], "wers": []}),
         "diarization": None,
         "alignment": None,
+        "mcq": {},  # MCQ results keyed by dataset name (e.g., "mmau")
         "entity_errors": defaultdict(lambda: {"found": 0, "total": 0}),
         "itn_errors": defaultdict(lambda: {"correct": 0, "total": 0}),
     }
@@ -414,7 +419,7 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
         metrics_file = dir_path / "metrics.txt"
         dir_name = dir_path.name
 
-        # Check for diarization/alignment results (special handling)
+        # Check for diarization/alignment/mcq results (special handling)
         if dir_name.endswith("_diarization"):
             if metrics_file.exists():
                 metrics["diarization"] = parse_metrics_file(metrics_file)
@@ -422,6 +427,11 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
         if dir_name.endswith("_alignment"):
             if metrics_file.exists():
                 metrics["alignment"] = parse_metrics_file(metrics_file)
+            continue
+        if dir_name.endswith("_mcq"):
+            if metrics_file.exists():
+                dataset = extract_dataset_name(dir_name)
+                metrics["mcq"][dataset] = parse_metrics_file(metrics_file)
             continue
 
         dataset = extract_dataset_name(dir_name)
@@ -546,10 +556,11 @@ def compare(
         console.print(f"Collecting metrics for '{model}'...")
         model_metrics[model] = collect_model_metrics(model, output_dir, exclude)
 
-    # Get all datasets present across models
+    # Get all datasets present across models (excluding certain datasets)
     all_datasets = set()
     for m in model_metrics.values():
         all_datasets.update(m["datasets"].keys())
+    all_datasets -= EXCLUDED_DATASETS
 
     # Order datasets according to canonical order
     ordered_datasets = [d for d in DATASET_ORDER if d in all_datasets]
@@ -694,6 +705,37 @@ def compare(
                 align_table.add_row(display_name, "-", "-")
 
         console.print(align_table)
+
+    # === MCQ/Audio Understanding Table ===
+    # Collect all MCQ datasets across models
+    all_mcq_datasets = set()
+    for m in model_metrics.values():
+        all_mcq_datasets.update(m["mcq"].keys())
+
+    if all_mcq_datasets:
+        console.print("\n")
+        mcq_table = Table(title="Audio Understanding (MCQ Accuracy)")
+        mcq_table.add_column("Model", style="cyan")
+        for mcq_ds in sorted(all_mcq_datasets):
+            mcq_table.add_column(mcq_ds.upper(), justify="right")
+
+        for model, data in model_metrics.items():
+            display_name = data.get("display_name", model)
+            row = [display_name]
+            for mcq_ds in sorted(all_mcq_datasets):
+                mcq_data = data["mcq"].get(mcq_ds, {})
+                accuracy = mcq_data.get("accuracy")
+                if accuracy is not None:
+                    # Handle both float and string (e.g., "19.00%") formats
+                    if isinstance(accuracy, str):
+                        row.append(accuracy if "%" in accuracy else f"{accuracy}%")
+                    else:
+                        row.append(f"{accuracy:.2f}%")
+                else:
+                    row.append("-")
+            mcq_table.add_row(*row)
+
+        console.print(mcq_table)
 
     # === Entity Errors Table ===
     # Get all entity types across models

@@ -1,20 +1,15 @@
 # @package _global_
-# Multitask training with MLP projector
-# Trains on ASR + Paralinguistic datasets (CREMA-D, RAVDESS, etc.)
+# Multitask SIFT training with MLP projector
+# Uses pre-generated sift-audio dataset with sift_instruction and sift_response columns
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=mlp_multitask
-#
-# Prerequisites:
-#   1. Generate SIFT dataset: ta runpod sift <host> <port>
-#      (defaults to mazesmazes/sift-audio)
-#   2. Or set SIFT_DATASET_REPO env var to override
 
 defaults:
   - override /data: multitask
 
 model:
-  pretrained_model_path: mazesmazes/tiny-audio  # Start from pretrained
+  pretrained_model_path: mazesmazes/tiny-audio  # Start from pretrained transcription model
   projector_type: mlp
   projector_pool_stride: 4
   audio_model_id: zai-org/GLM-ASR-Nano-2512
@@ -23,28 +18,22 @@ model:
 # Multitask configuration
 multitask:
   enabled: true
-  # SIFT mode: "mixed" randomly selects between 4 modes (25% each):
-  # - transcription: Standard transcription with prompts (like mlp.yaml)
-  # - sift_s: Transcription only (no system message, no prompt)
-  # - sift_ssp: SIFT response with system message (no instruction)
-  # - sit_ssp: SIFT response with system message + instruction
-  sift_mode: mixed
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-multitask"
-  group_by_length: false  # SIFT dataset doesn't have duration column
+  group_by_length: false
   learning_rate: 1e-3
   warmup_steps: 1000
   lr_scheduler_type: polynomial
   lr_scheduler_kwargs:
     power: 0.5
   seed: 42
-  per_device_train_batch_size: 14  # Slightly smaller for mixed data
+  per_device_train_batch_size: 14
   per_device_eval_batch_size: 14
   gradient_accumulation_steps: 1
   num_train_epochs: 4
-  save_steps: 10000
-  eval_steps: 10000
+  save_steps: 5000
+  eval_steps: 5000
 
   label_smoothing_factor: 0.1
   weight_decay: 0.0

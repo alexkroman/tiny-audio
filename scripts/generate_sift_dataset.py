@@ -29,16 +29,32 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig, pipeline
 from transformers.pipelines.pt_utils import KeyDataset
 
-# System message for paralinguistic-aware responses
+# System message for generating varied instructions and responses
 SIFT_SYSTEM_MESSAGE = (
-    "You are a speech perception system that describes audio content in third person. "
-    "Audio input is provided in <audio> tags with transcription and speaker characteristics. "
-    "Describe what is being said and how, using phrases like 'A person is saying...' or 'Someone says...'. "
-    "Do NOT use first person ('I hear'). Do NOT echo metadata directly ('the emotion is X'). "
-    "Naturally incorporate the speaker's tone and emotion into your description."
+    "You are a speech perception system that generates training data for audio understanding models. "
+    "You will be given audio metadata in <audio> tags containing transcription and speaker characteristics. "
+    "Your task is to generate TWO things:\n"
+    "1. INSTRUCTION: A natural question or command asking about the audio (vary widely between different types)\n"
+    "2. RESPONSE: A third-person response that answers the instruction based on the audio metadata.\n\n"
+    "Format your output EXACTLY as:\n"
+    "INSTRUCTION: <your varied instruction here>\n"
+    "RESPONSE: <your response here>\n\n"
+    "Example instructions to vary between:\n"
+    "- Transcription: 'What did they say?', 'Transcribe this audio', 'Repeat what was spoken', 'What words are spoken?'\n"
+    "- Description: 'Describe what you hear', 'What's happening in this audio?', 'Summarize this speech'\n"
+    "- Emotion: 'How does the speaker sound?', 'What emotion is conveyed?', 'Describe the speaker\\'s tone', "
+    "'What is the emotional state of the speaker?'\n"
+    "- Speaker attributes: 'Who is speaking?', 'Describe the speaker', 'What can you tell about the speaker?', "
+    "'Identify the source of the speaking voice', 'Is this a male or female speaker?'\n"
+    "- Speaking style: 'How fast is the speaker talking?', 'Describe the speaking rate', "
+    "'Is the speech slow, normal, or fast?', 'What is the pace of the speech?'\n"
+    "- Acoustic source: 'Identify the source of the speech', 'What type of voice is present in the audio?'\n"
+    "- Combined: 'Describe all information you can hear', 'What can you tell me about this audio?', "
+    "'Analyze the speech in this audio'\n\n"
+    "Keep responses natural and in third person. Do NOT just echo metadata directly."
 )
 
-# Instruction for SIT mode
+# Fallback instruction if parsing fails
 SIFT_INSTRUCTION = "Describe the audio in 1-2 sentences using third person."
 
 
@@ -55,9 +71,12 @@ class DatasetConfig:
     emotion_field: str | None = None
     gender_field: str | None = None
     age_field: str | None = None
+    speaking_rate_field: str | None = None
+    accent_field: str | None = None
     weight: float = 1.0
     max_samples: int | None = None  # Per-dataset sample limit (overrides --max-samples)
     emotion_map: dict | None = None  # Map numeric labels to emotion strings
+    num_responses: int | None = None  # Per-dataset override for responses per sample
 
 
 # Emotion label mappings for datasets with numeric labels
@@ -77,16 +96,17 @@ DATASET_CONFIGS = [
         weight=2.0,
         emotion_map=CREMA_D_EMOTIONS,
     ),
-    # RAVDESS: emotion, gender, text
+    # RAVDESS: emotion, gender, speaking_rate (AbstractTTS version)
     DatasetConfig(
         name="ravdess",
-        hf_path="narad/ravdess",
+        hf_path="AbstractTTS/RAVDESS",
         split="train",
         audio_field="audio",
-        text_field="text",  # Spoken utterance
+        text_field="transcription",
         emotion_field="emotion",
-        gender_field="speaker_gender",
+        gender_field="gender",
         age_field=None,
+        speaking_rate_field="speaking_rate",
         weight=2.0,
     ),
     # TESS: emotion + gender (all female speakers)
@@ -130,7 +150,6 @@ DATASET_CONFIGS = [
         max_samples=5000,  # Limit since it's large
     ),
     # LoquaciousSet: ASR dataset with gender metadata
-    # Limited to 10k samples since it's much larger than paralinguistic datasets
     DatasetConfig(
         name="loquacious",
         hf_path="speechbrain/LoquaciousSet",
@@ -142,7 +161,21 @@ DATASET_CONFIGS = [
         gender_field="sex",  # Has male/female labels
         age_field=None,
         weight=1.0,
-        max_samples=10000,
+    ),
+    # PODCAST: emotion, gender, speaking_rate from podcast recordings
+    # 149k samples with 16 emotion classes
+    DatasetConfig(
+        name="podcast",
+        hf_path="AbstractTTS/PODCAST",
+        split="train",
+        audio_field="audio",
+        text_field="transcription",
+        emotion_field="major_emotion",
+        gender_field="gender",
+        age_field=None,
+        speaking_rate_field="speaking_rate",
+        weight=1.0,
+        max_samples=20000,  # Limit since it's very large (149k)
     ),
 ]
 
@@ -166,6 +199,39 @@ def age_to_group(age: str | int | None) -> str | None:
         # Already a string like "young adult"
         if isinstance(age, str) and age.lower() not in ("", "na", "null", "unk", "unknown", "nan"):
             return age.lower()
+        return None
+
+
+def speaking_rate_to_label(rate: str | float | None) -> str | None:
+    """Convert numeric speaking rate to text label. Returns None for missing/invalid values.
+
+    Speaking rate thresholds based on typical speech rates:
+    - Slow: < 3.0 words/sec (< 180 wpm)
+    - Normal: 3.0 - 4.5 words/sec (180-270 wpm)
+    - Fast: > 4.5 words/sec (> 270 wpm)
+    """
+    if rate is None:
+        return None
+    try:
+        rate_float = float(rate)
+        if rate_float <= 0:
+            return None
+        if rate_float < 3.0:
+            return "slow"
+        if rate_float <= 4.5:
+            return "normal"
+        return "fast"
+    except (ValueError, TypeError):
+        # Already a string like "fast", "slow", "normal"
+        if isinstance(rate, str) and rate.lower() not in (
+            "",
+            "na",
+            "null",
+            "unk",
+            "unknown",
+            "nan",
+        ):
+            return rate.lower()
         return None
 
 
@@ -227,6 +293,8 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         "emotion": None,
         "gender": None,
         "age": None,
+        "speaking_rate": None,
+        "accent": None,
     }
 
     # Extract text transcription
@@ -259,21 +327,33 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
     if config.age_field and config.age_field in sample:
         metadata["age"] = age_to_group(sample[config.age_field])
 
+    # Extract speaking rate (convert numeric to label if needed)
+    if config.speaking_rate_field and config.speaking_rate_field in sample:
+        raw_rate = sample[config.speaking_rate_field]
+        metadata["speaking_rate"] = speaking_rate_to_label(raw_rate)
+
+    # Extract accent
+    if config.accent_field and config.accent_field in sample:
+        accent = normalize_label(sample[config.accent_field])
+        metadata["accent"] = accent
+
     return metadata
 
 
-def build_prompt(metadata: dict) -> tuple[str, str]:
-    """Build input text and user content for SIT_SSP mode.
+def build_prompt(metadata: dict) -> str:
+    """Build input text with audio metadata for LLM to generate instruction and response.
 
     Returns:
-        (input_text, user_content) - input_text is for metadata, user_content is full prompt
+        user_content - the prompt for the LLM containing audio metadata
     """
     # Build paralinguistic metadata
     para_parts = []
-    for key in ["age", "gender", "emotion"]:
+    for key in ["age", "gender", "emotion", "speaking_rate", "accent"]:
         value = metadata.get(key)
         if value is not None:
-            para_parts.append(f"{key}: {value}")
+            # Use more natural key names in the prompt
+            display_key = key.replace("_", " ")
+            para_parts.append(f"{display_key}: {value}")
 
     # Format input with audio tags
     if para_parts and metadata["text"]:
@@ -287,10 +367,31 @@ def build_prompt(metadata: dict) -> tuple[str, str]:
     else:
         input_text = "<audio></audio>"
 
-    # Add instruction
-    user_content = f"{input_text} {SIFT_INSTRUCTION}"
+    # Ask LLM to generate both instruction and response
+    return f"{input_text}\n\nGenerate a varied INSTRUCTION and RESPONSE for this audio."
 
-    return input_text, user_content
+
+def parse_instruction_response(text: str) -> tuple[str, str]:
+    """Parse LLM output to extract instruction and response.
+
+    Returns:
+        (instruction, response) - parsed values or fallbacks if parsing fails
+    """
+    instruction = SIFT_INSTRUCTION  # Fallback
+    response = text.strip()  # Fallback to full text
+
+    # Try to parse INSTRUCTION: and RESPONSE: format
+    instruction_match = re.search(
+        r"INSTRUCTION:\s*(.+?)(?=\nRESPONSE:|$)", text, re.DOTALL | re.IGNORECASE
+    )
+    response_match = re.search(r"RESPONSE:\s*(.+?)$", text, re.DOTALL | re.IGNORECASE)
+
+    if instruction_match:
+        instruction = instruction_match.group(1).strip()
+    if response_match:
+        response = response_match.group(1).strip()
+
+    return instruction, response
 
 
 def process_dataset(
@@ -300,10 +401,23 @@ def process_dataset(
     batch_size: int,
     max_samples: int | None,
     max_new_tokens: int,
+    num_responses: int = 1,
     num_proc: int = 32,
 ) -> Dataset | None:
-    """Process a single dataset and generate SIFT responses using datasets.map()."""
-    print(f"\nProcessing {config.name}...")
+    """Process a single dataset and generate SIFT responses using datasets.map().
+
+    Args:
+        num_responses: Number of instruction-response pairs to generate per audio sample.
+                      Each audio will appear num_responses times in the output with different
+                      instructions and responses.
+    """
+    # Use per-dataset override if specified
+    effective_num_responses = (
+        config.num_responses if config.num_responses is not None else num_responses
+    )
+    print(
+        f"\nProcessing {config.name} (generating {effective_num_responses} responses per sample)..."
+    )
 
     # Load dataset
     ds = load_dataset(
@@ -360,7 +474,14 @@ def process_dataset(
         """Extract metadata and build prompts for batch."""
         num_examples = len(examples[config.audio_field])
         prompts = []
-        metadata_lists = {"text": [], "emotion": [], "gender": [], "age": []}
+        metadata_lists = {
+            "text": [],
+            "emotion": [],
+            "gender": [],
+            "age": [],
+            "speaking_rate": [],
+            "accent": [],
+        }
 
         for i in range(num_examples):
             # Build sample dict for extract_metadata
@@ -371,8 +492,8 @@ def process_dataset(
             for key in metadata_lists:
                 metadata_lists[key].append(metadata[key])
 
-            # Build prompt
-            _, user_content = build_prompt(metadata)
+            # Build prompt (LLM will generate both instruction and response)
+            user_content = build_prompt(metadata)
             messages = [
                 {"role": "system", "content": SIFT_SYSTEM_MESSAGE},
                 {"role": "user", "content": user_content},
@@ -391,6 +512,8 @@ def process_dataset(
             "meta_emotion": metadata_lists["emotion"],
             "meta_gender": metadata_lists["gender"],
             "meta_age": metadata_lists["age"],
+            "meta_speaking_rate": metadata_lists["speaking_rate"],
+            "meta_accent": metadata_lists["accent"],
         }
 
     # Apply transformations
@@ -398,29 +521,76 @@ def process_dataset(
     ds = ds.map(prepare_examples, batched=True, num_proc=num_proc, desc="Preparing")
 
     # Generate responses using pipeline with dataset (more efficient than .map())
-    print("  Generating responses...")
+    print("  Generating instructions and responses...")
     thinking_pattern = re.compile(r"<think>.*?</think>", re.DOTALL)
     generation_config = GenerationConfig(
         max_new_tokens=max_new_tokens,
-        do_sample=False,
+        do_sample=True,
+        temperature=0.7,
+        top_p=0.9,
     )
 
-    # Use KeyDataset to iterate efficiently over the prompt column
-    responses = []
-    for out in tqdm(
-        pipe(
-            KeyDataset(ds, "prompt"),
-            generation_config=generation_config,
-            batch_size=batch_size,
-            return_full_text=False,
-        ),
-        total=len(ds),
-        desc="Generating",
-    ):
-        text = thinking_pattern.sub("", out[0]["generated_text"]).strip()
-        responses.append(text)
+    # Generate multiple responses per sample if requested
+    if effective_num_responses > 1:
+        # Repeat prompts for multiple generations per sample
+        all_prompts = []
+        sample_indices = []
+        response_indices = []
+        for idx, prompt in enumerate(ds["prompt"]):
+            for resp_idx in range(effective_num_responses):
+                all_prompts.append(prompt)
+                sample_indices.append(idx)
+                response_indices.append(resp_idx)
 
-    ds = ds.add_column("sift_response", responses)
+        # Create temporary dataset with repeated prompts
+        from datasets import Dataset as HFDataset
+
+        prompt_ds = HFDataset.from_dict({"prompt": all_prompts})
+
+        instructions = []
+        responses = []
+        for out in tqdm(
+            pipe(
+                KeyDataset(prompt_ds, "prompt"),
+                generation_config=generation_config,
+                batch_size=batch_size,
+                return_full_text=False,
+            ),
+            total=len(prompt_ds),
+            desc=f"Generating ({effective_num_responses}x)",
+        ):
+            text = thinking_pattern.sub("", out[0]["generated_text"]).strip()
+            instruction, response = parse_instruction_response(text)
+            instructions.append(instruction)
+            responses.append(response)
+
+        # Expand dataset by selecting samples according to sample_indices
+        ds = ds.select(sample_indices)
+        ds = ds.add_column("sift_instruction", instructions)
+        ds = ds.add_column("sift_response", responses)
+        ds = ds.add_column("response_idx", response_indices)
+    else:
+        # Single response per sample (original behavior)
+        instructions = []
+        responses = []
+        for out in tqdm(
+            pipe(
+                KeyDataset(ds, "prompt"),
+                generation_config=generation_config,
+                batch_size=batch_size,
+                return_full_text=False,
+            ),
+            total=len(ds),
+            desc="Generating",
+        ):
+            text = thinking_pattern.sub("", out[0]["generated_text"]).strip()
+            instruction, response = parse_instruction_response(text)
+            instructions.append(instruction)
+            responses.append(response)
+
+        ds = ds.add_column("sift_instruction", instructions)
+        ds = ds.add_column("sift_response", responses)
+        ds = ds.add_column("response_idx", [0] * len(ds))
 
     # Compute duration from audio
     def compute_duration(examples):
@@ -436,7 +606,11 @@ def process_dataset(
     ds = ds.map(compute_duration, batched=True, num_proc=num_proc)
 
     # Remove original columns that would conflict with our renamed columns
-    conflict_cols = [c for c in ["text", "emotion", "gender", "age"] if c in ds.column_names]
+    conflict_cols = [
+        c
+        for c in ["text", "emotion", "gender", "age", "speaking_rate", "accent"]
+        if c in ds.column_names
+    ]
     if conflict_cols:
         ds = ds.remove_columns(conflict_cols)
 
@@ -447,6 +621,8 @@ def process_dataset(
             "meta_emotion": "emotion",
             "meta_gender": "gender",
             "meta_age": "age",
+            "meta_speaking_rate": "speaking_rate",
+            "meta_accent": "accent",
         }
     )
     ds = ds.add_column("source_dataset", [config.name] * len(ds))
@@ -458,7 +634,11 @@ def process_dataset(
         "emotion",
         "gender",
         "age",
+        "speaking_rate",
+        "accent",
+        "sift_instruction",
         "sift_response",
+        "response_idx",
         "source_dataset",
         "duration",
     ]
@@ -470,6 +650,10 @@ def process_dataset(
     ds = ds.cast_column("emotion", Value("string"))
     ds = ds.cast_column("gender", Value("string"))
     ds = ds.cast_column("age", Value("string"))
+    ds = ds.cast_column("speaking_rate", Value("string"))
+    ds = ds.cast_column("accent", Value("string"))
+    ds = ds.cast_column("sift_instruction", Value("string"))
+    ds = ds.cast_column("response_idx", Value("int32"))
     ds = ds.cast_column("duration", Value("float64"))
     return ds.cast_column("audio", Audio(sampling_rate=16000))
 
@@ -484,12 +668,15 @@ def main(
     ] = "mazesmazes/sift-audio",
     model_name: Annotated[
         str, typer.Option(help="LLM model for response generation")
-    ] = "Qwen/Qwen3-4B",
+    ] = "Qwen/Qwen3-8B",
     batch_size: Annotated[int, typer.Option(help="Batch size for generation")] = 512,
     max_samples: Annotated[
         int | None, typer.Option(help="Max samples per dataset (for testing)")
     ] = None,
     max_new_tokens: Annotated[int, typer.Option(help="Max new tokens for generation")] = 256,
+    num_responses: Annotated[
+        int, typer.Option(help="Number of instruction-response pairs per audio sample")
+    ] = 3,
     datasets: Annotated[list[str] | None, typer.Option(help="Specific datasets to process")] = None,
     num_proc: Annotated[int, typer.Option(help="Number of CPU processes for preprocessing")] = 32,
     push_every: Annotated[int, typer.Option(help="Push to hub every N datasets")] = 1,
@@ -507,6 +694,7 @@ def main(
 
     typer.echo(f"Processing {len(configs)} datasets")
     typer.echo(f"Model: {model_name}")
+    typer.echo(f"Responses per sample: {num_responses}")
     typer.echo(f"Output: {output_repo}")
 
     # Load tokenizer and create pipeline
@@ -537,6 +725,7 @@ def main(
                 batch_size=batch_size,
                 max_samples=max_samples,
                 max_new_tokens=max_new_tokens,
+                num_responses=num_responses,
                 num_proc=num_proc,
             )
 
