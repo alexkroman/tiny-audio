@@ -516,7 +516,7 @@ def sift(
     session_name: str | None = typer.Option(
         None, "--session-name", "-s", help="Custom tmux session name"
     ),
-    batch_size: int = typer.Option(1024, "--batch-size", "-b", help="Batch size for generation"),
+    batch_size: int = typer.Option(128, "--batch-size", "-b", help="Batch size for generation"),
     max_samples: int | None = typer.Option(
         None, "--max-samples", "-n", help="Max samples per dataset"
     ),

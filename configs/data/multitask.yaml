@@ -1,21 +1,60 @@
 # Multitask dataset configuration for SIFT training
 # Uses pre-generated sift_instruction and sift_response columns from sift-audio dataset
+# Weights follow Auden's conservative approach: boost small datasets without overfitting
 
 datasets:
+  # Large datasets (base weight)
   - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
-    train_splits:
-      - crema_d
-      - ravdess
-      - tess
-      - savee
-      - esd
-      - loquacious
-      - podcast
-    eval_splits:
-      - crema_d
+    train_splits: [commonvoice]
+    eval_splits: [commonvoice]
     sampling_weight: 1.0
+
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    train_splits: [podcast]
+    eval_splits: [podcast]
+    sampling_weight: 1.0
+
+  # Medium dataset
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    train_splits: [esd]
+    eval_splits: [esd]
+    sampling_weight: 3.0
+
+  # Small datasets (boosted)
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    train_splits: [crema_d]
+    eval_splits: [crema_d]
+    sampling_weight: 5.0
+
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    train_splits: [tess]
+    eval_splits: [tess]
+    sampling_weight: 10.0
+
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    train_splits: [ravdess]
+    eval_splits: [ravdess]
+    sampling_weight: 15.0
+
+  # Tiny dataset (heavily boosted)
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    train_splits: [savee]
+    eval_splits: [savee]
+    sampling_weight: 20.0
 
 # Audio processing
 sample_rate: 16000

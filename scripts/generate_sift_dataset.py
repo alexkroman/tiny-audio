@@ -24,34 +24,48 @@ import typer
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 import torch
-from datasets import Audio, Dataset, DatasetDict, Value, load_dataset
+from datasets import Audio, Dataset, DatasetDict, Features, Value, load_dataset
+from huggingface_hub import DatasetCard, DatasetCardData
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig, pipeline
 from transformers.pipelines.pt_utils import KeyDataset
 
 # System message for generating varied instructions and responses
+# Aligned with MMAU evaluation categories: Acoustic Source Inference, Temporal Reasoning, Emotion
 SIFT_SYSTEM_MESSAGE = (
-    "You are a speech perception system that generates training data for audio understanding models. "
-    "You will be given audio metadata in <audio> tags containing transcription and speaker characteristics. "
-    "Your task is to generate TWO things:\n"
-    "1. INSTRUCTION: A natural question or command asking about the audio (vary widely between different types)\n"
-    "2. RESPONSE: A third-person response that answers the instruction based on the audio metadata.\n\n"
-    "Format your output EXACTLY as:\n"
-    "INSTRUCTION: <your varied instruction here>\n"
-    "RESPONSE: <your response here>\n\n"
-    "Example instructions to vary between:\n"
-    "- Transcription: 'What did they say?', 'Transcribe this audio', 'Repeat what was spoken', 'What words are spoken?'\n"
-    "- Description: 'Describe what you hear', 'What's happening in this audio?', 'Summarize this speech'\n"
-    "- Emotion: 'How does the speaker sound?', 'What emotion is conveyed?', 'Describe the speaker\\'s tone', "
-    "'What is the emotional state of the speaker?'\n"
-    "- Speaker attributes: 'Who is speaking?', 'Describe the speaker', 'What can you tell about the speaker?', "
-    "'Identify the source of the speaking voice', 'Is this a male or female speaker?'\n"
-    "- Speaking style: 'How fast is the speaker talking?', 'Describe the speaking rate', "
-    "'Is the speech slow, normal, or fast?', 'What is the pace of the speech?'\n"
-    "- Acoustic source: 'Identify the source of the speech', 'What type of voice is present in the audio?'\n"
-    "- Combined: 'Describe all information you can hear', 'What can you tell me about this audio?', "
-    "'Analyze the speech in this audio'\n\n"
-    "Keep responses natural and in third person. Do NOT just echo metadata directly."
+    "You generate training data for audio understanding models. "
+    "Given audio metadata in <audio> tags, generate an INSTRUCTION and RESPONSE pair.\n\n"
+    "CRITICAL: Vary your outputs significantly. Each call should feel different.\n\n"
+    "INSTRUCTION TYPES (rotate between these, use MCQ format when appropriate):\n\n"
+    "SPEAKER IDENTIFICATION (25%):\n"
+    "- 'Is the speaker male or female?'\n"
+    "- 'Identify the source of the speaking voice: (A) Man (B) Woman (C) Child'\n"
+    "- 'What is the gender of the speaker?'\n"
+    "- 'Who is speaking in this audio?'\n\n"
+    "TRANSCRIPTION (25%):\n"
+    "- 'What did they say?'\n"
+    "- 'Transcribe the audio.'\n"
+    "- 'What words were spoken?'\n"
+    "- 'Write out what you hear.'\n\n"
+    "EMOTION/TONE (20%):\n"
+    "- 'What emotion is conveyed?'\n"
+    "- 'How does the speaker sound: (A) Happy (B) Sad (C) Angry (D) Neutral?'\n"
+    "- 'Describe the emotional tone.'\n"
+    "- 'What is the speaker's mood?'\n\n"
+    "SPEAKER ATTRIBUTES (15%):\n"
+    "- 'Is the speaker speaking quickly or slowly?'\n"
+    "- 'What is the speaking pace: (A) Slow (B) Normal (C) Fast?'\n"
+    "- 'Does the speaker have an accent?'\n"
+    "- 'Describe the speaker's voice characteristics.'\n\n"
+    "COMBINED ANALYSIS (15%):\n"
+    "- 'Describe who is speaking and how they sound.'\n"
+    "- 'What can you tell about the speaker from this audio?'\n"
+    "- 'Summarize everything about this audio clip.'\n\n"
+    "RESPONSE GUIDELINES:\n"
+    "- For MCQ instructions: respond with the letter and brief explanation, e.g., '(A) Man - The deep voice indicates a male speaker.'\n"
+    "- For open questions: vary between short ('A happy woman'), medium (1 sentence), and detailed (2-3 sentences)\n"
+    "- Be direct and factual. Avoid verbose explanations.\n\n"
+    "Format: INSTRUCTION: <text>\nRESPONSE: <text>"
 )
 
 # Fallback instruction if parsing fails
@@ -77,6 +91,7 @@ class DatasetConfig:
     max_samples: int | None = None  # Per-dataset sample limit (overrides --max-samples)
     emotion_map: dict | None = None  # Map numeric labels to emotion strings
     num_responses: int | None = None  # Per-dataset override for responses per sample
+    max_down_votes: int | None = None  # Filter out samples with down_votes above this value
 
 
 # Emotion label mappings for datasets with numeric labels
@@ -109,7 +124,7 @@ DATASET_CONFIGS = [
         speaking_rate_field="speaking_rate",
         weight=2.0,
     ),
-    # TESS: emotion + gender (all female speakers)
+    # TESS: emotion + gender + speaking_rate (all female speakers)
     # 2,800 samples with 7 emotion classes
     DatasetConfig(
         name="tess",
@@ -120,9 +135,10 @@ DATASET_CONFIGS = [
         emotion_field="emotion",
         gender_field="gender",
         age_field=None,
+        speaking_rate_field="speaking_rate",
         weight=2.0,
     ),
-    # SAVEE: emotion + gender (all male speakers)
+    # SAVEE: emotion + gender + speaking_rate (all male speakers)
     # 480 samples with 7 emotion classes
     DatasetConfig(
         name="savee",
@@ -133,9 +149,10 @@ DATASET_CONFIGS = [
         emotion_field="emotion",
         gender_field="gender",
         age_field=None,
+        speaking_rate_field="speaking_rate",
         weight=2.0,
     ),
-    # ESD English: emotion + gender (male and female)
+    # ESD English: emotion + gender + speaking_rate (male and female)
     # 17,500 samples with 5 emotion classes
     DatasetConfig(
         name="esd",
@@ -146,21 +163,8 @@ DATASET_CONFIGS = [
         emotion_field="emotion",
         gender_field="gender",
         age_field=None,
+        speaking_rate_field="speaking_rate",
         weight=2.0,
-        max_samples=5000,  # Limit since it's large
-    ),
-    # LoquaciousSet: ASR dataset with gender metadata
-    DatasetConfig(
-        name="loquacious",
-        hf_path="speechbrain/LoquaciousSet",
-        hf_config="small",
-        split="train",
-        audio_field="wav",
-        text_field="text",
-        emotion_field=None,
-        gender_field="sex",  # Has male/female labels
-        age_field=None,
-        weight=1.0,
     ),
     # PODCAST: emotion, gender, speaking_rate from podcast recordings
     # 149k samples with 16 emotion classes
@@ -175,7 +179,23 @@ DATASET_CONFIGS = [
         age_field=None,
         speaking_rate_field="speaking_rate",
         weight=1.0,
-        max_samples=20000,  # Limit since it's very large (149k)
+    ),
+    # CommonVoice: Large-scale multilingual dataset (English subset)
+    # Has age, gender, accent metadata
+    DatasetConfig(
+        name="commonvoice",
+        hf_path="fixie-ai/common_voice_17_0",
+        hf_config="en",
+        split="train",
+        audio_field="audio",
+        text_field="sentence",
+        emotion_field=None,
+        gender_field="gender",
+        age_field="age",
+        accent_field="accent",
+        weight=1.0,
+        max_samples=300000,
+        max_down_votes=0,  # Only use samples with no downvotes
     ),
 ]
 
@@ -287,14 +307,18 @@ def normalize_emotion(value: str | None) -> str | None:
 
 
 def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
-    """Extract paralinguistic metadata from a sample."""
+    """Extract paralinguistic metadata from a sample.
+
+    Returns empty strings instead of None to ensure consistent schema
+    across multiprocessing batches in datasets.map().
+    """
     metadata = {
         "text": "",
-        "emotion": None,
-        "gender": None,
-        "age": None,
-        "speaking_rate": None,
-        "accent": None,
+        "emotion": "",
+        "gender": "",
+        "age": "",
+        "speaking_rate": "",
+        "accent": "",
     }
 
     # Extract text transcription
@@ -350,7 +374,7 @@ def build_prompt(metadata: dict) -> str:
     para_parts = []
     for key in ["age", "gender", "emotion", "speaking_rate", "accent"]:
         value = metadata.get(key)
-        if value is not None:
+        if value:  # Skip empty strings and None
             # Use more natural key names in the prompt
             display_key = key.replace("_", " ")
             para_parts.append(f"{display_key}: {value}")
@@ -394,6 +418,77 @@ def parse_instruction_response(text: str) -> tuple[str, str]:
     return instruction, response
 
 
+def create_dataset_card(repo_id: str, splits: list[str]) -> None:
+    """Create and push a dataset card with proper metadata."""
+    card_data = DatasetCardData(
+        language=["en"],
+        license="cc-by-nc-sa-4.0",
+        task_categories=["automatic-speech-recognition", "audio-classification"],
+        tags=["audio", "speech", "sift", "instruction-tuning", "emotion-recognition"],
+        pretty_name="SIFT Audio Dataset",
+    )
+
+    splits_list = "\n".join(f"- `{split}`" for split in sorted(splits))
+
+    card_content = f"""---
+{card_data.to_yaml()}
+---
+
+# SIFT Audio Dataset
+
+Self-Instruction Fine-Tuning (SIFT) dataset for training audio understanding models.
+
+## Dataset Description
+
+This dataset contains audio samples paired with varied instruction-response pairs generated
+using LLM-based data augmentation. Each audio sample includes:
+
+- **Transcription**: What was spoken in the audio
+- **Speaker metadata**: Gender, emotion, speaking rate (where available)
+- **Instruction**: A natural language question or command about the audio
+- **Response**: A natural language response answering the instruction
+
+## Splits
+
+{splits_list}
+
+## Usage
+
+```python
+from datasets import load_dataset
+
+# Load a specific split
+ds = load_dataset("{repo_id}", split="loquacious")
+
+# Access a sample
+sample = ds[0]
+print(sample["sift_instruction"])
+print(sample["sift_response"])
+```
+
+## Columns
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `audio` | Audio | Audio waveform |
+| `text` | string | Transcription of the audio |
+| `emotion` | string | Detected emotion (if available) |
+| `gender` | string | Speaker gender (if available) |
+| `speaking_rate` | string | Speaking pace (if available) |
+| `sift_instruction` | string | Generated instruction/question |
+| `sift_response` | string | Generated response |
+| `response_idx` | int | Response index (for multiple responses per audio) |
+| `source_dataset` | string | Original dataset source |
+
+## License
+
+Apache 2.0
+"""
+
+    card = DatasetCard(card_content)
+    card.push_to_hub(repo_id)
+
+
 def process_dataset(
     config: DatasetConfig,
     pipe,
@@ -426,6 +521,16 @@ def process_dataset(
         split=config.split,
         trust_remote_code=True,
     )
+
+    # Filter by down_votes if configured (using select for speed)
+    if config.max_down_votes is not None and "down_votes" in ds.column_names:
+        import numpy as np
+
+        original_len = len(ds)
+        down_votes = np.array(ds["down_votes"])
+        valid_indices = np.where(down_votes <= config.max_down_votes)[0].tolist()
+        ds = ds.select(valid_indices)
+        print(f"  Filtered by down_votes: {original_len} -> {len(ds)}")
 
     # Limit samples first (faster than filtering all)
     if config.max_samples is not None and max_samples is not None:
@@ -518,7 +623,25 @@ def process_dataset(
 
     # Apply transformations
     print("  Preparing prompts...")
-    ds = ds.map(prepare_examples, batched=True, num_proc=num_proc, desc="Preparing")
+    # Explicitly define features to avoid schema inference issues with multiprocessing
+    new_features = Features(
+        {
+            "prompt": Value("string"),
+            "meta_text": Value("string"),
+            "meta_emotion": Value("string"),
+            "meta_gender": Value("string"),
+            "meta_age": Value("string"),
+            "meta_speaking_rate": Value("string"),
+            "meta_accent": Value("string"),
+        }
+    )
+    ds = ds.map(
+        prepare_examples,
+        batched=True,
+        num_proc=num_proc,
+        desc="Preparing",
+        features=Features({**ds.features, **new_features}),
+    )
 
     # Generate responses using pipeline with dataset (more efficient than .map())
     print("  Generating instructions and responses...")
@@ -526,7 +649,7 @@ def process_dataset(
     generation_config = GenerationConfig(
         max_new_tokens=max_new_tokens,
         do_sample=True,
-        temperature=0.7,
+        temperature=0.9,
         top_p=0.9,
     )
 
@@ -668,7 +791,7 @@ def main(
     ] = "mazesmazes/sift-audio",
     model_name: Annotated[
         str, typer.Option(help="LLM model for response generation")
-    ] = "Qwen/Qwen3-8B",
+    ] = "Qwen/Qwen3-4B",
     batch_size: Annotated[int, typer.Option(help="Batch size for generation")] = 256,
     max_samples: Annotated[
         int | None, typer.Option(help="Max samples per dataset (for testing)")
@@ -678,14 +801,20 @@ def main(
         int, typer.Option(help="Number of instruction-response pairs per audio sample")
     ] = 3,
     datasets: Annotated[list[str] | None, typer.Option(help="Specific datasets to process")] = None,
-    num_proc: Annotated[int, typer.Option(help="Number of CPU processes for preprocessing")] = 12,
+    num_proc: Annotated[int, typer.Option(help="Number of CPU processes for preprocessing")] = 8,
     push_every: Annotated[int, typer.Option(help="Push to hub every N datasets")] = 1,
 ):
     """Generate SIFT datasets for paralinguistic training."""
-    # Filter datasets if specified
+    # Filter datasets if specified (support comma-separated values)
     configs = DATASET_CONFIGS
     if datasets:
-        configs = [c for c in configs if c.name in datasets]
+        # Expand comma-separated values: ["a,b", "c"] -> ["a", "b", "c"]
+        expanded = []
+        for d in datasets:
+            expanded.extend(d.split(","))
+        dataset_names = [d.strip() for d in expanded if d.strip()]
+
+        configs = [c for c in configs if c.name in dataset_names]
         if not configs:
             typer.echo(
                 f"No matching datasets found. Available: {[c.name for c in DATASET_CONFIGS]}"
@@ -751,6 +880,22 @@ def main(
         typer.echo(f"\nFinal push: {len(all_datasets)} splits to {output_repo}...")
         dataset_dict = DatasetDict(all_datasets)
         dataset_dict.push_to_hub(output_repo, private=False)
+
+        # Update dataset card
+        typer.echo("Updating dataset card...")
+        try:
+            from huggingface_hub import HfApi
+
+            api = HfApi()
+            info = api.dataset_info(output_repo)
+            # Get all splits (existing + new)
+            existing_splits = list(info.splits.keys()) if info.splits else []
+            all_splits = list(set(existing_splits) | set(all_datasets.keys()))
+            create_dataset_card(output_repo, all_splits)
+        except Exception as e:
+            typer.echo(f"Warning: Could not fetch existing splits: {e}")
+            create_dataset_card(output_repo, list(all_datasets.keys()))
+
         typer.echo("Done!")
     else:
         typer.echo("No datasets were successfully processed.")

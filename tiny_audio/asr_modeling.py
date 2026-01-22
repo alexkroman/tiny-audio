@@ -730,7 +730,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt",
-            enable_thinking=False,
+            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
         ).to(device)
 
         if input_ids.dim() == 1:
