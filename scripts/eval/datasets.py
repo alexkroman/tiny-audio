@@ -127,11 +127,53 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         choices_field="choices",
         category_field="other_attributes",  # JSON string with category info
     ),
+    # Classification (paralinguistic) datasets - AudioLLMs pre-formatted
+    "iemocap-emotion": DatasetConfig(
+        name="iemocap-emotion",
+        path="AudioLLMs/iemocap_emotion_recognition",
+        audio_field="context",
+        text_field="answer",
+        question_field="instruction",
+        answer_field="answer",
+    ),
+    "voxceleb-gender": DatasetConfig(
+        name="voxceleb-gender",
+        path="AudioLLMs/voxceleb_gender_test",
+        audio_field="context",
+        text_field="answer",
+        question_field="instruction",
+        answer_field="answer",
+    ),
+    # Classification datasets from Common Voice (same source as SIFT generation)
+    "commonvoice-gender": DatasetConfig(
+        name="commonvoice-gender",
+        path="fixie-ai/common_voice_17_0",
+        config="en",
+        audio_field="audio",
+        text_field="gender",  # Use gender as the answer field
+        question_field=None,  # Will generate instruction dynamically
+        answer_field="gender",
+    ),
+    "commonvoice-age": DatasetConfig(
+        name="commonvoice-age",
+        path="fixie-ai/common_voice_17_0",
+        config="en",
+        audio_field="audio",
+        text_field="age",  # Use age as the answer field
+        question_field=None,  # Will generate instruction dynamically
+        answer_field="age",
+    ),
 }
 
 DIARIZATION_DATASETS = {"callhome"}
 ALIGNMENT_DATASETS = {"librispeech-alignments"}
 MCQ_DATASETS = {"mmau"}
+CLASSIFICATION_DATASETS = {
+    "iemocap-emotion",
+    "voxceleb-gender",
+    "commonvoice-gender",
+    "commonvoice-age",
+}
 
 
 def load_eval_dataset(

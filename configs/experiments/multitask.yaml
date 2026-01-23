@@ -1,19 +1,22 @@
 # @package _global_
-# Multitask SIFT training with MLP projector
-# Uses pre-generated sift-audio dataset with sift_instruction and sift_response columns
+# Multitask training with MOSA projector from scratch
+# 80% loquacious-medium (ASR), 20% sift-audio (paralinguistic)
 #
 # Usage:
-#   poetry run python scripts/train.py +experiments=mlp_multitask
+#   poetry run python scripts/train.py +experiments=multitask
 
 defaults:
   - override /data: multitask
 
 model:
-  pretrained_model_path: mazesmazes/tiny-audio  # Start from pretrained transcription model
-  projector_type: mlp
+  # Train from scratch (no pretrained_model_path)
+  projector_type: mosa
   projector_pool_stride: 4
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   text_model_id: Qwen/Qwen3-1.7B
+  do_sample: true
+  temperature: 0.7
+  repetition_penalty: 1.05
 
 # Multitask configuration
 multitask:
@@ -21,7 +24,7 @@ multitask:
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-multitask"
-  group_by_length: false
+  group_by_length: true
   learning_rate: 1e-3
   warmup_steps: 1000
   lr_scheduler_type: polynomial

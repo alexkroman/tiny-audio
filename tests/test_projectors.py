@@ -152,9 +152,10 @@ class TestMoEAudioProjector:
         assert out.shape == (2, 25, 512)
 
     def test_get_output_length(self, projector):
-        """Test output length calculation."""
-        assert projector.get_output_length(100) == 25
-        assert projector.get_output_length(101) == 26
+        """Test output length calculation (matches MLP frame stacking)."""
+        # Formula: (L - k) // k + 1 where k=4
+        assert projector.get_output_length(100) == 25  # (100-4)//4+1 = 25
+        assert projector.get_output_length(101) == 25  # (101-4)//4+1 = 25
 
     def test_has_shared_expert(self, projector):
         """Test that projector has a shared expert."""

@@ -26,6 +26,10 @@ from .base import (
     Evaluator,
     setup_assemblyai,
 )
+from .classification import (
+    ClassificationEvaluator,
+    ClassificationResult,
+)
 from .diarization import (
     AssemblyAIDiarizationEvaluator,
     DeepgramDiarizationEvaluator,
@@ -73,4 +77,7 @@ __all__ = [
     "MCQResult",
     "MMAUEvaluator",
     "AssemblyAIMMAUEvaluator",
+    # Classification evaluators
+    "ClassificationResult",
+    "ClassificationEvaluator",
 ]

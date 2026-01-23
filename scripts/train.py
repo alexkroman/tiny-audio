@@ -155,7 +155,9 @@ class DatasetLoader:
         if train_ds and self.config.max_train_samples:
             train_ds = train_ds.take(self.config.max_train_samples)
         if val_ds and self.config.max_eval_samples:
-            val_ds = val_ds.take(self.config.max_eval_samples)
+            # Use min to avoid IndexError if dataset is smaller than max_eval_samples
+            n_samples = min(len(val_ds), self.config.max_eval_samples)
+            val_ds = val_ds.take(n_samples)
 
         return train_ds, val_ds
 
@@ -168,9 +170,7 @@ class DatasetLoader:
         if len(datasets) == 1:
             return datasets[0]
         probs = [w / sum(weights) for w in weights]
-        return interleave_datasets(
-            datasets, probabilities=probs, stopping_strategy="first_exhausted"
-        )
+        return interleave_datasets(datasets, probabilities=probs, stopping_strategy="all_exhausted")
 
 
 class DataCollator:

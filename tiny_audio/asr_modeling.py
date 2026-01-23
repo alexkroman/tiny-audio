@@ -136,11 +136,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.generation_config.max_new_tokens = config.max_new_tokens
         self.generation_config.min_new_tokens = config.min_new_tokens
         self.generation_config.num_beams = config.num_beams
-        self.generation_config.do_sample = False
-        # Clear sampling params (inherited from LLM) since we use greedy decoding
-        self.generation_config.temperature = None
-        self.generation_config.top_p = None
-        self.generation_config.top_k = None
+        self.generation_config.do_sample = config.do_sample
+        # Set sampling params from config (None means use model defaults)
+        self.generation_config.temperature = config.temperature
+        self.generation_config.top_p = config.top_p
+        self.generation_config.top_k = config.top_k
         self.generation_config.use_cache = config.use_cache
         self.generation_config.length_penalty = config.length_penalty
         self.generation_config.repetition_penalty = config.repetition_penalty
@@ -392,12 +392,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         audio_features: torch.Tensor,
         audio_attention_mask: torch.Tensor,
+        expected_token_counts: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Encode audio and project to LLM embedding space.
 
         Args:
             audio_features: Mel spectrogram features (batch, n_mels, mel_len)
             audio_attention_mask: Mask indicating real vs padded mel frames (batch, mel_len)
+            expected_token_counts: Expected number of audio tokens per sample from input_ids.
+                If provided, output will match these counts exactly (padding/truncating as needed).
 
         Returns:
             Flattened audio embeddings of shape (total_audio_tokens, hidden_dim).
@@ -406,24 +409,43 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
-        # Compute per-sample encoder output lengths using conv formulas
-        encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
-
         # Project to LLM space
         audio_embeds = self.projector(hidden_states)
 
-        # Compute per-sample projector output lengths
-        projector_lengths = torch.tensor(
-            [self.projector.get_output_length(int(length.item())) for length in encoder_lengths],
-            device=audio_embeds.device,
-        )
+        # Use expected token counts if provided (from input_ids), otherwise compute from audio
+        if expected_token_counts is not None:
+            token_counts = expected_token_counts
+        else:
+            # Compute per-sample encoder output lengths using conv formulas
+            encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
+            token_counts = torch.tensor(
+                [
+                    self.projector.get_output_length(int(length.item()))
+                    for length in encoder_lengths
+                ],
+                device=audio_embeds.device,
+            )
 
-        # Create valid mask for variable-length samples and extract only real embeddings
-        max_len = audio_embeds.shape[1]
-        valid_mask = (
-            torch.arange(max_len, device=audio_embeds.device)[None, :] < projector_lengths[:, None]
-        )
-        return audio_embeds[valid_mask]
+        # Extract embeddings matching expected token counts per sample
+        batch_size = audio_embeds.shape[0]
+        hidden_dim = audio_embeds.shape[2]
+
+        result_embeds = []
+        for i in range(batch_size):
+            count = int(token_counts[i].item())
+            sample_embeds = audio_embeds[i, :count, :]  # Take first 'count' embeddings
+            # Pad with zeros if we don't have enough embeddings
+            if sample_embeds.shape[0] < count:
+                padding = torch.zeros(
+                    count - sample_embeds.shape[0],
+                    hidden_dim,
+                    device=audio_embeds.device,
+                    dtype=audio_embeds.dtype,
+                )
+                sample_embeds = torch.cat([sample_embeds, padding], dim=0)
+            result_embeds.append(sample_embeds)
+
+        return torch.cat(result_embeds, dim=0)
 
     def forward(
         self,
@@ -449,8 +471,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if self.training and self.spec_augment is not None:
                 input_features = self.spec_augment(input_features)
 
+            # Count expected audio tokens from input_ids (ground truth from collator)
+            audio_token_counts = (input_ids == self.audio_token_id).sum(dim=-1)
+
             # Encode audio -> flattened (total_audio_tokens, hidden_dim)
-            audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+            audio_embeds = self._encode_audio(
+                input_features, audio_attention_mask, audio_token_counts
+            )
 
             # Replace <audio> token placeholders with audio embeddings using masked_scatter
             audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
@@ -573,17 +600,21 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
 
         # Generate using language model
+        # Pass both input_ids and inputs_embeds so repetition_penalty works correctly
+        # (it needs input_ids to track which tokens have been used)
         output = self.language_model.generate(
+            input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             generation_config=self.generation_config,
             **generate_kwargs,
         )
 
-        # When using inputs_embeds without input_ids, generate returns only new tokens
-        if isinstance(output, torch.Tensor):
-            return output
-        return output.sequences
+        # When using inputs_embeds with input_ids, generate returns full sequence
+        # Strip the input tokens to return only generated tokens
+        sequences = output if isinstance(output, torch.Tensor) else output.sequences
+        input_len = input_ids.shape[1]
+        return sequences[:, input_len:]
 
     def generate_streaming(
         self,

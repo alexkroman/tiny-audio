@@ -89,7 +89,7 @@ class MMAUEvaluator:
         """Answer a question about audio using the model."""
         # Format prompt with question and choices
         choices_str = "\n".join(choices)
-        prompt = f"{question}\n{choices_str}\n\nRespond with only the letter of the correct answer (A, B, C, or D)."
+        prompt = f"{question}\n{choices_str}\n\nPlease make your choice among A/B/C/D and do not output other texts."
 
         if self.user_prompt:
             prompt = f"{self.user_prompt}\n{prompt}"
@@ -324,7 +324,7 @@ class AssemblyAIMMAUEvaluator(MMAUEvaluator):
 
         # Format prompt with question and choices
         choices_str = "\n".join(choices)
-        prompt = f"{question}\n{choices_str}\n\nRespond with only the letter of the correct answer (A, B, C, or D)."
+        prompt = f"{question}\n{choices_str}\n\nPlease make your choice among A/B/C/D and do not output other texts."
 
         # Create config with prompt (undocumented but supported)
         config = aai.TranscriptionConfig(

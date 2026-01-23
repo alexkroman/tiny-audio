@@ -1,65 +1,74 @@
-# Multitask dataset configuration for SIFT training
-# Uses pre-generated sift_instruction and sift_response columns from sift-audio dataset
-# Weights follow Auden's conservative approach: boost small datasets without overfitting
+# Multitask dataset configuration
+# 80% loquacious-medium (ASR), 20% sift-audio (paralinguistic)
+# Sift-audio weights maintain relative ratios: emotion datasets upweighted vs ASR
 
 datasets:
-  # Large datasets (base weight)
+  # Loquacious medium - 80% of training (weight 4.0)
+  - path: speechbrain/LoquaciousSet
+    name: medium
+    audio_column: wav
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [dev]
+    sampling_weight: 4.0
+
+  # Sift-audio datasets - 20% of training (weights sum to ~1.0)
+  # Large ASR datasets - down-weighted within sift-audio
   - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
     train_splits: [commonvoice]
     eval_splits: [commonvoice]
-    sampling_weight: 1.0
+    sampling_weight: 0.04  # Relative 0.2 scaled to 20% total
 
   - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
     train_splits: [podcast]
     eval_splits: [podcast]
-    sampling_weight: 1.0
+    sampling_weight: 0.04  # Relative 0.2 scaled to 20% total
 
-  # Medium dataset
+  # Emotion/paralinguistic datasets - upweighted within sift-audio
   - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
     train_splits: [esd]
     eval_splits: [esd]
-    sampling_weight: 3.0
+    sampling_weight: 0.19  # Relative 1.0 scaled to 20% total
 
-  # Small datasets (boosted)
   - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
     train_splits: [crema_d]
     eval_splits: [crema_d]
-    sampling_weight: 5.0
+    sampling_weight: 0.19
 
   - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
     train_splits: [tess]
     eval_splits: [tess]
-    sampling_weight: 10.0
+    sampling_weight: 0.19
 
   - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
     train_splits: [ravdess]
     eval_splits: [ravdess]
-    sampling_weight: 15.0
+    sampling_weight: 0.19
 
-  # Tiny dataset (heavily boosted)
   - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
     train_splits: [savee]
     eval_splits: [savee]
-    sampling_weight: 20.0
+    sampling_weight: 0.19
 
 # Audio processing
 sample_rate: 16000
 
 # Processing options
 dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
-max_train_samples: null
+max_train_samples: 1000000  # ~1M samples per epoch
 max_eval_samples: 2000

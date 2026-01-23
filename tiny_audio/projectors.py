@@ -281,14 +281,9 @@ class MoEAudioProjector(nn.Module):
         self.k = getattr(config, "projector_pool_stride", 4)
         encoder_dim = config.encoder_dim
 
-        # Depthwise Conv for temporal mixing
-        self.temporal_conv = nn.Conv1d(
-            encoder_dim, encoder_dim, kernel_size=3, padding=1, groups=encoder_dim
-        )
-
         in_dim = encoder_dim * self.k
         out_dim = config.llm_dim
-        hidden_dim = getattr(config, "projector_hidden_dim", None) or in_dim
+        hidden_dim = getattr(config, "projector_hidden_dim", None) or (out_dim * 2)
 
         self.num_experts = getattr(config, "num_experts", 4)
         self.top_k = getattr(config, "num_experts_per_tok", 2)
@@ -308,11 +303,8 @@ class MoEAudioProjector(nn.Module):
                 nn.init.orthogonal_(expert.fc2.weight, gain=0.01)
 
     def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length."""
-        # Temporal pooling with stride k
-        if input_length % self.k:
-            input_length += self.k - input_length % self.k
-        return input_length // self.k
+        """Calculate output sequence length given input length (matches MLP projector)."""
+        return (input_length - self.k) // self.k + 1
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Project audio features using shared + sparse MoE.
@@ -323,21 +315,16 @@ class MoEAudioProjector(nn.Module):
         Returns:
             Projected features of shape [batch, out_len, llm_dim]
         """
-        batch_size, seq_len, dim = x.size()
+        batch, seq, dim = x.shape
 
         target_dtype = self.moe.shared_expert.fc1.weight.dtype
         if x.dtype != target_dtype:
             x = x.to(target_dtype)
 
-        # Temporal Context Injection
-        x_ctx = x.transpose(1, 2)
-        x_ctx = self.temporal_conv(x_ctx)
-        x = x + x_ctx.transpose(1, 2)
-
-        if seq_len % self.k:
-            x = F.pad(x, (0, 0, 0, self.k - seq_len % self.k))
-
-        x = x.view(batch_size, -1, dim * self.k)
+        # Frame stacking (matches MLP projector)
+        out_len = (seq - self.k) // self.k + 1
+        x = x[:, : out_len * self.k, :]
+        x = x.reshape(batch, out_len, dim * self.k)
 
         return self.moe(x)
 
