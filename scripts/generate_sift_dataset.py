@@ -23,53 +23,22 @@ import typer
 # Enable fast HuggingFace transfers (must be set before importing HF libraries)
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-import torch
-from datasets import Audio, Dataset, DatasetDict, Features, Value, load_dataset
+from datasets import Audio, DatasetDict, Value, load_dataset
 from huggingface_hub import DatasetCard, DatasetCardData
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig, pipeline
 from transformers.pipelines.pt_utils import KeyDataset
 
-# System message for generating varied instructions and responses
-# Aligned with MMAU evaluation categories: Acoustic Source Inference, Temporal Reasoning, Emotion
-SIFT_SYSTEM_MESSAGE = (
-    "You generate training data for audio understanding models. "
-    "Given audio metadata in <audio> tags, generate an INSTRUCTION and RESPONSE pair.\n\n"
-    "CRITICAL: Vary your outputs significantly. Each call should feel different.\n\n"
-    "INSTRUCTION TYPES (rotate between these, use MCQ format when appropriate):\n\n"
-    "SPEAKER IDENTIFICATION (25%):\n"
-    "- 'Is the speaker male or female?'\n"
-    "- 'Identify the source of the speaking voice: (A) Man (B) Woman (C) Child'\n"
-    "- 'What is the gender of the speaker?'\n"
-    "- 'Who is speaking in this audio?'\n\n"
-    "TRANSCRIPTION (25%):\n"
-    "- 'What did they say?'\n"
-    "- 'Transcribe the audio.'\n"
-    "- 'What words were spoken?'\n"
-    "- 'Write out what you hear.'\n\n"
-    "EMOTION/TONE (20%):\n"
-    "- 'What emotion is conveyed?'\n"
-    "- 'How does the speaker sound: (A) Happy (B) Sad (C) Angry (D) Neutral?'\n"
-    "- 'Describe the emotional tone.'\n"
-    "- 'What is the speaker's mood?'\n\n"
-    "SPEAKER ATTRIBUTES (15%):\n"
-    "- 'Is the speaker speaking quickly or slowly?'\n"
-    "- 'What is the speaking pace: (A) Slow (B) Normal (C) Fast?'\n"
-    "- 'Does the speaker have an accent?'\n"
-    "- 'Describe the speaker's voice characteristics.'\n\n"
-    "COMBINED ANALYSIS (15%):\n"
-    "- 'Describe who is speaking and how they sound.'\n"
-    "- 'What can you tell about the speaker from this audio?'\n"
-    "- 'Summarize everything about this audio clip.'\n\n"
-    "RESPONSE GUIDELINES:\n"
-    "- For MCQ instructions: respond with the letter and brief explanation, e.g., '(A) Man - The deep voice indicates a male speaker.'\n"
-    "- For open questions: vary between short ('A happy woman'), medium (1 sentence), and detailed (2-3 sentences)\n"
-    "- Be direct and factual. Avoid verbose explanations.\n\n"
-    "Format: INSTRUCTION: <text>\nRESPONSE: <text>"
+# System prompt for audio understanding
+SIFT_SYSTEM_PROMPT = (
+    "You are an audio assistant that can hear speech. "
+    "Audio is provided in <audio> tags. "
+    "Respond as if you directly heard the audio. "
+    "Never say 'the text says' or mention metadata - just describe what you hear."
 )
 
-# Fallback instruction if parsing fails
-SIFT_INSTRUCTION = "Describe the audio in 1-2 sentences using third person."
+# Fixed instruction for all samples
+SIFT_INSTRUCTION = "Describe all information you can hear."
 
 
 @dataclass
@@ -87,29 +56,22 @@ class DatasetConfig:
     age_field: str | None = None
     speaking_rate_field: str | None = None
     accent_field: str | None = None
-    weight: float = 1.0
     max_samples: int | None = None  # Per-dataset sample limit (overrides --max-samples)
-    emotion_map: dict | None = None  # Map numeric labels to emotion strings
-    num_responses: int | None = None  # Per-dataset override for responses per sample
-    max_down_votes: int | None = None  # Filter out samples with down_votes above this value
 
 
-# Emotion label mappings for datasets with numeric labels
-CREMA_D_EMOTIONS = {0: "anger", 1: "disgust", 2: "fear", 3: "happy", 4: "neutral", 5: "sad"}
 # HuggingFace datasets with paralinguistic labels (English only)
 DATASET_CONFIGS = [
-    # CREMA-D: emotion + text (gender/age not in this dataset version)
+    # CREMA-D: emotion + gender + speaking_rate (AbstractTTS version)
     DatasetConfig(
         name="crema_d",
-        hf_path="myleslinder/crema-d",
+        hf_path="AbstractTTS/CREMA-D",
         split="train",
         audio_field="audio",
-        text_field="sentence",  # Spoken sentence
-        emotion_field="label",
-        gender_field=None,
+        text_field="transcription",
+        emotion_field="major_emotion",
+        gender_field="gender",
         age_field=None,
-        weight=2.0,
-        emotion_map=CREMA_D_EMOTIONS,
+        speaking_rate_field="speaking_rate",
     ),
     # RAVDESS: emotion, gender, speaking_rate (AbstractTTS version)
     DatasetConfig(
@@ -122,7 +84,6 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
-        weight=2.0,
     ),
     # TESS: emotion + gender + speaking_rate (all female speakers)
     # 2,800 samples with 7 emotion classes
@@ -136,7 +97,6 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
-        weight=2.0,
     ),
     # SAVEE: emotion + gender + speaking_rate (all male speakers)
     # 480 samples with 7 emotion classes
@@ -150,7 +110,6 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
-        weight=2.0,
     ),
     # ESD English: emotion + gender + speaking_rate (male and female)
     # 17,500 samples with 5 emotion classes
@@ -164,7 +123,6 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
-        weight=2.0,
     ),
     # PODCAST: emotion, gender, speaking_rate from podcast recordings
     # 149k samples with 16 emotion classes
@@ -178,7 +136,6 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
-        weight=1.0,
     ),
     # CommonVoice: Large-scale multilingual dataset (English subset)
     # Has age, gender, accent metadata
@@ -193,9 +150,7 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field="age",
         accent_field="accent",
-        weight=1.0,
-        max_samples=300000,
-        max_down_votes=0,  # Only use samples with no downvotes
+        max_samples=100000,
     ),
 ]
 
@@ -329,13 +284,7 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
 
     # Extract emotion
     if config.emotion_field and config.emotion_field in sample:
-        raw_emotion = sample[config.emotion_field]
-        # Map numeric labels to emotion strings if mapping provided
-        if config.emotion_map and isinstance(raw_emotion, int):
-            mapped = config.emotion_map.get(raw_emotion)
-            metadata["emotion"] = normalize_emotion(mapped)
-        else:
-            metadata["emotion"] = normalize_emotion(raw_emotion)
+        metadata["emotion"] = normalize_emotion(sample[config.emotion_field])
 
     # Extract gender
     if config.gender_field and config.gender_field in sample:
@@ -364,58 +313,33 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
     return metadata
 
 
-def build_prompt(metadata: dict) -> str:
-    """Build input text with audio metadata for LLM to generate instruction and response.
+def build_audio_context(metadata: dict) -> str:
+    """Build audio context with metadata for the LLM.
+
+    Args:
+        metadata: Extracted metadata from the audio sample
 
     Returns:
-        user_content - the prompt for the LLM containing audio metadata
+        Audio context string with metadata in tags
     """
     # Build paralinguistic metadata
     para_parts = []
     for key in ["age", "gender", "emotion", "speaking_rate", "accent"]:
         value = metadata.get(key)
         if value:  # Skip empty strings and None
-            # Use more natural key names in the prompt
             display_key = key.replace("_", " ")
             para_parts.append(f"{display_key}: {value}")
 
     # Format input with audio tags
     if para_parts and metadata["text"]:
         para_text = ", ".join(para_parts)
-        input_text = f"<audio><meta>{para_text}</meta><text>{metadata['text']}</text></audio>"
-    elif para_parts:
+        return f"<audio><meta>{para_text}</meta><text>{metadata['text']}</text></audio>"
+    if para_parts:
         para_text = ", ".join(para_parts)
-        input_text = f"<audio><meta>{para_text}</meta></audio>"
-    elif metadata["text"]:
-        input_text = f"<audio><text>{metadata['text']}</text></audio>"
-    else:
-        input_text = "<audio></audio>"
-
-    # Ask LLM to generate both instruction and response
-    return f"{input_text}\n\nGenerate a varied INSTRUCTION and RESPONSE for this audio."
-
-
-def parse_instruction_response(text: str) -> tuple[str, str]:
-    """Parse LLM output to extract instruction and response.
-
-    Returns:
-        (instruction, response) - parsed values or fallbacks if parsing fails
-    """
-    instruction = SIFT_INSTRUCTION  # Fallback
-    response = text.strip()  # Fallback to full text
-
-    # Try to parse INSTRUCTION: and RESPONSE: format
-    instruction_match = re.search(
-        r"INSTRUCTION:\s*(.+?)(?=\nRESPONSE:|$)", text, re.DOTALL | re.IGNORECASE
-    )
-    response_match = re.search(r"RESPONSE:\s*(.+?)$", text, re.DOTALL | re.IGNORECASE)
-
-    if instruction_match:
-        instruction = instruction_match.group(1).strip()
-    if response_match:
-        response = response_match.group(1).strip()
-
-    return instruction, response
+        return f"<audio><meta>{para_text}</meta></audio>"
+    if metadata["text"]:
+        return f"<audio><text>{metadata['text']}</text></audio>"
+    return "<audio></audio>"
 
 
 def create_dataset_card(repo_id: str, splits: list[str]) -> None:
@@ -462,7 +386,6 @@ ds = load_dataset("{repo_id}", split="loquacious")
 
 # Access a sample
 sample = ds[0]
-print(sample["sift_instruction"])
 print(sample["sift_response"])
 ```
 
@@ -475,9 +398,7 @@ print(sample["sift_response"])
 | `emotion` | string | Detected emotion (if available) |
 | `gender` | string | Speaker gender (if available) |
 | `speaking_rate` | string | Speaking pace (if available) |
-| `sift_instruction` | string | Generated instruction/question |
-| `sift_response` | string | Generated response |
-| `response_idx` | int | Response index (for multiple responses per audio) |
+| `sift_response` | string | Generated description of the audio |
 | `source_dataset` | string | Original dataset source |
 
 ## License
@@ -496,23 +417,9 @@ def process_dataset(
     batch_size: int,
     max_samples: int | None,
     max_new_tokens: int,
-    num_responses: int = 1,
-    num_proc: int = 32,
-) -> Dataset | None:
-    """Process a single dataset and generate SIFT responses using datasets.map().
-
-    Args:
-        num_responses: Number of instruction-response pairs to generate per audio sample.
-                      Each audio will appear num_responses times in the output with different
-                      instructions and responses.
-    """
-    # Use per-dataset override if specified
-    effective_num_responses = (
-        config.num_responses if config.num_responses is not None else num_responses
-    )
-    print(
-        f"\nProcessing {config.name} (generating {effective_num_responses} responses per sample)..."
-    )
+):
+    """Process a single dataset and generate SIFT responses using datasets.map()."""
+    print(f"\nProcessing {config.name}...")
 
     # Load dataset
     ds = load_dataset(
@@ -521,16 +428,6 @@ def process_dataset(
         split=config.split,
         trust_remote_code=True,
     )
-
-    # Filter by down_votes if configured (using select for speed)
-    if config.max_down_votes is not None and "down_votes" in ds.column_names:
-        import numpy as np
-
-        original_len = len(ds)
-        down_votes = np.array(ds["down_votes"])
-        valid_indices = np.where(down_votes <= config.max_down_votes)[0].tolist()
-        ds = ds.select(valid_indices)
-        print(f"  Filtered by down_votes: {original_len} -> {len(ds)}")
 
     # Limit samples first (faster than filtering all)
     if config.max_samples is not None and max_samples is not None:
@@ -545,103 +442,45 @@ def process_dataset(
     if effective_max and len(ds) > effective_max:
         ds = ds.select(range(effective_max))
 
-    # Filter by duration using ds.filter()
-    audio_field = config.audio_field
-
-    def is_valid_duration(example):
-        try:
-            audio = example.get(audio_field)
-            if audio is None:
-                return False
-            # Check duration if audio is decoded
-            if isinstance(audio, dict) and "array" in audio:
-                arr = audio["array"]
-                if arr is None or len(arr) == 0:
-                    return False
-                duration = len(arr) / audio.get("sampling_rate", 16000)
-                return 1.0 < duration <= 30.0
-            # If audio exists but not decoded yet, keep it
-            return audio is not None
-        except Exception:
-            return False
-
-    # Filter with single process
-    ds = ds.filter(is_valid_duration, num_proc=1, desc=f"Filtering {config.name}")
-
-    if len(ds) == 0:
-        print(f"  No valid samples found in {config.name}")
-        return None
-
     print(f"  Loaded {len(ds)} samples")
 
-    # Extract metadata and build prompts
-    def prepare_examples(examples):
-        """Extract metadata and build prompts for batch."""
-        num_examples = len(examples[config.audio_field])
-        prompts = []
-        metadata_lists = {
-            "text": [],
-            "emotion": [],
-            "gender": [],
-            "age": [],
-            "speaking_rate": [],
-            "accent": [],
-        }
-
-        for i in range(num_examples):
-            # Build sample dict for extract_metadata
-            sample = {k: examples[k][i] for k in examples}
-            metadata = extract_metadata(sample, config)
-
-            # Store metadata
-            for key in metadata_lists:
-                metadata_lists[key].append(metadata[key])
-
-            # Build prompt (LLM will generate both instruction and response)
-            user_content = build_prompt(metadata)
-            messages = [
-                {"role": "system", "content": SIFT_SYSTEM_MESSAGE},
-                {"role": "user", "content": user_content},
-            ]
-            prompt = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-            prompts.append(prompt)
-
-        return {
-            "prompt": prompts,
-            "meta_text": metadata_lists["text"],
-            "meta_emotion": metadata_lists["emotion"],
-            "meta_gender": metadata_lists["gender"],
-            "meta_age": metadata_lists["age"],
-            "meta_speaking_rate": metadata_lists["speaking_rate"],
-            "meta_accent": metadata_lists["accent"],
-        }
-
-    # Apply transformations
+    # Extract metadata and build prompts (simple loop is faster than multiprocess map for this)
     print("  Preparing prompts...")
-    # Explicitly define features to avoid schema inference issues with multiprocessing
-    new_features = Features(
-        {
-            "prompt": Value("string"),
-            "meta_text": Value("string"),
-            "meta_emotion": Value("string"),
-            "meta_gender": Value("string"),
-            "meta_age": Value("string"),
-            "meta_speaking_rate": Value("string"),
-            "meta_accent": Value("string"),
-        }
-    )
-    ds = ds.map(
-        prepare_examples,
-        batched=True,
-        num_proc=num_proc,
-        desc="Preparing",
-        features=Features({**ds.features, **new_features}),
-    )
+    prompts = []
+    metadata_lists = {
+        "text": [],
+        "emotion": [],
+        "gender": [],
+        "age": [],
+        "speaking_rate": [],
+        "accent": [],
+    }
+
+    for sample in tqdm(ds, desc="Preparing", total=len(ds)):
+        metadata = extract_metadata(sample, config)
+        for key in metadata_lists:
+            metadata_lists[key].append(metadata[key])
+
+        audio_context = build_audio_context(metadata)
+        user_content = f"{audio_context}\n\n{SIFT_INSTRUCTION}"
+        messages = [
+            {"role": "system", "content": SIFT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+        prompts.append(
+            tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+            )
+        )
+
+    # Add columns to dataset
+    ds = ds.add_column("prompt", prompts)
+    ds = ds.add_column("meta_text", metadata_lists["text"])
+    ds = ds.add_column("meta_emotion", metadata_lists["emotion"])
+    ds = ds.add_column("meta_gender", metadata_lists["gender"])
+    ds = ds.add_column("meta_age", metadata_lists["age"])
+    ds = ds.add_column("meta_speaking_rate", metadata_lists["speaking_rate"])
+    ds = ds.add_column("meta_accent", metadata_lists["accent"])
 
     # Generate responses using pipeline with dataset (more efficient than .map())
     print("  Generating instructions and responses...")
@@ -649,84 +488,25 @@ def process_dataset(
     generation_config = GenerationConfig(
         max_new_tokens=max_new_tokens,
         do_sample=True,
-        temperature=0.9,
+        temperature=0.7,
         top_p=0.9,
     )
 
-    # Generate multiple responses per sample if requested
-    if effective_num_responses > 1:
-        # Repeat prompts for multiple generations per sample
-        all_prompts = []
-        sample_indices = []
-        response_indices = []
-        for idx, prompt in enumerate(ds["prompt"]):
-            for resp_idx in range(effective_num_responses):
-                all_prompts.append(prompt)
-                sample_indices.append(idx)
-                response_indices.append(resp_idx)
+    responses = []
+    for out in tqdm(
+        pipe(
+            KeyDataset(ds, "prompt"),
+            generation_config=generation_config,
+            batch_size=batch_size,
+            return_full_text=False,
+        ),
+        total=len(ds),
+        desc="Generating",
+    ):
+        text = thinking_pattern.sub("", out[0]["generated_text"]).strip()
+        responses.append(text)
 
-        # Create temporary dataset with repeated prompts
-        from datasets import Dataset as HFDataset
-
-        prompt_ds = HFDataset.from_dict({"prompt": all_prompts})
-
-        instructions = []
-        responses = []
-        for out in tqdm(
-            pipe(
-                KeyDataset(prompt_ds, "prompt"),
-                generation_config=generation_config,
-                batch_size=batch_size,
-                return_full_text=False,
-            ),
-            total=len(prompt_ds),
-            desc=f"Generating ({effective_num_responses}x)",
-        ):
-            text = thinking_pattern.sub("", out[0]["generated_text"]).strip()
-            instruction, response = parse_instruction_response(text)
-            instructions.append(instruction)
-            responses.append(response)
-
-        # Expand dataset by selecting samples according to sample_indices
-        ds = ds.select(sample_indices)
-        ds = ds.add_column("sift_instruction", instructions)
-        ds = ds.add_column("sift_response", responses)
-        ds = ds.add_column("response_idx", response_indices)
-    else:
-        # Single response per sample (original behavior)
-        instructions = []
-        responses = []
-        for out in tqdm(
-            pipe(
-                KeyDataset(ds, "prompt"),
-                generation_config=generation_config,
-                batch_size=batch_size,
-                return_full_text=False,
-            ),
-            total=len(ds),
-            desc="Generating",
-        ):
-            text = thinking_pattern.sub("", out[0]["generated_text"]).strip()
-            instruction, response = parse_instruction_response(text)
-            instructions.append(instruction)
-            responses.append(response)
-
-        ds = ds.add_column("sift_instruction", instructions)
-        ds = ds.add_column("sift_response", responses)
-        ds = ds.add_column("response_idx", [0] * len(ds))
-
-    # Compute duration from audio
-    def compute_duration(examples):
-        durations = []
-        for audio in examples[config.audio_field]:
-            if audio and isinstance(audio, dict) and "array" in audio:
-                sr = audio.get("sampling_rate", 16000)
-                durations.append(len(audio["array"]) / sr)
-            else:
-                durations.append(0.0)
-        return {"duration": durations}
-
-    ds = ds.map(compute_duration, batched=True, num_proc=num_proc)
+    ds = ds.add_column("sift_response", responses)
 
     # Remove original columns that would conflict with our renamed columns
     conflict_cols = [
@@ -759,11 +539,8 @@ def process_dataset(
         "age",
         "speaking_rate",
         "accent",
-        "sift_instruction",
         "sift_response",
-        "response_idx",
         "source_dataset",
-        "duration",
     ]
     remove_cols = [c for c in ds.column_names if c not in keep_cols]
     if remove_cols:
@@ -775,9 +552,6 @@ def process_dataset(
     ds = ds.cast_column("age", Value("string"))
     ds = ds.cast_column("speaking_rate", Value("string"))
     ds = ds.cast_column("accent", Value("string"))
-    ds = ds.cast_column("sift_instruction", Value("string"))
-    ds = ds.cast_column("response_idx", Value("int32"))
-    ds = ds.cast_column("duration", Value("float64"))
     return ds.cast_column("audio", Audio(sampling_rate=16000))
 
 
@@ -791,17 +565,15 @@ def main(
     ] = "mazesmazes/sift-audio",
     model_name: Annotated[
         str, typer.Option(help="LLM model for response generation")
-    ] = "Qwen/Qwen3-4B",
-    batch_size: Annotated[int, typer.Option(help="Batch size for generation")] = 256,
+    ] = "Qwen/Qwen3-1.7B",
+    batch_size: Annotated[
+        int, typer.Option(help="Batch size for generation")
+    ] = 1024,  # Tuned for A40 48GB
     max_samples: Annotated[
         int | None, typer.Option(help="Max samples per dataset (for testing)")
     ] = None,
     max_new_tokens: Annotated[int, typer.Option(help="Max new tokens for generation")] = 256,
-    num_responses: Annotated[
-        int, typer.Option(help="Number of instruction-response pairs per audio sample")
-    ] = 3,
     datasets: Annotated[list[str] | None, typer.Option(help="Specific datasets to process")] = None,
-    num_proc: Annotated[int, typer.Option(help="Number of CPU processes for preprocessing")] = 8,
     push_every: Annotated[int, typer.Option(help="Push to hub every N datasets")] = 1,
 ):
     """Generate SIFT datasets for paralinguistic training."""
@@ -823,7 +595,6 @@ def main(
 
     typer.echo(f"Processing {len(configs)} datasets")
     typer.echo(f"Model: {model_name}")
-    typer.echo(f"Responses per sample: {num_responses}")
     typer.echo(f"Output: {output_repo}")
 
     # Load tokenizer and create pipeline
@@ -836,7 +607,7 @@ def main(
         "text-generation",
         model=model_name,
         tokenizer=tokenizer,
-        dtype=torch.bfloat16,
+        dtype="bfloat16",
         device_map="auto",
         model_kwargs={"attn_implementation": "flash_attention_2"},
     )
@@ -854,8 +625,6 @@ def main(
                 batch_size=batch_size,
                 max_samples=max_samples,
                 max_new_tokens=max_new_tokens,
-                num_responses=num_responses,
-                num_proc=num_proc,
             )
 
             if ds is not None:
@@ -883,18 +652,7 @@ def main(
 
         # Update dataset card
         typer.echo("Updating dataset card...")
-        try:
-            from huggingface_hub import HfApi
-
-            api = HfApi()
-            info = api.dataset_info(output_repo)
-            # Get all splits (existing + new)
-            existing_splits = list(info.splits.keys()) if info.splits else []
-            all_splits = list(set(existing_splits) | set(all_datasets.keys()))
-            create_dataset_card(output_repo, all_splits)
-        except Exception as e:
-            typer.echo(f"Warning: Could not fetch existing splits: {e}")
-            create_dataset_card(output_repo, list(all_datasets.keys()))
+        create_dataset_card(output_repo, list(all_datasets.keys()))
 
         typer.echo("Done!")
     else:

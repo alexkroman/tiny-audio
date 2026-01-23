@@ -88,9 +88,9 @@ class DatasetLoader:
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        # For multitask, keep sift_instruction and sift_response columns
+        # For multitask, keep sift_response column (instruction is hardcoded in trainer)
         if self.multitask_enabled:
-            keep_cols = {"audio", "text", "duration", "sift_instruction", "sift_response"}
+            keep_cols = {"audio", "text", "duration", "sift_response"}
             extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
         else:
             # Remove extra columns, keep only audio, text, and duration (for group_by_length)
@@ -282,6 +282,9 @@ SIFT_SYSTEM_MESSAGE = (
     "including the speaker's emotion, age, and gender."
 )
 
+# SIFT instruction prompt for multi-task training
+SIFT_INSTRUCTION = "Describe all information you can hear."
+
 
 class MultiTaskDataCollator(DataCollator):
     """Collates audio and text data for multi-task SIFT training.
@@ -344,14 +347,13 @@ class MultiTaskDataCollator(DataCollator):
             num_tokens = self.projector.get_output_length(encoder_len)
             audio_token_counts.append(num_tokens)
 
-        # Build messages using sift_instruction and sift_response from dataset
+        # Build messages using hardcoded instruction
         text_features = []
         for f, num_audio_tokens in zip(valid_features, audio_token_counts):
-            instruction = (f.get("sift_instruction") or "").strip()
             response = (f.get("sift_response") or "").strip()
 
             audio_placeholder = "<audio>" * num_audio_tokens
-            user_content = audio_placeholder + (" " + instruction if instruction else "")
+            user_content = f"{audio_placeholder} {SIFT_INSTRUCTION}"
 
             messages = [
                 {"role": "system", "content": self.system_prompt},

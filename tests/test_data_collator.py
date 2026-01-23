@@ -313,11 +313,11 @@ class TestMultiTaskDataCollator:
             "sift_response": sift_response,
         }
 
-    def test_uses_sift_instruction_and_response(self, multitask_collator, tokenizer):
-        """Test that collator uses sift_instruction and sift_response from dataset."""
+    def test_uses_hardcoded_instruction_and_response(self, multitask_collator, tokenizer):
+        """Test that collator uses hardcoded instruction and sift_response from dataset."""
         samples = [
             self.create_sift_sample(
-                sift_instruction="What emotion is the speaker feeling?",
+                sift_instruction="ignored",  # instruction from dataset is ignored
                 sift_response="The speaker sounds happy and excited.",
             )
         ]
@@ -327,9 +327,9 @@ class TestMultiTaskDataCollator:
         # Decode to check structure
         decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
 
-        # Should contain the instruction
-        assert "What emotion is the speaker feeling?" in decoded
-        # Should contain the response
+        # Should contain the hardcoded instruction (not from dataset)
+        assert "Describe all information you can hear" in decoded
+        # Should contain the response from dataset
         assert "The speaker sounds happy and excited" in decoded
 
     def test_has_system_prompt(self, multitask_collator, tokenizer):
@@ -343,19 +343,21 @@ class TestMultiTaskDataCollator:
         # Should contain SIFT system message
         assert "powerful virtual human" in decoded
 
-    def test_handles_empty_instruction(self, multitask_collator, tokenizer):
-        """Test that empty instruction is handled gracefully."""
+    def test_ignores_dataset_instruction(self, multitask_collator, tokenizer):
+        """Test that instruction from dataset is ignored in favor of hardcoded one."""
         samples = [
             self.create_sift_sample(
-                sift_instruction="",
+                sift_instruction="This should be ignored",
                 sift_response="A speaker says hello.",
             )
         ]
 
         batch = multitask_collator(samples)
+        decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
 
-        # Should not raise an error
-        assert batch["input_ids"].shape[0] == 1
+        # Should use hardcoded instruction, not dataset instruction
+        assert "Describe all information you can hear" in decoded
+        assert "This should be ignored" not in decoded
 
     def test_response_is_unmasked(self, multitask_collator, tokenizer):
         """Test that sift_response content is unmasked in labels."""
