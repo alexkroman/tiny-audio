@@ -26,10 +26,11 @@ import wandb
 from datasets import (
     Audio,
     Dataset,
-    interleave_datasets,
+    concatenate_datasets,
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
+from tqdm.auto import tqdm
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -88,9 +89,12 @@ class DatasetLoader:
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        # For multitask, keep sift_response column (instruction is hardcoded in trainer)
+        # For multitask, keep sift_response and add task column
         if self.multitask_enabled:
-            keep_cols = {"audio", "text", "duration", "sift_response"}
+            task = dataset_cfg.get("task", "transcribe")  # Default to transcribe
+            # Add task column to identify ASR vs SIFT samples
+            ds = ds.add_column("task", [task] * len(ds))
+            keep_cols = {"audio", "text", "duration", "sift_response", "task"}
             extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
         else:
             # Remove extra columns, keep only audio, text, and duration (for group_by_length)
@@ -112,65 +116,47 @@ class DatasetLoader:
 
         return ds
 
+    def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
+        """Upsample or downsample dataset to target size."""
+        current = len(ds)
+        if current == target:
+            return ds
+        if current > target:
+            # Downsample
+            return ds.select(range(target))
+        # Upsample by repeating
+        repeats = (target // current) + 1
+        indices = list(range(current)) * repeats
+        return ds.select(indices[:target])
+
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
-        train_weights, val_weights = [], []
 
-        for d_cfg in self.config.datasets:
+        for d_cfg in tqdm(self.config.datasets, desc="Loading datasets"):
             train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
             eval_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
-            weight = d_cfg.get("sampling_weight", 1.0)
+            target_samples = d_cfg.get("target_samples")
 
-            # Handle multiple configs or direct splits
-            if "configs" in d_cfg:
-                configs = [
-                    (OmegaConf.create({**d_cfg, "name": c}), t, e)
-                    for c, t, e in zip(d_cfg.configs, train_splits, eval_splits)
-                ]
-                for cfg, train_split, eval_split in configs:
-                    train_datasets.append(self._prepare_split(cfg, train_split))
-                    train_weights.append(weight)
-                    if eval_split:
-                        val_datasets.append(self._prepare_split(cfg, eval_split))
-                        val_weights.append(weight)
-            else:
-                # Add all train splits
-                for train_split in train_splits:
-                    train_datasets.append(self._prepare_split(d_cfg, train_split))
-                    train_weights.append(weight)
-                # Add all eval splits (once, not per train split)
-                for eval_split in eval_splits:
-                    val_datasets.append(self._prepare_split(d_cfg, eval_split))
-                    val_weights.append(weight)
+            for train_split in train_splits:
+                ds = self._prepare_split(d_cfg, train_split)
+                if target_samples:
+                    ds = self._resample_to_target(ds, target_samples)
+                train_datasets.append(ds)
 
-        # Skip samples BEFORE combining/shuffling (for stage 2 to skip stage 1 data)
-        skip_samples = self.config.get("skip_train_samples", 0)
-        if skip_samples:
-            print(f"Skipping first {skip_samples} training samples")
-            train_datasets = [ds.skip(skip_samples) for ds in train_datasets]
+            for eval_split in eval_splits:
+                val_datasets.append(self._prepare_split(d_cfg, eval_split))
 
-        train_ds = self._combine_datasets(train_datasets, train_weights, shuffle=True)
-        val_ds = self._combine_datasets(val_datasets, val_weights, shuffle=False)
+        # Concatenate and shuffle
+        train_ds = (
+            concatenate_datasets(train_datasets).shuffle(seed=self.seed) if train_datasets else None
+        )
+        val_ds = concatenate_datasets(val_datasets) if val_datasets else None
 
-        if train_ds and self.config.max_train_samples:
-            train_ds = train_ds.take(self.config.max_train_samples)
-        if val_ds and self.config.max_eval_samples:
-            # Use min to avoid IndexError if dataset is smaller than max_eval_samples
+        if val_ds and self.config.get("max_eval_samples"):
             n_samples = min(len(val_ds), self.config.max_eval_samples)
-            val_ds = val_ds.take(n_samples)
+            val_ds = val_ds.select(range(n_samples))
 
         return train_ds, val_ds
-
-    def _combine_datasets(self, datasets: list, weights: list, shuffle: bool = True):
-        if not datasets:
-            return None
-        # Shuffle each dataset before interleaving for better randomization
-        if shuffle:
-            datasets = [ds.shuffle(seed=self.seed) for ds in datasets]
-        if len(datasets) == 1:
-            return datasets[0]
-        probs = [w / sum(weights) for w in weights]
-        return interleave_datasets(datasets, probabilities=probs, stopping_strategy="all_exhausted")
 
 
 class DataCollator:
@@ -275,12 +261,7 @@ class DataCollator:
 
 
 # SIFT system message for multi-task training
-SIFT_SYSTEM_MESSAGE = (
-    "You are a powerful virtual human who is capable of perceiving speech inputs "
-    "and generating precise natural responses. "
-    "You can understand both what is being said and how it is being said, "
-    "including the speaker's emotion, age, and gender."
-)
+SIFT_SYSTEM_MESSAGE = ""
 
 # SIFT instruction prompt for multi-task training
 SIFT_INSTRUCTION = "Describe all information you can hear."
@@ -347,19 +328,28 @@ class MultiTaskDataCollator(DataCollator):
             num_tokens = self.projector.get_output_length(encoder_len)
             audio_token_counts.append(num_tokens)
 
-        # Build messages using hardcoded instruction
+        # Build messages - differentiate between ASR and SIFT tasks using task column
         text_features = []
         for f, num_audio_tokens in zip(valid_features, audio_token_counts):
-            response = (f.get("sift_response") or "").strip()
-
             audio_placeholder = "<audio>" * num_audio_tokens
-            user_content = f"{audio_placeholder} {SIFT_INSTRUCTION}"
+            task = f.get("task", "transcribe")
 
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_content},
-                {"role": "assistant", "content": response},
-            ]
+            if task == "sift":
+                # SIFT task: describe audio
+                response = (f.get("sift_response") or f.get("text") or "").strip()
+                user_content = f"{audio_placeholder} {SIFT_INSTRUCTION}"
+            else:
+                # ASR task: transcription
+                prompt = random.choice(TRANSCRIBE_PROMPTS)
+                user_content = f"{audio_placeholder} {prompt}"
+                response = (f.get("text") or "").strip().lower()
+
+            # Build messages (skip system if empty)
+            messages = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": user_content})
+            messages.append({"role": "assistant", "content": response})
 
             text_features.append({"messages": messages})
 
@@ -393,6 +383,9 @@ class ASRTrainer(Trainer):
         if labels is not None:
             # Force shift_labels=True since ASRModel is a causal LM
             loss = self.label_smoother(outputs, labels, shift_labels=True)
+            # Scale loss for gradient accumulation (Trainer expects this)
+            if self.args.gradient_accumulation_steps > 1:
+                loss = loss / self.args.gradient_accumulation_steps
         else:
             loss = outputs.loss
 

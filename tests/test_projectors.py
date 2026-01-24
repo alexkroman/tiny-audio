@@ -14,8 +14,6 @@ from tiny_audio.projectors import (
     MOSAProjector,
     QFormerAudioProjector,
     SimpleAdapter,
-    load_balancing_loss,
-    z_loss,
 )
 
 # =============================================================================
@@ -159,8 +157,8 @@ class TestMoEAudioProjector:
 
     def test_has_shared_expert(self, projector):
         """Test that projector has a shared expert."""
-        assert hasattr(projector.moe, "shared_expert")
-        assert projector.moe.shared_expert is not None
+        assert hasattr(projector, "shared_expert")
+        assert projector.shared_expert is not None
 
     def test_aux_loss(self, projector):
         """Test auxiliary loss computation."""
@@ -217,42 +215,6 @@ class TestQFormerAudioProjector:
 
 
 # =============================================================================
-# Loss Function Tests
-# =============================================================================
-
-
-class TestLossFunctions:
-    """Tests for auxiliary loss functions."""
-
-    def test_load_balancing_loss_uniform(self):
-        """Test that uniform distribution gives minimal load balancing loss."""
-        num_experts = 4
-        probs = torch.ones(100, num_experts) / num_experts
-        loss = load_balancing_loss(probs, num_experts, top_k=num_experts)
-        assert loss < 1e-6
-
-    def test_load_balancing_loss_imbalanced(self):
-        """Test that imbalanced distribution gives higher loss."""
-        num_experts = 4
-        probs = torch.zeros(100, num_experts)
-        probs[:, 0] = 1.0
-        loss = load_balancing_loss(probs, num_experts, top_k=num_experts)
-        assert loss > 0
-
-    def test_z_loss_small_logits(self):
-        """Test that small logits give small z-loss."""
-        logits = torch.randn(100, 4) * 0.1
-        loss = z_loss(logits)
-        assert loss < 5.0
-
-    def test_z_loss_large_logits(self):
-        """Test that large logits give larger z-loss."""
-        logits = torch.randn(100, 4) * 100
-        loss = z_loss(logits)
-        assert loss > 100
-
-
-# =============================================================================
 # Registry Tests
 # =============================================================================
 
@@ -281,10 +243,14 @@ class TestProjectorRegistry:
 # =============================================================================
 
 
+# Projector types to test
+GRADIENT_TEST_PROJECTORS = ["mlp", "mosa", "moe"]
+
+
 class TestGradientFlow:
     """Tests for gradient flow through projectors."""
 
-    @pytest.mark.parametrize("projector_type", ["mlp", "mosa", "moe"])
+    @pytest.mark.parametrize("projector_type", GRADIENT_TEST_PROJECTORS)
     def test_gradients_flow(self, projector_type):
         """Test that gradients flow through projector."""
         config = MockProjectorConfig()

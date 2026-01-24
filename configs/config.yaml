@@ -39,3 +39,6 @@ early_stopping:
   threshold: 0.0
 
 verbose: false
+
+# Data loading
+num_proc: 8

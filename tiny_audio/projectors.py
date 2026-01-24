@@ -87,6 +87,34 @@ class SimpleAdapter(nn.Module):
         return self.fc2(self.act(self.fc1(x)))
 
 
+class SwiGLU(nn.Module):
+    """SwiGLU activation with gated linear units (used in LLaMA, Mistral, etc.)."""
+
+    def __init__(self, dim: int, hidden_dim: int, bias: bool = False):
+        super().__init__()
+        self.w1 = nn.Linear(dim, hidden_dim, bias=bias)  # Gate
+        self.w2 = nn.Linear(dim, hidden_dim, bias=bias)  # Value
+        self.w3 = nn.Linear(hidden_dim, dim, bias=bias)  # Output
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w3(F.silu(self.w1(x)) * self.w2(x))
+
+
+class AsymmetricSwiGLU(nn.Module):
+    """SwiGLU that handles different input and output dimensions."""
+
+    def __init__(
+        self, in_features: int, hidden_features: int, out_features: int, bias: bool = False
+    ):
+        super().__init__()
+        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)  # Gate
+        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)  # Value
+        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)  # Output
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w3(F.silu(self.w1(x)) * self.w2(x))
+
+
 class MOSAProjector(nn.Module):
     """MOSA-Base projector: simple 2-layer ReLU router with 4 simple adapters.
 
@@ -166,109 +194,18 @@ class MOSAProjector(nn.Module):
 
 
 # =============================================================================
-# MoE Projector (Shared Expert + Sparse Routed Experts)
+# MoE Projector (Pure PyTorch with Shared Expert)
 # =============================================================================
 
 
-class SharedMoEBlock(nn.Module):
-    """MoE block with Shared + Sigmoid-Routed Experts."""
-
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int,
-        output_dim: int,
-        num_experts: int = 4,
-        top_k: int = 2,
-    ):
-        super().__init__()
-        self.num_experts = num_experts
-        self.top_k = top_k
-        self.output_dim = output_dim
-
-        # RMSNorm before routing
-        self.norm = LlamaRMSNorm(input_dim, eps=1e-8)
-
-        self.router = nn.Linear(input_dim, num_experts, bias=False)
-        nn.init.normal_(self.router.weight, mean=0.0, std=0.02)
-
-        self.shared_expert = SimpleAdapter(input_dim, hidden_dim, output_dim)
-        self.experts = nn.ModuleList(
-            [SimpleAdapter(input_dim, hidden_dim, output_dim) for _ in range(num_experts)]
-        )
-
-        self.last_router_logits = None
-        self.last_router_probs = None
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len, dim = hidden_states.shape
-
-        # 1. Apply Shared Expert
-        normed_states = self.norm(hidden_states)
-        shared_out = self.shared_expert(normed_states)
-
-        # 2. Router Logic (Sigmoid Style)
-        flat_hidden = normed_states.view(-1, dim)
-        router_logits = self.router(flat_hidden)
-
-        # Sigmoid routing
-        router_probs = torch.sigmoid(router_logits)
-
-        self.last_router_logits = router_logits
-        self.last_router_probs = router_probs
-
-        # 3. Top-K Selection
-        top_k_scores, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
-
-        # Normalize weights
-        top_k_weights = top_k_scores / (top_k_scores.sum(dim=-1, keepdim=True) + 1e-6)
-        top_k_weights = top_k_weights.to(hidden_states.dtype)
-
-        # 4. Dispatch
-        routed_out = self._dispatch_experts(flat_hidden, top_k_indices, top_k_weights)
-        routed_out = routed_out.view(batch_size, seq_len, -1)
-
-        return shared_out + routed_out
-
-    def _dispatch_experts(
-        self,
-        hidden_states: torch.Tensor,
-        top_k_indices: torch.Tensor,
-        top_k_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        num_tokens = hidden_states.shape[0]
-        output = torch.zeros(
-            num_tokens, self.output_dim, device=hidden_states.device, dtype=hidden_states.dtype
-        )
-
-        for expert_idx, expert in enumerate(self.experts):
-            expert_mask = top_k_indices == expert_idx
-            if not expert_mask.any():
-                continue
-
-            token_indices, slot_indices = torch.where(expert_mask)
-            expert_input = hidden_states[token_indices]
-            expert_output = expert(expert_input).to(output.dtype)
-            weights = top_k_weights[token_indices, slot_indices].unsqueeze(-1)
-            output.index_add_(0, token_indices, expert_output * weights)
-
-        return output
-
-
-def load_balancing_loss(router_probs: torch.Tensor, num_experts: int, top_k: int) -> torch.Tensor:
-    """Auxiliary loss to encourage balanced expert usage."""
-    prob_per_expert = router_probs.mean(dim=0)
-    target_mean = prob_per_expert.mean()
-    return (prob_per_expert - target_mean).square().sum() * num_experts
-
-
-def z_loss(router_logits: torch.Tensor) -> torch.Tensor:
-    """Z-loss to prevent router logits from growing too large."""
-    return torch.logsumexp(router_logits.float(), dim=-1).square().mean()
-
-
 class MoEAudioProjector(nn.Module):
-    """MoE projector with shared expert + sparse routed experts."""
+    """MoE projector with shared expert (DeepSeek-style), pure PyTorch implementation.
+
+    Uses 4 sparse experts with top-2 routing plus a shared expert that processes all tokens.
+    No external dependencies (megablocks removed).
+
+    Architecture matches main branch: norm → experts(in_dim → hidden → out_dim)
+    """
 
     def __init__(self, config):
         """Initialize MoE projector.
@@ -279,28 +216,55 @@ class MoEAudioProjector(nn.Module):
         super().__init__()
 
         self.k = getattr(config, "projector_pool_stride", 4)
-        encoder_dim = config.encoder_dim
+        self.aux_coef = getattr(config, "router_aux_loss_coef", 0.01)
 
-        in_dim = encoder_dim * self.k
+        # Stability coefficients
+        self.router_z_loss_coef = getattr(
+            config, "router_z_loss_coef", 1e-4
+        )  # Prevents logit explosion
+        self.router_jitter_noise = getattr(
+            config, "router_jitter_noise", 0.01
+        )  # Prevents expert collapse
+
+        in_dim = config.encoder_dim * self.k
         out_dim = config.llm_dim
-        hidden_dim = getattr(config, "projector_hidden_dim", None) or (out_dim * 2)
 
+        # Expert hidden dim (default = output dim)
+        hidden_dim = getattr(config, "projector_hidden_dim", None) or out_dim
+
+        # Number of experts and top-k selection
         self.num_experts = getattr(config, "num_experts", 4)
         self.top_k = getattr(config, "num_experts_per_tok", 2)
-        self.aux_loss_coef = getattr(config, "router_aux_loss_coef", 0.02)
-        self.z_loss_coef = getattr(config, "router_z_loss_coef", 0.001)
 
-        self.moe = SharedMoEBlock(in_dim, hidden_dim, out_dim, self.num_experts, self.top_k)
+        # A. Normalize stacked input (like main branch SharedMoEBlock)
+        self.norm = LlamaRMSNorm(in_dim, eps=1e-6)
+
+        # B. Router (operates on stacked input)
+        self.router = nn.Linear(in_dim, self.num_experts, bias=False)
+
+        # C. Experts: simple 2-layer MLP (same as MLPAudioProjector)
+        self.experts = nn.ModuleList(
+            [SimpleAdapter(in_dim, hidden_dim, out_dim) for _ in range(self.num_experts)]
+        )
+
+        # D. Shared Expert (same architecture)
+        self.shared_expert = SimpleAdapter(in_dim, hidden_dim, out_dim)
+
+        # E. Initialize weights for stable training
         self._init_weights()
 
-    def _init_weights(self):
-        with torch.no_grad():
-            nn.init.orthogonal_(self.moe.shared_expert.fc1.weight)
-            nn.init.orthogonal_(self.moe.shared_expert.fc2.weight, gain=0.5)
+        self.last_aux_loss = torch.tensor(0.0)
 
-            for expert in self.moe.experts:
-                nn.init.orthogonal_(expert.fc1.weight)
-                nn.init.orthogonal_(expert.fc2.weight, gain=0.01)
+    def _init_weights(self):
+        """Initialize weights for stable training start."""
+        with torch.no_grad():
+            # Router: small weights -> uniform probability
+            nn.init.normal_(self.router.weight, mean=0.0, std=0.02)
+
+            # Experts: xavier for fc1, small for fc2 (output)
+            for expert in [self.shared_expert, *self.experts]:
+                nn.init.xavier_uniform_(expert.fc1.weight)
+                nn.init.normal_(expert.fc2.weight, mean=0.0, std=0.01)  # Small init
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length (matches MLP projector)."""
@@ -315,27 +279,95 @@ class MoEAudioProjector(nn.Module):
         Returns:
             Projected features of shape [batch, out_len, llm_dim]
         """
+        # 1. Frame Stacking
         batch, seq, dim = x.shape
-
-        target_dtype = self.moe.shared_expert.fc1.weight.dtype
-        if x.dtype != target_dtype:
-            x = x.to(target_dtype)
-
-        # Frame stacking (matches MLP projector)
         out_len = (seq - self.k) // self.k + 1
         x = x[:, : out_len * self.k, :]
         x = x.reshape(batch, out_len, dim * self.k)
 
-        return self.moe(x)
+        # 2. Normalize stacked input (like main branch SharedMoEBlock)
+        x = self.norm(x)
+        flat_x = x.view(-1, x.size(-1))  # [tokens, in_dim]
+
+        # 3. Shared Expert (compute first, creates output tensor)
+        output = self.shared_expert(flat_x)
+
+        # 4. Sparse Experts (in-place add to shared output)
+        self.last_aux_loss = self._forward_sparse(flat_x, output)
+
+        return output.view(batch, out_len, -1)
+
+    def _forward_sparse(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        """Stability-hardened sparse expert dispatch (in-place add to output).
+
+        Args:
+            x: Flattened input of shape [tokens, dim]
+            output: Output tensor to add sparse expert results into (in-place)
+
+        Returns:
+            Auxiliary loss tensor
+        """
+        # A. Router Logic with Jitter
+        logits = self.router(x)
+
+        if self.training and self.router_jitter_noise > 0:
+            # Jitter: multiply by uniform noise (1-eps, 1+eps) to shake decision boundary
+            # Prevents router from getting stuck on one expert early in training
+            noise = torch.empty_like(logits).uniform_(
+                1.0 - self.router_jitter_noise, 1.0 + self.router_jitter_noise
+            )
+            logits = logits * noise
+
+        # Force float32 for softmax (bf16/fp16 exponentials can overflow)
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(x)
+
+        # B. Top-K Selection
+        top_k_weights, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
+
+        # Normalize weights so they sum to 1.0
+        top_k_weights = top_k_weights / (top_k_weights.sum(dim=-1, keepdim=True) + 1e-6)
+
+        # C. Aux Loss + Z-Loss
+        aux_loss = torch.tensor(0.0, device=x.device)
+
+        if self.training:
+            # Load balancing loss (batch-size invariant)
+            prob_per_expert = probs.mean(0)  # [num_experts]
+            target = 1.0 / self.num_experts
+            balance_loss = (
+                self.aux_coef * ((prob_per_expert - target) ** 2).mean() * self.num_experts
+            )
+
+            # Z-loss: penalty on large logits to prevent softmax saturation
+            z_loss = self.router_z_loss_coef * torch.logsumexp(logits, dim=-1).pow(2).mean()
+
+            aux_loss = balance_loss + z_loss
+
+        # D. Dispatch Loop (in-place add to output)
+        for i, expert in enumerate(self.experts):
+            # Create boolean mask for tokens that selected Expert 'i'
+            mask = top_k_indices == i
+
+            if mask.any():
+                # token_idx = which tokens, k_idx = 1st or 2nd choice
+                token_idx, k_idx = torch.where(mask)
+
+                # Gather inputs and compute
+                expert_input = x[token_idx]
+                expert_output = expert(expert_input)
+
+                # Apply routing weight
+                weight = top_k_weights[token_idx, k_idx].unsqueeze(-1)
+                weighted_output = (expert_output * weight).type_as(output)
+
+                # Scatter back in-place (index_add_ is atomic and deterministic)
+                output.index_add_(0, token_idx, weighted_output)
+
+        return aux_loss
 
     def get_aux_loss(self) -> torch.Tensor:
-        if self.moe.last_router_logits is None:
-            return torch.tensor(0.0, device=self.moe.router.weight.device)
-
-        balance = load_balancing_loss(self.moe.last_router_probs, self.num_experts, self.top_k)
-        z = z_loss(self.moe.last_router_logits)
-
-        return self.aux_loss_coef * balance + self.z_loss_coef * z
+        """Return auxiliary load balancing loss."""
+        return self.last_aux_loss
 
 
 # =============================================================================

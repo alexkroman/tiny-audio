@@ -298,26 +298,26 @@ class TestMultiTaskDataCollator:
     def create_sift_sample(
         self,
         text: str = "hello world",
-        sift_instruction: str = "Describe the audio.",
         sift_response: str = "A happy female speaker says: hello world",
+        task: str = "sift",
         duration_sec: float = 1.0,
         sample_rate: int = 16000,
     ):
-        """Create a sample with sift_instruction and sift_response."""
+        """Create a sample with task and sift_response."""
         num_samples = int(duration_sec * sample_rate)
         audio_array = np.random.randn(num_samples).astype(np.float32) * 0.1
         return {
             "audio": {"array": audio_array, "sampling_rate": sample_rate},
             "text": text,
-            "sift_instruction": sift_instruction,
             "sift_response": sift_response,
+            "task": task,
         }
 
-    def test_uses_hardcoded_instruction_and_response(self, multitask_collator, tokenizer):
-        """Test that collator uses hardcoded instruction and sift_response from dataset."""
+    def test_sift_task_uses_instruction_and_response(self, multitask_collator, tokenizer):
+        """Test that SIFT task uses hardcoded instruction and sift_response."""
         samples = [
             self.create_sift_sample(
-                sift_instruction="ignored",  # instruction from dataset is ignored
+                task="sift",
                 sift_response="The speaker sounds happy and excited.",
             )
         ]
@@ -327,42 +327,59 @@ class TestMultiTaskDataCollator:
         # Decode to check structure
         decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
 
-        # Should contain the hardcoded instruction (not from dataset)
+        # Should contain the hardcoded SIFT instruction
         assert "Describe all information you can hear" in decoded
         # Should contain the response from dataset
         assert "The speaker sounds happy and excited" in decoded
 
-    def test_has_system_prompt(self, multitask_collator, tokenizer):
-        """Test that SIFT system prompt is included."""
-        samples = [self.create_sift_sample()]
-
-        batch = multitask_collator(samples)
-
-        decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
-
-        # Should contain SIFT system message
-        assert "powerful virtual human" in decoded
-
-    def test_ignores_dataset_instruction(self, multitask_collator, tokenizer):
-        """Test that instruction from dataset is ignored in favor of hardcoded one."""
+    def test_transcribe_task_uses_text(self, multitask_collator, tokenizer):
+        """Test that transcribe task uses text column and transcription prompt."""
         samples = [
             self.create_sift_sample(
-                sift_instruction="This should be ignored",
-                sift_response="A speaker says hello.",
+                task="transcribe",
+                text="hello world transcript",
+                sift_response="This should be ignored",
             )
         ]
 
         batch = multitask_collator(samples)
         decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
 
-        # Should use hardcoded instruction, not dataset instruction
-        assert "Describe all information you can hear" in decoded
+        # Should use transcription prompts (one of several)
+        from scripts.train import TRANSCRIBE_PROMPTS
+
+        assert any(prompt in decoded for prompt in TRANSCRIBE_PROMPTS)
+        # Should use text column (lowercased)
+        assert "hello world transcript" in decoded
+        # Should NOT use sift_response
         assert "This should be ignored" not in decoded
 
+    def test_default_task_is_transcribe(self, multitask_collator, tokenizer):
+        """Test that samples without task column default to transcribe."""
+        # Create sample without task column
+        num_samples = int(1.0 * 16000)
+        audio_array = np.random.randn(num_samples).astype(np.float32) * 0.1
+        samples = [
+            {
+                "audio": {"array": audio_array, "sampling_rate": 16000},
+                "text": "default transcription",
+            }
+        ]
+
+        batch = multitask_collator(samples)
+        decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
+
+        # Should use transcription prompt
+        from scripts.train import TRANSCRIBE_PROMPTS
+
+        assert any(prompt in decoded for prompt in TRANSCRIBE_PROMPTS)
+        assert "default transcription" in decoded
+
     def test_response_is_unmasked(self, multitask_collator, tokenizer):
-        """Test that sift_response content is unmasked in labels."""
+        """Test that response content is unmasked in labels."""
         samples = [
             self.create_sift_sample(
+                task="sift",
                 sift_response="The speaker sounds happy.",
             )
         ]
