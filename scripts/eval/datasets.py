@@ -95,6 +95,13 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         audio_field="audio",
         text_field="text",
     ),
+    "expresso": DatasetConfig(
+        name="expresso",
+        path="ylacombe/expresso",
+        audio_field="audio",
+        text_field="text",
+        default_split="train",  # Only split available
+    ),
     # Diarization datasets
     "callhome": DatasetConfig(
         name="callhome",
@@ -163,6 +170,35 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         question_field=None,  # Will generate instruction dynamically
         answer_field="age",
     ),
+    "commonvoice-accent": DatasetConfig(
+        name="commonvoice-accent",
+        path="fixie-ai/common_voice_17_0",
+        config="en",
+        audio_field="audio",
+        text_field="accent",  # Use accent as the answer field
+        question_field=None,  # Will generate instruction dynamically
+        answer_field="accent",
+    ),
+    # Speaking rate classification (from SIFT dataset)
+    "sift-rate": DatasetConfig(
+        name="sift-rate",
+        path="mazesmazes/sift-audio",
+        audio_field="audio",
+        text_field="speaking_rate",
+        question_field=None,  # Will generate instruction dynamically
+        answer_field="speaking_rate",
+        default_split="podcast",  # podcast split has all 3 labels (slow, normal, fast)
+    ),
+    # Expresso style classification (paralinguistic - emotion/expression)
+    "expresso-style": DatasetConfig(
+        name="expresso-style",
+        path="ylacombe/expresso",
+        audio_field="audio",
+        text_field="style",  # Style as the answer (confused, happy, sad, whisper, etc.)
+        question_field=None,  # Will generate instruction dynamically
+        answer_field="style",
+        default_split="train",
+    ),
 }
 
 DIARIZATION_DATASETS = {"callhome"}
@@ -173,6 +209,9 @@ CLASSIFICATION_DATASETS = {
     "voxceleb-gender",
     "commonvoice-gender",
     "commonvoice-age",
+    "commonvoice-accent",
+    "sift-rate",
+    "expresso-style",
 }
 
 

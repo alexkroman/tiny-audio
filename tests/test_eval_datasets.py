@@ -166,7 +166,7 @@ class TestDatasetValidation:
 
     def test_default_splits_are_valid(self):
         """Test that default splits are reasonable values."""
-        valid_splits = {"test", "validation", "dev", "train", "data", "dev_clean"}
+        valid_splits = {"test", "validation", "dev", "train", "data", "dev_clean", "podcast"}
         for name, config in DATASET_REGISTRY.items():
             assert config.default_split in valid_splits, (
                 f"Invalid split '{config.default_split}' for {name}"

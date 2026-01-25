@@ -145,10 +145,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.generation_config.length_penalty = config.length_penalty
         self.generation_config.repetition_penalty = config.repetition_penalty
         self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
-        self.generation_config.eos_token_id = [
+        # Set EOS tokens, filtering out any that don't exist in the tokenizer
+        eos_candidates = [
             self.tokenizer.convert_tokens_to_ids("<|im_end|>"),
             self.tokenizer.convert_tokens_to_ids("<|endoftext|>"),
         ]
+        self.generation_config.eos_token_id = [t for t in eos_candidates if t is not None]
         self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
         # Feature extractor for audio preprocessing
@@ -233,7 +235,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         decoder_kwargs = {
             "attn_implementation": config.attn_implementation,
             "trust_remote_code": True,
-            "tie_word_embeddings": False,
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }

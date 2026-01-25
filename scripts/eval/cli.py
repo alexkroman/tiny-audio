@@ -739,6 +739,10 @@ def main(
                 task = "gender"
             elif "age" in dataset_name:
                 task = "age"
+            elif "accent" in dataset_name:
+                task = "accent"
+            elif "rate" in dataset_name:
+                task = "rate"
             else:
                 task = "classification"
 

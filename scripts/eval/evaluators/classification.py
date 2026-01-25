@@ -49,7 +49,26 @@ class ClassificationEvaluator:
         "frustration",
         "frustrated",
     ]
+
+    # Normalize synonyms to canonical form for comparison
+    EMOTION_SYNONYMS = {
+        "anger": "angry",
+        "happiness": "happy",
+        "sadness": "sad",
+        "fearful": "fear",
+        "disgusted": "disgust",
+        "surprised": "surprise",
+        "frustrated": "frustration",
+        "excited": "happy",  # Often conflated
+    }
+
     GENDER_KEYWORDS = ["female", "male", "woman", "man", "female_feminine", "male_masculine"]
+    GENDER_SYNONYMS = {
+        "woman": "female",
+        "man": "male",
+        "female_feminine": "female",
+        "male_masculine": "male",
+    }
     AGE_KEYWORDS = [
         "child",
         "teen",
@@ -71,11 +90,134 @@ class ClassificationEvaluator:
         "nineties",
     ]
 
+    ACCENT_KEYWORDS = [
+        # Major English varieties
+        "american",
+        "british",
+        "australian",
+        "canadian",
+        "irish",
+        "scottish",
+        "welsh",
+        "indian",
+        "south african",
+        "new zealand",
+        # US regional
+        "southern",
+        "northern",
+        "midwestern",
+        "eastern",
+        "western",
+        "boston",
+        "new york",
+        "texan",
+        "ohio",
+        "midwest",
+        # UK regional
+        "english",
+        "london",
+        "cockney",
+        "manchester",
+        "liverpool",
+        "birmingham",
+        # Non-native / L2
+        "spanish",
+        "chinese",
+        "german",
+        "french",
+        "italian",
+        "russian",
+        "japanese",
+        "korean",
+        "arabic",
+        "african",
+        "asian",
+        "european",
+        "latin",
+        "hispanic",
+        # South Asian
+        "india",
+        "south asian",
+        "south asia",
+        "pakistan",
+        "sri lanka",
+        # Generic
+        "native",
+        "non-native",
+        "foreign",
+        "neutral",
+        "standard",
+        "united states",
+    ]
+
+    ACCENT_SYNONYMS = {
+        "england": "british",
+        "uk": "british",
+        "united kingdom": "british",
+        "us": "american",
+        "usa": "american",
+        "united states": "american",
+        "united states english": "american",
+        "aussie": "australian",
+        "kiwi": "new zealand",
+        "latino": "latin",
+        "india": "indian",
+        "south asian": "indian",
+        "south asia": "indian",
+        # US regional -> american (for coarse matching)
+        "midwestern": "american",
+        "midwest": "american",
+        "ohio": "american",
+        "southern": "american",
+        "texan": "american",
+        "texas": "american",
+        "boston": "american",
+        "new york": "american",
+        "eastern": "american",
+        "western": "american",
+        "northern": "american",
+    }
+
+    SPEAKING_RATE_KEYWORDS = [
+        "slow",
+        "slowly",
+        "fast",
+        "quickly",
+        "rapid",
+        "normal",
+        "moderate",
+        "average",
+        "deliberate",
+        "measured",
+        "hurried",
+        "rushed",
+        "leisurely",
+        "brisk",
+        "steady",
+    ]
+
+    SPEAKING_RATE_SYNONYMS = {
+        "slowly": "slow",
+        "quickly": "fast",
+        "rapid": "fast",
+        "hurried": "fast",
+        "rushed": "fast",
+        "brisk": "fast",
+        "moderate": "normal",
+        "average": "normal",
+        "steady": "normal",
+        "deliberate": "slow",
+        "measured": "slow",
+        "leisurely": "slow",
+    }
+
     # Default instructions for each task type (used when instruction_field is None)
     DEFAULT_INSTRUCTIONS = {
         "emotion": "What emotion is the speaker expressing?",
         "gender": "What is the gender of the speaker?",
         "age": "What is the approximate age group of the speaker?",
+        "accent": "What accent does the speaker have?",
+        "rate": "How fast is the speaker talking?",
     }
 
     def __init__(
@@ -118,25 +260,62 @@ class ClassificationEvaluator:
             return self.GENDER_KEYWORDS
         if self.task == "age":
             return self.AGE_KEYWORDS
+        if self.task == "accent":
+            return self.ACCENT_KEYWORDS
+        if self.task == "rate":
+            return self.SPEAKING_RATE_KEYWORDS
         return []
 
+    def _get_synonyms(self) -> dict[str, str]:
+        """Get synonym mapping for current task."""
+        if self.task == "emotion":
+            return self.EMOTION_SYNONYMS
+        if self.task == "gender":
+            return self.GENDER_SYNONYMS
+        if self.task == "accent":
+            return self.ACCENT_SYNONYMS
+        if self.task == "rate":
+            return self.SPEAKING_RATE_SYNONYMS
+        return {}
+
+    def _normalize_class(self, keyword: str) -> str:
+        """Normalize keyword to canonical form using synonyms."""
+        synonyms = self._get_synonyms()
+        return synonyms.get(keyword, keyword)
+
     def extract_class(self, text: str) -> str:
-        """Extract the predicted class from model output."""
+        """Extract the predicted class from model output and normalize it.
+
+        Returns the first keyword found (for single-class reference matching).
+        """
         text_lower = text.lower()
         keywords = self._get_keywords()
 
         for keyword in keywords:
             if keyword in text_lower:
-                return keyword
+                # Normalize to canonical form for fair comparison
+                return self._normalize_class(keyword)
 
         # Return full text if no keyword found
         return text_lower.strip()
+
+    def extract_all_classes(self, text: str) -> set[str]:
+        """Extract ALL matching classes from text, normalized."""
+        text_lower = text.lower()
+        keywords = self._get_keywords()
+        found = set()
+
+        for keyword in keywords:
+            if keyword in text_lower:
+                found.add(self._normalize_class(keyword))
+
+        return found
 
     def classify(self, audio: dict, instruction: str) -> tuple[str, float]:
         """Classify audio using the model."""
         start = time.time()
         try:
-            result = self.pipeline(audio, generate_kwargs={"prompt": instruction})
+            result = self.pipeline(audio, user_prompt=instruction)
         except Exception:
             # Model doesn't support prompts - just transcribe
             result = self.pipeline(audio)
@@ -155,12 +334,12 @@ class ClassificationEvaluator:
             print(f"Error on sample {idx}: {e}")
             prediction_raw, inference_time = "", 0.0
 
-        # Extract class from both prediction and reference
-        pred_class = self.extract_class(prediction_raw)
+        # Extract classes - get ALL classes from prediction, single class from reference
+        pred_classes = self.extract_all_classes(prediction_raw)
         ref_class = self.extract_class(sample["reference"])
 
-        # Check if prediction matches reference (keyword-based)
-        correct = pred_class == ref_class
+        # Check if reference class is in any of the predicted classes
+        correct = ref_class in pred_classes
 
         return idx, ClassificationResult(
             prediction=prediction_raw,

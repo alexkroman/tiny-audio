@@ -56,7 +56,11 @@ class DatasetConfig:
     age_field: str | None = None
     speaking_rate_field: str | None = None
     accent_field: str | None = None
+    sentiment_field: str | None = None
+    human_labels_field: str | None = None  # For audioset-style labels (list of strings)
     max_samples: int | None = None  # Per-dataset sample limit (overrides --max-samples)
+    # Flag for datasets with integer emotion labels (like MELD)
+    emotion_is_int: bool = False
 
 
 # HuggingFace datasets with paralinguistic labels (English only)
@@ -152,6 +156,28 @@ DATASET_CONFIGS = [
         accent_field="accent",
         max_samples=100000,
     ),
+    # MELD: Multimodal EmotionLines Dataset (Friends TV show)
+    # Has emotion (7 classes) and sentiment (3 classes)
+    DatasetConfig(
+        name="meld",
+        hf_path="garam-icecream/MELD",
+        split="train",
+        audio_field="audio",
+        text_field="text",
+        emotion_field="emotion",
+        sentiment_field="sentiment",
+        emotion_is_int=True,  # MELD uses integer labels
+    ),
+    # AudioSet Humans: Sound event detection with human-readable labels
+    # Has human_labels (list of sound categories like 'Music', 'Speech', etc.)
+    DatasetConfig(
+        name="audioset_humans",
+        hf_path="enyoukai/audioset-humans-reprocessed",
+        split="train",
+        audio_field="audio",
+        text_field=None,  # No transcription
+        human_labels_field="human_labels",
+    ),
 ]
 
 
@@ -180,10 +206,11 @@ def age_to_group(age: str | int | None) -> str | None:
 def speaking_rate_to_label(rate: str | float | None) -> str | None:
     """Convert numeric speaking rate to text label. Returns None for missing/invalid values.
 
-    Speaking rate thresholds based on typical speech rates:
-    - Slow: < 3.0 words/sec (< 180 wpm)
-    - Normal: 3.0 - 4.5 words/sec (180-270 wpm)
-    - Fast: > 4.5 words/sec (> 270 wpm)
+    Speaking rate thresholds based on AbstractTTS dataset distributions:
+    - Data ranges from ~3-17 with median ~7-10
+    - Slow: < 6.0 (bottom ~25%)
+    - Normal: 6.0 - 9.0 (middle ~50%)
+    - Fast: > 9.0 (top ~25%)
     """
     if rate is None:
         return None
@@ -191,9 +218,9 @@ def speaking_rate_to_label(rate: str | float | None) -> str | None:
         rate_float = float(rate)
         if rate_float <= 0:
             return None
-        if rate_float < 3.0:
+        if rate_float < 6.0:
             return "slow"
-        if rate_float <= 4.5:
+        if rate_float <= 9.0:
             return "normal"
         return "fast"
     except (ValueError, TypeError):
@@ -261,6 +288,47 @@ def normalize_emotion(value: str | None) -> str | None:
     return EMOTION_NORMALIZATION.get(value_lower, value_lower)
 
 
+# MELD emotion mapping (integer to string)
+MELD_EMOTION_MAP = {
+    0: "angry",
+    1: "disgust",
+    2: "fear",
+    3: "happy",  # joy -> happy for consistency
+    4: "neutral",
+    5: "sad",
+    6: "surprise",
+}
+
+# Sentiment mapping (integer to string)
+SENTIMENT_MAP = {
+    0: "negative",
+    1: "neutral",
+    2: "positive",
+}
+
+
+def normalize_meld_emotion(value: int | str | None) -> str | None:
+    """Convert MELD emotion integer to string label."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        label = MELD_EMOTION_MAP.get(value)
+        return normalize_emotion(label) if label else None
+    return normalize_emotion(value)
+
+
+def normalize_sentiment(value: int | str | None) -> str | None:
+    """Convert sentiment integer to string label."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return SENTIMENT_MAP.get(value)
+    value_lower = str(value).lower().strip()
+    if value_lower in ("", "na", "null", "unk", "unknown", "nan", "none"):
+        return None
+    return value_lower
+
+
 def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
     """Extract paralinguistic metadata from a sample.
 
@@ -274,6 +342,8 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         "age": "",
         "speaking_rate": "",
         "accent": "",
+        "sentiment": "",
+        "human_labels": "",
     }
 
     # Extract text transcription
@@ -282,9 +352,13 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         if text:
             metadata["text"] = str(text).strip().lower()
 
-    # Extract emotion
+    # Extract emotion (handle integer labels for MELD)
     if config.emotion_field and config.emotion_field in sample:
-        metadata["emotion"] = normalize_emotion(sample[config.emotion_field])
+        raw_emotion = sample[config.emotion_field]
+        if config.emotion_is_int:
+            metadata["emotion"] = normalize_meld_emotion(raw_emotion)
+        else:
+            metadata["emotion"] = normalize_emotion(raw_emotion)
 
     # Extract gender
     if config.gender_field and config.gender_field in sample:
@@ -310,6 +384,20 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         accent = normalize_label(sample[config.accent_field])
         metadata["accent"] = accent
 
+    # Extract sentiment (handle integer labels)
+    if config.sentiment_field and config.sentiment_field in sample:
+        raw_sentiment = sample[config.sentiment_field]
+        metadata["sentiment"] = normalize_sentiment(raw_sentiment)
+
+    # Extract human labels (list of sound/audio categories)
+    if config.human_labels_field and config.human_labels_field in sample:
+        labels = sample[config.human_labels_field]
+        if isinstance(labels, list) and labels:
+            # Join list into comma-separated string
+            metadata["human_labels"] = ", ".join(str(lbl).lower() for lbl in labels)
+        elif labels:
+            metadata["human_labels"] = str(labels).lower()
+
     return metadata
 
 
@@ -324,7 +412,7 @@ def build_audio_context(metadata: dict) -> str:
     """
     # Build paralinguistic metadata
     para_parts = []
-    for key in ["age", "gender", "emotion", "speaking_rate", "accent"]:
+    for key in ["age", "gender", "emotion", "speaking_rate", "accent", "sentiment", "human_labels"]:
         value = metadata.get(key)
         if value:  # Skip empty strings and None
             display_key = key.replace("_", " ")
@@ -397,7 +485,11 @@ print(sample["sift_response"])
 | `text` | string | Transcription of the audio |
 | `emotion` | string | Detected emotion (if available) |
 | `gender` | string | Speaker gender (if available) |
-| `speaking_rate` | string | Speaking pace (if available) |
+| `age` | string | Speaker age group (if available) |
+| `speaking_rate` | string | Speaking pace: slow, normal, fast (if available) |
+| `accent` | string | Speaker accent (if available) |
+| `sentiment` | string | Sentiment: positive, neutral, negative (if available) |
+| `human_labels` | string | Sound event labels from AudioSet (if available) |
 | `sift_response` | string | Generated description of the audio |
 | `source_dataset` | string | Original dataset source |
 
@@ -454,6 +546,8 @@ def process_dataset(
         "age": [],
         "speaking_rate": [],
         "accent": [],
+        "sentiment": [],
+        "human_labels": [],
     }
 
     for sample in tqdm(ds, desc="Preparing", total=len(ds)):
@@ -481,6 +575,8 @@ def process_dataset(
     ds = ds.add_column("meta_age", metadata_lists["age"])
     ds = ds.add_column("meta_speaking_rate", metadata_lists["speaking_rate"])
     ds = ds.add_column("meta_accent", metadata_lists["accent"])
+    ds = ds.add_column("meta_sentiment", metadata_lists["sentiment"])
+    ds = ds.add_column("meta_human_labels", metadata_lists["human_labels"])
 
     # Generate responses using pipeline with dataset (more efficient than .map())
     print("  Generating instructions and responses...")
@@ -511,7 +607,16 @@ def process_dataset(
     # Remove original columns that would conflict with our renamed columns
     conflict_cols = [
         c
-        for c in ["text", "emotion", "gender", "age", "speaking_rate", "accent"]
+        for c in [
+            "text",
+            "emotion",
+            "gender",
+            "age",
+            "speaking_rate",
+            "accent",
+            "sentiment",
+            "human_labels",
+        ]
         if c in ds.column_names
     ]
     if conflict_cols:
@@ -526,6 +631,8 @@ def process_dataset(
             "meta_age": "age",
             "meta_speaking_rate": "speaking_rate",
             "meta_accent": "accent",
+            "meta_sentiment": "sentiment",
+            "meta_human_labels": "human_labels",
         }
     )
     ds = ds.add_column("source_dataset", [config.name] * len(ds))
@@ -539,6 +646,8 @@ def process_dataset(
         "age",
         "speaking_rate",
         "accent",
+        "sentiment",
+        "human_labels",
         "sift_response",
         "source_dataset",
     ]
@@ -552,6 +661,8 @@ def process_dataset(
     ds = ds.cast_column("age", Value("string"))
     ds = ds.cast_column("speaking_rate", Value("string"))
     ds = ds.cast_column("accent", Value("string"))
+    ds = ds.cast_column("sentiment", Value("string"))
+    ds = ds.cast_column("human_labels", Value("string"))
     return ds.cast_column("audio", Audio(sampling_rate=16000))
 
 
