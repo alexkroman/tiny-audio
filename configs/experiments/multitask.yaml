@@ -25,7 +25,7 @@ training:
   hub_model_id: "mazesmazes/tiny-audio-multitask"
   group_by_length: false  # Disabled: interleaved datasets have inconsistent length columns
   learning_rate: 1e-3
-  warmup_steps: 500
+  warmup_steps: 1000
   lr_scheduler_type: polynomial
   lr_scheduler_kwargs:
     power: 0.5
