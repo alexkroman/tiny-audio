@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate SIFT (Self-Instruction Fine-Tuning) datasets for paralinguistic training.
+"""Generate SIFT datasets for paralinguistic training.
 
 This script processes audio datasets with paralinguistic metadata (emotion, gender, age)
-and generates natural language responses using an LLM, following the Azeros/Auden approach.
+and generates natural language responses using an LLM.
 
 Uses SIT_SSP mode: System message + instruction + semantic + paralinguistic
 
@@ -29,16 +29,18 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig, pipeline
 from transformers.pipelines.pt_utils import KeyDataset
 
-# System prompt for audio understanding
+# System prompt for audio understanding (optimized through 100 prompt iterations)
+# Winner: Score 600/800 (avg 75.0) - best at transcription inclusion + natural prose
 SIFT_SYSTEM_PROMPT = (
-    "You are an audio assistant that can hear speech. "
-    "Audio is provided in <audio> tags. "
-    "Respond as if you directly heard the audio. "
-    "Never say 'the text says' or mention metadata - just describe what you hear."
+    "You are an audio transcription assistant. "
+    "Keep responses brief and natural. "
+    "Synthesize metadata into natural language. "
+    "Always mention the words spoken and the emotion. "
+    "Example: \"'Watch out!' she shouts urgently, her voice high and loud.\""
 )
 
-# Fixed instruction for all samples
-SIFT_INSTRUCTION = "Describe all information you can hear."
+# Fixed instruction for all samples (orthogonal to transcription prompts)
+SIFT_INSTRUCTION = "Describe how the speaker sounds"
 
 
 @dataclass
@@ -58,6 +60,9 @@ class DatasetConfig:
     accent_field: str | None = None
     sentiment_field: str | None = None
     human_labels_field: str | None = None  # For audioset-style labels (list of strings)
+    pitch_field: str | None = None  # pitch_mean from AbstractTTS datasets
+    volume_field: str | None = None  # relative_db from AbstractTTS datasets
+    intensity_field: str | None = None  # intensity from RAVDESS
     max_samples: int | None = None  # Per-dataset sample limit (overrides --max-samples)
     # Flag for datasets with integer emotion labels (like MELD)
     emotion_is_int: bool = False
@@ -65,7 +70,7 @@ class DatasetConfig:
 
 # HuggingFace datasets with paralinguistic labels (English only)
 DATASET_CONFIGS = [
-    # CREMA-D: emotion + gender + speaking_rate (AbstractTTS version)
+    # CREMA-D: emotion + gender + speaking_rate + pitch + volume (AbstractTTS version)
     DatasetConfig(
         name="crema_d",
         hf_path="AbstractTTS/CREMA-D",
@@ -76,8 +81,10 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
+        pitch_field="pitch_mean",
+        volume_field="relative_db",
     ),
-    # RAVDESS: emotion, gender, speaking_rate (AbstractTTS version)
+    # RAVDESS: emotion, gender, speaking_rate, pitch, volume, intensity (AbstractTTS version)
     DatasetConfig(
         name="ravdess",
         hf_path="AbstractTTS/RAVDESS",
@@ -88,8 +95,11 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
+        pitch_field="pitch_mean",
+        volume_field="relative_db",
+        intensity_field="intensity",
     ),
-    # TESS: emotion + gender + speaking_rate (all female speakers)
+    # TESS: emotion + gender + speaking_rate + pitch + volume (all female speakers)
     # 2,800 samples with 7 emotion classes
     DatasetConfig(
         name="tess",
@@ -101,8 +111,10 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
+        pitch_field="pitch_mean",
+        volume_field="relative_db",
     ),
-    # SAVEE: emotion + gender + speaking_rate (all male speakers)
+    # SAVEE: emotion + gender + speaking_rate + pitch + volume (all male speakers)
     # 480 samples with 7 emotion classes
     DatasetConfig(
         name="savee",
@@ -114,8 +126,10 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
+        pitch_field="pitch_mean",
+        volume_field="relative_db",
     ),
-    # ESD English: emotion + gender + speaking_rate (male and female)
+    # ESD English: emotion + gender + speaking_rate + pitch + volume (male and female)
     # 17,500 samples with 5 emotion classes
     DatasetConfig(
         name="esd",
@@ -127,8 +141,10 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
+        pitch_field="pitch_mean",
+        volume_field="relative_db",
     ),
-    # PODCAST: emotion, gender, speaking_rate from podcast recordings
+    # PODCAST: emotion, gender, speaking_rate, pitch, volume from podcast recordings
     # 149k samples with 16 emotion classes
     DatasetConfig(
         name="podcast",
@@ -140,6 +156,8 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         speaking_rate_field="speaking_rate",
+        pitch_field="pitch_mean",
+        volume_field="relative_db",
     ),
     # CommonVoice: Large-scale multilingual dataset (English subset)
     # Has age, gender, accent metadata
@@ -201,6 +219,63 @@ def age_to_group(age: str | int | None) -> str | None:
         if isinstance(age, str) and age.lower() not in ("", "na", "null", "unk", "unknown", "nan"):
             return age.lower()
         return None
+
+
+def pitch_to_label(pitch: float | None, gender: str | None) -> str | None:
+    """Convert pitch_mean (Hz) to label using gender-relative thresholds.
+
+    Thresholds derived from AbstractTTS dataset distributions:
+    - Male: 25th=115 Hz, 75th=169 Hz (mean=146 Hz)
+    - Female: 25th=169 Hz, 75th=231 Hz (mean=204 Hz)
+
+    Returns None for missing/invalid values.
+    """
+    if pitch is None or pitch <= 0:
+        return None
+
+    # Normalize gender
+    gender_lower = (gender or "").lower()
+    is_male = gender_lower in ("m", "male")
+    is_female = gender_lower in ("f", "female")
+
+    if is_male:
+        if pitch < 115:
+            return "low-pitched"
+        if pitch <= 169:
+            return None  # Normal pitch - don't mention
+        return "high-pitched"
+    if is_female:
+        if pitch < 169:
+            return "low-pitched"
+        if pitch <= 231:
+            return None  # Normal pitch - don't mention
+        return "high-pitched"
+    # Unknown gender - use overall median (~169 Hz) as reference
+    if pitch < 130:
+        return "low-pitched"
+    if pitch <= 210:
+        return None  # Normal
+    return "high-pitched"
+
+
+def volume_to_label(relative_db: float | None) -> str | None:
+    """Convert relative_db to volume label.
+
+    Thresholds derived from AbstractTTS dataset distributions:
+    - Quiet: < -16.4 dB (below 25th percentile)
+    - Normal: -16.4 to -10.0 dB (25th to 75th percentile)
+    - Loud: > -10.0 dB (above 75th percentile)
+
+    Returns None for normal volume (don't mention unremarkable features).
+    """
+    if relative_db is None:
+        return None
+
+    if relative_db < -16.4:
+        return "quiet"
+    if relative_db > -10.0:
+        return "loud"
+    return None  # Normal volume - don't mention
 
 
 def speaking_rate_to_label(rate: str | float | None) -> str | None:
@@ -344,6 +419,9 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         "accent": "",
         "sentiment": "",
         "human_labels": "",
+        "pitch": "",
+        "volume": "",
+        "intensity": "",
     }
 
     # Extract text transcription
@@ -398,6 +476,23 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         elif labels:
             metadata["human_labels"] = str(labels).lower()
 
+    # Extract pitch (gender-relative thresholds)
+    if config.pitch_field and config.pitch_field in sample:
+        raw_pitch = sample[config.pitch_field]
+        metadata["pitch"] = pitch_to_label(raw_pitch, metadata["gender"])
+
+    # Extract volume (relative dB)
+    if config.volume_field and config.volume_field in sample:
+        raw_volume = sample[config.volume_field]
+        metadata["volume"] = volume_to_label(raw_volume)
+
+    # Extract intensity (RAVDESS only - already categorical)
+    if config.intensity_field and config.intensity_field in sample:
+        intensity = normalize_label(sample[config.intensity_field])
+        # Only include if "strong" - normal intensity is unremarkable
+        if intensity == "strong":
+            metadata["intensity"] = "strong intensity"
+
     return metadata
 
 
@@ -411,8 +506,20 @@ def build_audio_context(metadata: dict) -> str:
         Audio context string with metadata in tags
     """
     # Build paralinguistic metadata
+    # Order: demographics first, then voice characteristics, then content-related
     para_parts = []
-    for key in ["age", "gender", "emotion", "speaking_rate", "accent", "sentiment", "human_labels"]:
+    for key in [
+        "age",
+        "gender",
+        "pitch",
+        "volume",
+        "speaking_rate",
+        "intensity",
+        "emotion",
+        "sentiment",
+        "accent",
+        "human_labels",
+    ]:
         value = metadata.get(key)
         if value:  # Skip empty strings and None
             display_key = key.replace("_", " ")
@@ -487,6 +594,9 @@ print(sample["sift_response"])
 | `gender` | string | Speaker gender (if available) |
 | `age` | string | Speaker age group (if available) |
 | `speaking_rate` | string | Speaking pace: slow, normal, fast (if available) |
+| `pitch` | string | Voice pitch: low-pitched, high-pitched (if notable) |
+| `volume` | string | Volume level: quiet, loud (if notable) |
+| `intensity` | string | Emotional intensity: strong intensity (RAVDESS only) |
 | `accent` | string | Speaker accent (if available) |
 | `sentiment` | string | Sentiment: positive, neutral, negative (if available) |
 | `human_labels` | string | Sound event labels from AudioSet (if available) |
@@ -548,6 +658,9 @@ def process_dataset(
         "accent": [],
         "sentiment": [],
         "human_labels": [],
+        "pitch": [],
+        "volume": [],
+        "intensity": [],
     }
 
     for sample in tqdm(ds, desc="Preparing", total=len(ds)):
@@ -577,6 +690,9 @@ def process_dataset(
     ds = ds.add_column("meta_accent", metadata_lists["accent"])
     ds = ds.add_column("meta_sentiment", metadata_lists["sentiment"])
     ds = ds.add_column("meta_human_labels", metadata_lists["human_labels"])
+    ds = ds.add_column("meta_pitch", metadata_lists["pitch"])
+    ds = ds.add_column("meta_volume", metadata_lists["volume"])
+    ds = ds.add_column("meta_intensity", metadata_lists["intensity"])
 
     # Generate responses using pipeline with dataset (more efficient than .map())
     print("  Generating instructions and responses...")
@@ -616,6 +732,9 @@ def process_dataset(
             "accent",
             "sentiment",
             "human_labels",
+            "pitch",
+            "volume",
+            "intensity",
         ]
         if c in ds.column_names
     ]
@@ -633,6 +752,9 @@ def process_dataset(
             "meta_accent": "accent",
             "meta_sentiment": "sentiment",
             "meta_human_labels": "human_labels",
+            "meta_pitch": "pitch",
+            "meta_volume": "volume",
+            "meta_intensity": "intensity",
         }
     )
     ds = ds.add_column("source_dataset", [config.name] * len(ds))
@@ -648,6 +770,9 @@ def process_dataset(
         "accent",
         "sentiment",
         "human_labels",
+        "pitch",
+        "volume",
+        "intensity",
         "sift_response",
         "source_dataset",
     ]
@@ -663,6 +788,9 @@ def process_dataset(
     ds = ds.cast_column("accent", Value("string"))
     ds = ds.cast_column("sentiment", Value("string"))
     ds = ds.cast_column("human_labels", Value("string"))
+    ds = ds.cast_column("pitch", Value("string"))
+    ds = ds.cast_column("volume", Value("string"))
+    ds = ds.cast_column("intensity", Value("string"))
     return ds.cast_column("audio", Audio(sampling_rate=16000))
 
 
@@ -677,9 +805,7 @@ def main(
     model_name: Annotated[
         str, typer.Option(help="LLM model for response generation")
     ] = "Qwen/Qwen3-1.7B",
-    batch_size: Annotated[
-        int, typer.Option(help="Batch size for generation")
-    ] = 1024,  # Tuned for A40 48GB
+    batch_size: Annotated[int, typer.Option(help="Batch size for generation")] = 2048,
     max_samples: Annotated[
         int | None, typer.Option(help="Max samples per dataset (for testing)")
     ] = None,

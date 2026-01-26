@@ -1,6 +1,6 @@
 # @package _global_
-# ASR transcription training (Stage 1 - Semantic Alignment)
-# Following AZEROS: instruction-free training on ASR data
+# ASR transcription training
+# Train projector on multi-source ASR data
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=transcription
@@ -19,7 +19,7 @@ training:
   hub_model_id: "mazesmazes/tiny-audio"
   group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
   learning_rate: 1e-3
-  warmup_steps: 500
+  warmup_steps: 1000
   lr_scheduler_type: polynomial
   lr_scheduler_kwargs:
     power: 0.5
@@ -27,12 +27,12 @@ training:
   per_device_train_batch_size: 14
   per_device_eval_batch_size: 14
   gradient_accumulation_steps: 4
-  num_train_epochs: 4
+  num_train_epochs: 1
   save_steps: 1000
   eval_steps: 1000
 
   label_smoothing_factor: 0.1
-  weight_decay: 0.0
+  weight_decay: 0.01
 
   use_specaugment: true
   # LibriDouble settings (2 masks each)

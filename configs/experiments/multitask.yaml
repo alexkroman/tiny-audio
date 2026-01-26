@@ -1,6 +1,7 @@
 # @package _global_
-# Multitask training with MoE projector from scratch
-# 80% loquacious-medium (ASR), 20% sift-audio (paralinguistic)
+# Multitask training starting from pretrained ASR model
+# 50% ASR (from multiasr: loquacious, ami, switchboard, spgispeech)
+# 50% SIFT (paralinguistic: commonvoice, podcast, esd, crema_d, tess, ravdess, savee)
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=multitask
@@ -9,14 +10,12 @@ defaults:
   - override /data: multitask
 
 model:
-  # Train from scratch (no pretrained_model_path)
+  pretrained_model_path: mazesmazes/tiny-audio
   projector_type: mlp
   projector_pool_stride: 4
+  projector_hidden_dim: 1024
   audio_model_id: zai-org/GLM-ASR-Nano-2512
-  text_model_id: HuggingFaceTB/SmolLM3-3B
-  do_sample: true
-  temperature: 0.7
-  repetition_penalty: 1.05
+  text_model_id: Qwen/Qwen3-1.7B
 
 # Multitask configuration
 multitask:
@@ -25,16 +24,16 @@ multitask:
 training:
   hub_model_id: "mazesmazes/tiny-audio-multitask"
   group_by_length: false  # Disabled: interleaved datasets have inconsistent length columns
-  learning_rate: 2e-3
+  learning_rate: 1e-3
   warmup_steps: 500
   lr_scheduler_type: polynomial
   lr_scheduler_kwargs:
     power: 0.5
   seed: 42
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 8
+  per_device_train_batch_size: 14
+  per_device_eval_batch_size: 14
   gradient_accumulation_steps: 4
-  num_train_epochs: 6
+  num_train_epochs: 1
   save_steps: 1000
   eval_steps: 1000
 
@@ -42,7 +41,8 @@ training:
   weight_decay: 0.01
 
   use_specaugment: true
-  num_time_masks: 1
+  # LibriDouble settings (2 masks each)
+  num_time_masks: 2
   time_mask_length: 100
-  num_freq_masks: 1
+  num_freq_masks: 2
   freq_mask_length: 27

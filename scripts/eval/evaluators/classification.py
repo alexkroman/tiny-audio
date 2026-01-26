@@ -366,7 +366,7 @@ class ClassificationEvaluator:
         """Get instruction from sample or generate default."""
         if self.instruction_field and self.instruction_field in sample:
             return sample[self.instruction_field]
-        return self.DEFAULT_INSTRUCTIONS.get(self.task, "Describe what you hear.")
+        return self.DEFAULT_INSTRUCTIONS.get(self.task, "Describe how the speaker sounds")
 
     def _get_reference(self, sample: dict) -> str:
         """Get reference answer, filtering out empty values."""

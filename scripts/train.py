@@ -42,13 +42,13 @@ from trl.experimental.utils import DataCollatorForChatML
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
-# Use transcription prompts for ASR training
-USE_ASR_PROMPT = True  # Use prompts like "Transcribe this audio"
-TRANSCRIBE_PROMPTS = [
-    "Repeat the above",
-    "Transcribe speech to text",
-    "Transcribe audio to text",
-]
+# Prompts for ASR training (transcription task)
+# Focus on exact words only - no mention of description/emotion
+TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
+
+# Prompts for SIFT training (description task)
+# Focus on characteristics/delivery - the response naturally includes words
+DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
 
 
 class DatasetLoader:
@@ -76,19 +76,6 @@ class DatasetLoader:
             trust_remote_code=True,
         )
 
-        # Apply label-based filtering (e.g., for AudioSet to exclude speech)
-        if filter_cfg := dataset_cfg.get("filter"):
-            filter_column = filter_cfg.get("column")
-            exclude_labels = set(filter_cfg.get("exclude_labels", []))
-            if filter_column and exclude_labels and filter_column in ds.column_names:
-
-                def has_no_excluded_labels(labels):
-                    return not any(label in exclude_labels for label in labels)
-
-                ds = ds.filter(
-                    has_no_excluded_labels, num_proc=self.num_proc, input_columns=filter_column
-                )
-
         # Normalize column names for audio and text
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
@@ -99,10 +86,6 @@ class DatasetLoader:
                 if target in ds.column_names:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
-
-        # Override text with blank if specified (for negative samples like non-speech audio)
-        if dataset_cfg.get("blank_text"):
-            ds = ds.map(lambda _: {"text": ""}, num_proc=self.num_proc)
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
@@ -257,12 +240,8 @@ class DataCollator:
         text_features = []
         for text, num_audio_tokens in zip(processed_texts, audio_token_counts):
             audio_placeholder = "<audio>" * num_audio_tokens
-            # Following AZEROS: instruction-free for best generalization
-            if USE_ASR_PROMPT:
-                prompt = random.choice(TRANSCRIBE_PROMPTS)
-                user_content = audio_placeholder + " " + prompt
-            else:
-                user_content = audio_placeholder
+            prompt = random.choice(TRANSCRIBE_PROMPTS)
+            user_content = audio_placeholder + " " + prompt
 
             messages = []
             if self.system_prompt:
@@ -281,17 +260,11 @@ class DataCollator:
 
 
 # SIFT configuration for multi-task training
-# Following AZEROS paper: instruction-free tuning (SIFT) achieves best generalization
-# by forcing the model to learn general audio-text alignment without task-specific bias
-SIFT_SYSTEM_MESSAGE = ""  # No system message (AZEROS SIFT approach)
-SIFT_INSTRUCTION = ""  # No instruction (AZEROS SIFT approach)
+SIFT_SYSTEM_MESSAGE = ""  # No system message
 
 
 class MultiTaskDataCollator(DataCollator):
-    """Collates audio and text data for multi-task SIFT training.
-
-    Uses pre-generated sift_instruction and sift_response columns from the dataset.
-    """
+    """Collates audio and text data for multi-task training."""
 
     def __init__(
         self,
@@ -355,21 +328,15 @@ class MultiTaskDataCollator(DataCollator):
             task = f.get("task", "transcribe")
 
             if task == "sift":
-                # SIFT task: describe audio (instruction-free following AZEROS paper)
+                # SIFT task: describe audio
                 response = (f.get("sift_response") or f.get("text") or "").strip()
-                # No instruction = pure SIFT for best generalization
-                if SIFT_INSTRUCTION:
-                    user_content = f"{audio_placeholder} {SIFT_INSTRUCTION}"
-                else:
-                    user_content = audio_placeholder
+                prompt = random.choice(DESCRIBE_PROMPTS)
             else:
-                # ASR task: transcription (instruction-free following AZEROS)
-                if USE_ASR_PROMPT:
-                    prompt = random.choice(TRANSCRIBE_PROMPTS)
-                    user_content = f"{audio_placeholder} {prompt}"
-                else:
-                    user_content = audio_placeholder
+                # ASR task: transcription
                 response = (f.get("text") or "").strip().lower()
+                prompt = random.choice(TRANSCRIBE_PROMPTS)
+
+            user_content = f"{audio_placeholder} {prompt}"
 
             # Build messages (skip system if empty)
             messages = []
