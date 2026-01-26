@@ -29,18 +29,17 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig, pipeline
 from transformers.pipelines.pt_utils import KeyDataset
 
-# System prompt for audio understanding (optimized through 100 prompt iterations)
-# Winner: Score 600/800 (avg 75.0) - best at transcription inclusion + natural prose
+# System prompt for audio understanding (optimized through 300 prompt iterations)
+# Winner: Score 100/100 - "sounds like" prefix + emotion-first description
+# Key improvements: simpler question, emotion adjective before speaker, "really fast" emphasis
 SIFT_SYSTEM_PROMPT = (
-    "You are an audio transcription assistant. "
-    "Keep responses brief and natural. "
-    "Synthesize metadata into natural language. "
-    "Always mention the words spoken and the emotion. "
-    "Example: \"'Watch out!' she shouts urgently, her voice high and loud.\""
+    'What does it sound like? Example: "Sounds like an angry guy with a deep voice '
+    "loudly saying 'I can't believe this happened' really fast.\""
 )
 
 # Fixed instruction for all samples (orthogonal to transcription prompts)
-SIFT_INSTRUCTION = "Describe how the speaker sounds"
+# Simple question matching the system prompt style
+SIFT_INSTRUCTION = "What does it sound like? /no_think"
 
 
 @dataclass
@@ -56,10 +55,9 @@ class DatasetConfig:
     emotion_field: str | None = None
     gender_field: str | None = None
     age_field: str | None = None
-    speaking_rate_field: str | None = None
+    pace_field: str | None = None
     accent_field: str | None = None
     sentiment_field: str | None = None
-    human_labels_field: str | None = None  # For audioset-style labels (list of strings)
     pitch_field: str | None = None  # pitch_mean from AbstractTTS datasets
     volume_field: str | None = None  # relative_db from AbstractTTS datasets
     intensity_field: str | None = None  # intensity from RAVDESS
@@ -80,7 +78,7 @@ DATASET_CONFIGS = [
         emotion_field="major_emotion",
         gender_field="gender",
         age_field=None,
-        speaking_rate_field="speaking_rate",
+        pace_field="speaking_rate",
         pitch_field="pitch_mean",
         volume_field="relative_db",
     ),
@@ -94,7 +92,7 @@ DATASET_CONFIGS = [
         emotion_field="emotion",
         gender_field="gender",
         age_field=None,
-        speaking_rate_field="speaking_rate",
+        pace_field="speaking_rate",
         pitch_field="pitch_mean",
         volume_field="relative_db",
         intensity_field="intensity",
@@ -110,7 +108,7 @@ DATASET_CONFIGS = [
         emotion_field="emotion",
         gender_field="gender",
         age_field=None,
-        speaking_rate_field="speaking_rate",
+        pace_field="speaking_rate",
         pitch_field="pitch_mean",
         volume_field="relative_db",
     ),
@@ -125,7 +123,7 @@ DATASET_CONFIGS = [
         emotion_field="emotion",
         gender_field="gender",
         age_field=None,
-        speaking_rate_field="speaking_rate",
+        pace_field="speaking_rate",
         pitch_field="pitch_mean",
         volume_field="relative_db",
     ),
@@ -140,7 +138,7 @@ DATASET_CONFIGS = [
         emotion_field="emotion",
         gender_field="gender",
         age_field=None,
-        speaking_rate_field="speaking_rate",
+        pace_field="speaking_rate",
         pitch_field="pitch_mean",
         volume_field="relative_db",
     ),
@@ -155,7 +153,7 @@ DATASET_CONFIGS = [
         emotion_field="major_emotion",
         gender_field="gender",
         age_field=None,
-        speaking_rate_field="speaking_rate",
+        pace_field="speaking_rate",
         pitch_field="pitch_mean",
         volume_field="relative_db",
     ),
@@ -185,16 +183,6 @@ DATASET_CONFIGS = [
         emotion_field="emotion",
         sentiment_field="sentiment",
         emotion_is_int=True,  # MELD uses integer labels
-    ),
-    # AudioSet Humans: Sound event detection with human-readable labels
-    # Has human_labels (list of sound categories like 'Music', 'Speech', etc.)
-    DatasetConfig(
-        name="audioset_humans",
-        hf_path="enyoukai/audioset-humans-reprocessed",
-        split="train",
-        audio_field="audio",
-        text_field=None,  # No transcription
-        human_labels_field="human_labels",
     ),
 ]
 
@@ -278,7 +266,7 @@ def volume_to_label(relative_db: float | None) -> str | None:
     return None  # Normal volume - don't mention
 
 
-def speaking_rate_to_label(rate: str | float | None) -> str | None:
+def pace_to_label(rate: str | float | None) -> str | None:
     """Convert numeric speaking rate to text label. Returns None for missing/invalid values.
 
     Speaking rate thresholds based on AbstractTTS dataset distributions:
@@ -415,10 +403,9 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         "emotion": "",
         "gender": "",
         "age": "",
-        "speaking_rate": "",
+        "pace": "",
         "accent": "",
         "sentiment": "",
-        "human_labels": "",
         "pitch": "",
         "volume": "",
         "intensity": "",
@@ -453,9 +440,9 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         metadata["age"] = age_to_group(sample[config.age_field])
 
     # Extract speaking rate (convert numeric to label if needed)
-    if config.speaking_rate_field and config.speaking_rate_field in sample:
-        raw_rate = sample[config.speaking_rate_field]
-        metadata["speaking_rate"] = speaking_rate_to_label(raw_rate)
+    if config.pace_field and config.pace_field in sample:
+        raw_rate = sample[config.pace_field]
+        metadata["pace"] = pace_to_label(raw_rate)
 
     # Extract accent
     if config.accent_field and config.accent_field in sample:
@@ -466,15 +453,6 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
     if config.sentiment_field and config.sentiment_field in sample:
         raw_sentiment = sample[config.sentiment_field]
         metadata["sentiment"] = normalize_sentiment(raw_sentiment)
-
-    # Extract human labels (list of sound/audio categories)
-    if config.human_labels_field and config.human_labels_field in sample:
-        labels = sample[config.human_labels_field]
-        if isinstance(labels, list) and labels:
-            # Join list into comma-separated string
-            metadata["human_labels"] = ", ".join(str(lbl).lower() for lbl in labels)
-        elif labels:
-            metadata["human_labels"] = str(labels).lower()
 
     # Extract pitch (gender-relative thresholds)
     if config.pitch_field and config.pitch_field in sample:
@@ -513,12 +491,11 @@ def build_audio_context(metadata: dict) -> str:
         "gender",
         "pitch",
         "volume",
-        "speaking_rate",
+        "pace",
         "intensity",
         "emotion",
         "sentiment",
         "accent",
-        "human_labels",
     ]:
         value = metadata.get(key)
         if value:  # Skip empty strings and None
@@ -593,13 +570,12 @@ print(sample["sift_response"])
 | `emotion` | string | Detected emotion (if available) |
 | `gender` | string | Speaker gender (if available) |
 | `age` | string | Speaker age group (if available) |
-| `speaking_rate` | string | Speaking pace: slow, normal, fast (if available) |
+| `pace` | string | Speaking pace: slow, normal, fast (if available) |
 | `pitch` | string | Voice pitch: low-pitched, high-pitched (if notable) |
 | `volume` | string | Volume level: quiet, loud (if notable) |
 | `intensity` | string | Emotional intensity: strong intensity (RAVDESS only) |
 | `accent` | string | Speaker accent (if available) |
 | `sentiment` | string | Sentiment: positive, neutral, negative (if available) |
-| `human_labels` | string | Sound event labels from AudioSet (if available) |
 | `sift_response` | string | Generated description of the audio |
 | `source_dataset` | string | Original dataset source |
 
@@ -654,10 +630,9 @@ def process_dataset(
         "emotion": [],
         "gender": [],
         "age": [],
-        "speaking_rate": [],
+        "pace": [],
         "accent": [],
         "sentiment": [],
-        "human_labels": [],
         "pitch": [],
         "volume": [],
         "intensity": [],
@@ -686,10 +661,9 @@ def process_dataset(
     ds = ds.add_column("meta_emotion", metadata_lists["emotion"])
     ds = ds.add_column("meta_gender", metadata_lists["gender"])
     ds = ds.add_column("meta_age", metadata_lists["age"])
-    ds = ds.add_column("meta_speaking_rate", metadata_lists["speaking_rate"])
+    ds = ds.add_column("meta_pace", metadata_lists["pace"])
     ds = ds.add_column("meta_accent", metadata_lists["accent"])
     ds = ds.add_column("meta_sentiment", metadata_lists["sentiment"])
-    ds = ds.add_column("meta_human_labels", metadata_lists["human_labels"])
     ds = ds.add_column("meta_pitch", metadata_lists["pitch"])
     ds = ds.add_column("meta_volume", metadata_lists["volume"])
     ds = ds.add_column("meta_intensity", metadata_lists["intensity"])
@@ -728,10 +702,9 @@ def process_dataset(
             "emotion",
             "gender",
             "age",
-            "speaking_rate",
+            "pace",
             "accent",
             "sentiment",
-            "human_labels",
             "pitch",
             "volume",
             "intensity",
@@ -748,10 +721,9 @@ def process_dataset(
             "meta_emotion": "emotion",
             "meta_gender": "gender",
             "meta_age": "age",
-            "meta_speaking_rate": "speaking_rate",
+            "meta_pace": "pace",
             "meta_accent": "accent",
             "meta_sentiment": "sentiment",
-            "meta_human_labels": "human_labels",
             "meta_pitch": "pitch",
             "meta_volume": "volume",
             "meta_intensity": "intensity",
@@ -766,10 +738,9 @@ def process_dataset(
         "emotion",
         "gender",
         "age",
-        "speaking_rate",
+        "pace",
         "accent",
         "sentiment",
-        "human_labels",
         "pitch",
         "volume",
         "intensity",
@@ -784,10 +755,9 @@ def process_dataset(
     ds = ds.cast_column("emotion", Value("string"))
     ds = ds.cast_column("gender", Value("string"))
     ds = ds.cast_column("age", Value("string"))
-    ds = ds.cast_column("speaking_rate", Value("string"))
+    ds = ds.cast_column("pace", Value("string"))
     ds = ds.cast_column("accent", Value("string"))
     ds = ds.cast_column("sentiment", Value("string"))
-    ds = ds.cast_column("human_labels", Value("string"))
     ds = ds.cast_column("pitch", Value("string"))
     ds = ds.cast_column("volume", Value("string"))
     ds = ds.cast_column("intensity", Value("string"))
