@@ -1,31 +1,32 @@
 # Multitask dataset configuration
-# 50% ASR (from multiasr.yaml) + 50% SIFT (paralinguistic)
+# 60% ASR (from multiasr.yaml) + 40% SIFT (paralinguistic)
 #
 # Sampling factors (target / original):
 # ┌─────────────┬───────────┬──────────┬────────┬─────────┐
 # │ Dataset     │ Original  │ Target   │ Factor │ Type    │
 # ├─────────────┼───────────┼──────────┼────────┼─────────┤
-# │ ASR (50%)   │           │          │        │         │
-# │ loquacious  │ 1,090,000 │ 400,000  │ 0.37x  │ down    │
-# │ ami-ihm     │   108,502 │  42,000  │ 0.39x  │ down    │
-# │ switchboard │    80,000 │  32,000  │ 0.40x  │ down    │
-# │ spgispeech  │    77,073 │  26,000  │ 0.34x  │ down    │
+# │ ASR (60%)   │           │          │        │         │
+# │ loquacious  │ 1,090,000 │ 420,000  │ 0.39x  │ down    │
+# │ ami-ihm     │   108,502 │  60,000  │ 0.55x  │ down    │
+# │ switchboard │    80,000 │  60,000  │ 0.75x  │ down    │
+# │ spgispeech  │    77,073 │  60,000  │ 0.78x  │ down    │
 # ├─────────────┼───────────┼──────────┼────────┼─────────┤
-# │ SIFT (50%)  │           │          │        │         │
+# │ SIFT (40%)  │           │          │        │         │
+# │ podcast     │   149,000 │ 200,000  │ 1.34x  │ up      │
 # │ commonvoice │   100,000 │ 100,000  │ 1.0x   │ -       │
-# │ podcast     │   149,000 │ 100,000  │ 0.67x  │ down    │
-# │ esd         │    17,500 │ 175,000  │ 10.0x  │ up      │
-# │ crema_d     │     7,400 │  75,000  │ 10.1x  │ up      │
-# │ tess        │     2,800 │  28,000  │ 10.0x  │ up      │
-# │ ravdess     │     1,440 │  15,000  │ 10.4x  │ up      │
-# │ savee       │       480 │   7,000  │ 14.6x  │ up      │
+# │ meld        │     9,989 │  50,000  │ 5.0x   │ up      │
+# │ esd         │    17,500 │  52,500  │ 3.0x   │ up      │
+# │ crema_d     │     7,400 │  22,000  │ 3.0x   │ up      │
+# │ tess        │     2,800 │  14,000  │ 5.0x   │ up      │
+# │ ravdess     │     1,440 │   7,200  │ 5.0x   │ up      │
+# │ savee       │       480 │   2,400  │ 5.0x   │ up      │
 # └─────────────┴───────────┴──────────┴────────┴─────────┘
-# Total: 1,000,000 samples (ASR: 500k, SIFT: 500k)
+# Total: ~1,048,100 samples (ASR: 600k, SIFT: ~448k)
 
 datasets:
-  # === ASR Datasets (50% total = 500k) ===
+  # === ASR Datasets (60% total = 600k) ===
 
-  # Loquacious medium - main ASR dataset (40%)
+  # Loquacious medium - main ASR dataset (42%)
   - path: speechbrain/LoquaciousSet
     name: medium
     audio_column: wav
@@ -33,9 +34,9 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [dev]
-    target_samples: 400000
+    target_samples: 420000
 
-  # AMI corpus IHM - meeting transcriptions, close-talk mic (4.2%)
+  # AMI corpus IHM - meeting transcriptions, close-talk mic (6%)
   - path: edinburghcstr/ami
     name: ihm
     audio_column: audio
@@ -43,18 +44,18 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 42000
+    target_samples: 60000
 
-  # Switchboard - conversational telephone speech (3.2%)
+  # Switchboard - conversational telephone speech (6%)
   - path: hhoangphuoc/switchboard
     audio_column: audio
     text_column: transcript
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 32000
+    target_samples: 60000
 
-  # SPGISpeech S - financial earnings calls, spontaneous speech (2.6%)
+  # SPGISpeech S - financial earnings calls, spontaneous speech (6%)
   - path: kensho/spgispeech
     name: S
     audio_column: audio
@@ -62,11 +63,19 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 26000
+    target_samples: 60000
 
-  # === SIFT Datasets (50% total = 500k) ===
+  # === SIFT Datasets (40% total = 400k) ===
 
   # Large datasets with emotion/paralinguistics
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    task: sift
+    train_splits: [podcast]
+    eval_splits: [podcast]
+    target_samples: 200000
+
   - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
@@ -75,13 +84,14 @@ datasets:
     eval_splits: [commonvoice]
     target_samples: 100000
 
+  # MELD - Friends TV show with emotion + sentiment
   - path: mazesmazes/sift-audio
     audio_column: audio
     text_column: text
     task: sift
-    train_splits: [podcast]
-    eval_splits: [podcast]
-    target_samples: 100000
+    train_splits: [meld]
+    eval_splits: [meld]
+    target_samples: 50000
 
   # Emotion datasets - upsample to balance
   - path: mazesmazes/sift-audio
@@ -90,7 +100,7 @@ datasets:
     task: sift
     train_splits: [esd]
     eval_splits: [esd]
-    target_samples: 175000
+    target_samples: 52500
 
   - path: mazesmazes/sift-audio
     audio_column: audio
@@ -98,7 +108,7 @@ datasets:
     task: sift
     train_splits: [crema_d]
     eval_splits: [crema_d]
-    target_samples: 75000
+    target_samples: 22000
 
   - path: mazesmazes/sift-audio
     audio_column: audio
@@ -106,7 +116,7 @@ datasets:
     task: sift
     train_splits: [tess]
     eval_splits: [tess]
-    target_samples: 28000
+    target_samples: 14000
 
   - path: mazesmazes/sift-audio
     audio_column: audio
@@ -114,7 +124,7 @@ datasets:
     task: sift
     train_splits: [ravdess]
     eval_splits: [ravdess]
-    target_samples: 15000
+    target_samples: 7200
 
   - path: mazesmazes/sift-audio
     audio_column: audio
@@ -122,7 +132,7 @@ datasets:
     task: sift
     train_splits: [savee]
     eval_splits: [savee]
-    target_samples: 7000
+    target_samples: 2400
 
 # Audio processing
 sample_rate: 16000

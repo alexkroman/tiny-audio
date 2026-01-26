@@ -29,17 +29,16 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig, pipeline
 from transformers.pipelines.pt_utils import KeyDataset
 
-# System prompt for audio understanding (optimized through 300 prompt iterations)
-# Winner: Score 100/100 - "sounds like" prefix + emotion-first description
-# Key improvements: simpler question, emotion adjective before speaker, "really fast" emphasis
+# System prompt for audio understanding (optimized through iterative testing with Qwen3-4B)
+# Produces natural, human-like descriptions with voice quality details
 SIFT_SYSTEM_PROMPT = (
-    'What does it sound like? Example: "Sounds like an angry guy with a deep voice '
-    "loudly saying 'I can't believe this happened' really fast.\""
+    'Describe the audio in one sentence starting with "Sounds like".\n'
+    "Include: emotion, speaker gender, what they said (quoted), and voice quality.\n"
+    "Example: \"Sounds like an angry man saying 'leave me alone' in a harsh, loud voice.\""
 )
 
-# Fixed instruction for all samples (orthogonal to transcription prompts)
-# Simple question matching the system prompt style
-SIFT_INSTRUCTION = "What does it sound like? /no_think"
+# Simple instruction to trigger description
+SIFT_INSTRUCTION = "/no_think"
 
 
 @dataclass
@@ -771,15 +770,15 @@ app = typer.Typer(help="Generate SIFT datasets for paralinguistic training")
 def main(
     output_repo: Annotated[
         str, typer.Option(help="HuggingFace repo ID for output")
-    ] = "mazesmazes/sift-audio",
+    ] = "mazesmazes/sift-audio-2",
     model_name: Annotated[
         str, typer.Option(help="LLM model for response generation")
-    ] = "Qwen/Qwen3-1.7B",
+    ] = "Qwen/Qwen3-4B",
     batch_size: Annotated[int, typer.Option(help="Batch size for generation")] = 2048,
     max_samples: Annotated[
         int | None, typer.Option(help="Max samples per dataset (for testing)")
     ] = None,
-    max_new_tokens: Annotated[int, typer.Option(help="Max new tokens for generation")] = 256,
+    max_new_tokens: Annotated[int, typer.Option(help="Max new tokens for generation")] = 80,
     datasets: Annotated[list[str] | None, typer.Option(help="Specific datasets to process")] = None,
     push_every: Annotated[int, typer.Option(help="Push to hub every N datasets")] = 1,
 ):

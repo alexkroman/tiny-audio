@@ -1,7 +1,7 @@
 # @package _global_
 # Multitask training starting from pretrained ASR model
-# 50% ASR (from multiasr: loquacious, ami, switchboard, spgispeech)
-# 50% SIFT (paralinguistic: commonvoice, podcast, esd, crema_d, tess, ravdess, savee)
+# 60% ASR (from multiasr: loquacious, ami, switchboard, spgispeech)
+# 40% SIFT (paralinguistic: podcast, commonvoice, esd, crema_d, tess, ravdess, savee)
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=multitask
