@@ -38,7 +38,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
 
-    TRANSCRIBE_PROMPT = "Transcribe: "
+    TRANSCRIBE_PROMPT = ""
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: str, *args, **kwargs) -> "ASRModel":
@@ -136,19 +136,21 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.generation_config.max_new_tokens = config.max_new_tokens
         self.generation_config.min_new_tokens = config.min_new_tokens
         self.generation_config.num_beams = config.num_beams
-        self.generation_config.do_sample = False
-        # Clear sampling params (inherited from LLM) since we use greedy decoding
-        self.generation_config.temperature = None
-        self.generation_config.top_p = None
-        self.generation_config.top_k = None
+        self.generation_config.do_sample = config.do_sample
+        # Set sampling params from config (None means use model defaults)
+        self.generation_config.temperature = config.temperature
+        self.generation_config.top_p = config.top_p
+        self.generation_config.top_k = config.top_k
         self.generation_config.use_cache = config.use_cache
         self.generation_config.length_penalty = config.length_penalty
         self.generation_config.repetition_penalty = config.repetition_penalty
         self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
-        self.generation_config.eos_token_id = [
+        # Set EOS tokens, filtering out any that don't exist in the tokenizer
+        eos_candidates = [
             self.tokenizer.convert_tokens_to_ids("<|im_end|>"),
             self.tokenizer.convert_tokens_to_ids("<|endoftext|>"),
         ]
+        self.generation_config.eos_token_id = [t for t in eos_candidates if t is not None]
         self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
         # Feature extractor for audio preprocessing
@@ -186,7 +188,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """Create the appropriate feature extractor for the audio encoder."""
         from transformers import AutoFeatureExtractor
 
-        return AutoFeatureExtractor.from_pretrained(config.audio_model_id)
+        feature_extractor = AutoFeatureExtractor.from_pretrained(config.audio_model_id)
+        # Disable padding by default - use actual audio length
+        feature_extractor.padding = False
+        return feature_extractor
 
     @classmethod
     def _load_audio_encoder(cls, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
@@ -230,7 +235,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         decoder_kwargs = {
             "attn_implementation": config.attn_implementation,
             "trust_remote_code": True,
-            "tie_word_embeddings": False,
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
@@ -389,12 +393,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         audio_features: torch.Tensor,
         audio_attention_mask: torch.Tensor,
+        expected_token_counts: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Encode audio and project to LLM embedding space.
 
         Args:
             audio_features: Mel spectrogram features (batch, n_mels, mel_len)
             audio_attention_mask: Mask indicating real vs padded mel frames (batch, mel_len)
+            expected_token_counts: Expected number of audio tokens per sample from input_ids.
+                If provided, output will match these counts exactly (padding/truncating as needed).
 
         Returns:
             Flattened audio embeddings of shape (total_audio_tokens, hidden_dim).
@@ -403,24 +410,43 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
-        # Compute per-sample encoder output lengths using conv formulas
-        encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
-
         # Project to LLM space
         audio_embeds = self.projector(hidden_states)
 
-        # Compute per-sample projector output lengths
-        projector_lengths = torch.tensor(
-            [self.projector.get_output_length(int(length.item())) for length in encoder_lengths],
-            device=audio_embeds.device,
-        )
+        # Use expected token counts if provided (from input_ids), otherwise compute from audio
+        if expected_token_counts is not None:
+            token_counts = expected_token_counts
+        else:
+            # Compute per-sample encoder output lengths using conv formulas
+            encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
+            token_counts = torch.tensor(
+                [
+                    self.projector.get_output_length(int(length.item()))
+                    for length in encoder_lengths
+                ],
+                device=audio_embeds.device,
+            )
 
-        # Create valid mask for variable-length samples and extract only real embeddings
-        max_len = audio_embeds.shape[1]
-        valid_mask = (
-            torch.arange(max_len, device=audio_embeds.device)[None, :] < projector_lengths[:, None]
-        )
-        return audio_embeds[valid_mask]
+        # Extract embeddings matching expected token counts per sample
+        batch_size = audio_embeds.shape[0]
+        hidden_dim = audio_embeds.shape[2]
+
+        result_embeds = []
+        for i in range(batch_size):
+            count = int(token_counts[i].item())
+            sample_embeds = audio_embeds[i, :count, :]  # Take first 'count' embeddings
+            # Pad with zeros if we don't have enough embeddings
+            if sample_embeds.shape[0] < count:
+                padding = torch.zeros(
+                    count - sample_embeds.shape[0],
+                    hidden_dim,
+                    device=audio_embeds.device,
+                    dtype=audio_embeds.dtype,
+                )
+                sample_embeds = torch.cat([sample_embeds, padding], dim=0)
+            result_embeds.append(sample_embeds)
+
+        return torch.cat(result_embeds, dim=0)
 
     def forward(
         self,
@@ -446,8 +472,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if self.training and self.spec_augment is not None:
                 input_features = self.spec_augment(input_features)
 
+            # Count expected audio tokens from input_ids (ground truth from collator)
+            audio_token_counts = (input_ids == self.audio_token_id).sum(dim=-1)
+
             # Encode audio -> flattened (total_audio_tokens, hidden_dim)
-            audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+            audio_embeds = self._encode_audio(
+                input_features, audio_attention_mask, audio_token_counts
+            )
 
             # Replace <audio> token placeholders with audio embeddings using masked_scatter
             audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
@@ -540,7 +571,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             messages: list[dict[str, str]] = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": self.TRANSCRIBE_PROMPT + audio_placeholder})
+            # Audio tokens only (instruction-free)
+            user_content = audio_placeholder
+            if self.TRANSCRIBE_PROMPT:
+                user_content += " " + self.TRANSCRIBE_PROMPT
+            messages.append({"role": "user", "content": user_content})
 
             chat_result = self.tokenizer.apply_chat_template(
                 messages,
@@ -567,17 +602,21 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
 
         # Generate using language model
+        # Pass both input_ids and inputs_embeds so repetition_penalty works correctly
+        # (it needs input_ids to track which tokens have been used)
         output = self.language_model.generate(
+            input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             generation_config=self.generation_config,
             **generate_kwargs,
         )
 
-        # When using inputs_embeds without input_ids, generate returns only new tokens
-        if isinstance(output, torch.Tensor):
-            return output
-        return output.sequences
+        # When using inputs_embeds with input_ids, generate returns full sequence
+        # Strip the input tokens to return only generated tokens
+        sequences = output if isinstance(output, torch.Tensor) else output.sequences
+        input_len = input_ids.shape[1]
+        return sequences[:, input_len:]
 
     def generate_streaming(
         self,
@@ -615,7 +654,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": self.TRANSCRIBE_PROMPT + audio_placeholder})
+        # Audio tokens only (instruction-free)
+        user_content = audio_placeholder
+        if self.TRANSCRIBE_PROMPT:
+            user_content += " " + self.TRANSCRIBE_PROMPT
+        messages.append({"role": "user", "content": user_content})
 
         chat_result = self.tokenizer.apply_chat_template(
             messages,
@@ -693,6 +736,57 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             yield buffer
 
         thread.join()
+
+    @torch.no_grad()
+    def generate_text_only(
+        self,
+        messages: list[dict[str, str]],
+        max_new_tokens: int = 256,
+        **generate_kwargs,
+    ) -> str:
+        """Generate text using only the LLM (no audio encoding).
+
+        Used for SIFT-style response generation from metadata prompts.
+
+        Args:
+            messages: List of chat messages [{"role": "user", "content": "..."}]
+            max_new_tokens: Maximum tokens to generate
+            **generate_kwargs: Additional generation arguments
+
+        Returns:
+            Generated text response
+        """
+        device = next(self.language_model.parameters()).device
+
+        # Apply chat template
+        input_ids = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
+        ).to(device)
+
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+
+        attention_mask = torch.ones_like(input_ids)
+
+        # Generate using language model directly
+        output = self.language_model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+            **generate_kwargs,
+        )
+
+        # Decode only the new tokens
+        new_tokens = output[0, input_ids.shape[1] :]
+        response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
+        return response.strip()
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
         """Save model, tokenizer, and processor."""
@@ -775,6 +869,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projectors module
         shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
+        # Copy diarization module
+        shutil.copy(src_dir / "diarization.py", save_dir / "diarization.py")
 
     def push_to_hub(self, repo_id: str, **kwargs) -> str:
         """Push model to HuggingFace Hub, ensuring adapter_config points to repo.
@@ -785,8 +881,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """
         # Store repo_id in config so save_pretrained can access it
         self.config.pretrained_model_path = repo_id
-        # Call parent's push_to_hub with repo_id in kwargs
-        return super().push_to_hub(repo_id, repo_id=repo_id, **kwargs)
+        # Call parent's push_to_hub
+        return super().push_to_hub(repo_id, **kwargs)
 
     def create_or_update_model_card(self, output_dir: Union[str, Path]) -> None:
         """No-op for model card creation - we use MODEL_CARD.md in repo instead."""

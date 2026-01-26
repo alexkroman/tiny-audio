@@ -4,8 +4,6 @@ output_dir: ./outputs/production_model
 # Optimizer
 optim: adamw_torch_fused
 learning_rate: 1e-4
-weight_decay: 0.01
-adam_beta2: 0.95
 max_grad_norm: 1.0
 warmup_steps: 2000
 lr_scheduler_type: cosine
@@ -60,7 +58,8 @@ dataloader_prefetch_factor: 2
 dataloader_pin_memory: true
 dataloader_persistent_workers: true
 dataloader_drop_last: true
-group_by_length: false
+group_by_length: true
+length_column_name: duration
 
 # Model training options
 projector_dropout: 0.0

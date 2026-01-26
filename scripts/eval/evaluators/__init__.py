@@ -6,6 +6,7 @@ from .alignment import (
     AssemblyAIAlignmentEvaluator,
     BaseAlignmentEvaluator,
     DeepgramAlignmentEvaluator,
+    ElevenLabsAlignmentEvaluator,
     TimestampAlignmentEvaluator,
     align_words_to_reference,
 )
@@ -13,29 +14,33 @@ from .asr import (
     AssemblyAIEvaluator,
     AssemblyAIStreamingEvaluator,
     DeepgramEvaluator,
+    ElevenLabsEvaluator,
     EndpointEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
 )
 from .base import (
     AlignmentResult,
-    ClassificationResult,
     DiarizationResult,
     EvalResult,
     Evaluator,
     setup_assemblyai,
 )
 from .classification import (
-    AssemblyAIClassificationEvaluator,
-    BaseClassificationEvaluator,
-    LocalClassificationEvaluator,
-    extract_label,
+    ClassificationEvaluator,
+    ClassificationResult,
 )
 from .diarization import (
     AssemblyAIDiarizationEvaluator,
     DeepgramDiarizationEvaluator,
     DiarizationEvaluator,
+    ElevenLabsDiarizationEvaluator,
     LocalDiarizationEvaluator,
+)
+from .mcq import (
+    AssemblyAIMMAUEvaluator,
+    MCQResult,
+    MMAUEvaluator,
 )
 
 __all__ = [
@@ -43,7 +48,6 @@ __all__ = [
     "EvalResult",
     "DiarizationResult",
     "AlignmentResult",
-    "ClassificationResult",
     # Base
     "Evaluator",
     "TextNormalizer",
@@ -55,20 +59,25 @@ __all__ = [
     "AssemblyAIEvaluator",
     "AssemblyAIStreamingEvaluator",
     "DeepgramEvaluator",
+    "ElevenLabsEvaluator",
     # Diarization evaluators
     "DiarizationEvaluator",
     "AssemblyAIDiarizationEvaluator",
     "DeepgramDiarizationEvaluator",
+    "ElevenLabsDiarizationEvaluator",
     "LocalDiarizationEvaluator",
     # Alignment evaluators
     "BaseAlignmentEvaluator",
     "TimestampAlignmentEvaluator",
     "AssemblyAIAlignmentEvaluator",
     "DeepgramAlignmentEvaluator",
+    "ElevenLabsAlignmentEvaluator",
     "align_words_to_reference",
+    # MCQ evaluators
+    "MCQResult",
+    "MMAUEvaluator",
+    "AssemblyAIMMAUEvaluator",
     # Classification evaluators
-    "BaseClassificationEvaluator",
-    "LocalClassificationEvaluator",
-    "AssemblyAIClassificationEvaluator",
-    "extract_label",
+    "ClassificationResult",
+    "ClassificationEvaluator",
 ]

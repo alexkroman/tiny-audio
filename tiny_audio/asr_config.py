@@ -63,6 +63,10 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_dropout: float = 0.0,
         lora_target_modules: Optional[list] = None,  # Default: all linear layers
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
+        do_sample: bool = False,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
         max_new_tokens: Optional[int] = None,
         min_new_tokens: Optional[int] = None,
         repetition_penalty: Optional[float] = None,
@@ -169,6 +173,10 @@ class ASRConfig(transformers.PretrainedConfig):
             else generation_defaults["no_repeat_ngram_size"]
         )
         self.use_cache = use_cache if use_cache is not None else generation_defaults["use_cache"]
+        self.do_sample = do_sample
+        self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
 
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)

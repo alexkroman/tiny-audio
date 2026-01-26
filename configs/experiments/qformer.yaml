@@ -1,8 +1,0 @@
-# @package _global_
-# QFormer projector (Granite-style with learnable queries)
-
-model:
-  projector_type: qformer
-
-training:
-  hub_model_id: "mazesmazes/tiny-audio-qformer"

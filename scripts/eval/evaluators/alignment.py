@@ -371,3 +371,60 @@ class DeepgramAlignmentEvaluator(BaseAlignmentEvaluator):
 
         time.sleep(0.3)  # Rate limiting
         return text, words, elapsed
+
+
+class ElevenLabsAlignmentEvaluator(BaseAlignmentEvaluator):
+    """Evaluator for word-level timestamp alignment accuracy using ElevenLabs Scribe."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "scribe_v2",
+        audio_field: str = "audio",
+        text_field: str = "transcript",
+        words_field: str = "words",
+        num_workers: int = 1,
+    ):
+        super().__init__(audio_field, text_field, words_field, num_workers)
+        from elevenlabs.client import ElevenLabs
+
+        self.client = ElevenLabs(api_key=api_key)
+        self.model = model
+
+    def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
+        """Transcribe audio and return (text, word_timestamps, inference_time)."""
+        wav_bytes = prepare_wav_bytes(audio)
+        start = time.time()
+
+        transcription = self.client.speech_to_text.convert(
+            file=io.BytesIO(wav_bytes),
+            model_id=self.model,
+        )
+        elapsed = time.time() - start
+
+        # Extract transcript text
+        text = getattr(transcription, "text", "") or ""
+
+        # Extract word-level timestamps
+        words = []
+        api_words = getattr(transcription, "words", []) or []
+        for w in api_words:
+            word_text = getattr(w, "text", "")
+            word_start = getattr(w, "start", None)
+            word_end = getattr(w, "end", None)
+            word_type = getattr(w, "type", "word")
+
+            # Skip non-word types (spacing, audio_event)
+            if word_type != "word" or word_start is None or word_end is None:
+                continue
+
+            words.append(
+                {
+                    "word": word_text,
+                    "start": word_start,
+                    "end": word_end,
+                }
+            )
+
+        time.sleep(0.3)  # Rate limiting
+        return text, words, elapsed

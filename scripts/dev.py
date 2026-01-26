@@ -54,7 +54,7 @@ def lint():
     code = run_all(
         ["poetry", "check"],
         ["ruff", "check", "tiny_audio", "scripts", "tests"],
-        ["yamllint", "-d", "relaxed", "configs/"],
+        ["yamllint", "configs/"],
         ["taplo", "check", "pyproject.toml"],
     )
     raise typer.Exit(code)
@@ -113,7 +113,7 @@ def check():
     code = run_all(
         ["poetry", "check"],
         ["ruff", "check", "tiny_audio", "scripts", "tests"],
-        ["yamllint", "-d", "relaxed", "configs/"],
+        ["yamllint", "configs/"],
         ["taplo", "check", "pyproject.toml"],
         ["mypy", "tiny_audio"],
         ["pyright", "tiny_audio"],
@@ -139,7 +139,7 @@ def precommit():
     code = run_all(
         ["poetry", "check"],
         ["ruff", "check", "tiny_audio", "scripts", "tests"],
-        ["yamllint", "-d", "relaxed", "configs/"],
+        ["yamllint", "configs/"],
         ["taplo", "check", "pyproject.toml"],
         ["mypy", "tiny_audio"],
         ["pyright", "tiny_audio"],

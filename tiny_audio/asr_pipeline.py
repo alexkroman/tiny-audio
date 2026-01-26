@@ -418,4 +418,65 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
         # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
         text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+        # Truncate repetitions at end of text
+        text = _truncate_repetitions(text)
         return {"text": text}
+
+
+def _truncate_repetitions(text: str, min_repeats: int = 3) -> str:
+    """Truncate repeated words/phrases/characters at end of text.
+
+    Detects patterns like:
+    - Repeated words: "the the the the" -> "the"
+    - Repeated phrases: "i am sorry i am sorry i am sorry" -> "i am sorry"
+    - Repeated characters: "444444" -> "4"
+
+    Args:
+        text: Input text to process
+        min_repeats: Minimum repetitions to trigger truncation (default 3)
+
+    Returns:
+        Text with trailing repetitions removed
+    """
+    if not text:
+        return text
+
+    # 1. Truncate repeated characters at end (e.g., "444444" -> "4")
+    char_pattern = re.compile(r"(.)\1{" + str(min_repeats - 1) + r",}$")
+    text = char_pattern.sub(r"\1", text)
+
+    # 2. Truncate repeated words at end (e.g., "the the the" -> "the")
+    word_pattern = re.compile(
+        r"\b(\w+)(?:\s+\1){" + str(min_repeats - 1) + r",}\s*$", re.IGNORECASE
+    )
+    while word_pattern.search(text):
+        text = word_pattern.sub(r"\1", text)
+
+    # 3. Truncate repeated phrases (2-20 words) at end
+    # e.g., "i am sorry i am sorry i am sorry" -> "i am sorry"
+    words = text.split()
+    if len(words) >= min_repeats * 2:
+        # Try phrase lengths from 2 to 20 words
+        for phrase_len in range(2, min(21, len(words) // min_repeats + 1)):
+            # Check if the last phrase_len words repeat
+            phrase = " ".join(words[-phrase_len:])
+            # Build pattern to match repeated phrases at end
+            phrase_escaped = re.escape(phrase)
+            phrase_pattern = re.compile(
+                r"(^|.*?\s)("
+                + phrase_escaped
+                + r")(?:\s+"
+                + phrase_escaped
+                + r"){"
+                + str(min_repeats - 1)
+                + r",}\s*$",
+                re.IGNORECASE,
+            )
+            match = phrase_pattern.match(text)
+            if match:
+                # Keep prefix + one instance of the phrase
+                text = (match.group(1) + match.group(2)).strip()
+                words = text.split()
+                break
+
+    return text

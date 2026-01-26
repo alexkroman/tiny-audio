@@ -176,7 +176,7 @@ ______________________________________________________________________
 ## Multi-Stage Training
 
 **Stage 1**
-Initial training where only the projector learns. Config: `+experiments=mlp`
+Initial training where only the projector learns. Config: `+experiments=transcription`
 
 **Stage 2**
 Fine-tuning where LoRA adapters are trained while the projector is frozen. Config: `+experiments=mlp_lora`

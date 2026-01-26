@@ -1,0 +1,121 @@
+# Multitask dataset configuration
+# ASR: 80% (loquacious 60%, ami-ihm 10%, spgispeech 10%)
+# SIFT: 20% (emotion/paralinguistic datasets)
+#
+# Sampling factors (target / original):
+# ┌─────────────┬──────────┬──────────┬────────┬─────────┐
+# │ Dataset     │ Original │ Target   │ Factor │ Type    │
+# ├─────────────┼──────────┼──────────┼────────┼─────────┤
+# │ loquacious  │ ~700k    │ 600k     │ 0.86x  │ down    │
+# │ ami-ihm     │ ~100k    │ 100k     │ 1.0x   │ -       │
+# │ spgispeech  │ 156k     │ 100k     │ 0.64x  │ down    │
+# ├─────────────┼──────────┼──────────┼────────┼─────────┤
+# │ commonvoice │ 100k     │ 41k      │ 0.41x  │ down    │
+# │ podcast     │ 149k     │ 40k      │ 0.27x  │ down    │
+# │ esd         │ 17.5k    │ 70k      │ 4.0x   │ up      │
+# │ crema_d     │ 7.4k     │ 30k      │ 4.0x   │ up      │
+# │ tess        │ 2.8k     │ 11k      │ 3.9x   │ up      │
+# │ ravdess     │ 1.4k     │ 6k       │ 4.3x   │ up      │
+# │ savee       │ 480      │ 2k       │ 4.2x   │ up      │
+# └─────────────┴──────────┴──────────┴────────┴─────────┘
+# Total: 1,000,000 samples (ASR: 800k, SIFT: 200k)
+
+datasets:
+  # === ASR Datasets (80% total) ===
+
+  # Loquacious medium - main ASR dataset (60%)
+  - path: speechbrain/LoquaciousSet
+    name: medium
+    audio_column: wav
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [dev]
+    target_samples: 600000
+
+  # AMI corpus IHM - meeting transcriptions, close-talk mic (10%)
+  - path: edinburghcstr/ami
+    name: ihm
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 100000
+
+  # SPGISpeech S - financial earnings calls, spontaneous speech (10%)
+  - path: kensho/spgispeech
+    name: S
+    audio_column: audio
+    text_column: transcript
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 100000
+
+  # === SIFT Datasets (20% total) ===
+
+  # Large datasets with emotion - downsample
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    task: sift
+    train_splits: [commonvoice]
+    eval_splits: [commonvoice]
+    target_samples: 41000
+
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    task: sift
+    train_splits: [podcast]
+    eval_splits: [podcast]
+    target_samples: 40000
+
+  # Emotion datasets - capped at 4x upsample
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    task: sift
+    train_splits: [esd]
+    eval_splits: [esd]
+    target_samples: 70000
+
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    task: sift
+    train_splits: [crema_d]
+    eval_splits: [crema_d]
+    target_samples: 30000
+
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    task: sift
+    train_splits: [tess]
+    eval_splits: [tess]
+    target_samples: 11000
+
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    task: sift
+    train_splits: [ravdess]
+    eval_splits: [ravdess]
+    target_samples: 6000
+
+  - path: mazesmazes/sift-audio
+    audio_column: audio
+    text_column: text
+    task: sift
+    train_splits: [savee]
+    eval_splits: [savee]
+    target_samples: 2000
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+max_eval_samples: 2000

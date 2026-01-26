@@ -14,9 +14,6 @@ from tiny_audio.projectors import (
     MOSAProjector,
     QFormerAudioProjector,
     SimpleAdapter,
-    SwiGLUExpert,
-    load_balancing_loss,
-    z_loss,
 )
 
 # =============================================================================
@@ -40,24 +37,6 @@ class TestSimpleAdapter:
         x = torch.randn(2, 10, 256, dtype=torch.float32)
         out = adapter(x)
         assert out.dtype == torch.float32
-
-
-class TestSwiGLUExpert:
-    """Tests for SwiGLUExpert module."""
-
-    def test_forward_shape(self):
-        """Test that SwiGLUExpert produces correct output shape."""
-        expert = SwiGLUExpert(input_dim=256, hidden_dim=512, output_dim=128)
-        x = torch.randn(2, 10, 256)
-        out = expert(x)
-        assert out.shape == (2, 10, 128)
-
-    def test_no_bias(self):
-        """Test that SwiGLUExpert has no biases."""
-        expert = SwiGLUExpert(input_dim=256, hidden_dim=512, output_dim=128)
-        assert expert.gate_proj.bias is None
-        assert expert.up_proj.bias is None
-        assert expert.down_proj.bias is None
 
 
 # =============================================================================
@@ -129,11 +108,14 @@ class TestMOSAProjector:
         assert out.shape == (2, 25, 512)
 
     def test_get_output_length(self, projector):
-        """Test output length calculation for stride-4 (floor division)."""
+        """Test output length calculation for Conv1d downsampling (4x reduction)."""
+        # Conv1d formula: out = (in + 2*pad - kernel) // stride + 1
+        # With kernel=3, stride=2, pad=1: out = (in - 1) // 2 + 1
+        # Applied twice for 4x total reduction
         assert projector.get_output_length(100) == 25
-        assert projector.get_output_length(101) == 25
+        assert projector.get_output_length(101) == 26
         assert projector.get_output_length(4) == 1
-        assert projector.get_output_length(5) == 1
+        assert projector.get_output_length(5) == 2
 
 
 # =============================================================================
@@ -168,14 +150,15 @@ class TestMoEAudioProjector:
         assert out.shape == (2, 25, 512)
 
     def test_get_output_length(self, projector):
-        """Test output length calculation."""
-        assert projector.get_output_length(100) == 25
-        assert projector.get_output_length(101) == 26
+        """Test output length calculation (matches MLP frame stacking)."""
+        # Formula: (L - k) // k + 1 where k=4
+        assert projector.get_output_length(100) == 25  # (100-4)//4+1 = 25
+        assert projector.get_output_length(101) == 25  # (101-4)//4+1 = 25
 
     def test_has_shared_expert(self, projector):
         """Test that projector has a shared expert."""
-        assert hasattr(projector.moe, "shared_expert")
-        assert projector.moe.shared_expert is not None
+        assert hasattr(projector, "shared_expert")
+        assert projector.shared_expert is not None
 
     def test_aux_loss(self, projector):
         """Test auxiliary loss computation."""
@@ -232,42 +215,6 @@ class TestQFormerAudioProjector:
 
 
 # =============================================================================
-# Loss Function Tests
-# =============================================================================
-
-
-class TestLossFunctions:
-    """Tests for auxiliary loss functions."""
-
-    def test_load_balancing_loss_uniform(self):
-        """Test that uniform distribution gives minimal load balancing loss."""
-        num_experts = 4
-        probs = torch.ones(100, num_experts) / num_experts
-        loss = load_balancing_loss(probs, num_experts, top_k=num_experts)
-        assert loss < 1e-6
-
-    def test_load_balancing_loss_imbalanced(self):
-        """Test that imbalanced distribution gives higher loss."""
-        num_experts = 4
-        probs = torch.zeros(100, num_experts)
-        probs[:, 0] = 1.0
-        loss = load_balancing_loss(probs, num_experts, top_k=num_experts)
-        assert loss > 0
-
-    def test_z_loss_small_logits(self):
-        """Test that small logits give small z-loss."""
-        logits = torch.randn(100, 4) * 0.1
-        loss = z_loss(logits)
-        assert loss < 5.0
-
-    def test_z_loss_large_logits(self):
-        """Test that large logits give larger z-loss."""
-        logits = torch.randn(100, 4) * 100
-        loss = z_loss(logits)
-        assert loss > 100
-
-
-# =============================================================================
 # Registry Tests
 # =============================================================================
 
@@ -296,10 +243,14 @@ class TestProjectorRegistry:
 # =============================================================================
 
 
+# Projector types to test
+GRADIENT_TEST_PROJECTORS = ["mlp", "mosa", "moe"]
+
+
 class TestGradientFlow:
     """Tests for gradient flow through projectors."""
 
-    @pytest.mark.parametrize("projector_type", ["mlp", "mosa", "moe"])
+    @pytest.mark.parametrize("projector_type", GRADIENT_TEST_PROJECTORS)
     def test_gradients_flow(self, projector_type):
         """Test that gradients flow through projector."""
         config = MockProjectorConfig()

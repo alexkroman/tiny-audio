@@ -4,7 +4,10 @@ import numpy as np
 import pytest
 from transformers import AutoTokenizer, WhisperFeatureExtractor
 
-from scripts.train import DataCollator
+from scripts.train import (
+    DataCollator,
+    MultiTaskDataCollator,
+)
 
 
 class MockProjector:
@@ -127,7 +130,7 @@ class TestLabelMasking:
         )
 
     def test_system_and_user_prompts_are_masked(self, collator, tokenizer):
-        """Verify that system prompt and user instruction are masked (-100)."""
+        """Verify that system prompt and user content are masked (-100)."""
         text = "Transcription content here."
         samples = [create_sample(text)]
 
@@ -138,17 +141,18 @@ class TestLabelMasking:
 
         # Decode full input to verify structure
         full_text = tokenizer.decode(input_ids, skip_special_tokens=False)
-        assert "Transcribe:" in full_text, "User instruction not in input"
 
-        # Find "Transcribe" in input and verify it's masked
-        transcribe_tokens = tokenizer.encode("Transcribe", add_special_tokens=False)
-        for i in range(len(input_ids) - len(transcribe_tokens)):
-            if input_ids[i : i + len(transcribe_tokens)] == transcribe_tokens:
-                # These positions should be masked
-                assert all(labels[i + j] == -100 for j in range(len(transcribe_tokens))), (
-                    "User instruction should be masked"
-                )
-                break
+        # With instruction-free training (AZEROS), user content is just audio tokens
+        # Verify audio tokens are present and user section exists
+        assert "<audio>" in full_text, f"Audio tokens not in input. Got: {full_text}"
+        assert "<|im_start|>user" in full_text, f"User section not in input. Got: {full_text}"
+
+        # Verify that user section (audio tokens) is masked
+        # Find audio token positions and verify they're masked
+        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        audio_positions = [i for i, tok in enumerate(input_ids) if tok == audio_token_id]
+        assert len(audio_positions) > 0, "No audio tokens found"
+        assert all(labels[i] == -100 for i in audio_positions), "Audio tokens should be masked"
 
     def test_no_system_prompt(self, collator_no_system, tokenizer):
         """Verify masking works correctly without system prompt."""
@@ -269,6 +273,148 @@ class TestBatchProcessing:
         # Whisper expects (batch, n_mels, time)
         assert len(batch["input_features"].shape) == 3
         assert batch["input_features"].shape[1] == 80  # n_mels for Whisper
+
+
+class TestMultiTaskDataCollator:
+    """Tests for MultiTaskDataCollator with pre-generated SIFT data."""
+
+    @pytest.fixture
+    def multitask_collator(self, tokenizer, feature_extractor, projector):
+        """Create MultiTaskDataCollator."""
+        return MultiTaskDataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            projector=projector,
+        )
+
+    def create_sift_sample(
+        self,
+        text: str = "hello world",
+        sift_response: str = "A happy female speaker says: hello world",
+        task: str = "sift",
+        duration_sec: float = 1.0,
+        sample_rate: int = 16000,
+    ):
+        """Create a sample with task and sift_response."""
+        num_samples = int(duration_sec * sample_rate)
+        audio_array = np.random.randn(num_samples).astype(np.float32) * 0.1
+        return {
+            "audio": {"array": audio_array, "sampling_rate": sample_rate},
+            "text": text,
+            "sift_response": sift_response,
+            "task": task,
+        }
+
+    def test_sift_task_uses_instruction_and_response(self, multitask_collator, tokenizer):
+        """Test that SIFT task uses sift_response (instruction-free per AZEROS)."""
+        samples = [
+            self.create_sift_sample(
+                task="sift",
+                sift_response="The speaker sounds happy and excited.",
+            )
+        ]
+
+        batch = multitask_collator(samples)
+
+        # Decode to check structure
+        decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
+
+        # With AZEROS instruction-free training, SIFT_INSTRUCTION is empty
+        # User content should just be audio tokens
+        from scripts.train import SIFT_INSTRUCTION
+
+        if SIFT_INSTRUCTION:
+            assert SIFT_INSTRUCTION in decoded
+        else:
+            # Instruction-free: only audio tokens in user message
+            assert "<audio>" in decoded
+        # Should contain the response from dataset
+        assert "The speaker sounds happy and excited" in decoded
+
+    def test_transcribe_task_uses_text(self, multitask_collator, tokenizer):
+        """Test that transcribe task uses text column (instruction-free per AZEROS)."""
+        samples = [
+            self.create_sift_sample(
+                task="transcribe",
+                text="hello world transcript",
+                sift_response="This should be ignored",
+            )
+        ]
+
+        batch = multitask_collator(samples)
+        decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
+
+        # With AZEROS instruction-free training, USE_ASR_PROMPT is False
+        from scripts.train import TRANSCRIBE_PROMPTS, USE_ASR_PROMPT
+
+        if USE_ASR_PROMPT:
+            assert any(prompt in decoded for prompt in TRANSCRIBE_PROMPTS)
+        else:
+            # Instruction-free: only audio tokens in user message
+            assert "<audio>" in decoded
+        # Should use text column (lowercased)
+        assert "hello world transcript" in decoded
+        # Should NOT use sift_response
+        assert "This should be ignored" not in decoded
+
+    def test_default_task_is_transcribe(self, multitask_collator, tokenizer):
+        """Test that samples without task column default to transcribe."""
+        # Create sample without task column
+        num_samples = int(1.0 * 16000)
+        audio_array = np.random.randn(num_samples).astype(np.float32) * 0.1
+        samples = [
+            {
+                "audio": {"array": audio_array, "sampling_rate": 16000},
+                "text": "default transcription",
+            }
+        ]
+
+        batch = multitask_collator(samples)
+        decoded = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
+
+        # With AZEROS instruction-free training, USE_ASR_PROMPT is False
+        from scripts.train import TRANSCRIBE_PROMPTS, USE_ASR_PROMPT
+
+        if USE_ASR_PROMPT:
+            assert any(prompt in decoded for prompt in TRANSCRIBE_PROMPTS)
+        else:
+            # Instruction-free: only audio tokens in user message
+            assert "<audio>" in decoded
+        assert "default transcription" in decoded
+
+    def test_response_is_unmasked(self, multitask_collator, tokenizer):
+        """Test that response content is unmasked in labels."""
+        samples = [
+            self.create_sift_sample(
+                task="sift",
+                sift_response="The speaker sounds happy.",
+            )
+        ]
+
+        batch = multitask_collator(samples)
+
+        labels = batch["labels"][0].tolist()
+        input_ids = batch["input_ids"][0].tolist()
+
+        # Find non-masked positions
+        pad_id = tokenizer.pad_token_id
+        unmasked_positions = [
+            i
+            for i, (label, inp) in enumerate(zip(labels, input_ids))
+            if label != -100 and inp != pad_id
+        ]
+
+        assert len(unmasked_positions) > 0, "No unmasked labels found"
+
+        # Decode unmasked tokens
+        unmasked_tokens = [input_ids[i] for i in unmasked_positions]
+        unmasked_text = tokenizer.decode(unmasked_tokens, skip_special_tokens=True)
+
+        # The response should be in the unmasked portion
+        assert "happy" in unmasked_text.lower(), (
+            f"Response not found in unmasked text: {unmasked_text}"
+        )
 
 
 if __name__ == "__main__":

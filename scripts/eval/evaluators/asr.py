@@ -387,3 +387,28 @@ class DeepgramEvaluator(Evaluator):
 
         text = response.results.channels[0].alternatives[0].transcript
         return text, elapsed
+
+
+class ElevenLabsEvaluator(Evaluator):
+    """Evaluator for ElevenLabs Scribe API."""
+
+    def __init__(self, api_key: str, model: str = "scribe_v2", **kwargs):
+        super().__init__(**kwargs)
+        from elevenlabs.client import ElevenLabs
+
+        self.client = ElevenLabs(api_key=api_key)
+        self.model = model
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        wav_bytes = prepare_wav_bytes(audio)
+        start = time.time()
+
+        transcription = self.client.speech_to_text.convert(
+            file=io.BytesIO(wav_bytes),
+            model_id=self.model,
+        )
+        elapsed = time.time() - start
+
+        # Extract text from transcription response
+        text = transcription.text if hasattr(transcription, "text") else str(transcription)
+        return text or "", elapsed

@@ -22,10 +22,11 @@ class DatasetConfig:
     timestamps_end_field: str | None = None
     # Alignment-specific
     words_field: str | None = None
-    # Classification-specific
-    label_field: str | None = None
-    instruction_field: str | None = None
-    valid_labels: list[str] | None = None
+    # MCQ-specific (for audio understanding benchmarks)
+    question_field: str | None = None
+    answer_field: str | None = None
+    choices_field: str | None = None
+    category_field: str | None = None
 
 
 DATASET_REGISTRY: dict[str, DatasetConfig] = {
@@ -94,6 +95,13 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         audio_field="audio",
         text_field="text",
     ),
+    "expresso": DatasetConfig(
+        name="expresso",
+        path="ylacombe/expresso",
+        audio_field="audio",
+        text_field="text",
+        default_split="train",  # Only split available
+    ),
     # Diarization datasets
     "callhome": DatasetConfig(
         name="callhome",
@@ -115,38 +123,96 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         default_split="dev_clean",
         words_field="words",
     ),
-    # Classification datasets
-    "sentiment-meld": DatasetConfig(
-        name="sentiment-meld",
-        path="DynamicSuperb/SpeechSentimentAnalysis_MELD",
-        audio_field="audio",
-        text_field="transcription",
-        label_field="label",
-        instruction_field="instruction",
-        valid_labels=["Positive", "Negative", "Neutral"],
+    # MCQ (audio understanding) datasets
+    "mmau": DatasetConfig(
+        name="mmau",
+        path="gamma-lab-umd/MMAU-test-mini",
+        audio_field="context",  # Audio embedded as dict with array/sampling_rate
+        text_field="answer",
+        question_field="instruction",
+        answer_field="answer",
+        choices_field="choices",
+        category_field="other_attributes",  # JSON string with category info
     ),
-    "emotion-ravdess": DatasetConfig(
-        name="emotion-ravdess",
-        path="DynamicSuperb/EmotionalSpeechAudioClassification_RAVDESS-EmotionalSound",
+    # Classification (paralinguistic) datasets - AudioLLMs pre-formatted
+    "iemocap-emotion": DatasetConfig(
+        name="iemocap-emotion",
+        path="AudioLLMs/iemocap_emotion_recognition",
+        audio_field="context",
+        text_field="answer",
+        question_field="instruction",
+        answer_field="answer",
+    ),
+    "voxceleb-gender": DatasetConfig(
+        name="voxceleb-gender",
+        path="AudioLLMs/voxceleb_gender_test",
+        audio_field="context",
+        text_field="answer",
+        question_field="instruction",
+        answer_field="answer",
+    ),
+    # Classification datasets from Common Voice (same source as SIFT generation)
+    "commonvoice-gender": DatasetConfig(
+        name="commonvoice-gender",
+        path="fixie-ai/common_voice_17_0",
+        config="en",
         audio_field="audio",
-        label_field="label",
-        instruction_field="instruction",
-        valid_labels=[
-            "neutral",
-            "calm",
-            "happy",
-            "sad",
-            "angry",
-            "fearful",
-            "disgust",
-            "surprised",
-        ],
+        text_field="gender",  # Use gender as the answer field
+        question_field=None,  # Will generate instruction dynamically
+        answer_field="gender",
+    ),
+    "commonvoice-age": DatasetConfig(
+        name="commonvoice-age",
+        path="fixie-ai/common_voice_17_0",
+        config="en",
+        audio_field="audio",
+        text_field="age",  # Use age as the answer field
+        question_field=None,  # Will generate instruction dynamically
+        answer_field="age",
+    ),
+    "commonvoice-accent": DatasetConfig(
+        name="commonvoice-accent",
+        path="fixie-ai/common_voice_17_0",
+        config="en",
+        audio_field="audio",
+        text_field="accent",  # Use accent as the answer field
+        question_field=None,  # Will generate instruction dynamically
+        answer_field="accent",
+    ),
+    # Speaking rate classification (from SIFT dataset)
+    "sift-rate": DatasetConfig(
+        name="sift-rate",
+        path="mazesmazes/sift-audio",
+        audio_field="audio",
+        text_field="speaking_rate",
+        question_field=None,  # Will generate instruction dynamically
+        answer_field="speaking_rate",
+        default_split="podcast",  # podcast split has all 3 labels (slow, normal, fast)
+    ),
+    # Expresso style classification (paralinguistic - emotion/expression)
+    "expresso-style": DatasetConfig(
+        name="expresso-style",
+        path="ylacombe/expresso",
+        audio_field="audio",
+        text_field="style",  # Style as the answer (confused, happy, sad, whisper, etc.)
+        question_field=None,  # Will generate instruction dynamically
+        answer_field="style",
+        default_split="train",
     ),
 }
 
 DIARIZATION_DATASETS = {"callhome"}
 ALIGNMENT_DATASETS = {"librispeech-alignments"}
-CLASSIFICATION_DATASETS = {"sentiment-meld", "emotion-ravdess"}
+MCQ_DATASETS = {"mmau"}
+CLASSIFICATION_DATASETS = {
+    "iemocap-emotion",
+    "voxceleb-gender",
+    "commonvoice-gender",
+    "commonvoice-age",
+    "commonvoice-accent",
+    "sift-rate",
+    "expresso-style",
+}
 
 
 def load_eval_dataset(

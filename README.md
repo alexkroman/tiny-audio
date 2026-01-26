@@ -85,36 +85,36 @@ result = pipe("audio.wav", return_timestamps="word")
 
 ```bash
 # Verify setup (~5 min)
-poetry run python scripts/train.py +experiments=mlp data.max_train_samples=100 training.max_steps=10
+poetry run python scripts/train.py +experiments=transcription data.max_train_samples=100 training.max_steps=10
 ```
 
 ### Full Training
 
 ```bash
 # Standard training (~24 hours on A40)
-poetry run python scripts/train.py +experiments=mlp
+poetry run python scripts/train.py +experiments=transcription
 
 # With custom learning rate
-poetry run python scripts/train.py +experiments=mlp training.learning_rate=1e-4
+poetry run python scripts/train.py +experiments=transcription training.learning_rate=1e-4
 
 # Resume from checkpoint
-poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpoint=/path/to/checkpoint-XXXX
+poetry run python scripts/train.py +experiments=transcription training.resume_from_checkpoint=/path/to/checkpoint-XXXX
 ```
 
 ### Projector Types
 
 ```bash
-poetry run python scripts/train.py +experiments=mlp      # Simple MLP (~12M params)
-poetry run python scripts/train.py +experiments=mosa     # Dense mixture of experts
-poetry run python scripts/train.py +experiments=moe      # Sparse routed experts
-poetry run python scripts/train.py +experiments=qformer  # Transformer with learnable queries
+poetry run python scripts/train.py +experiments=transcription  # Simple MLP (~12M params)
+poetry run python scripts/train.py +experiments=mosa           # Dense mixture of experts
+poetry run python scripts/train.py +experiments=moe            # Sparse routed experts
+poetry run python scripts/train.py +experiments=qformer        # Transformer with learnable queries
 ```
 
 ### Multi-Stage Training with LoRA
 
 ```bash
 # Stage 1: Train projector only (default)
-poetry run python scripts/train.py +experiments=mlp
+poetry run python scripts/train.py +experiments=transcription
 
 # Stage 2: Freeze projector, train LoRA adapters on LLM
 poetry run python scripts/train.py +experiments=mlp_lora
@@ -212,14 +212,14 @@ poetry run python scripts/train.py data.max_train_samples=10000
 configs/
 ├── config.yaml           # Main config (imports data + training)
 ├── experiments/          # Projector presets
-│   ├── mlp.yaml          # Simple MLP
+│   ├── transcription.yaml # Simple MLP (Stage 1)
 │   ├── mosa.yaml         # Dense MoE
 │   ├── moe.yaml          # Sparse MoE
 │   ├── qformer.yaml      # Transformer
 │   ├── mlp_lora.yaml     # Stage 2: LoRA only
 │   └── mlp_fine_tune.yaml # Stage 3: Projector + LoRA
 ├── data/
-│   └── loquacious.yaml   # Dataset config
+│   └── multiasr.yaml     # Multi-ASR dataset config
 └── training/
     └── production.yaml   # Training hyperparameters
 ```

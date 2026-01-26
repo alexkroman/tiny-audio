@@ -8,28 +8,29 @@ This script handles:
 - Checkpoint saving and Hub pushing
 
 Usage:
-    poetry run python scripts/train.py +experiments=mlp
+    poetry run python scripts/train.py +experiments=transcription
     poetry run python scripts/train.py training.learning_rate=1e-4
 """
 
 import contextlib
-import html
-import re
+import os
+import random
 from dataclasses import fields
 from typing import Any
 
+os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
+
 import hydra
-import nltk
 import torch
 import wandb
 from datasets import (
     Audio,
     Dataset,
-    interleave_datasets,
+    concatenate_datasets,
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
-from punctuators.models import PunctCapSegModelONNX
+from tqdm.auto import tqdm
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -41,59 +42,25 @@ from trl.experimental.utils import DataCollatorForChatML
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
-TRANSCRIBE_PREFIX = "Transcribe: "  # Used in DataCollator, matches ASRConfig.user_prompt
-
-# Symbol mappings for PunctCapSeg preprocessing/postprocessing
-# PunctCapSeg converts these symbols to <unk>, so we use word placeholders
-_PCS_SYMBOL_MAP = [
-    # (pre_pattern, pre_replace, post_pattern, post_replace)
-    (r"(\d)%", r"\1 percent", r"(\d)\s*percent\b", r"\1%"),
-    (r"(\d):(\d)", r"\1 oclock \2", r"(\d)[,\s]*oclock[,\s]*(\d)", r"\1:\2"),
-    (r"(\d)/(\d)", r"\1 slashdate \2", r"(\d)[,\s]*slashdate[,\s]*(\d)", r"\1/\2"),
-    (r"#(\d)", r"numbersign \1", r"numbersign\s*(\d)", r"#\1"),
-    (r"(\w)&(\w)", r"\1 ampersand \2", r"(\w)\s*ampersand\s*(\w)", r"\1&\2"),
-    (r"¥(\d)", r"yensign \1", r"yensign\s*(\d)", r"¥\1"),
-    (r"(\d)¢", r"\1 centsign", r"(\d)\s*centsign", r"\1¢"),
-    (r"(\d)°", r"\1 degreesign", r"(\d)\s*degreesign", r"\1°"),
-    (r"(\w+)-(\w+)", r"\1 hyphenword \2", r"(\w+)[,\s]*hyphenword[,\s]*(\w+)", r"\1-\2"),
+# Use transcription prompts for ASR training
+USE_ASR_PROMPT = True  # Use prompts like "Transcribe this audio"
+TRANSCRIBE_PROMPTS = [
+    "Repeat the above",
+    "Transcribe speech to text",
+    "Transcribe audio to text",
 ]
-
-
-def _preprocess_for_pcs(text: str) -> str:
-    """Replace symbols with word placeholders before PunctCapSeg."""
-    for pre_pat, pre_repl, _, _ in _PCS_SYMBOL_MAP:
-        # Apply multiple times for consecutive patterns (dates, hyphens)
-        for _ in range(5):
-            new_text = re.sub(pre_pat, pre_repl, text)
-            if new_text == text:
-                break
-            text = new_text
-    return text
-
-
-def _postprocess_from_pcs(text: str) -> str:
-    """Convert placeholders back to symbols after PunctCapSeg."""
-    for _, _, post_pat, post_repl in _PCS_SYMBOL_MAP:
-        for _ in range(5):
-            new_text = re.sub(post_pat, post_repl, text, flags=re.IGNORECASE)
-            if new_text == text:
-                break
-            text = new_text
-    # Fix country abbreviations added by PunctCapSeg
-    text = re.sub(r"\bU\.S\.A\.?", "USA", text)
-    text = re.sub(r"\bU\.S\.?", "US", text)
-    return re.sub(r"\bU\.K\.?", "UK", text)
 
 
 class DatasetLoader:
     """Loads and prepares datasets for training."""
 
-    def __init__(self, config: DictConfig):
+    def __init__(self, config: DictConfig, multitask_enabled: bool = False):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
         self.num_proc = self.config.get("num_proc", 16)
+        self.multitask_enabled = multitask_enabled
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
@@ -109,7 +76,20 @@ class DatasetLoader:
             trust_remote_code=True,
         )
 
-        # Normalize column names
+        # Apply label-based filtering (e.g., for AudioSet to exclude speech)
+        if filter_cfg := dataset_cfg.get("filter"):
+            filter_column = filter_cfg.get("column")
+            exclude_labels = set(filter_cfg.get("exclude_labels", []))
+            if filter_column and exclude_labels and filter_column in ds.column_names:
+
+                def has_no_excluded_labels(labels):
+                    return not any(label in exclude_labels for label in labels)
+
+                ds = ds.filter(
+                    has_no_excluded_labels, num_proc=self.num_proc, input_columns=filter_column
+                )
+
+        # Normalize column names for audio and text
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
             "audio": dataset_cfg.get("audio_column", "audio"),
@@ -120,10 +100,25 @@ class DatasetLoader:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
 
+        # Override text with blank if specified (for negative samples like non-speech audio)
+        if dataset_cfg.get("blank_text"):
+            ds = ds.map(lambda _: {"text": ""}, num_proc=self.num_proc)
+
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        # Remove extra columns, keep only audio and text
-        extra_cols = [c for c in (ds.column_names or []) if c not in {"audio", "text"}]
+        # For multitask, keep sift_response and add task column
+        if self.multitask_enabled:
+            task = dataset_cfg.get("task", "transcribe")  # Default to transcribe
+            # Add task column to identify ASR vs SIFT samples
+            ds = ds.add_column("task", [task] * len(ds))
+            keep_cols = {"audio", "text", "duration", "sift_response", "task"}
+            extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
+        else:
+            # Remove extra columns, keep only audio, text, and duration (for group_by_length)
+            extra_cols = [
+                c for c in (ds.column_names or []) if c not in {"audio", "text", "duration"}
+            ]
+
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
@@ -136,71 +131,49 @@ class DatasetLoader:
 
             ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
-        # Filter short transcripts (<2 words) to avoid noisy backchannels like "yeah", "ok"
-        def filter_short_transcripts(text):
-            return len(text.split()) >= 2
+        return ds
 
-        return ds.filter(filter_short_transcripts, num_proc=self.num_proc, input_columns="text")
+    def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
+        """Upsample or downsample dataset to target size."""
+        current = len(ds)
+        if current == target:
+            return ds
+        if current > target:
+            # Downsample
+            return ds.select(range(target))
+        # Upsample by repeating
+        repeats = (target // current) + 1
+        indices = list(range(current)) * repeats
+        return ds.select(indices[:target])
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
-        train_weights, val_weights = [], []
 
-        for d_cfg in self.config.datasets:
+        for d_cfg in tqdm(self.config.datasets, desc="Loading datasets"):
             train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
             eval_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
-            weight = d_cfg.get("sampling_weight", 1.0)
+            target_samples = d_cfg.get("target_samples")
 
-            # Handle multiple configs or direct splits
-            if "configs" in d_cfg:
-                configs = [
-                    (OmegaConf.create({**d_cfg, "name": c}), t, e)
-                    for c, t, e in zip(d_cfg.configs, train_splits, eval_splits)
-                ]
-                for cfg, train_split, eval_split in configs:
-                    train_datasets.append(self._prepare_split(cfg, train_split))
-                    train_weights.append(weight)
-                    if eval_split:
-                        val_datasets.append(self._prepare_split(cfg, eval_split))
-                        val_weights.append(weight)
-            else:
-                # Add all train splits
-                for train_split in train_splits:
-                    train_datasets.append(self._prepare_split(d_cfg, train_split))
-                    train_weights.append(weight)
-                # Add all eval splits (once, not per train split)
-                for eval_split in eval_splits:
-                    val_datasets.append(self._prepare_split(d_cfg, eval_split))
-                    val_weights.append(weight)
+            for train_split in train_splits:
+                ds = self._prepare_split(d_cfg, train_split)
+                if target_samples:
+                    ds = self._resample_to_target(ds, target_samples)
+                train_datasets.append(ds)
 
-        # Skip samples BEFORE combining/shuffling (for stage 2 to skip stage 1 data)
-        skip_samples = self.config.get("skip_train_samples", 0)
-        if skip_samples:
-            print(f"Skipping first {skip_samples} training samples")
-            train_datasets = [ds.skip(skip_samples) for ds in train_datasets]
+            for eval_split in eval_splits:
+                val_datasets.append(self._prepare_split(d_cfg, eval_split))
 
-        train_ds = self._combine_datasets(train_datasets, train_weights, shuffle=True)
-        val_ds = self._combine_datasets(val_datasets, val_weights, shuffle=False)
+        # Concatenate and shuffle
+        train_ds = (
+            concatenate_datasets(train_datasets).shuffle(seed=self.seed) if train_datasets else None
+        )
+        val_ds = concatenate_datasets(val_datasets) if val_datasets else None
 
-        if train_ds and self.config.max_train_samples:
-            train_ds = train_ds.take(self.config.max_train_samples)
-        if val_ds and self.config.max_eval_samples:
-            val_ds = val_ds.take(self.config.max_eval_samples)
+        if val_ds and self.config.get("max_eval_samples"):
+            n_samples = min(len(val_ds), self.config.max_eval_samples)
+            val_ds = val_ds.select(range(n_samples))
 
         return train_ds, val_ds
-
-    def _combine_datasets(self, datasets: list, weights: list, shuffle: bool = True):
-        if not datasets:
-            return None
-        # Shuffle each dataset before interleaving for better randomization
-        if shuffle:
-            datasets = [ds.shuffle(seed=self.seed) for ds in datasets]
-        if len(datasets) == 1:
-            return datasets[0]
-        probs = [w / sum(weights) for w in weights]
-        return interleave_datasets(
-            datasets, probabilities=probs, stopping_strategy="first_exhausted"
-        )
 
 
 class DataCollator:
@@ -231,9 +204,6 @@ class DataCollator:
             tokenizer=tokenizer,
             max_length=2048,
         )
-
-        # Punctuation and truecasing model (lazy loaded)
-        self.punctuator = None
 
     def _compute_encoder_output_length(self, mel_length: int) -> int:
         """Compute encoder output length using conv layer formulas."""
@@ -267,7 +237,7 @@ class DataCollator:
         audio_out = self.feature_extractor(
             audio_arrays,
             sampling_rate=self.sample_rate,
-            padding="max_length",
+            padding="longest",  # Pad to longest in batch, not fixed 30s
             return_attention_mask=True,
             return_tensors="pt",
         )
@@ -280,26 +250,19 @@ class DataCollator:
             num_tokens = self.projector.get_output_length(encoder_len)
             audio_token_counts.append(num_tokens)
 
-        # Apply punctuation and truecasing to texts in batch (model expects lowercase)
-        if self.punctuator is None:
-            self.punctuator = PunctCapSegModelONNX.from_pretrained("pcs_en")
-
-        raw_texts = [
-            _preprocess_for_pcs(
-                re.sub(r"<[^>]+>", "", html.unescape(f.get("text") or "")).strip().lower()
-            )
-            for f in valid_features
-        ]
-        results = self.punctuator.infer(raw_texts)
-        processed_texts = [
-            _postprocess_from_pcs(" ".join(r) if r else t) for t, r in zip(raw_texts, results)
-        ]
+        # Lowercase all training texts
+        processed_texts = [(f.get("text") or "").strip().lower() for f in valid_features]
 
         # Build messages for each sample with per-sample audio token counts
         text_features = []
         for text, num_audio_tokens in zip(processed_texts, audio_token_counts):
             audio_placeholder = "<audio>" * num_audio_tokens
-            user_content = TRANSCRIBE_PREFIX + audio_placeholder
+            # Following AZEROS: instruction-free for best generalization
+            if USE_ASR_PROMPT:
+                prompt = random.choice(TRANSCRIBE_PROMPTS)
+                user_content = audio_placeholder + " " + prompt
+            else:
+                user_content = audio_placeholder
 
             messages = []
             if self.system_prompt:
@@ -317,10 +280,143 @@ class DataCollator:
         return batch
 
 
+# SIFT configuration for multi-task training
+# Following AZEROS paper: instruction-free tuning (SIFT) achieves best generalization
+# by forcing the model to learn general audio-text alignment without task-specific bias
+SIFT_SYSTEM_MESSAGE = ""  # No system message (AZEROS SIFT approach)
+SIFT_INSTRUCTION = ""  # No instruction (AZEROS SIFT approach)
+
+
+class MultiTaskDataCollator(DataCollator):
+    """Collates audio and text data for multi-task SIFT training.
+
+    Uses pre-generated sift_instruction and sift_response columns from the dataset.
+    """
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        feature_extractor: Any,
+        sample_rate: int,
+        projector: Any = None,
+        encoder_conv_layers: list = None,
+    ):
+        super().__init__(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=sample_rate,
+            system_prompt=SIFT_SYSTEM_MESSAGE,
+            projector=projector,
+            encoder_conv_layers=encoder_conv_layers,
+        )
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        # Process audio
+        audio_arrays = []
+        valid_features = []
+        for f in features:
+            try:
+                audio = f["audio"]["array"]
+                if hasattr(audio, "numpy"):
+                    audio = audio.numpy()
+                audio = audio.squeeze()
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=0)
+                audio_arrays.append(audio)
+                valid_features.append(f)
+            except Exception:
+                continue
+            finally:
+                f["audio"] = None
+
+        if not audio_arrays:
+            raise ValueError("No valid audio samples in batch")
+
+        audio_out = self.feature_extractor(
+            audio_arrays,
+            sampling_rate=self.sample_rate,
+            padding="longest",
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+
+        # Compute per-sample audio token counts
+        mel_lengths = audio_out.attention_mask.sum(dim=-1)
+        audio_token_counts = []
+        for mel_len in mel_lengths:
+            encoder_len = self._compute_encoder_output_length(int(mel_len.item()))
+            num_tokens = self.projector.get_output_length(encoder_len)
+            audio_token_counts.append(num_tokens)
+
+        # Build messages - differentiate between ASR and SIFT tasks using task column
+        text_features = []
+        for f, num_audio_tokens in zip(valid_features, audio_token_counts):
+            audio_placeholder = "<audio>" * num_audio_tokens
+            task = f.get("task", "transcribe")
+
+            if task == "sift":
+                # SIFT task: describe audio (instruction-free following AZEROS paper)
+                response = (f.get("sift_response") or f.get("text") or "").strip()
+                # No instruction = pure SIFT for best generalization
+                if SIFT_INSTRUCTION:
+                    user_content = f"{audio_placeholder} {SIFT_INSTRUCTION}"
+                else:
+                    user_content = audio_placeholder
+            else:
+                # ASR task: transcription (instruction-free following AZEROS)
+                if USE_ASR_PROMPT:
+                    prompt = random.choice(TRANSCRIBE_PROMPTS)
+                    user_content = f"{audio_placeholder} {prompt}"
+                else:
+                    user_content = audio_placeholder
+                response = (f.get("text") or "").strip().lower()
+
+            # Build messages (skip system if empty)
+            messages = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": user_content})
+            messages.append({"role": "assistant", "content": response})
+
+            text_features.append({"messages": messages})
+
+        # Let trl handle tokenization, label masking, and padding
+        batch = self.text_collator(text_features)
+        batch["input_features"] = audio_out.input_features
+        batch["audio_attention_mask"] = audio_out.attention_mask
+
+        return batch
+
+
 class ASRTrainer(Trainer):
     """Trainer subclass for ASR models."""
 
-    pass
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """Compute loss with proper label shifting for causal LM.
+
+        HuggingFace Trainer's label_smoother checks MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+        to decide whether to shift labels. Since ASRModel isn't in that mapping,
+        it incorrectly uses shift_labels=False, causing misaligned predictions.
+        This override forces shift_labels=True for correct causal LM behavior.
+        """
+        # Pop labels if using label smoothing (matches Trainer behavior)
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs.pop("labels")
+        else:
+            labels = None
+
+        outputs = model(**inputs)
+
+        if labels is not None:
+            # Force shift_labels=True since ASRModel is a causal LM
+            loss = self.label_smoother(outputs, labels, shift_labels=True)
+            # Scale loss for gradient accumulation (Trainer expects this)
+            if self.args.gradient_accumulation_steps > 1:
+                loss = loss / self.args.gradient_accumulation_steps
+        else:
+            loss = outputs.loss
+
+        return (loss, outputs) if return_outputs else loss
 
 
 class PushToHubCallback(TrainerCallback):
@@ -352,7 +448,15 @@ def get_valid_training_args(config: dict) -> dict:
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
-    nltk.download("punkt_tab", quiet=True)
+    # Check HF_TOKEN is set if pushing to hub
+    if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
+        import os
+
+        if not os.environ.get("HF_TOKEN"):
+            raise ValueError(
+                "HF_TOKEN environment variable is required when push_to_hub is enabled. "
+                "Set it with: export HF_TOKEN=your_token"
+            )
 
     # Initialize wandb
     if cfg.training.get("report_to") == "wandb":
@@ -410,18 +514,30 @@ def main(cfg: DictConfig) -> None:
             "true",  # Always disable thinking
         )
 
-    # Load datasets
-    train_dataset, val_dataset = DatasetLoader(cfg).load()
+    # Check if multi-task training is enabled
+    multitask_enabled = cfg.get("multitask", {}).get("enabled", False)
 
-    # Create data collator
-    data_collator = DataCollator(
-        tokenizer=model.tokenizer,
-        feature_extractor=model.feature_extractor,
-        sample_rate=cfg.data.sample_rate,
-        system_prompt=cfg.model.system_prompt,
-        projector=model.projector,
-        encoder_conv_layers=model.config.encoder_conv_layers,
-    )
+    # Load datasets
+    train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
+
+    # Create data collator (multi-task or standard)
+    if multitask_enabled:
+        data_collator = MultiTaskDataCollator(
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
+            sample_rate=cfg.data.sample_rate,
+            projector=model.projector,
+            encoder_conv_layers=model.config.encoder_conv_layers,
+        )
+    else:
+        data_collator = DataCollator(
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
+            sample_rate=cfg.data.sample_rate,
+            system_prompt=cfg.model.system_prompt,
+            projector=model.projector,
+            encoder_conv_layers=model.config.encoder_conv_layers,
+        )
 
     # Setup callbacks
     callbacks = []

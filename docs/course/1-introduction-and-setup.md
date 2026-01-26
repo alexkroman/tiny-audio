@@ -169,17 +169,17 @@ Tiny Audio uses Hydra for configuration:
 
 ```bash
 # Default training
-poetry run python scripts/train.py +experiments=mlp
+poetry run python scripts/train.py +experiments=transcription
 
 # Override any value
-poetry run python scripts/train.py +experiments=mlp training.learning_rate=1e-4
+poetry run python scripts/train.py +experiments=transcription training.learning_rate=1e-4
 
 # Use key=value syntax (not --key value)
 ```
 
 Config files live in `configs/`:
 - `config.yaml` - Main defaults
-- `experiments/` - Projector presets (mlp, mosa, moe)
+- `experiments/` - Projector presets (transcription, mosa, moe)
 - `training/` - Training hyperparameters
 - `data/` - Dataset settings
 
