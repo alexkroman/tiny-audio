@@ -46,7 +46,7 @@ poetry run ta runpod checkpoint <HOST> <PORT>
 
 ```bash
 # Train with default MLP projector
-poetry run python scripts/train.py +experiments=mlp
+poetry run python scripts/train.py +experiments=transcription
 
 # Train with different projector
 poetry run python scripts/train.py +experiments=mosa
@@ -54,10 +54,10 @@ poetry run python scripts/train.py +experiments=moe
 poetry run python scripts/train.py +experiments=qformer
 
 # Override config values
-poetry run python scripts/train.py +experiments=mlp training.learning_rate=1e-4
+poetry run python scripts/train.py +experiments=transcription training.learning_rate=1e-4
 
 # Resume from checkpoint
-poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpoint=/path/to/checkpoint
+poetry run python scripts/train.py +experiments=transcription training.resume_from_checkpoint=/path/to/checkpoint
 
 # Multi-stage training with LoRA
 poetry run python scripts/train.py +experiments=mlp_lora       # Stage 2
@@ -130,7 +130,7 @@ ______________________________________________________________________
 
 | Stage | Config | What trains | Purpose |
 |-------|--------|-------------|---------|
-| 1 | `+experiments=mlp` | Projector only | Learn audio→text mapping |
+| 1 | `+experiments=transcription` | Projector only | Learn audio→text mapping |
 | 2 | `+experiments=mlp_lora` | LoRA adapters only | Fine-tune LLM |
 | 3 | `+experiments=mlp_fine_tune` | Projector + LoRA | Joint optimization |
 
@@ -176,11 +176,11 @@ ______________________________________________________________________
 configs/
 ├── config.yaml          # Main config (model defaults)
 ├── data/
-│   └── loquacious.yaml  # Dataset configuration
+│   └── multiasr.yaml    # Multi-ASR dataset config
 ├── training/
 │   └── production.yaml  # Training hyperparameters
 └── experiments/         # Projector presets
-    ├── mlp.yaml         # Stage 1: MLP projector
+    ├── transcription.yaml  # Stage 1: MLP projector
     ├── mosa.yaml        # MOSA projector
     ├── moe.yaml         # MoE projector
     ├── qformer.yaml     # QFormer projector

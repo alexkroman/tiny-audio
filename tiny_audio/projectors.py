@@ -36,12 +36,13 @@ class MLPAudioProjector(nn.Module):
         self.k = getattr(config, "projector_pool_stride", 4)
 
         # Frame stacking: concat k adjacent frames then project
-        # Hidden dim uses 2x expansion like GLM-ASR's GlmAsrMultiModalProjector
         in_dim = encoder_dim * self.k
-        hidden_dim = llm_dim * 2
-        self.linear_1 = nn.Linear(in_dim, hidden_dim)
+        # Hidden dim defaults to llm_dim, can be overridden via config
+        hidden_dim = getattr(config, "projector_hidden_dim", None) or llm_dim
+        self.linear_1 = nn.Linear(in_dim, hidden_dim, bias=False)
+        self.norm = LlamaRMSNorm(hidden_dim, eps=1e-6)
         self.act = nn.GELU()
-        self.linear_2 = nn.Linear(hidden_dim, llm_dim)
+        self.linear_2 = nn.Linear(hidden_dim, llm_dim, bias=False)
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length (matches GLM-ASR)."""
@@ -65,6 +66,7 @@ class MLPAudioProjector(nn.Module):
         x = x.reshape(batch, out_len, dim * self.k)
 
         x = self.linear_1(x)
+        x = self.norm(x)
         x = self.act(x)
         return self.linear_2(x)
 

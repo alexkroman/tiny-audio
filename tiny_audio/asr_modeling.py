@@ -38,7 +38,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
 
-    TRANSCRIBE_PROMPT = "Transcribe speech to text"  # Audio tokens come BEFORE this
+    TRANSCRIBE_PROMPT = ""  # Instruction-free (AZEROS approach)
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: str, *args, **kwargs) -> "ASRModel":
@@ -571,10 +571,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             messages: list[dict[str, str]] = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
-            # Audio BEFORE prompt for proper causal attention
-            messages.append(
-                {"role": "user", "content": audio_placeholder + " " + self.TRANSCRIBE_PROMPT}
-            )
+            # Audio tokens only (instruction-free)
+            user_content = audio_placeholder
+            if self.TRANSCRIBE_PROMPT:
+                user_content += " " + self.TRANSCRIBE_PROMPT
+            messages.append({"role": "user", "content": user_content})
 
             chat_result = self.tokenizer.apply_chat_template(
                 messages,
@@ -653,10 +654,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        # Audio BEFORE prompt for proper causal attention
-        messages.append(
-            {"role": "user", "content": audio_placeholder + " " + self.TRANSCRIBE_PROMPT}
-        )
+        # Audio tokens only (instruction-free)
+        user_content = audio_placeholder
+        if self.TRANSCRIBE_PROMPT:
+            user_content += " " + self.TRANSCRIBE_PROMPT
+        messages.append({"role": "user", "content": user_content})
 
         chat_result = self.tokenizer.apply_chat_template(
             messages,

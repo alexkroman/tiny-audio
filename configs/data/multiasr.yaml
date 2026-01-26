@@ -1,0 +1,57 @@
+# Multi-ASR dataset configuration (Stage 1 - Semantic Alignment)
+# Following AZEROS: train semantic projector on ASR data only
+# Uses all available samples from each dataset
+#
+# ┌─────────────┬───────────┬─────────┐
+# │ Dataset     │ Samples   │ Percent │
+# ├─────────────┼───────────┼─────────┤
+# │ loquacious  │ 1,090,000 │  80.4%  │
+# │ ami-ihm     │   108,502 │   8.0%  │
+# │ switchboard │    80,000 │   5.9%  │
+# │ spgispeech  │    77,073 │   5.7%  │
+# └─────────────┴───────────┴─────────┘
+# Total: ~1,355,575 samples
+
+datasets:
+  # Loquacious medium - main ASR dataset
+  - path: speechbrain/LoquaciousSet
+    name: medium
+    audio_column: wav
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [dev]
+
+  # AMI corpus IHM - meeting transcriptions, close-talk mic
+  - path: edinburghcstr/ami
+    name: ihm
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+
+  # SPGISpeech S - financial earnings calls, spontaneous speech
+  - path: kensho/spgispeech
+    name: S
+    audio_column: audio
+    text_column: transcript
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+
+  # Switchboard - conversational telephone speech
+  - path: hhoangphuoc/switchboard
+    audio_column: audio
+    text_column: transcript
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 80000
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+max_eval_samples: 2000

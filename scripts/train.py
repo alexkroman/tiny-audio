@@ -8,7 +8,7 @@ This script handles:
 - Checkpoint saving and Hub pushing
 
 Usage:
-    poetry run python scripts/train.py +experiments=mlp
+    poetry run python scripts/train.py +experiments=transcription
     poetry run python scripts/train.py training.learning_rate=1e-4
 """
 
@@ -42,8 +42,9 @@ from trl.experimental.utils import DataCollatorForChatML
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
-# Transcription prompts (randomly selected during training)
-# Audio tokens come BEFORE the prompt for proper causal attention
+# Following AZEROS paper: instruction-free tuning achieves best generalization
+# No prompts for ASR - just audio tokens, the model learns to produce transcriptions
+USE_ASR_PROMPT = False  # Set to True to use prompts like "Transcribe this audio"
 TRANSCRIBE_PROMPTS = [
     "Repeat the above",
     "Transcribe speech to text",
@@ -240,9 +241,12 @@ class DataCollator:
         text_features = []
         for text, num_audio_tokens in zip(processed_texts, audio_token_counts):
             audio_placeholder = "<audio>" * num_audio_tokens
-            prompt = random.choice(TRANSCRIBE_PROMPTS)
-            # Audio BEFORE prompt for proper causal attention (matches Auden)
-            user_content = audio_placeholder + " " + prompt
+            # Following AZEROS: instruction-free for best generalization
+            if USE_ASR_PROMPT:
+                prompt = random.choice(TRANSCRIBE_PROMPTS)
+                user_content = audio_placeholder + " " + prompt
+            else:
+                user_content = audio_placeholder
 
             messages = []
             if self.system_prompt:
@@ -260,11 +264,11 @@ class DataCollator:
         return batch
 
 
-# SIFT system message for multi-task training
-SIFT_SYSTEM_MESSAGE = ""
-
-# SIFT instruction prompt for multi-task training
-SIFT_INSTRUCTION = "Describe all information you can hear."
+# SIFT configuration for multi-task training
+# Following AZEROS paper: instruction-free tuning (SIFT) achieves best generalization
+# by forcing the model to learn general audio-text alignment without task-specific bias
+SIFT_SYSTEM_MESSAGE = ""  # No system message (AZEROS SIFT approach)
+SIFT_INSTRUCTION = ""  # No instruction (AZEROS SIFT approach)
 
 
 class MultiTaskDataCollator(DataCollator):
@@ -335,13 +339,20 @@ class MultiTaskDataCollator(DataCollator):
             task = f.get("task", "transcribe")
 
             if task == "sift":
-                # SIFT task: describe audio
+                # SIFT task: describe audio (instruction-free following AZEROS paper)
                 response = (f.get("sift_response") or f.get("text") or "").strip()
-                user_content = f"{audio_placeholder} {SIFT_INSTRUCTION}"
+                # No instruction = pure SIFT for best generalization
+                if SIFT_INSTRUCTION:
+                    user_content = f"{audio_placeholder} {SIFT_INSTRUCTION}"
+                else:
+                    user_content = audio_placeholder
             else:
-                # ASR task: transcription
-                prompt = random.choice(TRANSCRIBE_PROMPTS)
-                user_content = f"{audio_placeholder} {prompt}"
+                # ASR task: transcription (instruction-free following AZEROS)
+                if USE_ASR_PROMPT:
+                    prompt = random.choice(TRANSCRIBE_PROMPTS)
+                    user_content = f"{audio_placeholder} {prompt}"
+                else:
+                    user_content = audio_placeholder
                 response = (f.get("text") or "").strip().lower()
 
             # Build messages (skip system if empty)

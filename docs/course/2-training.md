@@ -37,7 +37,7 @@ For best results, training happens in stages:
 
 | Stage | What trains | Config | Purpose |
 |-------|-------------|--------|---------|
-| **Stage 1** | Projector only | `+experiments=mlp` | Learn audio→text mapping |
+| **Stage 1** | Projector only | `+experiments=transcription` | Learn audio→text mapping |
 | **Stage 2** | LoRA adapters only | `+experiments=mlp_lora` | Fine-tune language model |
 | **Stage 3** | Projector + LoRA | `+experiments=mlp_fine_tune` | Joint optimization |
 
@@ -73,14 +73,14 @@ Takes 5-10 minutes. Re-run whenever you make local changes.
 ### Exercise 3: Configure Experiment (10 min)
 
 ```bash
-cp configs/experiments/mlp.yaml configs/experiments/my_experiment.yaml
+cp configs/experiments/transcription.yaml configs/experiments/my_experiment.yaml
 ```
 
 Edit `my_experiment.yaml`:
 
 ```yaml
 model:
-  projector_type: mlp
+  projector_type: mlp  # or mosa, moe, qformer
 
 training:
   hub_model_id: "your-username/tiny-audio-yourname"  # CHANGE THIS
@@ -144,16 +144,16 @@ If you have a local GPU (24GB+ VRAM):
 
 ```bash
 # Quick test (10 steps)
-poetry run python scripts/train.py +experiments=mlp training.max_steps=10
+poetry run python scripts/train.py +experiments=transcription training.max_steps=10
 
 # Full training
-poetry run python scripts/train.py +experiments=mlp
+poetry run python scripts/train.py +experiments=transcription
 
 # Override settings
-poetry run python scripts/train.py +experiments=mlp training.learning_rate=1e-4
+poetry run python scripts/train.py +experiments=transcription training.learning_rate=1e-4
 
 # Resume from checkpoint
-poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpoint=/path/to/checkpoint-XXXX
+poetry run python scripts/train.py +experiments=transcription training.resume_from_checkpoint=/path/to/checkpoint-XXXX
 ```
 
 ---
@@ -167,11 +167,11 @@ poetry run python scripts/train.py +experiments=mlp training.resume_from_checkpo
 | `moe` | Shared + sparse routed experts | Medium | Medium |
 | `qformer` | QFormer with learnable queries | Slow | High |
 
-Start with `mlp`. Try others after you have a baseline.
+Start with `transcription`. Try others after you have a baseline.
 
 ```bash
 # Different projectors
-poetry run python scripts/train.py +experiments=mlp
+poetry run python scripts/train.py +experiments=transcription
 poetry run python scripts/train.py +experiments=mosa
 poetry run python scripts/train.py +experiments=moe
 poetry run python scripts/train.py +experiments=qformer
