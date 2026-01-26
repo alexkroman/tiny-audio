@@ -42,9 +42,8 @@ from trl.experimental.utils import DataCollatorForChatML
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
-# Following AZEROS paper: instruction-free tuning achieves best generalization
-# No prompts for ASR - just audio tokens, the model learns to produce transcriptions
-USE_ASR_PROMPT = False  # Set to True to use prompts like "Transcribe this audio"
+# Use transcription prompts for ASR training
+USE_ASR_PROMPT = True  # Use prompts like "Transcribe this audio"
 TRANSCRIBE_PROMPTS = [
     "Repeat the above",
     "Transcribe speech to text",
@@ -77,6 +76,19 @@ class DatasetLoader:
             trust_remote_code=True,
         )
 
+        # Apply label-based filtering (e.g., for AudioSet to exclude speech)
+        if filter_cfg := dataset_cfg.get("filter"):
+            filter_column = filter_cfg.get("column")
+            exclude_labels = set(filter_cfg.get("exclude_labels", []))
+            if filter_column and exclude_labels and filter_column in ds.column_names:
+
+                def has_no_excluded_labels(labels):
+                    return not any(label in exclude_labels for label in labels)
+
+                ds = ds.filter(
+                    has_no_excluded_labels, num_proc=self.num_proc, input_columns=filter_column
+                )
+
         # Normalize column names for audio and text
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
@@ -87,6 +99,10 @@ class DatasetLoader:
                 if target in ds.column_names:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
+
+        # Override text with blank if specified (for negative samples like non-speech audio)
+        if dataset_cfg.get("blank_text"):
+            ds = ds.map(lambda _: {"text": ""}, num_proc=self.num_proc)
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 

@@ -38,7 +38,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
 
-    TRANSCRIBE_PROMPT = ""  # Instruction-free (AZEROS approach)
+    TRANSCRIBE_PROMPT = ""
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: str, *args, **kwargs) -> "ASRModel":

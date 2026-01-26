@@ -60,7 +60,6 @@ class TestProcessorConstants:
         from tiny_audio.asr_processing import ASRProcessor
 
         assert hasattr(ASRProcessor, "TRANSCRIBE_PROMPT")
-        # Instruction-free (AZEROS approach) - prompt is empty
         assert ASRProcessor.TRANSCRIBE_PROMPT == ""
 
     def test_default_conv_layers(self):

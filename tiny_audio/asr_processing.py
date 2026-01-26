@@ -17,7 +17,7 @@ class ASRProcessor(ProcessorMixin):
     feature_extractor_class = "AutoFeatureExtractor"
     tokenizer_class = "AutoTokenizer"
     AUDIO_TOKEN = "<audio>"
-    TRANSCRIBE_PROMPT = ""  # Instruction-free (AZEROS approach)
+    TRANSCRIBE_PROMPT = ""
     # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
     DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
 

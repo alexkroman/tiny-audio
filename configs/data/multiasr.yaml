@@ -5,12 +5,13 @@
 # ┌─────────────┬───────────┬─────────┐
 # │ Dataset     │ Samples   │ Percent │
 # ├─────────────┼───────────┼─────────┤
-# │ loquacious  │ 1,090,000 │  80.4%  │
-# │ ami-ihm     │   108,502 │   8.0%  │
-# │ switchboard │    80,000 │   5.9%  │
-# │ spgispeech  │    77,073 │   5.7%  │
+# │ loquacious  │ 1,090,000 │  77.7%  │
+# │ ami-ihm     │   108,502 │   7.7%  │
+# │ switchboard │    80,000 │   5.7%  │
+# │ spgispeech  │    77,073 │   5.5%  │
+# │ audioset    │    50,000 │   3.6%  │ (non-speech, blank target)
 # └─────────────┴───────────┴─────────┘
-# Total: ~1,355,575 samples
+# Total: ~1,405,575 samples
 
 datasets:
   # Loquacious medium - main ASR dataset
@@ -48,6 +49,48 @@ datasets:
     train_splits: [train]
     eval_splits: [validation]
     target_samples: 80000
+
+  # AudioSet - non-speech audio (negative examples with blank transcription target)
+  # Filtered to exclude all speech/singing/vocal labels
+  - path: agkphysics/AudioSet
+    audio_column: audio
+    text_column: human_labels
+    blank_text: true
+    task: transcribe
+    train_splits: [train]
+    eval_splits: []
+    target_samples: 50000
+    filter:
+      column: human_labels
+      exclude_labels:
+        # Primary speech
+        - Speech
+        - Child speech, kid speaking
+        - Female speech, woman speaking
+        - Male speech, man speaking
+        - Hubbub, speech noise, speech babble
+        - Conversation
+        - Narration, monologue
+        - Whispering
+        - Babbling
+        - Speech synthesizer
+        # Singing/vocal (contains words)
+        - Singing
+        - Female singing
+        - Male singing
+        - Child singing
+        - A capella
+        - Choir
+        - Rapping
+        - Beatboxing
+        - Yodeling
+        - Chant
+        - Mantra
+        - Opera
+        - Synthetic singing
+        - Vocal music
+        - Lullaby
+        - Humming
 
 # Audio processing
 sample_rate: 16000
