@@ -1,10 +1,10 @@
 # @package _global_
-# Multitask training starting from pretrained ASR model
+# Omni training starting from pretrained ASR model
 # 60% ASR (from multiasr: loquacious, ami, switchboard, spgispeech)
 # 40% SIFT (paralinguistic: podcast, commonvoice, esd, crema_d, tess, ravdess, savee)
 #
 # Usage:
-#   poetry run python scripts/train.py +experiments=multitask
+#   poetry run python scripts/train.py +experiments=omni
 
 defaults:
   - override /data: multitask
@@ -22,7 +22,7 @@ multitask:
   enabled: true
 
 training:
-  hub_model_id: "mazesmazes/tiny-audio-multitask"
+  hub_model_id: "mazesmazes/tiny-audio-omni"
   group_by_length: false  # Disabled: interleaved datasets have inconsistent length columns
   learning_rate: 1e-3
   warmup_steps: 1000

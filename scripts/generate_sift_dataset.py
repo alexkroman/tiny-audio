@@ -56,10 +56,7 @@ class DatasetConfig:
     age_field: str | None = None
     pace_field: str | None = None
     accent_field: str | None = None
-    sentiment_field: str | None = None
-    pitch_field: str | None = None  # pitch_mean from AbstractTTS datasets
     volume_field: str | None = None  # relative_db from AbstractTTS datasets
-    intensity_field: str | None = None  # intensity from RAVDESS
     max_samples: int | None = None  # Per-dataset sample limit (overrides --max-samples)
     # Flag for datasets with integer emotion labels (like MELD)
     emotion_is_int: bool = False
@@ -67,7 +64,7 @@ class DatasetConfig:
 
 # HuggingFace datasets with paralinguistic labels (English only)
 DATASET_CONFIGS = [
-    # CREMA-D: emotion + gender + speaking_rate + pitch + volume (AbstractTTS version)
+    # CREMA-D: emotion + gender + speaking_rate + volume (AbstractTTS version)
     DatasetConfig(
         name="crema_d",
         hf_path="AbstractTTS/CREMA-D",
@@ -78,10 +75,9 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         pace_field="speaking_rate",
-        pitch_field="pitch_mean",
         volume_field="relative_db",
     ),
-    # RAVDESS: emotion, gender, speaking_rate, pitch, volume, intensity (AbstractTTS version)
+    # RAVDESS: emotion, gender, speaking_rate, volume (AbstractTTS version)
     DatasetConfig(
         name="ravdess",
         hf_path="AbstractTTS/RAVDESS",
@@ -92,11 +88,9 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         pace_field="speaking_rate",
-        pitch_field="pitch_mean",
         volume_field="relative_db",
-        intensity_field="intensity",
     ),
-    # TESS: emotion + gender + speaking_rate + pitch + volume (all female speakers)
+    # TESS: emotion + gender + speaking_rate + volume (all female speakers)
     # 2,800 samples with 7 emotion classes
     DatasetConfig(
         name="tess",
@@ -108,10 +102,9 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         pace_field="speaking_rate",
-        pitch_field="pitch_mean",
         volume_field="relative_db",
     ),
-    # SAVEE: emotion + gender + speaking_rate + pitch + volume (all male speakers)
+    # SAVEE: emotion + gender + speaking_rate + volume (all male speakers)
     # 480 samples with 7 emotion classes
     DatasetConfig(
         name="savee",
@@ -123,10 +116,9 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         pace_field="speaking_rate",
-        pitch_field="pitch_mean",
         volume_field="relative_db",
     ),
-    # ESD English: emotion + gender + speaking_rate + pitch + volume (male and female)
+    # ESD English: emotion + gender + speaking_rate + volume (male and female)
     # 17,500 samples with 5 emotion classes
     DatasetConfig(
         name="esd",
@@ -138,10 +130,9 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         pace_field="speaking_rate",
-        pitch_field="pitch_mean",
         volume_field="relative_db",
     ),
-    # PODCAST: emotion, gender, speaking_rate, pitch, volume from podcast recordings
+    # PODCAST: emotion, gender, speaking_rate, volume from podcast recordings
     # 149k samples with 16 emotion classes
     DatasetConfig(
         name="podcast",
@@ -153,7 +144,6 @@ DATASET_CONFIGS = [
         gender_field="gender",
         age_field=None,
         pace_field="speaking_rate",
-        pitch_field="pitch_mean",
         volume_field="relative_db",
     ),
     # CommonVoice: Large-scale multilingual dataset (English subset)
@@ -172,7 +162,7 @@ DATASET_CONFIGS = [
         max_samples=100000,
     ),
     # MELD: Multimodal EmotionLines Dataset (Friends TV show)
-    # Has emotion (7 classes) and sentiment (3 classes)
+    # Has emotion (7 classes)
     DatasetConfig(
         name="meld",
         hf_path="garam-icecream/MELD",
@@ -180,7 +170,6 @@ DATASET_CONFIGS = [
         audio_field="audio",
         text_field="text",
         emotion_field="emotion",
-        sentiment_field="sentiment",
         emotion_is_int=True,  # MELD uses integer labels
     ),
 ]
@@ -206,43 +195,6 @@ def age_to_group(age: str | int | None) -> str | None:
         if isinstance(age, str) and age.lower() not in ("", "na", "null", "unk", "unknown", "nan"):
             return age.lower()
         return None
-
-
-def pitch_to_label(pitch: float | None, gender: str | None) -> str | None:
-    """Convert pitch_mean (Hz) to label using gender-relative thresholds.
-
-    Thresholds derived from AbstractTTS dataset distributions:
-    - Male: 25th=115 Hz, 75th=169 Hz (mean=146 Hz)
-    - Female: 25th=169 Hz, 75th=231 Hz (mean=204 Hz)
-
-    Returns None for missing/invalid values.
-    """
-    if pitch is None or pitch <= 0:
-        return None
-
-    # Normalize gender
-    gender_lower = (gender or "").lower()
-    is_male = gender_lower in ("m", "male")
-    is_female = gender_lower in ("f", "female")
-
-    if is_male:
-        if pitch < 115:
-            return "low-pitched"
-        if pitch <= 169:
-            return None  # Normal pitch - don't mention
-        return "high-pitched"
-    if is_female:
-        if pitch < 169:
-            return "low-pitched"
-        if pitch <= 231:
-            return None  # Normal pitch - don't mention
-        return "high-pitched"
-    # Unknown gender - use overall median (~169 Hz) as reference
-    if pitch < 130:
-        return "low-pitched"
-    if pitch <= 210:
-        return None  # Normal
-    return "high-pitched"
 
 
 def volume_to_label(relative_db: float | None) -> str | None:
@@ -361,13 +313,6 @@ MELD_EMOTION_MAP = {
     6: "surprise",
 }
 
-# Sentiment mapping (integer to string)
-SENTIMENT_MAP = {
-    0: "negative",
-    1: "neutral",
-    2: "positive",
-}
-
 
 def normalize_meld_emotion(value: int | str | None) -> str | None:
     """Convert MELD emotion integer to string label."""
@@ -377,18 +322,6 @@ def normalize_meld_emotion(value: int | str | None) -> str | None:
         label = MELD_EMOTION_MAP.get(value)
         return normalize_emotion(label) if label else None
     return normalize_emotion(value)
-
-
-def normalize_sentiment(value: int | str | None) -> str | None:
-    """Convert sentiment integer to string label."""
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return SENTIMENT_MAP.get(value)
-    value_lower = str(value).lower().strip()
-    if value_lower in ("", "na", "null", "unk", "unknown", "nan", "none"):
-        return None
-    return value_lower
 
 
 def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
@@ -404,10 +337,7 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         "age": "",
         "pace": "",
         "accent": "",
-        "sentiment": "",
-        "pitch": "",
         "volume": "",
-        "intensity": "",
     }
 
     # Extract text transcription
@@ -448,27 +378,10 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
         accent = normalize_label(sample[config.accent_field])
         metadata["accent"] = accent
 
-    # Extract sentiment (handle integer labels)
-    if config.sentiment_field and config.sentiment_field in sample:
-        raw_sentiment = sample[config.sentiment_field]
-        metadata["sentiment"] = normalize_sentiment(raw_sentiment)
-
-    # Extract pitch (gender-relative thresholds)
-    if config.pitch_field and config.pitch_field in sample:
-        raw_pitch = sample[config.pitch_field]
-        metadata["pitch"] = pitch_to_label(raw_pitch, metadata["gender"])
-
     # Extract volume (relative dB)
     if config.volume_field and config.volume_field in sample:
         raw_volume = sample[config.volume_field]
         metadata["volume"] = volume_to_label(raw_volume)
-
-    # Extract intensity (RAVDESS only - already categorical)
-    if config.intensity_field and config.intensity_field in sample:
-        intensity = normalize_label(sample[config.intensity_field])
-        # Only include if "strong" - normal intensity is unremarkable
-        if intensity == "strong":
-            metadata["intensity"] = "strong intensity"
 
     return metadata
 
@@ -488,12 +401,9 @@ def build_audio_context(metadata: dict) -> str:
     for key in [
         "age",
         "gender",
-        "pitch",
         "volume",
         "pace",
-        "intensity",
         "emotion",
-        "sentiment",
         "accent",
     ]:
         value = metadata.get(key)
@@ -570,11 +480,8 @@ print(sample["sift_response"])
 | `gender` | string | Speaker gender (if available) |
 | `age` | string | Speaker age group (if available) |
 | `pace` | string | Speaking pace: slow, normal, fast (if available) |
-| `pitch` | string | Voice pitch: low-pitched, high-pitched (if notable) |
 | `volume` | string | Volume level: quiet, loud (if notable) |
-| `intensity` | string | Emotional intensity: strong intensity (RAVDESS only) |
 | `accent` | string | Speaker accent (if available) |
-| `sentiment` | string | Sentiment: positive, neutral, negative (if available) |
 | `sift_response` | string | Generated description of the audio |
 | `source_dataset` | string | Original dataset source |
 
@@ -631,10 +538,7 @@ def process_dataset(
         "age": [],
         "pace": [],
         "accent": [],
-        "sentiment": [],
-        "pitch": [],
         "volume": [],
-        "intensity": [],
     }
 
     for sample in tqdm(ds, desc="Preparing", total=len(ds)):
@@ -662,10 +566,7 @@ def process_dataset(
     ds = ds.add_column("meta_age", metadata_lists["age"])
     ds = ds.add_column("meta_pace", metadata_lists["pace"])
     ds = ds.add_column("meta_accent", metadata_lists["accent"])
-    ds = ds.add_column("meta_sentiment", metadata_lists["sentiment"])
-    ds = ds.add_column("meta_pitch", metadata_lists["pitch"])
     ds = ds.add_column("meta_volume", metadata_lists["volume"])
-    ds = ds.add_column("meta_intensity", metadata_lists["intensity"])
 
     # Generate responses using pipeline with dataset (more efficient than .map())
     print("  Generating instructions and responses...")
@@ -703,10 +604,7 @@ def process_dataset(
             "age",
             "pace",
             "accent",
-            "sentiment",
-            "pitch",
             "volume",
-            "intensity",
         ]
         if c in ds.column_names
     ]
@@ -722,10 +620,7 @@ def process_dataset(
             "meta_age": "age",
             "meta_pace": "pace",
             "meta_accent": "accent",
-            "meta_sentiment": "sentiment",
-            "meta_pitch": "pitch",
             "meta_volume": "volume",
-            "meta_intensity": "intensity",
         }
     )
     ds = ds.add_column("source_dataset", [config.name] * len(ds))
@@ -739,10 +634,7 @@ def process_dataset(
         "age",
         "pace",
         "accent",
-        "sentiment",
-        "pitch",
         "volume",
-        "intensity",
         "sift_response",
         "source_dataset",
     ]
@@ -756,10 +648,7 @@ def process_dataset(
     ds = ds.cast_column("age", Value("string"))
     ds = ds.cast_column("pace", Value("string"))
     ds = ds.cast_column("accent", Value("string"))
-    ds = ds.cast_column("sentiment", Value("string"))
-    ds = ds.cast_column("pitch", Value("string"))
     ds = ds.cast_column("volume", Value("string"))
-    ds = ds.cast_column("intensity", Value("string"))
     return ds.cast_column("audio", Audio(sampling_rate=16000))
 
 

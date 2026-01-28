@@ -19,7 +19,7 @@ training:
   hub_model_id: "mazesmazes/tiny-audio"
   group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
   learning_rate: 1e-3
-  warmup_steps: 1000
+  warmup_steps: 500
   lr_scheduler_type: polynomial
   lr_scheduler_kwargs:
     power: 0.5
@@ -32,7 +32,7 @@ training:
   eval_steps: 1000
 
   label_smoothing_factor: 0.1
-  weight_decay: 0.01
+  weight_decay: 0.0
 
   use_specaugment: true
   # LibriDouble settings (2 masks each)
