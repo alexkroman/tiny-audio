@@ -53,8 +53,7 @@ python = ">=3.10,<3.13"
 torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
-# GLM-ASR requires transformers from source (>= 5.x not yet released)
-transformers = {git = "https://github.com/huggingface/transformers.git"}
+transformers = ">=5.0.0"
 datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
 jiwer = "*"
 attrs = "*"
