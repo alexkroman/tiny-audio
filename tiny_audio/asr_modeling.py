@@ -869,6 +869,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projectors module
         shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
+        # Copy alignment module
+        shutil.copy(src_dir / "alignment.py", save_dir / "alignment.py")
         # Copy diarization module
         shutil.copy(src_dir / "diarization.py", save_dir / "diarization.py")
 

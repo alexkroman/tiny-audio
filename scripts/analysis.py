@@ -718,9 +718,8 @@ def compare(
     if has_alignment:
         console.print("\n")
         align_table = Table(title="Timestamp Alignment")
+        align_table.add_column("Median AE (ms)", justify="right")
         align_table.add_column("Model", style="cyan")
-        align_table.add_column("Alignment Error", justify="right")
-        align_table.add_column("MAE (ms)", justify="right")
 
         rows = []
         for model, data in model_metrics.items():
@@ -728,18 +727,11 @@ def compare(
             align = data.get("alignment", {})
             if align:
                 mae = align.get("mae", 0)
-                align_err = align.get("alignment_error", 0)
-                rows.append(
-                    [
-                        display_name,
-                        f"{align_err * 100:.2f}%",
-                        f"{mae * 1000:.1f}",
-                    ]
-                )
+                rows.append([f"{mae * 1000:.1f}", display_name])
             else:
-                rows.append([display_name, "-", "-"])
+                rows.append(["-", display_name])
 
-        for row in sorted(rows, key=lambda r: _sort_key(r[1])):
+        for row in sorted(rows, key=lambda r: _sort_key(r[0])):
             align_table.add_row(*row)
 
         console.print(align_table)

@@ -270,12 +270,7 @@ def print_alignment_metrics(dataset_name: str, metrics: dict):
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
 
-    table.add_row("MAE", f"{metrics['mae'] * 1000:.1f}ms")
-    table.add_row("Alignment Error", f"{metrics.get('alignment_error', 0) * 100:.1f}%")
-    table.add_row(
-        "Words Aligned",
-        f"{metrics.get('total_aligned_words', 0)}/{metrics.get('total_ref_words', 0)}",
-    )
+    table.add_row("Median AE", f"{metrics['mae'] * 1000:.1f}ms")
     table.add_row("Samples", str(metrics["num_samples"]))
     table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
 
@@ -492,6 +487,10 @@ def main(
         int,
         typer.Option("--num-workers", "-w", help="Number of parallel workers for API evaluations"),
     ] = 1,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Show word-by-word alignment details"),
+    ] = False,
 ):
     """Evaluate ASR models on standard datasets."""
     # If a subcommand was invoked, skip
@@ -605,6 +604,7 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
+                    verbose=verbose,
                 )
             elif model == "deepgram":
                 api_key = os.environ.get("DEEPGRAM_API_KEY", "")
@@ -617,6 +617,7 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
+                    verbose=verbose,
                 )
             elif model == "elevenlabs":
                 api_key = os.environ.get("ELEVENLABS_API_KEY", "")
@@ -631,6 +632,7 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
+                    verbose=verbose,
                 )
             else:
                 model_id = get_model_name(model)
@@ -640,6 +642,7 @@ def main(
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
                     user_prompt=user_prompt,
+                    verbose=verbose,
                 )
 
             results = evaluator.evaluate(dataset, max_samples)
