@@ -23,6 +23,7 @@ classifiers = [
 ]
 requires-python = ">=3.10,<3.13"
 dynamic = ["dependencies"]
+dependencies = ["speechbrain @ git+https://github.com/speechbrain/speechbrain.git"]
 
 [project.urls]
 Homepage = "https://github.com/alexkroman/tiny-audio"
@@ -53,8 +54,7 @@ python = ">=3.10,<3.13"
 torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
-# GLM-ASR requires transformers from source (>= 5.x not yet released)
-transformers = {git = "https://github.com/huggingface/transformers.git"}
+transformers = ">=5.0.0"
 datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
 jiwer = "*"
 attrs = "*"
@@ -72,12 +72,15 @@ typer = ">=0.19.2"
 trl = ">=0.26.0"
 peft = ">=0.13.0"  # LoRA adapters for Stage 2 fine-tuning
 torchaudio = ">=2.0.0"
-pyannote-audio = ">=3.1.0"
+pyannote-core = ">=6.0.0"  # For DER metric calculation
+pyannote-metrics = ">=4.0.0"  # For DER metric calculation
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 fabric = ">=3.0.0"
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
 spacy = "^3.8.11"
 ten-vad = ">=1.0.6"
+speechbrain = ">=1.0.3"
+pytz = "*"
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]

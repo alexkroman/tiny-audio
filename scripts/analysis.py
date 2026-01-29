@@ -655,16 +655,13 @@ def compare(
     console.print("\n")
     wc_table = Table(title="WER by Word Count")
     wc_table.add_column("Model", style="cyan")
-    wc_table.add_column("Corpus", justify="right", style="bold")
     for i in range(1, 11):
         wc_table.add_column(f"{i} word{'s' if i > 1 else ''}", justify="right")
 
     rows = []
     for model, data in model_metrics.items():
         display_name = data.get("display_name", model)
-        corpus_wer = data.get("corpus_wer")
         row = [display_name]
-        row.append(f"{corpus_wer:.2f}%" if corpus_wer else "-")
         for wc in range(1, 11):
             wc_data = data["by_length"].get(wc, {})
             wers = wc_data.get("wers", [])
@@ -719,8 +716,7 @@ def compare(
         console.print("\n")
         align_table = Table(title="Timestamp Alignment")
         align_table.add_column("Model", style="cyan")
-        align_table.add_column("Alignment Error", justify="right")
-        align_table.add_column("MAE (ms)", justify="right")
+        align_table.add_column("Median AE (ms)", justify="right")
 
         rows = []
         for model, data in model_metrics.items():
@@ -728,16 +724,9 @@ def compare(
             align = data.get("alignment", {})
             if align:
                 mae = align.get("mae", 0)
-                align_err = align.get("alignment_error", 0)
-                rows.append(
-                    [
-                        display_name,
-                        f"{align_err * 100:.2f}%",
-                        f"{mae * 1000:.1f}",
-                    ]
-                )
+                rows.append([display_name, f"{mae * 1000:.1f}"])
             else:
-                rows.append([display_name, "-", "-"])
+                rows.append([display_name, "-"])
 
         for row in sorted(rows, key=lambda r: _sort_key(r[1])):
             align_table.add_row(*row)

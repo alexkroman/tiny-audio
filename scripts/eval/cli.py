@@ -30,7 +30,6 @@ from scripts.eval.evaluators import (
     DeepgramAlignmentEvaluator,
     DeepgramDiarizationEvaluator,
     DeepgramEvaluator,
-    DiarizationEvaluator,
     ElevenLabsAlignmentEvaluator,
     ElevenLabsDiarizationEvaluator,
     ElevenLabsEvaluator,
@@ -271,12 +270,7 @@ def print_alignment_metrics(dataset_name: str, metrics: dict):
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
 
-    table.add_row("MAE", f"{metrics['mae'] * 1000:.1f}ms")
-    table.add_row("Alignment Error", f"{metrics.get('alignment_error', 0) * 100:.1f}%")
-    table.add_row(
-        "Words Aligned",
-        f"{metrics.get('total_aligned_words', 0)}/{metrics.get('total_ref_words', 0)}",
-    )
+    table.add_row("Median AE", f"{metrics['mae'] * 1000:.1f}ms")
     table.add_row("Samples", str(metrics["num_samples"]))
     table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
 
@@ -420,7 +414,7 @@ def validate_datasets(datasets: list[str]) -> list[str]:
             console.print(f"Valid choices: {', '.join(VALID_DATASETS)}")
             raise typer.Exit(1)
 
-    # Expand "all" to ASR datasets only (exclude diarization, alignment, MCQ, classification)
+    # Expand "all" to ASR datasets only (exclude diarization, alignment, MCQ, classification, expresso)
     if "all" in datasets:
         return [
             k
@@ -429,6 +423,7 @@ def validate_datasets(datasets: list[str]) -> list[str]:
             and k not in ALIGNMENT_DATASETS
             and k not in MCQ_DATASETS
             and k not in CLASSIFICATION_DATASETS
+            and k != "expresso"
         ]
     # Expand "all-full" to include diarization, alignment, MCQ, and classification datasets too
     if "all-full" in datasets:
@@ -465,9 +460,6 @@ def main(
     streaming: Annotated[
         bool, typer.Option("--streaming", "-s", help="Use streaming evaluation (for local or AAI)")
     ] = False,
-    hf_token: Annotated[
-        Optional[str], typer.Option("--hf-token", help="HuggingFace token for diarization models")
-    ] = None,
     num_speakers: Annotated[
         Optional[int], typer.Option("--num-speakers", help="Number of speakers (for diarization)")
     ] = None,
@@ -495,6 +487,10 @@ def main(
         int,
         typer.Option("--num-workers", "-w", help="Number of parallel workers for API evaluations"),
     ] = 1,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Show word-by-word alignment details"),
+    ] = False,
 ):
     """Evaluate ASR models on standard datasets."""
     # If a subcommand was invoked, skip
@@ -570,9 +566,9 @@ def main(
                     timestamps_end_field=cfg.timestamps_end_field,
                     num_workers=num_workers,
                 )
-            elif model == "local":
-                # Local diarization using TEN-VAD + ERes2NetV2 + spectral clustering
-                model_id = "local"
+            else:
+                # Local diarization using TEN-VAD + ECAPA-TDNN + spectral clustering
+                model_id = "local" if model == "local" else get_model_name(model)
                 evaluator = LocalDiarizationEvaluator(
                     audio_field=cfg.audio_field,
                     speakers_field=cfg.speakers_field,
@@ -580,35 +576,7 @@ def main(
                     timestamps_end_field=cfg.timestamps_end_field,
                     num_speakers=num_speakers,
                     min_speakers=min_speakers or 2,
-                    max_speakers=max_speakers or 3,
-                    num_workers=num_workers,
-                )
-            elif model == "pyannote":
-                # Pyannote diarization (requires HF token with model access)
-                model_id = "pyannote"
-                evaluator = DiarizationEvaluator(
-                    audio_field=cfg.audio_field,
-                    speakers_field=cfg.speakers_field,
-                    timestamps_start_field=cfg.timestamps_start_field,
-                    timestamps_end_field=cfg.timestamps_end_field,
-                    hf_token=hf_token,
-                    num_speakers=num_speakers,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                    num_workers=num_workers,
-                )
-            else:
-                # Default to pyannote for other model paths
-                model_id = get_model_name(model)
-                evaluator = DiarizationEvaluator(
-                    audio_field=cfg.audio_field,
-                    speakers_field=cfg.speakers_field,
-                    timestamps_start_field=cfg.timestamps_start_field,
-                    timestamps_end_field=cfg.timestamps_end_field,
-                    hf_token=hf_token,
-                    num_speakers=num_speakers,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
+                    max_speakers=max_speakers or 10,
                     num_workers=num_workers,
                 )
 
@@ -636,6 +604,7 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
+                    verbose=verbose,
                 )
             elif model == "deepgram":
                 api_key = os.environ.get("DEEPGRAM_API_KEY", "")
@@ -648,6 +617,7 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
+                    verbose=verbose,
                 )
             elif model == "elevenlabs":
                 api_key = os.environ.get("ELEVENLABS_API_KEY", "")
@@ -662,6 +632,7 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
+                    verbose=verbose,
                 )
             else:
                 model_id = get_model_name(model)
@@ -671,6 +642,7 @@ def main(
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
                     user_prompt=user_prompt,
+                    verbose=verbose,
                 )
 
             results = evaluator.evaluate(dataset, max_samples)

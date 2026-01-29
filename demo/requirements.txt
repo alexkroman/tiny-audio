@@ -9,5 +9,5 @@ peft
 # Forced alignment for word-level timestamps
 ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
 
-# Speaker diarization
-pyannote-audio>=3.1.0
+# Speaker diarization (TEN-VAD + WavLM)
+ten-vad>=1.0.6

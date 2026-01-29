@@ -1,29 +1,35 @@
 # @package _global_
-# ASR transcription training
-# Train projector on multi-source ASR data
+# Omni training starting from pretrained ASR model
+# 60% ASR (from multiasr: loquacious, ami, switchboard, spgispeech)
+# 40% SIFT (paralinguistic: podcast, commonvoice, esd, crema_d, tess, ravdess, savee)
 #
 # Usage:
-#   poetry run python scripts/train.py +experiments=transcription
+#   poetry run python scripts/train.py +experiments=omni
 
 defaults:
-  - override /data: multiasr
+  - override /data: multitask
 
 model:
+  pretrained_model_path: mazesmazes/tiny-audio
   projector_type: mlp
   projector_pool_stride: 4
   projector_hidden_dim: 1024
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   text_model_id: Qwen/Qwen3-1.7B
 
+# Multitask configuration
+multitask:
+  enabled: true
+
 training:
-  hub_model_id: "mazesmazes/tiny-audio"
-  group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
+  hub_model_id: "mazesmazes/tiny-audio-omni"
+  group_by_length: false  # Disabled: interleaved datasets have inconsistent length columns
   learning_rate: 1e-3
-  warmup_steps: 500
+  warmup_steps: 1000
   lr_scheduler_type: polynomial
   lr_scheduler_kwargs:
     power: 0.5
-  seed: 42  # Different seed for data ordering
+  seed: 42
   per_device_train_batch_size: 14
   per_device_eval_batch_size: 14
   gradient_accumulation_steps: 4
@@ -32,7 +38,7 @@ training:
   eval_steps: 1000
 
   label_smoothing_factor: 0.1
-  weight_decay: 0.0
+  weight_decay: 0.01
 
   use_specaugment: true
   # LibriDouble settings (2 masks each)

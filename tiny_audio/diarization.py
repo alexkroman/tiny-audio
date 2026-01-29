@@ -1,19 +1,18 @@
-"""Speaker diarization with support for pyannote and local (tiny-audio) backends.
-
-Provides two diarization backends:
-- pyannote: Uses pyannote-audio pipeline (requires HF token with model access)
-- local: Uses TEN-VAD + ERes2NetV2 + spectral clustering (no token required)
+"""Speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
 
 Spectral clustering implementation adapted from FunASR/3D-Speaker:
 https://github.com/alibaba-damo-academy/FunASR
 MIT License (https://opensource.org/licenses/MIT)
 """
 
+import warnings
+
 import numpy as np
 import scipy
 import sklearn.metrics.pairwise
 import torch
 from sklearn.cluster._kmeans import k_means
+from sklearn.preprocessing import normalize
 
 
 def _get_device() -> torch.device:
@@ -70,23 +69,24 @@ class SpectralCluster:
         return sklearn.metrics.pairwise.cosine_similarity(embeddings, embeddings)
 
     def p_pruning(self, affinity: np.ndarray) -> np.ndarray:
-        """Prune low similarity values in affinity matrix."""
-        pval = 6.0 / affinity.shape[0] if affinity.shape[0] * self.pval < 6 else self.pval
-        n_elems = int((1 - pval) * affinity.shape[0])
+        """Prune low similarity values in affinity matrix (keep top pval fraction)."""
+        n = affinity.shape[0]
+        pval = max(self.pval, 6.0 / n)
+        k_keep = max(1, int(pval * n))
 
-        # For each row in affinity matrix, zero out low similarities
-        for i in range(affinity.shape[0]):
-            low_indexes = np.argsort(affinity[i, :])
-            low_indexes = low_indexes[0:n_elems]
-            affinity[i, low_indexes] = 0
+        # Vectorized: find top-k indices per row and zero out the rest
+        top_k_idx = np.argpartition(affinity, -k_keep, axis=1)[:, -k_keep:]
+        mask = np.zeros_like(affinity, dtype=bool)
+        np.put_along_axis(mask, top_k_idx, True, axis=1)
+        affinity[~mask] = 0
         return affinity
 
     def get_laplacian(self, sim_mat: np.ndarray) -> np.ndarray:
         """Compute unnormalized Laplacian matrix."""
-        sim_mat[np.diag_indices(sim_mat.shape[0])] = 0
-        degree = np.sum(np.abs(sim_mat), axis=1)
-        degree_mat = np.diag(degree)
-        return degree_mat - sim_mat
+        from scipy.sparse.csgraph import laplacian
+
+        np.fill_diagonal(sim_mat, 0)
+        return laplacian(sim_mat, normed=False)
 
     def get_spec_embs(
         self, laplacian: np.ndarray, k_oracle: int | None = None
@@ -110,13 +110,9 @@ class SpectralCluster:
         _, labels, _ = k_means(emb, k, n_init=10)
         return labels
 
-    def get_eigen_gaps(self, eig_vals: np.ndarray) -> list[float]:
+    def get_eigen_gaps(self, eig_vals: np.ndarray) -> np.ndarray:
         """Compute gaps between consecutive eigenvalues."""
-        eig_vals_gap_list = []
-        for i in range(len(eig_vals) - 1):
-            gap = float(eig_vals[i + 1]) - float(eig_vals[i])
-            eig_vals_gap_list.append(gap)
-        return eig_vals_gap_list
+        return np.diff(eig_vals)
 
 
 class SpeakerClusterer:
@@ -171,13 +167,9 @@ class SpeakerClusterer:
         if embeddings.shape[0] < 6:
             return np.zeros(embeddings.shape[0], dtype=int)
 
-        # Normalize embeddings
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-10)
-        embeddings = embeddings / norms
-
-        # Replace NaN/inf with zeros
+        # Normalize embeddings and replace NaN/inf
         embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
+        embeddings = normalize(embeddings)
 
         # Run spectral clustering (suppress numerical warnings)
         spectral = self._get_spectral_cluster()
@@ -207,49 +199,34 @@ class SpeakerClusterer:
 
     def _merge_by_cos(self, labels: np.ndarray, embs: np.ndarray, cos_thr: float) -> np.ndarray:
         """Merge similar speakers by cosine similarity of centroids."""
-        labels = labels.copy()
+        from scipy.cluster.hierarchy import fcluster, linkage
+        from scipy.spatial.distance import pdist
 
-        while True:
-            spk_num = labels.max() + 1
-            if spk_num == 1:
-                break
+        unique_labels = np.unique(labels)
+        if len(unique_labels) <= 1:
+            return labels
 
-            # Compute speaker centroids
-            spk_center = []
-            for i in range(spk_num):
-                spk_emb = embs[labels == i].mean(0)
-                spk_center.append(spk_emb)
+        # Compute normalized speaker centroids
+        centroids = np.array([embs[labels == lbl].mean(0) for lbl in unique_labels])
+        centroids = normalize(centroids)
 
-            if len(spk_center) == 0:
-                break
+        # Hierarchical clustering with cosine distance
+        distances = pdist(centroids, metric="cosine")
+        linkage_matrix = linkage(distances, method="average")
+        merged_labels = fcluster(linkage_matrix, t=1.0 - cos_thr, criterion="distance") - 1
 
-            spk_center = np.stack(spk_center, axis=0)
-            norm_spk_center = spk_center / np.linalg.norm(spk_center, axis=1, keepdims=True)
-            affinity = np.matmul(norm_spk_center, norm_spk_center.T)
-            affinity = np.triu(affinity, 1)
-
-            # Find most similar pair
-            spks = np.unravel_index(np.argmax(affinity), affinity.shape)
-            if affinity[spks] < cos_thr:
-                break
-
-            # Merge speakers
-            for i in range(len(labels)):
-                if labels[i] == spks[1]:
-                    labels[i] = spks[0]
-                elif labels[i] > spks[1]:
-                    labels[i] -= 1
-
-        return labels
+        # Map original labels to merged labels
+        label_map = dict(zip(unique_labels, merged_labels))
+        return np.array([label_map[lbl] for lbl in labels])
 
 
 class LocalSpeakerDiarizer:
-    """Local speaker diarization using TEN-VAD + ERes2NetV2 + spectral clustering.
+    """Local speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
 
     Pipeline:
     1. TEN-VAD detects speech segments
     2. Sliding window (1.0s, 75% overlap) for uniform embedding extraction
-    3. ERes2NetV2 extracts speaker embeddings per window
+    3. ECAPA-TDNN extracts speaker embeddings per window
     4. Spectral clustering with eigenvalue gap for auto speaker detection
     5. Frame-level consensus voting for segment reconstruction
     6. Post-processing merges short segments to reduce flicker
@@ -268,7 +245,7 @@ class LocalSpeakerDiarizer:
     """
 
     _ten_vad_model = None
-    _eres2netv2_model = None
+    _ecapa_model = None
     _device = None
 
     # ==================== TUNABLE PARAMETERS ====================
@@ -312,25 +289,21 @@ class LocalSpeakerDiarizer:
         return cls._device
 
     @classmethod
-    def _get_eres2netv2_model(cls):
-        """Lazy-load ERes2NetV2 speaker embedding model (singleton)."""
-        if cls._eres2netv2_model is None:
-            from modelscope.pipelines import pipeline
-            from modelscope.utils.constant import Tasks
+    def _get_ecapa_model(cls):
+        """Lazy-load ECAPA-TDNN speaker embedding model (singleton)."""
+        if cls._ecapa_model is None:
+            # Suppress torchaudio deprecation warning from SpeechBrain
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="torchaudio._backend")
+                from speechbrain.inference.speaker import EncoderClassifier
 
-            sv_pipeline = pipeline(
-                task=Tasks.speaker_verification,
-                model="iic/speech_eres2netv2_sv_zh-cn_16k-common",
-            )
-            cls._eres2netv2_model = sv_pipeline.model
+                device = cls._get_device()
+                cls._ecapa_model = EncoderClassifier.from_hparams(
+                    source="speechbrain/spkrec-ecapa-voxceleb",
+                    run_opts={"device": str(device)},
+                )
 
-            # Move model to GPU if available
-            device = cls._get_device()
-            cls._eres2netv2_model = cls._eres2netv2_model.to(device)
-            cls._eres2netv2_model.device = device
-            cls._eres2netv2_model.eval()
-
-        return cls._eres2netv2_model
+        return cls._ecapa_model
 
     @classmethod
     def diarize(
@@ -487,8 +460,7 @@ class LocalSpeakerDiarizer:
         cls, audio_array: np.ndarray, segments: list[dict], sample_rate: int
     ) -> tuple[np.ndarray, list[dict]]:
         """Extract speaker embeddings using sliding windows."""
-        speaker_model = cls._get_eres2netv2_model()
-        device = cls._get_device()
+        speaker_model = cls._get_ecapa_model()
 
         window_samples = int(cls.WINDOW_SIZE * sample_rate)
         step_samples = int(cls.STEP_SIZE * sample_rate)
@@ -525,16 +497,15 @@ class LocalSpeakerDiarizer:
                         pad_width = window_samples - len(chunk)
                         chunk = np.pad(chunk, (0, pad_width), mode="reflect")
 
-                    # Extract embedding
-                    chunk_tensor = torch.from_numpy(chunk).float().unsqueeze(0).to(device)
-                    embedding = speaker_model.forward(chunk_tensor).squeeze(0).cpu().numpy()
+                    # Extract embedding using SpeechBrain's encode_batch
+                    chunk_tensor = torch.from_numpy(chunk).float().unsqueeze(0)
+                    embedding = (
+                        speaker_model.encode_batch(chunk_tensor).squeeze(0).squeeze(0).cpu().numpy()
+                    )
 
-                    # Validate and normalize
-                    if not np.isfinite(embedding).all():
-                        continue
-                    norm = np.linalg.norm(embedding)
-                    if norm > 1e-8:
-                        embeddings.append(embedding / norm)
+                    # Validate embedding
+                    if np.isfinite(embedding).all() and np.linalg.norm(embedding) > 1e-8:
+                        embeddings.append(embedding)
                         window_segments.append(
                             {
                                 "start": c_start / sample_rate,
@@ -542,8 +513,9 @@ class LocalSpeakerDiarizer:
                             }
                         )
 
+        # Normalize all embeddings at once
         if embeddings:
-            return np.array(embeddings), window_segments
+            return normalize(np.array(embeddings)), window_segments
         return np.array([]), []
 
     @classmethod
@@ -558,15 +530,12 @@ class LocalSpeakerDiarizer:
             return np.zeros(num_frames, dtype=bool)
 
         vad_rate = 256 / 16000  # 16ms per VAD frame
-        result = np.zeros(num_frames, dtype=bool)
+        vad_arr = np.array(vad_frames)
 
-        for i in range(num_frames):
-            voting_time = i * cls.VOTING_RATE
-            vad_frame = int(voting_time / vad_rate)
-            if vad_frame < len(vad_frames):
-                result[i] = vad_frames[vad_frame]
-
-        return result
+        # Vectorized: compute VAD frame indices for each voting frame
+        voting_times = np.arange(num_frames) * cls.VOTING_RATE
+        vad_indices = np.clip((voting_times / vad_rate).astype(int), 0, len(vad_arr) - 1)
+        return vad_arr[vad_indices]
 
     @classmethod
     def _postprocess_segments(
@@ -715,33 +684,13 @@ class LocalSpeakerDiarizer:
 
 
 class SpeakerDiarizer:
-    """Unified speaker diarization interface supporting multiple backends.
-
-    Backends:
-    - 'pyannote': Uses pyannote-audio pipeline (requires HF token)
-    - 'local': Uses TEN-VAD + ERes2NetV2 + spectral clustering
+    """Speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
 
     Example:
-        >>> segments = SpeakerDiarizer.diarize(audio_array, backend="local")
+        >>> segments = SpeakerDiarizer.diarize(audio_array)
         >>> for seg in segments:
         ...     print(f"{seg['speaker']}: {seg['start']:.2f} - {seg['end']:.2f}")
     """
-
-    _pyannote_pipeline = None
-
-    @classmethod
-    def _get_pyannote_pipeline(cls, hf_token: str | None = None):
-        """Get or create the pyannote diarization pipeline."""
-        if cls._pyannote_pipeline is None:
-            from pyannote.audio import Pipeline
-
-            cls._pyannote_pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=hf_token,
-            )
-            cls._pyannote_pipeline.to(torch.device(_get_device()))
-
-        return cls._pyannote_pipeline
 
     @classmethod
     def diarize(
@@ -751,8 +700,7 @@ class SpeakerDiarizer:
         num_speakers: int | None = None,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
-        hf_token: str | None = None,
-        backend: str = "pyannote",
+        **_kwargs,
     ) -> list[dict]:
         """Run speaker diarization on audio.
 
@@ -762,86 +710,17 @@ class SpeakerDiarizer:
             num_speakers: Exact number of speakers (if known)
             min_speakers: Minimum number of speakers
             max_speakers: Maximum number of speakers
-            hf_token: HuggingFace token for pyannote models
-            backend: Diarization backend ("pyannote" or "local")
 
         Returns:
             List of dicts with 'speaker', 'start', 'end' keys
         """
-        if backend == "local":
-            return LocalSpeakerDiarizer.diarize(
-                audio,
-                sample_rate=sample_rate,
-                num_speakers=num_speakers,
-                min_speakers=min_speakers or 2,
-                max_speakers=max_speakers or 10,
-            )
-
-        # Default to pyannote
-        return cls._diarize_pyannote(
+        return LocalSpeakerDiarizer.diarize(
             audio,
             sample_rate=sample_rate,
             num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            hf_token=hf_token,
+            min_speakers=min_speakers or 2,
+            max_speakers=max_speakers or 10,
         )
-
-    @classmethod
-    def _diarize_pyannote(
-        cls,
-        audio: np.ndarray | str,
-        sample_rate: int = 16000,
-        num_speakers: int | None = None,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        hf_token: str | None = None,
-    ) -> list[dict]:
-        """Run pyannote diarization."""
-        pipeline = cls._get_pyannote_pipeline(hf_token)
-
-        # Prepare audio input
-        if isinstance(audio, np.ndarray):
-            waveform = torch.from_numpy(audio.copy()).unsqueeze(0)
-            if waveform.dim() == 1:
-                waveform = waveform.unsqueeze(0)
-            audio_input = {"waveform": waveform, "sample_rate": sample_rate}
-        else:
-            audio_input = audio
-
-        # Run diarization
-        diarization_args = {}
-        if num_speakers is not None:
-            diarization_args["num_speakers"] = num_speakers
-        if min_speakers is not None:
-            diarization_args["min_speakers"] = min_speakers
-        if max_speakers is not None:
-            diarization_args["max_speakers"] = max_speakers
-
-        diarization = pipeline(audio_input, **diarization_args)
-
-        # Handle different pyannote return types
-        if hasattr(diarization, "itertracks"):
-            annotation = diarization
-        elif hasattr(diarization, "speaker_diarization"):
-            annotation = diarization.speaker_diarization
-        elif isinstance(diarization, tuple):
-            annotation = diarization[0]
-        else:
-            raise TypeError(f"Unexpected diarization output type: {type(diarization)}")
-
-        # Convert to simple format
-        segments = []
-        for turn, _, speaker in annotation.itertracks(yield_label=True):
-            segments.append(
-                {
-                    "speaker": speaker,
-                    "start": turn.start,
-                    "end": turn.end,
-                }
-            )
-
-        return segments
 
     @classmethod
     def assign_speakers_to_words(
