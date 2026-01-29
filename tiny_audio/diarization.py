@@ -1,13 +1,11 @@
-"""Speaker diarization with support for pyannote and local (tiny-audio) backends.
-
-Provides two diarization backends:
-- pyannote: Uses pyannote-audio pipeline (requires HF token with model access)
-- local: Uses TEN-VAD + ERes2NetV2 + spectral clustering (no token required)
+"""Speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
 
 Spectral clustering implementation adapted from FunASR/3D-Speaker:
 https://github.com/alibaba-damo-academy/FunASR
 MIT License (https://opensource.org/licenses/MIT)
 """
+
+import warnings
 
 import numpy as np
 import scipy
@@ -244,12 +242,12 @@ class SpeakerClusterer:
 
 
 class LocalSpeakerDiarizer:
-    """Local speaker diarization using TEN-VAD + ERes2NetV2 + spectral clustering.
+    """Local speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
 
     Pipeline:
     1. TEN-VAD detects speech segments
     2. Sliding window (1.0s, 75% overlap) for uniform embedding extraction
-    3. ERes2NetV2 extracts speaker embeddings per window
+    3. ECAPA-TDNN extracts speaker embeddings per window
     4. Spectral clustering with eigenvalue gap for auto speaker detection
     5. Frame-level consensus voting for segment reconstruction
     6. Post-processing merges short segments to reduce flicker
@@ -268,7 +266,7 @@ class LocalSpeakerDiarizer:
     """
 
     _ten_vad_model = None
-    _eres2netv2_model = None
+    _ecapa_model = None
     _device = None
 
     # ==================== TUNABLE PARAMETERS ====================
@@ -312,25 +310,21 @@ class LocalSpeakerDiarizer:
         return cls._device
 
     @classmethod
-    def _get_eres2netv2_model(cls):
-        """Lazy-load ERes2NetV2 speaker embedding model (singleton)."""
-        if cls._eres2netv2_model is None:
-            from modelscope.pipelines import pipeline
-            from modelscope.utils.constant import Tasks
+    def _get_ecapa_model(cls):
+        """Lazy-load ECAPA-TDNN speaker embedding model (singleton)."""
+        if cls._ecapa_model is None:
+            # Suppress torchaudio deprecation warning from SpeechBrain
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="torchaudio._backend")
+                from speechbrain.inference.speaker import EncoderClassifier
 
-            sv_pipeline = pipeline(
-                task=Tasks.speaker_verification,
-                model="iic/speech_eres2netv2_sv_zh-cn_16k-common",
-            )
-            cls._eres2netv2_model = sv_pipeline.model
+                device = cls._get_device()
+                cls._ecapa_model = EncoderClassifier.from_hparams(
+                    source="speechbrain/spkrec-ecapa-voxceleb",
+                    run_opts={"device": str(device)},
+                )
 
-            # Move model to GPU if available
-            device = cls._get_device()
-            cls._eres2netv2_model = cls._eres2netv2_model.to(device)
-            cls._eres2netv2_model.device = device
-            cls._eres2netv2_model.eval()
-
-        return cls._eres2netv2_model
+        return cls._ecapa_model
 
     @classmethod
     def diarize(
@@ -487,8 +481,7 @@ class LocalSpeakerDiarizer:
         cls, audio_array: np.ndarray, segments: list[dict], sample_rate: int
     ) -> tuple[np.ndarray, list[dict]]:
         """Extract speaker embeddings using sliding windows."""
-        speaker_model = cls._get_eres2netv2_model()
-        device = cls._get_device()
+        speaker_model = cls._get_ecapa_model()
 
         window_samples = int(cls.WINDOW_SIZE * sample_rate)
         step_samples = int(cls.STEP_SIZE * sample_rate)
@@ -525,9 +518,11 @@ class LocalSpeakerDiarizer:
                         pad_width = window_samples - len(chunk)
                         chunk = np.pad(chunk, (0, pad_width), mode="reflect")
 
-                    # Extract embedding
-                    chunk_tensor = torch.from_numpy(chunk).float().unsqueeze(0).to(device)
-                    embedding = speaker_model.forward(chunk_tensor).squeeze(0).cpu().numpy()
+                    # Extract embedding using SpeechBrain's encode_batch
+                    chunk_tensor = torch.from_numpy(chunk).float().unsqueeze(0)
+                    embedding = (
+                        speaker_model.encode_batch(chunk_tensor).squeeze(0).squeeze(0).cpu().numpy()
+                    )
 
                     # Validate and normalize
                     if not np.isfinite(embedding).all():
@@ -715,33 +710,13 @@ class LocalSpeakerDiarizer:
 
 
 class SpeakerDiarizer:
-    """Unified speaker diarization interface supporting multiple backends.
-
-    Backends:
-    - 'pyannote': Uses pyannote-audio pipeline (requires HF token)
-    - 'local': Uses TEN-VAD + ERes2NetV2 + spectral clustering
+    """Speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
 
     Example:
-        >>> segments = SpeakerDiarizer.diarize(audio_array, backend="local")
+        >>> segments = SpeakerDiarizer.diarize(audio_array)
         >>> for seg in segments:
         ...     print(f"{seg['speaker']}: {seg['start']:.2f} - {seg['end']:.2f}")
     """
-
-    _pyannote_pipeline = None
-
-    @classmethod
-    def _get_pyannote_pipeline(cls, hf_token: str | None = None):
-        """Get or create the pyannote diarization pipeline."""
-        if cls._pyannote_pipeline is None:
-            from pyannote.audio import Pipeline
-
-            cls._pyannote_pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=hf_token,
-            )
-            cls._pyannote_pipeline.to(torch.device(_get_device()))
-
-        return cls._pyannote_pipeline
 
     @classmethod
     def diarize(
@@ -751,8 +726,7 @@ class SpeakerDiarizer:
         num_speakers: int | None = None,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
-        hf_token: str | None = None,
-        backend: str = "pyannote",
+        **_kwargs,
     ) -> list[dict]:
         """Run speaker diarization on audio.
 
@@ -762,86 +736,17 @@ class SpeakerDiarizer:
             num_speakers: Exact number of speakers (if known)
             min_speakers: Minimum number of speakers
             max_speakers: Maximum number of speakers
-            hf_token: HuggingFace token for pyannote models
-            backend: Diarization backend ("pyannote" or "local")
 
         Returns:
             List of dicts with 'speaker', 'start', 'end' keys
         """
-        if backend == "local":
-            return LocalSpeakerDiarizer.diarize(
-                audio,
-                sample_rate=sample_rate,
-                num_speakers=num_speakers,
-                min_speakers=min_speakers or 2,
-                max_speakers=max_speakers or 10,
-            )
-
-        # Default to pyannote
-        return cls._diarize_pyannote(
+        return LocalSpeakerDiarizer.diarize(
             audio,
             sample_rate=sample_rate,
             num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            hf_token=hf_token,
+            min_speakers=min_speakers or 2,
+            max_speakers=max_speakers or 10,
         )
-
-    @classmethod
-    def _diarize_pyannote(
-        cls,
-        audio: np.ndarray | str,
-        sample_rate: int = 16000,
-        num_speakers: int | None = None,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        hf_token: str | None = None,
-    ) -> list[dict]:
-        """Run pyannote diarization."""
-        pipeline = cls._get_pyannote_pipeline(hf_token)
-
-        # Prepare audio input
-        if isinstance(audio, np.ndarray):
-            waveform = torch.from_numpy(audio.copy()).unsqueeze(0)
-            if waveform.dim() == 1:
-                waveform = waveform.unsqueeze(0)
-            audio_input = {"waveform": waveform, "sample_rate": sample_rate}
-        else:
-            audio_input = audio
-
-        # Run diarization
-        diarization_args = {}
-        if num_speakers is not None:
-            diarization_args["num_speakers"] = num_speakers
-        if min_speakers is not None:
-            diarization_args["min_speakers"] = min_speakers
-        if max_speakers is not None:
-            diarization_args["max_speakers"] = max_speakers
-
-        diarization = pipeline(audio_input, **diarization_args)
-
-        # Handle different pyannote return types
-        if hasattr(diarization, "itertracks"):
-            annotation = diarization
-        elif hasattr(diarization, "speaker_diarization"):
-            annotation = diarization.speaker_diarization
-        elif isinstance(diarization, tuple):
-            annotation = diarization[0]
-        else:
-            raise TypeError(f"Unexpected diarization output type: {type(diarization)}")
-
-        # Convert to simple format
-        segments = []
-        for turn, _, speaker in annotation.itertracks(yield_label=True):
-            segments.append(
-                {
-                    "speaker": speaker,
-                    "start": turn.start,
-                    "end": turn.end,
-                }
-            )
-
-        return segments
 
     @classmethod
     def assign_speakers_to_words(

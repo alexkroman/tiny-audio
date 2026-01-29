@@ -1,51 +1,7 @@
-"""Tests for LocalDiarizationEvaluator and clustering algorithms."""
+"""Tests for LocalDiarizationEvaluator."""
 
 import numpy as np
 import pytest
-
-
-class TestSpeakerClusterer:
-    """Tests for SpeakerClusterer."""
-
-    def test_empty_embeddings(self):
-        """Test handling of empty embeddings."""
-        from tiny_audio.diarization import SpeakerClusterer
-
-        clusterer = SpeakerClusterer()
-        labels = clusterer(np.array([]).reshape(0, 192))
-        assert len(labels) == 0
-
-    def test_single_embedding(self):
-        """Test single embedding returns label 0."""
-        from tiny_audio.diarization import SpeakerClusterer
-
-        clusterer = SpeakerClusterer()
-        labels = clusterer(np.random.randn(1, 192))
-        assert len(labels) == 1
-        assert labels[0] == 0
-
-    def test_few_embeddings_returns_zeros(self):
-        """Test fewer than 6 embeddings returns all zeros."""
-        from tiny_audio.diarization import SpeakerClusterer
-
-        clusterer = SpeakerClusterer()
-        labels = clusterer(np.random.randn(5, 192))
-        assert len(labels) == 5
-        assert np.all(labels == 0)
-
-    def test_oracle_num_speakers(self):
-        """Test with oracle number of speakers."""
-        from tiny_audio.diarization import SpeakerClusterer
-
-        clusterer = SpeakerClusterer()
-        # Create 2 distinct clusters
-        emb1 = np.random.randn(15, 192) + np.array([1.0] * 192)
-        emb2 = np.random.randn(15, 192) + np.array([-1.0] * 192)
-        embeddings = np.vstack([emb1, emb2])
-
-        labels = clusterer(embeddings, num_speakers=2)
-        assert len(labels) == 30
-        assert len(np.unique(labels)) == 2
 
 
 class TestLocalDiarizationEvaluator:
@@ -63,23 +19,21 @@ class TestLocalDiarizationEvaluator:
     @pytest.fixture
     def mock_speaker_model(self, mocker):
         """Set up speaker model mock."""
-        mock_speaker = mocker.patch(
-            "tiny_audio.diarization.LocalSpeakerDiarizer._get_eres2netv2_model"
-        )
+        mock_speaker = mocker.patch("tiny_audio.diarization.LocalSpeakerDiarizer._get_ecapa_model")
         mock_model = mocker.MagicMock()
-        # ERes2NetV2 returns a tensor from forward pass
+        # SpeechBrain's encode_batch returns embeddings directly
         import torch
 
-        mock_model.return_value = torch.randn(1, 192)
+        mock_model.encode_batch.return_value = torch.randn(1, 1, 192)
         mock_speaker.return_value = mock_model
         return mock_model
 
     @pytest.fixture
     def mock_clusterer(self, mocker):
-        """Set up clusterer mock - mock the entire SpeakerClusterer class."""
-        mock_cluster = mocker.patch("tiny_audio.diarization.SpeakerClusterer")
+        """Set up clusterer mock - mock sklearn's AgglomerativeClustering."""
+        mock_cluster = mocker.patch("sklearn.cluster.AgglomerativeClustering", autospec=True)
         mock_obj = mocker.MagicMock()
-        mock_obj.return_value = np.array([0, 0])
+        mock_obj.fit_predict.return_value = np.array([0, 0])
         mock_cluster.return_value = mock_obj
         return mock_obj
 

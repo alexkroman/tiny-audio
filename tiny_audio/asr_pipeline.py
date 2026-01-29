@@ -229,8 +229,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             num_speakers: Exact number of speakers (if known, for diarization)
             min_speakers: Minimum number of speakers (for diarization)
             max_speakers: Maximum number of speakers (for diarization)
-            hf_token: HuggingFace token for pyannote models (or set HF_TOKEN env var)
-            diarization_backend: Backend for diarization ("pyannote" or "local")
             **kwargs: Additional arguments passed to the pipeline
 
         Returns:
@@ -245,8 +243,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             "num_speakers": kwargs.pop("num_speakers", None),
             "min_speakers": kwargs.pop("min_speakers", None),
             "max_speakers": kwargs.pop("max_speakers", None),
-            "hf_token": kwargs.pop("hf_token", None),
-            "backend": kwargs.pop("diarization_backend", "pyannote"),
         }
 
         if return_speakers:

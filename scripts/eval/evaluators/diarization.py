@@ -1,7 +1,6 @@
 """Diarization evaluator implementations."""
 
 import io
-import os
 import time
 
 import numpy as np
@@ -22,17 +21,16 @@ class DiarizationEvaluator:
         speakers_field: str = "speakers",
         timestamps_start_field: str = "timestamps_start",
         timestamps_end_field: str = "timestamps_end",
-        hf_token: str | None = None,
         num_speakers: int | None = None,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
         num_workers: int = 1,
+        **_kwargs,
     ):
         self.audio_field = audio_field
         self.speakers_field = speakers_field
         self.timestamps_start_field = timestamps_start_field
         self.timestamps_end_field = timestamps_end_field
-        self.hf_token = hf_token or os.environ.get("HF_TOKEN")
         self.num_speakers = num_speakers
         self.min_speakers = min_speakers
         self.max_speakers = max_speakers
@@ -93,7 +91,6 @@ class DiarizationEvaluator:
             num_speakers=self.num_speakers,
             min_speakers=self.min_speakers,
             max_speakers=self.max_speakers,
-            hf_token=self.hf_token,
         )
         elapsed = time.time() - start
 
@@ -377,7 +374,7 @@ class ElevenLabsDiarizationEvaluator(DiarizationEvaluator):
 
 
 class LocalDiarizationEvaluator(DiarizationEvaluator):
-    """Local diarization evaluator using TEN-VAD + ERes2NetV2 + spectral clustering.
+    """Local diarization evaluator using TEN-VAD + WavLM + spectral clustering.
 
     Uses the LocalSpeakerDiarizer from tiny_audio.diarization for the actual
     diarization logic. This class wraps it for the evaluation framework.

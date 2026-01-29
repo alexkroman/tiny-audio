@@ -30,7 +30,6 @@ from scripts.eval.evaluators import (
     DeepgramAlignmentEvaluator,
     DeepgramDiarizationEvaluator,
     DeepgramEvaluator,
-    DiarizationEvaluator,
     ElevenLabsAlignmentEvaluator,
     ElevenLabsDiarizationEvaluator,
     ElevenLabsEvaluator,
@@ -466,9 +465,6 @@ def main(
     streaming: Annotated[
         bool, typer.Option("--streaming", "-s", help="Use streaming evaluation (for local or AAI)")
     ] = False,
-    hf_token: Annotated[
-        Optional[str], typer.Option("--hf-token", help="HuggingFace token for diarization models")
-    ] = None,
     num_speakers: Annotated[
         Optional[int], typer.Option("--num-speakers", help="Number of speakers (for diarization)")
     ] = None,
@@ -584,32 +580,17 @@ def main(
                     max_speakers=max_speakers or 3,
                     num_workers=num_workers,
                 )
-            elif model == "pyannote":
-                # Pyannote diarization (requires HF token with model access)
-                model_id = "pyannote"
-                evaluator = DiarizationEvaluator(
-                    audio_field=cfg.audio_field,
-                    speakers_field=cfg.speakers_field,
-                    timestamps_start_field=cfg.timestamps_start_field,
-                    timestamps_end_field=cfg.timestamps_end_field,
-                    hf_token=hf_token,
-                    num_speakers=num_speakers,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                    num_workers=num_workers,
-                )
             else:
-                # Default to pyannote for other model paths
-                model_id = get_model_name(model)
-                evaluator = DiarizationEvaluator(
+                # Default to local WavLM diarization
+                model_id = get_model_name(model) if model != "local" else "local"
+                evaluator = LocalDiarizationEvaluator(
                     audio_field=cfg.audio_field,
                     speakers_field=cfg.speakers_field,
                     timestamps_start_field=cfg.timestamps_start_field,
                     timestamps_end_field=cfg.timestamps_end_field,
-                    hf_token=hf_token,
                     num_speakers=num_speakers,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
+                    min_speakers=min_speakers or 2,
+                    max_speakers=max_speakers or 10,
                     num_workers=num_workers,
                 )
 
