@@ -130,7 +130,7 @@ class ForcedAligner:
             token_frames[j - 1].insert(0, 0)
             j -= 1
 
-        # Convert to spans with sub-frame interpolation
+        # Convert to spans
         token_spans: list[tuple[int, float, float]] = []
         for token_idx, frames in enumerate(token_frames):
             if not frames:
@@ -142,27 +142,9 @@ class ForcedAligner:
                     frames = [0]
 
             token_id = tokens[token_idx]
-            frame_probs = emission[frames, token_id]
-            peak_idx = int(torch.argmax(frame_probs).item())
-            peak_frame = frames[peak_idx]
-
-            # Sub-frame interpolation using quadratic fit around peak
-            if len(frames) >= 3 and 0 < peak_idx < len(frames) - 1:
-                y0 = frame_probs[peak_idx - 1].item()
-                y1 = frame_probs[peak_idx].item()
-                y2 = frame_probs[peak_idx + 1].item()
-
-                denom = y0 - 2 * y1 + y2
-                if abs(denom) > 1e-10:
-                    offset = 0.5 * (y0 - y2) / denom
-                    offset = max(-0.5, min(0.5, offset))
-                else:
-                    offset = 0.0
-                refined_frame = peak_frame + offset
-            else:
-                refined_frame = float(peak_frame)
-
-            token_spans.append((token_id, refined_frame, refined_frame + 1.0))
+            start_frame = float(min(frames))
+            end_frame = float(max(frames)) + 1.0
+            token_spans.append((token_id, start_frame, end_frame))
 
         return token_spans
 
