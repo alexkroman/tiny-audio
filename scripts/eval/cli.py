@@ -567,22 +567,9 @@ def main(
                     timestamps_end_field=cfg.timestamps_end_field,
                     num_workers=num_workers,
                 )
-            elif model == "local":
-                # Local diarization using TEN-VAD + ERes2NetV2 + spectral clustering
-                model_id = "local"
-                evaluator = LocalDiarizationEvaluator(
-                    audio_field=cfg.audio_field,
-                    speakers_field=cfg.speakers_field,
-                    timestamps_start_field=cfg.timestamps_start_field,
-                    timestamps_end_field=cfg.timestamps_end_field,
-                    num_speakers=num_speakers,
-                    min_speakers=min_speakers or 2,
-                    max_speakers=max_speakers or 3,
-                    num_workers=num_workers,
-                )
             else:
-                # Default to local WavLM diarization
-                model_id = get_model_name(model) if model != "local" else "local"
+                # Local diarization using TEN-VAD + ECAPA-TDNN + spectral clustering
+                model_id = "local" if model == "local" else get_model_name(model)
                 evaluator = LocalDiarizationEvaluator(
                     audio_field=cfg.audio_field,
                     speakers_field=cfg.speakers_field,
