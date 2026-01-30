@@ -716,7 +716,7 @@ def compare(
         console.print("\n")
         align_table = Table(title="Timestamp Alignment")
         align_table.add_column("Model", style="cyan")
-        align_table.add_column("Median AE (ms)", justify="right")
+        align_table.add_column("MAE (ms)", justify="right")
 
         rows = []
         for model, data in model_metrics.items():

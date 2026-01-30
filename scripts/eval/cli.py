@@ -20,6 +20,11 @@ from scripts.eval.datasets import (
     load_eval_dataset,
 )
 from scripts.eval.evaluators import (
+    ALL_TASKS as AIRBENCH_ALL_TASKS,
+)
+from scripts.eval.evaluators import (
+    AIRBenchEvaluator,
+    AIRBenchResult,
     AssemblyAIAlignmentEvaluator,
     AssemblyAIDiarizationEvaluator,
     AssemblyAIEvaluator,
@@ -41,6 +46,7 @@ from scripts.eval.evaluators import (
     MCQResult,
     MMAUEvaluator,
     TimestampAlignmentEvaluator,
+    print_airbench_metrics,
 )
 
 app = typer.Typer(help="Evaluate ASR models on standard datasets")
@@ -270,7 +276,7 @@ def print_alignment_metrics(dataset_name: str, metrics: dict):
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
 
-    table.add_row("Median AE", f"{metrics['mae'] * 1000:.1f}ms")
+    table.add_row("MAE", f"{metrics['mae'] * 1000:.1f}ms")
     table.add_row("Samples", str(metrics["num_samples"]))
     table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
 
@@ -604,7 +610,6 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
-                    verbose=verbose,
                 )
             elif model == "deepgram":
                 api_key = os.environ.get("DEEPGRAM_API_KEY", "")
@@ -617,7 +622,6 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
-                    verbose=verbose,
                 )
             elif model == "elevenlabs":
                 api_key = os.environ.get("ELEVENLABS_API_KEY", "")
@@ -632,7 +636,6 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
-                    verbose=verbose,
                 )
             else:
                 model_id = get_model_name(model)
@@ -642,7 +645,6 @@ def main(
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
                     user_prompt=user_prompt,
-                    verbose=verbose,
                 )
 
             results = evaluator.evaluate(dataset, max_samples)
@@ -813,6 +815,164 @@ def main(
         metrics = evaluator.compute_metrics()
         save_results(model_id, dataset_name, results, metrics, output_dir, base_url)
         print_asr_metrics(dataset_name, metrics)
+
+
+def save_airbench_results(
+    model_name: str,
+    task_name: str | None,
+    results: list[AIRBenchResult],
+    metrics: dict,
+    output_dir: str = "outputs",
+) -> Path:
+    """Save AIR-Bench evaluation results and metrics."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    safe_model_name = model_name.replace("/", "_")
+    task_suffix = f"_{task_name}" if task_name else "_speech"
+    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_airbench{task_suffix}"
+    result_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save detailed results
+    results_file = result_dir / "results.txt"
+    with results_file.open("w") as f:
+        for i, r in enumerate(results, 1):
+            status = "✓" if r.correct else "✗"
+            f.write(f"Sample {i} [{status}]\n")
+            f.write(f"  Task: {r.task_name}_{r.dataset_name}\n")
+            f.write(f"  Question: {r.question}\n")
+            f.write(f"  Prediction: {r.prediction}\n")
+            f.write(f"  Extracted: {r.extracted_answer} | Reference: {r.reference}\n")
+            f.write(f"  Time: {r.time:.2f}s\n")
+            f.write("-" * 80 + "\n")
+
+    # Save summary metrics
+    metrics_file = result_dir / "metrics.txt"
+    with metrics_file.open("w") as f:
+        f.write(f"Model: {model_name}\n")
+        f.write(f"Task Filter: {task_name or 'speech (all)'}\n")
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Overall Accuracy: {metrics['accuracy']:.2f}%\n")
+        f.write(f"Correct: {metrics['correct']}/{metrics['total']}\n")
+        f.write(f"Avg Time: {metrics['avg_time']:.2f}s\n")
+        f.write(f"Num Samples: {metrics['num_samples']}\n")
+
+        if metrics.get("category_accuracy"):
+            f.write("-" * 40 + "\n")
+            f.write("Per-Category Accuracy:\n")
+            for cat, acc in sorted(metrics["category_accuracy"].items()):
+                f.write(f"  {cat}: {acc:.2f}%\n")
+
+        if metrics.get("task_accuracy"):
+            f.write("-" * 40 + "\n")
+            f.write("Per-Task Accuracy:\n")
+            for task_id, task_metrics in sorted(metrics["task_accuracy"].items()):
+                f.write(
+                    f"  {task_id}: {task_metrics['accuracy']:.2f}% "
+                    f"({task_metrics['correct']}/{task_metrics['total']})\n"
+                )
+
+    console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
+    return result_dir
+
+
+@app.command()
+def airbench(
+    model: Annotated[
+        str,
+        typer.Option("--model", "-m", help="HuggingFace model path/ID"),
+    ],
+    task_name: Annotated[
+        Optional[str],
+        typer.Option(
+            "--task",
+            "-t",
+            help="Filter to specific task (e.g., 'Speaker_Gender_Recognition'). If not specified, runs all speech tasks.",
+        ),
+    ] = None,
+    max_samples: Annotated[
+        Optional[int],
+        typer.Option(
+            "--max-samples",
+            "-n",
+            help="Max samples (per task if running all tasks, total if single task)",
+        ),
+    ] = None,
+    output_dir: Annotated[
+        str,
+        typer.Option("--output-dir", "-o", help="Output directory for results"),
+    ] = "outputs",
+    list_tasks: Annotated[
+        bool,
+        typer.Option("--list-tasks", "-l", help="List available tasks and exit"),
+    ] = False,
+):
+    """Evaluate models on AIR-Bench Foundation benchmark.
+
+    AIR-Bench is a benchmark for Large Audio-Language Models with 19 tasks
+    covering speech, sound, and music understanding.
+
+    When running all tasks (no -t flag), -n limits samples PER TASK for balanced
+    evaluation. When running a single task, -n limits total samples.
+
+    Examples:
+        # Run all speech tasks
+        ta eval airbench -m mazesmazes/tiny-audio-omni
+
+        # Run 50 samples per task (450 total for 9 speech tasks)
+        ta eval airbench -m mazesmazes/tiny-audio-omni -n 50
+
+        # Run specific task (100 total samples)
+        ta eval airbench -m mazesmazes/tiny-audio-omni -t Speaker_Gender_Recognition -n 100
+
+        # List available tasks
+        ta eval airbench -m dummy --list-tasks
+    """
+    if list_tasks:
+        console.print("\n[bold]Available AIR-Bench Foundation Tasks:[/bold]\n")
+
+        console.print("[cyan]Speech Tasks:[/cyan]")
+        from scripts.eval.evaluators.airbench import SPEECH_TASKS
+
+        for task in sorted(SPEECH_TASKS):
+            console.print(f"  • {task}")
+
+        console.print("\n[cyan]Sound Tasks:[/cyan]")
+        from scripts.eval.evaluators.airbench import SOUND_TASKS
+
+        for task in sorted(SOUND_TASKS):
+            console.print(f"  • {task}")
+
+        console.print("\n[cyan]Music Tasks:[/cyan]")
+        from scripts.eval.evaluators.airbench import MUSIC_TASKS
+
+        for task in sorted(MUSIC_TASKS):
+            console.print(f"  • {task}")
+
+        return
+
+    # Validate task_name if provided
+    if task_name and task_name not in AIRBENCH_ALL_TASKS:
+        console.print(f"[red]Error: Invalid task '{task_name}'[/red]")
+        console.print(f"Valid tasks: {', '.join(sorted(AIRBENCH_ALL_TASKS))}")
+        raise typer.Exit(1)
+
+    console.print("\n[bold blue]AIR-Bench Foundation Evaluation[/bold blue]")
+    console.print(f"Model: {model}")
+    console.print(f"Task: {task_name or 'all speech tasks'}")
+    if max_samples:
+        console.print(f"Max samples: {max_samples}")
+
+    model_id = get_model_name(model)
+    evaluator = AIRBenchEvaluator(
+        model_path=model,
+        task_name=task_name,
+    )
+
+    results = evaluator.evaluate(max_samples=max_samples)
+    metrics = evaluator.compute_metrics()
+
+    save_airbench_results(model_id, task_name, results, metrics, output_dir)
+    print_airbench_metrics(metrics)
 
 
 if __name__ == "__main__":

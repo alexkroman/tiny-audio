@@ -1,10 +1,10 @@
 """Timestamp alignment evaluator implementations."""
 
 import io
-import statistics
 import time
 
 from scripts.eval.audio import TextNormalizer, prepare_wav_bytes
+from tiny_audio.alignment import ForcedAligner
 
 from .base import AlignmentResult, console, setup_assemblyai
 
@@ -14,15 +14,16 @@ def align_words_to_reference(
     ref_words: list[dict],
     normalizer: TextNormalizer,
 ) -> list[tuple[dict, dict]]:
-    """Align predicted words to reference words using LCS-based monotonic matching.
+    """Align predicted words to reference words using normalized text matching.
 
-    Uses Longest Common Subsequence (LCS) to find the optimal monotonic alignment.
-    This maximizes the number of matched words while ensuring they appear in order,
-    preventing duplicate words (like "a", "the") from being matched out of order.
+    Uses a simple greedy alignment: for each reference word, find the best
+    matching predicted word that hasn't been used yet.
 
     Returns:
         List of (pred_word, ref_word) tuples for successfully aligned words.
     """
+    aligned_pairs = []
+
     # Normalize reference words
     ref_normalized = []
     for rw in ref_words:
@@ -42,39 +43,28 @@ def align_words_to_reference(
         if norm:
             pred_normalized.append((norm, pw))
 
-    n_ref = len(ref_normalized)
-    n_pred = len(pred_normalized)
+    # Greedy alignment: for each ref word, find matching pred word
+    used_pred_indices = set()
 
-    if n_ref == 0 or n_pred == 0:
-        return []
+    for ref_norm, ref_word in ref_normalized:
+        best_match_idx = None
+        best_time_diff = float("inf")
 
-    # Build LCS table
-    # dp[i][j] = length of LCS of ref[:i] and pred[:j]
-    dp = [[0] * (n_pred + 1) for _ in range(n_ref + 1)]
+        for i, (pred_norm, pred_word) in enumerate(pred_normalized):
+            if i in used_pred_indices:
+                continue
 
-    for i in range(1, n_ref + 1):
-        for j in range(1, n_pred + 1):
-            if ref_normalized[i - 1][0] == pred_normalized[j - 1][0]:
-                dp[i][j] = dp[i - 1][j - 1] + 1
-            else:
-                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+            # Check if normalized words match
+            if pred_norm == ref_norm:
+                # Prefer matches closer in time
+                time_diff = abs(pred_word.get("start", 0) - ref_word.get("start", 0))
+                if time_diff < best_time_diff:
+                    best_time_diff = time_diff
+                    best_match_idx = i
 
-    # Backtrack to find the actual alignment
-    aligned_pairs = []
-    i, j = n_ref, n_pred
-
-    while i > 0 and j > 0:
-        if ref_normalized[i - 1][0] == pred_normalized[j - 1][0]:
-            aligned_pairs.append((pred_normalized[j - 1][1], ref_normalized[i - 1][1]))
-            i -= 1
-            j -= 1
-        elif dp[i - 1][j] > dp[i][j - 1]:
-            i -= 1
-        else:
-            j -= 1
-
-    # Reverse to get chronological order
-    aligned_pairs.reverse()
+        if best_match_idx is not None:
+            used_pred_indices.add(best_match_idx)
+            aligned_pairs.append((pred_normalized[best_match_idx][1], ref_word))
 
     return aligned_pairs
 
@@ -88,13 +78,11 @@ class BaseAlignmentEvaluator:
         text_field: str = "transcript",
         words_field: str = "words",
         num_workers: int = 1,
-        verbose: bool = False,
     ):
         self.audio_field = audio_field
         self.text_field = text_field
         self.words_field = words_field
         self.num_workers = num_workers
-        self.verbose = verbose
         self.normalizer = TextNormalizer()
         self.results: list[AlignmentResult] = []
 
@@ -187,38 +175,6 @@ class BaseAlignmentEvaluator:
                 f"Time={inference_time:.2f}s"
             )
 
-            # Verbose word-by-word alignment logging
-            if self.verbose:
-                console.print(
-                    f"  [dim]{'Word':<20} {'Pred Start':>10} {'Ref Start':>10} {'Δ Start':>10} {'Pred End':>10} {'Ref End':>10} {'Δ End':>10}[/dim]"
-                )
-                console.print(f"  [dim]{'-' * 92}[/dim]")
-                for (pred_word, _ref_word), ps, pe, rs, re in zip(
-                    aligned_pairs, pred_starts, pred_ends, ref_starts, ref_ends
-                ):
-                    word = pred_word.get("word", "")[:20]
-                    delta_start = (ps - rs) * 1000  # ms
-                    delta_end = (pe - re) * 1000  # ms
-                    # Color code: green if <50ms, yellow if <100ms, red otherwise
-                    start_color = (
-                        "green"
-                        if abs(delta_start) < 50
-                        else "yellow"
-                        if abs(delta_start) < 100
-                        else "red"
-                    )
-                    end_color = (
-                        "green"
-                        if abs(delta_end) < 50
-                        else "yellow"
-                        if abs(delta_end) < 100
-                        else "red"
-                    )
-                    console.print(
-                        f"  {word:<20} {ps:>10.3f} {rs:>10.3f} [{start_color}]{delta_start:>+10.1f}[/{start_color}] "
-                        f"{pe:>10.3f} {re:>10.3f} [{end_color}]{delta_end:>+10.1f}[/{end_color}]"
-                    )
-
             # Checkpoint every 50 samples
             if processed % 50 == 0:
                 self._print_checkpoint(processed)
@@ -230,7 +186,8 @@ class BaseAlignmentEvaluator:
         metrics = self.compute_metrics()
         console.print(f"\n[bold]{'=' * 60}[/bold]")
         console.print(
-            f"[bold]CHECKPOINT @ {sample_count}:[/bold] Median AE={metrics['mae'] * 1000:.1f}ms"
+            f"[bold]CHECKPOINT @ {sample_count}:[/bold] MAE={metrics['mae'] * 1000:.1f}ms, "
+            f"Alignment Error={metrics['alignment_error'] * 100:.1f}%"
         )
         console.print(f"[bold]{'=' * 60}[/bold]\n")
 
@@ -239,6 +196,8 @@ class BaseAlignmentEvaluator:
         if not self.results:
             return {
                 "mae": 0.0,
+                "alignment_error": 1.0,
+                "mae_adjusted": float("inf"),
                 "avg_time": 0.0,
                 "num_samples": 0,
             }
@@ -246,6 +205,8 @@ class BaseAlignmentEvaluator:
         # Collect all predictions and references across samples
         all_pred_times = []
         all_ref_times = []
+        total_aligned = 0
+        total_ref = 0
 
         for r in self.results:
             # Combine start and end times for MAE calculation
@@ -253,20 +214,32 @@ class BaseAlignmentEvaluator:
             all_pred_times.extend(r.pred_ends)
             all_ref_times.extend(r.ref_starts)
             all_ref_times.extend(r.ref_ends)
+            total_aligned += r.num_aligned_words
+            total_ref += r.num_ref_words
 
         if not all_pred_times:
             return {
                 "mae": float("nan"),
+                "alignment_error": 1.0,
+                "mae_adjusted": float("inf"),
                 "avg_time": sum(r.time for r in self.results) / len(self.results),
                 "num_samples": len(self.results),
             }
 
-        # Median absolute error (robust to outliers)
-        errors = [abs(p - r) for p, r in zip(all_pred_times, all_ref_times)]
-        median_ae = statistics.median(errors)
+        # Mean absolute error calculation
+        mae = sum(abs(p - r) for p, r in zip(all_pred_times, all_ref_times)) / len(all_pred_times)
+
+        # Direct alignment rate calculation
+        alignment_rate = total_aligned / total_ref if total_ref > 0 else 0.0
+        alignment_error = 1.0 - alignment_rate
 
         return {
-            "mae": median_ae,
+            "mae": mae,
+            "alignment_error": alignment_error,
+            "alignment_rate": alignment_rate,
+            "mae_adjusted": mae / alignment_rate if alignment_rate > 0 else float("inf"),
+            "total_aligned_words": total_aligned,
+            "total_ref_words": total_ref,
             "avg_time": sum(r.time for r in self.results) / len(self.results),
             "num_samples": len(self.results),
         }
@@ -282,9 +255,8 @@ class TimestampAlignmentEvaluator(BaseAlignmentEvaluator):
         text_field: str = "transcript",
         words_field: str = "words",
         user_prompt: str | None = None,
-        verbose: bool = False,
     ):
-        super().__init__(audio_field, text_field, words_field, verbose=verbose)
+        super().__init__(audio_field, text_field, words_field)
         self.user_prompt = user_prompt
 
         from transformers import pipeline
@@ -306,22 +278,37 @@ class TimestampAlignmentEvaluator(BaseAlignmentEvaluator):
         )
 
     def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
-        """Transcribe audio and return (text, word_timestamps, inference_time)."""
-        # Convert to pipeline-compatible format
-        if isinstance(audio, dict) and "array" in audio and "raw" not in audio:
-            audio_input = {"raw": audio["array"], "sampling_rate": audio["sampling_rate"]}
+        """Transcribe audio and return (text, word_timestamps, inference_time).
+
+        Uses local ForcedAligner for timestamps to ensure local code changes are applied.
+        """
+        # Extract audio array and sample rate
+        if isinstance(audio, dict):
+            audio_array = audio.get("array", audio.get("raw"))
+            sample_rate = audio.get("sampling_rate", 16000)
+            audio_input = {"raw": audio_array, "sampling_rate": sample_rate}
         else:
+            audio_array = audio
+            sample_rate = 16000
             audio_input = audio
 
         start = time.time()
+
+        # Get transcription without timestamps from pipeline
         if self.user_prompt:
-            result = self.pipe(audio_input, return_timestamps=True, user_prompt=self.user_prompt)
+            result = self.pipe(audio_input, user_prompt=self.user_prompt)
         else:
-            result = self.pipe(audio_input, return_timestamps=True)
-        elapsed = time.time() - start
+            result = self.pipe(audio_input)
 
         text = result.get("text", "")
-        words = result.get("words", [])
+
+        # Use local ForcedAligner for timestamps
+        if text.strip():
+            words = ForcedAligner.align(audio_array, text, sample_rate=sample_rate)
+        else:
+            words = []
+
+        elapsed = time.time() - start
 
         return text, words, elapsed
 
@@ -336,9 +323,8 @@ class AssemblyAIAlignmentEvaluator(BaseAlignmentEvaluator):
         audio_field: str = "audio",
         text_field: str = "transcript",
         words_field: str = "words",
-        verbose: bool = False,
     ):
-        super().__init__(audio_field, text_field, words_field, verbose=verbose)
+        super().__init__(audio_field, text_field, words_field)
         self.transcriber = setup_assemblyai(api_key, model)
 
     def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
@@ -365,9 +351,8 @@ class DeepgramAlignmentEvaluator(BaseAlignmentEvaluator):
         text_field: str = "transcript",
         words_field: str = "words",
         num_workers: int = 1,
-        verbose: bool = False,
     ):
-        super().__init__(audio_field, text_field, words_field, num_workers, verbose=verbose)
+        super().__init__(audio_field, text_field, words_field, num_workers)
         from deepgram import DeepgramClient
 
         self.client = DeepgramClient(api_key=api_key)
@@ -415,9 +400,8 @@ class ElevenLabsAlignmentEvaluator(BaseAlignmentEvaluator):
         text_field: str = "transcript",
         words_field: str = "words",
         num_workers: int = 1,
-        verbose: bool = False,
     ):
-        super().__init__(audio_field, text_field, words_field, num_workers, verbose=verbose)
+        super().__init__(audio_field, text_field, words_field, num_workers)
         from elevenlabs.client import ElevenLabs
 
         self.client = ElevenLabs(api_key=api_key)
