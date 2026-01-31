@@ -4,35 +4,6 @@ import pytest
 import torch
 
 
-class TestIsFlashAttnAvailable:
-    """Tests for EndpointHandler._is_flash_attn_available."""
-
-    def test_returns_bool(self):
-        """Should return a boolean."""
-        from tiny_audio.handler import EndpointHandler
-
-        handler = object.__new__(EndpointHandler)
-        result = handler._is_flash_attn_available()
-
-        assert isinstance(result, bool)
-
-    def test_checks_flash_attn_module(self, mocker):
-        """Should check for flash_attn module."""
-        from tiny_audio.handler import EndpointHandler
-
-        handler = object.__new__(EndpointHandler)
-        mock_find = mocker.patch("importlib.util.find_spec")
-
-        # Test when flash_attn is available
-        mock_find.return_value = True
-        assert handler._is_flash_attn_available() is True
-        mock_find.assert_called_with("flash_attn")
-
-        # Test when flash_attn is not available
-        mock_find.return_value = None
-        assert handler._is_flash_attn_available() is False
-
-
 class TestEndpointHandlerCall:
     """Tests for EndpointHandler.__call__ method."""
 

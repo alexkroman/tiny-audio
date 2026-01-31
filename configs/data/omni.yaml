@@ -1,162 +1,74 @@
-# Multitask dataset configuration
-# ASR + SIFT + Caption
-#
-# Sampling factors (target / original):
-# ┌─────────────┬───────────┬──────────┬────────┬─────────┐
-# │ Dataset     │ Original  │ Target   │ Factor │ Type    │
-# ├─────────────┼───────────┼──────────┼────────┼─────────┤
-# │ ASR (700k)  │           │          │        │         │
-# │ loquacious  │ 1,090,000 │ 520,000  │ 0.48x  │ down    │
-# │ ami-ihm     │   108,502 │  60,000  │ 0.55x  │ down    │
-# │ switchboard │    80,000 │  60,000  │ 0.75x  │ down    │
-# │ spgispeech  │    77,073 │  60,000  │ 0.78x  │ down    │
-# ├─────────────┼───────────┼──────────┼────────┼─────────┤
-# │ SIFT (448k) │           │          │        │         │
-# │ podcast     │   149,000 │ 200,000  │ 1.34x  │ up      │
-# │ commonvoice │   100,000 │ 100,000  │ 1.0x   │ -       │
-# │ meld        │     9,989 │  50,000  │ 5.0x   │ up      │
-# │ esd         │    17,500 │  52,500  │ 3.0x   │ up      │
-# │ crema_d     │     7,400 │  22,000  │ 3.0x   │ up      │
-# │ tess        │     2,800 │  14,000  │ 5.0x   │ up      │
-# │ ravdess     │     1,440 │   7,200  │ 5.0x   │ up      │
-# │ savee       │       480 │   2,400  │ 5.0x   │ up      │
-# ├─────────────┼───────────┼──────────┼────────┼─────────┤
-# │ Caption(74k)│           │          │        │         │
-# │ musiccaps   │     5,000 │  25,000  │ 5.0x   │ up      │
-# │ audiocaps   │    49,000 │  49,000  │ 1.0x   │ -       │
-# └─────────────┴───────────┴──────────┴────────┴─────────┘
-# Total: ~1,222k samples
+# SIFT dataset configuration (3 modes from AZeroS approach)
+# - sift_s: Conversational response to transcription (voice assistant)
+# - sift_ssp: Empathetic response with tone awareness
+# - sit_ssp: Audio description/analysis ("Sounds like...")
 
 datasets:
-  # === ASR Datasets (60% total = 600k) ===
+  # === SIFT Datasets ===
 
-  # Loquacious medium - main ASR dataset
-  - path: speechbrain/LoquaciousSet
-    name: medium
-    audio_column: wav
-    text_column: text
-    task: transcribe
-    train_splits: [train]
-    eval_splits: [dev]
-    target_samples: 520000
-
-  # AMI corpus IHM - meeting transcriptions, close-talk mic (6%)
-  - path: edinburghcstr/ami
-    name: ihm
+  - path: mazesmazes/sift-audio-2
     audio_column: audio
-    text_column: text
-    task: transcribe
-    train_splits: [train]
-    eval_splits: [validation]
-    target_samples: 60000
-
-  # Switchboard - conversational telephone speech (6%)
-  - path: hhoangphuoc/switchboard
-    audio_column: audio
-    text_column: transcript
-    task: transcribe
-    train_splits: [train]
-    eval_splits: [validation]
-    target_samples: 60000
-
-  # SPGISpeech S - financial earnings calls, spontaneous speech (6%)
-  - path: kensho/spgispeech
-    name: S
-    audio_column: audio
-    text_column: transcript
-    task: transcribe
-    train_splits: [train]
-    eval_splits: [validation]
-    target_samples: 60000
-
-  # === SIFT Datasets (40% total = 400k) ===
-
-  # Large datasets with emotion/paralinguistics
-  - path: mazesmazes/sift-audio
-    audio_column: audio
-    text_column: text
+    text_column: sift_response
     task: sift
     train_splits: [podcast]
     eval_splits: [podcast]
     target_samples: 200000
 
-  - path: mazesmazes/sift-audio
+  - path: mazesmazes/sift-audio-2
     audio_column: audio
-    text_column: text
+    text_column: sift_response
     task: sift
     train_splits: [commonvoice]
     eval_splits: [commonvoice]
     target_samples: 100000
 
-  # MELD - Friends TV show with emotion + sentiment
-  - path: mazesmazes/sift-audio
+  - path: mazesmazes/sift-audio-2
     audio_column: audio
-    text_column: text
+    text_column: sift_response
     task: sift
     train_splits: [meld]
     eval_splits: [meld]
     target_samples: 50000
 
-  # Emotion datasets - upsample to balance
-  - path: mazesmazes/sift-audio
+  - path: mazesmazes/sift-audio-2
     audio_column: audio
-    text_column: text
+    text_column: sift_response
     task: sift
     train_splits: [esd]
     eval_splits: [esd]
     target_samples: 52500
 
-  - path: mazesmazes/sift-audio
+  - path: mazesmazes/sift-audio-2
     audio_column: audio
-    text_column: text
+    text_column: sift_response
     task: sift
     train_splits: [crema_d]
     eval_splits: [crema_d]
     target_samples: 22000
 
-  - path: mazesmazes/sift-audio
+  - path: mazesmazes/sift-audio-2
     audio_column: audio
-    text_column: text
+    text_column: sift_response
     task: sift
     train_splits: [tess]
     eval_splits: [tess]
     target_samples: 14000
 
-  - path: mazesmazes/sift-audio
+  - path: mazesmazes/sift-audio-2
     audio_column: audio
-    text_column: text
+    text_column: sift_response
     task: sift
     train_splits: [ravdess]
     eval_splits: [ravdess]
     target_samples: 7200
 
-  - path: mazesmazes/sift-audio
+  - path: mazesmazes/sift-audio-2
     audio_column: audio
-    text_column: text
+    text_column: sift_response
     task: sift
     train_splits: [savee]
     eval_splits: [savee]
     target_samples: 2400
-
-  # === Audio Captioning Datasets ===
-
-  # MusicCaps - music captioning with detailed descriptions (~5k samples, 5x upsample)
-  - path: CLAPv2/MusicCaps
-    audio_column: audio
-    text_column: caption
-    task: caption
-    train_splits: [train]
-    eval_splits: [train]
-    target_samples: 25000
-
-  # AudioCaps - general audio captioning (~49k samples)
-  - path: CLAPv2/audiocaps
-    audio_column: audio
-    text_column: text
-    task: caption
-    train_splits: [train]
-    eval_splits: [validation]
-    target_samples: 49000
 
 # Audio processing
 sample_rate: 16000

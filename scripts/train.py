@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Training script for ASR models using Hydra configuration.
+"""Training script for audio-language models using Hydra configuration.
 
-This script handles:
-- Loading and preparing datasets from multiple sources
-- Creating ASR models with configurable projector types
-- Training with HuggingFace Trainer and optional WandB logging
-- Checkpoint saving and Hub pushing
+Supports two training modes:
+- Transcription (ASR): +experiments=transcription
+- SIFT (AZeroS-style): +experiments=omni
 
 Usage:
     poetry run python scripts/train.py +experiments=transcription
-    poetry run python scripts/train.py training.learning_rate=1e-4
+    poetry run python scripts/train.py +experiments=omni
 """
 
 import contextlib
@@ -65,79 +63,39 @@ TRANSCRIBE_PROMPTS = [
     "What's being said?",
 ]
 
-# Prompts for SIFT training (speaker description task)
-# All prompts elicit comprehensive output: emotion + gender + quoted speech + voice quality
-# Target format: "Sounds like a neutral woman saying '...' in a calm, even voice."
-DESCRIBE_PROMPTS = [
-    # Direct requests for comprehensive description
-    "Describe what you hear.",
-    "Describe the speaker and what they say.",
-    "Describe the voice and speech.",
-    "Characterize this audio.",
-    "What do you hear?",
-    # Slightly more specific but still comprehensive
-    "Describe the speaker's voice, emotion, and words.",
-    "Who is speaking and how do they sound?",
-    "Summarize the speaker and their message.",
-    "Describe the vocal qualities and content.",
-    "What kind of voice is this and what are they saying?",
-    # Informal/conversational
-    "Tell me about this audio.",
-    "What's going on in this clip?",
-    "Break down this speech for me.",
-    "Give me the details on this speaker.",
-    "What can you tell me about this voice?",
-]
-
-# Prompts for audio/music captioning task (non-speech sounds)
-# Target: descriptions like "The recording features a ballad with sustained strings..."
-CAPTION_PROMPTS = [
-    # Direct requests
-    "Describe the audio.",
-    "Describe what you hear.",
-    "What sounds are in this recording?",
-    "Describe this sound.",
-    "What do you hear?",
-    # Scene-focused
-    "Describe the audio scene.",
-    "What's happening in this audio?",
-    "Describe the sounds.",
-    "Caption this audio.",
-    "What does this sound like?",
-    # Slightly more specific
-    "Describe the sound environment.",
-    "What audio events do you hear?",
-    "Summarize this audio.",
-    "What's in this recording?",
-    "Describe the audio content.",
-]
+# SIFT instructions by mode (matching AZeroS exactly)
+# - sift_s / sift_ssp: No instruction (empty string)
+# - sit_ssp: Fixed instruction to describe audio
+SIFT_INSTRUCTIONS = {
+    "sift_s": "",  # No instruction - conversational response
+    "sift_ssp": "",  # No instruction - empathetic response
+    "sit_ssp": "Describe all information you can hear.",  # Fixed description instruction
+}
 
 
 class DatasetLoader:
     """Loads and prepares datasets for training."""
 
-    def __init__(self, config: DictConfig, multitask_enabled: bool = False):
+    def __init__(self, config: DictConfig, sift_enabled: bool = False):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
         self.num_proc = self.config.get("num_proc", 16)
-        self.multitask_enabled = multitask_enabled
+        self.sift_enabled = sift_enabled
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
             raise ValueError("Dataset path is required")
 
-        use_streaming = dataset_cfg.get("streaming", False)
         ds = load_dataset(
             dataset_path,
             name=dataset_cfg.get("name"),
             split=split,
             cache_dir=self.cache_dir,
-            num_proc=None if use_streaming else self.num_proc,
+            num_proc=self.num_proc,
             trust_remote_code=True,
-            streaming=use_streaming,
         )
 
         # Normalize column names for audio and text
@@ -153,8 +111,8 @@ class DatasetLoader:
 
         # Remove extra columns BEFORE casting to avoid schema mismatch errors
         # (some datasets have complex column types that can't be cast)
-        if self.multitask_enabled:
-            keep_cols = {"audio", "text", "duration", "sift_response", "caption"}
+        if self.sift_enabled:
+            keep_cols = {"audio", "text", "duration", "sift_response", "mode"}
             extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
         else:
             keep_cols = {"audio", "text", "duration"}
@@ -164,30 +122,7 @@ class DatasetLoader:
             ds = ds.remove_columns(extra_cols)
 
         # Cast audio column after removing problematic columns
-        ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
-
-        # For multitask, add task column to identify sample type
-        if self.multitask_enabled:
-            task = dataset_cfg.get("task", "transcribe")  # Default to transcribe
-            if use_streaming:
-                # For streaming datasets, use map to add task column
-                ds = ds.map(lambda x: {**x, "task": task})
-            else:
-                ds = ds.add_column("task", [task] * len(ds))
-
-        # Filter TEDLIUM ignore markers only for TEDLIUM dataset
-        # Duration filtering happens in DataCollator to avoid loading all audio upfront
-        if "tedlium" in dataset_path.lower():
-
-            def filter_tedlium(text):
-                return text.strip() != "ignore_time_segment_in_scoring"
-
-            if use_streaming:
-                ds = ds.filter(filter_tedlium, input_columns="text")
-            else:
-                ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
-
-        return ds, use_streaming
+        return ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
     def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
         """Upsample or downsample dataset to target size."""
@@ -204,7 +139,6 @@ class DatasetLoader:
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
-        streaming_datasets = []
 
         for d_cfg in tqdm(self.config.datasets, desc="Loading datasets"):
             train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
@@ -212,27 +146,14 @@ class DatasetLoader:
             target_samples = d_cfg.get("target_samples")
 
             for train_split in train_splits:
-                ds, is_streaming = self._prepare_split(d_cfg, train_split)
-                if is_streaming:
-                    # For streaming datasets, take target samples and collect
-                    if target_samples:
-                        ds = ds.take(target_samples)
-                    streaming_datasets.append(ds)
-                else:
-                    if target_samples:
-                        ds = self._resample_to_target(ds, target_samples)
-                    train_datasets.append(ds)
+                ds = self._prepare_split(d_cfg, train_split)
+                if target_samples:
+                    ds = self._resample_to_target(ds, target_samples)
+                train_datasets.append(ds)
 
             for eval_split in eval_splits:
-                ds, is_streaming = self._prepare_split(d_cfg, eval_split)
-                if not is_streaming:
-                    val_datasets.append(ds)
-
-        # Convert streaming datasets to regular datasets
-        for streaming_ds in streaming_datasets:
-            samples = list(tqdm(streaming_ds, desc="Loading streaming dataset"))
-            if samples:
-                train_datasets.append(Dataset.from_list(samples))
+                ds = self._prepare_split(d_cfg, eval_split)
+                val_datasets.append(ds)
 
         # Concatenate and shuffle
         train_ds = (
@@ -347,12 +268,12 @@ class DataCollator:
         return batch
 
 
-# SIFT configuration for multi-task training
+# SIFT configuration (AZeroS-style training)
 SIFT_SYSTEM_MESSAGE = ""  # No system message
 
 
-class MultiTaskDataCollator(DataCollator):
-    """Collates audio and text data for multi-task training."""
+class SIFTDataCollator(DataCollator):
+    """Collates audio and text data for SIFT training (AZeroS-style)."""
 
     def __init__(
         self,
@@ -409,39 +330,21 @@ class MultiTaskDataCollator(DataCollator):
             num_tokens = self.projector.get_output_length(encoder_len)
             audio_token_counts.append(num_tokens)
 
-        # Build messages - differentiate between ASR, SIFT, and QA tasks using task column
+        # Build messages for SIFT task (AZeroS-style)
         text_features = []
         for f, num_audio_tokens in zip(valid_features, audio_token_counts):
             audio_placeholder = "<audio>" * num_audio_tokens
-            task = f.get("task", "transcribe")
+            mode = f.get("mode", "")  # SIFT mode: sift_s, sift_ssp, sit_ssp
 
-            if task == "caption":
-                # Audio/music captioning task
-                response = (f.get("caption") or f.get("text") or "").strip()
-                task_prompt = random.choice(CAPTION_PROMPTS)
-                # Multitask prompt strategy: 50% no instruction, 50% with instruction
-                if random.random() < 0.5:
-                    user_content = audio_placeholder
-                else:
-                    user_content = f"{task_prompt}\n\n{audio_placeholder}"
-            elif task == "sift":
-                # SIFT task: describe audio
-                response = (f.get("sift_response") or f.get("text") or "").strip()
-                task_prompt = random.choice(DESCRIBE_PROMPTS)
-                # Multitask prompt strategy: 50% no instruction, 50% with instruction
-                if random.random() < 0.5:
-                    user_content = audio_placeholder
-                else:
-                    user_content = f"{task_prompt}\n\n{audio_placeholder}"
+            # SIFT task: use AZeroS-style fixed instructions based on mode
+            response = (f.get("sift_response") or f.get("text") or "").strip()
+            instruction = SIFT_INSTRUCTIONS.get(mode, "")
+
+            # Format: <audio_tokens> {instruction} (matching AZeroS trainer.py)
+            if instruction:
+                user_content = f"{audio_placeholder} {instruction}"
             else:
-                # ASR task: transcription
-                response = (f.get("text") or "").strip().lower()
-                task_prompt = random.choice(TRANSCRIBE_PROMPTS)
-                # Multitask prompt strategy: 50% no instruction, 50% with instruction
-                if random.random() < 0.5:
-                    user_content = audio_placeholder
-                else:
-                    user_content = f"{task_prompt}\n\n{audio_placeholder}"
+                user_content = audio_placeholder
 
             # Build messages (skip system if empty)
             messages = []
@@ -586,15 +489,15 @@ def main(cfg: DictConfig) -> None:
             "true",  # Always disable thinking
         )
 
-    # Check if multi-task training is enabled
-    multitask_enabled = cfg.get("multitask", {}).get("enabled", False)
+    # Check if SIFT training is enabled (AZeroS-style)
+    sift_enabled = cfg.get("sift", {}).get("enabled", False)
 
     # Load datasets
-    train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
+    train_dataset, val_dataset = DatasetLoader(cfg, sift_enabled=sift_enabled).load()
 
-    # Create data collator (multi-task or standard)
-    if multitask_enabled:
-        data_collator = MultiTaskDataCollator(
+    # Create data collator (SIFT or standard ASR)
+    if sift_enabled:
+        data_collator = SIFTDataCollator(
             tokenizer=model.tokenizer,
             feature_extractor=model.feature_extractor,
             sample_rate=cfg.data.sample_rate,

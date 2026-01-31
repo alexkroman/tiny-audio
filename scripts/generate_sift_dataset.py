@@ -4,7 +4,10 @@
 This script processes audio datasets with paralinguistic metadata (emotion, gender, age)
 and generates natural language responses using an LLM.
 
-Uses SIT_SSP mode: System message + instruction + semantic + paralinguistic
+Supports three modes (following AZeroS approach):
+- sift_s: Semantic only - conversational response to transcription
+- sift_ssp: System + semantic + paralinguistic - empathetic response with tone awareness
+- sit_ssp: System + instruction + semantic + paralinguistic - audio description/analysis
 
 Usage:
     python -m scripts.generate_sift_dataset --output-repo user/sift-dataset
@@ -16,6 +19,7 @@ Usage:
 import os
 import re
 from dataclasses import dataclass
+from enum import Enum
 from typing import Annotated
 
 import typer
@@ -23,22 +27,36 @@ import typer
 # Enable fast HuggingFace transfers (must be set before importing HF libraries)
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-from datasets import Audio, DatasetDict, Value, load_dataset
+from datasets import Audio, DatasetDict, Value, concatenate_datasets, load_dataset
 from huggingface_hub import DatasetCard, DatasetCardData
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig, pipeline
 from transformers.pipelines.pt_utils import KeyDataset
 
-# System prompt for audio understanding (optimized through iterative testing with Qwen3-4B)
-# Produces natural, human-like descriptions with voice quality details
-SIFT_SYSTEM_PROMPT = (
-    'Describe the audio in one sentence starting with "Sounds like".\n'
-    "Include: emotion, speaker gender, what they said (quoted), and voice quality.\n"
-    "Example: \"Sounds like an angry man saying 'leave me alone' in a harsh, loud voice.\""
+
+class SiftMode(str, Enum):
+    """SIFT generation modes following AZeroS approach."""
+
+    SIFT_S = "sift_s"  # Semantic only - conversational response
+    SIFT_SSP = "sift_ssp"  # System + semantic + paralinguistic - empathetic response
+    SIT_SSP = "sit_ssp"  # System + instruction + semantic + paralinguistic - description
+
+
+# System prompts for each mode (optimized for SmolLM3-3B)
+SIFT_S_SYSTEM_PROMPT = (
+    "You are the user's friend. Respond warmly and briefly to what they tell you."
 )
 
-# Simple instruction to trigger description
-SIFT_INSTRUCTION = "/no_think"
+SIFT_SSP_SYSTEM_PROMPT = (
+    "You can hear audio. Respond empathetically to what the person says, "
+    "being aware of their tone and emotion. Don't describe the audio - just respond to it naturally."
+)
+
+SIT_SSP_SYSTEM_PROMPT = (
+    'Describe audio in one sentence starting with "Sounds like". '
+    "Include emotion, gender, what they said (quoted), and voice quality. "
+    "Example: \"Sounds like an angry man saying 'leave me alone' in a harsh voice.\""
+)
 
 
 @dataclass
@@ -146,12 +164,12 @@ DATASET_CONFIGS = [
         pace_field="speaking_rate",
         volume_field="relative_db",
     ),
-    # CommonVoice: Large-scale multilingual dataset (English subset)
-    # Has age, gender, accent metadata
+    # CommonVoice: Large-scale multilingual dataset (English subset only)
+    # Has age, gender, accent metadata (no emotion)
     DatasetConfig(
         name="commonvoice",
         hf_path="fixie-ai/common_voice_17_0",
-        hf_config="en",
+        hf_config="en",  # English only
         split="train",
         audio_field="audio",
         text_field="sentence",
@@ -423,6 +441,45 @@ def build_audio_context(metadata: dict) -> str:
     return "<audio></audio>"
 
 
+def build_prompt_for_mode(metadata: dict, mode: SiftMode, tokenizer) -> str:
+    """Build the appropriate prompt for a given SIFT mode.
+
+    Args:
+        metadata: Extracted metadata from the audio sample
+        mode: The SIFT mode to use
+        tokenizer: The tokenizer to apply chat template
+
+    Returns:
+        Formatted prompt string ready for the LLM
+    """
+    if mode == SiftMode.SIFT_S:
+        # Semantic only - conversational response to transcription
+        messages = [
+            {"role": "system", "content": SIFT_S_SYSTEM_PROMPT},
+            {"role": "user", "content": metadata["text"] or ""},
+        ]
+    elif mode == SiftMode.SIFT_SSP:
+        # System + semantic + paralinguistic - empathetic response
+        audio_context = build_audio_context(metadata)
+        messages = [
+            {"role": "system", "content": SIFT_SSP_SYSTEM_PROMPT},
+            {"role": "user", "content": audio_context},
+        ]
+    elif mode == SiftMode.SIT_SSP:
+        # System + semantic + paralinguistic - audio description
+        audio_context = build_audio_context(metadata)
+        messages = [
+            {"role": "system", "content": SIT_SSP_SYSTEM_PROMPT},
+            {"role": "user", "content": audio_context},
+        ]
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+    return tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
+
+
 def create_dataset_card(repo_id: str, splits: list[str]) -> None:
     """Create and push a dataset card with proper metadata."""
     card_data = DatasetCardData(
@@ -445,13 +502,27 @@ Self-Instruction Fine-Tuning (SIFT) dataset for training audio understanding mod
 
 ## Dataset Description
 
-This dataset contains audio samples paired with varied instruction-response pairs generated
-using LLM-based data augmentation. Each audio sample includes:
+This dataset contains audio samples paired with LLM-generated responses following the
+AZeroS multi-mode approach. Each audio sample is processed in three different modes
+to train models that can both respond conversationally AND describe/analyze audio.
 
-- **Transcription**: What was spoken in the audio
-- **Speaker metadata**: Gender, emotion, speaking rate (where available)
-- **Instruction**: A natural language question or command about the audio
-- **Response**: A natural language response answering the instruction
+## SIFT Modes
+
+Each audio sample generates three training samples with different behaviors:
+
+| Mode | Input Format | Expected Behavior |
+|------|--------------|-------------------|
+| `sift_s` | Just transcription | Conversational response (voice assistant) |
+| `sift_ssp` | System + audio tags (no instruction) | Empathetic response with tone awareness |
+| `sit_ssp` | System + audio tags + instruction | Audio description/analysis |
+
+### Example
+
+For audio of a happy woman saying "I got the job!":
+
+- **sift_s**: "Congratulations! That's wonderful news!"
+- **sift_ssp**: "That's amazing! I can hear how thrilled you are!"
+- **sit_ssp**: "A young adult female excitedly announcing she got a job..."
 
 ## Splits
 
@@ -463,11 +534,16 @@ using LLM-based data augmentation. Each audio sample includes:
 from datasets import load_dataset
 
 # Load a specific split
-ds = load_dataset("{repo_id}", split="loquacious")
+ds = load_dataset("{repo_id}", split="crema_d")
+
+# Filter by mode
+sift_s_only = ds.filter(lambda x: x["mode"] == "sift_s")
+sit_ssp_only = ds.filter(lambda x: x["mode"] == "sit_ssp")
 
 # Access a sample
 sample = ds[0]
-print(sample["sift_response"])
+print(f"Mode: {{sample['mode']}}")
+print(f"Response: {{sample['sift_response']}}")
 ```
 
 ## Columns
@@ -482,7 +558,8 @@ print(sample["sift_response"])
 | `pace` | string | Speaking pace: slow, normal, fast (if available) |
 | `volume` | string | Volume level: quiet, loud (if notable) |
 | `accent` | string | Speaker accent (if available) |
-| `sift_response` | string | Generated description of the audio |
+| `mode` | string | SIFT mode: sift_s, sift_ssp, or sit_ssp |
+| `sift_response` | string | Generated response for this mode |
 | `source_dataset` | string | Original dataset source |
 
 ## License
@@ -501,9 +578,17 @@ def process_dataset(
     batch_size: int,
     max_samples: int | None,
     max_new_tokens: int,
+    modes: list[SiftMode] | None = None,
 ):
-    """Process a single dataset and generate SIFT responses using datasets.map()."""
-    print(f"\nProcessing {config.name}...")
+    """Process a single dataset and generate SIFT responses for all modes.
+
+    Generates one sample per mode for each audio clip, resulting in 3x the data
+    when using all three modes (sift_s, sift_ssp, sit_ssp).
+    """
+    if modes is None:
+        modes = list(SiftMode)
+
+    print(f"\nProcessing {config.name} with modes: {[m.value for m in modes]}...")
 
     # Load dataset
     ds = load_dataset(
@@ -524,75 +609,72 @@ def process_dataset(
         effective_max = None
 
     if effective_max and len(ds) > effective_max:
+        # Shuffle before selecting to get random samples (especially important for CommonVoice)
+        ds = ds.shuffle(seed=None)  # None = random seed each run
         ds = ds.select(range(effective_max))
 
-    print(f"  Loaded {len(ds)} samples")
+    print(f"  Loaded {len(ds)} samples, generating {len(ds) * len(modes)} total samples")
 
-    # Extract metadata and build prompts (simple loop is faster than multiprocess map for this)
-    print("  Preparing prompts...")
-    prompts = []
-    metadata_lists = {
-        "text": [],
-        "emotion": [],
-        "gender": [],
-        "age": [],
-        "pace": [],
-        "accent": [],
-        "volume": [],
-    }
+    # Extract metadata for all samples first
+    print("  Extracting metadata...")
+    all_metadata = []
+    for sample in tqdm(ds, desc="Extracting", total=len(ds)):
+        all_metadata.append(extract_metadata(sample, config))
 
-    for sample in tqdm(ds, desc="Preparing", total=len(ds)):
-        metadata = extract_metadata(sample, config)
-        for key in metadata_lists:
-            metadata_lists[key].append(metadata[key])
-
-        audio_context = build_audio_context(metadata)
-        user_content = f"{audio_context}\n\n{SIFT_INSTRUCTION}"
-        messages = [
-            {"role": "system", "content": SIFT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
-        prompts.append(
-            tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
-            )
-        )
-
-    # Add columns to dataset
-    ds = ds.add_column("prompt", prompts)
-    ds = ds.add_column("meta_text", metadata_lists["text"])
-    ds = ds.add_column("meta_emotion", metadata_lists["emotion"])
-    ds = ds.add_column("meta_gender", metadata_lists["gender"])
-    ds = ds.add_column("meta_age", metadata_lists["age"])
-    ds = ds.add_column("meta_pace", metadata_lists["pace"])
-    ds = ds.add_column("meta_accent", metadata_lists["accent"])
-    ds = ds.add_column("meta_volume", metadata_lists["volume"])
-
-    # Generate responses using pipeline with dataset (more efficient than .map())
-    print("  Generating instructions and responses...")
+    # Process each mode
+    mode_datasets = []
     thinking_pattern = re.compile(r"<think>.*?</think>", re.DOTALL)
     generation_config = GenerationConfig(
         max_new_tokens=max_new_tokens,
         do_sample=True,
-        temperature=0.7,
-        top_p=0.9,
+        temperature=0.8,
+        top_p=0.92,
     )
 
-    responses = []
-    for out in tqdm(
-        pipe(
-            KeyDataset(ds, "prompt"),
-            generation_config=generation_config,
-            batch_size=batch_size,
-            return_full_text=False,
-        ),
-        total=len(ds),
-        desc="Generating",
-    ):
-        text = thinking_pattern.sub("", out[0]["generated_text"]).strip()
-        responses.append(text)
+    for mode in modes:
+        print(f"\n  Processing mode: {mode.value}")
 
-    ds = ds.add_column("sift_response", responses)
+        # Build prompts for this mode
+        prompts = []
+        for metadata in tqdm(all_metadata, desc=f"Building {mode.value} prompts"):
+            prompts.append(build_prompt_for_mode(metadata, mode, tokenizer))
+
+        # Create a copy of the dataset for this mode
+        mode_ds = ds.add_column("prompt", prompts)
+        mode_ds = mode_ds.add_column("mode", [mode.value] * len(ds))
+
+        # Add metadata columns
+        mode_ds = mode_ds.add_column("meta_text", [m["text"] or "" for m in all_metadata])
+        mode_ds = mode_ds.add_column("meta_emotion", [m["emotion"] or "" for m in all_metadata])
+        mode_ds = mode_ds.add_column("meta_gender", [m["gender"] or "" for m in all_metadata])
+        mode_ds = mode_ds.add_column("meta_age", [m["age"] or "" for m in all_metadata])
+        mode_ds = mode_ds.add_column("meta_pace", [m["pace"] or "" for m in all_metadata])
+        mode_ds = mode_ds.add_column("meta_accent", [m["accent"] or "" for m in all_metadata])
+        mode_ds = mode_ds.add_column("meta_volume", [m["volume"] or "" for m in all_metadata])
+
+        # Generate responses
+        print(f"  Generating {mode.value} responses...")
+        responses = []
+        for out in tqdm(
+            pipe(
+                KeyDataset(mode_ds, "prompt"),
+                generation_config=generation_config,
+                batch_size=batch_size,
+                return_full_text=False,
+            ),
+            total=len(mode_ds),
+            desc=f"Generating {mode.value}",
+        ):
+            text = thinking_pattern.sub("", out[0]["generated_text"]).strip()
+            responses.append(text)
+
+        mode_ds = mode_ds.add_column("sift_response", responses)
+        mode_ds = mode_ds.add_column("source_dataset", [config.name] * len(ds))
+        mode_datasets.append(mode_ds)
+
+    # Concatenate all mode datasets
+    print("\n  Combining all modes...")
+    combined_ds = concatenate_datasets(mode_datasets)
 
     # Remove original columns that would conflict with our renamed columns
     conflict_cols = [
@@ -606,13 +688,13 @@ def process_dataset(
             "accent",
             "volume",
         ]
-        if c in ds.column_names
+        if c in combined_ds.column_names
     ]
     if conflict_cols:
-        ds = ds.remove_columns(conflict_cols)
+        combined_ds = combined_ds.remove_columns(conflict_cols)
 
     # Rename meta columns to final names
-    ds = ds.rename_columns(
+    combined_ds = combined_ds.rename_columns(
         {
             "meta_text": "text",
             "meta_emotion": "emotion",
@@ -623,7 +705,6 @@ def process_dataset(
             "meta_volume": "volume",
         }
     )
-    ds = ds.add_column("source_dataset", [config.name] * len(ds))
 
     # Keep only needed columns
     keep_cols = [
@@ -637,19 +718,23 @@ def process_dataset(
         "volume",
         "sift_response",
         "source_dataset",
+        "mode",
     ]
-    remove_cols = [c for c in ds.column_names if c not in keep_cols]
+    remove_cols = [c for c in combined_ds.column_names if c not in keep_cols]
     if remove_cols:
-        ds = ds.remove_columns(remove_cols)
+        combined_ds = combined_ds.remove_columns(remove_cols)
 
     # Cast columns to consistent types
-    ds = ds.cast_column("emotion", Value("string"))
-    ds = ds.cast_column("gender", Value("string"))
-    ds = ds.cast_column("age", Value("string"))
-    ds = ds.cast_column("pace", Value("string"))
-    ds = ds.cast_column("accent", Value("string"))
-    ds = ds.cast_column("volume", Value("string"))
-    return ds.cast_column("audio", Audio(sampling_rate=16000))
+    combined_ds = combined_ds.cast_column("emotion", Value("string"))
+    combined_ds = combined_ds.cast_column("gender", Value("string"))
+    combined_ds = combined_ds.cast_column("age", Value("string"))
+    combined_ds = combined_ds.cast_column("pace", Value("string"))
+    combined_ds = combined_ds.cast_column("accent", Value("string"))
+    combined_ds = combined_ds.cast_column("volume", Value("string"))
+    combined_ds = combined_ds.cast_column("mode", Value("string"))
+
+    print(f"  Final dataset: {len(combined_ds)} samples")
+    return combined_ds.cast_column("audio", Audio(sampling_rate=16000))
 
 
 app = typer.Typer(help="Generate SIFT datasets for paralinguistic training")
@@ -662,16 +747,43 @@ def main(
     ] = "mazesmazes/sift-audio-2",
     model_name: Annotated[
         str, typer.Option(help="LLM model for response generation")
-    ] = "Qwen/Qwen3-4B",
+    ] = "HuggingFaceTB/SmolLM3-3B",
     batch_size: Annotated[int, typer.Option(help="Batch size for generation")] = 2048,
     max_samples: Annotated[
         int | None, typer.Option(help="Max samples per dataset (for testing)")
     ] = None,
-    max_new_tokens: Annotated[int, typer.Option(help="Max new tokens for generation")] = 80,
+    max_new_tokens: Annotated[int, typer.Option(help="Max new tokens for generation")] = 256,
     datasets: Annotated[list[str] | None, typer.Option(help="Specific datasets to process")] = None,
     push_every: Annotated[int, typer.Option(help="Push to hub every N datasets")] = 1,
+    modes: Annotated[
+        list[str] | None,
+        typer.Option(help="SIFT modes to generate (sift_s, sift_ssp, sit_ssp). Default: all three"),
+    ] = None,
 ):
-    """Generate SIFT datasets for paralinguistic training."""
+    """Generate SIFT datasets for paralinguistic training.
+
+    Generates three types of training samples per audio clip:
+    - sift_s: Conversational response to transcription (voice assistant behavior)
+    - sift_ssp: Empathetic response with tone awareness
+    - sit_ssp: Audio description/analysis (audio understanding behavior)
+    """
+    # Parse modes
+    if modes:
+        # Expand comma-separated values
+        expanded_modes = []
+        for m in modes:
+            expanded_modes.extend(m.split(","))
+        mode_names = [m.strip().lower() for m in expanded_modes if m.strip()]
+        selected_modes = []
+        for name in mode_names:
+            try:
+                selected_modes.append(SiftMode(name))
+            except ValueError:
+                typer.echo(f"Invalid mode: {name}. Valid modes: {[m.value for m in SiftMode]}")
+                raise typer.Exit(1) from None
+    else:
+        selected_modes = list(SiftMode)
+
     # Filter datasets if specified (support comma-separated values)
     configs = DATASET_CONFIGS
     if datasets:
@@ -689,6 +801,7 @@ def main(
             raise typer.Exit(1)
 
     typer.echo(f"Processing {len(configs)} datasets")
+    typer.echo(f"Modes: {[m.value for m in selected_modes]}")
     typer.echo(f"Model: {model_name}")
     typer.echo(f"Output: {output_repo}")
 
@@ -704,7 +817,7 @@ def main(
         tokenizer=tokenizer,
         dtype="bfloat16",
         device_map="auto",
-        model_kwargs={"attn_implementation": "flash_attention_2"},
+        model_kwargs={"attn_implementation": "sdpa"},
     )
 
     # Process each dataset
@@ -720,6 +833,7 @@ def main(
                 batch_size=batch_size,
                 max_samples=max_samples,
                 max_new_tokens=max_new_tokens,
+                modes=selected_modes,
             )
 
             if ds is not None:

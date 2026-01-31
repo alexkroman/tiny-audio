@@ -522,7 +522,6 @@ def main(
                 model_id = "slam-1"
                 evaluator = AssemblyAIDiarizationEvaluator(
                     api_key=api_key,
-                    model="slam_1",
                     audio_field=cfg.audio_field,
                     speakers_field=cfg.speakers_field,
                     timestamps_start_field=cfg.timestamps_start_field,
@@ -593,7 +592,6 @@ def main(
                 model_id = "slam-1"
                 evaluator = AssemblyAIAlignmentEvaluator(
                     api_key=api_key,
-                    model="slam_1",
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
@@ -656,7 +654,6 @@ def main(
                 model_id = "slam-1"
                 evaluator = AssemblyAIMMAUEvaluator(
                     api_key=api_key,
-                    model="slam_1",
                     audio_field=cfg.audio_field,
                     question_field=cfg.question_field,
                     answer_field=cfg.answer_field,
@@ -744,7 +741,6 @@ def main(
                 model_id = "slam-1"
                 evaluator = AssemblyAIEvaluator(
                     api_key=api_key,
-                    model="slam_1",
                     base_url=base_url,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,

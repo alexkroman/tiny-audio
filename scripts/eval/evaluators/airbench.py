@@ -51,7 +51,8 @@ MUSIC_TASKS = {
 ALL_TASKS = SPEECH_TASKS | SOUND_TASKS | MUSIC_TASKS
 
 # AIR-Bench prompt template (from Inference_Foundation.py)
-AIRBENCH_PROMPT_TEMPLATE = """
+AIRBENCH_PROMPT_TEMPLATE = """Listen to the audio and answer the following multiple choice question.
+
 Question: {question}
 
 A. {choice_a}
@@ -59,7 +60,7 @@ B. {choice_b}
 C. {choice_c}
 D. {choice_d}
 
-Please make your choice among A/B/C/D and do not output other texts."""
+Respond with ONLY a single letter: A, B, C, or D."""
 
 
 @attrs.define
@@ -279,7 +280,7 @@ class AIRBenchEvaluator:
                 items = items[:max_samples]
         else:
             # Multiple tasks: max_samples is PER TASK for balanced evaluation
-            task_set = SPEECH_TASKS
+            task_set = ALL_TASKS
             items = []
 
             # Group by task and take max_samples from each
@@ -300,7 +301,7 @@ class AIRBenchEvaluator:
                 console.print(f"[dim]  {task_name}: {len(task_list)} samples[/dim]")
 
             console.print(
-                f"[bold]Evaluating {len(task_items)} speech tasks "
+                f"[bold]Evaluating {len(task_items)} tasks "
                 f"({len(items)} total samples, {max_samples or 'all'} per task)[/bold]"
             )
 

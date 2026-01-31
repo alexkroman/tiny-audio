@@ -21,7 +21,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self,
         audio_model_id: str = "zai-org/GLM-ASR-Nano-2512",
         text_model_id: str = "Qwen/Qwen3-0.6B",
-        attn_implementation: str = "flash_attention_2",
+        attn_implementation: str = "sdpa",
         model_dtype: str = "bfloat16",
         num_beams: Optional[int] = None,
         system_prompt: str = "You are a helpful assistant.",
@@ -81,7 +81,7 @@ class ASRConfig(transformers.PretrainedConfig):
         Args:
             audio_model_id: HuggingFace model ID for audio encoder (GLM-ASR/Whisper)
             text_model_id: HuggingFace model ID for text decoder (Qwen)
-            attn_implementation: Attention implementation ("flash_attention_2", "sdpa", "eager")
+            attn_implementation: Attention implementation ("sdpa", "flash_attention_2", "eager")
             model_dtype: Model dtype ("bfloat16", "float16", "float32")
             projector_type: Projector architecture ("mlp", "mosa", "moe", "qformer")
             use_lora: Enable LoRA adapters for Stage 2 fine-tuning

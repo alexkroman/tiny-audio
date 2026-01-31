@@ -319,13 +319,12 @@ class AssemblyAIAlignmentEvaluator(BaseAlignmentEvaluator):
     def __init__(
         self,
         api_key: str,
-        model: str = "slam_1",
         audio_field: str = "audio",
         text_field: str = "transcript",
         words_field: str = "words",
     ):
         super().__init__(audio_field, text_field, words_field)
-        self.transcriber = setup_assemblyai(api_key, model)
+        self.transcriber = setup_assemblyai(api_key)
 
     def transcribe_with_timestamps(self, audio) -> tuple[str, list[dict], float]:
         """Transcribe audio and return (text, word_timestamps, inference_time)."""

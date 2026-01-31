@@ -1,7 +1,6 @@
 # @package _global_
-# Omni training starting from pretrained ASR model
-# 60% ASR (from multiasr: loquacious, ami, switchboard, spgispeech)
-# 40% SIFT (paralinguistic: podcast, commonvoice, esd, crema_d, tess, ravdess, savee)
+# SIFT training (AZeroS-style) starting from pretrained ASR model
+# Uses mazesmazes/sift-audio-2 dataset with 3 modes: sift_s, sift_ssp, sit_ssp
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=omni
@@ -16,7 +15,7 @@ model:
   projector_hidden_dim: 1024
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   text_model_id: HuggingFaceTB/SmolLM3-3B
-  # Omni mode: Qwen Audio defaults for instruction-following
+  # Generation defaults for instruction-following
   do_sample: true
   enable_thinking: true
   top_k: 0
@@ -24,8 +23,8 @@ model:
   temperature: 1.0
   repetition_penalty: 1.1
 
-# Multitask configuration
-multitask:
+# SIFT configuration (AZeroS-style training)
+sift:
   enabled: true
 
 training:
