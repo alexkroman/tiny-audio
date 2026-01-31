@@ -7,7 +7,7 @@
 #   poetry run python scripts/train.py +experiments=omni
 
 defaults:
-  - override /data: multitask
+  - override /data: omni
 
 model:
   pretrained_model_path: mazesmazes/tiny-audio
@@ -15,7 +15,14 @@ model:
   projector_pool_stride: 4
   projector_hidden_dim: 1024
   audio_model_id: zai-org/GLM-ASR-Nano-2512
-  text_model_id: Qwen/Qwen3-1.7B
+  text_model_id: HuggingFaceTB/SmolLM3-3B
+  # Omni mode: Qwen Audio defaults for instruction-following
+  do_sample: true
+  enable_thinking: true
+  top_k: 0
+  top_p: 0.01
+  temperature: 1.0
+  repetition_penalty: 1.1
 
 # Multitask configuration
 multitask:
@@ -30,15 +37,15 @@ training:
   lr_scheduler_kwargs:
     power: 0.5
   seed: 42
-  per_device_train_batch_size: 14
-  per_device_eval_batch_size: 14
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
   gradient_accumulation_steps: 4
   num_train_epochs: 1
   save_steps: 1000
   eval_steps: 1000
 
   label_smoothing_factor: 0.1
-  weight_decay: 0.01
+  weight_decay: 0.0
 
   use_specaugment: true
   # LibriDouble settings (2 masks each)

@@ -588,6 +588,129 @@ def sift(
 
 
 # =============================================================================
+# ClothoAQA Dataset Generation Command
+# =============================================================================
+
+
+def build_clothoaqa_script(
+    hf_token: str,
+    output_repo: str,
+    batch_size: int,
+    max_samples: int | None,
+) -> str:
+    """Generate the ClothoAQA dataset generation script content."""
+    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
+
+    return f"""#!/bin/bash
+# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
+
+ulimit -n 65536
+pip install hf_transfer --quiet --root-user-action=ignore
+export PATH="/root/.local/bin:$PATH"
+export HF_HOME=/workspace/.cache/huggingface
+export HF_DATASETS_CACHE=/workspace/datasets
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_TOKEN="{hf_token}"
+
+# A40 GPU optimizations (48GB VRAM)
+export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
+export TORCH_CUDNN_BENCHMARK=1
+
+cd /workspace
+
+# Install flash-attn if not present
+python -c "import flash_attn" 2>/dev/null || pip install flash-attn --no-build-isolation --quiet
+
+python -m scripts.generate_clothoaqa_dataset \\
+    --output-repo {output_repo} \\
+    --batch-size {batch_size} \\
+    {max_samples_arg}
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "===== ClothoAQA Dataset Generation Completed Successfully ====="
+else
+    echo "===== ClothoAQA Dataset Generation Failed with exit code: $EXIT_CODE ====="
+fi
+
+echo "Script finished. Session will remain active for inspection."
+sleep infinity
+"""
+
+
+@app.command()
+def clothoaqa(
+    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
+    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
+    output_repo: str = typer.Option(
+        "mazesmazes/clothoaqa", "--output-repo", "-o", help="HuggingFace repo for output"
+    ),
+    session_name: str | None = typer.Option(
+        None, "--session-name", "-s", help="Custom tmux session name"
+    ),
+    batch_size: int = typer.Option(1024, "--batch-size", "-b", help="Batch size for generation"),
+    max_samples: int | None = typer.Option(
+        None, "--max-samples", "-n", help="Max samples per split"
+    ),
+    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
+    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+):
+    """Generate enhanced ClothoAQA dataset on a remote RunPod instance.
+
+    Takes the CLAPv2/ClothoAQA dataset and generates LLM-augmented answers
+    that are more detailed than simple yes/no responses.
+    """
+    conn = get_connection(host, port)
+
+    if not test_connection(conn):
+        sys.exit(1)
+
+    # Generate session name if not provided
+    if session_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        session_name = f"clothoaqa_{timestamp}"
+
+    if force:
+        print(f"Killing existing session '{session_name}' if present...")
+        kill_tmux_session(conn, session_name)
+
+    # Get environment variables
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        print("Warning: HF_TOKEN environment variable not set.")
+
+    # Build and upload script
+    script_content = build_clothoaqa_script(hf_token, output_repo, batch_size, max_samples)
+    script_path = f"/tmp/clothoaqa_{session_name}.sh"
+
+    print(f"\nStarting ClothoAQA generation session '{session_name}'...")
+    print(f"Output repo: {output_repo}")
+    print(f"Batch size: {batch_size}")
+    if max_samples:
+        print(f"Max samples: {max_samples}")
+
+    # Write script to remote
+    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
+    conn.run(f"chmod +x {script_path}", hide=True)
+
+    # Start tmux session
+    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    if not result.ok:
+        print(f"Failed to start tmux session: {result.stderr}")
+        sys.exit(1)
+
+    print(f"\nClothoAQA generation started in session '{session_name}'.")
+    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
+
+    if not no_attach:
+        time.sleep(2)
+        attach_tmux_session(host, port, session_name)
+
+
+# =============================================================================
 # Eval Command
 # =============================================================================
 

@@ -64,6 +64,7 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,  # Default: all linear layers
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         do_sample: bool = False,
+        enable_thinking: bool = False,  # Enable Qwen3 thinking mode for omni models
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
@@ -174,6 +175,7 @@ class ASRConfig(transformers.PretrainedConfig):
         )
         self.use_cache = use_cache if use_cache is not None else generation_defaults["use_cache"]
         self.do_sample = do_sample
+        self.enable_thinking = enable_thinking
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k

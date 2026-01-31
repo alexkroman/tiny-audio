@@ -12,7 +12,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
 
 # AssemblyAI model options
-ASSEMBLYAI_MODELS = {"best", "universal", "slam_1", "nano"}
+ASSEMBLYAI_MODELS = {"best", "universal", "nano", "slam_1"}
 
 
 def setup_assemblyai(

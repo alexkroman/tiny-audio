@@ -2,7 +2,6 @@
 
 import os
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -51,15 +50,6 @@ from scripts.eval.evaluators import (
 
 app = typer.Typer(help="Evaluate ASR models on standard datasets")
 console = Console()
-
-
-class AssemblyAIModel(str, Enum):
-    """AssemblyAI model options."""
-
-    best = "best"
-    universal = "universal"
-    slam_1 = "slam_1"
-    nano = "nano"
 
 
 # Valid dataset choices
@@ -460,9 +450,6 @@ def main(
     endpoint: Annotated[
         bool, typer.Option("--endpoint", "-e", help="Use HF Inference Endpoint")
     ] = False,
-    assemblyai_model: Annotated[
-        AssemblyAIModel, typer.Option("--assemblyai-model", help="AssemblyAI model")
-    ] = AssemblyAIModel.slam_1,
     streaming: Annotated[
         bool, typer.Option("--streaming", "-s", help="Use streaming evaluation (for local or AAI)")
     ] = False,
@@ -532,10 +519,10 @@ def main(
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
                     raise typer.Exit(1)
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = "slam-1"
                 evaluator = AssemblyAIDiarizationEvaluator(
                     api_key=api_key,
-                    model=assemblyai_model.value,
+                    model="slam_1",
                     audio_field=cfg.audio_field,
                     speakers_field=cfg.speakers_field,
                     timestamps_start_field=cfg.timestamps_start_field,
@@ -603,10 +590,10 @@ def main(
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
                     raise typer.Exit(1)
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = "slam-1"
                 evaluator = AssemblyAIAlignmentEvaluator(
                     api_key=api_key,
-                    model=assemblyai_model.value,
+                    model="slam_1",
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
@@ -666,10 +653,10 @@ def main(
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
                     raise typer.Exit(1)
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = "slam-1"
                 evaluator = AssemblyAIMMAUEvaluator(
                     api_key=api_key,
-                    model=assemblyai_model.value,
+                    model="slam_1",
                     audio_field=cfg.audio_field,
                     question_field=cfg.question_field,
                     answer_field=cfg.answer_field,
@@ -754,10 +741,10 @@ def main(
                     num_workers=num_workers,
                 )
             else:
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = "slam-1"
                 evaluator = AssemblyAIEvaluator(
                     api_key=api_key,
-                    model=assemblyai_model.value,
+                    model="slam_1",
                     base_url=base_url,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,

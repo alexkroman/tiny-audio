@@ -114,6 +114,17 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         timestamps_start_field="timestamps_start",
         timestamps_end_field="timestamps_end",
     ),
+    "ami-diarization": DatasetConfig(
+        name="ami-diarization",
+        path="diarizers-community/ami",
+        config="sdm",  # Single distant microphone (far-field, more realistic)
+        audio_field="audio",
+        text_field="speakers",  # No text transcription, use speakers as placeholder
+        default_split="test",
+        speakers_field="speakers",
+        timestamps_start_field="timestamps_start",
+        timestamps_end_field="timestamps_end",
+    ),
     # Alignment datasets
     "librispeech-alignments": DatasetConfig(
         name="librispeech-alignments",
@@ -201,7 +212,7 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
     ),
 }
 
-DIARIZATION_DATASETS = {"callhome"}
+DIARIZATION_DATASETS = {"callhome", "ami-diarization"}
 ALIGNMENT_DATASETS = {"librispeech-alignments"}
 MCQ_DATASETS = {"mmau"}
 CLASSIFICATION_DATASETS = {

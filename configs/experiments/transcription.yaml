@@ -6,7 +6,7 @@
 #   poetry run python scripts/train.py +experiments=transcription
 
 defaults:
-  - override /data: multiasr
+  - override /data: transcription
 
 model:
   projector_type: mlp

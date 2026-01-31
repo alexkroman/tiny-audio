@@ -51,12 +51,15 @@ MUSIC_TASKS = {
 ALL_TASKS = SPEECH_TASKS | SOUND_TASKS | MUSIC_TASKS
 
 # AIR-Bench prompt template (from Inference_Foundation.py)
-AIRBENCH_PROMPT_TEMPLATE = """Choose the most suitable answer from options A, B, C, and D to respond the question in next line, you may only choose A or B or C or D.
-{question}
+AIRBENCH_PROMPT_TEMPLATE = """
+Question: {question}
+
 A. {choice_a}
 B. {choice_b}
 C. {choice_c}
-D. {choice_d}"""
+D. {choice_d}
+
+Please make your choice among A/B/C/D and do not output other texts."""
 
 
 @attrs.define
@@ -311,11 +314,14 @@ class AIRBenchEvaluator:
             self.results.append(result)
 
             status = "✓" if result.correct else "✗"
+            # Truncate prediction for display but show enough to debug
+            pred_display = result.prediction[:200] if result.prediction else "(empty)"
             console.print(
                 f"[{idx}/{len(items)}] {status} {result.task_name} | "
                 f"Pred: {result.extracted_answer} | GT: {result.reference} | "
                 f"Time: {result.time:.2f}s"
             )
+            console.print(f"  [dim]Raw output: {pred_display}[/dim]")
 
             if idx % 100 == 0:
                 self._print_checkpoint(idx)

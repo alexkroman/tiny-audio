@@ -215,6 +215,7 @@ class DiarizationEvaluator:
                 "false_alarm": 0.0,
                 "avg_time": 0.0,
                 "num_samples": 0,
+                "total_duration": 0.0,
             }
 
         # Corpus-level: sum raw values across all samples
@@ -238,6 +239,7 @@ class DiarizationEvaluator:
             "false_alarm": corpus_false_alarm,
             "avg_time": sum(r.time for r in self.results) / len(self.results),
             "num_samples": len(self.results),
+            "total_duration": total_duration,  # For corpus-level weighting across datasets
         }
 
 

@@ -91,19 +91,46 @@ class SpectralCluster:
     def get_spec_embs(
         self, laplacian: np.ndarray, k_oracle: int | None = None
     ) -> tuple[np.ndarray, int]:
-        """Extract spectral embeddings from Laplacian."""
+        """Extract spectral embeddings from Laplacian.
+
+        Uses the eigengap heuristic to estimate the number of clusters:
+        The number of clusters k is chosen where the gap between consecutive
+        eigenvalues is largest, indicating a transition from "cluster" eigenvalues
+        (near 0) to "noise" eigenvalues.
+        """
         lambdas, eig_vecs = scipy.linalg.eigh(laplacian)
 
-        if k_oracle is not None:
-            num_of_spk = k_oracle
-        else:
-            lambda_gap_list = self.get_eigen_gaps(
-                lambdas[self.min_num_spks - 1 : self.max_num_spks + 1]
-            )
-            num_of_spk = np.argmax(lambda_gap_list) + self.min_num_spks
+        num_of_spk = k_oracle if k_oracle is not None else self._estimate_num_speakers(lambdas)
 
         emb = eig_vecs[:, :num_of_spk]
         return emb, num_of_spk
+
+    def _estimate_num_speakers(self, lambdas: np.ndarray) -> int:
+        """Estimate number of speakers using refined eigengap heuristic.
+
+        For spectral clustering, we look for the largest gap in eigenvalues.
+        The eigenvalues corresponding to clusters are close to 0, and there
+        should be a significant jump to the remaining eigenvalues.
+        """
+        # Consider eigenvalues from index 1 to max_num_spks (skip first, it's always ~0)
+        # We need gaps between positions, so look at indices 1 to max_num_spks+1
+        max_idx = min(self.max_num_spks + 1, len(lambdas))
+        relevant_lambdas = lambdas[1:max_idx]  # Skip first eigenvalue
+
+        if len(relevant_lambdas) < 2:
+            return self.min_num_spks
+
+        # Compute absolute gaps (not ratios - ratios are unstable near 0)
+        gaps = np.diff(relevant_lambdas)
+
+        # Find the largest gap - the index gives us (k-1) since we skipped first
+        # Add 1 to convert from gap index to number of speakers
+        # Add 1 again because we skipped the first eigenvalue
+        max_gap_idx = int(np.argmax(gaps))
+        num_of_spk = max_gap_idx + 2  # +1 for gap->count, +1 for skipped eigenvalue
+
+        # Clamp between min and max
+        return max(self.min_num_spks, min(num_of_spk, self.max_num_spks))
 
     def cluster_embs(self, emb: np.ndarray, k: int) -> np.ndarray:
         """Cluster spectral embeddings using k-means."""

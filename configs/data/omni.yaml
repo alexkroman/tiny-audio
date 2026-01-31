@@ -1,17 +1,17 @@
 # Multitask dataset configuration
-# 60% ASR (from multiasr.yaml) + 40% SIFT (paralinguistic)
+# ASR + SIFT + Caption
 #
 # Sampling factors (target / original):
 # ┌─────────────┬───────────┬──────────┬────────┬─────────┐
 # │ Dataset     │ Original  │ Target   │ Factor │ Type    │
 # ├─────────────┼───────────┼──────────┼────────┼─────────┤
-# │ ASR (60%)   │           │          │        │         │
-# │ loquacious  │ 1,090,000 │ 420,000  │ 0.39x  │ down    │
+# │ ASR (700k)  │           │          │        │         │
+# │ loquacious  │ 1,090,000 │ 520,000  │ 0.48x  │ down    │
 # │ ami-ihm     │   108,502 │  60,000  │ 0.55x  │ down    │
 # │ switchboard │    80,000 │  60,000  │ 0.75x  │ down    │
 # │ spgispeech  │    77,073 │  60,000  │ 0.78x  │ down    │
 # ├─────────────┼───────────┼──────────┼────────┼─────────┤
-# │ SIFT (40%)  │           │          │        │         │
+# │ SIFT (448k) │           │          │        │         │
 # │ podcast     │   149,000 │ 200,000  │ 1.34x  │ up      │
 # │ commonvoice │   100,000 │ 100,000  │ 1.0x   │ -       │
 # │ meld        │     9,989 │  50,000  │ 5.0x   │ up      │
@@ -20,13 +20,17 @@
 # │ tess        │     2,800 │  14,000  │ 5.0x   │ up      │
 # │ ravdess     │     1,440 │   7,200  │ 5.0x   │ up      │
 # │ savee       │       480 │   2,400  │ 5.0x   │ up      │
+# ├─────────────┼───────────┼──────────┼────────┼─────────┤
+# │ Caption(74k)│           │          │        │         │
+# │ musiccaps   │     5,000 │  25,000  │ 5.0x   │ up      │
+# │ audiocaps   │    49,000 │  49,000  │ 1.0x   │ -       │
 # └─────────────┴───────────┴──────────┴────────┴─────────┘
-# Total: ~1,048,100 samples (ASR: 600k, SIFT: ~448k)
+# Total: ~1,222k samples
 
 datasets:
   # === ASR Datasets (60% total = 600k) ===
 
-  # Loquacious medium - main ASR dataset (42%)
+  # Loquacious medium - main ASR dataset
   - path: speechbrain/LoquaciousSet
     name: medium
     audio_column: wav
@@ -34,7 +38,7 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [dev]
-    target_samples: 420000
+    target_samples: 520000
 
   # AMI corpus IHM - meeting transcriptions, close-talk mic (6%)
   - path: edinburghcstr/ami
@@ -134,36 +138,25 @@ datasets:
     eval_splits: [savee]
     target_samples: 2400
 
-  # === QA Datasets ===
-
-  # ClothoAQA - Audio question answering (format: "Question: ... Answer: ...")
-  - path: CLAPv2/ClothoAQA
-    audio_column: audio
-    text_column: text
-    task: qa
-    train_splits: [train]
-    eval_splits: [validation]
-    target_samples: 22000
-
   # === Audio Captioning Datasets ===
 
-  # AudioSet Strong - general audio/music captioning with strong labels
-  - path: CLAPv2/audioset_strong
-    audio_column: audio
-    text_column: text
-    task: caption
-    train_splits: [train]
-    eval_splits: [validation]
-    target_samples: 100000
-
-  # MusicCaps - music captioning with detailed descriptions
+  # MusicCaps - music captioning with detailed descriptions (~5k samples, 5x upsample)
   - path: CLAPv2/MusicCaps
     audio_column: audio
     text_column: caption
     task: caption
     train_splits: [train]
-    eval_splits: [test]
-    target_samples: 5000
+    eval_splits: [train]
+    target_samples: 25000
+
+  # AudioCaps - general audio captioning (~49k samples)
+  - path: CLAPv2/audiocaps
+    audio_column: audio
+    text_column: text
+    task: caption
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 49000
 
 # Audio processing
 sample_rate: 16000

@@ -305,8 +305,11 @@ class TestMultiTaskDataCollator:
             "task": task,
         }
 
-    def test_sift_task_uses_instruction_and_response(self, multitask_collator, tokenizer):
+    def test_sift_task_uses_instruction_and_response(self, multitask_collator, tokenizer, mocker):
         """Test that SIFT task uses sift_response with a describe prompt."""
+        # Force instruction to be included (random() returns > 0.5)
+        mocker.patch("scripts.train.random.random", return_value=0.6)
+
         samples = [
             self.create_sift_sample(
                 task="sift",
@@ -329,8 +332,11 @@ class TestMultiTaskDataCollator:
         # Should contain the response from dataset
         assert "The speaker sounds happy and excited" in decoded
 
-    def test_transcribe_task_uses_text(self, multitask_collator, tokenizer):
+    def test_transcribe_task_uses_text(self, multitask_collator, tokenizer, mocker):
         """Test that transcribe task uses text column with a transcribe prompt."""
+        # Force instruction to be included (random() returns > 0.5)
+        mocker.patch("scripts.train.random.random", return_value=0.6)
+
         samples = [
             self.create_sift_sample(
                 task="transcribe",
@@ -354,8 +360,11 @@ class TestMultiTaskDataCollator:
         # Should NOT use sift_response
         assert "This should be ignored" not in decoded
 
-    def test_default_task_is_transcribe(self, multitask_collator, tokenizer):
+    def test_default_task_is_transcribe(self, multitask_collator, tokenizer, mocker):
         """Test that samples without task column default to transcribe."""
+        # Force instruction to be included (random() returns > 0.5)
+        mocker.patch("scripts.train.random.random", return_value=0.6)
+
         # Create sample without task column
         num_samples = int(1.0 * 16000)
         audio_array = np.random.randn(num_samples).astype(np.float32) * 0.1

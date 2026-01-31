@@ -43,12 +43,74 @@ from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
 # Prompts for ASR training (transcription task)
-# Focus on exact words only - no mention of description/emotion
-TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
+# Target: lowercased verbatim transcription of speech
+TRANSCRIBE_PROMPTS = [
+    # Direct/simple
+    "Transcribe this.",
+    "What is being said?",
+    "What did they say?",
+    "What words are spoken?",
+    "Write out the speech.",
+    # Slightly varied
+    "Transcribe the audio.",
+    "What do you hear them saying?",
+    "Type out what's said.",
+    "What's the transcript?",
+    "Transcribe the spoken words.",
+    # Question form
+    "What is the speaker saying?",
+    "What was spoken here?",
+    "What are the words?",
+    "What did you hear?",
+    "What's being said?",
+]
 
-# Prompts for SIFT training (description task)
-# Focus on characteristics/delivery - the response naturally includes words
-DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
+# Prompts for SIFT training (speaker description task)
+# All prompts elicit comprehensive output: emotion + gender + quoted speech + voice quality
+# Target format: "Sounds like a neutral woman saying '...' in a calm, even voice."
+DESCRIBE_PROMPTS = [
+    # Direct requests for comprehensive description
+    "Describe what you hear.",
+    "Describe the speaker and what they say.",
+    "Describe the voice and speech.",
+    "Characterize this audio.",
+    "What do you hear?",
+    # Slightly more specific but still comprehensive
+    "Describe the speaker's voice, emotion, and words.",
+    "Who is speaking and how do they sound?",
+    "Summarize the speaker and their message.",
+    "Describe the vocal qualities and content.",
+    "What kind of voice is this and what are they saying?",
+    # Informal/conversational
+    "Tell me about this audio.",
+    "What's going on in this clip?",
+    "Break down this speech for me.",
+    "Give me the details on this speaker.",
+    "What can you tell me about this voice?",
+]
+
+# Prompts for audio/music captioning task (non-speech sounds)
+# Target: descriptions like "The recording features a ballad with sustained strings..."
+CAPTION_PROMPTS = [
+    # Direct requests
+    "Describe the audio.",
+    "Describe what you hear.",
+    "What sounds are in this recording?",
+    "Describe this sound.",
+    "What do you hear?",
+    # Scene-focused
+    "Describe the audio scene.",
+    "What's happening in this audio?",
+    "Describe the sounds.",
+    "Caption this audio.",
+    "What does this sound like?",
+    # Slightly more specific
+    "Describe the sound environment.",
+    "What audio events do you hear?",
+    "Summarize this audio.",
+    "What's in this recording?",
+    "Describe the audio content.",
+]
 
 
 class DatasetLoader:
@@ -67,13 +129,15 @@ class DatasetLoader:
         if not dataset_path:
             raise ValueError("Dataset path is required")
 
+        use_streaming = dataset_cfg.get("streaming", False)
         ds = load_dataset(
             dataset_path,
             name=dataset_cfg.get("name"),
             split=split,
             cache_dir=self.cache_dir,
-            num_proc=self.num_proc,
+            num_proc=None if use_streaming else self.num_proc,
             trust_remote_code=True,
+            streaming=use_streaming,
         )
 
         # Normalize column names for audio and text
@@ -87,23 +151,29 @@ class DatasetLoader:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
 
-        ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
-
-        # For multitask, keep sift_response and add task column
+        # Remove extra columns BEFORE casting to avoid schema mismatch errors
+        # (some datasets have complex column types that can't be cast)
         if self.multitask_enabled:
-            task = dataset_cfg.get("task", "transcribe")  # Default to transcribe
-            # Add task column to identify ASR vs SIFT samples
-            ds = ds.add_column("task", [task] * len(ds))
-            keep_cols = {"audio", "text", "duration", "sift_response", "task"}
+            keep_cols = {"audio", "text", "duration", "sift_response", "caption"}
             extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
         else:
-            # Remove extra columns, keep only audio, text, and duration (for group_by_length)
-            extra_cols = [
-                c for c in (ds.column_names or []) if c not in {"audio", "text", "duration"}
-            ]
+            keep_cols = {"audio", "text", "duration"}
+            extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
+
+        # Cast audio column after removing problematic columns
+        ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
+
+        # For multitask, add task column to identify sample type
+        if self.multitask_enabled:
+            task = dataset_cfg.get("task", "transcribe")  # Default to transcribe
+            if use_streaming:
+                # For streaming datasets, use map to add task column
+                ds = ds.map(lambda x: {**x, "task": task})
+            else:
+                ds = ds.add_column("task", [task] * len(ds))
 
         # Filter TEDLIUM ignore markers only for TEDLIUM dataset
         # Duration filtering happens in DataCollator to avoid loading all audio upfront
@@ -112,9 +182,12 @@ class DatasetLoader:
             def filter_tedlium(text):
                 return text.strip() != "ignore_time_segment_in_scoring"
 
-            ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
+            if use_streaming:
+                ds = ds.filter(filter_tedlium, input_columns="text")
+            else:
+                ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
 
-        return ds
+        return ds, use_streaming
 
     def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
         """Upsample or downsample dataset to target size."""
@@ -131,6 +204,7 @@ class DatasetLoader:
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
+        streaming_datasets = []
 
         for d_cfg in tqdm(self.config.datasets, desc="Loading datasets"):
             train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
@@ -138,13 +212,27 @@ class DatasetLoader:
             target_samples = d_cfg.get("target_samples")
 
             for train_split in train_splits:
-                ds = self._prepare_split(d_cfg, train_split)
-                if target_samples:
-                    ds = self._resample_to_target(ds, target_samples)
-                train_datasets.append(ds)
+                ds, is_streaming = self._prepare_split(d_cfg, train_split)
+                if is_streaming:
+                    # For streaming datasets, take target samples and collect
+                    if target_samples:
+                        ds = ds.take(target_samples)
+                    streaming_datasets.append(ds)
+                else:
+                    if target_samples:
+                        ds = self._resample_to_target(ds, target_samples)
+                    train_datasets.append(ds)
 
             for eval_split in eval_splits:
-                val_datasets.append(self._prepare_split(d_cfg, eval_split))
+                ds, is_streaming = self._prepare_split(d_cfg, eval_split)
+                if not is_streaming:
+                    val_datasets.append(ds)
+
+        # Convert streaming datasets to regular datasets
+        for streaming_ds in streaming_datasets:
+            samples = list(tqdm(streaming_ds, desc="Loading streaming dataset"))
+            if samples:
+                train_datasets.append(Dataset.from_list(samples))
 
         # Concatenate and shuffle
         train_ds = (
@@ -321,22 +409,39 @@ class MultiTaskDataCollator(DataCollator):
             num_tokens = self.projector.get_output_length(encoder_len)
             audio_token_counts.append(num_tokens)
 
-        # Build messages - differentiate between ASR and SIFT tasks using task column
+        # Build messages - differentiate between ASR, SIFT, and QA tasks using task column
         text_features = []
         for f, num_audio_tokens in zip(valid_features, audio_token_counts):
             audio_placeholder = "<audio>" * num_audio_tokens
             task = f.get("task", "transcribe")
 
-            if task == "sift":
+            if task == "caption":
+                # Audio/music captioning task
+                response = (f.get("caption") or f.get("text") or "").strip()
+                task_prompt = random.choice(CAPTION_PROMPTS)
+                # Multitask prompt strategy: 50% no instruction, 50% with instruction
+                if random.random() < 0.5:
+                    user_content = audio_placeholder
+                else:
+                    user_content = f"{task_prompt}\n\n{audio_placeholder}"
+            elif task == "sift":
                 # SIFT task: describe audio
                 response = (f.get("sift_response") or f.get("text") or "").strip()
-                prompt = random.choice(DESCRIBE_PROMPTS)
+                task_prompt = random.choice(DESCRIBE_PROMPTS)
+                # Multitask prompt strategy: 50% no instruction, 50% with instruction
+                if random.random() < 0.5:
+                    user_content = audio_placeholder
+                else:
+                    user_content = f"{task_prompt}\n\n{audio_placeholder}"
             else:
                 # ASR task: transcription
                 response = (f.get("text") or "").strip().lower()
-                prompt = random.choice(TRANSCRIBE_PROMPTS)
-
-            user_content = f"{audio_placeholder} {prompt}"
+                task_prompt = random.choice(TRANSCRIBE_PROMPTS)
+                # Multitask prompt strategy: 50% no instruction, 50% with instruction
+                if random.random() < 0.5:
+                    user_content = audio_placeholder
+                else:
+                    user_content = f"{task_prompt}\n\n{audio_placeholder}"
 
             # Build messages (skip system if empty)
             messages = []
