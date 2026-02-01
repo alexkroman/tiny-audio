@@ -236,10 +236,18 @@ class AssemblyAIEvaluator(Evaluator):
         api_key: str,
         base_url: str | None = None,
         temperature: float | None = None,
+        prompt: str | None = None,
+        keyterms_prompt: list[str] | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.transcriber = setup_assemblyai(api_key, base_url=base_url, temperature=temperature)
+        self.transcriber = setup_assemblyai(
+            api_key,
+            base_url=base_url,
+            temperature=temperature,
+            prompt=prompt,
+            keyterms_prompt=keyterms_prompt,
+        )
 
     def transcribe(self, audio) -> tuple[str, float]:
         wav_bytes = prepare_wav_bytes(audio)

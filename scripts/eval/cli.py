@@ -488,6 +488,10 @@ def main(
         Optional[float],
         typer.Option("--temperature", "-t", help="Temperature for AssemblyAI SLAM-1 (e.g., 0.5)"),
     ] = None,
+    keyterms: Annotated[
+        Optional[str],
+        typer.Option("--keyterms", "-k", help="Comma-separated key terms for AssemblyAI SLAM-1"),
+    ] = None,
 ):
     """Evaluate ASR models on standard datasets."""
     # If a subcommand was invoked, skip
@@ -745,10 +749,18 @@ def main(
                 model_id = "slam-1"
                 if temperature is not None:
                     console.print(f"[cyan]Using temperature: {temperature}[/cyan]")
+                if user_prompt is not None:
+                    console.print(f"[cyan]Using prompt: {user_prompt}[/cyan]")
+                keyterms_list = None
+                if keyterms is not None:
+                    keyterms_list = [k.strip() for k in keyterms.split(",")]
+                    console.print(f"[cyan]Using keyterms: {keyterms_list}[/cyan]")
                 evaluator = AssemblyAIEvaluator(
                     api_key=api_key,
                     base_url=base_url,
                     temperature=temperature,
+                    prompt=user_prompt,
+                    keyterms_prompt=keyterms_list,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     num_workers=num_workers,

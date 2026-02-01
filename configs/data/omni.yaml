@@ -12,7 +12,7 @@ datasets:
     task: sift
     train_splits: [podcast]
     eval_splits: [podcast]
-    target_samples: 200000
+    target_samples: 500000
 
   - path: mazesmazes/sift-audio-2
     audio_column: audio
@@ -20,7 +20,7 @@ datasets:
     task: sift
     train_splits: [commonvoice]
     eval_splits: [commonvoice]
-    target_samples: 100000
+    target_samples: 300000
 
   - path: mazesmazes/sift-audio-2
     audio_column: audio
@@ -28,7 +28,7 @@ datasets:
     task: sift
     train_splits: [meld]
     eval_splits: [meld]
-    target_samples: 50000
+    target_samples: 150000
 
   - path: mazesmazes/sift-audio-2
     audio_column: audio
@@ -36,7 +36,7 @@ datasets:
     task: sift
     train_splits: [esd]
     eval_splits: [esd]
-    target_samples: 52500
+    target_samples: 150000
 
   - path: mazesmazes/sift-audio-2
     audio_column: audio
@@ -44,7 +44,7 @@ datasets:
     task: sift
     train_splits: [crema_d]
     eval_splits: [crema_d]
-    target_samples: 22000
+    target_samples: 65000
 
   - path: mazesmazes/sift-audio-2
     audio_column: audio
@@ -52,7 +52,7 @@ datasets:
     task: sift
     train_splits: [tess]
     eval_splits: [tess]
-    target_samples: 14000
+    target_samples: 40000
 
   - path: mazesmazes/sift-audio-2
     audio_column: audio
@@ -60,7 +60,7 @@ datasets:
     task: sift
     train_splits: [ravdess]
     eval_splits: [ravdess]
-    target_samples: 7200
+    target_samples: 22000
 
   - path: mazesmazes/sift-audio-2
     audio_column: audio
@@ -68,7 +68,7 @@ datasets:
     task: sift
     train_splits: [savee]
     eval_splits: [savee]
-    target_samples: 2400
+    target_samples: 7000
 
 # Audio processing
 sample_rate: 16000

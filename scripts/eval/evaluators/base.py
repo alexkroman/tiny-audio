@@ -17,6 +17,8 @@ def setup_assemblyai(
     speaker_labels: bool = False,
     base_url: str | None = None,
     temperature: float | None = None,
+    prompt: str | None = None,
+    keyterms_prompt: list[str] | None = None,
 ):
     """Initialize AssemblyAI transcriber with slam-1 model."""
     import assemblyai as aai
@@ -24,15 +26,20 @@ def setup_assemblyai(
     aai.settings.api_key = api_key
     if base_url:
         aai.settings.base_url = base_url
-    # Build raw config kwargs (allows passing extra params like temperature)
-    raw_config_kwargs = {
+
+    # Build config kwargs directly on TranscriptionConfig
+    config_kwargs = {
         "speech_model": aai.types.SpeechModel.slam_1,
         "speaker_labels": speaker_labels,
     }
+    if prompt is not None:
+        config_kwargs["prompt"] = prompt
+    if keyterms_prompt is not None:
+        config_kwargs["keyterms_prompt"] = keyterms_prompt
     if temperature is not None:
-        raw_config_kwargs["temperature"] = temperature
-    raw_config = aai.types.RawTranscriptionConfig(**raw_config_kwargs)
-    config = aai.TranscriptionConfig(raw_transcription_config=raw_config)
+        config_kwargs["temperature"] = temperature
+
+    config = aai.TranscriptionConfig(**config_kwargs)
     return aai.Transcriber(config=config)
 
 

@@ -178,6 +178,7 @@ def install_dependencies(conn: Connection) -> None:
 
     setup_commands = """
         export PATH="/root/.local/bin:$PATH"
+        export LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cusparselt/lib:${LD_LIBRARY_PATH:-}"
         export PIP_ROOT_USER_ACTION=ignore
         export POETRY_VIRTUALENVS_CREATE=false
         export PIP_BREAK_SYSTEM_PACKAGES=1
@@ -187,30 +188,34 @@ def install_dependencies(conn: Connection) -> None:
         echo -e "[global]\\nbreak-system-packages = true" > /root/.config/pip/pip.conf
 
         # Install Poetry if needed
-        command -v poetry >/dev/null 2>&1 || pip install --user poetry
-        pip install --user poetry-plugin-export
+        command -v poetry >/dev/null 2>&1 || python3 -m pip install --user poetry
+        python3 -m pip install --user poetry-plugin-export
 
         # Configure Poetry
         poetry config virtualenvs.create false
         poetry config installer.max-workers 10
 
         # Install PyTorch with CUDA 12.8 if needed
-        python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || \
-            pip install --user torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128
+        python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || \
+            python3 -m pip install --user torch~=2.10.0 --index-url=https://download.pytorch.org/whl/cu128
 
-        # Install peft for LoRA support
-        pip install --user peft
+        # Install cusparseLt library required by torch (may already be satisfied)
+        python3 -m pip install --user nvidia-cusparselt-cu12 2>&1 | grep -v "already satisfied" || true
 
-        # Export and install dependencies (excluding torch to preserve system version)
+        # Fix torchvision version mismatch if present (torch 2.8 needs torchvision 0.23)
+        python3 -m pip uninstall torchvision -y 2>/dev/null || true
+        python3 -m pip install --user torchvision~=0.25.0 --index-url=https://download.pytorch.org/whl/cu128 2>&1 | grep -v "already satisfied" || true
+
+        # Export and install dependencies (excluding torch to preserve CUDA-specific version)
         cd /workspace
         poetry export --only main --without-hashes | grep -v "^torch==" > /tmp/requirements.txt
-        pip install --user -r /tmp/requirements.txt 2>&1 | grep -v "already satisfied" || true
+        python3 -m pip install --user -r /tmp/requirements.txt 2>&1 | grep -v "already satisfied" || true
 
         # Install project in editable mode
-        pip install --user -e . --no-deps
+        python3 -m pip install --user -e . --no-deps
 
-        # Verify
-        python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+        # Verify (warn on failure but do not abort)
+        python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())" || echo "WARNING: torch verification failed"
     """
 
     conn.run(f"bash -c '{setup_commands}'", hide=False)
@@ -273,8 +278,9 @@ def build_training_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-pip install hf_transfer --quiet --root-user-action=ignore
+python3 -m pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cusparselt/lib:${{LD_LIBRARY_PATH:-}}"
 export TOKENIZERS_PARALLELISM=false
 export HF_DATASETS_AUDIO_DECODER="soundfile"
 export HF_HOME=/workspace/.cache/huggingface
@@ -465,7 +471,7 @@ def build_sift_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-pip install hf_transfer --quiet --root-user-action=ignore
+python3 -m pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
@@ -599,7 +605,7 @@ def build_clothoaqa_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-pip install hf_transfer --quiet --root-user-action=ignore
+python3 -m pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
@@ -733,7 +739,7 @@ def build_eval_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-pip install hf_transfer modelscope --quiet --root-user-action=ignore
+python3 -m pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
