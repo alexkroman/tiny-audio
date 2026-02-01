@@ -12,17 +12,27 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
 
 
-def setup_assemblyai(api_key: str, speaker_labels: bool = False, base_url: str | None = None):
-    """Initialize AssemblyAI transcriber with universal-3-pro preview model."""
+def setup_assemblyai(
+    api_key: str,
+    speaker_labels: bool = False,
+    base_url: str | None = None,
+    temperature: float | None = None,
+):
+    """Initialize AssemblyAI transcriber with slam-1 model."""
     import assemblyai as aai
 
     aai.settings.api_key = api_key
     if base_url:
         aai.settings.base_url = base_url
-    # Use speech_models list to bypass SDK enum and use preview model
-    config = aai.TranscriptionConfig(
-        speech_models=["universal-3-pro"], speaker_labels=speaker_labels
-    )
+    # Build raw config kwargs (allows passing extra params like temperature)
+    raw_config_kwargs = {
+        "speech_model": aai.types.SpeechModel.slam_1,
+        "speaker_labels": speaker_labels,
+    }
+    if temperature is not None:
+        raw_config_kwargs["temperature"] = temperature
+    raw_config = aai.types.RawTranscriptionConfig(**raw_config_kwargs)
+    config = aai.TranscriptionConfig(raw_transcription_config=raw_config)
     return aai.Transcriber(config=config)
 
 

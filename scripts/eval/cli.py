@@ -484,6 +484,10 @@ def main(
         bool,
         typer.Option("--verbose", "-v", help="Show word-by-word alignment details"),
     ] = False,
+    temperature: Annotated[
+        Optional[float],
+        typer.Option("--temperature", "-t", help="Temperature for AssemblyAI SLAM-1 (e.g., 0.5)"),
+    ] = None,
 ):
     """Evaluate ASR models on standard datasets."""
     # If a subcommand was invoked, skip
@@ -739,9 +743,12 @@ def main(
                 )
             else:
                 model_id = "slam-1"
+                if temperature is not None:
+                    console.print(f"[cyan]Using temperature: {temperature}[/cyan]")
                 evaluator = AssemblyAIEvaluator(
                     api_key=api_key,
                     base_url=base_url,
+                    temperature=temperature,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     num_workers=num_workers,
