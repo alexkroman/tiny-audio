@@ -89,7 +89,7 @@ class MMAUEvaluator:
         """Answer a question about audio using the model."""
         # Format prompt with question and choices
         choices_str = "\n".join(choices)
-        prompt = f"{question}\n{choices_str}\n\nPlease make your choice among A/B/C/D and do not output other texts."
+        prompt = f"{question}\n{choices_str}\n\nPlease make your choice among A/B/C/D and do not output other texts. Answer with only the letter of your choice."
 
         if self.user_prompt:
             prompt = f"{self.user_prompt}\n{prompt}"
@@ -97,7 +97,10 @@ class MMAUEvaluator:
         start = time.time()
         # Try with prompt first, fall back to plain transcription if not supported
         try:
-            result = self.pipeline(audio, generate_kwargs={"prompt": prompt})
+            result = self.pipeline(
+                audio,
+                user_prompt=prompt,
+            )
         except Exception:
             # Model doesn't support prompts - just transcribe
             result = self.pipeline(audio)
@@ -324,7 +327,7 @@ class AssemblyAIMMAUEvaluator(MMAUEvaluator):
 
         # Format prompt with question and choices
         choices_str = "\n".join(choices)
-        prompt = f"{question}\n{choices_str}\n\nPlease make your choice among A/B/C/D and do not output other texts."
+        prompt = f"{question}\n{choices_str}\n\nPlease make your choice among A/B/C/D and do not output other texts. Answer with only the letter of your choice."
 
         # Create config with prompt (undocumented but supported)
         config = aai.TranscriptionConfig(

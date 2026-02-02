@@ -1,6 +1,9 @@
 """CLI for ASR, diarization, and alignment evaluation."""
 
 import os
+
+# Use soundfile for audio decoding instead of torchaudio (avoids compatibility issues)
+os.environ.setdefault("HF_DATASETS_AUDIO_DECODER", "soundfile")
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
@@ -913,8 +916,9 @@ def airbench(
     AIR-Bench is a benchmark for Large Audio-Language Models with 19 tasks
     covering speech, sound, and music understanding.
 
-    When running all tasks (no -t flag), -n limits samples PER TASK for balanced
-    evaluation. When running a single task, -n limits total samples.
+    By default, runs only speech tasks. Use --task to run a specific task.
+    When running multiple tasks (no -t flag), -n limits samples PER TASK.
+    When running a single task, -n limits total samples.
 
     Examples:
         # Run all speech tasks

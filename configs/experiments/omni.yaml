@@ -1,6 +1,5 @@
 # @package _global_
-# SIFT training (AZeroS-style) starting from pretrained ASR model
-# Uses mazesmazes/sift-audio-2 dataset with 3 modes: sift_s, sift_ssp, sit_ssp
+# Omni training: SIFT + transcription multitask
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=omni
@@ -9,21 +8,18 @@ defaults:
   - override /data: omni
 
 model:
-  pretrained_model_path: mazesmazes/tiny-audio
   projector_type: mlp
   projector_pool_stride: 4
   projector_hidden_dim: 1024
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   text_model_id: HuggingFaceTB/SmolLM3-3B
-  # Generation defaults for instruction-following
-  do_sample: true
-  enable_thinking: true
-  top_k: 0
-  top_p: 0.01
-  temperature: 1.0
+  # Generation defaults for voice agent (greedy decoding)
+  do_sample: false
+  max_new_tokens: 128
+  enable_thinking: false
   repetition_penalty: 1.1
 
-# SIFT configuration (AZeroS-style training)
+# SIFT configuration
 sift:
   enabled: true
 

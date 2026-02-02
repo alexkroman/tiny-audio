@@ -13,6 +13,8 @@ from huggingface_hub import hf_hub_download
 from rich.console import Console
 from rich.table import Table
 
+from tiny_audio.asr_pipeline import strip_thinking
+
 from .asr import print_generation_config
 
 console = Console()
@@ -51,16 +53,13 @@ MUSIC_TASKS = {
 ALL_TASKS = SPEECH_TASKS | SOUND_TASKS | MUSIC_TASKS
 
 # AIR-Bench prompt template (from Inference_Foundation.py)
-AIRBENCH_PROMPT_TEMPLATE = """Listen to the audio and answer the following multiple choice question.
-
-Question: {question}
-
+AIRBENCH_PROMPT_TEMPLATE = """Choose the most suitable answer from options A, B, C, and D to respond the question in next line, you may only choose A or B or C or D.
+{question}
 A. {choice_a}
 B. {choice_b}
 C. {choice_c}
 D. {choice_d}
-
-Respond with ONLY a single letter: A, B, C, or D."""
+Respond with exactly one letter."""
 
 
 @attrs.define
@@ -198,24 +197,55 @@ class AIRBenchEvaluator:
         return "?"
 
     def _extract_answer(self, response: str) -> str:
-        """Extract A, B, C, or D from model response.
-
-        Follows the logic from AIR-Bench score_foundation.py
-        """
-        response = response.strip().replace("\n", "")
+        """Extract A, B, C, or D from model response."""
+        import re
 
         if not response:
             return "?"
 
-        # Check first character
-        if response[0] in ("A", "B", "C", "D"):
-            return response[0]
+        # Check if response is ONLY a single letter (direct answer)
+        if response.strip() in ("A", "B", "C", "D"):
+            return response.strip()
 
-        # Check for "The answer is X." pattern (second to last char)
-        if len(response) > 1 and response[-2] in ("A", "B", "C", "D"):
-            return response[-2]
+        # Look for standalone letter at end: "...the answer is A" or just "A" on its own line
+        match = re.search(r"\b([ABCD])\s*$", response)
+        if match:
+            return match.group(1)
 
-        # Check for letter anywhere in response
+        # Look for quoted letter at end: respond with "C" or 'C'
+        match = re.search(r'["\']([ABCD])["\']\s*\.?\s*$', response)
+        if match:
+            return match.group(1)
+
+        # Look for parenthesized letter: (A), (B), (C), (D) - common format
+        matches = re.findall(r"\(([ABCD])\)", response)
+        if matches:
+            return matches[0]  # Return first match (usually the answer stated early)
+
+        # Look for "A." / "B." / "C." / "D." pattern at end of response
+        match = re.search(r"\b([ABCD])\.\s*\w+\s*$", response)
+        if match:
+            return match.group(1)
+
+        # Look for "answer/option is X" or "answer: X" pattern
+        match = re.search(r"(?:answer|option)\s*(?:is|:)\s*([ABCD])\b", response, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+        # Look for "X. <word>" pattern (e.g., "C. Train") - find LAST occurrence
+        matches = re.findall(r"\b([ABCD])\.\s+\w+", response)
+        if matches:
+            return matches[-1]  # Return last match
+
+        # Last resort: find the LAST letter mentioned (reasoning comes first, answer last)
+        for letter in ("D", "C", "B", "A"):  # Reverse order to prefer later mentions
+            # Find all positions of this letter
+            positions = [i for i, c in enumerate(response.upper()) if c == letter]
+            # Check if this letter appears in the second half of the response
+            if positions and positions[-1] > len(response) // 2:
+                return letter
+
+        # Absolute fallback: any letter
         for letter in ("A", "B", "C", "D"):
             if letter in response.upper():
                 return letter
@@ -233,13 +263,18 @@ class AIRBenchEvaluator:
 
         start = time.time()
         try:
-            result = self.pipeline(str(audio_path), user_prompt=prompt)
+            result = self.pipeline(
+                str(audio_path),
+                user_prompt=prompt,
+            )
             prediction = result.get("text", "") if isinstance(result, dict) else str(result)
         except Exception as e:
             console.print(f"[red]Error processing sample {item['uniq_id']}: {e}[/red]")
             prediction = ""
         elapsed = time.time() - start
 
+        # Strip thinking tags for display and extraction
+        prediction = strip_thinking(prediction)
         extracted = self._extract_answer(prediction)
         correct = extracted == gt_letter
 
@@ -280,7 +315,8 @@ class AIRBenchEvaluator:
                 items = items[:max_samples]
         else:
             # Multiple tasks: max_samples is PER TASK for balanced evaluation
-            task_set = ALL_TASKS
+            # Default to speech tasks only (use --task to run specific task)
+            task_set = SPEECH_TASKS
             items = []
 
             # Group by task and take max_samples from each
@@ -315,14 +351,12 @@ class AIRBenchEvaluator:
             self.results.append(result)
 
             status = "✓" if result.correct else "✗"
-            # Truncate prediction for display but show enough to debug
-            pred_display = result.prediction[:200] if result.prediction else "(empty)"
             console.print(
                 f"[{idx}/{len(items)}] {status} {result.task_name} | "
                 f"Pred: {result.extracted_answer} | GT: {result.reference} | "
                 f"Time: {result.time:.2f}s"
             )
-            console.print(f"  [dim]Raw output: {pred_display}[/dim]")
+            console.print(f"  [dim]Raw output: {result.prediction or '(empty)'}[/dim]")
 
             if idx % 100 == 0:
                 self._print_checkpoint(idx)

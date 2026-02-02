@@ -197,14 +197,14 @@ def install_dependencies(conn: Connection) -> None:
 
         # Install PyTorch with CUDA 12.8 if needed
         python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || \
-            python3 -m pip install --user torch~=2.10.0 --index-url=https://download.pytorch.org/whl/cu128
+            python3 -m pip install --user torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128
 
         # Install cusparseLt library required by torch (may already be satisfied)
         python3 -m pip install --user nvidia-cusparselt-cu12 2>&1 | grep -v "already satisfied" || true
 
         # Fix torchvision version mismatch if present (torch 2.8 needs torchvision 0.23)
         python3 -m pip uninstall torchvision -y 2>/dev/null || true
-        python3 -m pip install --user torchvision~=0.25.0 --index-url=https://download.pytorch.org/whl/cu128 2>&1 | grep -v "already satisfied" || true
+        python3 -m pip install --user torchvision~=0.23.0 --index-url=https://download.pytorch.org/whl/cu128 2>&1 | grep -v "already satisfied" || true
 
         # Export and install dependencies (excluding torch to preserve CUDA-specific version)
         cd /workspace

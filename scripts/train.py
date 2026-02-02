@@ -17,6 +17,8 @@ from dataclasses import fields
 from typing import Any
 
 os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
+# Use soundfile for audio decoding instead of torchaudio (avoids compatibility issues)
+os.environ.setdefault("HF_DATASETS_AUDIO_DECODER", "soundfile")
 
 import hydra
 import torch
@@ -43,24 +45,7 @@ from tiny_audio.asr_modeling import ASRModel
 # Prompts for ASR training (transcription task)
 # Target: lowercased verbatim transcription of speech
 TRANSCRIBE_PROMPTS = [
-    # Direct/simple
-    "Transcribe this.",
-    "What is being said?",
-    "What did they say?",
-    "What words are spoken?",
-    "Write out the speech.",
-    # Slightly varied
-    "Transcribe the audio.",
-    "What do you hear them saying?",
-    "Type out what's said.",
-    "What's the transcript?",
-    "Transcribe the spoken words.",
-    # Question form
-    "What is the speaker saying?",
-    "What was spoken here?",
-    "What are the words?",
-    "What did you hear?",
-    "What's being said?",
+    "Transcribe: ",
 ]
 
 # SIFT instructions by mode (matching AZeroS exactly)
@@ -69,7 +54,7 @@ TRANSCRIBE_PROMPTS = [
 SIFT_INSTRUCTIONS = {
     "sift_s": "",  # No instruction - conversational response
     "sift_ssp": "",  # No instruction - empathetic response
-    "sit_ssp": "Describe all information you can hear.",  # Fixed description instruction
+    "sit_ssp": "Describe all information you can hear: ",  # Fixed description instruction
 }
 
 
@@ -98,6 +83,20 @@ class DatasetLoader:
             trust_remote_code=True,
         )
 
+        # Apply text transform if specified (e.g., extract text from nested structures)
+        text_transform = dataset_cfg.get("text_transform")
+        if text_transform == "first_answer_text":
+            # Extract text from SQuAD-style answers: [{"answer_start": N, "text": "..."}]
+            text_column = dataset_cfg.get("text_column", "text")
+            ds = ds.map(
+                lambda x: {"text": x[text_column][0]["text"] if x[text_column] else ""},
+                num_proc=self.num_proc,
+            )
+            # Override text_column since we've already extracted to "text"
+            dataset_cfg = OmegaConf.to_container(dataset_cfg, resolve=True)
+            dataset_cfg["text_column"] = "text"
+            dataset_cfg = OmegaConf.create(dataset_cfg)
+
         # Normalize column names for audio and text
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
@@ -112,14 +111,18 @@ class DatasetLoader:
         # Remove extra columns BEFORE casting to avoid schema mismatch errors
         # (some datasets have complex column types that can't be cast)
         if self.sift_enabled:
-            keep_cols = {"audio", "text", "duration", "sift_response", "mode"}
+            keep_cols = {"audio", "text", "duration", "sift_response", "mode", "task"}
             extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
         else:
-            keep_cols = {"audio", "text", "duration"}
+            keep_cols = {"audio", "text", "duration", "task"}
             extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
+
+        # Add task column if specified in config
+        task = dataset_cfg.get("task", "transcribe")
+        ds = ds.add_column("task", [task] * len(ds))
 
         # Cast audio column after removing problematic columns
         return ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
@@ -330,21 +333,32 @@ class SIFTDataCollator(DataCollator):
             num_tokens = self.projector.get_output_length(encoder_len)
             audio_token_counts.append(num_tokens)
 
-        # Build messages for SIFT task (AZeroS-style)
+        # Build messages for each sample based on task type
         text_features = []
         for f, num_audio_tokens in zip(valid_features, audio_token_counts):
             audio_placeholder = "<audio>" * num_audio_tokens
-            mode = f.get("mode", "")  # SIFT mode: sift_s, sift_ssp, sit_ssp
+            task = f.get("task", "sift")
 
-            # SIFT task: use AZeroS-style fixed instructions based on mode
-            response = (f.get("sift_response") or f.get("text") or "").strip()
-            instruction = SIFT_INSTRUCTIONS.get(mode, "")
-
-            # Format: <audio_tokens> {instruction} (matching AZeroS trainer.py)
-            if instruction:
-                user_content = f"{audio_placeholder} {instruction}"
-            else:
+            if task == "transcribe":
+                # Transcription task: use transcription prompt
+                response = (f.get("text") or "").strip().lower()
+                prompt = random.choice(TRANSCRIBE_PROMPTS)
+                user_content = audio_placeholder + " " + prompt
+            elif task == "answer":
+                # Answer extraction task: empty prompt, lowercased text target
+                response = (f.get("text") or "").strip().lower()
                 user_content = audio_placeholder
+            else:
+                # SIFT task: use AZeroS-style fixed instructions based on mode
+                mode = f.get("mode", "")
+                response = (f.get("sift_response") or f.get("text") or "").strip()
+                instruction = SIFT_INSTRUCTIONS.get(mode, "")
+
+                # Format: <audio_tokens> {instruction} (matching AZeroS trainer.py)
+                if instruction:
+                    user_content = f"{audio_placeholder} {instruction}"
+                else:
+                    user_content = audio_placeholder
 
             # Build messages (skip system if empty)
             messages = []
@@ -472,6 +486,10 @@ def main(cfg: DictConfig) -> None:
         model = ASRModel.from_pretrained(cfg.model.pretrained_model_path, config=asr_config)
     else:
         model = ASRModel(asr_config)
+
+    # Validate generation config early to catch conflicts before training starts
+    # (e.g., do_sample=False with temperature/top_p/top_k set)
+    model.generation_config.validate()
 
     model.config.use_cache = False
 

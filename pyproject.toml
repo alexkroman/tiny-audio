@@ -23,6 +23,7 @@ classifiers = [
 ]
 requires-python = ">=3.10,<3.13"
 dynamic = ["dependencies"]
+dependencies = ["pipecat-ai[silero] (>=0.0.101,<0.0.102)"]
 
 [project.urls]
 Homepage = "https://github.com/alexkroman/tiny-audio"
@@ -50,7 +51,7 @@ priority = "supplemental"
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
 # torch - Poetry will pull from pytorch-cu128 source on Linux when available
-torch = "~2.10.0"
+torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
 transformers = ">=5.0.0"
@@ -80,6 +81,8 @@ spacy = "^3.8.11"
 ten-vad = ">=1.0.6"
 speechbrain = ">=1.0.3"
 pytz = "*"
+kokoro = ">=0.9.2"  # Kokoro TTS for speech output
+sounddevice = ">=0.4.6"  # Audio I/O for voice demos
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]

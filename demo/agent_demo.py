@@ -32,16 +32,16 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 async def main():
     # Import pipecat components
     try:
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.runner import PipelineRunner
         from pipecat.pipeline.task import PipelineTask
+        from pipecat.services.openai.llm import OpenAILLMService
+        from pipecat.services.openai.tts import OpenAITTSService
         from pipecat.transports.local.audio import (
             LocalAudioTransport,
             LocalAudioTransportParams,
         )
-        from pipecat.services.openai.llm import OpenAILLMService
-        from pipecat.services.openai.tts import OpenAITTSService
-        from pipecat.audio.vad.silero import SileroVADAnalyzer
     except ImportError as e:
         print(f"Error: {e}")
         print("\nPlease install pipecat with required extras:")

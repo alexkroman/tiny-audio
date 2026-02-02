@@ -1,5 +1,10 @@
 """Dataset configuration and loading for ASR evaluation."""
 
+import os
+
+# Use soundfile for audio decoding instead of torchaudio (avoids compatibility issues)
+os.environ.setdefault("HF_DATASETS_AUDIO_DECODER", "soundfile")
+
 from dataclasses import dataclass
 
 from datasets import Audio, load_dataset

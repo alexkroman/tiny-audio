@@ -54,7 +54,8 @@ tokenizer_config.json -filter -diff -merge text
 """
         gitattributes_path = temp_path / ".gitattributes"
         gitattributes_path.write_text(gitattributes_content)
-        console.print("Created .gitattributes (excludes tokenizer_config.json from LFS)")
+
+        console.print(f"\n[bold]Pushing to {repo_id}[/bold]\n")
 
         # Copy all custom ASR Python files for trust_remote_code support
         # Include handler.py for Inference Endpoints support
@@ -74,25 +75,25 @@ tokenizer_config.json -filter -diff -merge text
             if src.exists():
                 shutil.copy2(src, dst)
                 if filename == "handler.py":
-                    console.print(f"Copied {src} to staging (for Inference Endpoints)")
+                    console.print(f"  {src} (for Inference Endpoints)")
                 else:
-                    console.print(f"Copied {src} to staging")
+                    console.print(f"  {src}")
             else:
-                console.print(f"[yellow]Warning: {src} not found, skipping[/yellow]")
+                console.print(f"  [yellow]{src} not found, skipping[/yellow]")
 
         # Copy MODEL_CARD.md as README.md
         model_card_src = Path("MODEL_CARD.md")
         if model_card_src.exists():
             readme_dst = temp_path / "README.md"
             shutil.copy2(model_card_src, readme_dst)
-            console.print(f"Copied {model_card_src} as README.md to staging")
+            console.print(f"  {model_card_src} -> README.md")
 
         # Copy requirements.txt for model dependencies
         requirements_src = Path("requirements.txt")
         if requirements_src.exists():
             requirements_dst = temp_path / "requirements.txt"
             shutil.copy2(requirements_src, requirements_dst)
-            console.print(f"Copied {requirements_src} to staging")
+            console.print(f"  {requirements_src}")
 
         # Copy tokenizer files from checkpoint directory if provided
         if checkpoint_dir:
@@ -108,10 +109,10 @@ tokenizer_config.json -filter -diff -merge text
                 if src.exists():
                     dst = temp_path / filename
                     shutil.copy2(src, dst)
-                    console.print(f"Copied {src} to staging")
+                    console.print(f"  {src}")
 
         # Upload files to Hub
-        console.print(f"\nUploading to {repo_id}...")
+        console.print("\n[dim]Uploading...[/dim]")
         api.upload_folder(
             folder_path=temp_dir,
             repo_id=repo_id,

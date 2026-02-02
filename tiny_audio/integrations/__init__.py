@@ -1,9 +1,6 @@
 """Integration adapters for voice agent frameworks."""
 
-try:
-    from .pipecat_stt import TinyAudioSTTService
-except ImportError:
-    # pipecat not installed - that's okay, make import conditional
-    TinyAudioSTTService = None
+from .pipecat_s2s import TinyAudioS2SService
+from .pipecat_stt import TinyAudioSTTService
 
-__all__ = ["TinyAudioSTTService"]
+__all__ = ["TinyAudioSTTService", "TinyAudioS2SService"]
