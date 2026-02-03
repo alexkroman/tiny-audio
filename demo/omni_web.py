@@ -123,6 +123,7 @@ HTML_PAGE = """
         let mediaStream = null;
         let processor = null;
         let isRunning = false;
+        let isPlaying = false;
 
         const statusEl = document.getElementById('status');
         const startBtn = document.getElementById('startBtn');
@@ -175,9 +176,9 @@ HTML_PAGE = """
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
 
-                    // Send audio chunks
+                    // Send audio chunks (pause while playing response)
                     processor.onaudioprocess = (e) => {
-                        if (!isRunning || ws.readyState !== WebSocket.OPEN) return;
+                        if (!isRunning || isPlaying || ws.readyState !== WebSocket.OPEN) return;
                         const float32 = e.inputBuffer.getChannelData(0);
                         const int16 = new Int16Array(float32.length);
                         for (let i = 0; i < float32.length; i++) {
@@ -224,6 +225,8 @@ HTML_PAGE = """
         let playbackContext = null;
 
         async function playAudio(arrayBuffer) {
+            isPlaying = true;
+            setStatus('speaking', 'Speaking...');
             try {
                 // Decode as 48kHz int16 mono (server already resampled)
                 const int16 = new Int16Array(arrayBuffer);
@@ -244,9 +247,17 @@ HTML_PAGE = """
                 const source = playbackContext.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(playbackContext.destination);
-                source.start();
+
+                // Wait for audio to finish before resuming listening
+                await new Promise(resolve => {
+                    source.onended = resolve;
+                    source.start();
+                });
             } catch (err) {
                 console.error('Error playing audio:', err);
+            } finally {
+                isPlaying = false;
+                setStatus('listening', 'Listening...');
             }
         }
 
@@ -304,22 +315,33 @@ def load_models(model_id: str, voice: str = "af_heart"):
 
     # Load Silero VAD
     vad_model, vad_utils = torch.hub.load(
-        repo_or_dir='snakers4/silero-vad',
-        model='silero_vad',
-        force_reload=False
+        repo_or_dir="snakers4/silero-vad", model="silero_vad", force_reload=False
     )
     print("VAD loaded")
 
 
-def build_system_prompt() -> str:
-    """Build system prompt with conversation history."""
-    prompt = SYSTEM_PROMPT
-    if conversation_history:
-        history_text = "\n\nPrevious conversation:\n"
-        for turn in conversation_history[-MAX_HISTORY_TURNS:]:
-            history_text += f"{turn['role'].title()}: {turn['content']}\n"
-        prompt = prompt + history_text
-    return prompt
+GREETING_TEXT = "Hi there! How can I help you today?"
+
+
+def generate_greeting() -> tuple[str, bytes]:
+    """Generate greeting audio using TTS."""
+    if pipeline is None:
+        return GREETING_TEXT, b""
+
+    # Generate TTS audio using pipeline method
+    tts_result = pipeline.text_to_speech(GREETING_TEXT, voice=tts_voice)
+    audio_out = tts_result.get("audio")
+
+    if audio_out is None or len(audio_out) == 0:
+        return GREETING_TEXT, b""
+
+    # Resample from 24kHz to 48kHz for browser playback
+    num_samples = int(len(audio_out) * OUTPUT_SAMPLE_RATE / TTS_SAMPLE_RATE)
+    audio_resampled = scipy.signal.resample(audio_out, num_samples)
+
+    # Convert to int16 bytes
+    audio_int16 = (audio_resampled * 32767).astype(np.int16)
+    return GREETING_TEXT, audio_int16.tobytes()
 
 
 async def process_audio(audio_bytes: bytes) -> tuple[str, bytes]:
@@ -329,10 +351,6 @@ async def process_audio(audio_bytes: bytes) -> tuple[str, bytes]:
 
     if len(audio_array) == 0:
         return "", b""
-
-    # Update system prompt with conversation history
-    if model is not None:
-        model.system_prompt = build_system_prompt()
 
     # Use pipeline with return_audio=True to get text + TTS in one call
     result = pipeline(
@@ -346,10 +364,6 @@ async def process_audio(audio_bytes: bytes) -> tuple[str, bytes]:
 
     if not response_text:
         return "", b""
-
-    # Update conversation history
-    conversation_history.append({"role": "user", "content": "[audio input]"})
-    conversation_history.append({"role": "assistant", "content": response_text})
 
     if audio_out is None or len(audio_out) == 0:
         return response_text, b""
@@ -384,7 +398,14 @@ async def websocket_endpoint(websocket: WebSocket):
     get_speech_timestamps = vad_utils[0]
 
     try:
-        await websocket.send_json({"type": "status", "status": "listening", "text": "Listening..."})
+        # Send greeting on connection
+        greeting_text, greeting_audio = generate_greeting()
+        if greeting_text:
+            await websocket.send_json(
+                {"type": "transcript", "role": "assistant", "text": greeting_text}
+            )
+        if greeting_audio:
+            await websocket.send_bytes(greeting_audio)
 
         while True:
             data = await websocket.receive_bytes()
@@ -404,7 +425,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not is_speaking:
                     is_speaking = True
                     audio_buffer = []
-                    await websocket.send_json({"type": "status", "status": "listening", "text": "Listening..."})
                 audio_buffer.append(data)
                 silence_frames = 0
             elif is_speaking:
@@ -417,7 +437,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     silence_frames = 0
 
                     if audio_buffer:
-                        await websocket.send_json({"type": "status", "status": "processing", "text": "Processing..."})
+                        await websocket.send_json(
+                            {"type": "status", "status": "processing", "text": "Processing..."}
+                        )
 
                         # Process audio
                         full_audio = b"".join(audio_buffer)
@@ -426,17 +448,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         response_text, response_audio = await process_audio(full_audio)
 
                         if response_text:
-                            await websocket.send_json({
-                                "type": "transcript",
-                                "role": "assistant",
-                                "text": response_text
-                            })
+                            await websocket.send_json(
+                                {"type": "transcript", "role": "assistant", "text": response_text}
+                            )
 
                         if response_audio:
-                            await websocket.send_json({"type": "status", "status": "speaking", "text": "Speaking..."})
                             await websocket.send_bytes(response_audio)
-
-                        await websocket.send_json({"type": "status", "status": "listening", "text": "Listening..."})
 
     except WebSocketDisconnect:
         print("Client disconnected")
@@ -446,14 +463,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
 def main():
     parser = argparse.ArgumentParser(description="Tiny Audio Voice Agent Web Demo")
-    parser.add_argument("--model", "-m", default="mazesmazes/tiny-audio-omni",
-                        help="HuggingFace model ID")
-    parser.add_argument("--voice", "-v", default="af_heart",
-                        help="Kokoro TTS voice ID")
-    parser.add_argument("--port", "-p", type=int, default=8000,
-                        help="Server port")
-    parser.add_argument("--host", default="0.0.0.0",
-                        help="Server host")
+    parser.add_argument(
+        "--model", "-m", default="mazesmazes/tiny-audio-omni", help="HuggingFace model ID"
+    )
+    parser.add_argument("--voice", "-v", default="af_heart", help="Kokoro TTS voice ID")
+    parser.add_argument("--port", "-p", type=int, default=8000, help="Server port")
+    parser.add_argument("--host", default="0.0.0.0", help="Server host")
     args = parser.parse_args()
 
     load_models(args.model, args.voice)
