@@ -27,11 +27,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 app = FastAPI(title="Tiny Audio Voice Agent")
 
 # Global state (initialized on startup)
-model = None
 pipeline = None
 vad_model = None
 vad_utils = None
-device = None
 tts_voice = "af_heart"
 
 # Audio settings
@@ -101,6 +99,7 @@ HTML_PAGE = """
         .transcript p { margin: 8px 0; }
         .transcript .user { color: #007bff; }
         .transcript .assistant { color: #28a745; }
+        .transcript .interim { color: #6c757d; font-style: italic; }
     </style>
 </head>
 <body>
@@ -135,11 +134,28 @@ HTML_PAGE = """
             statusEl.textContent = text;
         }
 
-        function addTranscript(role, text) {
-            const p = document.createElement('p');
-            p.className = role;
-            p.textContent = (role === 'user' ? 'You: ' : 'Assistant: ') + text;
-            transcriptEl.appendChild(p);
+        let interimElement = null;
+
+        function addTranscript(role, text, interim = false) {
+            if (interim) {
+                // Update or create interim element
+                if (!interimElement) {
+                    interimElement = document.createElement('p');
+                    interimElement.className = 'assistant interim';
+                    transcriptEl.appendChild(interimElement);
+                }
+                interimElement.textContent = 'Assistant: ' + text;
+            } else {
+                // Final transcript - remove interim and add final
+                if (interimElement) {
+                    interimElement.remove();
+                    interimElement = null;
+                }
+                const p = document.createElement('p');
+                p.className = role;
+                p.textContent = (role === 'user' ? 'You: ' : 'Assistant: ') + text;
+                transcriptEl.appendChild(p);
+            }
             transcriptEl.scrollTop = transcriptEl.scrollHeight;
         }
 
@@ -197,7 +213,7 @@ HTML_PAGE = """
                         if (msg.type === 'status') {
                             setStatus(msg.status, msg.text);
                         } else if (msg.type === 'transcript') {
-                            addTranscript(msg.role, msg.text);
+                            addTranscript(msg.role, msg.text, msg.interim || false);
                         }
                     } else {
                         // Audio data - play it
@@ -288,30 +304,19 @@ HTML_PAGE = """
 
 def load_models(model_id: str, voice: str = "af_heart"):
     """Load ASR model and VAD."""
-    global model, pipeline, vad_model, vad_utils, device, tts_voice
+    global pipeline, vad_model, vad_utils, tts_voice
 
     tts_voice = voice
     print(f"Loading model: {model_id}")
 
-    # Device selection
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
-    print(f"Using device: {device}")
-
-    # Load ASR model
+    # Load ASR model and create pipeline (HF handles device detection)
     from tiny_audio.asr_modeling import ASRModel
     from tiny_audio.asr_pipeline import ASRPipeline
 
     model = ASRModel.from_pretrained(model_id)
-    model.to(device)
+    pipeline = ASRPipeline(model)
     model.eval()
-    model.system_prompt = SYSTEM_PROMPT
-    pipeline = ASRPipeline(model, device=device)
-    print("ASR model loaded (includes Kokoro TTS)")
+    print(f"ASR model loaded on {model.device} (includes Kokoro TTS)")
 
     # Load Silero VAD
     vad_model, vad_utils = torch.hub.load(
@@ -344,37 +349,31 @@ def generate_greeting() -> tuple[str, bytes]:
     return GREETING_TEXT, audio_int16.tobytes()
 
 
-async def process_audio(audio_bytes: bytes) -> tuple[str, bytes]:
-    """Process audio and return response text and audio."""
-    # Convert to numpy
-    audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+def process_audio_streaming_with_audio(audio_bytes: bytes):
+    """Process audio with streaming transcription and TTS.
 
-    if len(audio_array) == 0:
-        return "", b""
+    Yields dicts with either text updates or audio chunks.
+    Audio is generated sentence-by-sentence for low latency.
+    """
+    if len(audio_bytes) == 0:
+        return
 
-    # Use pipeline with return_audio=True to get text + TTS in one call
-    result = pipeline(
-        {"array": audio_array, "sampling_rate": SAMPLE_RATE},
-        return_audio=True,
-        tts_voice=tts_voice,
-    )
+    # Use raw_bytes format - pipeline handles conversion
+    audio_input = {"raw_bytes": audio_bytes, "dtype": "int16", "sampling_rate": SAMPLE_RATE}
 
-    response_text = result.get("text", "").strip()
-    audio_out = result.get("audio")
-
-    if not response_text:
-        return "", b""
-
-    if audio_out is None or len(audio_out) == 0:
-        return response_text, b""
-
-    # Resample from 24kHz to 48kHz for browser playback
-    num_samples = int(len(audio_out) * OUTPUT_SAMPLE_RATE / TTS_SAMPLE_RATE)
-    audio_resampled = scipy.signal.resample(audio_out, num_samples)
-
-    # Convert to int16 bytes
-    audio_int16 = (audio_resampled * 32767).astype(np.int16)
-    return response_text, audio_int16.tobytes()
+    # Stream transcription + TTS with explicit system prompt
+    for chunk in pipeline.transcribe_streaming_with_audio(
+        audio_input, voice=tts_voice, system_prompt=SYSTEM_PROMPT
+    ):
+        if chunk["type"] == "audio":
+            # Resample audio for browser playback
+            audio_out = chunk["audio"]
+            num_samples = int(len(audio_out) * OUTPUT_SAMPLE_RATE / TTS_SAMPLE_RATE)
+            audio_resampled = scipy.signal.resample(audio_out, num_samples)
+            audio_int16 = (audio_resampled * 32767).astype(np.int16)
+            yield {"type": "audio", "data": audio_int16.tobytes()}
+        else:
+            yield {"type": "text", "text": chunk["text"], "interim": chunk["interim"]}
 
 
 @app.get("/")
@@ -441,19 +440,21 @@ async def websocket_endpoint(websocket: WebSocket):
                             {"type": "status", "status": "processing", "text": "Processing..."}
                         )
 
-                        # Process audio
+                        # Process audio with streaming transcription + TTS
                         full_audio = b"".join(audio_buffer)
                         audio_buffer = []
 
-                        response_text, response_audio = await process_audio(full_audio)
-
-                        if response_text:
-                            await websocket.send_json(
-                                {"type": "transcript", "role": "assistant", "text": response_text}
-                            )
-
-                        if response_audio:
-                            await websocket.send_bytes(response_audio)
+                        # Stream text and audio chunks to client
+                        response_text = ""
+                        for chunk in process_audio_streaming_with_audio(full_audio):
+                            if chunk["type"] == "text":
+                                response_text = chunk["text"]
+                                await websocket.send_json(
+                                    {"type": "transcript", "role": "assistant", "text": chunk["text"], "interim": chunk["interim"]}
+                                )
+                            elif chunk["type"] == "audio":
+                                # Send audio chunk immediately (sentence-level streaming)
+                                await websocket.send_bytes(chunk["data"])
 
     except WebSocketDisconnect:
         print("Client disconnected")

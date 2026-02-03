@@ -2,8 +2,6 @@
 
 from typing import Optional
 
-import numpy as np
-
 try:
     from pipecat.frames.frames import (
         InterimTranscriptionFrame,
@@ -45,41 +43,33 @@ class TinyAudioSTTService(SegmentedSTTService):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self._model = None
+        self._pipeline = None
         self._model_id = model_id
         self._streaming = streaming
         self._device = device
 
-    def _ensure_model(self):
-        """Lazy-load the model on first use."""
-        if self._model is None:
-            import torch
+    def _ensure_pipeline(self):
+        """Lazy-load the ASR pipeline on first use."""
+        if self._pipeline is not None:
+            return
 
-            try:
-                from tiny_audio import ASRModel  # pyright: ignore[reportMissingImports]
-            except ImportError:
-                # Fallback for local development
-                import sys
-                from pathlib import Path
+        try:
+            from tiny_audio import ASRModel, ASRPipeline
+        except ImportError:
+            # Fallback for local development
+            import sys
+            from pathlib import Path
 
-                src_path = Path(__file__).parent.parent
-                if str(src_path) not in sys.path:
-                    sys.path.insert(0, str(src_path))
-                from asr_modeling import ASRModel
+            src_path = Path(__file__).parent.parent
+            if str(src_path) not in sys.path:
+                sys.path.insert(0, str(src_path))
+            from asr_modeling import ASRModel
+            from asr_pipeline import ASRPipeline
 
-            # Determine device: MPS > CUDA > CPU
-            if self._device is None:
-                if torch.backends.mps.is_available():
-                    self._device = torch.device("mps")
-                elif torch.cuda.is_available():
-                    self._device = torch.device("cuda")
-                else:
-                    self._device = torch.device("cpu")
-
-            # Load model and move to device
-            self._model = ASRModel.from_pretrained(self._model_id)
-            self._model.to(self._device)
-            self._model.eval()
+        # Load model and create pipeline (HF Pipeline handles device detection)
+        model = ASRModel.from_pretrained(self._model_id)
+        self._pipeline = ASRPipeline(model, device=self._device)
+        model.eval()
 
     async def run_stt(self, audio: bytes):
         """Transcribe audio segment, yielding interim results if streaming enabled.
@@ -91,45 +81,26 @@ class TinyAudioSTTService(SegmentedSTTService):
             InterimTranscriptionFrame for partial results (if streaming)
             TranscriptionFrame for final result
         """
-        self._ensure_model()
-
-        # Convert bytes to float32 array (16-bit PCM at 16kHz)
-        audio_array = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+        self._ensure_pipeline()
 
         # Handle empty audio
-        if len(audio_array) == 0:
+        if len(audio) == 0:
             yield TranscriptionFrame(text="", user_id=self._user_id, timestamp="")
             return
 
-        # Preprocess audio through feature extractor
-        import torch
-
-        inputs = self._model.feature_extractor(
-            audio_array,
-            sampling_rate=16000,
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
-
-        # Get model dtype and cast inputs to match
-        model_dtype = next(self._model.parameters()).dtype
-        input_features = inputs.input_features.to(self._device, dtype=model_dtype)
-        attention_mask = inputs.attention_mask.to(self._device)
+        # Pass raw PCM bytes directly - pipeline handles conversion
+        audio_input = {"raw_bytes": audio, "dtype": "int16", "sampling_rate": 16000}
 
         if self._streaming:
             # Stream tokens as generated for lower latency
             partial_text = ""
-            for token_text in self._model.generate_streaming(
-                input_features=input_features,
-                audio_attention_mask=attention_mask,
-            ):
+            for token_text in self._pipeline.transcribe_streaming(audio_input):
                 partial_text += token_text
                 yield InterimTranscriptionFrame(
                     text=partial_text,
                     user_id=self._user_id,
                     timestamp="",
                 )
-
             # Yield final result
             yield TranscriptionFrame(
                 text=partial_text.strip(),
@@ -137,16 +108,10 @@ class TinyAudioSTTService(SegmentedSTTService):
                 timestamp="",
             )
         else:
-            # Non-streaming: wait for full result
-            with torch.no_grad():
-                output = self._model.generate(
-                    input_features=input_features,
-                    audio_attention_mask=attention_mask,
-                )
-
-            text = self._model.tokenizer.decode(output[0], skip_special_tokens=True)
+            # Non-streaming: use pipeline's __call__ method
+            result = self._pipeline(audio_input)
             yield TranscriptionFrame(
-                text=text.strip(),
+                text=result.get("text", "").strip(),
                 user_id=self._user_id,
                 timestamp="",
             )
