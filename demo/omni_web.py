@@ -349,31 +349,33 @@ def generate_greeting() -> tuple[str, bytes]:
     return GREETING_TEXT, audio_int16.tobytes()
 
 
-def process_audio_streaming_with_audio(audio_bytes: bytes):
-    """Process audio with streaming transcription and TTS.
+def process_audio(audio_bytes: bytes) -> dict:
+    """Process audio with transcription and TTS.
 
-    Yields dicts with either text updates or audio chunks.
-    Audio is generated sentence-by-sentence for low latency.
+    Returns dict with text and audio data.
     """
     if len(audio_bytes) == 0:
-        return
+        return {"text": "", "audio": b""}
 
-    # Use raw_bytes format - pipeline handles conversion
-    audio_input = {"raw_bytes": audio_bytes, "dtype": "int16", "sampling_rate": SAMPLE_RATE}
+    # Convert raw PCM bytes to float32 numpy array
+    audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    audio_input = {"raw": audio_array, "sampling_rate": SAMPLE_RATE}
 
-    # Stream transcription + TTS with explicit system prompt
-    for chunk in pipeline.transcribe_streaming_with_audio(
-        audio_input, voice=tts_voice, system_prompt=SYSTEM_PROMPT
-    ):
-        if chunk["type"] == "audio":
-            # Resample audio for browser playback
-            audio_out = chunk["audio"]
-            num_samples = int(len(audio_out) * OUTPUT_SAMPLE_RATE / TTS_SAMPLE_RATE)
-            audio_resampled = scipy.signal.resample(audio_out, num_samples)
-            audio_int16 = (audio_resampled * 32767).astype(np.int16)
-            yield {"type": "audio", "data": audio_int16.tobytes()}
-        else:
-            yield {"type": "text", "text": chunk["text"], "interim": chunk["interim"]}
+    # Run transcription + TTS (non-streaming)
+    result = pipeline(audio_input, return_audio=True, tts_voice=tts_voice, system_prompt=SYSTEM_PROMPT)
+
+    text = result.get("text", "")
+    audio_out = result.get("audio")
+
+    if audio_out is None or len(audio_out) == 0:
+        return {"text": text, "audio": b""}
+
+    # Resample audio for browser playback
+    num_samples = int(len(audio_out) * OUTPUT_SAMPLE_RATE / TTS_SAMPLE_RATE)
+    audio_resampled = scipy.signal.resample(audio_out, num_samples)
+    audio_int16 = (audio_resampled * 32767).astype(np.int16)
+
+    return {"text": text, "audio": audio_int16.tobytes()}
 
 
 @app.get("/")
@@ -440,21 +442,22 @@ async def websocket_endpoint(websocket: WebSocket):
                             {"type": "status", "status": "processing", "text": "Processing..."}
                         )
 
-                        # Process audio with streaming transcription + TTS
+                        # Process audio with transcription + TTS
                         full_audio = b"".join(audio_buffer)
                         audio_buffer = []
 
-                        # Stream text and audio chunks to client
-                        response_text = ""
-                        for chunk in process_audio_streaming_with_audio(full_audio):
-                            if chunk["type"] == "text":
-                                response_text = chunk["text"]
-                                await websocket.send_json(
-                                    {"type": "transcript", "role": "assistant", "text": chunk["text"], "interim": chunk["interim"]}
-                                )
-                            elif chunk["type"] == "audio":
-                                # Send audio chunk immediately (sentence-level streaming)
-                                await websocket.send_bytes(chunk["data"])
+                        # Run transcription and get response
+                        result = process_audio(full_audio)
+
+                        # Send transcript
+                        if result["text"]:
+                            await websocket.send_json(
+                                {"type": "transcript", "role": "assistant", "text": result["text"], "interim": False}
+                            )
+
+                        # Send audio
+                        if result["audio"]:
+                            await websocket.send_bytes(result["audio"])
 
     except WebSocketDisconnect:
         print("Client disconnected")

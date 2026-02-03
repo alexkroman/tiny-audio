@@ -247,6 +247,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         kwargs.pop("max_speakers", None)
         kwargs.pop("hf_token", None)
         kwargs.pop("user_prompt", None)
+        kwargs.pop("system_prompt", None)
         kwargs.pop("diarization_backend", None)
         # TTS parameters
         kwargs.pop("return_audio", None)
@@ -268,6 +269,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             return_audio: If True, synthesize transcription as speech using Kokoro TTS
             tts_voice: Kokoro voice ID for TTS output (default: "af_heart")
             user_prompt: Custom transcription prompt (default: "Transcribe: ")
+            system_prompt: Custom system prompt override (uses model's default if not provided)
             num_speakers: Exact number of speakers (if known, for diarization)
             min_speakers: Minimum number of speakers (for diarization)
             max_speakers: Maximum number of speakers (for diarization)
@@ -284,6 +286,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         return_audio = kwargs.pop("return_audio", False)
         tts_voice = kwargs.pop("tts_voice", DEFAULT_TTS_VOICE)
         user_prompt = kwargs.pop("user_prompt", None)
+        system_prompt = kwargs.pop("system_prompt", None)
         diarization_params = {
             "num_speakers": kwargs.pop("num_speakers", None),
             "min_speakers": kwargs.pop("min_speakers", None),
@@ -298,6 +301,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if user_prompt:
             original_prompt = self.model.TRANSCRIBE_PROMPT
             self.model.TRANSCRIBE_PROMPT = user_prompt
+
+        # Set custom system prompt if provided
+        original_system_prompt = None
+        if system_prompt:
+            original_system_prompt = self.model.system_prompt
+            self.model.system_prompt = system_prompt
 
         # Store audio for timestamp alignment and diarization
         if return_timestamps or return_speakers:
@@ -360,6 +369,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         self._current_audio = None
         if original_prompt is not None:
             self.model.TRANSCRIBE_PROMPT = original_prompt
+        if original_system_prompt is not None:
+            self.model.system_prompt = original_system_prompt
 
         return result
 
