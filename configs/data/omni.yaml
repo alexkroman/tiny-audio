@@ -7,6 +7,9 @@
 # - sift_s: Conversational response to transcription (voice assistant)
 # - sift_ssp: Empathetic response with tone awareness
 # - sit_ssp: Audio description/analysis ("Sounds like...")
+#
+# Audio head uses distillation training: learns to match CosyVoice's text encoder
+# embeddings from the sift_response text. No pre-computed codes needed!
 
 datasets:
   # === Transcription Datasets (25% of training) ===
@@ -41,6 +44,7 @@ datasets:
 
   # === SIFT Datasets (75% of training) ===
   # Total target: ~1,234k samples
+  # sift_response: Text responses used for distillation training
 
   - path: mazesmazes/sift-audio-2
     audio_column: audio

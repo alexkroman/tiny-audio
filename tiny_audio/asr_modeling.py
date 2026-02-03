@@ -181,6 +181,19 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         else:
             self.spec_augment = None
 
+        # Audio Head for S2S (trainable)
+        if getattr(config, "use_audio_head", False):
+            from .audio_head import AudioHead
+
+            self.audio_head = AudioHead(config).to(
+                device=next(self.language_model.parameters()).device,
+                dtype=target_dtype,
+            )
+            if getattr(config, "freeze_audio_head", False):
+                self.audio_head.requires_grad_(False)
+        else:
+            self.audio_head = None
+
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
@@ -365,8 +378,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
 
     def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
-        """Only save trainable projector weights."""
-        return {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
+        """Save trainable weights (projector + audio_head if present)."""
+        state = {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
+        if self.audio_head is not None:
+            state.update({f"audio_head.{k}": v for k, v in self.audio_head.state_dict().items()})
+        return state
 
     def _compute_encoder_output_lengths(
         self,
@@ -460,6 +476,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
+        codec_targets: Optional[torch.Tensor] = None,
+        codec_target_lengths: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
@@ -487,6 +505,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
             )
 
+        # Request hidden states if training audio head
+        if self.audio_head is not None and codec_targets is not None:
+            kwargs["output_hidden_states"] = True
+
         # Run through language model (let it compute loss if labels provided)
         outputs = self.language_model(
             attention_mask=attention_mask,
@@ -504,6 +526,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             aux_loss = self.projector.get_aux_loss()
             if aux_loss is not None and aux_loss.numel() > 0:
                 outputs.loss = outputs.loss + aux_loss.to(outputs.loss.device)
+
+        # Compute audio head loss if training S2S
+        if self.audio_head is not None and codec_targets is not None:
+            hidden_states = outputs.hidden_states[-1]  # Last layer
+            audio_head_loss = self.audio_head(hidden_states, codec_target_lengths, codec_targets)
+            if outputs.loss is not None:
+                outputs.loss = outputs.loss + audio_head_loss
+            else:
+                outputs.loss = audio_head_loss
 
         return outputs
 
@@ -787,6 +818,139 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         new_tokens = output[0, input_ids.shape[1] :]
         response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
         return response.strip()
+
+    @torch.no_grad()
+    def generate_with_audio(
+        self,
+        input_features: torch.Tensor,
+        audio_attention_mask: torch.Tensor,
+        **generate_kwargs,
+    ) -> dict[str, torch.Tensor]:
+        """Generate text and NeuCodec tokens for Speech-to-Speech.
+
+        Args:
+            input_features: Mel spectrogram features (batch, n_mels, mel_len)
+            audio_attention_mask: Mask for real vs padded mel frames (batch, mel_len)
+            **generate_kwargs: Additional generation arguments
+
+        Returns:
+            Dict with:
+                - text_ids: Generated text token IDs (batch, seq_len)
+                - text: Decoded text strings (list of str)
+                - codec_tokens: Predicted NeuCodec tokens (batch, audio_len)
+        """
+        if self.audio_head is None:
+            raise ValueError("Audio head not configured. Set use_audio_head=True in config.")
+
+        device = input_features.device
+        batch_size = input_features.shape[0]
+
+        # Encode audio -> flattened embeddings
+        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+
+        # Build prompt with correct number of audio tokens
+        num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
+        audio_placeholder = "<audio>" * num_audio_tokens
+
+        messages: list[dict[str, str]] = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        user_content = audio_placeholder
+        if self.TRANSCRIBE_PROMPT:
+            user_content += " " + self.TRANSCRIBE_PROMPT
+        messages.append({"role": "user", "content": user_content})
+
+        chat_result = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            enable_thinking=getattr(self.config, "enable_thinking", False),
+        )
+        input_ids = chat_result.input_ids.to(device)
+
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if input_ids.shape[0] == 1 and batch_size > 1:
+            input_ids = input_ids.expand(batch_size, -1)
+
+        attention_mask = torch.ones_like(input_ids)
+
+        # Get text embeddings and replace audio tokens with audio embeddings
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
+        inputs_embeds = inputs_embeds.masked_scatter(
+            audio_token_mask.to(inputs_embeds.device),
+            audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
+        )
+
+        # Generate with hidden states
+        output = self.language_model.generate(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            generation_config=self.generation_config,
+            output_hidden_states=True,
+            return_dict_in_generate=True,
+            **generate_kwargs,
+        )
+
+        # Extract generated text
+        text_ids = output.sequences[:, input_ids.shape[1] :]
+        text = self.tokenizer.batch_decode(text_ids, skip_special_tokens=True)
+
+        # Extract hidden states from generation steps and concatenate
+        # output.hidden_states is tuple of (step,) where each step is tuple of (layer,)
+        # Each layer tensor is (batch, 1, hidden_dim) for generated tokens
+        last_layer_states = []
+        for step_hidden in output.hidden_states:
+            # step_hidden is tuple of (num_layers,) tensors
+            # Get last layer: shape (batch, 1, hidden_dim)
+            last_layer_states.append(step_hidden[-1])
+
+        # Concatenate across generation steps: (batch, gen_seq_len, hidden_dim)
+        hidden_states = torch.cat(last_layer_states, dim=1)
+
+        # Predict codec tokens (uses inference heuristic for duration)
+        # WavTokenizer: single codebook, shape (batch, audio_len)
+        codec_tokens = self.audio_head(hidden_states)
+
+        return {
+            "text_ids": text_ids,
+            "text": text,
+            "codec_tokens": codec_tokens,
+        }
+
+    def decode_audio(
+        self,
+        codec_tokens: torch.Tensor,
+        codec_model_id: str = "neuphonic/neucodec",
+    ) -> torch.Tensor:
+        """Decode NeuCodec tokens to waveform.
+
+        Args:
+            codec_tokens: Codec token indices (batch, audio_len)
+            codec_model_id: HuggingFace model ID for NeuCodec
+
+        Returns:
+            Waveform tensor (batch, 1, samples) at 24kHz
+        """
+        try:
+            from neucodec import NeuCodec
+        except ImportError as e:
+            raise ImportError(
+                "NeuCodec required for audio decoding. Install with: pip install neucodec"
+            ) from e
+
+        model = NeuCodec.from_pretrained(codec_model_id)
+        model = model.to(codec_tokens.device)
+        model.eval()
+
+        # NeuCodec decode expects (batch, 1, seq_len)
+        codes = codec_tokens.unsqueeze(1)
+
+        with torch.no_grad():
+            return model.decode_code(codes)
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
         """Save model, tokenizer, and processor."""

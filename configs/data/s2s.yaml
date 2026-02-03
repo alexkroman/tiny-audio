@@ -1,0 +1,19 @@
+# S2S Audio Head training dataset
+# Uses HeySQuAD for distillation training of the CosyVoice bridge.
+# Audio questions → LLM hidden states → Bridge → matches CosyVoice embeddings of answers
+
+datasets:
+  - path: fixie-ai/HeySQuAD_human
+    audio_column: audio
+    text_column: answers
+    text_transform: first_answer_text
+    task: answer
+    train_splits: [train]
+    eval_splits: [validation]
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+max_eval_samples: 1000

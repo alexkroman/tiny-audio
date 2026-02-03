@@ -1,8 +1,17 @@
 # @package _global_
-# Omni training: SIFT + transcription multitask
+# Omni training: SIFT + transcription + Audio Head (joint training)
+#
+# Stage 1: Trains projector for audio understanding. Audio head is frozen.
+# Uses SIFT dataset with text responses for distillation training.
+# No pre-computed speech codes needed - distillation from CosyVoice text encoder.
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=omni
+#
+# Architecture:
+#   Audio Input → Encoder → Projector (trained) → LLM → Text Response
+#
+# (Audio head is frozen in Stage 1, trained in Stage 2 with s2s.yaml)
 
 defaults:
   - override /data: omni
@@ -13,11 +22,19 @@ model:
   projector_hidden_dim: 1024
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   text_model_id: HuggingFaceTB/SmolLM3-3B
+
   # Generation defaults for voice agent (greedy decoding)
   do_sample: false
   max_new_tokens: 128
   enable_thinking: false
   repetition_penalty: 1.1
+
+  # Audio Head settings - CosyVoice bridge architecture
+  # Stage 1: Train projector only, audio head frozen
+  use_audio_head: true
+  freeze_audio_head: true  # Freeze audio head, train projector only
+  audio_head_hidden_dim: 512  # Bridge hidden dimension
+  freeze_cosy_llm: true  # CosyVoice LLM is always frozen (pretrained)
 
 # SIFT configuration
 sift:

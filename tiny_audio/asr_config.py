@@ -70,6 +70,12 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,
         freeze_projector: bool = False,
         label_smoothing: float = 0.0,
+        # Audio Head settings (CosyVoice bridge architecture)
+        use_audio_head: bool = False,
+        audio_head_hidden_dim: int = 512,  # Bridge hidden dimension
+        freeze_cosy_llm: bool = True,  # Freeze CosyVoice LLM (train only bridge)
+        freeze_audio_head: bool = False,  # Freeze entire audio head
+        distillation_loss_weight: float = 1.0,  # Weight for distillation loss
         **kwargs,
     ):
         # Merge generation defaults with kwargs (kwargs takes precedence)
@@ -133,6 +139,13 @@ class ASRConfig(transformers.PretrainedConfig):
         ]
         self.freeze_projector = freeze_projector
         self.label_smoothing = label_smoothing
+
+        # Audio Head settings (CosyVoice bridge architecture)
+        self.use_audio_head = use_audio_head
+        self.audio_head_hidden_dim = audio_head_hidden_dim
+        self.freeze_cosy_llm = freeze_cosy_llm
+        self.freeze_audio_head = freeze_audio_head
+        self.distillation_loss_weight = distillation_loss_weight
 
         # Generation parameters (from kwargs after merge with defaults)
         self.num_beams = kwargs.pop("num_beams")

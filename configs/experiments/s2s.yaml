@@ -1,0 +1,81 @@
+# @package _global_
+# Speech-to-Speech (S2S) training: Train Audio Head from pretrained Omni model
+#
+# Stage 2 of training pipeline:
+# - Starts from pretrained omni model (projector already trained)
+# - Freezes projector, trains only the audio head bridge
+# - Uses distillation: bridge learns to match CosyVoice's text encoder embeddings
+# - No pre-computed speech codes needed!
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=s2s
+#
+# Prerequisites:
+#   - Pretrained omni model at mazesmazes/tiny-audio-omni (or specify model.pretrained_model_id)
+#   - HeySQuAD dataset (audio questions + text answers for distillation)
+#
+# Architecture (Training):
+#   Audio Input → Encoder → Projector (frozen) → LLM → Hidden States → Bridge (trained)
+#                                                                           ↓
+#   Text Response → CosyVoice Tokenizer → CosyVoice Embeddings (teacher target)
+#
+#   Loss: MSE + cosine similarity between bridge output and teacher embeddings
+#
+# Architecture (Inference):
+#   Hidden States → Bridge → CosyVoice LLM (frozen) → Speech Tokens → Audio
+
+defaults:
+  - override /data: s2s
+
+model:
+  # Start from pretrained omni model
+  pretrained_model_id: mazesmazes/tiny-audio-omni
+
+  projector_type: mlp
+  projector_pool_stride: 4
+  projector_hidden_dim: 1024
+  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  text_model_id: HuggingFaceTB/SmolLM3-3B
+
+  # Generation defaults
+  do_sample: false
+  max_new_tokens: 128
+  enable_thinking: false
+  repetition_penalty: 1.1
+
+  # Freeze projector, train audio head (Stage 2)
+  freeze_projector: true
+
+  # Audio Head settings - CosyVoice bridge with distillation
+  # Stage 2: Train bridge only, projector frozen, CosyVoice LLM frozen
+  use_audio_head: true
+  freeze_audio_head: false  # Train the bridge
+  audio_head_hidden_dim: 512  # Bridge hidden dimension
+  freeze_cosy_llm: true  # CosyVoice LLM is always frozen (pretrained)
+  distillation_loss_weight: 1.0  # Weight for distillation loss
+
+# SIFT configuration
+sift:
+  enabled: true
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-s2s"
+  group_by_length: false
+  learning_rate: 5e-4  # Higher LR since only training audio head
+  warmup_steps: 500
+  lr_scheduler_type: polynomial
+  lr_scheduler_kwargs:
+    power: 0.5
+  seed: 42
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 4
+  num_train_epochs: 3  # More epochs for audio head
+  save_steps: 1000
+  eval_steps: 1000
+
+  weight_decay: 0.0
+
+  # No specaugment needed for audio head training
+  # (audio understanding already learned in Stage 1)
+  use_specaugment: false

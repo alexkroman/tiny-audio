@@ -83,6 +83,15 @@ class DatasetLoader:
             trust_remote_code=True,
         )
 
+        # Filter by column value if specified (e.g., single speaker training)
+        filter_column = dataset_cfg.get("filter_column")
+        filter_value = dataset_cfg.get("filter_value")
+        if filter_column and filter_value:
+            ds = ds.filter(
+                lambda x: str(x[filter_column]) == str(filter_value),
+                num_proc=self.num_proc,
+            )
+
         # Apply text transform if specified (e.g., extract text from nested structures)
         text_transform = dataset_cfg.get("text_transform")
         if text_transform == "first_answer_text":
@@ -97,11 +106,19 @@ class DatasetLoader:
             dataset_cfg["text_column"] = "text"
             dataset_cfg = OmegaConf.create(dataset_cfg)
 
-        # Normalize column names for audio and text
-        col_map = {
-            "text": dataset_cfg.get("text_column", "text"),
-            "audio": dataset_cfg.get("audio_column", "audio"),
-        }
+        # Normalize column names for text (and audio if present)
+        col_map = {"text": dataset_cfg.get("text_column", "text")}
+
+        # Only map audio column if not TTS mode or if audio column exists
+        audio_column = dataset_cfg.get("audio_column")
+        if audio_column and audio_column in ds.column_names:
+            col_map["audio"] = audio_column
+
+        # Map codes column if specified (for TTS training)
+        codes_column = dataset_cfg.get("codes_column")
+        if codes_column and codes_column in ds.column_names:
+            col_map["codes"] = codes_column
+
         for target, source in col_map.items():
             if source != target and source in ds.column_names:
                 if target in ds.column_names:
@@ -111,21 +128,33 @@ class DatasetLoader:
         # Remove extra columns BEFORE casting to avoid schema mismatch errors
         # (some datasets have complex column types that can't be cast)
         if self.sift_enabled:
-            keep_cols = {"audio", "text", "duration", "sift_response", "mode", "task"}
-            extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
+            # SIFT training: include response_codes for audio head if present
+            keep_cols = {
+                "audio",
+                "text",
+                "duration",
+                "sift_response",
+                "mode",
+                "task",
+                "codes",
+                "response_codes",
+            }
         else:
+            # Standard ASR training
             keep_cols = {"audio", "text", "duration", "task"}
-            extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
+        extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
-        # Add task column if specified in config
+        # Add task column if specified in config (use map for robustness after filter)
         task = dataset_cfg.get("task", "transcribe")
-        ds = ds.add_column("task", [task] * len(ds))
+        ds = ds.map(lambda x: {"task": task}, num_proc=self.num_proc)
 
-        # Cast audio column after removing problematic columns
-        return ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
+        # Cast audio column after removing problematic columns (skip for TTS)
+        if "audio" in ds.column_names:
+            return ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
+        return ds
 
     def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
         """Upsample or downsample dataset to target size."""
@@ -276,7 +305,11 @@ SIFT_SYSTEM_MESSAGE = ""  # No system message
 
 
 class SIFTDataCollator(DataCollator):
-    """Collates audio and text data for SIFT training (AZeroS-style)."""
+    """Collates audio, text, and optional NeuCodec codes for SIFT training.
+
+    Supports joint training of projector (audio understanding) and audio head
+    (speaking responses) when response_codes are available in the dataset.
+    """
 
     def __init__(
         self,
@@ -285,6 +318,7 @@ class SIFTDataCollator(DataCollator):
         sample_rate: int,
         projector: Any = None,
         encoder_conv_layers: list = None,
+        use_audio_head: bool = False,
     ):
         super().__init__(
             tokenizer=tokenizer,
@@ -294,6 +328,7 @@ class SIFTDataCollator(DataCollator):
             projector=projector,
             encoder_conv_layers=encoder_conv_layers,
         )
+        self.use_audio_head = use_audio_head
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         # Process audio
@@ -374,7 +409,52 @@ class SIFTDataCollator(DataCollator):
         batch["input_features"] = audio_out.input_features
         batch["audio_attention_mask"] = audio_out.attention_mask
 
+        # Add codec targets for audio head training if available
+        if self.use_audio_head:
+            codec_targets, codec_lengths = self._extract_response_codes(valid_features)
+            if codec_targets is not None:
+                batch["codec_targets"] = codec_targets
+                batch["codec_target_lengths"] = codec_lengths
+
         return batch
+
+    def _extract_response_codes(
+        self, features: list[dict]
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Extract and pad response_codes from features.
+
+        Args:
+            features: List of feature dicts, may contain 'response_codes' or 'codes'
+
+        Returns:
+            Tuple of (padded_codes, code_lengths) or (None, None) if no codes
+        """
+        codec_tensors = []
+        codec_lengths = []
+
+        for f in features:
+            # Try response_codes first (SIFT), then codes (generic)
+            codes = f.get("response_codes") or f.get("codes") or []
+            if isinstance(codes, list):
+                if codes:  # Non-empty
+                    codes = torch.tensor(codes, dtype=torch.long)
+                else:
+                    codes = torch.tensor([], dtype=torch.long)
+            codec_tensors.append(codes)
+            codec_lengths.append(len(codes))
+
+        # Skip if no samples have codes
+        if all(length == 0 for length in codec_lengths):
+            return None, None
+
+        # Pad to max length
+        max_len = max(codec_lengths) if codec_lengths else 1
+        padded_codes = torch.zeros(len(codec_tensors), max_len, dtype=torch.long)
+        for i, codes in enumerate(codec_tensors):
+            if len(codes) > 0:
+                padded_codes[i, : len(codes)] = codes
+
+        return padded_codes, torch.tensor(codec_lengths, dtype=torch.long)
 
 
 class ASRTrainer(Trainer):
@@ -388,6 +468,8 @@ class ASRTrainer(Trainer):
         it incorrectly uses shift_labels=False, causing misaligned predictions.
         This override forces shift_labels=True for correct causal LM behavior.
         """
+        _ = num_items_in_batch  # Unused but required by Trainer signature
+
         # Pop labels if using label smoothing (matches Trainer behavior)
         if self.label_smoother is not None and "labels" in inputs:
             labels = inputs.pop("labels")
@@ -510,17 +592,22 @@ def main(cfg: DictConfig) -> None:
     # Check if SIFT training is enabled (AZeroS-style)
     sift_enabled = cfg.get("sift", {}).get("enabled", False)
 
+    # Check if audio head training is enabled (jointly with projector)
+    use_audio_head = cfg.model.get("use_audio_head", False)
+
     # Load datasets
     train_dataset, val_dataset = DatasetLoader(cfg, sift_enabled=sift_enabled).load()
 
     # Create data collator (SIFT or standard ASR)
     if sift_enabled:
+        # SIFT training with optional audio head for speaking responses
         data_collator = SIFTDataCollator(
             tokenizer=model.tokenizer,
             feature_extractor=model.feature_extractor,
             sample_rate=cfg.data.sample_rate,
             projector=model.projector,
             encoder_conv_layers=model.config.encoder_conv_layers,
+            use_audio_head=use_audio_head,
         )
     else:
         data_collator = DataCollator(
