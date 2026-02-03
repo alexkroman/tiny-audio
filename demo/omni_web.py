@@ -41,10 +41,6 @@ OUTPUT_SAMPLE_RATE = 48000  # Browser-native rate
 VAD_THRESHOLD = 0.5
 SILENCE_DURATION_MS = 700  # End of speech after this much silence
 
-# Conversation history
-conversation_history = []
-MAX_HISTORY_TURNS = 10
-
 SYSTEM_PROMPT = """You are a helpful voice assistant. Keep your responses brief and conversational - aim for 1-2 sentences. Be friendly and natural. Do not use emojis or special characters."""
 
 HTML_PAGE = """
