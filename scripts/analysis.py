@@ -361,7 +361,7 @@ DATASET_ORDER = [
 ]
 
 # Datasets to exclude from comparison tables
-EXCLUDED_DATASETS = {"classification", "expresso"}
+EXCLUDED_DATASETS: set[str] = set()
 
 # Short names for display
 DATASET_SHORT_NAMES = {
