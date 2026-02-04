@@ -24,6 +24,8 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
 )
 
+from .projectors import SimpleAdapter
+
 
 class AudioHead(nn.Module):
     """Freeze-Omni style AR decoder for Mimi codec tokens.
@@ -84,8 +86,12 @@ class AudioHead(nn.Module):
             _attn_implementation="sdpa",  # Use scaled dot product attention
         )
 
-        # Input projection: LLM dim → hidden dim
-        self.input_proj = nn.Linear(self.llm_dim, self.hidden_dim)
+        # Input projection: LLM dim → hidden dim (2-layer MLP)
+        self.input_proj = SimpleAdapter(
+            input_dim=self.llm_dim,
+            hidden_dim=self.llm_dim,
+            output_dim=self.hidden_dim,
+        )
 
         # Token embedding (vocab + 4 special tokens)
         self.embedding = nn.Embedding(
@@ -135,8 +141,8 @@ class AudioHead(nn.Module):
         batch_size = hidden_states.shape[0]
         device = hidden_states.device
 
-        # Project LLM hidden states
-        hidden_states = self.input_proj(hidden_states)  # (batch, llm_seq, hidden)
+        # Project LLM hidden states to decoder dimension
+        hidden_states = self.input_proj(hidden_states)
 
         # Process through Pre-NN
         hidden_states = self._forward_pre_nn(hidden_states)
