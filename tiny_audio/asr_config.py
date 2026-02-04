@@ -70,13 +70,13 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,
         freeze_projector: bool = False,
         label_smoothing: float = 0.0,
-        # Audio Head / Depformer settings (Moshi-style depth transformer)
+        # Audio Head / Depformer settings (Moshi code defaults for smaller models)
         use_audio_head: bool = False,
         audio_head_hidden_dim: int = 512,  # Legacy (use depformer_dim instead)
-        depformer_dim: int = 1024,  # Depformer hidden dimension
+        depformer_dim: int = 512,  # 1/4 of SmolLM3-3B hidden (matches Moshi ratio)
         depformer_num_layers: int = 6,  # Depformer transformer layers
-        codebook_size: int = 2048,  # Mimi codec vocabulary size
-        num_codebooks: int = 8,  # Number of codebooks to predict
+        codebook_size: int = 2048,  # Mimi codec default
+        num_codebooks: int = 8,  # Moshi default (dep_q)
         freeze_audio_head: bool = False,  # Freeze entire audio head
         first_codebook_weight: float = 100.0,  # Weight for first codebook loss (semantic tokens)
         acoustic_delay: int = 1,  # Delay τ for acoustic codebooks (Moshi uses 1 or 2)

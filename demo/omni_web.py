@@ -37,9 +37,9 @@ SAMPLE_RATE = 16000
 TTS_SAMPLE_RATE = 24000
 OUTPUT_SAMPLE_RATE = 48000  # Browser-native rate
 VAD_THRESHOLD = 0.5
-SILENCE_DURATION_MS = 700  # End of speech after this much silence
+SILENCE_DURATION_MS = 1400  # End of speech after this much silence
 
-SYSTEM_PROMPT = """You are a helpful voice assistant. Keep your responses brief and conversational - aim for 1-2 sentences. Be friendly and natural. Do not use emojis or special characters."""
+SYSTEM_PROMPT = """You are a helpful voice assistant. Keep your responses brief and conversational. Be friendly and natural."""
 
 HTML_PAGE = """
 <!DOCTYPE html>

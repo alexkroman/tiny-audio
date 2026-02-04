@@ -44,13 +44,13 @@ model:
   # Freeze projector, train Depformer (Stage 2)
   freeze_projector: true
 
-  # Depformer settings - Moshi-style depth transformer
+  # Depformer settings - Moshi code defaults (smaller model)
   use_audio_head: true
   freeze_audio_head: false
-  depformer_dim: 512  # Depformer hidden dimension (smaller for efficiency)
+  depformer_dim: 512  # 1/4 of SmolLM3-3B hidden (matches Moshi ratio)
   depformer_num_layers: 6  # Depformer transformer layers
-  codebook_size: 2048  # Mimi codec vocabulary size
-  num_codebooks: 8  # All 8 Mimi codebooks
+  codebook_size: 2048  # Mimi codec default
+  num_codebooks: 8  # Moshi code default (dep_q)
   first_codebook_weight: 100.0  # Semantic tokens weighted 100x higher (Moshi default)
   acoustic_delay: 1  # Delay τ between semantic and acoustic tokens (Moshi uses 1-2)
 
@@ -69,7 +69,7 @@ training:
   seed: 42
   per_device_train_batch_size: 18  # Can increase with smaller model
   per_device_eval_batch_size: 18
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
   num_train_epochs: 20
   save_steps: 1000
   eval_steps: 1000

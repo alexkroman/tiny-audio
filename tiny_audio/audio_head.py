@@ -46,12 +46,12 @@ class Depformer(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        # Dimensions
+        # Dimensions (Moshi code defaults, codebook_size matches Mimi codec)
         self.llm_dim = getattr(config, "llm_dim", 2048)
-        self.hidden_dim = getattr(config, "depformer_dim", 1024)
+        self.hidden_dim = getattr(config, "depformer_dim", 512)  # 1/4 of SmolLM3-3B hidden
         self.num_layers = getattr(config, "depformer_num_layers", 6)
         self.num_codebooks = getattr(config, "num_codebooks", 8)
-        self.vocab_size = getattr(config, "codebook_size", 2048)
+        self.vocab_size = getattr(config, "codebook_size", 2048)  # Mimi codec default
 
         # Acoustic delay τ (Moshi uses 1 or 2, "greatly improves quality")
         self.acoustic_delay = getattr(config, "acoustic_delay", 1)
