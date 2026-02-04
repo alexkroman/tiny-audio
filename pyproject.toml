@@ -186,6 +186,8 @@ filterwarnings = [
     "ignore::DeprecationWarning:onnxruntime.*",
     "ignore:builtin type.*has no __module__ attribute:DeprecationWarning",
     "ignore:Specified provider.*is not in available provider names:UserWarning",
+    "ignore:The get_cmap function was deprecated:matplotlib.MatplotlibDeprecationWarning",
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
 ]
 
 [tool.ruff]

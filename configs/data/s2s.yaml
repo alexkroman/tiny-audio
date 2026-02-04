@@ -1,25 +1,35 @@
 # S2S Audio Head training dataset
-# Uses mazesmazes/libritts-r-mimi-audio with audio + pre-computed Mimi codec codes.
+# Uses mazesmazes/libritts-mimi and mazesmazes/jenny-mimi with audio + pre-computed Mimi codec codes.
 #
 # Dataset properties:
-# - Audio: 24kHz LibriTTS-R audio
-# - Codebooks: 8 (we use first 1-2)
+# - Audio: 24kHz
+# - Codebooks: 8 (we use first 1)
 # - Vocab size: 2048 per codebook
 # - Frame rate: 12.5 Hz
-# - train.clean.360: ~116k samples
-# - dev.clean: ~5.7k samples
-# - Columns: audio, text_normalized, codes, speaker_id
+#
+# libritts-mimi columns: audio, text_normalized, codes, speaker_id, chapter_id
+# jenny-mimi columns: audio, transcription_normalised, codes
 
 datasets:
-  - path: mazesmazes/libritts-r-mimi-audio
+  # LibriTTS-R with Mimi codes (~10 samples currently, will grow)
+  - path: mazesmazes/libritts-mimi
     audio_column: audio
     text_column: text_normalized
     codes_column: codes
     task: s2s
-    train_splits: [train.clean.360]
-    eval_splits: [dev.clean]
+    train_splits: [train.clean.100]
+    eval_splits: [train.clean.100]
 
-# Audio processing
+  # Jenny TTS with Mimi codes (~21k samples)
+  - path: mazesmazes/jenny-mimi
+    audio_column: audio
+    text_column: transcription_normalised
+    codes_column: codes
+    task: s2s
+    train_splits: [train]
+    eval_splits: [train]
+
+# Audio processing (Mimi uses 24kHz, Whisper/GLM uses 16kHz - encoder handles resampling)
 sample_rate: 16000
 
 # Processing options

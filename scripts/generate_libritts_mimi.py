@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate LibriTTS dataset with Mimi codec codes.
 
-Takes the parler-tts/libritts_r_filtered clean/train.clean.360 split and adds a 'codes' column
+Takes the parler-tts/libritts_r_filtered clean/train.clean.100 split and adds a 'codes' column
 containing Mimi codec tokens encoded from the audio.
 
 Usage:
@@ -9,9 +9,6 @@ Usage:
 
     # Test with limited samples
     python -m scripts.generate_libritts_mimi --max-samples 100
-
-    # Use specific batch size for encoding
-    python -m scripts.generate_libritts_mimi --batch-size 32
 """
 
 import os
@@ -26,7 +23,6 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 from datasets import Audio, Dataset, load_dataset
 from huggingface_hub import DatasetCard, DatasetCardData
-from tqdm import tqdm
 
 app = typer.Typer(help="Generate LibriTTS dataset with Mimi codec codes")
 
@@ -51,7 +47,7 @@ def create_dataset_card(repo_id: str, num_samples: int) -> None:
 
 # LibriTTS with Mimi Codes
 
-This dataset adds Mimi codec codes to [parler-tts/libritts_r_filtered](https://huggingface.co/datasets/parler-tts/libritts_r_filtered) clean/train.clean.360 split.
+This dataset adds Mimi codec codes to [parler-tts/libritts_r_filtered](https://huggingface.co/datasets/parler-tts/libritts_r_filtered) clean/train.clean.100 split.
 
 ## Dataset Description
 
@@ -112,7 +108,6 @@ class MimiEncoder:
     def __init__(self, device: str = "cpu"):
         self.device = device
         self.model = None
-        self.feature_extractor = None
         self._use_mlx = False
 
     def _load_model(self):
@@ -136,104 +131,62 @@ class MimiEncoder:
 
         # Fall back to transformers
         typer.echo("Loading Mimi (transformers)...")
-        from transformers import AutoFeatureExtractor, MimiModel
+        from transformers import MimiModel
 
-        self.model = MimiModel.from_pretrained("kyutai/mimi").to(self.device)
+        # Load in half precision for faster inference
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        self.model = MimiModel.from_pretrained("kyutai/mimi", torch_dtype=dtype).to(self.device)
         self.model.eval()
-        self.feature_extractor = AutoFeatureExtractor.from_pretrained("kyutai/mimi")
         self._use_mlx = False
-        typer.echo(f"Mimi loaded on {self.device}")
+        self._dtype = dtype
+        typer.echo(f"Mimi loaded on {self.device} ({dtype})")
 
-        # Verify model is on correct device
-        param_device = next(self.model.parameters()).device
-        typer.echo(f"Model parameters on: {param_device}")
-
-    def encode(self, audio: torch.Tensor) -> list[list[int]]:
-        """Encode audio tensor to Mimi codes.
+    def encode_single(self, audio_np) -> list[list[int]]:
+        """Encode single audio array to Mimi codes.
 
         Args:
-            audio: Audio tensor (samples,) at 24kHz
+            audio_np: Numpy array at 24kHz
 
         Returns:
             List of 8 lists of codec indices (one per codebook)
         """
         self._load_model()
 
-        # Convert to numpy for feature extractor
-        if audio.dim() > 1:
-            audio = audio.squeeze()
-        audio_np = audio.numpy()
-
         if self._use_mlx:
             import mlx.core as mx
 
-            # MLX expects (batch, channels, samples)
             audio_mlx = mx.array(audio_np[None, None, :])
             codes_mlx = self.model.encode(audio_mlx)
             codes = torch.from_numpy(codes_mlx.__array__())
-        else:
-            # Use feature extractor for proper preprocessing
-            inputs = self.feature_extractor(
-                raw_audio=audio_np,
-                sampling_rate=MIMI_SAMPLE_RATE,
-                return_tensors="pt",
-            )
-            # Move ALL inputs to the device
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            return codes.squeeze(0).tolist()
 
-            with torch.no_grad():
-                # Encode with 8 codebooks (matching Mimi's default)
-                encoded = self.model.encode(**inputs, num_quantizers=8)
-                codes = encoded.audio_codes  # (batch, codebooks, seq_len)
+        # Pass raw tensor directly - skip feature_extractor overhead
+        # Shape: (batch=1, channels=1, samples)
+        audio_tensor = torch.as_tensor(audio_np, dtype=self._dtype, device=self.device)
+        audio_tensor = audio_tensor.unsqueeze(0).unsqueeze(0)
 
-        # Convert to list of lists: 8 codebooks, each with seq_len indices
-        # Shape: (1, 8, seq_len) -> list of 8 lists
-        return codes.squeeze(0).cpu().tolist()  # (8, seq_len)
+        with torch.inference_mode():
+            encoded = self.model.encode(audio_tensor, num_quantizers=8)
+            codes = encoded.audio_codes  # (1, 8, seq_len)
 
-    def encode_batch(
-        self, audios: list[torch.Tensor], show_progress: bool = True
-    ) -> list[list[list[int]]]:
-        """Encode multiple audio tensors.
-
-        Args:
-            audios: List of audio tensors at 24kHz
-            show_progress: Whether to show progress bar
-
-        Returns:
-            List of codes for each audio
-        """
-        results = []
-        iterator = tqdm(audios, desc="Encoding") if show_progress else audios
-
-        for audio in iterator:
-            try:
-                codes = self.encode(audio)
-                results.append(codes)
-            except Exception as e:
-                typer.echo(f"Warning: Encoding failed: {e}")
-                # Return empty codes on failure
-                results.append([[] for _ in range(8)])
-
-        return results
+        return codes.squeeze(0).cpu().tolist()
 
 
 def process_dataset(
     max_samples: int | None = None,
-    batch_size: int = 1,
 ) -> Dataset | None:
     """Load LibriTTS dataset and add Mimi codes.
 
     Args:
         max_samples: Optional limit on number of samples
-        batch_size: Batch size for progress reporting
 
     Returns:
         Dataset with codes column added
     """
-    import gc
+    from tqdm import tqdm
 
-    typer.echo("Loading parler-tts/libritts_r_filtered clean/train.clean.360...")
-    ds = load_dataset("parler-tts/libritts_r_filtered", "clean", split="train.clean.360")
+    typer.echo("Loading parler-tts/libritts_r_filtered clean/train.clean.100...")
+    ds = load_dataset("parler-tts/libritts_r_filtered", "clean", split="train.clean.100")
     typer.echo(f"Loaded {len(ds)} samples")
 
     # Limit samples if requested
@@ -249,32 +202,21 @@ def process_dataset(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     typer.echo(f"Using device: {device}")
     encoder = MimiEncoder(device=device)
+    encoder._load_model()
 
-    # Encode all audio samples
+    # Encode all samples
     typer.echo("Encoding audio to Mimi codes...")
     all_codes = []
-
-    for i in tqdm(range(0, len(ds), batch_size), desc="Processing"):
-        batch_end = min(i + batch_size, len(ds))
-        batch = ds.select(range(i, batch_end))
-
-        for sample in batch:
-            audio_array = sample["audio"]["array"]
-            audio_tensor = torch.tensor(audio_array, dtype=torch.float32)
-
-            try:
-                codes = encoder.encode(audio_tensor)
-                all_codes.append(codes)
-            except Exception as e:
-                typer.echo(f"Warning: Failed to encode sample {i}: {e}")
-                all_codes.append([[] for _ in range(8)])
-
-        # Periodic garbage collection
-        if (i // batch_size) % 100 == 0:
-            gc.collect()
+    for sample in tqdm(ds, desc="Encoding"):
+        audio_array = sample["audio"]["array"]
+        try:
+            codes = encoder.encode_single(audio_array)
+            all_codes.append(codes)
+        except Exception as e:
+            typer.echo(f"Warning: Encoding failed: {e}")
+            all_codes.append([[] for _ in range(8)])
 
     # Add codes column
-    typer.echo("Adding codes column...")
     ds = ds.add_column("codes", all_codes)
 
     # Keep only essential columns
@@ -293,24 +235,18 @@ def main(
         str, typer.Option(help="HuggingFace repo ID for output")
     ] = "mazesmazes/libritts-mimi",
     max_samples: Annotated[int | None, typer.Option(help="Max samples (for testing)")] = None,
-    batch_size: Annotated[
-        int, typer.Option("--batch-size", "-b", help="Batch size for processing")
-    ] = 1,
     push: Annotated[bool, typer.Option(help="Push to HuggingFace Hub")] = True,
 ):
     """Generate LibriTTS dataset with Mimi codec codes.
 
-    Loads parler-tts/libritts_r_filtered clean/train.clean.360, ensures audio is at 24kHz,
+    Loads parler-tts/libritts_r_filtered clean/train.clean.100, ensures audio is at 24kHz,
     encodes with Mimi codec, and pushes to HuggingFace Hub.
     """
     typer.echo(f"Output: {output_repo}")
     if max_samples:
         typer.echo(f"Max samples: {max_samples}")
 
-    ds = process_dataset(
-        max_samples=max_samples,
-        batch_size=batch_size,
-    )
+    ds = process_dataset(max_samples=max_samples)
 
     if ds is None:
         typer.echo("Failed to process dataset")

@@ -5,14 +5,14 @@
 # - Starts from pretrained omni model (projector already trained)
 # - Freezes projector, trains only the audio head AR decoder
 # - Uses cross-entropy loss on pre-computed Mimi codec tokens
-# - Uses mazesmazes/libritts-r-mimi-audio dataset with audio + pre-computed codes
+# - Uses mazesmazes/libritts-mimi + mazesmazes/jenny-mimi datasets
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=s2s
 #
 # Prerequisites:
 #   - Pretrained omni model at mazesmazes/tiny-audio-omni (or specify model.pretrained_model_id)
-#   - LibriTTS-R-Mimi-Audio dataset (audio + pre-computed Mimi codec codes)
+#   - LibriTTS-Mimi and Jenny-Mimi datasets (audio + pre-computed Mimi codec codes)
 #
 # Architecture:
 #   LLM Hidden States → Pre-NN (4 layers) → AR Decoder (8 layers) → Mimi Token Logits
@@ -34,7 +34,7 @@ model:
 
   # Generation defaults
   do_sample: false
-  max_new_tokens: 128
+  max_new_tokens: 512
   enable_thinking: false
   repetition_penalty: 1.1
 
@@ -65,7 +65,7 @@ training:
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
   gradient_accumulation_steps: 4
-  num_train_epochs: 10
+  num_train_epochs: 20
   save_steps: 1000
   eval_steps: 1000
 

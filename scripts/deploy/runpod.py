@@ -835,7 +835,6 @@ def jenny_mimi(
 def build_libritts_mimi_script(
     hf_token: str,
     output_repo: str,
-    batch_size: int,
     max_samples: int | None,
 ) -> str:
     """Generate the LibriTTS MIMI dataset generation script content."""
@@ -861,7 +860,6 @@ cd /workspace
 
 python -m scripts.generate_libritts_mimi \\
     --output-repo {output_repo} \\
-    --batch-size {batch_size} \\
     {max_samples_arg}
 
 EXIT_CODE=$?
@@ -890,7 +888,6 @@ def libritts_mimi(
     session_name: str | None = typer.Option(
         None, "--session-name", "-s", help="Custom tmux session name"
     ),
-    batch_size: int = typer.Option(1, "--batch-size", "-b", help="Batch size for encoding"),
     max_samples: int | None = typer.Option(
         None, "--max-samples", "-n", help="Max samples (for testing)"
     ),
@@ -899,7 +896,7 @@ def libritts_mimi(
 ):
     """Generate LibriTTS dataset with Mimi codec codes.
 
-    Takes blabble-io/libritts_r train.clean.360, encodes audio with Mimi codec,
+    Takes parler-tts/libritts_r_filtered train.clean.100, encodes audio with Mimi codec,
     and pushes to HuggingFace Hub.
 
     Examples:
@@ -926,12 +923,11 @@ def libritts_mimi(
         print("Warning: HF_TOKEN environment variable not set.")
 
     # Build and upload script
-    script_content = build_libritts_mimi_script(hf_token, output_repo, batch_size, max_samples)
+    script_content = build_libritts_mimi_script(hf_token, output_repo, max_samples)
     script_path = f"/tmp/libritts_mimi_{session_name}.sh"
 
     print(f"\nStarting LibriTTS MIMI generation session '{session_name}'...")
     print(f"Output repo: {output_repo}")
-    print(f"Batch size: {batch_size}")
     if max_samples:
         print(f"Max samples: {max_samples}")
 
