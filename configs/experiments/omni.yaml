@@ -29,12 +29,12 @@ model:
   enable_thinking: false
   repetition_penalty: 1.1
 
-  # Audio Head settings - CosyVoice bridge architecture
+  # Audio Head settings - Fish-Speech TTS bridge architecture
   # Stage 1: Train projector only, audio head frozen
   use_audio_head: true
   freeze_audio_head: true  # Freeze audio head, train projector only
   audio_head_hidden_dim: 512  # Bridge hidden dimension
-  freeze_cosy_llm: true  # CosyVoice LLM is always frozen (pretrained)
+  freeze_tts: true  # TTS model is always frozen (pretrained)
 
 # SIFT configuration
 sift:

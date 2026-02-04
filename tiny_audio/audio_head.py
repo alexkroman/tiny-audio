@@ -1,318 +1,341 @@
-"""Audio Head module using CosyVoice 3 for speech token generation.
+"""Autoregressive Audio Head for Mimi codec token prediction.
 
-This module uses CosyVoice 3's pretrained LLM as a decoder, with a trainable
-bridge that maps the main LLM's hidden states to CosyVoice's embedding space.
-
-CosyVoice 3 advantages:
-- S3 Tokens: Supervised semantic tokens trained on ASR, emotion, speaker analysis
-- Dual-Resolution: 5Hz backbone + 25Hz refined head
-- Efficient: 0.5B model (~4GB VRAM) outperforms larger models
+This module implements a Freeze-Omni style AR decoder that predicts Mimi codec tokens
+from LLM hidden states using cross-entropy loss.
 
 Architecture:
-    SmolLM3 Hidden States → Bridge (trainable) → CosyVoice LLM → Speech Tokens
-                                                                      ↓
-                                                              Flow Matching (CFM)
-                                                                      ↓
-                                                                   Audio
+    LLM Hidden States → Pre-NN (4 Llama layers) → AR Decoder (8 Llama layers) → Token logits
 
-Distillation Training:
-    No pre-computed codes needed! The bridge learns to match CosyVoice's text encoder:
+Training:
+    Uses audio + pre-computed Mimi codes from mazesmazes/libritts-r-mimi-audio dataset.
+    Learns to predict codec tokens from audio input (speech alignment).
+    Simple cross-entropy loss on codec tokens, no teacher model needed.
 
-    Teacher path: Text Response → CosyVoice Tokenizer → CosyVoice Embeddings
-    Student path: LLM Hidden States → Bridge → Projected Embeddings
-    Loss: MSE + cosine similarity between teacher and student embeddings
+Inference:
+    Autoregressive generation of codec tokens that can be decoded to audio.
 """
 
 import torch
 import torch.nn as nn
-from torch.nn import functional as nnf
+from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import (
+    LlamaDecoderLayer,
+    LlamaRMSNorm,
+    LlamaRotaryEmbedding,
+)
 
 
 class AudioHead(nn.Module):
-    """CosyVoice 3-based Audio Head for speech generation.
+    """Freeze-Omni style AR decoder for Mimi codec tokens.
 
-    Uses distillation training: the bridge learns to produce embeddings that
-    match CosyVoice's text encoder output, without needing pre-computed codes.
+    Architecture:
+        LLM hidden → Pre-NN (4 layers) → AR Decoder (8 layers) → Token logits
+
+    The model uses teacher forcing during training and autoregressive generation
+    during inference.
     """
 
-    COSY_MODEL_ID = "FunAudioLLM/CosyVoice2-0.5B"
+    # Special token offsets from vocab_size
+    BOS_OFFSET = 0  # Beginning of sequence (prepended to LLM hidden)
+    SOS_OFFSET = 1  # Start of speech (first AR input token)
+    EOS_OFFSET = 2  # End of speech (target for last position)
+    PAD_OFFSET = 3  # Padding token
 
     def __init__(self, config):
-        """Initialize AudioHead with CosyVoice bridge.
+        """Initialize AudioHead with AR decoder architecture.
 
         Args:
             config: ASRConfig with audio head parameters:
                 - llm_dim: Main LLM hidden dimension (default: 1536)
-                - audio_head_hidden_dim: Bridge hidden dimension (default: 512)
-                - freeze_cosy_llm: Whether to freeze CosyVoice LLM (default: True)
-                - distillation_loss_weight: Weight for distillation loss (default: 1.0)
+                - audio_head_hidden_dim: AR decoder hidden dimension (default: 512)
+                - codebook_size: Mimi codec vocabulary size (default: 2048)
+                - num_codebooks: Number of codebooks to predict (default: 1)
         """
         super().__init__()
 
-        llm_dim = getattr(config, "llm_dim", 1536)
-        hidden_dim = getattr(config, "audio_head_hidden_dim", 512)
-        freeze_cosy = getattr(config, "freeze_cosy_llm", True)
-        self.distillation_loss_weight = getattr(config, "distillation_loss_weight", 1.0)
+        # Dimensions
+        self.llm_dim = getattr(config, "llm_dim", 1536)
+        self.hidden_dim = getattr(config, "audio_head_hidden_dim", 512)
+        self.vocab_size = getattr(config, "codebook_size", 2048)
+        self.num_codebooks = getattr(config, "num_codebooks", 1)
 
-        self.llm_dim = llm_dim
-        self.hidden_dim = hidden_dim
+        # Special tokens (after vocab)
+        self.bos_id = self.vocab_size + self.BOS_OFFSET
+        self.sos_id = self.vocab_size + self.SOS_OFFSET
+        self.eos_id = self.vocab_size + self.EOS_OFFSET
+        self.pad_id = self.vocab_size + self.PAD_OFFSET
+        self.total_vocab_size = self.vocab_size + 4  # vocab + 4 special tokens
 
-        # Lazy load CosyVoice to avoid import issues during config
-        self._cosy_llm = None
-        self._cosy_tokenizer = None
-        self._cosy_dim = None
-        self._freeze_cosy = freeze_cosy
+        # Calculate number of attention heads based on hidden dim
+        # head_dim should be at least 8 for RoPE to work correctly
+        num_heads = max(1, self.hidden_dim // 64)  # Each head is 64 dims
+        if num_heads == 0:
+            num_heads = 1  # Ensure at least 1 head
 
-        # Bridge will be initialized after we know cosy_dim
-        self._bridge = None
-
-    def _load_cosy_model(self):
-        """Lazy load CosyVoice LLM and tokenizer."""
-        if self._cosy_llm is not None:
-            return
-
-        print(f"Loading CosyVoice from {self.COSY_MODEL_ID}...")
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-
-        # Load config first to get hidden size
-        cosy_config = AutoConfig.from_pretrained(self.COSY_MODEL_ID, trust_remote_code=True)
-        self._cosy_dim = cosy_config.hidden_size
-
-        # Load tokenizer for distillation training
-        self._cosy_tokenizer = AutoTokenizer.from_pretrained(
-            self.COSY_MODEL_ID,
-            trust_remote_code=True,
+        # Llama config for decoder layers
+        self.llama_config = LlamaConfig(
+            vocab_size=self.total_vocab_size,
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.hidden_dim * 4,
+            num_hidden_layers=8,  # Main AR decoder depth
+            num_attention_heads=num_heads,
+            max_position_embeddings=4096,
+            rms_norm_eps=1e-6,
+            _attn_implementation="sdpa",  # Use scaled dot product attention
         )
 
-        # Load model
-        self._cosy_llm = AutoModelForCausalLM.from_pretrained(
-            self.COSY_MODEL_ID,
-            trust_remote_code=True,
-            torch_dtype=torch.bfloat16,
+        # Input projection: LLM dim → hidden dim
+        self.input_proj = nn.Linear(self.llm_dim, self.hidden_dim)
+
+        # Token embedding (vocab + 4 special tokens)
+        self.embedding = nn.Embedding(
+            self.total_vocab_size,
+            self.hidden_dim,
+            padding_idx=self.pad_id,
         )
 
-        if self._freeze_cosy:
-            self._cosy_llm.requires_grad_(False)
-            print("CosyVoice LLM frozen")
-
-        # Initialize bridge now that we know dimensions
-        self._bridge = nn.Sequential(
-            nn.LayerNorm(self.llm_dim),
-            nn.Linear(self.llm_dim, self.hidden_dim),
-            nn.GELU(),
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.GELU(),
-            nn.Linear(self.hidden_dim, self._cosy_dim),
+        # Pre-NN: Process LLM hidden states (4 layers)
+        self.pre_nn_layers = nn.ModuleList(
+            [LlamaDecoderLayer(self.llama_config, layer_idx=i) for i in range(4)]
         )
+        self.pre_nn_norm = LlamaRMSNorm(self.hidden_dim, eps=1e-6)
 
-        # Move bridge to same device/dtype as cosy model
-        device = next(self._cosy_llm.parameters()).device
-        dtype = next(self._cosy_llm.parameters()).dtype
-        self._bridge = self._bridge.to(device=device, dtype=dtype)
+        # AR Decoder layers (8 layers)
+        self.decoder_layers = nn.ModuleList(
+            [LlamaDecoderLayer(self.llama_config, layer_idx=i) for i in range(8)]
+        )
+        self.decoder_norm = LlamaRMSNorm(self.hidden_dim, eps=1e-6)
 
-        print(f"CosyVoice loaded: {self._cosy_dim}d, bridge: {self.llm_dim} -> {self._cosy_dim}")
+        # Rotary embeddings
+        self.rotary_emb = LlamaRotaryEmbedding(config=self.llama_config)
 
-    def to(self, *args, **kwargs):
-        """Override to handle lazy-loaded modules."""
-        result = super().to(*args, **kwargs)
-        if self._cosy_llm is not None:
-            self._cosy_llm = self._cosy_llm.to(*args, **kwargs)
-        if self._bridge is not None:
-            self._bridge = self._bridge.to(*args, **kwargs)
-        return result
+        # Output projection
+        self.output_proj = nn.Linear(self.hidden_dim, self.total_vocab_size)
 
-    @property
-    def bridge(self) -> nn.Sequential:
-        """Get the bridge module, loading if necessary."""
-        if self._bridge is None:
-            self._load_cosy_model()
-        assert self._bridge is not None  # Narrowing for type checker
-        return self._bridge
-
-    @property
-    def cosy_llm(self):
-        """Get CosyVoice LLM, loading if necessary."""
-        if self._cosy_llm is None:
-            self._load_cosy_model()
-        return self._cosy_llm
-
-    @property
-    def cosy_tokenizer(self):
-        """Get CosyVoice tokenizer, loading if necessary."""
-        if self._cosy_tokenizer is None:
-            self._load_cosy_model()
-        return self._cosy_tokenizer
+        # Loss
+        self.criterion = nn.CrossEntropyLoss(ignore_index=self.pad_id)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        text_targets: list[str] | None = None,
+        codec_targets: torch.Tensor | None = None,
+        codec_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward pass for training (distillation) or inference.
-
-        Training uses distillation: the bridge learns to produce embeddings
-        that match CosyVoice's text encoder output for the text response.
-        No pre-computed speech codes needed!
+        """Forward pass for training or inference.
 
         Args:
-            hidden_states: Main LLM hidden states (batch, seq_len, llm_dim)
-            text_targets: Text responses for distillation training (list of strings)
+            hidden_states: LLM hidden states (batch, llm_seq, llm_dim)
+            codec_targets: Target codec tokens (batch, audio_len) for training
+            codec_lengths: Actual lengths of targets (batch,)
 
         Returns:
-            If text_targets is provided: scalar distillation loss
-            If text_targets is None: predicted speech tokens (batch, token_len)
+            Training: scalar loss
+            Inference: predicted token IDs (batch, audio_len)
         """
-        # Ensure models are loaded
-        self._load_cosy_model()
+        batch_size = hidden_states.shape[0]
+        device = hidden_states.device
 
-        # Project hidden states to CosyVoice embedding space
-        projected = self.bridge(hidden_states)  # (batch, seq, cosy_dim)
+        # Project LLM hidden states
+        hidden_states = self.input_proj(hidden_states)  # (batch, llm_seq, hidden)
 
-        # Training mode: distillation
-        if text_targets is not None:
-            return self._forward_distillation(projected, text_targets)
+        # Process through Pre-NN
+        hidden_states = self._forward_pre_nn(hidden_states)
 
-        # Inference mode
-        return self._forward_inference(projected)
+        # Add BOS embedding
+        bos_emb = self.embedding(
+            torch.full((batch_size, 1), self.bos_id, device=device, dtype=torch.long)
+        )
+        context = torch.cat([bos_emb, hidden_states], dim=1)  # (batch, 1+llm_seq, hidden)
 
-    def _forward_distillation(
-        self,
-        projected_states: torch.Tensor,
-        text_targets: list[str],
-    ) -> torch.Tensor:
-        """Distillation training: match CosyVoice's text encoder embeddings.
+        if codec_targets is not None:
+            # Training: teacher forcing
+            return self._forward_train(context, codec_targets, codec_lengths)
+        # Inference: autoregressive generation
+        return self._forward_inference(context)
 
-        No pre-computed codes needed! The bridge learns to produce embeddings
-        that match what CosyVoice's text encoder would produce for the response.
+    def _forward_pre_nn(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Process LLM hidden states through Pre-NN layers."""
+        seq_len = hidden_states.shape[1]
+        position_ids = torch.arange(seq_len, device=hidden_states.device).unsqueeze(0)
 
-        Args:
-            projected_states: Bridge output (batch, seq_len, cosy_dim)
-            text_targets: List of text responses to distill from
+        # Get rotary embeddings
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        Returns:
-            Scalar distillation loss (MSE + cosine similarity)
-        """
-        device = projected_states.device
-        dtype = projected_states.dtype
-
-        # Get teacher embeddings from CosyVoice's text encoder
-        with torch.no_grad():
-            # Tokenize text targets
-            encoded = self.cosy_tokenizer(
-                text_targets,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=512,
-            ).to(device)
-
-            # Get embeddings from CosyVoice's embedding layer
-            # This is the target our bridge should learn to produce
-            teacher_embeds = self.cosy_llm.get_input_embeddings()(encoded.input_ids)
-            teacher_embeds = teacher_embeds.to(dtype)  # (batch, text_len, cosy_dim)
-
-        # Align sequence lengths between student and teacher
-        student_len = projected_states.shape[1]
-        teacher_len = teacher_embeds.shape[1]
-
-        if student_len > teacher_len:
-            # Pool student states to match teacher length
-            projected_states = nnf.adaptive_avg_pool1d(
-                projected_states.transpose(1, 2), teacher_len
-            ).transpose(1, 2)
-        elif teacher_len > student_len:
-            # Pool teacher states to match student length
-            teacher_embeds = nnf.adaptive_avg_pool1d(
-                teacher_embeds.transpose(1, 2), student_len
-            ).transpose(1, 2)
-
-        # Create attention mask for valid positions
-        attention_mask = encoded.attention_mask
-        if attention_mask.shape[1] != projected_states.shape[1]:
-            # Interpolate mask to match aligned length
-            attention_mask = (
-                nnf.interpolate(
-                    attention_mask.unsqueeze(1).float(),
-                    size=projected_states.shape[1],
-                    mode="nearest",
-                )
-                .squeeze(1)
-                .bool()
+        for layer in self.pre_nn_layers:
+            layer_out = layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
             )
+            # Transformers 5.0+ returns tensor directly, earlier returns tuple
+            hidden_states = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
-        # MSE loss on embeddings (masked)
-        mask = attention_mask.unsqueeze(-1).expand_as(projected_states)
-        mse_loss = nnf.mse_loss(
-            projected_states[mask],
-            teacher_embeds[mask],
-            reduction="mean",
+        return self.pre_nn_norm(hidden_states)
+
+    def _forward_train(
+        self,
+        context: torch.Tensor,
+        targets: torch.Tensor,
+        lengths: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Training forward with teacher forcing."""
+        batch_size = context.shape[0]
+        context_len = context.shape[1]
+        device = context.device
+        max_target_len = targets.shape[1]
+
+        # Prepare input: SOS + targets[:-1] (shifted right)
+        sos_tokens = torch.full((batch_size, 1), self.sos_id, device=device, dtype=torch.long)
+        input_tokens = torch.cat([sos_tokens, targets[:, :-1]], dim=1)  # (batch, max_target_len)
+        input_embeds = self.embedding(input_tokens)
+
+        # Prepare output targets: targets + EOS at length position
+        output_targets = targets.clone()
+        if lengths is not None:
+            for i, length in enumerate(lengths):
+                length = int(length.item())
+                if length < max_target_len:
+                    output_targets[i, length] = self.eos_id
+                    output_targets[i, length + 1 :] = self.pad_id
+
+        # Concatenate context + input embeddings
+        full_embeds = torch.cat([context, input_embeds], dim=1)
+        total_len = full_embeds.shape[1]
+
+        # Create causal mask
+        attn_mask = self._create_train_mask(batch_size, context_len, max_target_len, device)
+
+        # Position IDs
+        position_ids = torch.arange(total_len, device=device).unsqueeze(0)
+        position_embeddings = self.rotary_emb(full_embeds, position_ids)
+
+        # Forward through decoder
+        hidden = full_embeds
+        for layer in self.decoder_layers:
+            layer_out = layer(
+                hidden,
+                attention_mask=attn_mask,
+                position_embeddings=position_embeddings,
+            )
+            # Transformers 5.0+ returns tensor directly, earlier returns tuple
+            hidden = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+
+        hidden = self.decoder_norm(hidden)
+
+        # Get logits for AR portion only
+        ar_hidden = hidden[:, context_len:]  # (batch, max_target_len, hidden)
+        logits = self.output_proj(ar_hidden)  # (batch, max_target_len, vocab+4)
+
+        # Compute loss
+        return self.criterion(
+            logits.reshape(-1, logits.shape[-1]),
+            output_targets.reshape(-1),
         )
 
-        # Cosine similarity loss for direction alignment
-        student_norm = nnf.normalize(projected_states, p=2, dim=-1)
-        teacher_norm = nnf.normalize(teacher_embeds, p=2, dim=-1)
-        cosine_loss = 1.0 - (student_norm * teacher_norm).sum(dim=-1)
-        cosine_loss = (cosine_loss * attention_mask.float()).sum() / attention_mask.sum()
+    def _forward_inference(self, context: torch.Tensor, max_tokens: int = 500) -> torch.Tensor:
+        """Autoregressive inference."""
+        batch_size = context.shape[0]
+        device = context.device
 
-        # Combined loss
-        total_loss = mse_loss + 0.1 * cosine_loss
+        # Start with SOS token
+        generated = torch.full((batch_size, 1), self.sos_id, device=device, dtype=torch.long)
 
-        return total_loss * self.distillation_loss_weight
+        for _ in range(max_tokens):
+            # Embed generated tokens
+            gen_embeds = self.embedding(generated)
 
-    def _forward_inference(
-        self,
-        projected_states: torch.Tensor,
-        max_new_tokens: int = 512,
-    ) -> torch.Tensor:
-        """Inference forward pass - generate speech tokens.
+            # Concatenate context + generated
+            full_embeds = torch.cat([context, gen_embeds], dim=1)
+            total_len = full_embeds.shape[1]
 
-        Args:
-            projected_states: (batch, seq_len, cosy_dim) projected embeddings
-            max_new_tokens: Maximum tokens to generate
-
-        Returns:
-            (batch, token_len) generated speech tokens
-        """
-        # Generate speech tokens using CosyVoice LLM
-        with torch.no_grad():
-            return self.cosy_llm.generate(
-                inputs_embeds=projected_states,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                use_cache=True,
+            # Causal mask
+            causal_mask = torch.triu(
+                torch.ones(total_len, total_len, device=device), diagonal=1
+            ).bool()
+            attn_mask = causal_mask.unsqueeze(0).unsqueeze(0)
+            attn_mask = attn_mask.expand(batch_size, 1, -1, -1)
+            # Convert to float mask with -inf for masked positions
+            attn_mask = torch.where(
+                attn_mask,
+                torch.tensor(float("-inf"), device=device),
+                torch.tensor(0.0, device=device),
             )
 
-    def get_output_length(self, input_length: int) -> int:
-        """Estimate output speech token count.
+            # Position embeddings
+            position_ids = torch.arange(total_len, device=device).unsqueeze(0)
+            position_embeddings = self.rotary_emb(full_embeds, position_ids)
 
-        CosyVoice uses ~25Hz token rate for speech.
-        Assuming ~5 LLM tokens per second input, ratio is ~5x.
+            # Forward
+            hidden = full_embeds
+            for layer in self.decoder_layers:
+                layer_out = layer(
+                    hidden,
+                    attention_mask=attn_mask,
+                    position_embeddings=position_embeddings,
+                )
+                # Transformers 5.0+ returns tensor directly, earlier returns tuple
+                hidden = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+
+            hidden = self.decoder_norm(hidden)
+            logits = self.output_proj(hidden[:, -1:])  # Last position
+
+            # Greedy decode
+            next_token = logits.argmax(dim=-1)  # (batch, 1)
+
+            # Check for EOS
+            if (next_token == self.eos_id).all():
+                break
+
+            generated = torch.cat([generated, next_token], dim=1)
+
+        # Remove SOS token from output
+        return generated[:, 1:]
+
+    def _create_train_mask(
+        self,
+        batch_size: int,
+        context_len: int,
+        target_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Create attention mask for training.
+
+        Context tokens can attend to all context.
+        AR tokens can attend to context + previous AR tokens (causal).
+        """
+        total_len = context_len + target_len
+
+        # Start with zeros (no masking)
+        mask = torch.zeros(batch_size, 1, total_len, total_len, device=device)
+
+        # AR tokens: causal attention to other AR tokens (upper triangular = -inf)
+        ar_causal = torch.triu(
+            torch.ones(target_len, target_len, device=device) * float("-inf"),
+            diagonal=1,
+        )
+        mask[:, :, context_len:, context_len:] = ar_causal
+
+        return mask
+
+    def get_output_length(self, input_length: int) -> int:
+        """Estimate output codec token count.
+
+        Mimi uses 12.5 Hz frame rate. For simplicity, we estimate based on
+        typical speech duration ratios.
 
         Args:
             input_length: Number of input LLM hidden states
 
         Returns:
-            Estimated number of speech tokens
+            Estimated number of codec tokens
         """
-        return int(input_length * 5)
+        # Rough estimate: LLM tokens -> speech frames
+        # This will be refined based on actual audio duration
+        return int(input_length * 2)
 
     def state_dict(self, *args, **kwargs):
-        """Return only the bridge weights (CosyVoice is pretrained)."""
-        # Ignore args/kwargs - we only save bridge weights
-        del args, kwargs
-        if self._bridge is None:
-            return {}
-        return {f"bridge.{k}": v for k, v in self._bridge.state_dict().items()}
+        """Return full state dict."""
+        return super().state_dict(*args, **kwargs)
 
     def load_state_dict(self, state_dict, strict=True):
-        """Load only bridge weights."""
-        # Ensure models are loaded first
-        self._load_cosy_model()
-
-        # Extract bridge weights
-        bridge_state = {
-            k.replace("bridge.", ""): v for k, v in state_dict.items() if k.startswith("bridge.")
-        }
-
-        if bridge_state:
-            self._bridge.load_state_dict(bridge_state, strict=strict)
+        """Load state dict."""
+        return super().load_state_dict(state_dict, strict=strict)

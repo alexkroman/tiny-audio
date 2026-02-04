@@ -61,13 +61,14 @@ SIFT_INSTRUCTIONS = {
 class DatasetLoader:
     """Loads and prepares datasets for training."""
 
-    def __init__(self, config: DictConfig, sift_enabled: bool = False):
+    def __init__(self, config: DictConfig, sift_enabled: bool = False, s2s_enabled: bool = False):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
         self.num_proc = self.config.get("num_proc", 16)
         self.sift_enabled = sift_enabled
+        self.s2s_enabled = s2s_enabled
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
@@ -139,6 +140,9 @@ class DatasetLoader:
                 "codes",
                 "response_codes",
             }
+        elif self.s2s_enabled:
+            # S2S training: need codes column for audio head
+            keep_cols = {"audio", "text", "duration", "task", "codes"}
         else:
             # Standard ASR training
             keep_cols = {"audio", "text", "duration", "task"}
@@ -409,52 +413,183 @@ class SIFTDataCollator(DataCollator):
         batch["input_features"] = audio_out.input_features
         batch["audio_attention_mask"] = audio_out.attention_mask
 
-        # Add codec targets for audio head training if available
+        # Add codec targets for audio head training (Mimi codes)
         if self.use_audio_head:
-            codec_targets, codec_lengths = self._extract_response_codes(valid_features)
-            if codec_targets is not None:
-                batch["codec_targets"] = codec_targets
-                batch["codec_target_lengths"] = codec_lengths
+            codec_batch = self._extract_codec_targets(valid_features)
+            if codec_batch is not None:
+                batch["codec_targets"] = codec_batch["codec_targets"]
+                batch["codec_lengths"] = codec_batch["codec_lengths"]
 
         return batch
 
-    def _extract_response_codes(
-        self, features: list[dict]
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Extract and pad response_codes from features.
+    def _extract_codec_targets(self, features: list[dict]) -> dict | None:
+        """Extract Mimi codec targets for audio head training.
 
         Args:
-            features: List of feature dicts, may contain 'response_codes' or 'codes'
+            features: List of feature dicts with codes
 
         Returns:
-            Tuple of (padded_codes, code_lengths) or (None, None) if no codes
+            Dict with codec_targets and codec_lengths tensors, or None if no codes
         """
-        codec_tensors = []
+        if not features or "codes" not in features[0]:
+            return None
+
+        codec_list = []
         codec_lengths = []
 
         for f in features:
-            # Try response_codes first (SIFT), then codes (generic)
-            codes = f.get("response_codes") or f.get("codes") or []
-            if isinstance(codes, list):
-                if codes:  # Non-empty
-                    codes = torch.tensor(codes, dtype=torch.long)
-                else:
-                    codes = torch.tensor([], dtype=torch.long)
-            codec_tensors.append(codes)
-            codec_lengths.append(len(codes))
+            # codes shape: (8, num_frames) - take first codebook only
+            codes = f.get("codes")
+            if codes is None:
+                continue
+            codes_first = codes[0] if hasattr(codes, "__getitem__") else codes
+            codes_t = torch.tensor(codes_first, dtype=torch.long)
+            codec_list.append(codes_t)
+            codec_lengths.append(len(codes_t))
 
-        # Skip if no samples have codes
-        if all(length == 0 for length in codec_lengths):
-            return None, None
+        if not codec_list:
+            return None
 
         # Pad to max length
-        max_len = max(codec_lengths) if codec_lengths else 1
-        padded_codes = torch.zeros(len(codec_tensors), max_len, dtype=torch.long)
-        for i, codes in enumerate(codec_tensors):
-            if len(codes) > 0:
-                padded_codes[i, : len(codes)] = codes
+        max_len = max(codec_lengths)
+        padded = torch.zeros(len(codec_list), max_len, dtype=torch.long)
+        for i, codes in enumerate(codec_list):
+            padded[i, : len(codes)] = codes
 
-        return padded_codes, torch.tensor(codec_lengths, dtype=torch.long)
+        return {
+            "codec_targets": padded,
+            "codec_lengths": torch.tensor(codec_lengths, dtype=torch.long),
+        }
+
+
+class S2SDataCollator:
+    """Data collator for S2S training: audio -> Mimi codec tokens.
+
+    This collator handles speech alignment training where we predict
+    Mimi codec tokens from input audio. Uses mazesmazes/libritts-r-mimi-audio.
+    """
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        feature_extractor: Any,
+        sample_rate: int,
+        projector: Any = None,
+        encoder_conv_layers: list = None,
+        system_prompt: str = None,
+        num_codebooks: int = 1,
+    ):
+        self.tokenizer = tokenizer
+        self.feature_extractor = feature_extractor
+        self.sample_rate = sample_rate
+        self.projector = projector
+        self.encoder_conv_layers = encoder_conv_layers or [(1, 3, 1), (1, 3, 2)]
+        self.system_prompt = system_prompt
+        self.num_codebooks = num_codebooks
+
+        # Use trl's DataCollatorForChatML for label masking
+        self.text_collator = DataCollatorForChatML(
+            tokenizer=tokenizer,
+            max_length=2048,
+        )
+
+    def _compute_encoder_output_length(self, mel_length: int) -> int:
+        """Compute encoder output length using conv layer formulas."""
+        length = mel_length
+        for padding, kernel_size, stride in self.encoder_conv_layers:
+            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
+        return length
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        # Process audio (required for S2S training)
+        audio_arrays = []
+        valid_features = []
+
+        for f in features:
+            try:
+                audio = f["audio"]["array"]
+                if hasattr(audio, "numpy"):
+                    audio = audio.numpy()
+                audio = audio.squeeze()
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=0)
+                audio_arrays.append(audio)
+                valid_features.append(f)
+            except Exception:
+                continue
+            finally:
+                f["audio"] = None
+
+        if not audio_arrays:
+            raise ValueError("No valid audio samples in batch - S2S requires audio input")
+
+        audio_out = self.feature_extractor(
+            audio_arrays,
+            sampling_rate=self.sample_rate,
+            padding="longest",
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+
+        # Compute per-sample audio token counts
+        mel_lengths = audio_out.attention_mask.sum(dim=-1)
+        audio_token_counts = []
+        for mel_len in mel_lengths:
+            encoder_len = self._compute_encoder_output_length(int(mel_len.item()))
+            num_tokens = self.projector.get_output_length(encoder_len)
+            audio_token_counts.append(num_tokens)
+
+        # Get text for each sample
+        processed_texts = [(f.get("text") or "").strip().lower() for f in valid_features]
+
+        # Build messages for each sample
+        text_features = []
+        for text, num_audio_tokens in zip(processed_texts, audio_token_counts):
+            audio_placeholder = "<audio>" * num_audio_tokens
+            user_content = audio_placeholder + " Transcribe: "
+
+            messages = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": user_content})
+            messages.append({"role": "assistant", "content": text})
+
+            text_features.append({"messages": messages})
+
+        # Let trl handle tokenization, label masking, and padding
+        batch = self.text_collator(text_features)
+
+        # Remove labels - we only train audio head, not LLM text prediction
+        # (LLM and projector are frozen, so text loss has no gradient path)
+        batch.pop("labels", None)
+
+        batch["input_features"] = audio_out.input_features
+        batch["audio_attention_mask"] = audio_out.attention_mask
+
+        # Process Mimi codes (required for S2S training)
+        codec_list = []
+        codec_lengths = []
+
+        for f in valid_features:
+            codes = f.get("codes")
+            if codes is None:
+                raise ValueError("No codec targets found - S2S requires codes column")
+            # codes shape: (8, num_frames) - take first codebook(s)
+            codes_first = codes[0] if hasattr(codes, "__getitem__") and len(codes) > 0 else codes
+            codes_t = torch.tensor(codes_first, dtype=torch.long)
+            codec_list.append(codes_t)
+            codec_lengths.append(len(codes_t))
+
+        # Pad to max length
+        max_len = max(codec_lengths)
+        padded = torch.zeros(len(codec_list), max_len, dtype=torch.long)
+        for i, codes in enumerate(codec_list):
+            padded[i, : len(codes)] = codes
+
+        batch["codec_targets"] = padded
+        batch["codec_lengths"] = torch.tensor(codec_lengths, dtype=torch.long)
+
+        return batch
 
 
 class ASRTrainer(Trainer):
@@ -485,7 +620,10 @@ class ASRTrainer(Trainer):
             if self.args.gradient_accumulation_steps > 1:
                 loss = loss / self.args.gradient_accumulation_steps
         else:
-            loss = outputs.loss
+            loss = outputs.loss  # Could be None for S2S-only training
+
+        # Audio head loss is now added directly to outputs.loss in the model forward
+        # (CausalLMOutputWithPast doesn't preserve custom attributes through Accelerator)
 
         return (loss, outputs) if return_outputs else loss
 
@@ -595,11 +733,27 @@ def main(cfg: DictConfig) -> None:
     # Check if audio head training is enabled (jointly with projector)
     use_audio_head = cfg.model.get("use_audio_head", False)
 
-    # Load datasets
-    train_dataset, val_dataset = DatasetLoader(cfg, sift_enabled=sift_enabled).load()
+    # Check if S2S training mode (audio head with Mimi codes)
+    s2s_mode = use_audio_head and cfg.get("s2s", {}).get("enabled", False)
 
-    # Create data collator (SIFT or standard ASR)
-    if sift_enabled:
+    # Load datasets
+    train_dataset, val_dataset = DatasetLoader(
+        cfg, sift_enabled=sift_enabled, s2s_enabled=s2s_mode
+    ).load()
+
+    # Create data collator (S2S, SIFT, or standard ASR)
+    if s2s_mode:
+        # S2S training with Mimi codec targets
+        data_collator = S2SDataCollator(
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
+            sample_rate=cfg.data.sample_rate,
+            projector=model.projector,
+            encoder_conv_layers=model.config.encoder_conv_layers,
+            system_prompt=cfg.model.system_prompt,
+            num_codebooks=cfg.model.get("num_codebooks", 1),
+        )
+    elif sift_enabled:
         # SIFT training with optional audio head for speaking responses
         data_collator = SIFTDataCollator(
             tokenizer=model.tokenizer,

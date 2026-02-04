@@ -477,7 +477,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
         codec_targets: Optional[torch.Tensor] = None,
-        codec_target_lengths: Optional[torch.Tensor] = None,
+        codec_lengths: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
@@ -505,7 +505,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
             )
 
-        # Request hidden states if training audio head
+        # Request hidden states if training audio head with codec targets
         if self.audio_head is not None and codec_targets is not None:
             kwargs["output_hidden_states"] = True
 
@@ -527,15 +527,29 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if aux_loss is not None and aux_loss.numel() > 0:
                 outputs.loss = outputs.loss + aux_loss.to(outputs.loss.device)
 
-        # Compute audio head loss if training S2S
+        # Compute audio head loss if training S2S with codec targets
         if self.audio_head is not None and codec_targets is not None:
-            hidden_states = outputs.hidden_states[-1]  # Last layer
-            audio_head_loss = self.audio_head(hidden_states, codec_target_lengths, codec_targets)
+            hidden_states = outputs.hidden_states[-1]  # Last layer hidden states
+            # No detach needed: LLM is frozen (requires_grad=False), so gradients
+            # naturally stop there. Hidden states keep their grad_fn for proper backprop.
+            audio_head_loss = self.audio_head(
+                hidden_states,
+                codec_targets=codec_targets,
+                codec_lengths=codec_lengths,
+            )
+            # Add audio_head_loss directly to outputs.loss
+            # (CausalLMOutputWithPast doesn't preserve custom attributes through Accelerator)
             if outputs.loss is not None:
                 outputs.loss = outputs.loss + audio_head_loss
             else:
+                # S2S-only training: audio head loss is the only loss
                 outputs.loss = audio_head_loss
+        else:
+            print(
+                f"DEBUG: audio_head branch NOT taken: audio_head={self.audio_head is not None}, codec_targets={codec_targets is not None}"
+            )
 
+        print(f"DEBUG: returning outputs.loss={outputs.loss}")
         return outputs
 
     def prepare_inputs_for_generation(self, *args, **kwargs):

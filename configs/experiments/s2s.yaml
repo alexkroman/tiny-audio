@@ -1,35 +1,30 @@
 # @package _global_
-# Speech-to-Speech (S2S) training: Train Audio Head from pretrained Omni model
+# Speech-to-Speech (S2S) training: Train Audio Head with Mimi codec tokens
 #
 # Stage 2 of training pipeline:
 # - Starts from pretrained omni model (projector already trained)
-# - Freezes projector, trains only the audio head bridge
-# - Uses distillation: bridge learns to match CosyVoice's text encoder embeddings
-# - No pre-computed speech codes needed!
+# - Freezes projector, trains only the audio head AR decoder
+# - Uses cross-entropy loss on pre-computed Mimi codec tokens
+# - Uses mazesmazes/libritts-r-mimi-audio dataset with audio + pre-computed codes
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=s2s
 #
 # Prerequisites:
 #   - Pretrained omni model at mazesmazes/tiny-audio-omni (or specify model.pretrained_model_id)
-#   - HeySQuAD dataset (audio questions + text answers for distillation)
+#   - LibriTTS-R-Mimi-Audio dataset (audio + pre-computed Mimi codec codes)
 #
-# Architecture (Training):
-#   Audio Input → Encoder → Projector (frozen) → LLM → Hidden States → Bridge (trained)
-#                                                                           ↓
-#   Text Response → CosyVoice Tokenizer → CosyVoice Embeddings (teacher target)
+# Architecture:
+#   LLM Hidden States → Pre-NN (4 layers) → AR Decoder (8 layers) → Mimi Token Logits
 #
-#   Loss: MSE + cosine similarity between bridge output and teacher embeddings
-#
-# Architecture (Inference):
-#   Hidden States → Bridge → CosyVoice LLM (frozen) → Speech Tokens → Audio
+#   Loss: Cross-entropy on Mimi codec tokens (~25M trainable params)
 
 defaults:
   - override /data: s2s
 
 model:
   # Start from pretrained omni model
-  pretrained_model_id: mazesmazes/tiny-audio-omni
+  pretrained_model_path: mazesmazes/tiny-audio-omni
 
   projector_type: mlp
   projector_pool_stride: 4
@@ -46,31 +41,31 @@ model:
   # Freeze projector, train audio head (Stage 2)
   freeze_projector: true
 
-  # Audio Head settings - CosyVoice bridge with distillation
-  # Stage 2: Train bridge only, projector frozen, CosyVoice LLM frozen
+  # Audio Head settings - Freeze-Omni style AR decoder
+  # Predicts Mimi codec tokens using cross-entropy loss
   use_audio_head: true
-  freeze_audio_head: false  # Train the bridge
-  audio_head_hidden_dim: 512  # Bridge hidden dimension
-  freeze_cosy_llm: true  # CosyVoice LLM is always frozen (pretrained)
-  distillation_loss_weight: 1.0  # Weight for distillation loss
+  freeze_audio_head: false  # Train the AR decoder
+  audio_head_hidden_dim: 512  # AR decoder hidden dimension
+  codebook_size: 2048  # Mimi codec vocabulary size
+  num_codebooks: 1  # First codebook only (most important)
 
-# SIFT configuration
-sift:
+# S2S configuration flag
+s2s:
   enabled: true
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-s2s"
   group_by_length: false
-  learning_rate: 5e-4  # Higher LR since only training audio head
+  learning_rate: 1e-4
   warmup_steps: 500
   lr_scheduler_type: polynomial
   lr_scheduler_kwargs:
     power: 0.5
   seed: 42
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 8
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
   gradient_accumulation_steps: 4
-  num_train_epochs: 3  # More epochs for audio head
+  num_train_epochs: 10
   save_steps: 1000
   eval_steps: 1000
 

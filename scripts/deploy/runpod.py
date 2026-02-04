@@ -278,7 +278,6 @@ def build_training_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-python3 -m pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cusparselt/lib:${{LD_LIBRARY_PATH:-}}"
 export TOKENIZERS_PARALLELISM=false
@@ -471,7 +470,6 @@ def build_sift_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-python3 -m pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
@@ -608,7 +606,6 @@ def build_add_codes_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-python3 -m pip install hf_transfer kokoro>=0.9.2 --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
@@ -746,7 +743,6 @@ def build_clothoaqa_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-python3 -m pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
@@ -867,7 +863,6 @@ def build_neucodec_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-python3 -m pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
@@ -977,6 +972,132 @@ def neucodec(
 
 
 # =============================================================================
+# LibriTTS-R MIMI with Audio Command
+# =============================================================================
+
+
+def build_libritts_mimi_script(
+    hf_token: str,
+    output_repo: str,
+    splits: list[str] | None,
+    max_samples: int | None,
+) -> str:
+    """Generate the LibriTTS-R MIMI with audio script content."""
+    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
+    splits_arg = f"--splits {','.join(splits)}" if splits else ""
+
+    return f"""#!/bin/bash
+# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
+
+ulimit -n 65536
+export PATH="/root/.local/bin:$PATH"
+export HF_HOME=/workspace/.cache/huggingface
+export HF_DATASETS_CACHE=/workspace/datasets
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_TOKEN="{hf_token}"
+
+cd /workspace
+
+python -m scripts.generate_libritts_mimi_with_audio \\
+    --output-repo {output_repo} \\
+    {splits_arg} \\
+    {max_samples_arg}
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "===== LibriTTS-R MIMI Dataset Generation Completed Successfully ====="
+else
+    echo "===== LibriTTS-R MIMI Dataset Generation Failed with exit code: $EXIT_CODE ====="
+fi
+
+echo "Script finished. Session will remain active for inspection."
+sleep infinity
+"""
+
+
+@app.command("libritts-mimi")
+def libritts_mimi(
+    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
+    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
+    output_repo: str = typer.Option(
+        "mazesmazes/libritts-r-mimi-audio",
+        "--output-repo",
+        "-o",
+        help="HuggingFace repo for output",
+    ),
+    splits: Annotated[
+        list[str] | None,
+        typer.Option("--splits", "-s", help="Specific splits to process (comma-separated)"),
+    ] = None,
+    session_name: str | None = typer.Option(
+        None, "--session-name", help="Custom tmux session name"
+    ),
+    max_samples: int | None = typer.Option(
+        None, "--max-samples", "-n", help="Max samples per split (for testing)"
+    ),
+    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
+    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+):
+    """Generate LibriTTS-R MIMI dataset with audio column.
+
+    Joins jkeisling/libritts-r-mimi (MIMI codec codes) with blabble-io/libritts_r
+    (audio) to create a dataset with both audio and codes.
+
+    Examples:
+        ta runpod libritts-mimi host port
+        ta runpod libritts-mimi host port --splits dev.clean,test.clean
+        ta runpod libritts-mimi host port --splits dev.clean --max-samples 100
+    """
+    conn = get_connection(host, port)
+
+    if not test_connection(conn):
+        sys.exit(1)
+
+    # Generate session name if not provided
+    if session_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        session_name = f"libritts_mimi_{timestamp}"
+
+    if force:
+        print(f"Killing existing session '{session_name}' if present...")
+        kill_tmux_session(conn, session_name)
+
+    # Get environment variables
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        print("Warning: HF_TOKEN environment variable not set.")
+
+    # Build and upload script
+    script_content = build_libritts_mimi_script(hf_token, output_repo, splits, max_samples)
+    script_path = f"/tmp/libritts_mimi_{session_name}.sh"
+
+    print(f"\nStarting LibriTTS-R MIMI generation session '{session_name}'...")
+    print(f"Output repo: {output_repo}")
+    if splits:
+        print(f"Splits: {', '.join(splits)}")
+    if max_samples:
+        print(f"Max samples: {max_samples}")
+
+    # Write script to remote
+    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
+    conn.run(f"chmod +x {script_path}", hide=True)
+
+    # Start tmux session
+    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    if not result.ok:
+        print(f"Failed to start tmux session: {result.stderr}")
+        sys.exit(1)
+
+    print(f"\nLibriTTS-R MIMI generation started in session '{session_name}'.")
+    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
+
+    if not no_attach:
+        time.sleep(2)
+        attach_tmux_session(host, port, session_name)
+
+
+# =============================================================================
 # Eval Command
 # =============================================================================
 
@@ -1008,7 +1129,6 @@ def build_eval_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-python3 -m pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets

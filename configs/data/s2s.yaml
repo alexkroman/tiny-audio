@@ -1,15 +1,23 @@
 # S2S Audio Head training dataset
-# Uses HeySQuAD for distillation training of the CosyVoice bridge.
-# Audio questions → LLM hidden states → Bridge → matches CosyVoice embeddings of answers
+# Uses mazesmazes/libritts-r-mimi-audio with audio + pre-computed Mimi codec codes.
+#
+# Dataset properties:
+# - Audio: 24kHz LibriTTS-R audio
+# - Codebooks: 8 (we use first 1-2)
+# - Vocab size: 2048 per codebook
+# - Frame rate: 12.5 Hz
+# - train.clean.360: ~116k samples
+# - dev.clean: ~5.7k samples
+# - Columns: audio, text_normalized, codes, speaker_id
 
 datasets:
-  - path: fixie-ai/HeySQuAD_human
+  - path: mazesmazes/libritts-r-mimi-audio
     audio_column: audio
-    text_column: answers
-    text_transform: first_answer_text
-    task: answer
-    train_splits: [train]
-    eval_splits: [validation]
+    text_column: text_normalized
+    codes_column: codes
+    task: s2s
+    train_splits: [train.clean.360]
+    eval_splits: [dev.clean]
 
 # Audio processing
 sample_rate: 16000

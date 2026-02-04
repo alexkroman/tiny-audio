@@ -70,12 +70,12 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,
         freeze_projector: bool = False,
         label_smoothing: float = 0.0,
-        # Audio Head settings (CosyVoice bridge architecture)
+        # Audio Head settings (Freeze-Omni style AR decoder)
         use_audio_head: bool = False,
-        audio_head_hidden_dim: int = 512,  # Bridge hidden dimension
-        freeze_cosy_llm: bool = True,  # Freeze CosyVoice LLM (train only bridge)
+        audio_head_hidden_dim: int = 512,  # AR decoder hidden dimension
+        codebook_size: int = 2048,  # Mimi codec vocabulary size
+        num_codebooks: int = 1,  # Number of codebooks to predict (first 1-2 most important)
         freeze_audio_head: bool = False,  # Freeze entire audio head
-        distillation_loss_weight: float = 1.0,  # Weight for distillation loss
         **kwargs,
     ):
         # Merge generation defaults with kwargs (kwargs takes precedence)
@@ -140,12 +140,12 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_projector = freeze_projector
         self.label_smoothing = label_smoothing
 
-        # Audio Head settings (CosyVoice bridge architecture)
+        # Audio Head settings (Freeze-Omni style AR decoder)
         self.use_audio_head = use_audio_head
         self.audio_head_hidden_dim = audio_head_hidden_dim
-        self.freeze_cosy_llm = freeze_cosy_llm
+        self.codebook_size = codebook_size
+        self.num_codebooks = num_codebooks
         self.freeze_audio_head = freeze_audio_head
-        self.distillation_loss_weight = distillation_loss_weight
 
         # Generation parameters (from kwargs after merge with defaults)
         self.num_beams = kwargs.pop("num_beams")
@@ -163,7 +163,9 @@ class ASRConfig(transformers.PretrainedConfig):
         # Load sub-configs
         self.audio_config = kwargs.pop("audio_config", None)
         if self.audio_config is None:
-            self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
+            self.audio_config = transformers.AutoConfig.from_pretrained(
+                audio_model_id, trust_remote_code=True
+            )
             self.audio_config.dtype = model_dtype
         elif isinstance(self.audio_config, dict) and self.audio_config.get("model_type"):
             config_class = transformers.AutoConfig.for_model(
