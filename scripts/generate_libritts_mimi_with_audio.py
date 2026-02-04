@@ -22,9 +22,8 @@ import typer
 # Enable fast HuggingFace transfers
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-from datasets import Audio, DatasetDict, load_dataset
+from datasets import DatasetDict, Features, load_dataset
 from huggingface_hub import DatasetCard, DatasetCardData
-from tqdm import tqdm
 
 app = typer.Typer(help="Generate LibriTTS-R-MIMI dataset with audio column")
 
@@ -110,52 +109,60 @@ CC-BY-4.0 (same as LibriTTS-R)
 def process_split(
     mimi_split_name: str,
     max_samples: int | None = None,
+    num_workers: int = 12,
 ) -> dict | None:
     """Process a single split by joining mimi codes with libritts_r audio.
+
+    Uses .map() to process sample-by-sample with disk caching to avoid OOM.
 
     Args:
         mimi_split_name: Name of the split (e.g., "dev.clean")
         max_samples: Optional limit on number of samples
+        num_workers: Number of parallel workers for processing
 
     Returns:
         Dataset with audio column added, or None on failure
     """
+    import gc
+    from concurrent.futures import ThreadPoolExecutor
+
     typer.echo(f"\nProcessing split: {mimi_split_name}")
 
-    # Load mimi dataset (has codes but no audio)
-    typer.echo("  Loading mimi dataset...")
-    try:
-        mimi_ds = load_dataset(
-            "jkeisling/libritts-r-mimi",
-            split=mimi_split_name,
-            trust_remote_code=True,
-        )
-    except Exception as e:
-        typer.echo(f"  Error loading mimi split {mimi_split_name}: {e}")
-        return None
-
-    # Load libritts_r dataset (has audio)
-    # LibriTTS-R requires a config name: "clean", "other", or "all"
+    # Determine libritts config
     libritts_split = LIBRITTS_SPLIT_MAPPING.get(mimi_split_name, mimi_split_name)
-    # Determine config based on split name
     if "clean" in libritts_split:
         libritts_config = "clean"
     elif "other" in libritts_split:
         libritts_config = "other"
     else:
         libritts_config = "all"
-    typer.echo(
-        f"  Loading libritts_r dataset (config: {libritts_config}, split: {libritts_split})..."
-    )
-    try:
-        libritts_ds = load_dataset(
+
+    # Load both datasets in parallel
+    typer.echo("  Loading datasets in parallel (mimi + libritts_r)...")
+
+    def load_mimi():
+        return load_dataset(
+            "jkeisling/libritts-r-mimi",
+            split=mimi_split_name,
+            trust_remote_code=True,
+        )
+
+    def load_libritts():
+        return load_dataset(
             "mythicinfinity/libritts_r",
             libritts_config,
             split=libritts_split,
             trust_remote_code=True,
         )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            mimi_future = executor.submit(load_mimi)
+            libritts_future = executor.submit(load_libritts)
+            mimi_ds = mimi_future.result()
+            libritts_ds = libritts_future.result()
     except Exception as e:
-        typer.echo(f"  Error loading libritts_r split {libritts_split}: {e}")
+        typer.echo(f"  Error loading datasets: {e}")
         return None
 
     typer.echo(f"  MIMI samples: {len(mimi_ds)}, LibriTTS-R samples: {len(libritts_ds)}")
@@ -165,45 +172,64 @@ def process_split(
         mimi_ds = mimi_ds.select(range(max_samples))
         typer.echo(f"  Limited to {len(mimi_ds)} samples")
 
-    # Build lookup from id -> audio
-    typer.echo("  Building audio lookup...")
-    id_to_audio = {}
-    for sample in tqdm(libritts_ds, desc="  Indexing audio"):
-        id_to_audio[sample["id"]] = sample["audio"]
+    # Save the Audio feature type from libritts for later
+    audio_feature = libritts_ds.features["audio"]
 
-    # Add audio column to mimi dataset
-    typer.echo("  Adding audio column...")
-    audio_list = []
-    missing_count = 0
+    # Build lookup from id -> index (extract IDs in batch, much faster)
+    typer.echo("  Building ID index...")
+    libritts_ids = libritts_ds["id"]
+    id_to_idx = {id_val: idx for idx, id_val in enumerate(libritts_ids)}
+    del libritts_ids
+    gc.collect()
 
-    for sample in tqdm(mimi_ds, desc="  Matching audio"):
-        sample_id = sample["id"]
-        if sample_id in id_to_audio:
-            audio_list.append(id_to_audio[sample_id])
-        else:
-            # Audio not found - this shouldn't happen if datasets are aligned
-            missing_count += 1
-            audio_list.append(None)
+    # Filter mimi to only samples that exist in libritts
+    typer.echo("  Filtering to matched samples...")
+    mimi_ids = set(mimi_ds["id"])
+    matched_ids = mimi_ids & set(id_to_idx.keys())
+    missing_count = len(mimi_ids) - len(matched_ids)
 
     if missing_count > 0:
         typer.echo(f"  Warning: {missing_count} samples missing audio")
 
-    # Filter out samples with missing audio
-    if missing_count > 0:
-        valid_indices = [i for i, a in enumerate(audio_list) if a is not None]
-        mimi_ds = mimi_ds.select(valid_indices)
-        audio_list = [a for a in audio_list if a is not None]
-        typer.echo(f"  Filtered to {len(mimi_ds)} samples with audio")
+    mimi_ds = mimi_ds.filter(
+        lambda x: x["id"] in id_to_idx,  # noqa: F821
+        num_proc=num_workers,
+        desc="  Filtering",
+    )
 
-    # Add audio column
-    result_ds = mimi_ds.add_column("audio", audio_list)
+    typer.echo(f"  Matched {len(mimi_ds)} samples")
 
-    # Remove the path column (not needed anymore, was just cache path)
+    # Use map to add audio - processes one sample at a time with disk caching
+    # This avoids loading all audio into memory
+    typer.echo("  Adding audio via map (memory-efficient)...")
+
+    def add_audio(example):
+        """Look up and add audio for this sample."""
+        idx = id_to_idx[example["id"]]  # noqa: F821
+        audio = libritts_ds[idx]["audio"]  # noqa: F821
+        return {"audio": audio}
+
+    # Build new features with the Audio type from libritts
+    new_features = Features({**mimi_ds.features, "audio": audio_feature})
+
+    # Process with single worker to avoid memory issues with audio data
+    result_ds = mimi_ds.map(
+        add_audio,
+        num_proc=1,  # Single proc to share libritts_ds
+        desc="  Adding audio",
+        load_from_cache_file=False,  # Force processing to show progress
+        writer_batch_size=100,  # Write to disk every 100 samples
+        features=new_features,  # Set correct Audio type upfront
+    )
+
+    # Clean up
+    del id_to_idx
+    del libritts_ds
+    gc.collect()
+
+    # Remove the path column if present
     if "path" in result_ds.column_names:
         result_ds = result_ds.remove_columns(["path"])
-
-    # Ensure audio column has proper type
-    result_ds = result_ds.cast_column("audio", Audio(sampling_rate=24000))
 
     typer.echo(f"  Final dataset: {len(result_ds)} samples")
     return result_ds
@@ -222,6 +248,9 @@ def main(
         int | None, typer.Option(help="Max samples per split (for testing)")
     ] = None,
     push_every: Annotated[int, typer.Option(help="Push to hub every N splits")] = 1,
+    num_workers: Annotated[
+        int, typer.Option("--num-workers", "-w", help="Number of parallel workers")
+    ] = 12,
 ):
     """Generate LibriTTS-R-MIMI dataset with audio column.
 
@@ -244,11 +273,14 @@ def main(
     all_datasets = {}
     splits_processed = 0
 
+    import gc
+
     for split_name in split_names:
         try:
             ds = process_split(
                 mimi_split_name=split_name,
                 max_samples=max_samples,
+                num_workers=num_workers,
             )
 
             if ds is not None:
@@ -260,6 +292,9 @@ def main(
                     typer.echo(f"\nPushing {len(all_datasets)} splits to {output_repo}...")
                     dataset_dict = DatasetDict(all_datasets)
                     dataset_dict.push_to_hub(output_repo, private=False)
+
+            # Force garbage collection between splits
+            gc.collect()
 
         except Exception as e:
             import traceback

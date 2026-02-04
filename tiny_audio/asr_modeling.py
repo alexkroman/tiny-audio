@@ -840,7 +840,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         audio_attention_mask: torch.Tensor,
         **generate_kwargs,
     ) -> dict[str, torch.Tensor]:
-        """Generate text and NeuCodec tokens for Speech-to-Speech.
+        """Generate text and codec tokens for Speech-to-Speech.
 
         Args:
             input_features: Mel spectrogram features (batch, n_mels, mel_len)
@@ -851,7 +851,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             Dict with:
                 - text_ids: Generated text token IDs (batch, seq_len)
                 - text: Decoded text strings (list of str)
-                - codec_tokens: Predicted NeuCodec tokens (batch, audio_len)
+                - codec_tokens: Predicted codec tokens (batch, audio_len)
         """
         if self.audio_head is None:
             raise ValueError("Audio head not configured. Set use_audio_head=True in config.")
@@ -938,33 +938,65 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def decode_audio(
         self,
         codec_tokens: torch.Tensor,
-        codec_model_id: str = "neuphonic/neucodec",
+        sample_rate: int = 24000,
     ) -> torch.Tensor:
-        """Decode NeuCodec tokens to waveform.
+        """Decode Mimi codec tokens to waveform.
 
         Args:
-            codec_tokens: Codec token indices (batch, audio_len)
-            codec_model_id: HuggingFace model ID for NeuCodec
+            codec_tokens: Codec token indices (batch, codebooks, seq_len) or (batch, seq_len)
+                         If 2D, assumes single codebook and will unsqueeze.
+            sample_rate: Output sample rate (Mimi uses 24kHz)
 
         Returns:
-            Waveform tensor (batch, 1, samples) at 24kHz
+            Waveform tensor (batch, samples) at 24kHz
         """
+        import platform
+
+        # Ensure 3D: (batch, codebooks, seq_len)
+        if codec_tokens.dim() == 2:
+            codec_tokens = codec_tokens.unsqueeze(1)
+
+        # Use MLX on Mac for better performance
+        if platform.system() == "Darwin":
+            try:
+                import mlx.core as mx
+                from moshi_mlx import models
+
+                mimi = models.mimi_202412()
+                mimi.load_weights()
+
+                # Convert to MLX array
+                codes_np = codec_tokens.cpu().numpy()
+                codes_mlx = mx.array(codes_np)
+
+                # Decode
+                pcm = mimi.decode(codes_mlx)
+                waveform = torch.from_numpy(pcm.__array__())
+
+                return waveform.squeeze(1)  # (batch, samples)
+
+            except ImportError:
+                pass  # Fall back to transformers
+
+        # Use transformers MimiModel (works on all platforms)
         try:
-            from neucodec import NeuCodec
+            from transformers import MimiModel
+
+            mimi = MimiModel.from_pretrained("kyutai/mimi")
+            mimi = mimi.to(codec_tokens.device)
+            mimi.eval()
+
+            with torch.no_grad():
+                decoded = mimi.decode(codec_tokens)
+                waveform = decoded.audio_values
+
+            return waveform.squeeze(1)  # (batch, samples)
+
         except ImportError as e:
             raise ImportError(
-                "NeuCodec required for audio decoding. Install with: pip install neucodec"
+                "Mimi required for audio decoding. Install with: "
+                "pip install moshi_mlx (Mac) or transformers with Mimi support"
             ) from e
-
-        model = NeuCodec.from_pretrained(codec_model_id)
-        model = model.to(codec_tokens.device)
-        model.eval()
-
-        # NeuCodec decode expects (batch, 1, seq_len)
-        codes = codec_tokens.unsqueeze(1)
-
-        with torch.no_grad():
-            return model.decode_code(codes)
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
         """Save model, tokenizer, and processor."""

@@ -9,17 +9,11 @@ Supports three modes (following AZeroS approach):
 - sift_ssp: System + semantic + paralinguistic - empathetic response with tone awareness
 - sit_ssp: System + instruction + semantic + paralinguistic - audio description/analysis
 
-Now also generates NeuCodec codes for SIFT responses using Kokoro TTS, enabling
-joint training of the audio head alongside the LLM.
-
 Usage:
     python -m scripts.generate_sift_dataset --output-repo user/sift-dataset
 
-    # With TTS + NeuCodec encoding:
-    python -m scripts.generate_sift_dataset --output-repo user/sift-dataset --generate-codes
-
     # On RunPod via CLI:
-    ta runpod sift <host> <port> --output-repo user/sift-dataset --generate-codes
+    ta runpod sift <host> <port> --output-repo user/sift-dataset
 """
 
 import os
@@ -28,7 +22,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated
 
-import torch
 import typer
 
 # Enable fast HuggingFace transfers (must be set before importing HF libraries)
@@ -39,152 +32,6 @@ from huggingface_hub import DatasetCard, DatasetCardData
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig, pipeline
 from transformers.pipelines.pt_utils import KeyDataset
-
-
-class TTSEncoder:
-    """Generates speech from text using Parler-TTS Mini and encodes to NeuCodec."""
-
-    NEUCODEC_SAMPLE_RATE = 16000
-    PARLER_SAMPLE_RATE = 44100
-    PARLER_MODEL_ID = "parler-tts/parler-tts-mini-v1"
-    DEFAULT_VOICE_DESC = "Laura's voice is monotone yet slightly fast in delivery, with a very close recording that almost has no background noise."
-
-    def __init__(self, device: str = "cuda", voice_description: str | None = None):
-        self.device = device
-        self.voice_description = voice_description or self.DEFAULT_VOICE_DESC
-        self.tts_model = None
-        self.tts_tokenizer = None
-        self.codec_model = None
-        self._resampler = None
-
-    def _load_models(self):
-        """Lazy load TTS and codec models."""
-        if self.tts_model is None:
-            print("Loading Parler-TTS Mini...")
-            from parler_tts import ParlerTTSForConditionalGeneration
-            from transformers import AutoTokenizer
-
-            self.tts_model = ParlerTTSForConditionalGeneration.from_pretrained(
-                self.PARLER_MODEL_ID
-            ).to(self.device)
-            self.tts_tokenizer = AutoTokenizer.from_pretrained(self.PARLER_MODEL_ID)
-            print("Parler-TTS Mini loaded")
-
-        if self.codec_model is None:
-            print("Loading NeuCodec...")
-            from neucodec import NeuCodec
-
-            self.codec_model = NeuCodec.from_pretrained("neuphonic/neucodec")
-            self.codec_model.eval()
-            if self.device != "cpu" and torch.cuda.is_available():
-                self.codec_model = self.codec_model.to(self.device)
-            print(f"NeuCodec loaded on {self.device}")
-
-        # Create resampler on GPU: 44.1kHz -> 16kHz
-        if self._resampler is None:
-            from torchaudio.transforms import Resample
-
-            self._resampler = Resample(
-                orig_freq=self.PARLER_SAMPLE_RATE,
-                new_freq=self.NEUCODEC_SAMPLE_RATE,
-            )
-            if self.device != "cpu" and torch.cuda.is_available():
-                self._resampler = self._resampler.to(self.device)
-
-    def _generate_audio(self, text: str) -> torch.Tensor | None:
-        """Generate audio for a single text using Parler-TTS.
-
-        Returns:
-            Audio tensor (1, samples) on GPU, or None on failure
-        """
-        if not text or not text.strip():
-            return None
-
-        try:
-            # Tokenize description and text
-            description_tokens = self.tts_tokenizer(self.voice_description, return_tensors="pt").to(
-                self.device
-            )
-            text_tokens = self.tts_tokenizer(text, return_tensors="pt").to(self.device)
-
-            # Generate audio - returns (1, samples)
-            with torch.no_grad():
-                return self.tts_model.generate(
-                    input_ids=description_tokens.input_ids,
-                    attention_mask=description_tokens.attention_mask,
-                    prompt_input_ids=text_tokens.input_ids,
-                    prompt_attention_mask=text_tokens.attention_mask,
-                )
-
-        except Exception as e:
-            print(f"Warning: TTS failed for text '{text[:50]}...': {e}")
-            return None
-
-    def _encode_audio(self, audio: torch.Tensor) -> list[int]:
-        """Encode audio tensor to NeuCodec codes on GPU.
-
-        Args:
-            audio: Audio tensor (1, samples) on GPU at 44.1kHz
-
-        Returns:
-            List of codec indices
-        """
-        # Resample on GPU: 44.1kHz -> 16kHz
-        audio = self._resampler(audio)
-
-        # NeuCodec expects (1, 1, samples) - batch, channels, time
-        audio = audio.unsqueeze(0)  # (1, 1, samples)
-
-        # Encode with NeuCodec on GPU
-        with torch.no_grad():
-            codes = self.codec_model.encode_code(audio_or_path=audio)
-            # codes shape: (1, 1, seq_len) -> list
-            return codes.squeeze(0).squeeze(0).cpu().tolist()
-
-    def generate_codes(self, texts: list[str], batch_size: int = 64) -> list[list[int]]:
-        """Generate NeuCodec codes for a list of texts.
-
-        Args:
-            texts: List of text strings to convert to speech codes
-            batch_size: Batch size for progress reporting
-
-        Returns:
-            List of NeuCodec code lists (one per text)
-        """
-        self._load_models()
-
-        all_codes: list[list[int]] = []
-
-        for i in tqdm(range(0, len(texts), batch_size), desc="TTS + NeuCodec"):
-            batch_texts = texts[i : i + batch_size]
-            batch_codes: list[list[int]] = []
-
-            for text in batch_texts:
-                audio = self._generate_audio(text)
-                if audio is None:
-                    batch_codes.append([])
-                    continue
-
-                try:
-                    codes = self._encode_audio(audio)
-                    batch_codes.append(codes)
-                except Exception as e:
-                    print(f"Warning: Encoding failed: {e}")
-                    batch_codes.append([])
-
-            all_codes.extend(batch_codes)
-
-        return all_codes
-
-    def close(self):
-        """Clean up resources."""
-        if self.tts_model is not None:
-            del self.tts_model
-            self.tts_model = None
-        if self.codec_model is not None:
-            del self.codec_model
-            self.codec_model = None
-        torch.cuda.empty_cache()
 
 
 class SiftMode(str, Enum):
@@ -732,16 +579,11 @@ def process_dataset(
     max_samples: int | None,
     max_new_tokens: int,
     modes: list[SiftMode] | None = None,
-    tts_encoder: TTSEncoder | None = None,
-    tts_batch_size: int = 64,
 ):
     """Process a single dataset and generate SIFT responses for all modes.
 
     Generates one sample per mode for each audio clip, resulting in 3x the data
     when using all three modes (sift_s, sift_ssp, sit_ssp).
-
-    If tts_encoder is provided, also generates NeuCodec codes for each response
-    using Kokoro TTS.
     """
     if modes is None:
         modes = list(SiftMode)
@@ -829,12 +671,6 @@ def process_dataset(
         mode_ds = mode_ds.add_column("sift_response", responses)
         mode_ds = mode_ds.add_column("source_dataset", [config.name] * len(ds))
 
-        # Generate NeuCodec codes for responses if TTS encoder is provided
-        if tts_encoder is not None:
-            print(f"  Generating TTS + NeuCodec codes for {mode.value}...")
-            codes = tts_encoder.generate_codes(responses, batch_size=tts_batch_size)
-            mode_ds = mode_ds.add_column("response_codes", codes)
-
         mode_datasets.append(mode_ds)
 
     # Concatenate all mode datasets
@@ -884,7 +720,6 @@ def process_dataset(
         "sift_response",
         "source_dataset",
         "mode",
-        "response_codes",  # NeuCodec codes for TTS of sift_response
     ]
     remove_cols = [c for c in combined_ds.column_names if c not in keep_cols]
     if remove_cols:
@@ -906,106 +741,6 @@ def process_dataset(
 app = typer.Typer(help="Generate SIFT datasets for paralinguistic training")
 
 
-@app.command("add-codes")
-def add_codes_to_existing(
-    input_repo: Annotated[
-        str, typer.Option(help="Existing SIFT dataset repo to update")
-    ] = "mazesmazes/sift-audio-2",
-    output_repo: Annotated[
-        str, typer.Option(help="Output repo (can be same as input to update in place)")
-    ] = "mazesmazes/sift-audio-2",
-    splits: Annotated[
-        list[str] | None, typer.Option(help="Specific splits to process (default: all)")
-    ] = None,
-    batch_size: Annotated[int, typer.Option(help="Batch size for TTS + NeuCodec encoding")] = 64,
-    max_samples: Annotated[
-        int | None, typer.Option(help="Max samples per split (for testing)")
-    ] = None,
-):
-    """Add NeuCodec codes to an existing SIFT dataset.
-
-    This is much faster than regenerating from scratch since it only adds
-    the response_codes column using Kokoro TTS + NeuCodec encoding.
-
-    Uses multiprocessing for parallel TTS generation.
-
-    Usage:
-        python -m scripts.generate_sift_dataset add-codes --input-repo mazesmazes/sift-audio-2
-    """
-    typer.echo(f"Adding NeuCodec codes to {input_repo}")
-    typer.echo(f"Output: {output_repo}")
-    # Initialize TTS encoder
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    tts_encoder = TTSEncoder(device=device)
-
-    # Load existing dataset
-    typer.echo(f"\nLoading {input_repo}...")
-    from datasets import DatasetDict, load_dataset
-
-    ds_dict = load_dataset(input_repo)
-
-    # Filter splits if specified
-    if splits:
-        # Expand comma-separated values
-        expanded = []
-        for s in splits:
-            expanded.extend(s.split(","))
-        split_names = [s.strip() for s in expanded if s.strip()]
-    else:
-        split_names = list(ds_dict.keys())
-
-    typer.echo(f"Processing splits: {split_names}")
-
-    updated_splits = {}
-    for split_name in split_names:
-        if split_name not in ds_dict:
-            typer.echo(f"  Warning: Split '{split_name}' not found, skipping")
-            continue
-
-        ds = ds_dict[split_name]
-        typer.echo(f"\n  Processing {split_name}: {len(ds)} samples")
-
-        # Limit samples if requested
-        if max_samples and len(ds) > max_samples:
-            ds = ds.select(range(max_samples))
-            typer.echo(f"    Limited to {len(ds)} samples")
-
-        # Check if response_codes already exists
-        if "response_codes" in ds.column_names:
-            typer.echo("    response_codes already exists, skipping")
-            updated_splits[split_name] = ds
-            continue
-
-        # Get sift_response texts
-        responses = ds["sift_response"]
-
-        # Generate codes
-        typer.echo("    Generating TTS + NeuCodec codes...")
-        codes = tts_encoder.generate_codes(responses, batch_size=batch_size)
-
-        # Add column
-        ds = ds.add_column("response_codes", codes)
-        updated_splits[split_name] = ds
-        typer.echo(f"    Done: {len(ds)} samples with codes")
-
-    # Clean up TTS workers
-    tts_encoder.close()
-
-    # Push to hub
-    if updated_splits:
-        typer.echo(f"\nPushing to {output_repo}...")
-        # Merge with existing splits that weren't processed
-        for split_name in ds_dict:
-            if split_name not in updated_splits:
-                updated_splits[split_name] = ds_dict[split_name]
-
-        result_dict = DatasetDict(updated_splits)
-        result_dict.push_to_hub(output_repo, private=False)
-        typer.echo("Done!")
-    else:
-        typer.echo("No splits were processed.")
-
-
 @app.command()
 def main(
     output_repo: Annotated[
@@ -1025,12 +760,6 @@ def main(
         list[str] | None,
         typer.Option(help="SIFT modes to generate (sift_s, sift_ssp, sit_ssp). Default: all three"),
     ] = None,
-    generate_codes: Annotated[
-        bool, typer.Option(help="Generate NeuCodec codes for responses using Parler-TTS")
-    ] = False,
-    tts_batch_size: Annotated[
-        int, typer.Option(help="Batch size for TTS + NeuCodec encoding")
-    ] = 64,
 ):
     """Generate SIFT datasets for paralinguistic training.
 
@@ -1038,9 +767,6 @@ def main(
     - sift_s: Conversational response to transcription (voice assistant behavior)
     - sift_ssp: Empathetic response with tone awareness
     - sit_ssp: Audio description/analysis (audio understanding behavior)
-
-    With --generate-codes, also generates NeuCodec audio codes for each response
-    using Parler-TTS Mini, enabling joint training of projector + audio head.
     """
     # Parse modes
     if modes:
@@ -1079,14 +805,6 @@ def main(
     typer.echo(f"Modes: {[m.value for m in selected_modes]}")
     typer.echo(f"Model: {model_name}")
     typer.echo(f"Output: {output_repo}")
-    if generate_codes:
-        typer.echo("TTS + NeuCodec encoding: ENABLED")
-
-    # Initialize TTS encoder if requested
-    tts_encoder = None
-    if generate_codes:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        tts_encoder = TTSEncoder(device=device)
 
     # Load tokenizer and create pipeline
     typer.echo(f"\nLoading model {model_name}...")
@@ -1117,8 +835,6 @@ def main(
                 max_samples=max_samples,
                 max_new_tokens=max_new_tokens,
                 modes=selected_modes,
-                tts_encoder=tts_encoder,
-                tts_batch_size=tts_batch_size,
             )
 
             if ds is not None:
@@ -1139,10 +855,6 @@ def main(
             continue
 
     # Final push
-    # Clean up TTS workers
-    if tts_encoder is not None:
-        tts_encoder.close()
-
     if all_datasets:
         typer.echo(f"\nFinal push: {len(all_datasets)} splits to {output_repo}...")
         dataset_dict = DatasetDict(all_datasets)

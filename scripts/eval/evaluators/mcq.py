@@ -40,6 +40,7 @@ class MMAUEvaluator:
         category_field: str = "other_attributes",
         user_prompt: str | None = None,
         num_workers: int = 1,
+        domain_filter: str | None = "speech",
     ):
         self.model_path = model_path
         self.audio_field = audio_field
@@ -49,6 +50,7 @@ class MMAUEvaluator:
         self.category_field = category_field
         self.user_prompt = user_prompt
         self.num_workers = num_workers
+        self.domain_filter = domain_filter
         self.results: list[MCQResult] = []
         self._pipeline = None
 
@@ -65,17 +67,22 @@ class MMAUEvaluator:
             )
         return self._pipeline
 
+    def _parse_other_attributes(self, other_attributes) -> dict:
+        """Parse other_attributes JSON string into a dict."""
+        try:
+            if isinstance(other_attributes, str):
+                return json.loads(other_attributes)
+            if isinstance(other_attributes, dict):
+                return other_attributes
+            return {}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {}
+
     def _extract_category(self, other_attributes) -> str:
         """Extract category from other_attributes JSON string."""
         try:
-            category = None
-            if isinstance(other_attributes, str):
-                attrs_dict = json.loads(other_attributes)
-                category = attrs_dict.get("category", "unknown")
-            elif isinstance(other_attributes, dict):
-                category = other_attributes.get("category", "unknown")
-            else:
-                category = other_attributes
+            attrs_dict = self._parse_other_attributes(other_attributes)
+            category = attrs_dict.get("category", "unknown")
 
             # Handle list values like ['Reasoning']
             if isinstance(category, list) and len(category) > 0:
@@ -84,6 +91,21 @@ class MMAUEvaluator:
             return str(category) if category else "unknown"
         except (json.JSONDecodeError, TypeError, ValueError):
             return "unknown"
+
+    def _extract_domain(self, other_attributes) -> str:
+        """Extract domain (speech/sound/music) from other_attributes 'task' field."""
+        attrs_dict = self._parse_other_attributes(other_attributes)
+        domain = attrs_dict.get("task", "unknown")
+        if isinstance(domain, list) and len(domain) > 0:
+            domain = domain[0]
+        return str(domain).lower() if domain else "unknown"
+
+    def _matches_domain_filter(self, other_attributes) -> bool:
+        """Check if sample matches the domain filter."""
+        if not self.domain_filter:
+            return True
+        domain = self._extract_domain(other_attributes)
+        return domain == self.domain_filter.lower()
 
     def answer_question(self, audio: dict, question: str, choices: list[str]) -> tuple[str, float]:
         """Answer a question about audio using the model."""
@@ -174,37 +196,58 @@ class MMAUEvaluator:
     def _collect_samples(self, dataset, max_samples: int | None) -> list[dict]:
         """Collect samples for parallel processing."""
         samples = []
-        console.print(f"[dim]Collecting samples (target: {max_samples or 'all'})...[/dim]")
+        skipped = 0
+        filter_desc = f" (domain={self.domain_filter})" if self.domain_filter else ""
+        console.print(
+            f"[dim]Collecting samples{filter_desc} (target: {max_samples or 'all'})...[/dim]"
+        )
 
         for sample in dataset:
+            other_attrs = sample.get(self.category_field, "")
+            if not self._matches_domain_filter(other_attrs):
+                skipped += 1
+                continue
+
             samples.append(
                 {
                     "audio": sample[self.audio_field],
                     "question": sample[self.question_field],
                     "reference": sample[self.answer_field],
                     "choices": sample[self.choices_field],
-                    "category": self._extract_category(sample.get(self.category_field, "")),
+                    "category": self._extract_category(other_attrs),
                 }
             )
 
             if len(samples) % 100 == 0:
-                console.print(f"[dim]  Collected {len(samples)} samples...[/dim]")
+                console.print(
+                    f"[dim]  Collected {len(samples)} samples (skipped {skipped})...[/dim]"
+                )
 
             if max_samples and len(samples) >= max_samples:
                 break
 
-        console.print(f"[dim]Collected {len(samples)} samples, starting evaluation...[/dim]")
+        console.print(
+            f"[dim]Collected {len(samples)} samples (skipped {skipped}), starting evaluation...[/dim]"
+        )
         return samples
 
     def _evaluate_sequential(self, dataset, max_samples: int | None) -> None:
         """Run sequential evaluation."""
-        for idx, sample in enumerate(dataset, 1):
+        idx = 0
+        skipped = 0
+        for sample in dataset:
+            other_attrs = sample.get(self.category_field, "")
+            if not self._matches_domain_filter(other_attrs):
+                skipped += 1
+                continue
+
+            idx += 1
             sample_data = {
                 "audio": sample[self.audio_field],
                 "question": sample[self.question_field],
                 "reference": sample[self.answer_field],
                 "choices": sample[self.choices_field],
-                "category": self._extract_category(sample.get(self.category_field, "")),
+                "category": self._extract_category(other_attrs),
             }
 
             _, result = self._process_sample((idx, sample_data))
@@ -305,6 +348,7 @@ class AssemblyAIMMAUEvaluator(MMAUEvaluator):
         choices_field: str = "choices",
         category_field: str = "other_attributes",
         num_workers: int = 1,
+        domain_filter: str | None = "speech",
     ):
         # Don't call parent __init__ fully - we override the pipeline
         self.audio_field = audio_field
@@ -314,6 +358,7 @@ class AssemblyAIMMAUEvaluator(MMAUEvaluator):
         self.category_field = category_field
         self.user_prompt = None
         self.num_workers = num_workers
+        self.domain_filter = domain_filter
         self.results: list[MCQResult] = []
 
         self.api_key = api_key

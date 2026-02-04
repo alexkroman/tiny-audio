@@ -432,6 +432,12 @@ def main(
         Optional[str],
         typer.Option("--keyterms", "-k", help="Comma-separated key terms for AssemblyAI SLAM-1"),
     ] = None,
+    domain: Annotated[
+        Optional[str],
+        typer.Option(
+            "--domain", help="Domain filter for MMAU: speech, sound, music, or 'all' for no filter"
+        ),
+    ] = "speech",
 ):
     """Evaluate ASR models on standard datasets."""
     # If a subcommand was invoked, skip
@@ -592,6 +598,9 @@ def main(
 
             dataset = hf_load_dataset(cfg.path, split=actual_split, streaming=True)
 
+            # Convert 'all' to None for no filtering
+            domain_filter = None if domain == "all" else domain
+
             if model == "assemblyai":
                 api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
                 if not api_key:
@@ -608,6 +617,7 @@ def main(
                     choices_field=cfg.choices_field,
                     category_field=cfg.category_field,
                     num_workers=num_workers,
+                    domain_filter=domain_filter,
                 )
             else:
                 model_id = get_model_name(model)
@@ -620,6 +630,7 @@ def main(
                     category_field=cfg.category_field,
                     user_prompt=user_prompt,
                     num_workers=num_workers,
+                    domain_filter=domain_filter,
                 )
 
             results = evaluator.evaluate(dataset, max_samples)
