@@ -70,12 +70,16 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,
         freeze_projector: bool = False,
         label_smoothing: float = 0.0,
-        # Audio Head settings (Freeze-Omni style AR decoder)
+        # Audio Head / Depformer settings (Moshi-style depth transformer)
         use_audio_head: bool = False,
-        audio_head_hidden_dim: int = 512,  # AR decoder hidden dimension
+        audio_head_hidden_dim: int = 512,  # Legacy (use depformer_dim instead)
+        depformer_dim: int = 1024,  # Depformer hidden dimension
+        depformer_num_layers: int = 6,  # Depformer transformer layers
         codebook_size: int = 2048,  # Mimi codec vocabulary size
-        num_codebooks: int = 1,  # Number of codebooks to predict (first 1-2 most important)
+        num_codebooks: int = 8,  # Number of codebooks to predict
         freeze_audio_head: bool = False,  # Freeze entire audio head
+        first_codebook_weight: float = 100.0,  # Weight for first codebook loss (semantic tokens)
+        acoustic_delay: int = 1,  # Delay τ for acoustic codebooks (Moshi uses 1 or 2)
         **kwargs,
     ):
         # Merge generation defaults with kwargs (kwargs takes precedence)
@@ -140,12 +144,16 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_projector = freeze_projector
         self.label_smoothing = label_smoothing
 
-        # Audio Head settings (Freeze-Omni style AR decoder)
+        # Audio Head / Depformer settings (Moshi-style depth transformer)
         self.use_audio_head = use_audio_head
-        self.audio_head_hidden_dim = audio_head_hidden_dim
+        self.audio_head_hidden_dim = audio_head_hidden_dim  # Legacy
+        self.depformer_dim = depformer_dim
+        self.depformer_num_layers = depformer_num_layers
         self.codebook_size = codebook_size
         self.num_codebooks = num_codebooks
         self.freeze_audio_head = freeze_audio_head
+        self.first_codebook_weight = first_codebook_weight
+        self.acoustic_delay = acoustic_delay
 
         # Generation parameters (from kwargs after merge with defaults)
         self.num_beams = kwargs.pop("num_beams")

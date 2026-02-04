@@ -181,11 +181,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         else:
             self.spec_augment = None
 
-        # Audio Head for S2S (trainable)
+        # Depformer for S2S (trainable) - Moshi-style depth transformer
         if getattr(config, "use_audio_head", False):
-            from .audio_head import AudioHead
+            from .audio_head import Depformer
 
-            self.audio_head = AudioHead(config).to(
+            self.audio_head = Depformer(config).to(
                 device=next(self.language_model.parameters()).device,
                 dtype=target_dtype,
             )
@@ -509,6 +509,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if self.audio_head is not None and codec_targets is not None:
             kwargs["output_hidden_states"] = True
 
+        # Remove TRL-specific keys that shouldn't go to the LLM
+        kwargs.pop("prompts", None)
+        kwargs.pop("prompt_attention_mask", None)
+
         # Run through language model (let it compute loss if labels provided)
         outputs = self.language_model(
             attention_mask=attention_mask,
@@ -529,6 +533,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Compute audio head loss if training S2S with codec targets
         if self.audio_head is not None and codec_targets is not None:
+            if outputs.hidden_states is None:
+                raise ValueError(
+                    "LLM did not return hidden_states for audio head. "
+                    "Ensure output_hidden_states=True is passed to the LLM."
+                )
             hidden_states = outputs.hidden_states[-1]  # Last layer hidden states
             # No detach needed: LLM is frozen (requires_grad=False), so gradients
             # naturally stop there. Hidden states keep their grad_fn for proper backprop.
@@ -537,19 +546,24 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 codec_targets=codec_targets,
                 codec_lengths=codec_lengths,
             )
-            # Add audio_head_loss directly to outputs.loss
-            # (CausalLMOutputWithPast doesn't preserve custom attributes through Accelerator)
+
+            # Combine with LLM loss if present (e.g., joint ASR+S2S training)
             if outputs.loss is not None:
-                outputs.loss = outputs.loss + audio_head_loss
+                total_loss = outputs.loss + audio_head_loss
             else:
-                # S2S-only training: audio head loss is the only loss
-                outputs.loss = audio_head_loss
-        else:
-            print(
-                f"DEBUG: audio_head branch NOT taken: audio_head={self.audio_head is not None}, codec_targets={codec_targets is not None}"
+                total_loss = audio_head_loss
+
+            # Return new output object (direct assignment doesn't work with Accelerator/DDP)
+            from transformers.modeling_outputs import CausalLMOutputWithPast
+
+            return CausalLMOutputWithPast(
+                loss=total_loss,
+                logits=outputs.logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
             )
 
-        print(f"DEBUG: returning outputs.loss={outputs.loss}")
         return outputs
 
     def prepare_inputs_for_generation(self, *args, **kwargs):

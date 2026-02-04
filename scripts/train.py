@@ -567,6 +567,7 @@ class S2SDataCollator:
         batch["audio_attention_mask"] = audio_out.attention_mask
 
         # Process Mimi codes (required for S2S training)
+        # codes shape from dataset: (num_codebooks, num_frames)
         codec_list = []
         codec_lengths = []
 
@@ -574,17 +575,28 @@ class S2SDataCollator:
             codes = f.get("codes")
             if codes is None:
                 raise ValueError("No codec targets found - S2S requires codes column")
-            # codes shape: (8, num_frames) - take first codebook(s)
-            codes_first = codes[0] if hasattr(codes, "__getitem__") and len(codes) > 0 else codes
-            codes_t = torch.tensor(codes_first, dtype=torch.long)
-            codec_list.append(codes_t)
-            codec_lengths.append(len(codes_t))
 
-        # Pad to max length
+            # Convert to tensor - shape: (num_codebooks, num_frames)
+            if hasattr(codes, "shape"):
+                codes_t = torch.tensor(codes, dtype=torch.long)
+            else:
+                codes_t = torch.tensor(list(codes), dtype=torch.long)
+
+            # Take only the codebooks we need
+            if codes_t.dim() == 1:
+                # Single codebook - add codebook dimension
+                codes_t = codes_t.unsqueeze(0)
+
+            codes_t = codes_t[: self.num_codebooks]  # (num_codebooks, num_frames)
+            codec_list.append(codes_t)
+            codec_lengths.append(codes_t.shape[-1])  # num_frames
+
+        # Pad to max length: (batch, num_codebooks, max_len)
         max_len = max(codec_lengths)
-        padded = torch.zeros(len(codec_list), max_len, dtype=torch.long)
+        num_cbs = codec_list[0].shape[0]
+        padded = torch.zeros(len(codec_list), num_cbs, max_len, dtype=torch.long)
         for i, codes in enumerate(codec_list):
-            padded[i, : len(codes)] = codes
+            padded[i, :, : codes.shape[-1]] = codes
 
         batch["codec_targets"] = padded
         batch["codec_lengths"] = torch.tensor(codec_lengths, dtype=torch.long)
@@ -620,10 +632,21 @@ class ASRTrainer(Trainer):
             if self.args.gradient_accumulation_steps > 1:
                 loss = loss / self.args.gradient_accumulation_steps
         else:
-            loss = outputs.loss  # Could be None for S2S-only training
+            loss = outputs.loss
 
-        # Audio head loss is now added directly to outputs.loss in the model forward
-        # (CausalLMOutputWithPast doesn't preserve custom attributes through Accelerator)
+        # Fail fast with helpful error if loss is None
+        if loss is None:
+            # Get debug info - handle wrapped model (DDP/Accelerator)
+            underlying_model = getattr(model, "module", model)
+            has_audio_head = getattr(underlying_model, "audio_head", None) is not None
+            has_codec_targets = "codec_targets" in inputs
+            has_labels = "labels" in inputs
+            raise ValueError(
+                f"Model returned None loss. This usually means the forward pass didn't compute a loss. "
+                f"Debug info: has_labels={has_labels}, has_audio_head={has_audio_head}, "
+                f"has_codec_targets={has_codec_targets}. "
+                f"Input keys: {list(inputs.keys())}"
+            )
 
         return (loss, outputs) if return_outputs else loss
 
@@ -732,6 +755,14 @@ def main(cfg: DictConfig) -> None:
 
     # Check if audio head training is enabled (jointly with projector)
     use_audio_head = cfg.model.get("use_audio_head", False)
+
+    # Validate audio head exists when expected
+    if use_audio_head and model.audio_head is None:
+        raise ValueError(
+            f"use_audio_head=True but model.audio_head is None. "
+            f"Config use_audio_head={model.config.use_audio_head}. "
+            "Check that the config is being passed correctly to the model."
+        )
 
     # Check if S2S training mode (audio head with Mimi codes)
     s2s_mode = use_audio_head and cfg.get("s2s", {}).get("enabled", False)
