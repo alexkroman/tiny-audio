@@ -1,0 +1,19 @@
+# Data configuration for S2S flow matching training
+# Uses datasets with pre-computed continuous Mimi latents
+
+datasets:
+  - path: mazesmazes/libritts-r-mimi-latents
+    audio_column: audio
+    text_column: text_normalized
+    latents_column: latents
+    task: s2s
+    train_splits: [train.clean.100]
+    eval_splits: [train.clean.100]  # Use same split until dev.clean is generated
+
+# Whisper encoder requires 16kHz (audio is resampled from 24kHz Mimi dataset)
+sample_rate: 16000
+
+# Dataset processing
+dataset_cache_dir: null
+max_eval_samples: 500
+num_proc: 8

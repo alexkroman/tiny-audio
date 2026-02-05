@@ -705,17 +705,24 @@ def clothoaqa(
 
 
 # =============================================================================
-# Jenny MIMI Dataset Generation Command
+# Mimi Latents Generation Command (for flow matching S2S)
 # =============================================================================
 
 
-def build_jenny_mimi_script(
+def build_latents_script(
     hf_token: str,
+    input_dataset: str,
     output_repo: str,
+    dataset_config: str | None,
+    audio_column: str,
+    text_column: str,
+    splits: list[str],
     batch_size: int,
     max_samples: int | None,
 ) -> str:
-    """Generate the Jenny MIMI dataset generation script content."""
+    """Generate the Mimi latents generation script content."""
+    splits_arg = ",".join(splits)
+    config_arg = f"--dataset-config {dataset_config}" if dataset_config else ""
     max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
 
     return f"""#!/bin/bash
@@ -736,17 +743,22 @@ export TORCH_CUDNN_BENCHMARK=1
 
 cd /workspace
 
-python -m scripts.generate_jenny_mimi \\
-    --output-repo {output_repo} \\
+python -m scripts.generate_mimi_latents \\
+    --input-dataset {input_dataset} \\
+    --output-dataset {output_repo} \\
+    {config_arg} \\
+    --audio-column {audio_column} \\
+    --text-column {text_column} \\
+    --splits {splits_arg} \\
     --batch-size {batch_size} \\
     {max_samples_arg}
 
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
-    echo "===== Jenny MIMI Dataset Generation Completed Successfully ====="
+    echo "===== Mimi Latents Generation Completed Successfully ====="
 else
-    echo "===== Jenny MIMI Dataset Generation Failed with exit code: $EXIT_CODE ====="
+    echo "===== Mimi Latents Generation Failed with exit code: $EXIT_CODE ====="
 fi
 
 echo "Script finished. Session will remain active for inspection."
@@ -754,41 +766,66 @@ sleep infinity
 """
 
 
-@app.command("jenny-mimi")
-def jenny_mimi(
+@app.command()
+def latents(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
     port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
+    input_dataset: str = typer.Option(
+        "parler-tts/libritts_r_filtered",
+        "--input-dataset",
+        "-i",
+        help="Input HuggingFace dataset",
+    ),
+    dataset_config: str | None = typer.Option(
+        "clean",
+        "--dataset-config",
+        "-c",
+        help="Dataset config/name (e.g., 'clean' or 'other' for libritts_r_filtered)",
+    ),
     output_repo: str = typer.Option(
-        "mazesmazes/jenny-mimi", "--output-repo", "-o", help="HuggingFace repo for output"
+        ...,
+        "--output-repo",
+        "-o",
+        help="Output HuggingFace repo for latents",
     ),
-    session_name: str | None = typer.Option(
-        None, "--session-name", "-s", help="Custom tmux session name"
-    ),
+    audio_column: str = typer.Option("audio", "--audio-column", help="Audio column name"),
+    text_column: str = typer.Option("text_normalized", "--text-column", help="Text column name"),
+    splits: Annotated[
+        list[str] | None,
+        typer.Option("--splits", "-s", help="Dataset splits to process"),
+    ] = None,
     batch_size: int = typer.Option(1, "--batch-size", "-b", help="Batch size for encoding"),
     max_samples: int | None = typer.Option(
-        None, "--max-samples", "-n", help="Max samples (for testing)"
+        None, "--max-samples", "-n", help="Max samples to process (for testing)"
+    ),
+    session_name: str | None = typer.Option(
+        None, "--session-name", help="Custom tmux session name"
     ),
     no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
     force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
 ):
-    """Generate Jenny TTS dataset with Mimi codec codes.
+    """Generate continuous Mimi latents for flow matching S2S training.
 
-    Takes reach-vb/jenny_tts_dataset, resamples audio to 24kHz,
-    encodes with Mimi codec, and pushes to HuggingFace Hub.
+    Encodes audio to continuous Mimi embeddings (before quantization) for use
+    with the flow matching audio head.
 
-    Example:
-        ta runpod jenny-mimi host port
-        ta runpod jenny-mimi host port --max-samples 100
+    Examples:
+        ta runpod latents host port -o user/libritts-latents
+        ta runpod latents host port -i parler-tts/libritts_r_filtered -c clean -o user/latents -s train.clean.100
     """
     conn = get_connection(host, port)
 
     if not test_connection(conn):
         sys.exit(1)
 
+    # Default splits
+    if splits is None:
+        splits = ["train.clean.100"]
+
     # Generate session name if not provided
     if session_name is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-        session_name = f"jenny_mimi_{timestamp}"
+        session_name = f"latents_{timestamp}"
 
     if force:
         print(f"Killing existing session '{session_name}' if present...")
@@ -800,11 +837,23 @@ def jenny_mimi(
         print("Warning: HF_TOKEN environment variable not set.")
 
     # Build and upload script
-    script_content = build_jenny_mimi_script(hf_token, output_repo, batch_size, max_samples)
-    script_path = f"/tmp/jenny_mimi_{session_name}.sh"
+    script_content = build_latents_script(
+        hf_token,
+        input_dataset,
+        output_repo,
+        dataset_config,
+        audio_column,
+        text_column,
+        splits,
+        batch_size,
+        max_samples,
+    )
+    script_path = f"/tmp/latents_{session_name}.sh"
 
-    print(f"\nStarting Jenny MIMI generation session '{session_name}'...")
+    print(f"\nStarting Mimi latents generation session '{session_name}'...")
+    print(f"Input dataset: {input_dataset}" + (f" ({dataset_config})" if dataset_config else ""))
     print(f"Output repo: {output_repo}")
+    print(f"Splits: {', '.join(splits)}")
     print(f"Batch size: {batch_size}")
     if max_samples:
         print(f"Max samples: {max_samples}")
@@ -819,129 +868,7 @@ def jenny_mimi(
         print(f"Failed to start tmux session: {result.stderr}")
         sys.exit(1)
 
-    print(f"\nJenny MIMI generation started in session '{session_name}'.")
-    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
-
-    if not no_attach:
-        time.sleep(2)
-        attach_tmux_session(host, port, session_name)
-
-
-# =============================================================================
-# LibriTTS MIMI Dataset Generation Command
-# =============================================================================
-
-
-def build_libritts_mimi_script(
-    hf_token: str,
-    output_repo: str,
-    max_samples: int | None,
-) -> str:
-    """Generate the LibriTTS MIMI dataset generation script content."""
-    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
-
-    return f"""#!/bin/bash
-# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
-
-ulimit -n 65536
-export PATH="/root/.local/bin:$PATH"
-export HF_HOME=/workspace/.cache/huggingface
-export HF_DATASETS_CACHE=/workspace/datasets
-export HF_HUB_ENABLE_HF_TRANSFER=1
-export HF_TOKEN="{hf_token}"
-
-# GPU optimizations
-export CUDA_VISIBLE_DEVICES=0
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
-export TORCH_CUDNN_BENCHMARK=1
-
-cd /workspace
-
-python -m scripts.generate_libritts_mimi \\
-    --output-repo {output_repo} \\
-    {max_samples_arg}
-
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "===== LibriTTS MIMI Dataset Generation Completed Successfully ====="
-else
-    echo "===== LibriTTS MIMI Dataset Generation Failed with exit code: $EXIT_CODE ====="
-fi
-
-echo "Script finished. Session will remain active for inspection."
-sleep infinity
-"""
-
-
-@app.command("libritts-mimi")
-def libritts_mimi(
-    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
-    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
-    output_repo: str = typer.Option(
-        "mazesmazes/libritts-mimi",
-        "--output-repo",
-        "-o",
-        help="HuggingFace repo for output",
-    ),
-    session_name: str | None = typer.Option(
-        None, "--session-name", "-s", help="Custom tmux session name"
-    ),
-    max_samples: int | None = typer.Option(
-        None, "--max-samples", "-n", help="Max samples (for testing)"
-    ),
-    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
-    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
-):
-    """Generate LibriTTS dataset with Mimi codec codes.
-
-    Takes parler-tts/libritts_r_filtered train.clean.100, encodes audio with Mimi codec,
-    and pushes to HuggingFace Hub.
-
-    Examples:
-        ta runpod libritts-mimi host port
-        ta runpod libritts-mimi host port --max-samples 100
-    """
-    conn = get_connection(host, port)
-
-    if not test_connection(conn):
-        sys.exit(1)
-
-    # Generate session name if not provided
-    if session_name is None:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-        session_name = f"libritts_mimi_{timestamp}"
-
-    if force:
-        print(f"Killing existing session '{session_name}' if present...")
-        kill_tmux_session(conn, session_name)
-
-    # Get environment variables
-    hf_token = os.environ.get("HF_TOKEN", "")
-    if not hf_token:
-        print("Warning: HF_TOKEN environment variable not set.")
-
-    # Build and upload script
-    script_content = build_libritts_mimi_script(hf_token, output_repo, max_samples)
-    script_path = f"/tmp/libritts_mimi_{session_name}.sh"
-
-    print(f"\nStarting LibriTTS MIMI generation session '{session_name}'...")
-    print(f"Output repo: {output_repo}")
-    if max_samples:
-        print(f"Max samples: {max_samples}")
-
-    # Write script to remote
-    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
-    conn.run(f"chmod +x {script_path}", hide=True)
-
-    # Start tmux session
-    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
-    if not result.ok:
-        print(f"Failed to start tmux session: {result.stderr}")
-        sys.exit(1)
-
-    print(f"\nLibriTTS MIMI generation started in session '{session_name}'.")
+    print(f"\nLatents generation started in session '{session_name}'.")
     print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
 
     if not no_attach:

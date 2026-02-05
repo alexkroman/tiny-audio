@@ -1,33 +1,25 @@
 # @package _global_
-# Speech-to-Speech (S2S) training: Train Depformer with Mimi codec tokens
+# Speech-to-Speech (S2S) training: Flow matching with pocket-tts
 #
-# Stage 2 of training pipeline:
-# - Starts from pretrained omni model (projector already trained)
-# - Freezes projector, trains only the Depformer
-# - Uses cross-entropy loss on pre-computed Mimi codec tokens
-# - Uses mazesmazes/libritts-mimi + mazesmazes/jenny-mimi datasets
+# Architecture:
+#   LLM hidden -> llm_proj (trainable) -> flow_net (pretrained) -> Mimi latents -> audio
+#
+# Only llm_proj is trained; flow_net and Mimi decoder use pretrained pocket-tts weights.
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=s2s
 #
 # Prerequisites:
-#   - Pretrained omni model at mazesmazes/tiny-audio-omni (or specify model.pretrained_model_id)
-#   - LibriTTS-Mimi and Jenny-Mimi datasets (audio + pre-computed Mimi codec codes)
-#
-# Architecture (Moshi-style Depformer):
-#   For each time step t:
-#     LLM hidden[t] -> depformer_in[0] -> depformer -> output_head[0] -> token_0
-#     token_0 -> depformer_in[1] -> depformer -> output_head[1] -> token_1
-#     ... (all 8 codebooks sequentially)
-#
-#   Loss: Weighted cross-entropy (first codebook 100x, semantic tokens most important)
+#   - Pretrained ASR model at mazesmazes/tiny-audio-omni (or specify model.pretrained_model_path)
+#   - Dataset with pre-computed Mimi latents (use scripts/generate_mimi_latents.py)
 
 defaults:
-  - override /data: s2s
+  - override /data: s2s_latents
 
 model:
-  # Start from pretrained omni model
+  # Start from pretrained ASR model
   pretrained_model_path: mazesmazes/tiny-audio-omni
+  model_dtype: float32  # Force float32 for MPS compatibility
 
   projector_type: mlp
   projector_pool_stride: 4
@@ -41,18 +33,14 @@ model:
   enable_thinking: false
   repetition_penalty: 1.1
 
-  # Freeze projector, train Depformer (Stage 2)
+  # Freeze projector, train audio head (llm_proj only)
   freeze_projector: true
 
-  # Depformer settings - Moshi code defaults (smaller model)
+  # Audio head settings (flow matching with pocket-tts)
   use_audio_head: true
   freeze_audio_head: false
-  depformer_dim: 512  # 1/4 of SmolLM3-3B hidden (matches Moshi ratio)
-  depformer_num_layers: 6  # Depformer transformer layers
-  codebook_size: 2048  # Mimi codec default
-  num_codebooks: 8  # Moshi code default (dep_q)
-  first_codebook_weight: 100.0  # Semantic tokens weighted 100x higher (Moshi default)
-  acoustic_delay: 1  # Delay τ between semantic and acoustic tokens (Moshi uses 1-2)
+  lsd_decode_steps: 1  # LSD integration steps (1 is fast, 4+ for quality)
+  flow_temperature: 1.0  # Sampling temperature (1.0 = standard, <1.0 = sharper)
 
 # S2S configuration flag
 s2s:
@@ -61,25 +49,27 @@ s2s:
 training:
   hub_model_id: "mazesmazes/tiny-audio-s2s"
   group_by_length: false
-  learning_rate: 2e-4
+  # Disable best model tracking (eval doesn't return loss for S2S)
+  load_best_model_at_end: false
+  metric_for_best_model: null
+  learning_rate: 1e-4
   warmup_steps: 500
   lr_scheduler_type: polynomial
   lr_scheduler_kwargs:
     power: 0.5
   seed: 42
-  per_device_train_batch_size: 18  # Can increase with smaller model
-  per_device_eval_batch_size: 18
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
   gradient_accumulation_steps: 2
-  num_train_epochs: 20
-  save_steps: 1000
-  eval_steps: 1000
+  num_train_epochs: 10
+  save_steps: 500
+  eval_steps: 500
 
   weight_decay: 0.0
 
-  # No specaugment needed for Depformer training
-  # (audio understanding already learned in Stage 1)
+  # No specaugment needed (audio understanding already learned in ASR training)
   use_specaugment: false
 
-  # S2S doesn't use labels (uses codec_targets instead)
+  # S2S doesn't use text labels (uses latent_targets for flow matching)
   label_names: []
   label_smoothing: 0.0

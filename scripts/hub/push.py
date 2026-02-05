@@ -67,6 +67,7 @@ tokenizer_config.json -filter -diff -merge text
             "projectors.py",
             "alignment.py",
             "diarization.py",
+            "audio_head.py",  # For S2S flow matching
             "handler.py",  # For Inference Endpoints
         ]
         for filename in custom_files:
@@ -80,6 +81,15 @@ tokenizer_config.json -filter -diff -merge text
                     console.print(f"  {src}")
             else:
                 console.print(f"  [yellow]{src} not found, skipping[/yellow]")
+
+        # Copy modules directory for audio head dependencies
+        modules_dir = Path("tiny_audio") / "modules"
+        if modules_dir.exists():
+            modules_temp = temp_path / "modules"
+            modules_temp.mkdir(exist_ok=True)
+            for module_file in modules_dir.glob("*.py"):
+                shutil.copy2(module_file, modules_temp / module_file.name)
+                console.print(f"  {module_file}")
 
         # Copy MODEL_CARD.md as README.md
         model_card_src = Path("MODEL_CARD.md")

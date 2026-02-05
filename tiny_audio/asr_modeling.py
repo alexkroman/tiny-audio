@@ -181,14 +181,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         else:
             self.spec_augment = None
 
-        # Depformer for S2S (trainable) - Moshi-style depth transformer
+        # Audio head for S2S (flow matching)
         if getattr(config, "use_audio_head", False):
-            from .audio_head import Depformer
+            from .audio_head import AudioHead
 
-            self.audio_head = Depformer(config).to(
-                device=next(self.language_model.parameters()).device,
-                dtype=target_dtype,
+            device = next(self.language_model.parameters()).device
+            llm_dim = self.language_model.config.hidden_size
+
+            self.audio_head = AudioHead(config, llm_dim=llm_dim).to(
+                device=device, dtype=target_dtype
             )
+
             if getattr(config, "freeze_audio_head", False):
                 self.audio_head.requires_grad_(False)
         else:
@@ -212,7 +215,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         encoder_kwargs = {
             "attn_implementation": config.attn_implementation,
             "low_cpu_mem_usage": True,
-            "dtype": dtype,
+            "torch_dtype": dtype,
         }
 
         if "whisper" in config.audio_model_id.lower():
@@ -476,8 +479,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
-        codec_targets: Optional[torch.Tensor] = None,
-        codec_lengths: Optional[torch.Tensor] = None,
+        latent_targets: Optional[torch.Tensor] = None,
+        latent_lengths: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
@@ -500,13 +503,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
             # Replace <audio> token placeholders with audio embeddings using masked_scatter
             audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
+
             inputs_embeds = inputs_embeds.masked_scatter(
                 audio_token_mask.to(inputs_embeds.device),
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
             )
 
-        # Request hidden states if training audio head with codec targets
-        if self.audio_head is not None and codec_targets is not None:
+        # Request hidden states if training audio head with latent targets
+        if self.audio_head is not None and latent_targets is not None:
             kwargs["output_hidden_states"] = True
 
         # Remove TRL-specific keys that shouldn't go to the LLM
@@ -531,20 +535,44 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if aux_loss is not None and aux_loss.numel() > 0:
                 outputs.loss = outputs.loss + aux_loss.to(outputs.loss.device)
 
-        # Compute audio head loss if training S2S with codec targets
-        if self.audio_head is not None and codec_targets is not None:
+        # Compute audio head loss if training S2S with latent targets
+        if self.audio_head is not None and latent_targets is not None:
             if outputs.hidden_states is None:
                 raise ValueError(
                     "LLM did not return hidden_states for audio head. "
                     "Ensure output_hidden_states=True is passed to the LLM."
                 )
             hidden_states = outputs.hidden_states[-1]  # Last layer hidden states
+
+            # Extract only assistant-position hidden states using assistant_mask
+            # This mask identifies text output positions (where LLM generates response)
+            assistant_mask = kwargs.get("assistant_mask")
+            if assistant_mask is not None:
+                batch_size = hidden_states.shape[0]
+
+                # Extract assistant hidden states for each sample
+                assistant_hidden_list = []
+                assistant_lengths = []
+                for i in range(batch_size):
+                    mask_i = assistant_mask[i]  # [seq_len]
+                    hidden_i = hidden_states[i][mask_i]  # [num_assistant_tokens, hidden_dim]
+                    assistant_hidden_list.append(hidden_i)
+                    assistant_lengths.append(hidden_i.shape[0])
+
+                # Pad sequences while preserving gradients
+                # Use pad_sequence which maintains gradient flow
+                hidden_states = torch.nn.utils.rnn.pad_sequence(
+                    assistant_hidden_list, batch_first=True, padding_value=0.0
+                )
+                # Note: latent_lengths stays as original Mimi latent lengths for masking
+                # audio_head._compute_loss handles interpolation between different seq lengths
+
             # No detach needed: LLM is frozen (requires_grad=False), so gradients
             # naturally stop there. Hidden states keep their grad_fn for proper backprop.
             audio_head_loss = self.audio_head(
                 hidden_states,
-                codec_targets=codec_targets,
-                codec_lengths=codec_lengths,
+                latent_targets=latent_targets,
+                latent_lengths=latent_lengths,
             )
 
             # Combine with LLM loss if present (e.g., joint ASR+S2S training)
@@ -1097,6 +1125,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         shutil.copy(src_dir / "alignment.py", save_dir / "alignment.py")
         # Copy diarization module
         shutil.copy(src_dir / "diarization.py", save_dir / "diarization.py")
+        # Copy audio head for S2S
+        audio_head_path = src_dir / "audio_head.py"
+        if audio_head_path.exists():
+            shutil.copy(audio_head_path, save_dir / "audio_head.py")
+        # Copy modules directory (for audio head dependencies)
+        modules_dir = src_dir / "modules"
+        if modules_dir.exists():
+            save_modules_dir = save_dir / "modules"
+            save_modules_dir.mkdir(exist_ok=True)
+            for module_file in modules_dir.glob("*.py"):
+                shutil.copy(module_file, save_modules_dir / module_file.name)
 
     def push_to_hub(self, repo_id: str, **kwargs) -> str:
         """Push model to HuggingFace Hub, ensuring adapter_config points to repo.
