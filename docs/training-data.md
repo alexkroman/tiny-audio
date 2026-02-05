@@ -1,6 +1,6 @@
-# Omni Training Data Examples
+# Training Data Examples
 
-This document shows examples of the different training data formats used in `+experiments=omni` training. The model learns from four distinct task types.
+This document shows examples of the different training data formats used for model training.
 
 ## Example 1: Transcription Task
 
@@ -80,5 +80,39 @@ Assistant: Sounds like an angry young male saying "leave me alone" in a harsh, f
 **Source Dataset**: mazesmazes/sift-audio-2
 
 **Note**: This mode includes an instruction prompt, teaching the model to describe audio on demand.
+
+______________________________________________________________________
+
+## Example 6: Speech-to-Speech (S2S)
+
+**Audio**: A person saying "The weather is beautiful today."
+
+**Training Format**:
+
+```
+User: <audio><audio><audio>...
+Assistant: the weather is beautiful today.
+```
+
+**Codec Targets** (parallel supervision for Audio Head):
+
+```
+codec_targets: [8, T]  # 8 Mimi codebooks × T frames
+
+Codebook 0 (semantic):  [1842, 1203, 892, 1456, ...]   # AR decoder target
+Codebook 1 (acoustic):  [456, 1823, 234, 901, ...]    # Depformer target
+Codebook 2 (acoustic):  [78, 1234, 567, 2001, ...]    # Depformer target
+...
+Codebook 7 (acoustic):  [234, 890, 1567, 432, ...]    # Depformer target
+```
+
+**Source Dataset**: mazesmazes/libritts-mimi
+
+**Note**: S2S training uses two parallel objectives:
+
+1. **Text loss**: LLM learns to generate transcription from audio embeddings
+1. **Codec loss**: Audio Head learns to generate Mimi codes from LLM hidden states
+
+The codec targets are pre-computed using the Mimi encoder and stored alongside the audio.
 
 ______________________________________________________________________
