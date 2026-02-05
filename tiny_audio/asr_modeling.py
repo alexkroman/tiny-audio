@@ -1,6 +1,8 @@
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from threading import Thread
+from typing import TYPE_CHECKING, Callable, Iterator, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -10,9 +12,13 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
+    TextIteratorStreamer,
 )
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
+
+if TYPE_CHECKING:
+    from .full_duplex import FullDuplexConfig, FullDuplexSession
 
 try:
     from .asr_config import ASRConfig
@@ -23,6 +29,16 @@ except ImportError:
 
 
 from torchaudio.transforms import SpecAugment
+
+
+@dataclass
+class InterruptedGeneration:
+    """Result when generation is interrupted by user speech."""
+
+    text: str  # Text generated before interruption
+    audio: Optional[torch.Tensor]  # Audio generated before interruption (if S2S)
+    interrupted: bool  # Whether generation was interrupted
+    interrupt_audio: Optional[torch.Tensor]  # User audio that caused interruption
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -195,8 +211,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         else:
             self.audio_head = None
 
+        # Silero VAD for interruption detection (Freeze-Omni style)
+        # Loaded lazily on first use to avoid startup cost
+        self._vad_model = None
+        self._vad_utils = None
+
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
+
+    def _tie_weights(self):
+        """Tie weights between AudioHead embedding and AR decoder embedding."""
+        if self.audio_head is not None:
+            self.audio_head.ar_decoder.embedding = self.audio_head.embedding
 
     def _create_feature_extractor(self, config: ASRConfig):
         """Create the appropriate feature extractor for the audio encoder."""
@@ -374,6 +400,203 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_conv_layers=self.config.encoder_conv_layers,
         )
 
+    # =========================================================================
+    # Silero VAD for Interruption Detection (Freeze-Omni style)
+    # =========================================================================
+
+    def load_vad(self, force_reload: bool = False) -> None:
+        """Load Silero VAD model for interruption detection.
+
+        Silero VAD is a lightweight (~2MB) voice activity detector that runs
+        in real-time. Used as the first layer of interruption detection.
+
+        Args:
+            force_reload: Force reload even if already loaded
+        """
+        if self._vad_model is not None and not force_reload:
+            return
+
+        model, utils = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            force_reload=force_reload,
+            trust_repo=True,
+        )
+
+        self._vad_model = model
+        self._vad_utils = utils
+
+        # Freeze VAD model
+        self._vad_model.eval()
+        for param in self._vad_model.parameters():
+            param.requires_grad = False
+
+    def detect_speech(
+        self,
+        audio_chunk: torch.Tensor,
+        sample_rate: int = 16000,
+        threshold: float = 0.5,
+    ) -> tuple[bool, float]:
+        """Detect speech in an audio chunk using Silero VAD.
+
+        Args:
+            audio_chunk: Audio waveform [samples] or [1, samples] at sample_rate
+            sample_rate: Audio sample rate (default 16kHz)
+            threshold: Speech probability threshold (default 0.5)
+
+        Returns:
+            Tuple of (is_speech, probability)
+        """
+        if self._vad_model is None:
+            self.load_vad()
+
+        # Ensure 1D tensor
+        if audio_chunk.dim() > 1:
+            audio_chunk = audio_chunk.squeeze()
+
+        # VAD expects specific sample rates (8000 or 16000)
+        if sample_rate not in (8000, 16000):
+            import torchaudio.functional as audio_functional
+
+            audio_chunk = audio_functional.resample(audio_chunk, sample_rate, 16000)
+            sample_rate = 16000
+
+        # Run VAD
+        with torch.no_grad():
+            speech_prob = self._vad_model(audio_chunk, sample_rate).item()
+
+        return speech_prob > threshold, speech_prob
+
+    def reset_vad_state(self) -> None:
+        """Reset VAD internal state between utterances."""
+        if self._vad_model is not None:
+            self._vad_model.reset_states()
+
+    # =========================================================================
+    # Streaming Generation with Interruption Detection
+    # =========================================================================
+
+    @torch.no_grad()
+    def generate_streaming(
+        self,
+        input_features: torch.Tensor,
+        audio_attention_mask: torch.Tensor,
+        system_prompt: Optional[str] = None,
+        user_audio_callback: Optional[Callable] = None,
+        vad_threshold: float = 0.5,
+        **generate_kwargs,
+    ) -> Iterator[str | InterruptedGeneration]:
+        """Generate transcription with streaming token output and interruption detection.
+
+        Yields partial transcript strings as tokens are generated. If user_audio_callback
+        is provided, checks for user speech and can interrupt generation.
+
+        Args:
+            input_features: Mel spectrogram features (batch, n_mels, mel_len)
+            audio_attention_mask: Mask for real vs padded mel frames (batch, mel_len)
+            system_prompt: Optional system prompt override
+            user_audio_callback: Optional callback that returns user audio chunk.
+                Should return (audio_tensor, sample_rate) or None if no audio.
+                Called periodically during generation to check for interruptions.
+            vad_threshold: Speech probability threshold for interruption (default 0.5)
+            **generate_kwargs: Additional generation arguments
+
+        Yields:
+            - str: Partial transcript text as each token is generated
+            - InterruptedGeneration: Final result if interrupted by user speech
+        """
+        device = input_features.device
+        batch_size = input_features.shape[0]
+
+        # Encode audio -> flattened embeddings
+        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+
+        # Build prompt with correct number of audio tokens
+        input_ids, attention_mask = self._build_audio_prompt(
+            audio_attention_mask, batch_size, device, system_prompt
+        )
+
+        # Replace audio tokens with audio embeddings
+        inputs_embeds = self._inject_audio_embeddings(input_ids, audio_embeds)
+
+        # Setup streamer for token-by-token output
+        streamer = TextIteratorStreamer(
+            self.tokenizer,
+            skip_prompt=True,
+            skip_special_tokens=True,
+        )
+
+        # Prepare generation kwargs
+        gen_kwargs = {
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "generation_config": self.generation_config,
+            "streamer": streamer,
+            **generate_kwargs,
+        }
+
+        # Run generation in background thread
+        thread = Thread(target=self.language_model.generate, kwargs=gen_kwargs)
+        thread.start()
+
+        # Track generated text for potential interruption result
+        generated_text = ""
+        interrupted = False
+        interrupt_audio = None
+
+        # Yield tokens as they're generated, checking for interruptions
+        in_think_block = False
+        buffer = ""
+
+        for text in streamer:
+            # Check for user speech interruption
+            if user_audio_callback is not None:
+                audio_result = user_audio_callback()
+                if audio_result is not None:
+                    audio_chunk, sr = audio_result
+                    is_speech, _ = self.detect_speech(audio_chunk, sr, vad_threshold)
+                    if is_speech:
+                        interrupted = True
+                        interrupt_audio = audio_chunk
+                        # Don't break immediately - let thread finish gracefully
+                        break
+
+            buffer += text
+
+            # Filter out <think>...</think> blocks
+            while "<think>" in buffer:
+                in_think_block = True
+                before_think = buffer.split("<think>")[0]
+                if before_think:
+                    generated_text += before_think
+                    yield before_think
+                buffer = buffer.split("<think>", 1)[-1]
+
+            while in_think_block and "</think>" in buffer:
+                in_think_block = False
+                buffer = buffer.split("</think>", 1)[-1]
+
+            if not in_think_block and buffer:
+                generated_text += buffer
+                yield buffer
+                buffer = ""
+
+        # Yield any remaining buffer
+        if buffer and not in_think_block:
+            generated_text += buffer
+            yield buffer
+
+        thread.join()
+
+        # If interrupted, yield final InterruptedGeneration result
+        if interrupted:
+            yield InterruptedGeneration(
+                text=generated_text,
+                audio=None,
+                interrupted=True,
+                interrupt_audio=interrupt_audio,
+            )
+
     def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
         """Save trainable weights (projector + audio_head if present)."""
         state = {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
@@ -475,6 +698,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         cache_position: Optional[torch.Tensor] = None,
         codec_targets: Optional[torch.Tensor] = None,
         codec_lengths: Optional[torch.Tensor] = None,
+        tts_text_ids: Optional[torch.Tensor] = None,
+        tts_text_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
@@ -563,11 +788,32 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             else:
                 embeddings = all_hidden_states
 
+            # Dual-path processing for S2S (Freeze-Omni style):
+            # Path 1: Text hidden states → Pre-NN → context (what to say)
+            # Path 2: LLM hidden states → Prefix Bridge → KV cache (how to say it)
+            text_hidden_states = None
+            text_mask = None
+            if tts_text_ids is not None:
+                # Run text through LLM to get hidden states (Freeze-Omni style)
+                # This gives the model full LLM context for the text, not just raw embeddings
+                with torch.no_grad():  # Don't backprop through this path
+                    text_outputs = self.language_model(
+                        input_ids=tts_text_ids,
+                        attention_mask=tts_text_mask,
+                        output_hidden_states=True,
+                        return_dict=True,
+                    )
+                    # Use last hidden state as text representation
+                    text_hidden_states = text_outputs.hidden_states[-1]
+                text_mask = tts_text_mask
+
             # Compute loss: embeddings condition the AR decoder to generate codec_targets
             audio_head_loss = self.audio_head(
                 embeddings,
                 codec_targets=codec_targets,
                 codec_lengths=codec_lengths,
+                text_embeddings=text_hidden_states,  # LLM-processed hidden states
+                text_mask=text_mask,
             )
 
             # Combine with LLM loss if present (e.g., joint ASR+S2S training)
@@ -968,6 +1214,228 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             "audio": audio,
         }
 
+    @torch.no_grad()
+    def generate_streaming_s2s(
+        self,
+        audio,
+        sampling_rate: int = 16000,
+        user_audio_callback: Optional[Callable] = None,
+        vad_threshold: float = 0.5,
+        **generate_kwargs,
+    ) -> Iterator[dict | InterruptedGeneration]:
+        """Generate text and audio with streaming output and interruption detection.
+
+        Streams text tokens as they're generated, then yields audio at the end.
+        Can be interrupted by user speech detected via VAD.
+
+        This is the main method for real-time S2S with turn-taking support.
+
+        Args:
+            audio: Raw audio waveform (numpy array or tensor) at sampling_rate
+            sampling_rate: Audio sampling rate (default 16kHz)
+            user_audio_callback: Optional callback that returns user audio chunk.
+                Should return (audio_tensor, sample_rate) or None if no audio.
+                Called periodically during generation to check for interruptions.
+            vad_threshold: Speech probability threshold for interruption (default 0.5)
+            **generate_kwargs: Additional generation arguments
+
+        Yields:
+            - dict with "type": "text", "content": str for text chunks
+            - dict with "type": "audio", "content": tensor for final audio
+            - InterruptedGeneration if interrupted by user speech
+        """
+        if self.audio_head is None:
+            raise ValueError("Audio head not configured. Set use_audio_head=True in config.")
+
+        inputs = self._process_audio(audio, sampling_rate)
+        input_features = inputs["input_features"]
+        audio_attention_mask = inputs["attention_mask"]
+
+        device = input_features.device
+        batch_size = input_features.shape[0]
+
+        # Encode audio -> flattened embeddings
+        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+
+        # Build prompt and inject audio embeddings
+        input_ids, attention_mask = self._build_audio_prompt(
+            audio_attention_mask, batch_size, device
+        )
+        inputs_embeds = self._inject_audio_embeddings(input_ids, audio_embeds)
+
+        # Setup streamer for token-by-token output
+        streamer = TextIteratorStreamer(
+            self.tokenizer,
+            skip_prompt=True,
+            skip_special_tokens=True,
+        )
+
+        # Prepare generation kwargs
+        gen_kwargs = {
+            "input_ids": input_ids,
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "generation_config": self.generation_config,
+            "streamer": streamer,
+            "return_dict_in_generate": True,
+            "output_hidden_states": False,  # We'll get hidden states separately
+            **generate_kwargs,
+        }
+
+        # Run generation in background thread
+        generation_output = [None]  # Use list to capture output from thread
+
+        def generate_fn():
+            generation_output[0] = self.language_model.generate(**gen_kwargs)
+
+        thread = Thread(target=generate_fn)
+        thread.start()
+
+        # Track state
+        generated_text = ""
+        interrupted = False
+        interrupt_audio = None
+        in_think_block = False
+        buffer = ""
+
+        # Stream text tokens
+        for text in streamer:
+            # Check for user speech interruption
+            if user_audio_callback is not None:
+                audio_result = user_audio_callback()
+                if audio_result is not None:
+                    audio_chunk, sr = audio_result
+                    is_speech, _ = self.detect_speech(audio_chunk, sr, vad_threshold)
+                    if is_speech:
+                        interrupted = True
+                        interrupt_audio = audio_chunk
+                        break
+
+            buffer += text
+
+            # Filter out <think>...</think> blocks
+            while "<think>" in buffer:
+                in_think_block = True
+                before_think = buffer.split("<think>")[0]
+                if before_think:
+                    generated_text += before_think
+                    yield {"type": "text", "content": before_think}
+                buffer = buffer.split("<think>", 1)[-1]
+
+            while in_think_block and "</think>" in buffer:
+                in_think_block = False
+                buffer = buffer.split("</think>", 1)[-1]
+
+            if not in_think_block and buffer:
+                generated_text += buffer
+                yield {"type": "text", "content": buffer}
+                buffer = ""
+
+        # Yield remaining buffer
+        if buffer and not in_think_block:
+            generated_text += buffer
+            yield {"type": "text", "content": buffer}
+
+        thread.join()
+
+        # If interrupted, yield InterruptedGeneration and stop
+        if interrupted:
+            yield InterruptedGeneration(
+                text=generated_text,
+                audio=None,
+                interrupted=True,
+                interrupt_audio=interrupt_audio,
+            )
+            return
+
+        # Generate streaming audio from the text
+        # Get text token IDs from generation output
+        output = generation_output[0]
+        if output is None:
+            return
+
+        sequences = output.sequences if hasattr(output, "sequences") else output
+        text_ids = sequences[:, input_ids.shape[1] :]
+
+        # Get hidden states for audio generation
+        with torch.no_grad():
+            lm_output = self.language_model(
+                input_ids=text_ids,
+                output_hidden_states=True,
+            )
+            embeddings = lm_output.hidden_states[-1]
+
+        # Stream audio chunks (Moshi-style low-latency output)
+        for audio_chunk in self.audio_head.generate_streaming(
+            embeddings=embeddings,
+            chunk_size=1,  # Lowest latency
+        ):
+            # Check for interruption during audio generation
+            if user_audio_callback is not None:
+                audio_result = user_audio_callback()
+                if audio_result is not None:
+                    user_chunk, sr = audio_result
+                    is_speech, _ = self.detect_speech(user_chunk, sr, vad_threshold)
+                    if is_speech:
+                        yield InterruptedGeneration(
+                            text=generated_text,
+                            audio=audio_chunk,  # Last chunk before interruption
+                            interrupted=True,
+                            interrupt_audio=user_chunk,
+                        )
+                        return
+
+            yield {"type": "audio", "content": audio_chunk}
+
+    def create_full_duplex_session(
+        self,
+        config: Optional["FullDuplexConfig"] = None,
+        on_text: Optional[Callable] = None,
+        on_state_change: Optional[Callable] = None,
+    ) -> "FullDuplexSession":
+        """Create a full-duplex conversation session (Freeze-Omni style).
+
+        Full-duplex allows the model to listen and speak simultaneously,
+        with automatic interruption when the user starts speaking.
+
+        Args:
+            config: FullDuplexConfig for session parameters
+            on_text: Callback for generated text chunks
+            on_state_change: Callback for state transitions
+
+        Returns:
+            FullDuplexSession ready to start
+
+        Example:
+            session = model.create_full_duplex_session(
+                on_text=lambda t: print(t, end="", flush=True)
+            )
+            session.start()
+
+            # In your audio loop:
+            while running:
+                # Push user audio
+                session.push_audio(mic.read())
+
+                # Get and play model audio
+                output = session.pop_audio()
+                if output is not None:
+                    speaker.play(output)
+
+            session.stop()
+        """
+        from .full_duplex import FullDuplexConfig, FullDuplexSession
+
+        if config is None:
+            config = FullDuplexConfig()
+
+        return FullDuplexSession(
+            model=self,
+            config=config,
+            on_text=on_text,
+            on_state_change=on_state_change,
+        )
+
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
         """Save model, tokenizer, and processor."""
         import shutil
@@ -983,14 +1451,22 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if hasattr(self.audio_tower.config, "num_mel_bins"):
             self.config.audio_config.num_mel_bins = self.audio_tower.config.num_mel_bins
 
-        # Save model (temporarily remove non-serializable attributes)
-        tokenizer = self.tokenizer
-        del self.tokenizer
+        # Save config
+        self.config.save_pretrained(save_dir)
 
-        try:
-            super().save_pretrained(save_dir, **kwargs)
-        finally:
-            self.tokenizer = tokenizer
+        # Save state dict directly to avoid HuggingFace's tied weights handling
+        # which conflicts with our shared AudioHead embedding
+        state_dict = self.state_dict()
+        safe_serialization = kwargs.get("safe_serialization", True)
+
+        if safe_serialization:
+            from safetensors.torch import save_file
+
+            save_file(state_dict, save_dir / "model.safetensors")
+        else:
+            import torch
+
+            torch.save(state_dict, save_dir / "pytorch_model.bin")
 
         # Save tokenizer and feature extractor
         self.tokenizer.save_pretrained(save_dir)
@@ -1057,6 +1533,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         audio_head_path = src_dir / "audio_head.py"
         if audio_head_path.exists():
             shutil.copy(audio_head_path, save_dir / "audio_head.py")
+        # Copy full duplex session for S2S
+        full_duplex_path = src_dir / "full_duplex.py"
+        if full_duplex_path.exists():
+            shutil.copy(full_duplex_path, save_dir / "full_duplex.py")
         # Copy modules directory (for audio head dependencies)
         modules_dir = src_dir / "modules"
         if modules_dir.exists():

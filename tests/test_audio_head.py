@@ -121,8 +121,8 @@ class TestAudioHeadStateDict:
                 param.fill_(0.0)
                 break
 
-        # Load original state
-        small_audio_head.load_state_dict(original_state)
+        # Load original state (strict=False because ar_decoder.embedding is tied to self.embedding)
+        small_audio_head.load_state_dict(original_state, strict=False)
 
         # Verify weights are restored
         restored_state = small_audio_head.state_dict()
@@ -457,7 +457,7 @@ class TestConfigPriority:
 
         head = AudioHead(EmptyConfig(), llm_dim=None)
 
-        assert head.llm_dim == 3072
+        assert head.llm_dim == 2048  # SmolLM3 native dimension
 
 
 class TestGenerationParameters:

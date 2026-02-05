@@ -32,14 +32,13 @@ class Depformer(nn.Module):
     - Processes all codebooks in parallel during training
     - Supports acoustic delays for improved audio quality
 
-    With acoustic delays enabled (default):
+    With acoustic delays enabled (default, Moshi-style flat delays):
     - CB0 (semantic) at AR position t is for audio time t
-    - CB1 at AR position t is for audio time t - 1
-    - CB2 at AR position t is for audio time t - 2
-    - etc.
+    - CB1-CB7 at AR position t are all for audio time t - 1
 
-    This allows higher codebooks to benefit from "future" semantic context,
-    improving the hierarchical structure of RVQ-based audio generation.
+    This flat delay pattern (vs progressive delays) allows all acoustic
+    codebooks to be decoded in parallel after CB0, reducing latency for
+    streaming/real-time generation.
 
     Args:
         num_codebooks: Number of codebooks to predict (default: 7 for cb 1-7)
@@ -72,17 +71,13 @@ class Depformer(nn.Module):
         self.hidden_size = hidden_size
         self.use_delays = use_delays
 
-        # Acoustic delays: CB_k is delayed by k relative to semantic CB0
-        # Input delays for CB0-CB6: [0, 1, 2, 3, 4, 5, 6]
-        # Target delays for CB1-CB7: [1, 2, 3, 4, 5, 6, 7]
+        # Moshi-style flat delays: all acoustic codebooks at same delay
+        # Input delays: [0, 0, 0, 0, 0, 0, 0] - all use same input timing
+        # Target delays: [1, 1, 1, 1, 1, 1, 1] - all predict same target timing
+        # This enables parallel decoding of all acoustic codebooks
         if use_delays:
-            self.register_buffer(
-                "input_delays", torch.tensor(list(range(num_codebooks)), dtype=torch.long)
-            )
-            self.register_buffer(
-                "target_delays",
-                torch.tensor(list(range(1, num_codebooks + 1)), dtype=torch.long),
-            )
+            self.register_buffer("input_delays", torch.zeros(num_codebooks, dtype=torch.long))
+            self.register_buffer("target_delays", torch.ones(num_codebooks, dtype=torch.long))
         else:
             self.register_buffer("input_delays", torch.zeros(num_codebooks, dtype=torch.long))
             self.register_buffer("target_delays", torch.zeros(num_codebooks, dtype=torch.long))
@@ -100,8 +95,11 @@ class Depformer(nn.Module):
             _attn_implementation="eager",  # Use eager for small sequences
         )
 
-        # Input projection from main AR decoder
-        self.input_proj = nn.Linear(main_dim, hidden_size, bias=False)
+        # Per-codebook input projections from main AR decoder (Moshi-style multi-linear)
+        # Each codebook gets its own projection, allowing different information per codebook
+        self.input_projs = nn.ModuleList(
+            [nn.Linear(main_dim, hidden_size, bias=False) for _ in range(num_codebooks)]
+        )
 
         # Embeddings for previous codebook tokens
         # cb_index 0: embed codebook 0 token (semantic)
@@ -174,10 +172,11 @@ class Depformer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for training - process all codebooks in parallel.
 
-        With acoustic delays enabled, each codebook is shifted in time:
-        - Input CB_k at AR position t uses ground truth for audio time t - input_delay[k]
-        - Target CB_{k+1} at AR position t is for audio time t - target_delay[k]
+        With Moshi-style flat delays enabled:
+        - All input codebooks at AR position t use audio time t (delay=0)
+        - All target codebooks at AR position t are for audio time t-1 (delay=1)
 
+        This enables parallel decoding during inference.
         Loss is computed only on valid positions (after delay padding).
 
         Args:
@@ -194,14 +193,15 @@ class Depformer(nn.Module):
         device = main_hidden.device
         dtype = main_hidden.dtype
 
-        # Project main hidden states
-        projected = self.input_proj(main_hidden)  # [B, T, hidden]
-
         # Build inputs for each codebook with delays applied
+        # Each codebook gets its own projection (multi-linear)
         depformer_inputs = []
         input_valid_masks = []
 
         for cb_idx in range(self.num_codebooks):
+            # Project main hidden states with per-codebook projection
+            projected = self.input_projs[cb_idx](main_hidden)  # [B, T, hidden]
+
             # Get previous codebook tokens
             prev_tokens = codebook_targets[:, cb_idx, :]  # [B, T]
 
@@ -353,10 +353,7 @@ class Depformer(nn.Module):
             )
             use_delays = False
 
-        # Project all hidden states and flatten for parallel processing
-        projected = self.input_proj(main_hidden)  # [B, T, hidden]
         flat_batch = batch_size * seq_len
-        projected_flat = projected.view(flat_batch, 1, -1)  # [B*T, 1, hidden]
 
         # Initialize KV cache - each item in flat_batch gets independent cache entries
         # along the batch dimension, so this is correct for parallel processing
@@ -375,6 +372,10 @@ class Depformer(nn.Module):
         all_generated = []
 
         for cb_idx in range(self.num_codebooks):
+            # Project with per-codebook projection (multi-linear)
+            projected = self.input_projs[cb_idx](main_hidden)  # [B, T, hidden]
+            projected_flat = projected.view(flat_batch, 1, -1)  # [B*T, 1, hidden]
+
             # Embed previous tokens
             token_emb = self.codebook_emb[cb_idx](prev_tokens)  # [B*T, hidden]
             token_emb = token_emb.unsqueeze(1)  # [B*T, 1, hidden]

@@ -3,6 +3,16 @@
 #
 # Architecture:
 #   LLM text -> embeddings -> Pre-NN -> AR Decoder -> Mimi codes -> audio
+#                    |
+#                    +-> Prefix Bridge -> KV Cache (conditions AR Decoder)
+#
+# Prefix Bridge (Freeze-Omni style): Transforms LLM hidden states into KV cache
+# entries that condition the AR decoder, bridging text→audio modality gap.
+#
+# Audio head dimensions scaled for SmolLM3-3B following Freeze-Omni ratios:
+#   - Hidden: 512 (vs 2048 LLM), Layers: 4 AR + 4 Prefix + 2 Pre-NN
+#   - Depformer: 256 hidden, 4 layers
+#   - Total trainable: ~60M params (vs ~1.1B before scaling)
 #
 # All audio_head components trained from scratch (random initialization).
 #
@@ -39,6 +49,7 @@ model:
   # Audio head settings (AR codec generation)
   use_audio_head: true
   freeze_audio_head: false
+  use_prefix_bridge: true  # Enable prefix bridge for text→audio KV-cache fine-tuning
   max_audio_tokens: 500  # Max codec tokens to generate
   audio_top_k: 50  # Top-k sampling
   audio_temperature: 1.0  # Sampling temperature
@@ -51,21 +62,22 @@ s2s:
 training:
   hub_model_id: "mazesmazes/tiny-audio-s2s"
   group_by_length: false
-  # Disable best model tracking (eval doesn't return loss for S2S)
-  load_best_model_at_end: false
-  metric_for_best_model: null
+  # Track best model by eval loss
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  greater_is_better: false
   learning_rate: 1e-4
   warmup_steps: 500
   lr_scheduler_type: polynomial
   lr_scheduler_kwargs:
     power: 0.5
   seed: 42
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
+  per_device_train_batch_size: 14
+  per_device_eval_batch_size: 14
   gradient_accumulation_steps: 2
   num_train_epochs: 30
-  save_steps: 500
-  eval_steps: 500
+  save_steps: 1000
+  eval_steps: 1000
 
   weight_decay: 0.0
 
@@ -73,5 +85,5 @@ training:
   use_specaugment: false
 
   # S2S uses codec_targets for AR token prediction
-  label_names: []
+  label_names: ["codec_targets"]
   label_smoothing: 0.0

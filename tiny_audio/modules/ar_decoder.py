@@ -148,6 +148,7 @@ class CodecARDecoder(nn.Module):
         intermediate_size: int = 4096,
         vocab_size: int = 2048,
         dropout: float = 0.0,
+        embedding: nn.Embedding = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -175,12 +176,16 @@ class CodecARDecoder(nn.Module):
             _attn_implementation="sdpa",
         )
 
-        # Token embedding
-        self.embedding = nn.Embedding(
-            self.total_vocab,
-            hidden_size,
-            padding_idx=self.pad_token_id,
-        )
+        # Token embedding - use provided embedding or create new one
+        # (Freeze-Omni style: single shared embedding for all tokens)
+        if embedding is not None:
+            self.embedding = embedding
+        else:
+            self.embedding = nn.Embedding(
+                self.total_vocab,
+                hidden_size,
+                padding_idx=self.pad_token_id,
+            )
 
         # Transformer layers
         self.layers = nn.ModuleList(
@@ -199,6 +204,7 @@ class CodecARDecoder(nn.Module):
         target_ids: torch.Tensor,
         target_mask: Optional[torch.Tensor] = None,
         return_hidden: bool = False,
+        prefix_kv_cache: Optional["DynamicCache"] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass for training.
 
@@ -207,12 +213,18 @@ class CodecARDecoder(nn.Module):
         - Labels: [target_0, target_1, ..., target_{n-1}, EOS]
         This teaches the model to predict EOS after the last token.
 
+        With prefix KV cache (Freeze-Omni style bridge):
+        - Prefix KV cache contains pre-computed keys/values from text hidden states
+        - Audio tokens attend to prefix + context + causal targets
+        - Enables efficient transfer from text to audio space
+
         Args:
             context: Pre-NN output [batch, context_len, hidden_size]
             context_mask: Mask for context [batch, context_len]
             target_ids: Target codec tokens [batch, target_len]
             target_mask: Mask for targets [batch, target_len]
             return_hidden: If True, also return hidden states for Depformer
+            prefix_kv_cache: Optional pre-computed KV cache from PrefixBridge
 
         Returns:
             logits: [batch, target_len + 1, vocab_size]
@@ -222,6 +234,9 @@ class CodecARDecoder(nn.Module):
         batch_size, context_len, _ = context.shape
         device = context.device
         dtype = context.dtype
+
+        # Get prefix length if prefix KV cache is provided
+        prefix_len = prefix_kv_cache.get_seq_length() if prefix_kv_cache is not None else 0
 
         # Create special tokens
         sos = torch.full((batch_size, 1), self.sos_token_id, dtype=torch.long, device=device)
@@ -244,20 +259,28 @@ class CodecARDecoder(nn.Module):
         combined = torch.cat([context, input_emb], dim=1)
         total_len = combined.shape[1]
 
-        # Create attention mask:
-        # - Context attends to all context (bidirectional within context)
-        # - Targets attend to all context + causal within targets
-        attn_mask = torch.zeros(batch_size, total_len, total_len, dtype=torch.bool, device=device)
+        # Create attention mask including prefix positions:
+        # - Prefix: pre-computed KV cache (all positions attend to prefix)
+        # - Context: bidirectional within context
+        # - Targets: attend to prefix + context + causal within targets
+        full_attn_len = prefix_len + total_len
+        attn_mask = torch.zeros(
+            batch_size, total_len, full_attn_len, dtype=torch.bool, device=device
+        )
+
+        # All positions attend to prefix (if present)
+        if prefix_len > 0:
+            attn_mask[:, :, :prefix_len] = True
 
         # Context attends to context (bidirectional)
-        attn_mask[:, :context_len, :context_len] = True
+        attn_mask[:, :context_len, prefix_len : prefix_len + context_len] = True
 
         # Targets attend to context
-        attn_mask[:, context_len:, :context_len] = True
+        attn_mask[:, context_len:, prefix_len : prefix_len + context_len] = True
 
         # Targets attend causally to targets
         causal = torch.tril(torch.ones(input_len, input_len, dtype=torch.bool, device=device))
-        attn_mask[:, context_len:, context_len:] = causal
+        attn_mask[:, context_len:, prefix_len + context_len :] = causal
 
         # Apply sequence masks if provided
         if context_mask is not None:
@@ -266,7 +289,7 @@ class CodecARDecoder(nn.Module):
             # Add column for BOS (always attend to it)
             bos_col = torch.ones(batch_size, total_len, 1, dtype=torch.bool, device=device)
             ctx_mask = torch.cat([bos_col, ctx_mask], dim=2)
-            attn_mask[:, :, :context_len] &= ctx_mask
+            attn_mask[:, :, prefix_len : prefix_len + context_len] &= ctx_mask
 
         if target_mask is not None:
             # Expand target_mask to include the +1 position for EOS prediction
@@ -275,7 +298,7 @@ class CodecARDecoder(nn.Module):
                 [target_mask, torch.ones(batch_size, 1, dtype=torch.bool, device=device)], dim=1
             )
             tgt_mask = extended_mask.unsqueeze(1).expand(-1, total_len, -1)
-            attn_mask[:, :, context_len:] &= tgt_mask
+            attn_mask[:, :, prefix_len + context_len :] &= tgt_mask
 
         # Convert to float mask
         # IMPORTANT: correct dtype required to avoid CUBLAS errors with BF16 on GPU
@@ -285,22 +308,22 @@ class CodecARDecoder(nn.Module):
             torch.tensor(torch.finfo(dtype).min, device=device, dtype=dtype),
         )
 
-        # Position IDs
-        position_ids = torch.arange(total_len, device=device).unsqueeze(0)
+        # Position IDs - offset by prefix length for correct rotary embeddings
+        position_ids = torch.arange(prefix_len, prefix_len + total_len, device=device).unsqueeze(0)
 
         # Rotary embeddings
         position_embeddings = self.rotary_emb(combined, position_ids)
 
-        # Forward through transformer
+        # Forward through transformer with optional prefix KV cache
         hidden_states = combined
         for layer in self.layers:
             layer_outputs = layer(
                 hidden_states,
                 attention_mask=attn_mask,
                 position_ids=position_ids,
-                past_key_value=None,
+                past_key_value=prefix_kv_cache,
                 output_attentions=False,
-                use_cache=False,
+                use_cache=prefix_kv_cache is not None,  # Only cache if using prefix
                 position_embeddings=position_embeddings,
             )
             # Handle both tensor (transformers 5.0+) and tuple (older) outputs
@@ -365,8 +388,14 @@ class CodecARDecoder(nn.Module):
         repetition_penalty: float = 1.1,
         penalty_window: int = 20,
         return_hidden: bool = False,
+        prefix_kv_cache: Optional[DynamicCache] = None,
     ):
         """Generate codec tokens autoregressively.
+
+        With prefix KV cache (Freeze-Omni style bridge):
+        - Prefix KV cache contains pre-computed keys/values from text hidden states
+        - Audio tokens attend to prefix + context during generation
+        - Enables efficient transfer from text to audio space
 
         Args:
             context: Pre-NN output [batch, context_len, hidden_size]
@@ -377,6 +406,7 @@ class CodecARDecoder(nn.Module):
             repetition_penalty: Penalty for repeated tokens
             penalty_window: Window size for repetition penalty
             return_hidden: If True, yield (token, hidden_state) tuples for Depformer
+            prefix_kv_cache: Optional pre-computed KV cache from PrefixBridge
 
         Yields:
             If return_hidden=False: Generated token IDs one at a time
@@ -387,29 +417,51 @@ class CodecARDecoder(nn.Module):
 
         assert batch_size == 1, "Streaming generation only supports batch_size=1"
 
+        # Get prefix length if provided
+        prefix_len = prefix_kv_cache.get_seq_length() if prefix_kv_cache is not None else 0
+
         # Add BOS to context
         bos_emb = self.embedding(torch.full((1, 1), self.bos_token_id, device=device))
         context = torch.cat([bos_emb, context], dim=1)
         context_len = context.shape[1]
 
-        # Initialize KV cache
-        past_key_values = DynamicCache()
+        # Initialize or clone KV cache (don't modify the original prefix cache)
+        if prefix_kv_cache is not None:
+            # Clone the prefix cache so we don't modify the original
+            # Handle different transformers versions
+            import copy
+
+            past_key_values = copy.deepcopy(prefix_kv_cache)
+        else:
+            past_key_values = DynamicCache()
 
         # First pass: process context
-        position_ids = torch.arange(context_len, device=device).unsqueeze(0)
+        # Position IDs offset by prefix length
+        position_ids = torch.arange(prefix_len, prefix_len + context_len, device=device).unsqueeze(
+            0
+        )
         position_embeddings = self.rotary_emb(context, position_ids)
 
         # Build context attention mask if provided
         # context_mask is [batch, seq_len] where True = valid, False = padding
         # Need to prepend True for BOS token we added
+        # Also include prefix positions (always valid)
         if context_mask is not None:
             # Add BOS position (always valid) to mask
             bos_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
             full_context_mask = torch.cat([bos_mask, context_mask], dim=1)
-            # Expand to [batch, 1, 1, context_len] for attention
+            # Prepend prefix mask (all True since prefix is always valid)
+            if prefix_len > 0:
+                prefix_mask = torch.ones(1, prefix_len, dtype=torch.bool, device=device)
+                full_context_mask = torch.cat([prefix_mask, full_context_mask], dim=1)
+            # Expand to [batch, 1, 1, prefix_len + context_len] for attention
             # Invalid positions get large negative value
             context_attn_mask = full_context_mask.unsqueeze(1).unsqueeze(2)
             context_attn_mask = (~context_attn_mask) * torch.finfo(context.dtype).min
+        elif prefix_len > 0:
+            # No context mask but have prefix - need mask for prefix positions
+            # Context attends to prefix (all valid) + context (all valid)
+            context_attn_mask = None  # All valid, no mask needed
         else:
             context_attn_mask = None
 
@@ -431,11 +483,20 @@ class CodecARDecoder(nn.Module):
         current_token = torch.full((1, 1), self.sos_token_id, device=device)
         generated: list[int] = []
 
-        # Build base mask for generation: valid context + all generated tokens are attendable
-        # full_context_mask is [1, context_len] with BOS prepended (always True)
+        # Build base mask for generation: prefix + valid context + all generated tokens are attendable
+        # Include prefix positions (always valid)
         if context_mask is not None:
             bos_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
             base_valid_mask = torch.cat([bos_mask, context_mask], dim=1)  # [1, context_len]
+            # Prepend prefix mask
+            if prefix_len > 0:
+                prefix_mask = torch.ones(1, prefix_len, dtype=torch.bool, device=device)
+                base_valid_mask = torch.cat([prefix_mask, base_valid_mask], dim=1)
+        elif prefix_len > 0:
+            # No context mask but have prefix - create mask with prefix + context all valid
+            base_valid_mask = torch.ones(
+                1, prefix_len + context_len, dtype=torch.bool, device=device
+            )
         else:
             base_valid_mask = None
 
@@ -449,10 +510,11 @@ class CodecARDecoder(nn.Module):
             position_embeddings = self.rotary_emb(token_emb, position_ids)
 
             # Build attention mask for this step
-            # Current token attends to: valid context + all previously generated tokens
+            # Current token attends to: prefix + valid context + all previously generated tokens
             if base_valid_mask is not None:
                 # Number of generated tokens so far (including SOS)
-                num_generated = pos - context_len
+                # pos includes prefix_len, so subtract both prefix and context
+                num_generated = pos - prefix_len - context_len
                 # Extend mask: context mask + all True for generated tokens
                 if num_generated > 0:
                     gen_mask = torch.ones(1, num_generated, dtype=torch.bool, device=device)
@@ -486,6 +548,12 @@ class CodecARDecoder(nn.Module):
 
             # Project to vocab
             logits = self.output_proj(hidden_states[:, -1, :])  # [1, vocab]
+
+            # Mask special tokens (BOS, SOS, PAD) to ensure valid Mimi codes
+            # EOS is kept since we check for it to stop generation
+            logits[:, self.bos_token_id] = float("-inf")
+            logits[:, self.sos_token_id] = float("-inf")
+            logits[:, self.pad_token_id] = float("-inf")
 
             # Apply repetition penalty
             # For positive logits, divide to reduce probability

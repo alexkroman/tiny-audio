@@ -73,6 +73,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # Audio Head settings (AR codec generation)
         use_audio_head: bool = False,
         freeze_audio_head: bool = False,  # Freeze entire audio head
+        use_prefix_bridge: bool = True,  # Enable prefix bridge for KV-cache fine-tuning
         max_audio_tokens: int = 500,  # Maximum codec tokens to generate
         audio_top_k: int = 50,  # Top-k sampling for audio generation
         audio_temperature: float = 1.0,  # Sampling temperature for audio generation
@@ -144,6 +145,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # Audio Head settings (AR codec generation)
         self.use_audio_head = use_audio_head
         self.freeze_audio_head = freeze_audio_head
+        self.use_prefix_bridge = use_prefix_bridge
         self.max_audio_tokens = max_audio_tokens
         self.audio_top_k = audio_top_k
         self.audio_temperature = audio_temperature

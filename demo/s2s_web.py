@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-Web-based Speech-to-Speech Demo using native Mimi audio decoding.
+Web-based Speech-to-Speech Demo using FullDuplexSession.
 
-Uses WebSocket for real-time audio streaming and Silero VAD for turn detection.
-Uses the model's audio_head to generate Mimi codec tokens, then decodes to audio.
+Implements Freeze-Omni style full-duplex conversation:
+- Browser-level AEC (echoCancellation: true)
+- Separate AudioContexts for input/output
+- Interruption support via VAD
+- Streaming audio generation
 
 Usage:
     python demo/s2s_web.py
     python demo/s2s_web.py --model mazesmazes/tiny-audio-s2s --port 8000
-
-Then open http://localhost:8000 in your browser.
-
-Requirements:
-    pip install moshi_mlx  # Mac (recommended)
-    # or transformers with Mimi support for other platforms
 """
 
 import argparse
+import asyncio
 import os
+from typing import Optional
 
 import numpy as np
 import scipy.signal
@@ -30,25 +29,20 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 app = FastAPI(title="Tiny Audio S2S Demo")
 
-# Global state (initialized on startup)
+# Global model (initialized on startup)
 model = None
-vad_model = None
-vad_utils = None
 
 # Audio settings
-SAMPLE_RATE = 16000
-MIMI_SAMPLE_RATE = 24000
-OUTPUT_SAMPLE_RATE = 48000  # Browser-native rate
-VAD_THRESHOLD = 0.5
-SILENCE_DURATION_MS = 1400  # End of speech after this much silence
+OUTPUT_SAMPLE_RATE = 24000  # Mimi native
+BROWSER_SAMPLE_RATE = 48000  # Browser playback
 
-SYSTEM_PROMPT = """You are a helpful voice assistant. Keep your responses brief and conversational - aim for 1-2 sentences. Be friendly and natural. Do not use emojis or special characters."""
+SYSTEM_PROMPT = """You are a helpful voice assistant. Keep responses brief - 1-2 sentences. Be friendly and natural."""
 
 HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Tiny Audio S2S Demo</title>
+    <title>Tiny Audio S2S</title>
     <style>
         * { box-sizing: border-box; }
         body {
@@ -65,15 +59,13 @@ HTML_PAGE = """
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
         h1 { margin-top: 0; color: #333; }
-        .subtitle { color: #666; margin-top: -10px; font-size: 14px; }
         .status {
             padding: 15px;
             border-radius: 8px;
             margin: 20px 0;
             font-weight: 500;
         }
-        .status.disconnected { background: #fee; color: #c00; }
-        .status.connected { background: #efe; color: #070; }
+        .status.idle { background: #f5f5f5; color: #666; }
         .status.listening { background: #eef; color: #007; }
         .status.processing { background: #ffe; color: #a70; }
         .status.speaking { background: #fef; color: #707; }
@@ -84,13 +76,10 @@ HTML_PAGE = """
             border-radius: 8px;
             cursor: pointer;
             margin: 5px;
-            transition: all 0.2s;
         }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        button:disabled { opacity: 0.5; }
         #startBtn { background: #007bff; color: white; }
-        #startBtn:hover:not(:disabled) { background: #0056b3; }
         #stopBtn { background: #dc3545; color: white; }
-        #stopBtn:hover:not(:disabled) { background: #c82333; }
         .transcript {
             margin-top: 20px;
             padding: 15px;
@@ -101,193 +90,108 @@ HTML_PAGE = """
             overflow-y: auto;
         }
         .transcript p { margin: 8px 0; }
-        .transcript .user { color: #007bff; }
-        .transcript .assistant { color: #28a745; }
-        .transcript .interim { color: #6c757d; font-style: italic; }
+        .user { color: #007bff; }
+        .assistant { color: #28a745; }
+        .system { color: #999; font-size: 12px; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Tiny Audio S2S</h1>
-        <p class="subtitle">Native Speech-to-Speech with Mimi codec</p>
-
-        <div id="status" class="status disconnected">Disconnected</div>
-
+        <div id="status" class="status idle">Click Start</div>
         <div>
-            <button id="startBtn" onclick="start()">Start Conversation</button>
+            <button id="startBtn" onclick="start()">Start</button>
             <button id="stopBtn" onclick="stop()" disabled>Stop</button>
         </div>
-
         <div class="transcript" id="transcript"></div>
     </div>
-
     <script>
-        let ws = null;
-        let audioContext = null;
-        let mediaStream = null;
-        let processor = null;
-        let isRunning = false;
-        let isPlaying = false;
-
-        const statusEl = document.getElementById('status');
-        const startBtn = document.getElementById('startBtn');
-        const stopBtn = document.getElementById('stopBtn');
-        const transcriptEl = document.getElementById('transcript');
-
-        function setStatus(status, text) {
-            statusEl.className = 'status ' + status;
-            statusEl.textContent = text;
-        }
-
-        let interimElement = null;
-
-        function addTranscript(role, text, interim = false) {
-            if (interim) {
-                if (!interimElement) {
-                    interimElement = document.createElement('p');
-                    interimElement.className = 'assistant interim';
-                    transcriptEl.appendChild(interimElement);
-                }
-                interimElement.textContent = 'Assistant: ' + text;
-            } else {
-                if (interimElement) {
-                    interimElement.remove();
-                    interimElement = null;
-                }
-                const p = document.createElement('p');
-                p.className = role;
-                p.textContent = (role === 'user' ? 'You: ' : 'Assistant: ') + text;
-                transcriptEl.appendChild(p);
-            }
-            transcriptEl.scrollTop = transcriptEl.scrollHeight;
-        }
+        let ws, inputCtx, outputCtx, stream, processor;
+        let audioQueue = [], playing = false;
 
         async function start() {
-            try {
-                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                    throw new Error('getUserMedia not available. Use localhost or HTTPS.');
+            // Mic with browser AEC (Freeze-Omni style)
+            stream = await navigator.mediaDevices.getUserMedia({
+                audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
+            });
+
+            // Separate contexts for input/output (Freeze-Omni style)
+            inputCtx = new AudioContext({ sampleRate: 16000 });
+            outputCtx = new AudioContext({ sampleRate: 48000 });
+
+            const src = inputCtx.createMediaStreamSource(stream);
+            processor = inputCtx.createScriptProcessor(512, 1, 1);
+
+            ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('stopBtn').disabled = false;
+                processor.onaudioprocess = e => {
+                    if (ws.readyState !== 1) return;
+                    const f = e.inputBuffer.getChannelData(0);
+                    const i = new Int16Array(f.length);
+                    for (let j = 0; j < f.length; j++) i[j] = Math.max(-32768, Math.min(32767, f[j] * 32768));
+                    ws.send(i.buffer);
+                };
+                src.connect(processor);
+                processor.connect(inputCtx.destination);
+            };
+
+            ws.onmessage = e => {
+                if (typeof e.data === 'string') {
+                    const m = JSON.parse(e.data);
+                    if (m.type === 'state') setStatus(m.state);
+                    else if (m.type === 'text') addText('assistant', m.content);
+                    else if (m.type === 'interrupted') { audioQueue = []; playing = false; addText('system', '[interrupted]'); }
+                } else {
+                    audioQueue.push(e.data);
+                    if (!playing) playNext();
                 }
+            };
 
-                mediaStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                        sampleRate: 16000
-                    }
-                });
-
-                audioContext = new AudioContext({ sampleRate: 16000 });
-                const source = audioContext.createMediaStreamSource(mediaStream);
-                processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-                ws.binaryType = 'arraybuffer';
-
-                ws.onopen = () => {
-                    setStatus('listening', 'Listening...');
-                    isRunning = true;
-                    startBtn.disabled = true;
-                    stopBtn.disabled = false;
-
-                    processor.onaudioprocess = (e) => {
-                        if (!isRunning || isPlaying || ws.readyState !== WebSocket.OPEN) return;
-                        const float32 = e.inputBuffer.getChannelData(0);
-                        const int16 = new Int16Array(float32.length);
-                        for (let i = 0; i < float32.length; i++) {
-                            int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-                        }
-                        ws.send(int16.buffer);
-                    };
-
-                    source.connect(processor);
-                    processor.connect(audioContext.destination);
-                };
-
-                ws.onmessage = async (event) => {
-                    if (typeof event.data === 'string') {
-                        const msg = JSON.parse(event.data);
-                        if (msg.type === 'status') {
-                            setStatus(msg.status, msg.text);
-                        } else if (msg.type === 'transcript') {
-                            addTranscript(msg.role, msg.text, msg.interim || false);
-                        }
-                    } else {
-                        await playAudio(event.data);
-                    }
-                };
-
-                ws.onclose = () => {
-                    setStatus('disconnected', 'Disconnected');
-                    cleanup();
-                };
-
-                ws.onerror = (err) => {
-                    console.error('WebSocket error:', err);
-                    setStatus('disconnected', 'Connection error');
-                    cleanup();
-                };
-
-            } catch (err) {
-                console.error('Error starting:', err);
-                setStatus('disconnected', 'Error: ' + err.message);
-            }
+            ws.onclose = () => cleanup();
         }
 
-        let playbackContext = null;
-
-        async function playAudio(arrayBuffer) {
-            isPlaying = true;
-            setStatus('speaking', 'Speaking...');
-            try {
-                const int16 = new Int16Array(arrayBuffer);
-                const float32 = new Float32Array(int16.length);
-                for (let i = 0; i < int16.length; i++) {
-                    float32[i] = int16[i] / 32768;
-                }
-
-                if (!playbackContext || playbackContext.state === 'closed') {
-                    playbackContext = new AudioContext({ sampleRate: 48000 });
-                }
-
-                const audioBuffer = playbackContext.createBuffer(1, float32.length, 48000);
-                audioBuffer.getChannelData(0).set(float32);
-
-                const source = playbackContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(playbackContext.destination);
-
-                await new Promise(resolve => {
-                    source.onended = resolve;
-                    source.start();
-                });
-            } catch (err) {
-                console.error('Error playing audio:', err);
-            } finally {
-                isPlaying = false;
-                setStatus('listening', 'Listening...');
-            }
+        function setStatus(s) {
+            const el = document.getElementById('status');
+            el.className = 'status ' + s;
+            el.textContent = s.charAt(0).toUpperCase() + s.slice(1);
         }
 
-        function stop() {
-            isRunning = false;
-            if (ws) ws.close();
-            cleanup();
+        function addText(role, text) {
+            const p = document.createElement('p');
+            p.className = role;
+            p.textContent = (role === 'assistant' ? 'Assistant: ' : '') + text;
+            document.getElementById('transcript').appendChild(p);
         }
+
+        async function playNext() {
+            if (!audioQueue.length) { playing = false; return; }
+            playing = true;
+            const buf = audioQueue.shift();
+            const i16 = new Int16Array(buf), f32 = new Float32Array(i16.length);
+            for (let j = 0; j < i16.length; j++) f32[j] = i16[j] / 32768;
+            const ab = outputCtx.createBuffer(1, f32.length, 48000);
+            ab.getChannelData(0).set(f32);
+            const s = outputCtx.createBufferSource();
+            s.buffer = ab;
+            s.connect(outputCtx.destination);
+            s.onended = playNext;
+            s.start();
+        }
+
+        function stop() { if (ws) ws.close(); cleanup(); }
 
         function cleanup() {
-            isRunning = false;
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
             if (processor) processor.disconnect();
-            if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-            if (audioContext) audioContext.close();
-            if (playbackContext) playbackContext.close();
-            processor = null;
-            mediaStream = null;
-            audioContext = null;
-            playbackContext = null;
+            if (stream) stream.getTracks().forEach(t => t.stop());
+            if (inputCtx) inputCtx.close();
+            if (outputCtx) outputCtx.close();
+            audioQueue = []; playing = false;
         }
     </script>
 </body>
@@ -295,173 +199,134 @@ HTML_PAGE = """
 """
 
 
-def load_models(model_id: str):
-    """Load ASR model with audio head and VAD."""
-    global model, vad_model, vad_utils
-
-    print(f"Loading model: {model_id}")
-
+def load_model(model_id: str):
+    """Load model with audio head."""
+    global model
     from tiny_audio.asr_modeling import ASRModel
 
+    print(f"Loading model: {model_id}")
     model = ASRModel.from_pretrained(model_id)
     model.eval()
-
-    # Set system prompt
     model.system_prompt = SYSTEM_PROMPT
 
-    if torch.cuda.is_available():
-        device = "cuda"
-        model = model.to(device)
-    elif torch.backends.mps.is_available():
-        device = "mps"
-        # MPS doesn't support bfloat16, use float32
-        model = model.to(device=device, dtype=torch.float32)
-    else:
-        device = "cpu"
-        model = model.to(device)
+    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    dtype = torch.float32 if device == "mps" else None
+    model = model.to(device=device, dtype=dtype) if dtype else model.to(device)
 
-    print(f"Model loaded on {device}")
-    if model.audio_head is not None:
-        print("Audio head: enabled (native S2S)")
-        # Pre-load Mimi decoder for faster first response
+    print(f"Model on {device}")
+
+    if model.audio_head:
         model.audio_head.load_mimi_decoder(device=device)
         print("Mimi decoder loaded")
-    else:
-        print("WARNING: Model has no audio_head - S2S will not work!")
 
-    # Load Silero VAD
-    vad_model, vad_utils = torch.hub.load(
-        repo_or_dir="snakers4/silero-vad", model="silero_vad", force_reload=False
-    )
+    model.load_vad()
     print("VAD loaded")
 
 
-def process_audio(audio_bytes: bytes) -> dict:
-    """Process audio with speech-to-speech."""
-    if len(audio_bytes) == 0 or model is None:
-        return {"text": "", "audio": b""}
-
-    try:
-        # Convert PCM bytes to float32
-        audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-
-        # Generate response
-        result = model.generate_with_audio(audio_array, sampling_rate=SAMPLE_RATE)
-        text = result["text"][0] if result["text"] else ""
-
-        # Convert output to browser format (48kHz int16 bytes)
-        audio_out = result["audio"].squeeze().cpu().numpy()
-
-        # Normalize audio to use full dynamic range
-        max_val = max(abs(audio_out.min()), abs(audio_out.max()))
-        if max_val > 0:
-            audio_out = audio_out / max_val * 0.9
-
-        num_samples = int(len(audio_out) * OUTPUT_SAMPLE_RATE / MIMI_SAMPLE_RATE)
-        audio_resampled = scipy.signal.resample(audio_out, num_samples)
-        audio_int16 = (np.clip(audio_resampled, -1, 1) * 32767).astype(np.int16)
-
-        return {"text": text, "audio": audio_int16.tobytes()}
-
-    except Exception as e:
-        print(f"S2S error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"text": f"Error: {e}", "audio": b""}
+def resample_to_browser(audio: np.ndarray) -> bytes:
+    """Resample from Mimi (24kHz) to browser (48kHz)."""
+    mx = max(abs(audio.min()), abs(audio.max()))
+    if mx > 0:
+        audio = audio / mx * 0.9
+    resampled = scipy.signal.resample(audio, int(len(audio) * BROWSER_SAMPLE_RATE / OUTPUT_SAMPLE_RATE))
+    return (np.clip(resampled, -1, 1) * 32767).astype(np.int16).tobytes()
 
 
 @app.get("/")
-async def get_index():
+async def index():
     return HTMLResponse(HTML_PAGE)
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket handler using FullDuplexSession."""
     await websocket.accept()
 
-    audio_buffer = []
-    is_speaking = False
-    silence_frames = 0
-    frames_per_chunk = 4096
-    silence_threshold = int(SILENCE_DURATION_MS / (frames_per_chunk / SAMPLE_RATE * 1000))
+    from tiny_audio.full_duplex import FullDuplexSession, FullDuplexConfig, ConversationState
 
-    if vad_utils is None:
-        await websocket.close(code=1011, reason="VAD not loaded")
-        return
-    get_speech_timestamps = vad_utils[0]
+    # Async-safe message sending
+    loop = asyncio.get_event_loop()
+    send_lock = asyncio.Lock()
 
-    try:
-        # Send ready message
-        await websocket.send_json(
-            {"type": "status", "status": "listening", "text": "Listening..."}
+    async def safe_send_json(data):
+        async with send_lock:
+            try:
+                await websocket.send_json(data)
+            except Exception:
+                pass
+
+    async def safe_send_bytes(data):
+        async with send_lock:
+            try:
+                await websocket.send_bytes(data)
+            except Exception:
+                pass
+
+    # Callbacks (called from background threads)
+    def on_state(state: ConversationState):
+        asyncio.run_coroutine_threadsafe(
+            safe_send_json({"type": "state", "state": state.value}),
+            loop
         )
 
+    def on_text(text: str, interim: bool):
+        asyncio.run_coroutine_threadsafe(
+            safe_send_json({"type": "text", "content": text, "interim": interim}),
+            loop
+        )
+
+    def on_audio(audio: torch.Tensor):
+        audio_bytes = resample_to_browser(audio.squeeze().cpu().numpy())
+        asyncio.run_coroutine_threadsafe(
+            safe_send_bytes(audio_bytes),
+            loop
+        )
+
+    def on_interrupted():
+        asyncio.run_coroutine_threadsafe(
+            safe_send_json({"type": "interrupted"}),
+            loop
+        )
+
+    # Create session with callbacks
+    session = FullDuplexSession(
+        model=model,
+        config=FullDuplexConfig(
+            vad_threshold=0.5,
+            silence_duration_ms=700,
+            audio_chunk_size=4,
+        ),
+        on_state_change=on_state,
+        on_text=on_text,
+        on_audio=on_audio,
+        on_interrupted=on_interrupted,
+    )
+
+    session.start()
+
+    try:
         while True:
             data = await websocket.receive_bytes()
-            audio_chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-
-            # Run VAD
-            speech_timestamps = get_speech_timestamps(
-                torch.from_numpy(audio_chunk),
-                vad_model,
-                sampling_rate=SAMPLE_RATE,
-                threshold=VAD_THRESHOLD,
-            )
-
-            has_speech = len(speech_timestamps) > 0
-
-            if has_speech:
-                if not is_speaking:
-                    is_speaking = True
-                    audio_buffer = []
-                audio_buffer.append(data)
-                silence_frames = 0
-            elif is_speaking:
-                audio_buffer.append(data)
-                silence_frames += 1
-
-                if silence_frames >= silence_threshold:
-                    is_speaking = False
-                    silence_frames = 0
-
-                    if audio_buffer:
-                        await websocket.send_json(
-                            {"type": "status", "status": "processing", "text": "Processing..."}
-                        )
-
-                        full_audio = b"".join(audio_buffer)
-                        audio_buffer = []
-
-                        result = process_audio(full_audio)
-
-                        if result["text"]:
-                            await websocket.send_json(
-                                {"type": "transcript", "role": "assistant", "text": result["text"], "interim": False}
-                            )
-
-                        if result["audio"]:
-                            await websocket.send_bytes(result["audio"])
+            audio = np.frombuffer(data, dtype=np.int16)
+            session.push_audio(audio)
 
     except WebSocketDisconnect:
-        print("Client disconnected")
+        pass
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        print(f"Error: {e}")
+    finally:
+        session.stop()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Tiny Audio S2S Web Demo")
-    parser.add_argument(
-        "--model", "-m", default="mazesmazes/tiny-audio-s2s", help="HuggingFace model ID with audio_head"
-    )
-    parser.add_argument("--port", "-p", type=int, default=8000, help="Server port")
-    parser.add_argument("--host", default="0.0.0.0", help="Server host")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", "-m", default="mazesmazes/tiny-audio-s2s")
+    parser.add_argument("--port", "-p", type=int, default=8000)
+    parser.add_argument("--host", default="0.0.0.0")
     args = parser.parse_args()
 
-    load_models(args.model)
-
-    print(f"\nStarting S2S server at http://localhost:{args.port}")
-    print("Open this URL in Chrome/Edge for best echo cancellation.\n")
-
+    load_model(args.model)
+    print(f"\nServer at http://localhost:{args.port}\n")
     uvicorn.run(app, host=args.host, port=args.port)
 
 
