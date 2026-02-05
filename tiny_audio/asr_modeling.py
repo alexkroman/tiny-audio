@@ -537,34 +537,37 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Compute audio head loss if training S2S with codec targets
         if self.audio_head is not None and codec_targets is not None:
-            # Use token embeddings instead of hidden states for conditioning
-            # This is simpler and more similar to how pocket-tts conditions on text
-            # Note: input_ids is a direct argument to forward(), not in kwargs
-            if input_ids is None:
-                raise ValueError("input_ids required for audio head training")
+            # Use LLM hidden states for conditioning (not raw token embeddings)
+            # Hidden states contain rich contextualized representations from the transformer
+            # This follows Moshi/Freeze-Omni which use processed hidden states
+            if outputs.hidden_states is None:
+                raise ValueError(
+                    "hidden_states required for audio head training. "
+                    "Ensure output_hidden_states=True is set."
+                )
 
-            # Get embeddings for all tokens
-            all_embeddings = self.language_model.get_input_embeddings()(input_ids)
+            # Get last layer hidden states (most processed representations)
+            all_hidden_states = outputs.hidden_states[-1]  # [batch, seq_len, hidden_dim]
 
-            # Extract only assistant-position embeddings using assistant_mask
+            # Extract only assistant-position hidden states using assistant_mask
             # This mask identifies text output positions (where LLM generates response)
             assistant_mask = kwargs.get("assistant_mask")
             if assistant_mask is not None:
-                batch_size = all_embeddings.shape[0]
+                batch_size = all_hidden_states.shape[0]
 
-                # Extract assistant embeddings for each sample
-                assistant_emb_list = []
+                # Extract assistant hidden states for each sample
+                assistant_hidden_list = []
                 for i in range(batch_size):
                     mask_i = assistant_mask[i]  # [seq_len]
-                    emb_i = all_embeddings[i][mask_i]  # [num_assistant_tokens, embed_dim]
-                    assistant_emb_list.append(emb_i)
+                    hidden_i = all_hidden_states[i][mask_i]  # [num_assistant_tokens, hidden_dim]
+                    assistant_hidden_list.append(hidden_i)
 
                 # Pad sequences
                 embeddings = torch.nn.utils.rnn.pad_sequence(
-                    assistant_emb_list, batch_first=True, padding_value=0.0
+                    assistant_hidden_list, batch_first=True, padding_value=0.0
                 )
             else:
-                embeddings = all_embeddings
+                embeddings = all_hidden_states
 
             # Compute loss: embeddings condition the AR decoder to generate codec_targets
             audio_head_loss = self.audio_head(
@@ -981,11 +984,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         text_ids = output[:, input_ids.shape[1] :]
         text = self.tokenizer.batch_decode(text_ids, skip_special_tokens=True)
 
-        # Get embeddings for the generated text tokens
-        # This is simpler than hidden states - just a lookup table
-        embeddings = self.language_model.get_input_embeddings()(text_ids)
+        # Get hidden states for the generated text tokens via forward pass
+        # This provides rich contextualized representations (not just raw embeddings)
+        with torch.no_grad():
+            lm_output = self.language_model(
+                input_ids=text_ids,
+                output_hidden_states=True,
+            )
+            embeddings = lm_output.hidden_states[-1]  # [batch, seq_len, hidden_dim]
 
-        # Generate Mimi codec codes from text embeddings via AR decoder
+        # Generate Mimi codec codes from hidden states via AR decoder
         codes, _ = self.audio_head(embeddings)
 
         # Load Mimi decoder if not already loaded
@@ -1054,10 +1062,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         text_ids = output[:, input_ids.shape[1] :]
         response_text: str = self.tokenizer.decode(text_ids[0], skip_special_tokens=True)
 
-        # Get embeddings for the generated text tokens
-        embeddings = self.language_model.get_input_embeddings()(text_ids)
+        # Get hidden states for the generated text tokens via forward pass
+        # This provides rich contextualized representations (not just raw embeddings)
+        with torch.no_grad():
+            lm_output = self.language_model(
+                input_ids=text_ids,
+                output_hidden_states=True,
+            )
+            embeddings = lm_output.hidden_states[-1]  # [batch, seq_len, hidden_dim]
 
-        # Generate Mimi codec codes from text embeddings via AR decoder
+        # Generate Mimi codec codes from hidden states via AR decoder
         codes, _ = self.audio_head(embeddings)
 
         # Load Mimi decoder if not already loaded
