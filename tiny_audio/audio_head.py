@@ -1,290 +1,392 @@
-"""Flow matching audio head for speech-to-speech.
+"""Autoregressive audio head for speech-to-speech.
 
-Generates audio from LLM hidden states via flow matching:
-  LLM hidden -> llm_proj -> flow_net (LSD decode) -> Mimi latents -> Mimi decoder -> audio
+Generates audio from LLM embeddings via discrete codec tokens:
+  LLM embeddings -> Pre-NN -> AR Decoder -> Depformer -> Mimi codes -> audio
 
-All components are trained from scratch for S2S.
+Architecture:
+- Pre-NN transformer (3 layers, bidirectional) processes LLM hidden states
+- AR decoder (6 layers, causal) generates semantic codebook 0 autoregressively
+- Depformer (4 layers) predicts acoustic codebooks 1-7 conditioned on codebook 0
+- Mimi decoder converts all 8 codebooks to audio waveform
 """
 
 import logging
-from functools import partial
 from typing import Optional
 
 import torch
 import torch.nn as nn
 
-from .modules.mlp import SimpleMLPAdaLN
+from .modules.ar_decoder import CodecARDecoder, PreNN
+from .modules.depformer import Depformer
 
 logger = logging.getLogger(__name__)
 
 
-def lsd_decode(
-    v_t,
-    x_0: torch.Tensor,
-    num_steps: int = 1,
-) -> torch.Tensor:
-    """Lagrangian Self-Distillation decoding.
-
-    Iteratively refines noise into latents using the flow velocity network.
-
-    Args:
-        v_t: Velocity function v(s, t, x) -> velocity
-        x_0: Initial noise, shape [N, latent_dim]
-        num_steps: Number of integration steps
-
-    Returns:
-        Decoded latents, shape [N, latent_dim]
-    """
-    current = x_0
-    for i in range(num_steps):
-        s = i / num_steps
-        t = (i + 1) / num_steps
-        s_tensor = torch.full_like(x_0[..., :1], s)
-        t_tensor = torch.full_like(x_0[..., :1], t)
-        flow_dir = v_t(s_tensor, t_tensor, current)
-        current = current + flow_dir / num_steps
-    return current
-
-
 class AudioHead(nn.Module):
-    """Flow matching head: LLM hidden -> Mimi latents -> audio.
+    """AR codec head: LLM embeddings -> Mimi codes -> audio.
 
     Architecture:
-        - llm_proj: Linear projection from LLM hidden dim to flow conditioning
-        - latent_proj_in/out: Project between Mimi 512-dim and flow 32-dim
-        - flow_net: SimpleMLPAdaLN that predicts flow velocity
-        - Mimi decoder for latent -> audio
+        - input_proj: Projects LLM embeddings to hidden_dim
+        - pre_nn: 3-layer bidirectional transformer for context processing
+        - ar_decoder: 6-layer causal transformer for semantic codebook 0
+        - depformer: 4-layer transformer for acoustic codebooks 1-7
+        - Mimi decoder (frozen) for codes -> audio
 
     Args:
         config: ASRConfig with:
-            - llm_dim: LLM hidden dimension (default: 2048)
-            - lsd_decode_steps: Number of LSD integration steps (default: 1)
-            - flow_temperature: Sampling temperature for noise (default: 1.0)
+            - llm_dim: LLM embedding dimension (default: 3072 for SmolLM3)
+        llm_dim: Override for LLM dimension (takes precedence over config)
     """
 
     # Architecture dimensions
-    COND_DIM = 1024  # Conditioning dimension
-    LATENT_DIM = 32  # Flow latent dimension (matches Mimi's 32 codebooks)
-    MIMI_DIM = 512  # Mimi encoder output dimension
-    FLOW_DIM = 512  # Flow network hidden dimension
-    FLOW_DEPTH = 6  # Number of residual blocks
+    HIDDEN_DIM = 1024  # Transformer hidden dimension
+    INTERMEDIATE_DIM = 4096  # FFN intermediate dimension
+    NUM_HEADS = 16  # Attention heads
+
+    # Pre-NN config
+    PRE_NN_LAYERS = 3
+
+    # AR Decoder config (for semantic codebook 0)
+    AR_LAYERS = 6
+    VOCAB_SIZE = 2048  # Mimi codebook size
+
+    # Depformer config (for acoustic codebooks 1-7)
+    DEPFORMER_DIM = 512
+    DEPFORMER_LAYERS = 4
+    DEPFORMER_HEADS = 8
+    DEPFORMER_INTERMEDIATE = 2048
+    NUM_ACOUSTIC_CODEBOOKS = 7  # Codebooks 1-7
+
+    # Loss weighting (equal weights following Moshi's approach)
+    SEMANTIC_LOSS_WEIGHT = 1.0  # Weight for codebook 0 loss
+    ACOUSTIC_LOSS_WEIGHT = 1.0  # Weight for codebooks 1-7 loss
+
+    # Generation defaults
+    DEFAULT_MAX_TOKENS = 500
+    DEFAULT_TOP_K = 50
+    DEFAULT_TEMPERATURE = 1.0
+    DEFAULT_REPETITION_PENALTY = 1.1
+
+    # Mimi codec constants
+    MIMI_SAMPLE_RATE = 24000  # Expected sample rate for Mimi
 
     def __init__(self, config, llm_dim: int = None):
         super().__init__()
-        # llm_dim can be passed directly or from config
-        self.llm_dim = llm_dim or getattr(config, "llm_dim", None) or 2048
-        self.cond_dim = self.COND_DIM
-        self.latent_dim = self.LATENT_DIM
-        self.mimi_dim = self.MIMI_DIM
-        self.lsd_steps = getattr(config, "lsd_decode_steps", 1)
-        self.temp = getattr(config, "flow_temperature", 1.0)
+        self.llm_dim = llm_dim or getattr(config, "llm_dim", None) or 3072
+        self.hidden_dim = self.HIDDEN_DIM
+        self.vocab_size = self.VOCAB_SIZE
+        self.num_codebooks = 1 + self.NUM_ACOUSTIC_CODEBOOKS  # 8 total
 
-        # LLM -> conditioning projection
-        self.llm_proj = nn.Linear(self.llm_dim, self.cond_dim, bias=False)
-
-        # Mimi embedding projections
-        # Projects 512-dim Mimi embeddings to 32-dim flow latents and back
-        self.latent_proj_in = nn.Linear(self.mimi_dim, self.latent_dim, bias=False)
-        self.latent_proj_out = nn.Linear(self.latent_dim, self.mimi_dim, bias=False)
-
-        # Flow network
-        self.flow_net = SimpleMLPAdaLN(
-            in_channels=self.latent_dim,
-            model_channels=self.FLOW_DIM,
-            out_channels=self.latent_dim,
-            cond_channels=self.cond_dim,
-            num_res_blocks=self.FLOW_DEPTH,
-            num_time_conds=2,
+        # Generation parameters from config
+        self.max_tokens = getattr(config, "max_audio_tokens", self.DEFAULT_MAX_TOKENS)
+        self.top_k = getattr(config, "audio_top_k", self.DEFAULT_TOP_K)
+        self.temperature = getattr(config, "audio_temperature", self.DEFAULT_TEMPERATURE)
+        self.repetition_penalty = getattr(
+            config, "audio_repetition_penalty", self.DEFAULT_REPETITION_PENALTY
         )
 
-        # Mimi decoder components (loaded separately via load_mimi_decoder)
+        # Input projection: LLM dim -> hidden dim
+        self.input_proj = nn.Linear(self.llm_dim, self.hidden_dim, bias=False)
+
+        # Pre-NN: Process LLM hidden states with bidirectional attention
+        self.pre_nn = PreNN(
+            hidden_size=self.hidden_dim,
+            num_layers=self.PRE_NN_LAYERS,
+            num_heads=self.NUM_HEADS,
+            intermediate_size=self.INTERMEDIATE_DIM,
+        )
+
+        # AR Decoder: Generate semantic codebook 0 autoregressively
+        self.ar_decoder = CodecARDecoder(
+            hidden_size=self.hidden_dim,
+            num_layers=self.AR_LAYERS,
+            num_heads=self.NUM_HEADS,
+            intermediate_size=self.INTERMEDIATE_DIM,
+            vocab_size=self.vocab_size,
+        )
+
+        # Depformer: Generate acoustic codebooks 1-7
+        self.depformer = Depformer(
+            num_codebooks=self.NUM_ACOUSTIC_CODEBOOKS,
+            vocab_size=self.vocab_size,
+            main_dim=self.hidden_dim,
+            hidden_size=self.DEPFORMER_DIM,
+            num_layers=self.DEPFORMER_LAYERS,
+            num_heads=self.DEPFORMER_HEADS,
+            intermediate_size=self.DEPFORMER_INTERMEDIATE,
+        )
+
+        # Mimi model (loaded separately via load_mimi_decoder)
         self.mimi = None
 
+    @property
+    def bos_token_id(self) -> int:
+        return self.ar_decoder.bos_token_id
+
+    @property
+    def sos_token_id(self) -> int:
+        return self.ar_decoder.sos_token_id
+
+    @property
+    def eos_token_id(self) -> int:
+        return self.ar_decoder.eos_token_id
+
+    @property
+    def pad_token_id(self) -> int:
+        return self.ar_decoder.pad_token_id
+
     def load_mimi_decoder(self, device: torch.device = None, dtype: torch.dtype = None):
-        """Load Mimi model for decoding latents to audio."""
+        """Load Mimi model for encoding/decoding audio.
+
+        Args:
+            device: Device to load model on (e.g., 'cuda', 'cpu')
+            dtype: Data type for model weights (e.g., torch.float16, torch.bfloat16)
+        """
         from transformers import MimiModel
 
         self.mimi = MimiModel.from_pretrained("kyutai/mimi")
         self.mimi.requires_grad_(False)
         self.mimi.eval()
 
-        if device is not None:
-            self.mimi = self.mimi.to(device)
-        if dtype is not None:
-            self.mimi = self.mimi.to(dtype)
+        # Single transfer for efficiency (instead of two separate .to() calls)
+        if device is not None or dtype is not None:
+            self.mimi = self.mimi.to(device=device, dtype=dtype)
 
-        logger.info("Loaded Mimi decoder from kyutai/mimi")
+        logger.info("Loaded Mimi model from kyutai/mimi")
+
+    def encode_audio(self, audio: torch.Tensor, sample_rate: Optional[int] = None) -> torch.Tensor:
+        """Encode audio waveform to Mimi codec tokens.
+
+        Args:
+            audio: Audio waveform [batch, samples] or [batch, 1, samples]
+            sample_rate: Sample rate of input audio. If provided and doesn't match
+                MIMI_SAMPLE_RATE (24000), a warning is logged. Audio will still be
+                encoded but results may be incorrect.
+
+        Returns:
+            Codec tokens [batch, 8, seq_len] for all codebooks
+        """
+        if self.mimi is None:
+            raise RuntimeError("Mimi not loaded. Call load_mimi_decoder() first.")
+
+        # Validate sample rate if provided
+        if sample_rate is not None and sample_rate != self.MIMI_SAMPLE_RATE:
+            logger.warning(
+                f"Audio sample rate ({sample_rate} Hz) does not match Mimi's expected "
+                f"rate ({self.MIMI_SAMPLE_RATE} Hz). This may produce incorrect codec "
+                f"tokens. Consider resampling the audio first."
+            )
+
+        # Ensure [batch, channels, samples]
+        if audio.dim() == 2:
+            audio = audio.unsqueeze(1)
+
+        with torch.no_grad():
+            # Encode to codes: [batch, num_codebooks, seq_len]
+            # Use num_quantizers=8 (Mimi supports up to 32, we use 8 for efficiency)
+            encoder_outputs = self.mimi.encode(audio, num_quantizers=self.num_codebooks)
+            codes = encoder_outputs.audio_codes
+            assert codes is not None, "Mimi encode returned no codes"
+            return codes  # [batch, 8, seq_len]
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
-        latent_targets: Optional[torch.Tensor] = None,
-        latent_lengths: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        embeddings: torch.Tensor,
+        codec_targets: Optional[torch.Tensor] = None,
+        codec_lengths: Optional[torch.Tensor] = None,
+        embeddings_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for training or inference.
 
         Args:
-            hidden_states: LLM hidden states, shape [batch, seq_len, llm_dim]
-            latent_targets: Target Mimi latents for training, shape [batch, seq_len, 512]
-            latent_lengths: Actual lengths per sample, shape [batch]
+            embeddings: LLM token embeddings [batch, seq_len, llm_dim]
+            codec_targets: Target Mimi codes for training.
+                - [batch, 8, audio_seq_len] for full training (all codebooks)
+                - [batch, audio_seq_len] for legacy (codebook 0 only)
+            codec_lengths: Actual audio lengths per sample [batch]
+            embeddings_mask: Mask for embeddings [batch, seq_len]
 
         Returns:
-            Training: scalar flow matching loss
-            Inference: generated Mimi latents, shape [batch, seq_len, 512]
+            Training: scalar cross-entropy loss (weighted combination of all codebooks)
+            Inference: tuple of (generated codes [batch, 8, gen_len], empty tensor)
         """
-        # Project LLM hidden states to conditioning
-        cond = self.llm_proj(hidden_states)
+        # Project to hidden dim
+        hidden = self.input_proj(embeddings)
 
-        if latent_targets is not None:
-            return self._compute_loss(cond, latent_targets, latent_lengths)
-        return self._generate(cond)
+        # Process through Pre-NN
+        context = self.pre_nn(hidden, attention_mask=embeddings_mask)
+
+        if codec_targets is not None:
+            return self._compute_loss(context, embeddings_mask, codec_targets, codec_lengths)
+        return self._generate(context, embeddings_mask)
 
     def _compute_loss(
         self,
-        cond: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: Optional[torch.Tensor],
         targets: torch.Tensor,
         lengths: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """Compute flow matching loss.
+        """Compute cross-entropy loss for codec token prediction.
+
+        Trains both AR decoder (codebook 0) and Depformer (codebooks 1-7).
+        Uses equal weighting following Moshi's approach.
 
         Args:
-            cond: Conditioning from LLM, shape [batch, cond_seq_len, cond_dim]
-            targets: Mimi embeddings, shape [batch, target_seq_len, 512]
-            lengths: Optional lengths for masking
+            context: Pre-NN output [batch, context_len, hidden_dim]
+            context_mask: Mask for context [batch, context_len]
+            targets: Target codec tokens [batch, 8, target_len] for all codebooks
+            lengths: Actual target lengths [batch]
+
+        Returns:
+            Weighted sum of semantic and acoustic losses
         """
-        # Debug: check inputs for NaN/Inf
-        if torch.isnan(cond).any() or torch.isinf(cond).any():
-            logger.warning(
-                f"NaN/Inf in cond! shape={cond.shape}, nan={torch.isnan(cond).sum()}, inf={torch.isinf(cond).sum()}"
-            )
-        if torch.isnan(targets).any() or torch.isinf(targets).any():
-            logger.warning(f"NaN/Inf in targets! shape={targets.shape}")
+        device = targets.device
 
-        batch, cond_seq_len, _ = cond.shape
-        target_seq_len = targets.shape[1]
-        device = cond.device
+        assert targets.dim() == 3, f"Expected [batch, 8, seq_len], got {targets.shape}"
+        assert targets.shape[1] == self.num_codebooks, (
+            f"Expected {self.num_codebooks} codebooks, got {targets.shape[1]}"
+        )
 
-        # Project 512-dim Mimi embeddings to 32-dim flow latents
-        targets_proj = self.latent_proj_in(targets)
+        target_len = targets.shape[2]
 
-        # Interpolate targets to match conditioning sequence length
-        if target_seq_len != cond_seq_len:
-            targets_proj = targets_proj.transpose(1, 2)
-            targets_proj = torch.nn.functional.interpolate(
-                targets_proj, size=cond_seq_len, mode="linear", align_corners=False
-            )
-            targets_proj = targets_proj.transpose(1, 2).contiguous()
-
-            if lengths is not None:
-                scale = cond_seq_len / target_seq_len
-                lengths = (lengths.float() * scale).long()
-
-        seq_len = cond_seq_len
-        x_1 = targets_proj
-
-        # Random timesteps for each sample/position
-        t = torch.rand(batch, seq_len, 1, device=device)
-
-        # Sample noise
-        x_0 = torch.randn_like(x_1)
-
-        # Linear interpolation: x_t = (1-t) * x_0 + t * x_1
-        x_t = (1 - t) * x_0 + t * x_1
-
-        # Target velocity: dx/dt = x_1 - x_0
-        v_target = x_1 - x_0
-
-        # Flatten for flow_net: [batch * seq_len, dim]
-        cond_flat = cond.view(-1, self.cond_dim)
-        t_flat = t.view(-1, 1)
-        x_t_flat = x_t.view(-1, self.latent_dim)
-
-        # Predict velocity
-        v_pred = self.flow_net(cond_flat, t_flat, t_flat, x_t_flat)
-        v_pred = v_pred.view(batch, seq_len, -1)
-
-        # Compute masked MSE loss
+        # Create target mask from lengths
         if lengths is not None:
-            positions = torch.arange(seq_len, device=device).unsqueeze(0)
-            mask = positions < lengths.unsqueeze(1)
-            mask = mask.unsqueeze(-1).expand_as(v_pred)
-            loss = ((v_pred - v_target) ** 2)[mask].mean()
+            positions = torch.arange(target_len, device=device).unsqueeze(0)
+            target_mask = positions < lengths.unsqueeze(1)
         else:
-            loss = ((v_pred - v_target) ** 2).mean()
+            target_mask = None
 
-        return loss
+        # Extract semantic targets (codebook 0)
+        semantic_targets = targets[:, 0, :]  # [batch, target_len]
 
-    def _generate(self, cond: torch.Tensor) -> torch.Tensor:
-        """Generate Mimi embeddings via LSD decoding.
+        # Forward through AR decoder for semantic codebook
+        # Get hidden states for Depformer conditioning
+        _, semantic_loss, ar_hidden = self.ar_decoder(
+            context=context,
+            context_mask=context_mask,
+            target_ids=semantic_targets,
+            target_mask=target_mask,
+            return_hidden=True,
+        )
+
+        # Train Depformer on acoustic codebooks 1-7
+        # Use AR decoder hidden states as conditioning
+        # Depformer expects [batch, num_codebooks, seq_len] where
+        # [:, 0, :] is semantic (input condition)
+        # [:, 1:, :] are targets for depformer
+        _, acoustic_loss = self.depformer.forward_training(
+            main_hidden=ar_hidden,
+            codebook_targets=targets,
+        )
+
+        return self.SEMANTIC_LOSS_WEIGHT * semantic_loss + self.ACOUSTIC_LOSS_WEIGHT * acoustic_loss
+
+    def _generate(
+        self,
+        context: torch.Tensor,
+        context_mask: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generate codec tokens via AR decoding + Depformer.
+
+        Uses AR decoder hidden states for Depformer conditioning, providing
+        position-specific context at each generated timestep.
 
         Args:
-            cond: Conditioning from LLM, shape [batch, seq_len, cond_dim]
+            context: Pre-NN output [batch, context_len, hidden_dim]
+            context_mask: Mask for context [batch, context_len]
 
         Returns:
-            Generated Mimi embeddings, shape [batch, seq_len, 512]
+            Tuple of:
+                - Generated codec tokens [batch, 8, gen_len] (all codebooks)
+                - Empty tensor (for API compatibility)
         """
-        batch, seq_len, _ = cond.shape
-        device = cond.device
-        dtype = cond.dtype
+        device = context.device
 
-        latents = []
-        for t in range(seq_len):
-            cond_t = cond[:, t]
+        # Collect generated semantic tokens AND AR decoder hidden states
+        semantic_tokens = []
+        ar_hidden_states = []
 
-            # Sample initial noise in 32-dim flow space
-            noise = torch.randn(batch, self.latent_dim, device=device, dtype=dtype)
-            noise = noise * (self.temp**0.5)
+        for token, hidden in self.ar_decoder.generate(
+            context=context,
+            context_mask=context_mask,
+            max_tokens=self.max_tokens,
+            top_k=self.top_k,
+            temperature=self.temperature,
+            repetition_penalty=self.repetition_penalty,
+            return_hidden=True,
+        ):
+            semantic_tokens.append(token)
+            ar_hidden_states.append(hidden)
 
-            def velocity_fn(cond_fixed, s, t, x):
-                return self.flow_net(cond_fixed, s, t, x)
+        if not semantic_tokens:
+            return torch.empty(
+                1, self.num_codebooks, 0, dtype=torch.long, device=device
+            ), torch.empty(0, device=device)
 
-            conditioned_flow = partial(velocity_fn, cond_t)
-            latent = lsd_decode(conditioned_flow, noise, self.lsd_steps)
-            latents.append(latent)
+        # Convert to tensors
+        semantic = torch.tensor([semantic_tokens], device=device)  # [1, seq_len]
+        # Stack AR hidden states: [1, seq_len, hidden_dim]
+        ar_hidden = torch.cat(ar_hidden_states, dim=1)
 
-        latents = torch.stack(latents, dim=1)
+        # Generate acoustic codebooks 1-7 using Depformer
+        # Now using position-specific AR decoder hidden states
+        acoustic = self.depformer.generate_batch(
+            main_hidden=ar_hidden,
+            semantic_tokens=semantic,
+            temperature=self.temperature,
+            top_k=self.top_k,
+        )  # [1, 7, seq_len]
 
-        # Project back to 512-dim Mimi embedding space
-        return self.latent_proj_out(latents)
+        # Combine semantic + acoustic: [1, 8, seq_len]
+        all_codes = torch.cat([semantic.unsqueeze(1), acoustic], dim=1)
 
-    def decode_to_audio(self, latents: torch.Tensor) -> torch.Tensor:
-        """Decode Mimi latents to audio waveform.
+        return all_codes, torch.empty(0, device=device)
 
-        Note: HuggingFace MimiModel.decode() expects discrete codes, not continuous
-        embeddings. We bypass the quantizer and call upsample → decoder_transformer
-        → decoder directly to decode from continuous latents.
+    def decode_to_audio(self, codes: torch.Tensor) -> torch.Tensor:
+        """Decode Mimi codec tokens to audio waveform.
 
         Args:
-            latents: Mimi latents, shape [batch, seq_len, 512]
+            codes: Codec tokens [batch, 8, seq_len] (all codebooks)
 
         Returns:
-            Audio waveform, shape [batch, samples]
+            Audio waveform [batch, samples]
         """
         if self.mimi is None:
-            raise RuntimeError("Mimi decoder not loaded. Call load_mimi_decoder() first.")
+            raise RuntimeError("Mimi not loaded. Call load_mimi_decoder() first.")
 
-        # [batch, seq, 512] → [batch, 512, seq]
-        latents = latents.transpose(1, 2)
+        # Ensure we have all 8 codebooks
+        if codes.dim() == 2:
+            # Legacy: single codebook, pad with zeros for others
+            codes = codes.unsqueeze(1)
+            padding = torch.zeros(
+                codes.shape[0],
+                self.num_codebooks - 1,
+                codes.shape[2],
+                dtype=codes.dtype,
+                device=codes.device,
+            )
+            codes = torch.cat([codes, padding], dim=1)
+
+        assert codes.shape[1] == self.num_codebooks, (
+            f"Expected {self.num_codebooks} codebooks, got {codes.shape[1]}"
+        )
 
         with torch.no_grad():
-            # Upsample latents (2x temporal upsampling)
-            emb = self.mimi.upsample(latents)
+            # Decode to audio - returns MimiDecoderOutput with audio_values
+            output = self.mimi.decode(codes)
+            audio = output.audio_values  # [batch, 1, samples]
 
-            # Decoder transformer expects [batch, seq, dim]
-            emb = emb.transpose(1, 2)
-            decoder_out = self.mimi.decoder_transformer(emb)
-            emb = getattr(decoder_out, "last_hidden_state", decoder_out[0])
-
-            # Final decoder expects [batch, dim, seq]
-            emb = emb.transpose(1, 2)
-            audio = self.mimi.decoder(emb)
-
-        return audio.squeeze(1)
+        return audio.squeeze(1)  # [batch, samples]
 
     def get_output_length(self, input_length: int) -> int:
-        """Estimate output audio frames from input hidden state length.
+        """Estimate output audio samples from input hidden state length.
 
-        For Mimi at 12.5 Hz frame rate with 24kHz audio:
-        Each latent frame = 24000 / 12.5 = 1920 audio samples
+        Mimi operates at 12.5 Hz frame rate with 24kHz audio:
+        Each codec frame = 24000 / 12.5 = 1920 audio samples
+
+        Note: Actual length depends on AR generation, this is an estimate.
         """
-        return input_length * 1920
+        # Rough estimate: ~3 audio frames per text token
+        estimated_frames = input_length * 3
+        return estimated_frames * 1920

@@ -70,12 +70,13 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,
         freeze_projector: bool = False,
         label_smoothing: float = 0.0,
-        # Audio Head settings (flow matching with pocket-tts)
+        # Audio Head settings (AR codec generation)
         use_audio_head: bool = False,
         freeze_audio_head: bool = False,  # Freeze entire audio head
-        lsd_decode_steps: int = 1,  # LSD decoding integration steps
-        flow_temperature: float = 1.0,  # Sampling temperature for flow generation
-        pocket_tts_weights: Optional[str] = None,  # Path to pretrained pocket-tts weights
+        max_audio_tokens: int = 500,  # Maximum codec tokens to generate
+        audio_top_k: int = 50,  # Top-k sampling for audio generation
+        audio_temperature: float = 1.0,  # Sampling temperature for audio generation
+        audio_repetition_penalty: float = 1.1,  # Repetition penalty for audio tokens
         **kwargs,
     ):
         # Merge generation defaults with kwargs (kwargs takes precedence)
@@ -140,12 +141,13 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_projector = freeze_projector
         self.label_smoothing = label_smoothing
 
-        # Audio Head settings (flow matching with pocket-tts)
+        # Audio Head settings (AR codec generation)
         self.use_audio_head = use_audio_head
         self.freeze_audio_head = freeze_audio_head
-        self.lsd_decode_steps = lsd_decode_steps
-        self.flow_temperature = flow_temperature
-        self.pocket_tts_weights = pocket_tts_weights
+        self.max_audio_tokens = max_audio_tokens
+        self.audio_top_k = audio_top_k
+        self.audio_temperature = audio_temperature
+        self.audio_repetition_penalty = audio_repetition_penalty
 
         # Generation parameters (from kwargs after merge with defaults)
         self.num_beams = kwargs.pop("num_beams")

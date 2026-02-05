@@ -32,7 +32,6 @@ app = FastAPI(title="Tiny Audio S2S Demo")
 
 # Global state (initialized on startup)
 model = None
-processor = None
 vad_model = None
 vad_utils = None
 
@@ -298,12 +297,11 @@ HTML_PAGE = """
 
 def load_models(model_id: str):
     """Load ASR model with audio head and VAD."""
-    global model, processor, vad_model, vad_utils
+    global model, vad_model, vad_utils
 
     print(f"Loading model: {model_id}")
 
     from tiny_audio.asr_modeling import ASRModel
-    from tiny_audio.asr_processing import ASRProcessor
 
     model = ASRModel.from_pretrained(model_id)
     model.eval()
@@ -311,14 +309,23 @@ def load_models(model_id: str):
     # Set system prompt
     model.system_prompt = SYSTEM_PROMPT
 
-    processor = ASRProcessor.from_pretrained(model_id)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model.to(device)
+    if torch.cuda.is_available():
+        device = "cuda"
+        model = model.to(device)
+    elif torch.backends.mps.is_available():
+        device = "mps"
+        # MPS doesn't support bfloat16, use float32
+        model = model.to(device=device, dtype=torch.float32)
+    else:
+        device = "cpu"
+        model = model.to(device)
 
     print(f"Model loaded on {device}")
     if model.audio_head is not None:
         print("Audio head: enabled (native S2S)")
+        # Pre-load Mimi decoder for faster first response
+        model.audio_head.load_mimi_decoder(device=device)
+        print("Mimi decoder loaded")
     else:
         print("WARNING: Model has no audio_head - S2S will not work!")
 
@@ -330,51 +337,28 @@ def load_models(model_id: str):
 
 
 def process_audio(audio_bytes: bytes) -> dict:
-    """Process audio with speech-to-speech using Mimi codec.
-
-    Returns dict with text and audio data.
-    """
+    """Process audio with speech-to-speech."""
     if len(audio_bytes) == 0 or model is None:
         return {"text": "", "audio": b""}
 
-    # Convert raw PCM bytes to float32 numpy array
-    audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-
-    # Process with ASRProcessor to get mel features
-    inputs = processor(
-        audio_array,
-        sampling_rate=SAMPLE_RATE,
-        return_tensors="pt",
-    )
-
-    input_features = inputs["input_features"].to(model.device)
-    attention_mask = inputs.get("attention_mask")
-    if attention_mask is not None:
-        attention_mask = attention_mask.to(model.device)
-    else:
-        attention_mask = torch.ones(input_features.shape[0], input_features.shape[-1], device=model.device)
-
-    # Generate text + codec tokens
     try:
-        result = model.generate_with_audio(
-            input_features=input_features,
-            audio_attention_mask=attention_mask,
-        )
+        # Convert PCM bytes to float32
+        audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
+        # Generate response
+        result = model.generate_with_audio(audio_array, sampling_rate=SAMPLE_RATE)
         text = result["text"][0] if result["text"] else ""
-        codec_tokens = result["codec_tokens"]
 
-        # Decode codec tokens to audio waveform
-        waveform = model.decode_audio(codec_tokens)
+        # Convert output to browser format (48kHz int16 bytes)
+        audio_out = result["audio"].squeeze().cpu().numpy()
 
-        # Convert to numpy
-        audio_out = waveform.squeeze().cpu().numpy()
+        # Normalize audio to use full dynamic range
+        max_val = max(abs(audio_out.min()), abs(audio_out.max()))
+        if max_val > 0:
+            audio_out = audio_out / max_val * 0.9
 
-        # Resample from 24kHz to 48kHz for browser playback
         num_samples = int(len(audio_out) * OUTPUT_SAMPLE_RATE / MIMI_SAMPLE_RATE)
         audio_resampled = scipy.signal.resample(audio_out, num_samples)
-
-        # Convert to int16 bytes
         audio_int16 = (np.clip(audio_resampled, -1, 1) * 32767).astype(np.int16)
 
         return {"text": text, "audio": audio_int16.tobytes()}
@@ -409,7 +393,7 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # Send ready message
         await websocket.send_json(
-            {"type": "status", "status": "listening", "text": "Ready - start speaking!"}
+            {"type": "status", "status": "listening", "text": "Listening..."}
         )
 
         while True:

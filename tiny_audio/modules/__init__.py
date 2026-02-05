@@ -1,5 +1,6 @@
-"""Modules for flow matching audio synthesis."""
+"""Modules for AR codec audio synthesis."""
 
-from .mlp import SimpleMLPAdaLN
+from .ar_decoder import CodecARDecoder, PreNN
+from .depformer import Depformer
 
-__all__ = ["SimpleMLPAdaLN"]
+__all__ = ["PreNN", "CodecARDecoder", "Depformer"]

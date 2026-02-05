@@ -115,10 +115,10 @@ class DatasetLoader:
         if audio_column and audio_column in ds.column_names:
             col_map["audio"] = audio_column
 
-        # Map latents column if specified (for S2S flow matching training)
-        latents_column = dataset_cfg.get("latents_column")
-        if latents_column and latents_column in ds.column_names:
-            col_map["latents"] = latents_column
+        # Map codes column if specified (for S2S AR codec training)
+        codes_column = dataset_cfg.get("codes_column")
+        if codes_column and codes_column in ds.column_names:
+            col_map["codes"] = codes_column
 
         for target, source in col_map.items():
             if source != target and source in ds.column_names:
@@ -129,7 +129,7 @@ class DatasetLoader:
         # Remove extra columns BEFORE casting to avoid schema mismatch errors
         # (some datasets have complex column types that can't be cast)
         if self.sift_enabled:
-            # SIFT training: include latents for audio head if present
+            # SIFT training: include codes for audio head if present
             keep_cols = {
                 "audio",
                 "text",
@@ -137,11 +137,11 @@ class DatasetLoader:
                 "sift_response",
                 "mode",
                 "task",
-                "latents",
+                "codes",
             }
         elif self.s2s_enabled:
-            # S2S training: need latents column for audio head (flow matching)
-            keep_cols = {"audio", "text", "duration", "task", "latents"}
+            # S2S training: need codes column for audio head (AR codec generation)
+            keep_cols = {"audio", "text", "duration", "task", "codes"}
         else:
             # Standard ASR training
             keep_cols = {"audio", "text", "duration", "task"}
@@ -308,10 +308,10 @@ SIFT_SYSTEM_MESSAGE = ""  # No system message
 
 
 class SIFTDataCollator(DataCollator):
-    """Collates audio, text, and optional Mimi latents for SIFT training.
+    """Collates audio, text, and optional Mimi codes for SIFT training.
 
     Supports joint training of projector (audio understanding) and audio head
-    (speaking responses) when latents are available in the dataset.
+    (speaking responses) when codes are available in the dataset.
     """
 
     def __init__(
@@ -412,70 +412,73 @@ class SIFTDataCollator(DataCollator):
         batch["input_features"] = audio_out.input_features
         batch["audio_attention_mask"] = audio_out.attention_mask
 
-        # Add latent targets for audio head training (continuous Mimi latents)
+        # Add codec targets for audio head training (discrete Mimi codes)
         if self.use_audio_head:
-            latent_batch = self._extract_latent_targets(valid_features)
-            if latent_batch is not None:
-                batch["latent_targets"] = latent_batch["latent_targets"]
-                batch["latent_lengths"] = latent_batch["latent_lengths"]
+            code_batch = self._extract_codec_targets(valid_features)
+            if code_batch is not None:
+                batch["codec_targets"] = code_batch["codec_targets"]
+                batch["codec_lengths"] = code_batch["codec_lengths"]
 
         return batch
 
-    def _extract_latent_targets(self, features: list[dict]) -> dict | None:
-        """Extract continuous Mimi latents for audio head training.
+    def _extract_codec_targets(self, features: list[dict]) -> dict | None:
+        """Extract discrete Mimi codes for audio head training.
 
         Args:
-            features: List of feature dicts with latents
+            features: List of feature dicts with codes
 
         Returns:
-            Dict with latent_targets and latent_lengths tensors, or None if no latents
+            Dict with codec_targets [batch, 8, seq_len] and codec_lengths tensors, or None if no codes
         """
-        if not features or "latents" not in features[0]:
+        if not features or "codes" not in features[0]:
             return None
 
-        latent_list = []
-        latent_lengths = []
+        code_list = []
+        code_lengths = []
 
         for f in features:
-            latents = f.get("latents")
-            if latents is None:
+            codes = f.get("codes")
+            if codes is None:
                 continue
 
-            # latents shape: (seq_len, latent_dim) where latent_dim=256
-            if hasattr(latents, "shape"):
-                latents_t = torch.tensor(latents, dtype=torch.float32)
+            # Extract all 8 codebooks: codes shape [8][seq_len]
+            if isinstance(codes[0], list):
+                # codes is [8 codebooks][seq_len]
+                codes_t = torch.tensor(codes, dtype=torch.long)  # [8, seq_len]
             else:
-                latents_t = torch.tensor(list(latents), dtype=torch.float32)
+                # Single codebook (legacy format) - expand to [1, seq_len]
+                codes_t = torch.tensor(codes, dtype=torch.long).unsqueeze(0)
 
-            latent_list.append(latents_t)
-            latent_lengths.append(len(latents_t))
+            code_list.append(codes_t)
+            code_lengths.append(codes_t.shape[1])  # seq_len
 
-        if not latent_list:
+        if not code_list:
             return None
 
-        # Pad to max length: (batch, max_seq_len, latent_dim)
-        max_len = max(latent_lengths)
-        latent_dim = latent_list[0].shape[-1] if latent_list[0].dim() > 1 else 256
-        padded = torch.zeros(len(latent_list), max_len, latent_dim, dtype=torch.float32)
-        for i, lat in enumerate(latent_list):
-            padded[i, : len(lat)] = lat
+        # Pad to max length with pad token
+        max_len = max(code_lengths)
+        pad_token = 2048 + 3  # vocab_size + PAD_OFFSET
+        num_codebooks = code_list[0].shape[0]
+        padded = torch.full((len(code_list), num_codebooks, max_len), pad_token, dtype=torch.long)
+        for i, codes_t in enumerate(code_list):
+            padded[i, :, : codes_t.shape[1]] = codes_t
 
         return {
-            "latent_targets": padded,
-            "latent_lengths": torch.tensor(latent_lengths, dtype=torch.long),
+            "codec_targets": padded,  # [batch, 8, seq_len]
+            "codec_lengths": torch.tensor(code_lengths, dtype=torch.long),
         }
 
 
 class S2SDataCollator:
-    """Data collator for S2S training: audio -> Mimi continuous latents.
+    """Data collator for S2S training: audio -> Mimi discrete codes.
 
     This collator handles speech synthesis training where we predict
-    continuous Mimi latents from input audio via flow matching.
-    Uses datasets with pre-computed latents (e.g., mazesmazes/libritts-mimi-latents).
+    discrete Mimi codec tokens autoregressively.
+    Uses datasets with pre-computed codes (e.g., mazesmazes/libritts-mimi).
     """
 
-    # Mimi latent dimension (from encoder_transformer + downsample)
-    LATENT_DIM = 512
+    # Mimi vocab size per codebook
+    VOCAB_SIZE = 2048
 
     def __init__(
         self,
@@ -486,6 +489,8 @@ class S2SDataCollator:
         encoder_conv_layers: list = None,
         system_prompt: str = None,
         text_column: str = "text",
+        codes_column: str = "codes",
+        use_codebook: int = 0,  # Which codebook to use (0 = semantic)
     ):
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
@@ -494,6 +499,8 @@ class S2SDataCollator:
         self.encoder_conv_layers = encoder_conv_layers or [(1, 3, 1), (1, 3, 2)]
         self.system_prompt = system_prompt
         self.text_column = text_column
+        self.codes_column = codes_column
+        self.use_codebook = use_codebook
 
         # Use trl's DataCollatorForChatML for label masking
         self.text_collator = DataCollatorForChatML(
@@ -627,40 +634,41 @@ class S2SDataCollator:
         batch["input_features"] = audio_out.input_features
         batch["audio_attention_mask"] = audio_out.attention_mask
 
-        # Process continuous Mimi latents (required for S2S flow matching training)
-        # latents shape from dataset: (seq_len, latent_dim) where latent_dim=256
-        latent_list = []
-        latent_lengths = []
+        # Process Mimi codec codes (required for S2S AR training)
+        # codes shape from dataset: [8 codebooks][seq_len]
+        # We extract all 8 codebooks for Depformer training
+        code_list = []
+        code_lengths = []
 
         for f in valid_features:
-            latents = f.get("latents")
-            if latents is None:
+            codes = f.get(self.codes_column)
+            if codes is None:
                 raise ValueError(
-                    "No latent targets found - S2S requires 'latents' column. "
-                    "Use scripts/generate_mimi_latents.py to create dataset."
+                    f"No codec codes found - S2S requires '{self.codes_column}' column. "
+                    "Use scripts/generate_libritts_mimi.py to create dataset."
                 )
 
-            # Convert to tensor - shape: (seq_len, latent_dim)
-            if hasattr(latents, "shape"):
-                latents_t = torch.tensor(latents, dtype=torch.float32)
+            # Extract all 8 codebooks: codes shape [8][seq_len]
+            if isinstance(codes[0], list):
+                # codes is [8 codebooks][seq_len]
+                codes_t = torch.tensor(codes, dtype=torch.long)  # [8, seq_len]
             else:
-                latents_t = torch.tensor(list(latents), dtype=torch.float32)
+                # Single codebook (legacy format) - expand to [1, seq_len]
+                codes_t = torch.tensor(codes, dtype=torch.long).unsqueeze(0)
 
-            # Ensure 2D: (seq_len, latent_dim)
-            if latents_t.dim() == 1:
-                latents_t = latents_t.unsqueeze(-1)
+            code_list.append(codes_t)
+            code_lengths.append(codes_t.shape[1])  # seq_len
 
-            latent_list.append(latents_t)
-            latent_lengths.append(latents_t.shape[0])  # seq_len
+        # Pad to max length with pad token (vocab_size + 3)
+        max_len = max(code_lengths)
+        pad_token = self.VOCAB_SIZE + 3  # Matches AudioHead.pad_token_id
+        num_codebooks = code_list[0].shape[0]
+        padded = torch.full((len(code_list), num_codebooks, max_len), pad_token, dtype=torch.long)
+        for i, codes_t in enumerate(code_list):
+            padded[i, :, : codes_t.shape[1]] = codes_t
 
-        # Pad to max length: (batch, max_seq_len, latent_dim)
-        max_len = max(latent_lengths)
-        padded = torch.zeros(len(latent_list), max_len, self.LATENT_DIM, dtype=torch.float32)
-        for i, lat in enumerate(latent_list):
-            padded[i, : lat.shape[0], :] = lat
-
-        batch["latent_targets"] = padded
-        batch["latent_lengths"] = torch.tensor(latent_lengths, dtype=torch.long)
+        batch["codec_targets"] = padded  # [batch, 8, seq_len]
+        batch["codec_lengths"] = torch.tensor(code_lengths, dtype=torch.long)
 
         return batch
 
@@ -700,12 +708,12 @@ class ASRTrainer(Trainer):
             # Get debug info - handle wrapped model (DDP/Accelerator)
             underlying_model = getattr(model, "module", model)
             has_audio_head = getattr(underlying_model, "audio_head", None) is not None
-            has_latent_targets = "latent_targets" in inputs
+            has_codec_targets = "codec_targets" in inputs
             has_labels = "labels" in inputs
             raise ValueError(
                 f"Model returned None loss. This usually means the forward pass didn't compute a loss. "
                 f"Debug info: has_labels={has_labels}, has_audio_head={has_audio_head}, "
-                f"has_latent_targets={has_latent_targets}. "
+                f"has_codec_targets={has_codec_targets}. "
                 f"Input keys: {list(inputs.keys())}"
             )
 
@@ -841,7 +849,7 @@ def main(cfg: DictConfig) -> None:
             "Check that the config is being passed correctly to the model."
         )
 
-    # Check if S2S training mode (audio head with Mimi latents via flow matching)
+    # Check if S2S training mode (audio head with Mimi codes via AR decoder)
     s2s_mode = use_audio_head and cfg.get("s2s", {}).get("enabled", False)
 
     # Load datasets
@@ -851,10 +859,9 @@ def main(cfg: DictConfig) -> None:
 
     # Create data collator (S2S, SIFT, or standard ASR)
     if s2s_mode:
-        # S2S training with Mimi continuous latents (flow matching)
+        # S2S training with Mimi discrete codes (AR generation)
         # DatasetLoader renames text_column to "text", so always use "text"
         text_column = "text"
-        print(f"DEBUG: S2S mode using text_column='{text_column}'")
         data_collator = S2SDataCollator(
             tokenizer=model.tokenizer,
             feature_extractor=model.feature_extractor,

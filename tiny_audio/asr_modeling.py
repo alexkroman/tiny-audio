@@ -479,8 +479,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
-        latent_targets: Optional[torch.Tensor] = None,
-        latent_lengths: Optional[torch.Tensor] = None,
+        codec_targets: Optional[torch.Tensor] = None,
+        codec_lengths: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
@@ -509,8 +509,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
             )
 
-        # Request hidden states if training audio head with latent targets
-        if self.audio_head is not None and latent_targets is not None:
+        # Request hidden states if training audio head with codec targets
+        if self.audio_head is not None and codec_targets is not None:
             kwargs["output_hidden_states"] = True
 
         # Remove TRL-specific keys that shouldn't go to the LLM
@@ -535,44 +535,42 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if aux_loss is not None and aux_loss.numel() > 0:
                 outputs.loss = outputs.loss + aux_loss.to(outputs.loss.device)
 
-        # Compute audio head loss if training S2S with latent targets
-        if self.audio_head is not None and latent_targets is not None:
-            if outputs.hidden_states is None:
-                raise ValueError(
-                    "LLM did not return hidden_states for audio head. "
-                    "Ensure output_hidden_states=True is passed to the LLM."
-                )
-            hidden_states = outputs.hidden_states[-1]  # Last layer hidden states
+        # Compute audio head loss if training S2S with codec targets
+        if self.audio_head is not None and codec_targets is not None:
+            # Use token embeddings instead of hidden states for conditioning
+            # This is simpler and more similar to how pocket-tts conditions on text
+            # Note: input_ids is a direct argument to forward(), not in kwargs
+            if input_ids is None:
+                raise ValueError("input_ids required for audio head training")
 
-            # Extract only assistant-position hidden states using assistant_mask
+            # Get embeddings for all tokens
+            all_embeddings = self.language_model.get_input_embeddings()(input_ids)
+
+            # Extract only assistant-position embeddings using assistant_mask
             # This mask identifies text output positions (where LLM generates response)
             assistant_mask = kwargs.get("assistant_mask")
             if assistant_mask is not None:
-                batch_size = hidden_states.shape[0]
+                batch_size = all_embeddings.shape[0]
 
-                # Extract assistant hidden states for each sample
-                assistant_hidden_list = []
-                assistant_lengths = []
+                # Extract assistant embeddings for each sample
+                assistant_emb_list = []
                 for i in range(batch_size):
                     mask_i = assistant_mask[i]  # [seq_len]
-                    hidden_i = hidden_states[i][mask_i]  # [num_assistant_tokens, hidden_dim]
-                    assistant_hidden_list.append(hidden_i)
-                    assistant_lengths.append(hidden_i.shape[0])
+                    emb_i = all_embeddings[i][mask_i]  # [num_assistant_tokens, embed_dim]
+                    assistant_emb_list.append(emb_i)
 
-                # Pad sequences while preserving gradients
-                # Use pad_sequence which maintains gradient flow
-                hidden_states = torch.nn.utils.rnn.pad_sequence(
-                    assistant_hidden_list, batch_first=True, padding_value=0.0
+                # Pad sequences
+                embeddings = torch.nn.utils.rnn.pad_sequence(
+                    assistant_emb_list, batch_first=True, padding_value=0.0
                 )
-                # Note: latent_lengths stays as original Mimi latent lengths for masking
-                # audio_head._compute_loss handles interpolation between different seq lengths
+            else:
+                embeddings = all_embeddings
 
-            # No detach needed: LLM is frozen (requires_grad=False), so gradients
-            # naturally stop there. Hidden states keep their grad_fn for proper backprop.
+            # Compute loss: embeddings condition the AR decoder to generate codec_targets
             audio_head_loss = self.audio_head(
-                hidden_states,
-                latent_targets=latent_targets,
-                latent_lengths=latent_lengths,
+                embeddings,
+                codec_targets=codec_targets,
+                codec_lengths=codec_lengths,
             )
 
             # Combine with LLM loss if present (e.g., joint ASR+S2S training)
@@ -875,37 +873,67 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
         return response.strip()
 
+    def _process_audio(
+        self,
+        audio,
+        sampling_rate: int = 16000,
+    ) -> dict[str, torch.Tensor]:
+        """Process raw audio waveform to model inputs."""
+        # Convert to numpy if tensor
+        if isinstance(audio, torch.Tensor):
+            audio = audio.cpu().numpy()
+
+        # Get mel features from feature extractor
+        inputs = self.feature_extractor(
+            audio,
+            sampling_rate=sampling_rate,
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+
+        device = next(self.language_model.parameters()).device
+        return {
+            "input_features": inputs["input_features"].to(device),
+            "attention_mask": inputs["attention_mask"].to(device),
+        }
+
     @torch.no_grad()
     def generate_with_audio(
         self,
-        input_features: torch.Tensor,
-        audio_attention_mask: torch.Tensor,
+        audio,
+        sampling_rate: int = 16000,
         **generate_kwargs,
-    ) -> dict[str, torch.Tensor]:
-        """Generate text and codec tokens for Speech-to-Speech.
+    ) -> dict[str, torch.Tensor | list[str]]:
+        """Generate text and audio for Speech-to-Speech.
+
+        Uses LLM token embeddings (not hidden states) to condition the flow model.
+        This is simpler and more similar to how pocket-tts conditions on text.
 
         Args:
-            input_features: Mel spectrogram features (batch, n_mels, mel_len)
-            audio_attention_mask: Mask for real vs padded mel frames (batch, mel_len)
+            audio: Raw audio waveform (numpy array or tensor) at given sampling_rate
+            sampling_rate: Audio sampling rate (default 16kHz)
             **generate_kwargs: Additional generation arguments
 
         Returns:
             Dict with:
-                - text_ids: Generated text token IDs (batch, seq_len)
                 - text: Decoded text strings (list of str)
-                - codec_tokens: Predicted codec tokens (batch, audio_len)
+                - audio: Audio waveform at 24kHz (batch, samples)
         """
         if self.audio_head is None:
             raise ValueError("Audio head not configured. Set use_audio_head=True in config.")
+
+        inputs = self._process_audio(audio, sampling_rate)
+        input_features = inputs["input_features"]
+        attention_mask = inputs["attention_mask"]
 
         device = input_features.device
         batch_size = input_features.shape[0]
 
         # Encode audio -> flattened embeddings
-        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+        audio_embeds = self._encode_audio(input_features, attention_mask)
 
         # Build prompt with correct number of audio tokens
-        num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
+        num_audio_tokens = self._get_num_audio_tokens(attention_mask)
         audio_placeholder = "<audio>" * num_audio_tokens
 
         messages: list[dict[str, str]] = []
@@ -940,105 +968,109 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
         )
 
-        # Generate with hidden states
+        # Generate text response
         output = self.language_model.generate(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             generation_config=self.generation_config,
-            output_hidden_states=True,
-            return_dict_in_generate=True,
             **generate_kwargs,
         )
 
         # Extract generated text
-        text_ids = output.sequences[:, input_ids.shape[1] :]
+        text_ids = output[:, input_ids.shape[1] :]
         text = self.tokenizer.batch_decode(text_ids, skip_special_tokens=True)
 
-        # Extract hidden states from generation steps and concatenate
-        # output.hidden_states is tuple of (step,) where each step is tuple of (layer,)
-        # Each layer tensor is (batch, 1, hidden_dim) for generated tokens
-        last_layer_states = []
-        for step_hidden in output.hidden_states:
-            # step_hidden is tuple of (num_layers,) tensors
-            # Get last layer: shape (batch, 1, hidden_dim)
-            last_layer_states.append(step_hidden[-1])
+        # Get embeddings for the generated text tokens
+        # This is simpler than hidden states - just a lookup table
+        embeddings = self.language_model.get_input_embeddings()(text_ids)
 
-        # Concatenate across generation steps: (batch, gen_seq_len, hidden_dim)
-        hidden_states = torch.cat(last_layer_states, dim=1)
+        # Generate Mimi codec codes from text embeddings via AR decoder
+        codes, _ = self.audio_head(embeddings)
 
-        # Predict codec tokens (uses inference heuristic for duration)
-        # WavTokenizer: single codebook, shape (batch, audio_len)
-        codec_tokens = self.audio_head(hidden_states)
+        # Load Mimi decoder if not already loaded
+        if self.audio_head.mimi is None:
+            self.audio_head.load_mimi_decoder(device=device)
+
+        # Decode codes to audio waveform
+        audio = self.audio_head.decode_to_audio(codes)
 
         return {
-            "text_ids": text_ids,
             "text": text,
-            "codec_tokens": codec_tokens,
+            "audio": audio,
         }
 
-    def decode_audio(
+    def generate_speech(
         self,
-        codec_tokens: torch.Tensor,
-        sample_rate: int = 24000,
-    ) -> torch.Tensor:
-        """Decode Mimi codec tokens to waveform.
+        text: str,
+        system_prompt: str | None = None,
+        **generate_kwargs,
+    ) -> dict[str, torch.Tensor | str]:
+        """Generate speech from text (Text-to-Speech).
 
         Args:
-            codec_tokens: Codec token indices (batch, codebooks, seq_len) or (batch, seq_len)
-                         If 2D, assumes single codebook and will unsqueeze.
-            sample_rate: Output sample rate (Mimi uses 24kHz)
+            text: Input text to speak
+            system_prompt: Optional system prompt (defaults to self.system_prompt)
+            **generate_kwargs: Additional generation arguments
 
         Returns:
-            Waveform tensor (batch, samples) at 24kHz
+            Dict with:
+                - text: Generated response text (str)
+                - audio: Audio waveform at 24kHz (batch, samples)
         """
-        import platform
+        if self.audio_head is None:
+            raise ValueError("Audio head not configured. Set use_audio_head=True in config.")
 
-        # Ensure 3D: (batch, codebooks, seq_len)
-        if codec_tokens.dim() == 2:
-            codec_tokens = codec_tokens.unsqueeze(1)
+        device = next(self.language_model.parameters()).device
 
-        # Use MLX on Mac for better performance
-        if platform.system() == "Darwin":
-            try:
-                import mlx.core as mx
-                from moshi_mlx import models
+        # Build chat messages
+        messages: list[dict[str, str]] = []
+        prompt = system_prompt or self.system_prompt
+        if prompt:
+            messages.append({"role": "system", "content": prompt})
+        messages.append({"role": "user", "content": text})
 
-                mimi = models.mimi_202412()
-                mimi.load_weights()
+        # Tokenize
+        chat_result = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            enable_thinking=getattr(self.config, "enable_thinking", False),
+        )
+        input_ids = chat_result.input_ids.to(device)
 
-                # Convert to MLX array
-                codes_np = codec_tokens.cpu().numpy()
-                codes_mlx = mx.array(codes_np)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
 
-                # Decode
-                pcm = mimi.decode(codes_mlx)
-                waveform = torch.from_numpy(pcm.__array__())
+        # Generate text response
+        output = self.language_model.generate(
+            input_ids,
+            generation_config=self.generation_config,
+            **generate_kwargs,
+        )
 
-                return waveform.squeeze(1)  # (batch, samples)
+        # Extract generated text
+        text_ids = output[:, input_ids.shape[1] :]
+        response_text: str = self.tokenizer.decode(text_ids[0], skip_special_tokens=True)
 
-            except ImportError:
-                pass  # Fall back to transformers
+        # Get embeddings for the generated text tokens
+        embeddings = self.language_model.get_input_embeddings()(text_ids)
 
-        # Use transformers MimiModel (works on all platforms)
-        try:
-            from transformers import MimiModel
+        # Generate Mimi codec codes from text embeddings via AR decoder
+        codes, _ = self.audio_head(embeddings)
 
-            mimi = MimiModel.from_pretrained("kyutai/mimi")
-            mimi = mimi.to(codec_tokens.device)
-            mimi.eval()
+        # Load Mimi decoder if not already loaded
+        if self.audio_head.mimi is None:
+            self.audio_head.load_mimi_decoder(device=device)
 
-            with torch.no_grad():
-                decoded = mimi.decode(codec_tokens)
-                waveform = decoded.audio_values
+        # Decode codes to audio waveform
+        audio = self.audio_head.decode_to_audio(codes)
 
-            return waveform.squeeze(1)  # (batch, samples)
-
-        except ImportError as e:
-            raise ImportError(
-                "Mimi required for audio decoding. Install with: "
-                "pip install moshi_mlx (Mac) or transformers with Mimi support"
-            ) from e
+        return {
+            "text": response_text,
+            "audio": audio,
+        }
 
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
         """Save model, tokenizer, and processor."""
