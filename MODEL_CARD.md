@@ -77,25 +77,6 @@ result = pipe("audio.wav", return_timestamps="word")
 # }
 ```
 
-### Streaming Inference
-
-```python
-from tiny_audio import ASRModel, ASRProcessor
-import torch
-
-model = ASRModel.from_pretrained("mazesmazes/tiny-audio")
-processor = ASRProcessor.from_pretrained("mazesmazes/tiny-audio")
-
-# Load and process audio
-import librosa
-audio, sr = librosa.load("audio.wav", sr=16000)
-inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
-
-# Stream tokens
-for token in model.generate_streaming(inputs["input_features"]):
-    print(token, end="", flush=True)
-```
-
 ### Using with torch directly
 
 ```python

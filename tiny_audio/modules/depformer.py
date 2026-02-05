@@ -344,13 +344,14 @@ class Depformer(nn.Module):
         batch_size, seq_len, _ = main_hidden.shape
         device = main_hidden.device
 
-        # Validate sequence length vs delays
-        if self.use_delays and seq_len <= self.max_delay:
-            logger.warning(
+        # Validate sequence length vs delays - disable delays for short sequences
+        use_delays = self.use_delays
+        if use_delays and seq_len <= self.max_delay:
+            logger.info(
                 f"Sequence length ({seq_len}) <= max_delay ({self.max_delay}). "
-                f"This will result in mostly invalid/padded output. Consider "
-                f"generating more frames or disabling delays."
+                f"Disabling delays for this batch to avoid invalid output."
             )
+            use_delays = False
 
         # Project all hidden states and flatten for parallel processing
         projected = self.input_proj(main_hidden)  # [B, T, hidden]
@@ -428,7 +429,7 @@ class Depformer(nn.Module):
         # Generated at AR position t is for audio time t - delay
         # To get audio-aligned output: aligned[audio_t] = generated[ar_t] where ar_t = audio_t + delay
         # So: aligned[t] = generated[t + delay] (shift left to undo delay)
-        if self.use_delays:
+        if use_delays:
             aligned = torch.zeros_like(generated)
             for cb_idx in range(self.num_codebooks):
                 delay = int(self.target_delays[cb_idx].item())

@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
-from threading import Thread
-from typing import Iterator, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -11,7 +10,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
-    TextIteratorStreamer,
 )
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -337,10 +335,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 cfg.eos_token_id = self.tokenizer.eos_token_id
                 cfg.bos_token_id = self.tokenizer.bos_token_id
 
-    def _init_weights(self, _module):
-        """Weight initialization (projector weights are initialized in MoEAudioProjector)."""
-        pass
-
     def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func=None):
         """Enable/disable gradient checkpointing for the language model."""
         # The LLM still stores activations during forward for backprop to projector
@@ -622,6 +616,74 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         encoder_output_len = int(encoder_lengths.max().item())
         return int(self.projector.get_output_length(encoder_output_len))
 
+    def _build_audio_prompt(
+        self,
+        audio_attention_mask: torch.Tensor,
+        batch_size: int,
+        device: torch.device,
+        system_prompt: Optional[str] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build input_ids and attention_mask for audio-conditioned generation.
+
+        Args:
+            audio_attention_mask: Mask for real vs padded mel frames
+            batch_size: Batch size for expanding single prompts
+            device: Device to place tensors on
+            system_prompt: Optional system prompt override
+
+        Returns:
+            Tuple of (input_ids, attention_mask) tensors
+        """
+        num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
+        audio_placeholder = "<audio>" * num_audio_tokens
+
+        system_prompt = system_prompt or self.system_prompt
+
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        user_content = audio_placeholder
+        if self.TRANSCRIBE_PROMPT:
+            user_content += " " + self.TRANSCRIBE_PROMPT
+        messages.append({"role": "user", "content": user_content})
+
+        chat_result = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            enable_thinking=getattr(self.config, "enable_thinking", False),
+        )
+        input_ids = chat_result.input_ids.to(device)
+
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if input_ids.shape[0] == 1 and batch_size > 1:
+            input_ids = input_ids.expand(batch_size, -1)
+
+        return input_ids, torch.ones_like(input_ids)
+
+    def _inject_audio_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        audio_embeds: torch.Tensor,
+    ) -> torch.Tensor:
+        """Replace audio token placeholders with actual audio embeddings.
+
+        Args:
+            input_ids: Token IDs containing <audio> placeholder tokens
+            audio_embeds: Encoded audio embeddings to inject
+
+        Returns:
+            Input embeddings with audio tokens replaced by audio embeddings
+        """
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
+        return inputs_embeds.masked_scatter(
+            audio_token_mask.to(inputs_embeds.device),
+            audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
+        )
+
     @torch.no_grad()
     def generate(
         self,
@@ -651,43 +713,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # If input_ids not provided, build prompt with correct number of audio tokens
         if input_ids is None:
-            num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
-            audio_placeholder = "<audio>" * num_audio_tokens
-
-            system_prompt = system_prompt or self.system_prompt
-
-            messages: list[dict[str, str]] = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            # Audio tokens only (instruction-free)
-            user_content = audio_placeholder
-            if self.TRANSCRIBE_PROMPT:
-                user_content += " " + self.TRANSCRIBE_PROMPT
-            messages.append({"role": "user", "content": user_content})
-
-            chat_result = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                enable_thinking=getattr(self.config, "enable_thinking", False),
+            input_ids, attention_mask = self._build_audio_prompt(
+                audio_attention_mask, batch_size, device, system_prompt
             )
-            input_ids = chat_result.input_ids.to(device)
 
-            if input_ids.dim() == 1:
-                input_ids = input_ids.unsqueeze(0)
-            if input_ids.shape[0] == 1 and batch_size > 1:
-                input_ids = input_ids.expand(batch_size, -1)
-
-            attention_mask = torch.ones_like(input_ids)
-
-        # Get text embeddings and replace audio tokens with audio embeddings
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-        audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
-        inputs_embeds = inputs_embeds.masked_scatter(
-            audio_token_mask.to(inputs_embeds.device),
-            audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
-        )
+        # Replace audio token placeholders with audio embeddings
+        inputs_embeds = self._inject_audio_embeddings(input_ids, audio_embeds)
 
         # Generate using language model
         # Pass both input_ids and inputs_embeds so repetition_penalty works correctly
@@ -705,125 +736,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         sequences = output if isinstance(output, torch.Tensor) else output.sequences
         input_len = input_ids.shape[1]
         return sequences[:, input_len:]
-
-    def generate_streaming(
-        self,
-        input_features: torch.Tensor,
-        audio_attention_mask: torch.Tensor,
-        system_prompt: Optional[str] = None,
-        **generate_kwargs,
-    ) -> Iterator[str]:
-        """Generate transcription with streaming token output.
-
-        Yields partial transcript strings as tokens are generated.
-        Reduces time-to-first-word by streaming tokens as they're decoded.
-
-        Args:
-            input_features: Mel spectrogram features (batch, n_mels, mel_len)
-            audio_attention_mask: Mask for real vs padded mel frames (batch, mel_len)
-            system_prompt: Optional system prompt override
-            **generate_kwargs: Additional generation arguments
-
-        Yields:
-            Partial transcript text as each token is generated
-        """
-        device = input_features.device
-        batch_size = input_features.shape[0]
-
-        # Encode audio -> flattened embeddings
-        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
-
-        # Build prompt with correct number of audio tokens
-        num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
-        audio_placeholder = "<audio>" * num_audio_tokens
-
-        system_prompt = system_prompt or self.system_prompt
-
-        messages: list[dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        # Audio tokens only (instruction-free)
-        user_content = audio_placeholder
-        if self.TRANSCRIBE_PROMPT:
-            user_content += " " + self.TRANSCRIBE_PROMPT
-        messages.append({"role": "user", "content": user_content})
-
-        chat_result = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            enable_thinking=getattr(self.config, "enable_thinking", False),
-        )
-        input_ids = chat_result.input_ids.to(device)
-
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-        if input_ids.shape[0] == 1 and batch_size > 1:
-            input_ids = input_ids.expand(batch_size, -1)
-
-        attention_mask = torch.ones_like(input_ids)
-
-        # Get text embeddings and replace audio tokens with audio embeddings
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-        audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
-        inputs_embeds = inputs_embeds.masked_scatter(
-            audio_token_mask.to(inputs_embeds.device),
-            audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
-        )
-
-        # Setup streamer for token-by-token output
-        streamer = TextIteratorStreamer(
-            self.tokenizer,
-            skip_prompt=True,
-            skip_special_tokens=True,
-        )
-
-        # Prepare generation kwargs
-        gen_kwargs = {
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": attention_mask,
-            "generation_config": self.generation_config,
-            "streamer": streamer,
-            **generate_kwargs,
-        }
-
-        # Run generation in background thread
-        thread = Thread(target=self.language_model.generate, kwargs=gen_kwargs)
-        thread.start()
-
-        # Yield tokens as they're generated, filtering out <think>...</think> blocks
-        # Start assuming no think block - only filter when we see <think>
-        in_think_block = False
-        buffer = ""
-
-        for text in streamer:
-            buffer += text
-
-            # Check for think block start (in case model outputs think blocks)
-            while "<think>" in buffer:
-                in_think_block = True
-                # Yield any text before <think>
-                before_think = buffer.split("<think>")[0]
-                if before_think:
-                    yield before_think
-                buffer = buffer.split("<think>", 1)[-1]
-
-            # Check for think block end
-            while in_think_block and "</think>" in buffer:
-                in_think_block = False
-                buffer = buffer.split("</think>", 1)[-1]
-
-            # Yield text if not in think block
-            if not in_think_block and buffer:
-                yield buffer
-                buffer = ""
-
-        # Yield any remaining buffer
-        if buffer and not in_think_block:
-            yield buffer
-
-        thread.join()
 
     @torch.no_grad()
     def generate_text_only(
@@ -927,49 +839,19 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         inputs = self._process_audio(audio, sampling_rate)
         input_features = inputs["input_features"]
-        attention_mask = inputs["attention_mask"]
+        audio_attention_mask = inputs["attention_mask"]
 
         device = input_features.device
         batch_size = input_features.shape[0]
 
         # Encode audio -> flattened embeddings
-        audio_embeds = self._encode_audio(input_features, attention_mask)
+        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
 
-        # Build prompt with correct number of audio tokens
-        num_audio_tokens = self._get_num_audio_tokens(attention_mask)
-        audio_placeholder = "<audio>" * num_audio_tokens
-
-        messages: list[dict[str, str]] = []
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
-        user_content = audio_placeholder
-        if self.TRANSCRIBE_PROMPT:
-            user_content += " " + self.TRANSCRIBE_PROMPT
-        messages.append({"role": "user", "content": user_content})
-
-        chat_result = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            enable_thinking=getattr(self.config, "enable_thinking", False),
+        # Build prompt and inject audio embeddings
+        input_ids, attention_mask = self._build_audio_prompt(
+            audio_attention_mask, batch_size, device
         )
-        input_ids = chat_result.input_ids.to(device)
-
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-        if input_ids.shape[0] == 1 and batch_size > 1:
-            input_ids = input_ids.expand(batch_size, -1)
-
-        attention_mask = torch.ones_like(input_ids)
-
-        # Get text embeddings and replace audio tokens with audio embeddings
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-        audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
-        inputs_embeds = inputs_embeds.masked_scatter(
-            audio_token_mask.to(inputs_embeds.device),
-            audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
-        )
+        inputs_embeds = self._inject_audio_embeddings(input_ids, audio_embeds)
 
         # Generate text response
         output = self.language_model.generate(

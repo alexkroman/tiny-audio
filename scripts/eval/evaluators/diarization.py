@@ -64,7 +64,7 @@ class DiarizationEvaluator:
 
         import librosa
 
-        from tiny_audio.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.diarization import LocalSpeakerDiarizer
 
         # Prepare audio array - handle both decoded and raw bytes formats
         if isinstance(audio, dict):
@@ -85,7 +85,7 @@ class DiarizationEvaluator:
             audio_array = audio_array.astype(np.float32)
 
         start = time.time()
-        segments = SpeakerDiarizer.diarize(
+        segments = LocalSpeakerDiarizer.diarize(
             audio_array,
             sample_rate=sample_rate,
             num_speakers=self.num_speakers,

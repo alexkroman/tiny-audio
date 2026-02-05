@@ -57,19 +57,6 @@ audio = np.random.randn(16000)  # 1 second of audio
 result = pipe(audio)
 ```
 
-### Streaming Inference
-
-```python
-from tiny_audio import ASRModel, ASRProcessor
-
-model = ASRModel.from_pretrained("mazesmazes/tiny-audio")
-processor = ASRProcessor.from_pretrained("mazesmazes/tiny-audio")
-
-# Stream tokens as they're generated
-for token in model.generate_streaming(audio_features):
-    print(token, end="", flush=True)
-```
-
 ### Word-Level Timestamps
 
 ```python

@@ -9,6 +9,7 @@ Commands:
 import contextlib
 import json
 import re
+import statistics
 from collections import defaultdict
 from pathlib import Path
 
@@ -517,7 +518,7 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
             metrics["corpus_ins_rate"] = output.insertions / total * 100
 
     if all_latencies:
-        metrics["avg_latency"] = sum(all_latencies) / len(all_latencies)
+        metrics["avg_latency"] = statistics.mean(all_latencies)
 
     return metrics
 
@@ -667,8 +668,7 @@ def compare(
             wc_data = data["by_length"].get(wc, {})
             wers = wc_data.get("wers", [])
             if wers:
-                avg_wer = sum(wers) / len(wers)
-                row.append(f"{avg_wer:.1f}%")
+                row.append(f"{statistics.mean(wers):.1f}%")
             else:
                 row.append("-")
         rows.append(row)

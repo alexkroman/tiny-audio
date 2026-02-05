@@ -32,51 +32,103 @@ Assistant: paris
 
 ______________________________________________________________________
 
-## Example 3: Conversational Response
+## SIFT Training Data Generation
 
-**Audio**: A happy woman saying "I got the job!"
+The SIFT (Self-Instruction Fine-Tuning) responses in `mazesmazes/sift-audio-2` are generated using an LLM (SmolLM3-3B) with three different modes. The script `scripts/generate_sift_dataset.py` processes audio datasets with paralinguistic metadata (emotion, gender, age, pace, volume, accent) and generates training responses.
 
-**Training Format**:
+### Mode 1: `sift_s` - Semantic Only (Conversational Response)
+
+Teaches the model to respond conversationally to what it hears, like a voice assistant.
+
+**LLM Prompt Used to Generate Response**:
+
+```
+System: You are the user's friend. Respond warmly and briefly to what they tell you.
+User: i got the job!
+```
+
+**Generated Response**: "That's wonderful news! Congratulations on your new position!"
+
+**Final Training Format** (audio tokens replace text):
 
 ```
 User: <audio><audio><audio>...
 Assistant: That's wonderful news! Congratulations on your new position!
 ```
 
-**Source Dataset**: mazesmazes/sift-audio-2
-
-**Note**: No instruction prompt - model learns to respond conversationally to what it hears.
+**Note**: No paralinguistic metadata is included - the model learns purely from the semantic content.
 
 ______________________________________________________________________
 
-## Example 4: Empathetic Response
+### Mode 2: `sift_ssp` - Empathetic Response with Tone Awareness
 
-**Audio**: A sad man saying "I lost my keys again."
+Teaches the model to respond empathetically, considering the speaker's emotional tone.
 
-**Training Format**:
+**LLM Prompt Used to Generate Response**:
+
+```
+System: You can hear audio. Respond empathetically to what the person says, being aware of their tone and emotion. Don't describe the audio - just respond to it naturally.
+User: <audio><meta>gender: male, emotion: sad</meta><text>i lost my keys again.</text></audio>
+```
+
+**Generated Response**: "Oh no, that's frustrating! Have you checked your coat pockets?"
+
+**Final Training Format** (audio tokens replace text):
 
 ```
 User: <audio><audio><audio>...
 Assistant: Oh no, that's frustrating! Have you checked your coat pockets?
 ```
 
-**Source Dataset**: mazesmazes/sift-audio-2
-
-**Note**: Model learns to respond with awareness of speaker's emotional tone.
+**Note**: The LLM sees metadata tags during generation, but the final training data only uses audio tokens. This teaches the model to infer emotion from audio features.
 
 ______________________________________________________________________
 
-## Example 5: Audio Description
+### Mode 3: `sit_ssp` - Audio Description/Analysis
 
-**Audio**: An angry young adult male saying "Leave me alone!"
+Teaches the model to describe what it hears, including paralinguistic features.
 
-**Training Format**:
+**LLM Prompt Used to Generate Response**:
+
+```
+System: Describe audio in one sentence starting with "Sounds like". Include emotion, gender, what they said (quoted), and voice quality. Example: "Sounds like an angry man saying 'leave me alone' in a harsh voice."
+User: <audio><meta>age: young adult, gender: male, emotion: angry</meta><text>leave me alone</text></audio>
+```
+
+**Generated Response**: "Sounds like an angry young male saying 'leave me alone' in a harsh, frustrated voice."
+
+**Final Training Format** (audio tokens replace text):
 
 ```
 User: <audio><audio><audio>... Describe all information you can hear:
 Assistant: Sounds like an angry young male saying "leave me alone" in a harsh, frustrated voice.
 ```
 
-**Source Dataset**: mazesmazes/sift-audio-2
+**Note**: This mode includes an instruction prompt in the training data, teaching the model to describe audio on demand.
+
+______________________________________________________________________
+
+## Metadata Extraction
+
+The `generate_sift_dataset.py` script extracts metadata from source datasets:
+
+| Field | Source | Normalization |
+|-------|--------|---------------|
+| `emotion` | CREMA-D, RAVDESS, TESS, SAVEE, ESD, PODCAST, MELD | Normalized to: angry, happy, sad, surprise, neutral, fear, disgust |
+| `gender` | All datasets | Normalized to: male, female |
+| `age` | CommonVoice | Grouped: teenager, young adult, middle-age adult, senior |
+| `pace` | AbstractTTS datasets (speaking_rate) | Converted: slow (\<6.0), normal (6-9), fast (>9.0) |
+| `volume` | AbstractTTS datasets (relative_db) | Converted: quiet (\<-16.4dB), loud (>-10dB), or omitted if normal |
+| `accent` | CommonVoice | Passed through as-is |
+
+## Audio Context Format
+
+The metadata is formatted into XML-style tags for the LLM:
+
+```
+<audio><meta>age: young adult, gender: female, volume: loud, pace: fast, emotion: happy</meta><text>i got the job!</text></audio>
+```
+
+Fields appear in order: age, gender, volume, pace, emotion, accent. Missing fields are omitted.
 
 ______________________________________________________________________

@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
-"""Generate LibriTTS dataset with Mimi codec codes.
+"""Generate dataset with Mimi codec codes.
 
-Takes the parler-tts/libritts_r_filtered clean/train.clean.360 split and adds a 'codes' column
-containing Mimi codec tokens encoded from the audio.
+Encodes audio from any HuggingFace dataset to Mimi codec tokens (8 codebooks).
 
 Usage:
-    python -m scripts.generate_libritts_mimi --output-repo user/libritts-mimi
+    # LibriTTS (default)
+    python -m scripts.generate_mimi --output-repo user/libritts-mimi
+
+    # Process specific splits
+    python -m scripts.generate_mimi \
+        --input-dataset parler-tts/libritts_r_filtered \
+        --dataset-config clean \
+        --splits train.clean.100,train.clean.360 \
+        --output-repo user/libritts-mimi
+
+    # Process a different dataset
+    python -m scripts.generate_mimi \
+        --input-dataset librispeech_asr \
+        --dataset-config clean \
+        --splits train.100 \
+        --audio-column audio \
+        --text-column text \
+        --output-repo user/librispeech-mimi
 
     # Test with limited samples
-    python -m scripts.generate_libritts_mimi --max-samples 100
-
-    # Use specific batch size for encoding
-    python -m scripts.generate_libritts_mimi --batch-size 32
+    python -m scripts.generate_mimi --max-samples 100
 """
 
+import gc
 import os
 import platform
 from typing import Annotated
@@ -24,47 +38,53 @@ import typer
 # Enable fast HuggingFace transfers
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-from datasets import Audio, Dataset, load_dataset
+from datasets import Audio, Dataset, concatenate_datasets, load_dataset
 from huggingface_hub import DatasetCard, DatasetCardData
 from tqdm import tqdm
 
-app = typer.Typer(help="Generate LibriTTS dataset with Mimi codec codes")
+app = typer.Typer(help="Generate dataset with Mimi codec codes")
 
 # Mimi codec settings
 MIMI_SAMPLE_RATE = 24000
-LIBRITTS_SAMPLE_RATE = 24000  # LibriTTS-R is already at 24kHz
 
 
-def create_dataset_card(repo_id: str, num_samples: int) -> None:
+def create_dataset_card(
+    repo_id: str,
+    input_dataset: str,
+    splits: list[str],
+    num_samples: int,
+    text_column: str,
+) -> None:
     """Create and push a dataset card with proper metadata."""
     card_data = DatasetCardData(
         language=["en"],
         license="cc-by-4.0",
         task_categories=["text-to-speech", "audio-to-audio"],
-        tags=["audio", "speech", "mimi", "codec", "tts", "libritts"],
-        pretty_name="LibriTTS with Mimi Codes",
+        tags=["audio", "speech", "mimi", "codec", "s2s"],
+        pretty_name="Dataset with Mimi Codes",
     )
 
+    splits_str = ", ".join(splits)
     card_content = f"""---
 {card_data.to_yaml()}
 ---
 
-# LibriTTS with Mimi Codes
+# Dataset with Mimi Codes
 
-This dataset adds Mimi codec codes to [parler-tts/libritts_r_filtered](https://huggingface.co/datasets/parler-tts/libritts_r_filtered) clean/train.clean.360 split.
+This dataset adds Mimi codec codes to [{input_dataset}](https://huggingface.co/datasets/{input_dataset}).
 
 ## Dataset Description
 
 Each sample contains:
-- **audio**: Original LibriTTS-R audio at 24kHz (Mimi's native rate)
+- **audio**: Audio resampled to 24kHz (Mimi's native rate)
 - **codes**: 8-layer Mimi codec codes (list of 8 lists of integers)
-- **text_normalized**: Normalized text transcription
-- **text_original**: Original text transcription
-- **speaker_id**: Speaker identifier
-- **chapter_id**: Chapter identifier
+- **text**: Text transcription (from `{text_column}` column)
+- Additional columns preserved from source dataset
 
 ## Stats
 
+- **Source**: {input_dataset}
+- **Splits**: {splits_str}
 - **Samples**: {num_samples:,}
 - **Audio Sample Rate**: 24kHz
 - **Codec**: Mimi (kyutai/mimi) with 8 codebooks
@@ -80,9 +100,9 @@ ds = load_dataset("{repo_id}", split="train")
 sample = ds[0]
 audio = sample["audio"]  # {{'array': [...], 'sampling_rate': 24000}}
 codes = sample["codes"]  # 8 lists of codec indices
-text = sample["text_normalized"]
+text = sample["text"]
 
-# Decode codes back to audio (requires moshi_mlx or transformers)
+# Decode codes back to audio
 import torch
 from transformers import MimiModel
 
@@ -95,11 +115,11 @@ with torch.no_grad():
 
 ## Source Dataset
 
-- [parler-tts/libritts_r_filtered](https://huggingface.co/datasets/parler-tts/libritts_r_filtered) - LibriTTS-R filtered recordings
+- [{input_dataset}](https://huggingface.co/datasets/{input_dataset})
 
 ## License
 
-CC-BY-4.0 (same as source dataset)
+Same as source dataset.
 """
 
     card = DatasetCard(card_content)
@@ -190,65 +210,36 @@ class MimiEncoder:
         # Shape: (1, 8, seq_len) -> list of 8 lists
         return codes.squeeze(0).cpu().tolist()  # (8, seq_len)
 
-    def encode_batch(
-        self, audios: list[torch.Tensor], show_progress: bool = True
-    ) -> list[list[list[int]]]:
-        """Encode multiple audio tensors.
 
-        Args:
-            audios: List of audio tensors at 24kHz
-            show_progress: Whether to show progress bar
-
-        Returns:
-            List of codes for each audio
-        """
-        results = []
-        iterator = tqdm(audios, desc="Encoding") if show_progress else audios
-
-        for audio in iterator:
-            try:
-                codes = self.encode(audio)
-                results.append(codes)
-            except Exception as e:
-                typer.echo(f"Warning: Encoding failed: {e}")
-                # Return empty codes on failure
-                results.append([[] for _ in range(8)])
-
-        return results
-
-
-def process_dataset(
+def process_split(
+    ds: Dataset,
+    encoder: MimiEncoder,
+    audio_column: str,
+    text_column: str,
     max_samples: int | None = None,
     batch_size: int = 1,
-) -> Dataset | None:
-    """Load LibriTTS dataset and add Mimi codes.
+) -> Dataset:
+    """Process a single dataset split and add Mimi codes.
 
     Args:
+        ds: Input dataset split
+        encoder: MimiEncoder instance
+        audio_column: Name of audio column
+        text_column: Name of text column
         max_samples: Optional limit on number of samples
         batch_size: Batch size for progress reporting
 
     Returns:
         Dataset with codes column added
     """
-    import gc
-
-    typer.echo("Loading parler-tts/libritts_r_filtered clean/train.clean.360...")
-    ds = load_dataset("parler-tts/libritts_r_filtered", "clean", split="train.clean.360")
-    typer.echo(f"Loaded {len(ds)} samples")
-
     # Limit samples if requested
     if max_samples and len(ds) > max_samples:
         ds = ds.select(range(max_samples))
         typer.echo(f"Limited to {len(ds)} samples")
 
-    # Ensure audio is at 24kHz (should already be, but cast to be sure)
+    # Ensure audio is at 24kHz
     typer.echo(f"Ensuring audio is at {MIMI_SAMPLE_RATE}Hz...")
-    ds = ds.cast_column("audio", Audio(sampling_rate=MIMI_SAMPLE_RATE))
-
-    # Initialize encoder on GPU if available
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    typer.echo(f"Using device: {device}")
-    encoder = MimiEncoder(device=device)
+    ds = ds.cast_column(audio_column, Audio(sampling_rate=MIMI_SAMPLE_RATE))
 
     # Encode all audio samples
     typer.echo("Encoding audio to Mimi codes...")
@@ -259,7 +250,7 @@ def process_dataset(
         batch = ds.select(range(i, batch_end))
 
         for sample in batch:
-            audio_array = sample["audio"]["array"]
+            audio_array = sample[audio_column]["array"]
             audio_tensor = torch.tensor(audio_array, dtype=torch.float32)
 
             try:
@@ -277,53 +268,114 @@ def process_dataset(
     typer.echo("Adding codes column...")
     ds = ds.add_column("codes", all_codes)
 
-    # Keep only essential columns
-    keep_cols = ["audio", "codes", "text_normalized", "text_original", "speaker_id", "chapter_id"]
-    remove_cols = [c for c in ds.column_names if c not in keep_cols]
-    if remove_cols:
-        ds = ds.remove_columns(remove_cols)
+    # Rename text column to standardized 'text' if different
+    if text_column != "text" and text_column in ds.column_names:
+        ds = ds.rename_column(text_column, "text")
 
-    typer.echo(f"Final dataset: {len(ds)} samples with codes")
+    # Rename audio column to standardized 'audio' if different
+    if audio_column != "audio" and audio_column in ds.column_names:
+        ds = ds.rename_column(audio_column, "audio")
+
+    typer.echo(f"Processed {len(ds)} samples")
     return ds
 
 
 @app.command()
 def main(
+    input_dataset: Annotated[
+        str, typer.Option("--input-dataset", "-i", help="Input HuggingFace dataset")
+    ] = "parler-tts/libritts_r_filtered",
+    dataset_config: Annotated[
+        str | None, typer.Option("--dataset-config", "-c", help="Dataset config name")
+    ] = "clean",
+    splits: Annotated[
+        str, typer.Option("--splits", "-s", help="Comma-separated list of splits")
+    ] = "train.clean.360",
+    audio_column: Annotated[
+        str, typer.Option("--audio-column", help="Audio column name")
+    ] = "audio",
+    text_column: Annotated[
+        str, typer.Option("--text-column", help="Text column name")
+    ] = "text_normalized",
     output_repo: Annotated[
-        str, typer.Option(help="HuggingFace repo ID for output")
+        str, typer.Option("--output-repo", "-o", help="HuggingFace repo ID for output")
     ] = "mazesmazes/libritts-mimi",
-    max_samples: Annotated[int | None, typer.Option(help="Max samples (for testing)")] = None,
+    max_samples: Annotated[
+        int | None, typer.Option("--max-samples", "-n", help="Max samples per split")
+    ] = None,
     batch_size: Annotated[
         int, typer.Option("--batch-size", "-b", help="Batch size for processing")
     ] = 1,
     push: Annotated[bool, typer.Option(help="Push to HuggingFace Hub")] = True,
 ):
-    """Generate LibriTTS dataset with Mimi codec codes.
+    """Generate dataset with Mimi codec codes.
 
-    Loads parler-tts/libritts_r_filtered clean/train.clean.360, ensures audio is at 24kHz,
-    encodes with Mimi codec, and pushes to HuggingFace Hub.
+    Loads audio from any HuggingFace dataset, encodes with Mimi codec (8 codebooks),
+    and optionally pushes to HuggingFace Hub.
     """
+    split_list = [s.strip() for s in splits.split(",")]
+
+    typer.echo(f"Input: {input_dataset}" + (f" ({dataset_config})" if dataset_config else ""))
+    typer.echo(f"Splits: {', '.join(split_list)}")
     typer.echo(f"Output: {output_repo}")
     if max_samples:
-        typer.echo(f"Max samples: {max_samples}")
+        typer.echo(f"Max samples per split: {max_samples}")
 
-    ds = process_dataset(
-        max_samples=max_samples,
-        batch_size=batch_size,
-    )
+    # Initialize encoder on GPU if available
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    typer.echo(f"Using device: {device}")
+    encoder = MimiEncoder(device=device)
 
-    if ds is None:
-        typer.echo("Failed to process dataset")
-        raise typer.Exit(1)
+    # Process each split
+    processed_datasets = []
+    total_samples = 0
+
+    for split in split_list:
+        typer.echo(f"\n{'=' * 50}")
+        typer.echo(f"Processing split: {split}")
+        typer.echo(f"{'=' * 50}")
+
+        # Load dataset split
+        typer.echo(f"Loading {input_dataset} {dataset_config or ''} {split}...")
+        ds = load_dataset(input_dataset, dataset_config, split=split)
+        typer.echo(f"Loaded {len(ds)} samples")
+
+        # Process split
+        processed = process_split(
+            ds,
+            encoder,
+            audio_column,
+            text_column,
+            max_samples,
+            batch_size,
+        )
+        processed_datasets.append(processed)
+        total_samples += len(processed)
+
+        # Clear memory between splits
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # Concatenate all splits
+    typer.echo(f"\nConcatenating {len(processed_datasets)} splits...")
+    final_ds = concatenate_datasets(processed_datasets)
+    typer.echo(f"Final dataset: {len(final_ds)} samples with codes")
 
     if push:
         typer.echo(f"\nPushing to {output_repo}...")
-        ds.push_to_hub(output_repo, private=False)
+        final_ds.push_to_hub(output_repo, private=False)
 
         typer.echo("Updating dataset card...")
-        create_dataset_card(output_repo, len(ds))
+        create_dataset_card(
+            output_repo,
+            input_dataset,
+            split_list,
+            len(final_ds),
+            text_column,
+        )
 
-    typer.echo("Done!")
+    typer.echo("\nDone!")
 
 
 if __name__ == "__main__":

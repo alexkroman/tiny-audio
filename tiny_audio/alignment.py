@@ -177,8 +177,6 @@ class ForcedAligner:
         audio: np.ndarray,
         text: str,
         sample_rate: int = 16000,
-        _language: str = "eng",
-        _batch_size: int = 16,
     ) -> list[dict]:
         """Align transcript to audio and return word-level timestamps.
 
@@ -188,8 +186,6 @@ class ForcedAligner:
             audio: Audio waveform as numpy array
             text: Transcript text to align
             sample_rate: Audio sample rate (default 16000)
-            _language: ISO-639-3 language code (default "eng" for English, unused)
-            _batch_size: Batch size for alignment model (unused)
 
         Returns:
             List of dicts with 'word', 'start', 'end' keys

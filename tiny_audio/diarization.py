@@ -137,10 +137,6 @@ class SpectralCluster:
         _, labels, _ = k_means(emb, k, n_init=10)
         return labels
 
-    def get_eigen_gaps(self, eig_vals: np.ndarray) -> np.ndarray:
-        """Compute gaps between consecutive eigenvalues."""
-        return np.diff(eig_vals)
-
 
 class SpeakerClusterer:
     """Speaker clustering backend using spectral clustering with speaker merging.
@@ -708,52 +704,3 @@ class LocalSpeakerDiarizer:
             word["speaker"] = best_speaker
 
         return words
-
-
-class SpeakerDiarizer:
-    """Speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
-
-    Example:
-        >>> segments = SpeakerDiarizer.diarize(audio_array)
-        >>> for seg in segments:
-        ...     print(f"{seg['speaker']}: {seg['start']:.2f} - {seg['end']:.2f}")
-    """
-
-    @classmethod
-    def diarize(
-        cls,
-        audio: np.ndarray | str,
-        sample_rate: int = 16000,
-        num_speakers: int | None = None,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        **_kwargs,
-    ) -> list[dict]:
-        """Run speaker diarization on audio.
-
-        Args:
-            audio: Audio waveform as numpy array or path to audio file
-            sample_rate: Audio sample rate (default 16000)
-            num_speakers: Exact number of speakers (if known)
-            min_speakers: Minimum number of speakers
-            max_speakers: Maximum number of speakers
-
-        Returns:
-            List of dicts with 'speaker', 'start', 'end' keys
-        """
-        return LocalSpeakerDiarizer.diarize(
-            audio,
-            sample_rate=sample_rate,
-            num_speakers=num_speakers,
-            min_speakers=min_speakers or 2,
-            max_speakers=max_speakers or 10,
-        )
-
-    @classmethod
-    def assign_speakers_to_words(
-        cls,
-        words: list[dict],
-        speaker_segments: list[dict],
-    ) -> list[dict]:
-        """Assign speaker labels to words based on timestamp overlap."""
-        return LocalSpeakerDiarizer.assign_speakers_to_words(words, speaker_segments)

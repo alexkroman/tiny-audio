@@ -2,7 +2,7 @@
 
 import re
 from pathlib import Path
-from typing import Any, Iterator, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -11,14 +11,14 @@ import transformers
 try:
     from .alignment import ForcedAligner
     from .asr_modeling import ASRModel
-    from .diarization import SpeakerDiarizer
+    from .diarization import LocalSpeakerDiarizer
 except ImportError:
     from alignment import ForcedAligner  # type: ignore[no-redef]
     from asr_modeling import ASRModel  # type: ignore[no-redef]
-    from diarization import SpeakerDiarizer  # type: ignore[no-redef]
+    from diarization import LocalSpeakerDiarizer  # type: ignore[no-redef]
 
 # Re-export for backwards compatibility
-__all__ = ["ForcedAligner", "SpeakerDiarizer", "ASRPipeline", "strip_thinking"]
+__all__ = ["ForcedAligner", "LocalSpeakerDiarizer", "ASRPipeline", "strip_thinking"]
 
 # Default TTS voice for Kokoro
 DEFAULT_TTS_VOICE = "af_heart"
@@ -100,142 +100,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         audio = np.concatenate(audio_chunks) if audio_chunks else np.array([], dtype=np.float32)
         return {"audio": audio, "sample_rate": TTS_SAMPLE_RATE}
-
-    def transcribe_streaming(
-        self,
-        inputs: Union[str, bytes, np.ndarray, dict],
-        system_prompt: str | None = None,
-    ) -> Iterator[str]:
-        """Transcribe audio with streaming token output for low-latency applications.
-
-        Yields partial transcript strings as tokens are generated, reducing
-        time-to-first-word compared to waiting for full transcription.
-
-        Args:
-            inputs: Audio input in any supported format:
-                - str: File path to audio file
-                - bytes: Raw audio bytes
-                - np.ndarray: Audio samples as numpy array
-                - dict: {"array": np.ndarray, "sampling_rate": int}
-            system_prompt: Optional system prompt override (uses model's default if not provided)
-
-        Yields:
-            Partial transcript text as each token is generated
-
-        Example:
-            >>> for partial in pipeline.transcribe_streaming("audio.wav"):
-            ...     print(partial, end="", flush=True)
-        """
-        # Extract audio array from various input formats
-        audio_data = self._extract_audio(inputs)
-        if audio_data is None:
-            return
-
-        audio_array = audio_data["array"]
-        sample_rate = audio_data.get("sampling_rate", 16000)
-
-        # Preprocess audio through feature extractor
-        model_inputs = self.feature_extractor(
-            audio_array,
-            sampling_rate=sample_rate,
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
-
-        # Get model dtype and device, cast inputs to match
-        device = self.model.device
-        model_dtype = next(self.model.parameters()).dtype
-        input_features = model_inputs.input_features.to(device, dtype=model_dtype)
-        attention_mask = model_inputs.attention_mask.to(device)
-
-        # Stream tokens from model
-        yield from self.model.generate_streaming(
-            input_features=input_features,
-            audio_attention_mask=attention_mask,
-            system_prompt=system_prompt,
-        )
-
-    def transcribe_streaming_with_audio(
-        self,
-        inputs: Union[str, bytes, np.ndarray, dict],
-        voice: str = DEFAULT_TTS_VOICE,
-        system_prompt: str | None = None,
-    ) -> Iterator[dict[str, Any]]:
-        """Transcribe audio with streaming text AND audio output.
-
-        Yields partial text as tokens are generated, and audio chunks
-        as complete sentences are detected. This enables low-latency
-        voice agents that can start speaking before transcription completes.
-
-        Args:
-            inputs: Audio input (same formats as transcribe_streaming)
-            voice: Kokoro TTS voice ID
-            system_prompt: Optional system prompt override (uses model's default if not provided)
-
-        Yields:
-            Dicts with either:
-            - {"type": "text", "text": str, "interim": bool} for text updates
-            - {"type": "audio", "audio": np.ndarray, "sample_rate": int} for audio chunks
-
-        Example:
-            >>> for chunk in pipeline.transcribe_streaming_with_audio(audio):
-            ...     if chunk["type"] == "text":
-            ...         print(chunk["text"], end="", flush=True)
-            ...     elif chunk["type"] == "audio":
-            ...         play_audio(chunk["audio"], chunk["sample_rate"])
-        """
-        import re
-
-        sentence_buffer = ""
-        full_text = ""
-
-        # Sentence-ending patterns (handles ., !, ?, and common abbreviations)
-        sentence_end_pattern = re.compile(r"[.!?](?:\s|$)")
-
-        for token_text in self.transcribe_streaming(inputs, system_prompt=system_prompt):
-            full_text += token_text
-            sentence_buffer += token_text
-
-            # Yield text update
-            yield {"type": "text", "text": full_text, "interim": True}
-
-            # Check for complete sentence
-            match = sentence_end_pattern.search(sentence_buffer)
-            if match:
-                # Extract complete sentence(s)
-                end_pos = match.end()
-                complete_text = sentence_buffer[:end_pos].strip()
-                sentence_buffer = sentence_buffer[end_pos:]
-
-                # Generate audio for the complete sentence
-                if complete_text:
-                    try:
-                        tts_result = self.text_to_speech(complete_text, voice=voice)
-                        if tts_result["audio"] is not None and len(tts_result["audio"]) > 0:
-                            yield {
-                                "type": "audio",
-                                "audio": tts_result["audio"],
-                                "sample_rate": tts_result["sample_rate"],
-                            }
-                    except Exception:
-                        pass  # Skip audio on TTS errors
-
-        # Final text update (not interim)
-        yield {"type": "text", "text": full_text, "interim": False}
-
-        # Generate audio for any remaining text
-        remaining = sentence_buffer.strip()
-        if remaining:
-            try:
-                tts_result = self.text_to_speech(remaining, voice=voice)
-                if tts_result["audio"] is not None and len(tts_result["audio"]) > 0:
-                    yield {
-                        "type": "audio",
-                        "audio": tts_result["audio"],
-                        "sample_rate": tts_result["sample_rate"],
-                    }
-            except Exception:
-                pass
 
     def _sanitize_parameters(self, **kwargs):
         """Intercept our custom parameters before parent class validates them."""
@@ -336,7 +200,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if return_speakers and self._current_audio is not None:
             try:
                 # Run diarization
-                speaker_segments = SpeakerDiarizer.diarize(
+                speaker_segments = LocalSpeakerDiarizer.diarize(
                     self._current_audio["array"],
                     sample_rate=self._current_audio.get("sampling_rate", 16000),
                     **{k: v for k, v in diarization_params.items() if v is not None},
@@ -345,7 +209,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
                 # Assign speakers to words
                 if result.get("words"):
-                    result["words"] = SpeakerDiarizer.assign_speakers_to_words(
+                    result["words"] = LocalSpeakerDiarizer.assign_speakers_to_words(
                         result["words"],
                         speaker_segments,
                     )

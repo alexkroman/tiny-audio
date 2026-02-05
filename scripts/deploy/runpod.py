@@ -877,6 +877,185 @@ def latents(
 
 
 # =============================================================================
+# Mimi Codes Generation Command (discrete codes for AR S2S)
+# =============================================================================
+
+
+def build_mimi_script(
+    hf_token: str,
+    input_dataset: str,
+    output_repo: str,
+    dataset_config: str | None,
+    audio_column: str,
+    text_column: str,
+    splits: list[str],
+    batch_size: int,
+    max_samples: int | None,
+) -> str:
+    """Generate the Mimi codes generation script content."""
+    splits_arg = ",".join(splits)
+    config_arg = f"--dataset-config {dataset_config}" if dataset_config else ""
+    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
+
+    return f"""#!/bin/bash
+# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
+
+ulimit -n 65536
+export PATH="/root/.local/bin:$PATH"
+export HF_HOME=/workspace/.cache/huggingface
+export HF_DATASETS_CACHE=/workspace/datasets
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_TOKEN="{hf_token}"
+
+# GPU optimizations
+export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
+export TORCH_CUDNN_BENCHMARK=1
+
+cd /workspace
+
+python -m scripts.generate_mimi \\
+    --input-dataset {input_dataset} \\
+    --output-repo {output_repo} \\
+    {config_arg} \\
+    --audio-column {audio_column} \\
+    --text-column {text_column} \\
+    --splits {splits_arg} \\
+    --batch-size {batch_size} \\
+    {max_samples_arg}
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "===== Mimi Codes Generation Completed Successfully ====="
+else
+    echo "===== Mimi Codes Generation Failed with exit code: $EXIT_CODE ====="
+fi
+
+echo "Script finished. Session will remain active for inspection."
+sleep infinity
+"""
+
+
+@app.command()
+def mimi(
+    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
+    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
+    input_dataset: str = typer.Option(
+        "parler-tts/libritts_r_filtered",
+        "--input-dataset",
+        "-i",
+        help="Input HuggingFace dataset",
+    ),
+    dataset_config: str | None = typer.Option(
+        "clean",
+        "--dataset-config",
+        "-c",
+        help="Dataset config/name (e.g., 'clean' or 'other')",
+    ),
+    output_repo: str = typer.Option(
+        ...,
+        "--output-repo",
+        "-o",
+        help="Output HuggingFace repo for encoded dataset",
+    ),
+    audio_column: str = typer.Option("audio", "--audio-column", help="Audio column name"),
+    text_column: str = typer.Option("text_normalized", "--text-column", help="Text column name"),
+    splits: Annotated[
+        str | None,
+        typer.Option("--splits", "-s", help="Comma-separated list of splits to process"),
+    ] = None,
+    batch_size: int = typer.Option(1, "--batch-size", "-b", help="Batch size for encoding"),
+    max_samples: int | None = typer.Option(
+        None, "--max-samples", "-n", help="Max samples per split (for testing)"
+    ),
+    session_name: str | None = typer.Option(
+        None, "--session-name", help="Custom tmux session name"
+    ),
+    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
+    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+):
+    """Generate Mimi codec codes for S2S training.
+
+    Encodes audio to discrete Mimi codes (8 codebooks) for use with the
+    autoregressive audio head in speech-to-speech training.
+
+    Examples:
+        # Process LibriTTS clean splits
+        ta runpod mimi host port -o user/libritts-mimi -s train.clean.100,train.clean.360
+
+        # Process LibriTTS other split
+        ta runpod mimi host port -i parler-tts/libritts_r_filtered -c other -o user/libritts-mimi-other -s train.other.500
+
+        # Process LibriSpeech
+        ta runpod mimi host port -i librispeech_asr -c clean -o user/librispeech-mimi -s train.100 --text-column text
+    """
+    conn = get_connection(host, port)
+
+    if not test_connection(conn):
+        sys.exit(1)
+
+    # Default splits for LibriTTS
+    if splits is None:
+        splits = "train.clean.360"
+    split_list = [s.strip() for s in splits.split(",")]
+
+    # Generate session name if not provided
+    if session_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        session_name = f"mimi_{timestamp}"
+
+    if force:
+        print(f"Killing existing session '{session_name}' if present...")
+        kill_tmux_session(conn, session_name)
+
+    # Get environment variables
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        print("Warning: HF_TOKEN environment variable not set.")
+
+    # Build and upload script
+    script_content = build_mimi_script(
+        hf_token,
+        input_dataset,
+        output_repo,
+        dataset_config,
+        audio_column,
+        text_column,
+        split_list,
+        batch_size,
+        max_samples,
+    )
+    script_path = f"/tmp/mimi_{session_name}.sh"
+
+    print(f"\nStarting Mimi codes generation session '{session_name}'...")
+    print(f"Input dataset: {input_dataset}" + (f" ({dataset_config})" if dataset_config else ""))
+    print(f"Output repo: {output_repo}")
+    print(f"Splits: {', '.join(split_list)}")
+    print(f"Batch size: {batch_size}")
+    if max_samples:
+        print(f"Max samples per split: {max_samples}")
+
+    # Write script to remote
+    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
+    conn.run(f"chmod +x {script_path}", hide=True)
+
+    # Start tmux session
+    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    if not result.ok:
+        print(f"Failed to start tmux session: {result.stderr}")
+        sys.exit(1)
+
+    print(f"\nMimi codes generation started in session '{session_name}'.")
+    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
+
+    if not no_attach:
+        time.sleep(2)
+        attach_tmux_session(host, port, session_name)
+
+
+# =============================================================================
 # Eval Command
 # =============================================================================
 
