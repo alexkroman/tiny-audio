@@ -162,20 +162,3 @@ Technical architecture for the speech-to-speech (S2S) model. Only the Projector 
 | SmolLM3-3B | [B, T_seq, 3072] | [B, T_seq, 3072] | 3B (frozen) |
 | Audio Head | [B, T_resp, 3072] | [B, 8, T_codec] | ~50M |
 | Mimi Decoder | [B, 8, T_codec] | [B, T_codec\*1920] | 100M (frozen) |
-
-## Training Configuration
-
-**Trainable components**: Projector (~12M) + Audio Head (~50M) ≈ 62M parameters
-
-**Loss function**: Cross-entropy on codec tokens
-
-- Semantic loss (CB0): AR decoder predicts next token
-- Acoustic loss (CB1-7): Depformer predicts each codebook given previous
-- Equal weighting: `total_loss = semantic_loss + acoustic_loss`
-
-**Acoustic delays** (Moshi-style):
-
-- CB0 at AR position t → audio time t
-- CB1 at AR position t → audio time t-1
-- CB_k at AR position t → audio time t-k
-- Enables higher codebooks to use "future" semantic context
