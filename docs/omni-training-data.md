@@ -32,12 +32,6 @@ Assistant: paris
 
 ______________________________________________________________________
 
-## SIFT Training Data Generation
-
-The SIFT (Self-Instruction Fine-Tuning) responses in `mazesmazes/sift-audio-2` are generated using an LLM (SmolLM3-3B) with three different modes. The script `scripts/generate_sift_dataset.py` processes audio datasets with paralinguistic metadata (emotion, gender, age, pace, volume, accent) and generates training responses.
-
-______________________________________________________________________
-
 ## Example 3: Conversational Response
 
 **Audio**: A happy woman saying "I got the job!"
