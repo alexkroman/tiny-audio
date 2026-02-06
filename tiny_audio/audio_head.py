@@ -146,27 +146,30 @@ class StreamingState:
     device: torch.device = field(default_factory=lambda: torch.device("cpu"))
 
     def write_to_cache(self, codebook_idx: int, token: int):
-        """Write a token to the delay cache at current offset + delay."""
-        if self.delay_cache is None or self.delays is None:
+        """Write a token to the delay cache at current offset.
+
+        Since Depformer handles delays internally (delays inputs, outputs time-aligned
+        tokens), all codebooks at step t represent audio time t. No additional delay
+        adjustment needed during cache write.
+        """
+        if self.delay_cache is None:
             return
-        delay = int(self.delays[codebook_idx].item())
         cache_size = self.delay_cache.shape[2]
-        write_pos = (self.offset + delay) % cache_size
+        write_pos = self.offset % cache_size
         self.delay_cache[0, codebook_idx, write_pos] = token
 
     def read_from_cache(self) -> Optional[torch.Tensor]:
-        """Read aligned tokens from cache, accounting for delays.
+        """Read aligned tokens from cache.
 
-        Returns None if we haven't generated enough tokens yet (offset <= max_delay).
+        Since Depformer outputs are already time-aligned, we read directly from
+        the current offset position. All codebooks at a given position represent
+        the same audio time.
         """
         if self.delay_cache is None:
             return None
-        if self.offset <= self.max_delay:
-            return None  # Not enough tokens generated yet
-
+        # Read from current position (all codebooks are time-aligned)
         cache_size = self.delay_cache.shape[2]
-        # Read position is offset - max_delay (oldest valid position)
-        read_pos = (self.offset - self.max_delay) % cache_size
+        read_pos = self.offset % cache_size
         return self.delay_cache[:, :, read_pos]  # [1, num_codebooks]
 
     def advance(self):
@@ -668,7 +671,6 @@ class AudioHead(nn.Module):
         semantic = torch.tensor([semantic_tokens], device=device)  # [1, seq_len]
         # Stack AR hidden states: [1, seq_len, hidden_dim]
         ar_hidden = torch.cat(ar_hidden_states, dim=1)
-        seq_len = semantic.shape[1]
 
         # Generate acoustic codebooks 1-7 using Depformer
         # Now using position-specific AR decoder hidden states
@@ -680,29 +682,9 @@ class AudioHead(nn.Module):
         )  # [1, 7, seq_len]
 
         # Combine all codebooks: [1, 8, seq_len]
+        # Depformer already handles delays internally (delays inputs, outputs time-aligned tokens)
+        # No additional undelaying needed - outputs are already aligned to audio time
         all_codes = torch.cat([semantic.unsqueeze(1), acoustic], dim=1)
-
-        # Apply Moshi-style delay alignment using undelay_sequence
-        # This shifts each codebook to align audio time
-        delays = torch.tensor(self.DELAYS, dtype=torch.long, device=device)
-        max_delay = int(delays.max().item())
-
-        if max_delay > 0 and seq_len > max_delay:
-            # Undelay to align all codebooks to audio time
-            aligned_codes, valid_mask = undelay_sequence(delays, all_codes, fill_value=0)
-
-            # Trim to valid length (seq_len - max_delay)
-            valid_len = seq_len - max_delay
-            aligned_codes = aligned_codes[:, :, :valid_len]
-
-            # Fill trailing invalid positions by repeating last valid frame
-            # This avoids audio artifacts from abrupt endings
-            if valid_len > 0:
-                last_frame = aligned_codes[:, :, -1:]
-                padding = last_frame.expand(-1, -1, max_delay)
-                aligned_codes = torch.cat([aligned_codes, padding], dim=2)
-
-            return aligned_codes, torch.empty(0, device=device)
 
         return all_codes, torch.empty(0, device=device)
 
@@ -913,7 +895,6 @@ class AudioHead(nn.Module):
                 break
 
         if not output_codes_list:
-            # Not enough tokens generated yet (offset <= max_delay)
             return None
 
         # Stack aligned codes: [1, num_codebooks, num_frames]
@@ -924,43 +905,14 @@ class AudioHead(nn.Module):
             output = self.mimi.decode(codes)
             return output.audio_values.squeeze(1)  # [1, samples]
 
-    def _flush_delay_cache(self, state: StreamingState) -> Optional[torch.Tensor]:
+    def _flush_delay_cache(self, _state: StreamingState) -> Optional[torch.Tensor]:
         """Flush remaining tokens from delay cache after generation ends.
 
-        Called when AR decoder finishes to output any remaining aligned frames.
+        Since Depformer outputs are time-aligned and we output immediately in step(),
+        there are no remaining frames to flush. This method exists for API compatibility.
         """
-        if state.delay_cache is None:
-            return None
-
-        # Collect remaining valid frames from cache
-        output_codes_list = []
-        cache_size = state.delay_cache.shape[2]
-
-        # Continue reading until we've exhausted all generated positions
-        while True:
-            read_pos = (state.offset - state.max_delay) % cache_size
-            codes = state.delay_cache[:, :, read_pos]
-
-            # Check if this position has valid data (not ungenerated)
-            if (codes == state.ungenerated_token).any():
-                break
-
-            output_codes_list.append(codes)
-            state.offset += 1
-
-            # Safety: don't loop forever
-            if len(output_codes_list) > state.max_delay + 10:
-                break
-
-        if not output_codes_list:
-            return None
-
-        # Stack and decode
-        codes = torch.stack(output_codes_list, dim=2)
-
-        with torch.no_grad():
-            output = self.mimi.decode(codes)
-            return output.audio_values.squeeze(1)
+        # All frames are output immediately in step(), nothing to flush
+        return None
 
     def stop_streaming(self, state: StreamingState) -> None:
         """Clean up streaming state.
