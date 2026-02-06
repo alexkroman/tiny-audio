@@ -197,7 +197,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Audio head for S2S (flow matching)
         if getattr(config, "use_audio_head", False):
-            from .audio_head import AudioHead
+            from .audio_head import AudioHead, PreNN
 
             device = next(self.language_model.parameters()).device
             llm_dim = self.language_model.config.hidden_size
@@ -206,10 +206,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 device=device, dtype=target_dtype
             )
 
-            # Projection from LLM dim to AudioHead hidden dim
-            # AudioHead expects pre-projected input at hidden_dim
-            self.audio_head_proj = torch.nn.Linear(
-                llm_dim, self.audio_head.hidden_dim, bias=False
+            # Pre-NN: Linear projection + transformer layers (Freeze-Omni style)
+            # Transforms LLM hidden states into contextualized conditioning for AudioHead
+            self.audio_head_proj = PreNN(
+                llm_dim=llm_dim,
+                hidden_dim=self.audio_head.hidden_dim,
+                num_layers=self.audio_head.AR_LAYERS // 2,
+                num_heads=self.audio_head.NUM_HEADS,
+                intermediate_size=self.audio_head.INTERMEDIATE_DIM,
+                dropout=self.audio_head.DROPOUT_RATE,
             ).to(device=device, dtype=target_dtype)
 
             if getattr(config, "freeze_audio_head", False):
@@ -832,9 +837,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 text_hidden_states = embeddings
                 text_mask = embeddings_mask
 
-            # Project LLM hidden states to AudioHead hidden dim
-            projected_embeddings = self.audio_head_proj(embeddings)
-            projected_text = self.audio_head_proj(text_hidden_states)
+            # Project LLM hidden states to AudioHead hidden dim via Pre-NN
+            projected_embeddings = self.audio_head_proj(embeddings, mask=embeddings_mask)
+            projected_text = self.audio_head_proj(text_hidden_states, mask=text_mask)
 
             # Compute loss: embeddings condition the AR decoder to generate codec_targets
             audio_head_loss = self.audio_head(

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from tiny_audio.audio_head import AudioHead
+from tiny_audio.audio_head import AudioHead, PreNN
 
 
 class MockAudioHeadConfig:
@@ -432,6 +432,184 @@ class TestGradientFlow:
             if param.grad is not None:
                 grad_norm = param.grad.norm()
                 assert grad_norm < 1e6, f"Exploding gradient for {name}: {grad_norm}"
+
+
+class TestPreNN:
+    """Tests for Pre-NN projection module."""
+
+    def test_prenn_output_shape(self):
+        """Test PreNN output has correct shape."""
+        prenn = PreNN(llm_dim=512, hidden_dim=256, num_layers=2, num_heads=4)
+        x = torch.randn(2, 10, 512)
+        out = prenn(x)
+        assert out.shape == (2, 10, 256)
+
+    def test_prenn_with_mask(self):
+        """Test PreNN works with padding mask."""
+        prenn = PreNN(llm_dim=512, hidden_dim=256, num_layers=2, num_heads=4)
+        x = torch.randn(2, 10, 512)
+        mask = torch.ones(2, 10, dtype=torch.bool)
+        mask[1, 7:] = False  # Pad last 3 positions in sample 2
+        out = prenn(x, mask=mask)
+        assert out.shape == (2, 10, 256)
+
+    def test_prenn_without_mask(self):
+        """Test PreNN works without mask (inference path)."""
+        prenn = PreNN(llm_dim=512, hidden_dim=256, num_layers=2, num_heads=4)
+        x = torch.randn(1, 5, 512)
+        out = prenn(x)
+        assert out.shape == (1, 5, 256)
+
+    def test_prenn_gradient_flow(self):
+        """Test gradients flow through PreNN to input."""
+        prenn = PreNN(llm_dim=512, hidden_dim=256, num_layers=2, num_heads=4)
+        x = torch.randn(2, 10, 512, requires_grad=True)
+        out = prenn(x)
+        out.sum().backward()
+        assert x.grad is not None
+        assert not torch.isnan(x.grad).any()
+
+
+class TestFullPipelineGradients:
+    """Test gradient flow and magnitude through PreNN + AudioHead together."""
+
+    @pytest.fixture
+    def prenn_and_head(self):
+        """Create a PreNN + AudioHead pair matching real config."""
+        llm_dim = 512  # Smaller for testing
+        hidden_dim = AudioHead.HIDDEN_DIM  # 256
+
+        config = MockAudioHeadConfig(llm_dim=llm_dim)
+        head = AudioHead(config, llm_dim=hidden_dim)  # AudioHead takes pre-projected input
+        prenn = PreNN(
+            llm_dim=llm_dim,
+            hidden_dim=hidden_dim,
+            num_layers=head.AR_LAYERS // 2,
+            num_heads=head.NUM_HEADS,
+            intermediate_size=head.INTERMEDIATE_DIM,
+            dropout=0.0,  # Disable dropout for deterministic gradient test
+        )
+        return prenn, head
+
+    def test_gradients_reach_all_components(self, prenn_and_head):
+        """Test gradients flow through PreNN -> AudioHead -> all sub-components."""
+        prenn, head = prenn_and_head
+        batch_size, text_len, audio_len = 2, 10, 30
+        num_codebooks = 8
+
+        # Simulate LLM hidden states
+        llm_hidden = torch.randn(batch_size, text_len, prenn.llm_dim, requires_grad=True)
+        targets = torch.randint(0, head.vocab_size, (batch_size, num_codebooks, audio_len))
+        lengths = torch.tensor([30, 25])
+
+        # Forward: PreNN -> AudioHead
+        projected = prenn(llm_hidden)
+        loss = head(projected, projected, codec_targets=targets, codec_lengths=lengths)
+        loss.backward()
+
+        # Check input gets gradients
+        assert llm_hidden.grad is not None, "No gradient on LLM hidden states"
+
+        # Check every trainable param in both modules
+        dead_params = []
+        for name, param in prenn.named_parameters():
+            if param.requires_grad:
+                assert param.grad is not None, f"No gradient for prenn.{name}"
+                if param.grad.norm() == 0:
+                    dead_params.append(f"prenn.{name}")
+
+        for name, param in head.named_parameters():
+            if param.requires_grad:
+                assert param.grad is not None, f"No gradient for head.{name}"
+                if param.grad.norm() == 0:
+                    dead_params.append(f"head.{name}")
+
+        assert len(dead_params) == 0, f"Dead parameters (zero gradient): {dead_params}"
+
+    def test_gradient_magnitudes_per_layer(self, prenn_and_head, capsys):
+        """Test gradient magnitudes are healthy across all layers.
+
+        Checks for:
+        - No vanishing gradients (norm > 1e-8)
+        - No exploding gradients (norm < 1e4)
+        - Reasonable ratio between largest and smallest gradient norms
+        """
+        prenn, head = prenn_and_head
+        batch_size, text_len, audio_len = 2, 10, 30
+        num_codebooks = 8
+
+        llm_hidden = torch.randn(batch_size, text_len, prenn.llm_dim, requires_grad=True)
+        targets = torch.randint(0, head.vocab_size, (batch_size, num_codebooks, audio_len))
+        lengths = torch.tensor([30, 25])
+
+        projected = prenn(llm_hidden)
+        loss = head(projected, projected, codec_targets=targets, codec_lengths=lengths)
+        loss.backward()
+
+        # Collect gradient norms grouped by component
+        component_grads: dict[str, list[tuple[str, float]]] = {}
+
+        for prefix, module in [("prenn", prenn), ("audio_head", head)]:
+            for name, param in module.named_parameters():
+                if param.grad is None or not param.requires_grad:
+                    continue
+                # Group by top-level component
+                parts = name.split(".")
+                if prefix == "prenn":
+                    if parts[0] == "proj":
+                        component = "prenn.proj"
+                    elif parts[0] == "layers":
+                        component = f"prenn.layer_{parts[1]}"
+                    elif parts[0] == "norm":
+                        component = "prenn.norm"
+                    else:
+                        component = f"prenn.{parts[0]}"
+                else:
+                    if parts[0] == "ar_decoder" and len(parts) > 1:
+                        if parts[1] == "layers":
+                            component = f"ar_decoder.layer_{parts[2]}"
+                        else:
+                            component = f"ar_decoder.{parts[1]}"
+                    elif parts[0] == "depformer":
+                        component = "depformer"
+                    elif parts[0] == "embedding":
+                        component = "embedding"
+                    else:
+                        component = parts[0]
+
+                grad_norm = param.grad.norm().item()
+                if component not in component_grads:
+                    component_grads[component] = []
+                component_grads[component].append((f"{prefix}.{name}", grad_norm))
+
+        # Print report
+        print("\n" + "=" * 70)
+        print(f"{'Component':<30} {'Mean Grad Norm':>15} {'Max Grad Norm':>15}")
+        print("-" * 70)
+
+        all_norms = []
+        for component in sorted(component_grads.keys()):
+            norms = [n for _, n in component_grads[component]]
+            mean_norm = sum(norms) / len(norms)
+            max_norm = max(norms)
+            all_norms.extend(norms)
+            print(f"{component:<30} {mean_norm:>15.6f} {max_norm:>15.6f}")
+
+        print("-" * 70)
+        print(f"{'Overall':<30} {sum(all_norms) / len(all_norms):>15.6f} {max(all_norms):>15.6f}")
+        print(f"{'Min norm anywhere':<30} {min(all_norms):>15.8f}")
+        print(f"{'Max/Min ratio':<30} {max(all_norms) / max(min(all_norms), 1e-12):>15.1f}")
+        print("=" * 70)
+
+        # Assertions
+        for _component, entries in component_grads.items():
+            for param_name, grad_norm in entries:
+                assert grad_norm > 1e-8, f"Vanishing gradient in {param_name}: {grad_norm:.2e}"
+                assert grad_norm < 1e4, f"Exploding gradient in {param_name}: {grad_norm:.2e}"
+
+        # Check gradient ratio isn't too extreme (sign of training instability)
+        ratio = max(all_norms) / max(min(all_norms), 1e-12)
+        assert ratio < 1e6, f"Gradient norm ratio too large: {ratio:.1f}"
 
 
 class TestConfigPriority:

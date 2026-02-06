@@ -92,9 +92,10 @@ class CodecARDecoder(nn.Module):
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
 
         # Output projection (Freeze-Omni style: has bias)
-        # Small init to reduce gradient magnitude at output layer
+        # Scale init by 1/sqrt(hidden_size) so initial logits are near-uniform,
+        # preventing large gradients from confident wrong predictions at start
         self.output_proj = nn.Linear(hidden_size, self.total_vocab)
-        nn.init.normal_(self.output_proj.weight, std=0.02)
+        nn.init.normal_(self.output_proj.weight, std=1.0 / (hidden_size**0.5))
         nn.init.zeros_(self.output_proj.bias)
 
     def _embed(self, token_ids: torch.Tensor) -> torch.Tensor:

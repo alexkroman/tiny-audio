@@ -1,18 +1,13 @@
 """Autoregressive audio head for speech-to-speech.
 
 Generates audio from LLM embeddings via discrete codec tokens:
-  LLM embeddings -> AR Decoder -> Depformer -> Mimi codes -> audio
+  LLM embeddings -> Pre-NN -> AR Decoder -> Depformer -> Mimi codes -> audio
 
-Architecture (simplified for gradient flow):
-- Input: Concatenate conditioning embeddings + text embeddings (already projected)
+Architecture (Freeze-Omni style):
+- Pre-NN: Linear projection + half-depth transformer layers to transform LLM hidden states
 - AR decoder (causal) generates semantic codebook 0 autoregressively
 - Depformer predicts acoustic codebooks 1-7 conditioned on codebook 0
 - Mimi decoder converts all 8 codebooks to audio waveform
-
-Design choices for fast convergence:
-- No Pre-NN layers (shorter gradient path)
-- No internal projections (caller projects to hidden_dim)
-- Simple concatenation + attention masking
 
 Streaming Support (Moshi-style):
 - StreamingState holds generation state between steps
@@ -26,11 +21,124 @@ from typing import Iterator, Optional
 
 import torch
 import torch.nn as nn
+from transformers import LlamaConfig
+from transformers.models.llama.modeling_llama import (
+    LlamaDecoderLayer,
+    LlamaRMSNorm,
+    LlamaRotaryEmbedding,
+)
 
 from .modules.ar_decoder import CodecARDecoder
 from .modules.depformer import Depformer
 
 logger = logging.getLogger(__name__)
+
+
+class PreNN(nn.Module):
+    """Pre-NN projection from LLM hidden states to AudioHead hidden dim (Freeze-Omni style).
+
+    Replaces a simple linear projection with:
+    1. Linear projection from LLM dim to hidden dim
+    2. Half-depth Llama transformer layers with bidirectional attention
+
+    This gives the model multiple layers of self-attention to transform and
+    contextualize the LLM representations before codec generation.
+
+    Args:
+        llm_dim: LLM hidden state dimension (e.g., 3072 for SmolLM3-3B)
+        hidden_dim: AudioHead hidden dimension (e.g., 256)
+        num_layers: Number of transformer layers (default: AR_LAYERS // 2 = 3)
+        num_heads: Number of attention heads
+        intermediate_size: FFN intermediate dimension
+        dropout: Dropout rate
+    """
+
+    def __init__(
+        self,
+        llm_dim: int,
+        hidden_dim: int = 256,
+        num_layers: int = 3,
+        num_heads: int = 4,
+        intermediate_size: int = 1024,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.llm_dim = llm_dim
+        self.hidden_dim = hidden_dim
+
+        # Linear projection from LLM dim to hidden dim
+        self.proj = nn.Linear(llm_dim, hidden_dim, bias=False)
+
+        # Llama transformer layers for contextual processing
+        config = LlamaConfig(
+            hidden_size=hidden_dim,
+            intermediate_size=intermediate_size,
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            num_key_value_heads=num_heads,
+            max_position_embeddings=4096,
+            attention_dropout=dropout,
+            _attn_implementation="sdpa",
+        )
+
+        self.layers = nn.ModuleList(
+            [LlamaDecoderLayer(config, layer_idx=i) for i in range(num_layers)]
+        )
+        self.norm = LlamaRMSNorm(hidden_dim, eps=config.rms_norm_eps)
+        self.rotary_emb = LlamaRotaryEmbedding(config=config)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Project and contextualize LLM hidden states.
+
+        Args:
+            hidden_states: LLM hidden states [batch, seq_len, llm_dim]
+            mask: Boolean mask [batch, seq_len] where True = valid, False = padding
+
+        Returns:
+            Transformed hidden states [batch, seq_len, hidden_dim]
+        """
+        # Project from LLM dim to hidden dim
+        hidden_states = self.proj(hidden_states)
+
+        seq_len = hidden_states.shape[1]
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+
+        # Build bidirectional attention mask (Freeze-Omni Pre-NN uses bidirectional)
+        if mask is not None:
+            # [batch, seq_len] -> [batch, 1, seq_len, seq_len] bidirectional mask
+            attn_mask = mask.unsqueeze(1).unsqueeze(2)  # [batch, 1, 1, seq_len]
+            attn_mask = attn_mask.expand(-1, -1, seq_len, -1)  # [batch, 1, seq_len, seq_len]
+            attn_mask = torch.where(
+                attn_mask,
+                torch.tensor(0.0, device=device, dtype=dtype),
+                torch.tensor(torch.finfo(dtype).min, device=device, dtype=dtype),
+            )
+        else:
+            attn_mask = None
+
+        # Position IDs and rotary embeddings
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        # Forward through transformer layers
+        for layer in self.layers:
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=attn_mask,
+                position_ids=position_ids,
+                past_key_value=None,
+                output_attentions=False,
+                use_cache=False,
+                position_embeddings=position_embeddings,
+            )
+            hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
+
+        return self.norm(hidden_states)
 
 
 @dataclass
@@ -106,17 +214,12 @@ class StreamingState:
 class AudioHead(nn.Module):
     """AR codec head: LLM embeddings -> Mimi codes -> audio.
 
-    Architecture (simplified for gradient flow):
-        - Input: Already-projected embeddings at hidden_dim (caller projects)
+    Architecture (Freeze-Omni style):
+        - Input: Already-projected embeddings at hidden_dim (Pre-NN projects + contextualizes)
         - Concatenate conditioning + text embeddings as combined context
         - ar_decoder: Causal transformer layers
         - depformer: 4-layer transformer for acoustic codebooks 1-7
         - Mimi decoder (frozen) for codes -> audio
-
-    Design choices for fast convergence:
-        - No Pre-NN layers (shorter gradient path)
-        - No internal projections (caller projects)
-        - Simple concatenation + attention masking
 
     Args:
         config: ASRConfig with:
