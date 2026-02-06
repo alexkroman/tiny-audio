@@ -3,16 +3,17 @@
 Generates audio from LLM embeddings via discrete codec tokens:
   LLM embeddings -> Pre-NN -> AR Decoder -> Depformer -> Mimi codes -> audio
 
-Architecture:
-- Pre-NN transformer (3 layers, bidirectional) processes LLM hidden states
-- AR decoder (6 layers, causal) generates semantic codebook 0 autoregressively
-- Depformer (4 layers) predicts acoustic codebooks 1-7 conditioned on codebook 0
+Architecture (Freeze-Omni style concatenation):
+- Input: Concatenate conditioning embeddings + text embeddings
+- Pre-NN transformer (bidirectional) processes combined context
+- AR decoder (causal) generates semantic codebook 0 autoregressively
+- Depformer predicts acoustic codebooks 1-7 conditioned on codebook 0
 - Mimi decoder converts all 8 codebooks to audio waveform
 
-Optional Prefix Bridge (Freeze-Omni style):
-- PrefixBridge transforms LLM hidden states into KV cache entries
-- Enables efficient fine-tuning by freezing main components
-- Only prefix bridge layers are trained, bridging text→audio modality gap
+This uses Freeze-Omni's simpler concatenation + masking approach for:
+- Shorter gradient path for faster convergence
+- Simpler optimization landscape
+- Single unified forward pass
 
 Streaming Support (Moshi-style):
 - StreamingState holds generation state between steps
@@ -22,85 +23,15 @@ Streaming Support (Moshi-style):
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Iterator, Optional
+from typing import Iterator, Optional
 
 import torch
 import torch.nn as nn
 
 from .modules.ar_decoder import CodecARDecoder
 from .modules.depformer import Depformer
-from .modules.prefix_bridge import PrefixBridge
-
-if TYPE_CHECKING:
-    from transformers.cache_utils import DynamicCache
 
 logger = logging.getLogger(__name__)
-
-
-def delay_sequence(
-    delays: torch.Tensor,
-    codes: torch.Tensor,
-    initial_token: int,
-) -> torch.Tensor:
-    """Apply per-codebook delays to a sequence (Moshi-style).
-
-    At AR position t, we want the token for audio time (t - delay).
-    So delayed[k, t] = codes[k, t - delays[k]] if t >= delays[k] else initial_token.
-
-    Args:
-        delays: Per-codebook delays [num_codebooks]
-        codes: Input codes [batch, num_codebooks, seq_len]
-        initial_token: Token to use for positions before delay
-
-    Returns:
-        Delayed codes [batch, num_codebooks, seq_len]
-    """
-    _, num_cb, seq_len = codes.shape
-    delayed = torch.full_like(codes, initial_token)
-
-    for k in range(num_cb):
-        delay = int(delays[k].item())
-        if delay < seq_len:
-            # delayed[k, t] = codes[k, t - delay] for t >= delay
-            delayed[:, k, delay:] = codes[:, k, : seq_len - delay]
-
-    return delayed
-
-
-def undelay_sequence(
-    delays: torch.Tensor,
-    codes: torch.Tensor,
-    fill_value: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Remove per-codebook delays from a sequence (Moshi-style).
-
-    Inverse of delay_sequence. Shifts each codebook left by its delay.
-    undelayed[k, t] = codes[k, t + delays[k]] if t + delays[k] < seq_len else fill_value.
-
-    Args:
-        delays: Per-codebook delays [num_codebooks]
-        codes: Delayed codes [batch, num_codebooks, seq_len]
-        fill_value: Value for positions past end after shift
-
-    Returns:
-        Tuple of:
-            - Undelayed codes [batch, num_codebooks, seq_len]
-            - Valid mask [batch, num_codebooks, seq_len] (True where data exists)
-    """
-    batch, num_cb, seq_len = codes.shape
-    device = codes.device
-    undelayed = torch.full_like(codes, fill_value)
-    valid = torch.zeros(batch, num_cb, seq_len, dtype=torch.bool, device=device)
-
-    for k in range(num_cb):
-        delay = int(delays[k].item())
-        if delay < seq_len:
-            valid_len = seq_len - delay
-            # undelayed[k, t] = codes[k, t + delay]
-            undelayed[:, k, :valid_len] = codes[:, k, delay:]
-            valid[:, k, :valid_len] = True
-
-    return undelayed, valid
 
 
 @dataclass
@@ -117,10 +48,6 @@ class StreamingState:
 
     # AR decoder state
     ar_generator: Optional[Iterator] = None  # AR decoder generator
-    ar_kv_cache: Optional["DynamicCache"] = None  # KV cache for AR decoder
-
-    # Prefix bridge KV cache (optional)
-    prefix_kv_cache: Optional["DynamicCache"] = None
 
     # Generated tokens buffer
     semantic_tokens: list[int] = field(default_factory=list)
@@ -180,24 +107,22 @@ class StreamingState:
 class AudioHead(nn.Module):
     """AR codec head: LLM embeddings -> Mimi codes -> audio.
 
-    Architecture (Freeze-Omni style):
+    Architecture (Freeze-Omni style concatenation):
         - input_proj: Projects LLM embeddings to hidden_dim
-        - ar_decoder: Includes Pre-NN (num_layers//2 bidirectional) + AR layers (causal)
+        - Concatenate conditioning + text embeddings as combined context
+        - ar_decoder: Includes Pre-NN (bidirectional) + AR layers (causal)
         - depformer: 4-layer transformer for acoustic codebooks 1-7
         - Mimi decoder (frozen) for codes -> audio
 
-    Optional Prefix Bridge (Freeze-Omni style KV-cache fine-tuning):
-        - prefix_bridge: Learnable transformer layers that transform LLM hidden
-          states into KV cache entries for the AR decoder
-        - When enabled, main components can be frozen and only prefix bridge
-          is trained, enabling efficient transfer from text to audio space
+    Uses simple concatenation + attention masking (like Freeze-Omni) for:
+        - Shorter gradient paths
+        - Faster convergence
+        - Simpler optimization
 
     Args:
         config: ASRConfig with:
             - llm_dim: LLM embedding dimension (default: 2048 for SmolLM3-3B)
-            - use_prefix_bridge: Enable prefix bridge for KV-cache fine-tuning
         llm_dim: Override for LLM dimension (takes precedence over config)
-        use_prefix_bridge: Override for prefix bridge flag
     """
 
     # Architecture dimensions (scaled for SmolLM3-3B following Freeze-Omni ratios)
@@ -228,7 +153,6 @@ class AudioHead(nn.Module):
     DEFAULT_TOP_K = 50
     DEFAULT_TEMPERATURE = 1.0
     DEFAULT_REPETITION_PENALTY = 1.1
-    DEFAULT_CFG_COEF = 1.0  # 1.0 = no CFG, >1.0 = stronger conditioning
 
     # Moshi-style delays for multi-codebook AR (audio-time alignment)
     # delays[k] = how many AR steps codebook k is delayed
@@ -246,19 +170,12 @@ class AudioHead(nn.Module):
     # Mimi codec constants
     MIMI_SAMPLE_RATE = 24000  # Expected sample rate for Mimi
 
-    def __init__(self, config, llm_dim: int = None, use_prefix_bridge: bool = None):
+    def __init__(self, config, llm_dim: int = None):
         super().__init__()
         self.llm_dim = llm_dim or getattr(config, "llm_dim", None) or 2048  # SmolLM3 native
         self.hidden_dim = self.HIDDEN_DIM
         self.vocab_size = self.VOCAB_SIZE
         self.num_codebooks = 1 + self.NUM_ACOUSTIC_CODEBOOKS  # 8 total
-
-        # Prefix bridge flag (Freeze-Omni style KV-cache fine-tuning)
-        self.use_prefix_bridge = (
-            use_prefix_bridge
-            if use_prefix_bridge is not None
-            else getattr(config, "use_prefix_bridge", False)
-        )
 
         # Generation parameters from config
         self.max_tokens = getattr(config, "max_audio_tokens", self.DEFAULT_MAX_TOKENS)
@@ -267,7 +184,6 @@ class AudioHead(nn.Module):
         self.repetition_penalty = getattr(
             config, "audio_repetition_penalty", self.DEFAULT_REPETITION_PENALTY
         )
-        self.cfg_coef = getattr(config, "audio_cfg_coef", self.DEFAULT_CFG_COEF)
 
         # Input projection: LLM dim -> hidden dim (identity if dims match)
         if self.llm_dim != self.hidden_dim:
@@ -311,20 +227,6 @@ class AudioHead(nn.Module):
             intermediate_size=self.DEPFORMER_INTERMEDIATE,
         )
 
-        # Optional Prefix Bridge for KV-cache fine-tuning (Freeze-Omni style)
-        # Transforms LLM hidden states into KV cache entries that condition
-        # the AR decoder, enabling efficient text→audio transfer learning
-        if self.use_prefix_bridge:
-            self.prefix_bridge = PrefixBridge(
-                hidden_size=self.hidden_dim,
-                num_layers=self.AR_LAYERS,  # Match AR decoder layers
-                num_heads=self.NUM_HEADS,
-                intermediate_size=self.INTERMEDIATE_DIM,
-                input_dim=self.hidden_dim,  # After input_proj
-            )
-        else:
-            self.prefix_bridge = None
-
         # Mimi model (loaded separately via load_mimi_decoder)
         self.mimi = None
 
@@ -362,76 +264,6 @@ class AudioHead(nn.Module):
             self.mimi = self.mimi.to(device=device, dtype=dtype)
 
         logger.info("Loaded Mimi model from kyutai/mimi")
-
-    def enable_prefix_tuning(self, freeze_main_components: bool = True):
-        """Enable prefix bridge tuning mode.
-
-        When enabled:
-        - Prefix bridge layers are trainable (if present)
-        - Main components (input_proj, ar_decoder with pre_nn, depformer) are frozen
-
-        This enables efficient fine-tuning where only the prefix bridge
-        learns to transfer text-space hidden states to audio decoder space.
-
-        Args:
-            freeze_main_components: If True, freeze all non-prefix components
-        """
-        if self.prefix_bridge is None:
-            raise ValueError(
-                "Cannot enable prefix tuning without prefix_bridge. "
-                "Initialize AudioHead with use_prefix_bridge=True"
-            )
-
-        if freeze_main_components:
-            # Freeze main components (ar_decoder includes pre_nn layers)
-            self.input_proj.requires_grad_(False)
-            self.ar_decoder.requires_grad_(False)
-            self.depformer.requires_grad_(False)
-
-            # Set to eval mode to disable dropout etc.
-            self.input_proj.eval()
-            self.ar_decoder.eval()
-            self.depformer.eval()
-
-            logger.info(
-                "Prefix tuning enabled: froze input_proj, ar_decoder (with pre_nn), depformer"
-            )
-
-        # Ensure prefix bridge is trainable
-        self.prefix_bridge.requires_grad_(True)
-        self.prefix_bridge.train()
-
-        logger.info("Prefix bridge layers are trainable")
-
-    def disable_prefix_tuning(self):
-        """Disable prefix tuning mode, making all components trainable."""
-        self.input_proj.requires_grad_(True)
-        self.ar_decoder.requires_grad_(True)  # Includes pre_nn layers
-        self.depformer.requires_grad_(True)
-
-        if self.prefix_bridge is not None:
-            self.prefix_bridge.requires_grad_(True)
-
-        logger.info("Prefix tuning disabled: all components are trainable")
-
-    def set_cfg(self, cfg_coef: float):
-        """Set the classifier-free guidance coefficient at runtime.
-
-        CFG steers generation toward conditioned output by blending conditioned
-        and unconditioned logits: logits = uncond + cfg_coef * (cond - uncond)
-
-        Args:
-            cfg_coef: Guidance strength.
-                - 1.0: No guidance (default, uses conditioned logits only)
-                - >1.0: Stronger guidance toward conditioning
-                - <1.0: Weaker guidance (unusual)
-
-        Example:
-            >>> audio_head.set_cfg(1.5)  # Moderate guidance
-            >>> audio_head.set_cfg(2.0)  # Strong guidance
-        """
-        self.cfg_coef = cfg_coef
-        logger.info(f"Set CFG coefficient to {cfg_coef}")
 
     def state_dict(self, destination=None, prefix="", keep_vars=False):
         """Save state dict, excluding tied ar_decoder.embedding (shares with self.embedding)."""
@@ -501,17 +333,16 @@ class AudioHead(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for training or inference.
 
-        Dual-path processing (Freeze-Omni style):
-        - Path 1 (Context): text_embeddings → Pre-NN → AR decoder context
-          Provides linguistic content (what to say)
-        - Path 2 (Conditioning): embeddings → Prefix Bridge → KV cache
-          Provides prosodic/stylistic conditioning (how to say it)
+        Concatenation approach (Freeze-Omni style):
+        - Concatenate conditioning embeddings + text embeddings
+        - Project combined context through input_proj
+        - Let Pre-NN and AR decoder handle via attention masking
 
         Args:
             embeddings: LLM hidden states [batch, seq_len, llm_dim]
-                Used for prefix bridge conditioning (prosody/style)
+                Conditioning information (prosody/style)
             text_embeddings: Text token embeddings [batch, text_len, llm_dim]
-                Used for Pre-NN context (linguistic content)
+                Linguistic content (what to say)
             codec_targets: Target Mimi codes for training.
                 - [batch, 8, audio_seq_len] for full training (all codebooks)
                 - [batch, audio_seq_len] for legacy (codebook 0 only)
@@ -523,29 +354,25 @@ class AudioHead(nn.Module):
             Training: scalar cross-entropy loss (weighted combination of all codebooks)
             Inference: tuple of (generated codes [batch, 8, gen_len], empty tensor)
         """
-        # Dual-path processing (Freeze-Omni style):
-        # Path 1: Text embeddings → Pre-NN → context (what to say)
-        # Path 2: Hidden states → Prefix Bridge → KV cache (how to say it)
+        # Simple concatenation approach (Freeze-Omni style)
+        # Concatenate conditioning + text, let attention masking handle separation
+        combined = torch.cat([embeddings, text_embeddings], dim=1)
+        context = self.input_proj(combined)
+        context = self.hidden_dropout(context)
 
-        # Path 1: Project text embeddings → context (what to say)
-        context = self.input_proj(text_embeddings)
-        context = self.hidden_dropout(context)  # Freeze-Omni style dropout
-
-        # Path 2: Compute prefix KV cache from embeddings (how to say it)
-        prefix_kv_cache = None
-        if self.prefix_bridge is not None:
-            conditioning_hidden = self.input_proj(embeddings)
-            conditioning_hidden = self.hidden_dropout(conditioning_hidden)
-            _, prefix_kv_cache = self.prefix_bridge(
-                hidden_states=conditioning_hidden,
-                attention_mask=embeddings_mask,
-            )
+        # Combine masks
+        if embeddings_mask is not None and text_mask is not None:
+            context_mask = torch.cat([embeddings_mask, text_mask], dim=1)
+        elif embeddings_mask is not None:
+            context_mask = embeddings_mask
+        elif text_mask is not None:
+            context_mask = text_mask
+        else:
+            context_mask = None
 
         if codec_targets is not None:
-            return self._compute_loss(
-                context, text_mask, codec_targets, codec_lengths, prefix_kv_cache
-            )
-        return self._generate(context, text_mask, prefix_kv_cache)
+            return self._compute_loss(context, context_mask, codec_targets, codec_lengths)
+        return self._generate(context, context_mask)
 
     def _compute_loss(
         self,
@@ -553,23 +380,17 @@ class AudioHead(nn.Module):
         context_mask: Optional[torch.Tensor],
         targets: torch.Tensor,
         lengths: Optional[torch.Tensor],
-        prefix_kv_cache: Optional["DynamicCache"] = None,
     ) -> torch.Tensor:
         """Compute cross-entropy loss for codec token prediction.
 
         Trains both AR decoder (codebook 0) and Depformer (codebooks 1-7).
         Uses equal weighting following Moshi's approach.
 
-        When prefix_kv_cache is provided (from prefix bridge):
-        - AR decoder attends to prefix KV cache + context
-        - Enables text→audio modality transfer via KV conditioning
-
         Args:
-            context: Pre-NN output [batch, context_len, hidden_dim]
+            context: Combined context [batch, context_len, hidden_dim]
             context_mask: Mask for context [batch, context_len]
             targets: Target codec tokens [batch, 8, target_len] for all codebooks
             lengths: Actual target lengths [batch]
-            prefix_kv_cache: Optional pre-computed KV cache from PrefixBridge
 
         Returns:
             Weighted sum of semantic and acoustic losses
@@ -595,14 +416,12 @@ class AudioHead(nn.Module):
 
         # Forward through AR decoder for semantic codebook
         # Get hidden states for Depformer conditioning
-        # Pass prefix_kv_cache for text→audio modality bridging
         _, semantic_loss, ar_hidden = self.ar_decoder(
             context=context,
             context_mask=context_mask,
             target_ids=semantic_targets,
             target_mask=target_mask,
             return_hidden=True,
-            prefix_kv_cache=prefix_kv_cache,
         )
 
         # Train Depformer on acoustic codebooks 1-7
@@ -621,21 +440,15 @@ class AudioHead(nn.Module):
         self,
         context: torch.Tensor,
         context_mask: Optional[torch.Tensor],
-        prefix_kv_cache: Optional["DynamicCache"] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Generate codec tokens via AR decoding + Depformer.
 
         Uses AR decoder hidden states for Depformer conditioning, providing
         position-specific context at each generated timestep.
 
-        When prefix_kv_cache is provided (from prefix bridge):
-        - AR decoder attends to prefix KV cache during generation
-        - Enables text→audio modality transfer via KV conditioning
-
         Args:
-            context: Pre-NN output [batch, context_len, hidden_dim]
+            context: Combined context [batch, context_len, hidden_dim]
             context_mask: Mask for context [batch, context_len]
-            prefix_kv_cache: Optional pre-computed KV cache from PrefixBridge
 
         Returns:
             Tuple of:
@@ -656,8 +469,6 @@ class AudioHead(nn.Module):
             temperature=self.temperature,
             repetition_penalty=self.repetition_penalty,
             return_hidden=True,
-            prefix_kv_cache=prefix_kv_cache,
-            cfg_coef=self.cfg_coef,  # Classifier-free guidance
         ):
             semantic_tokens.append(token)
             ar_hidden_states.append(hidden)
@@ -753,15 +564,15 @@ class AudioHead(nn.Module):
         Call this once with the LLM embeddings, then call step() repeatedly
         to generate audio chunks with minimal latency.
 
-        Dual-path processing (Freeze-Omni style):
-        - Path 1 (Context): text_embeddings → Pre-NN → AR decoder context
-        - Path 2 (Conditioning): embeddings → Prefix Bridge → KV cache
+        Concatenation approach (Freeze-Omni style):
+        - Concatenate conditioning + text embeddings
+        - Project and process as combined context
 
         Args:
             embeddings: LLM hidden states [batch, seq_len, llm_dim]
-                Used for prefix bridge conditioning (prosody/style)
+                Conditioning information (prosody/style)
             text_embeddings: Text token embeddings [batch, text_len, llm_dim]
-                Used for Pre-NN context (linguistic content)
+                Linguistic content (what to say)
             embeddings_mask: Mask for embeddings [batch, seq_len]
             text_mask: Mask for text embeddings [batch, text_len]
             chunk_size: Number of tokens per audio chunk (1 = lowest latency)
@@ -769,19 +580,20 @@ class AudioHead(nn.Module):
         Returns:
             StreamingState to pass to step() calls
         """
-        # Path 1: Project text embeddings → context (what to say)
-        context = self.input_proj(text_embeddings)
-        context = self.hidden_dropout(context)  # Freeze-Omni style dropout
+        # Simple concatenation approach (Freeze-Omni style)
+        combined = torch.cat([embeddings, text_embeddings], dim=1)
+        context = self.input_proj(combined)
+        context = self.hidden_dropout(context)
 
-        # Path 2: Compute prefix KV cache from embeddings (how to say it)
-        prefix_kv_cache = None
-        if self.prefix_bridge is not None:
-            conditioning_hidden = self.input_proj(embeddings)
-            conditioning_hidden = self.hidden_dropout(conditioning_hidden)
-            _, prefix_kv_cache = self.prefix_bridge(
-                hidden_states=conditioning_hidden,
-                attention_mask=embeddings_mask,
-            )
+        # Combine masks
+        if embeddings_mask is not None and text_mask is not None:
+            context_mask = torch.cat([embeddings_mask, text_mask], dim=1)
+        elif embeddings_mask is not None:
+            context_mask = embeddings_mask
+        elif text_mask is not None:
+            context_mask = text_mask
+        else:
+            context_mask = None
 
         device = context.device
 
@@ -801,8 +613,7 @@ class AudioHead(nn.Module):
         # Create streaming state with delay cache
         state = StreamingState(
             context=context,
-            context_mask=text_mask,
-            prefix_kv_cache=prefix_kv_cache,
+            context_mask=context_mask,
             chunk_size=chunk_size,
             device=device,
             delay_cache=delay_cache,
@@ -811,17 +622,15 @@ class AudioHead(nn.Module):
             ungenerated_token=-1,
         )
 
-        # Initialize AR decoder generator with CFG
+        # Initialize AR decoder generator
         state.ar_generator = self.ar_decoder.generate(
             context=context,
-            context_mask=text_mask,
+            context_mask=context_mask,
             max_tokens=self.max_tokens,
             top_k=self.top_k,
             temperature=self.temperature,
             repetition_penalty=self.repetition_penalty,
             return_hidden=True,
-            prefix_kv_cache=prefix_kv_cache,
-            cfg_coef=self.cfg_coef,  # Classifier-free guidance
         )
 
         # Load Mimi if not already loaded
@@ -905,13 +714,16 @@ class AudioHead(nn.Module):
             output = self.mimi.decode(codes)
             return output.audio_values.squeeze(1)  # [1, samples]
 
-    def _flush_delay_cache(self, _state: StreamingState) -> Optional[torch.Tensor]:
+    def _flush_delay_cache(self, state: StreamingState) -> Optional[torch.Tensor]:
         """Flush remaining tokens from delay cache after generation ends.
 
         Since Depformer outputs are time-aligned and we output immediately in step(),
         there are no remaining frames to flush. This method exists for API compatibility.
+
+        Args:
+            state: StreamingState (unused, kept for API compatibility)
         """
-        # All frames are output immediately in step(), nothing to flush
+        del state  # Unused, kept for API compatibility
         return None
 
     def stop_streaming(self, state: StreamingState) -> None:
@@ -923,8 +735,6 @@ class AudioHead(nn.Module):
             state: StreamingState to clean up
         """
         state.ar_generator = None
-        state.ar_kv_cache = None
-        state.prefix_kv_cache = None
         state.semantic_tokens.clear()
         state.ar_hidden_states.clear()
         state.delay_cache = None
@@ -943,15 +753,15 @@ class AudioHead(nn.Module):
 
         Yields audio chunks as they're generated for low-latency output.
 
-        Dual-path processing (Freeze-Omni style):
-        - Path 1 (Context): text_embeddings → Pre-NN → AR decoder context
-        - Path 2 (Conditioning): embeddings → Prefix Bridge → KV cache
+        Concatenation approach (Freeze-Omni style):
+        - Concatenate conditioning + text embeddings
+        - Project and process as combined context
 
         Args:
             embeddings: LLM hidden states [batch, seq_len, llm_dim]
-                Used for prefix bridge conditioning (prosody/style)
+                Conditioning information (prosody/style)
             text_embeddings: Text token embeddings [batch, text_len, llm_dim]
-                Used for Pre-NN context (linguistic content)
+                Linguistic content (what to say)
             embeddings_mask: Mask for embeddings
             text_mask: Mask for text embeddings
             chunk_size: Tokens per chunk (1 = lowest latency, higher = better quality)

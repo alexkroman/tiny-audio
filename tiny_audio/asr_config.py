@@ -73,12 +73,10 @@ class ASRConfig(transformers.PretrainedConfig):
         # Audio Head settings (AR codec generation)
         use_audio_head: bool = False,
         freeze_audio_head: bool = False,  # Freeze entire audio head
-        use_prefix_bridge: bool = True,  # Enable prefix bridge for KV-cache fine-tuning
         max_audio_tokens: int = 500,  # Maximum codec tokens to generate
         audio_top_k: int = 50,  # Top-k sampling for audio generation
         audio_temperature: float = 1.0,  # Sampling temperature for audio generation
         audio_repetition_penalty: float = 1.1,  # Repetition penalty for audio tokens
-        audio_cfg_coef: float = 1.0,  # CFG coefficient (1.0=no CFG, >1.0=stronger conditioning)
         **kwargs,
     ):
         # Merge generation defaults with kwargs (kwargs takes precedence)
@@ -146,12 +144,10 @@ class ASRConfig(transformers.PretrainedConfig):
         # Audio Head settings (AR codec generation)
         self.use_audio_head = use_audio_head
         self.freeze_audio_head = freeze_audio_head
-        self.use_prefix_bridge = use_prefix_bridge
         self.max_audio_tokens = max_audio_tokens
         self.audio_top_k = audio_top_k
         self.audio_temperature = audio_temperature
         self.audio_repetition_penalty = audio_repetition_penalty
-        self.audio_cfg_coef = audio_cfg_coef
 
         # Generation parameters (from kwargs after merge with defaults)
         self.num_beams = kwargs.pop("num_beams")

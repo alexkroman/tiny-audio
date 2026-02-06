@@ -1,18 +1,20 @@
 # @package _global_
 # Speech-to-Speech (S2S) training: AR codec token generation
 #
-# Architecture:
-#   LLM text -> embeddings -> Pre-NN -> AR Decoder -> Mimi codes -> audio
-#                    |
-#                    +-> Prefix Bridge -> KV Cache (conditions AR Decoder)
+# Architecture (Freeze-Omni style concatenation):
+#   Conditioning embeddings + Text embeddings -> concat -> Pre-NN -> AR Decoder -> Mimi codes -> audio
+#                                                                        |
+#                                                                        +-> Depformer -> acoustic codebooks
 #
-# Prefix Bridge (Freeze-Omni style): Transforms LLM hidden states into KV cache
-# entries that condition the AR decoder, bridging text→audio modality gap.
+# Uses simple concatenation + attention masking (like Freeze-Omni) for:
+#   - Shorter gradient paths
+#   - Faster convergence
+#   - Simpler optimization
 #
 # Audio head dimensions scaled for SmolLM3-3B following Freeze-Omni ratios:
-#   - Hidden: 512 (vs 2048 LLM), Layers: 4 AR + 4 Prefix + 2 Pre-NN
+#   - Hidden: 512 (vs 2048 LLM), Layers: 4 AR + 2 Pre-NN
 #   - Depformer: 256 hidden, 4 layers
-#   - Total trainable: ~60M params (vs ~1.1B before scaling)
+#   - Total trainable: ~41M params
 #
 # All audio_head components trained from scratch (random initialization).
 #
@@ -28,7 +30,7 @@ defaults:
 
 model:
   # Start from pretrained ASR model
-  pretrained_model_path: mazesmazes/tiny-audio-s2s
+  pretrained_model_path: mazesmazes/tiny-audio-omni
   model_dtype: bfloat16
 
   projector_type: mlp
@@ -49,7 +51,6 @@ model:
   # Audio head settings (AR codec generation)
   use_audio_head: true
   freeze_audio_head: false
-  use_prefix_bridge: true  # Enable prefix bridge for text→audio KV-cache fine-tuning
   max_audio_tokens: 500  # Max codec tokens to generate
   audio_top_k: 50  # Top-k sampling
   audio_temperature: 1.0  # Sampling temperature
