@@ -14,7 +14,7 @@ datasets:
       - train.clean.100  # Use subset of train for eval (no separate eval split)
     # Column mappings
     audio_column: audio
-    text_column: text_normalized
+    text_column: text
     codes_column: codes  # Mimi codes [8 codebooks][seq_len]
     # Limit eval samples from train split
     eval_max_samples: 500

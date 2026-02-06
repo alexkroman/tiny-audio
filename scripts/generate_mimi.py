@@ -2,16 +2,23 @@
 """Generate dataset with Mimi codec codes.
 
 Encodes audio from any HuggingFace dataset to Mimi codec tokens (8 codebooks).
+Each split is pushed separately, so running again with a new split will add/update
+only that split without overwriting existing splits.
 
 Usage:
     # LibriTTS (default)
     python -m scripts.generate_mimi --output-repo user/libritts-mimi
 
-    # Process specific splits
+    # Process specific splits (each pushed as separate HF split)
     python -m scripts.generate_mimi \
         --input-dataset parler-tts/libritts_r_filtered \
         --dataset-config clean \
         --splits train.clean.100,train.clean.360 \
+        --output-repo user/libritts-mimi
+
+    # Add another split later (won't overwrite existing splits)
+    python -m scripts.generate_mimi \
+        --splits train.clean.500 \
         --output-repo user/libritts-mimi
 
     # Process a different dataset
@@ -38,7 +45,7 @@ import typer
 # Enable fast HuggingFace transfers
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-from datasets import Audio, Dataset, concatenate_datasets, load_dataset
+from datasets import Audio, Dataset, Features, Value, load_dataset
 from huggingface_hub import DatasetCard, DatasetCardData
 from tqdm import tqdm
 
@@ -276,6 +283,26 @@ def process_split(
     if audio_column != "audio" and audio_column in ds.column_names:
         ds = ds.rename_column(audio_column, "audio")
 
+    # Keep only essential columns to avoid schema mismatch issues
+    keep_cols = {"audio", "text", "text_original", "speaker_id", "chapter_id", "codes"}
+    extra_cols = [c for c in ds.column_names if c not in keep_cols]
+    if extra_cols:
+        typer.echo(f"Removing extra columns: {extra_cols}")
+        ds = ds.remove_columns(extra_cols)
+
+    # Cast to explicit features to ensure correct schema in HuggingFace
+    features = Features(
+        {
+            "audio": Audio(sampling_rate=MIMI_SAMPLE_RATE),
+            "text": Value("string"),
+            "text_original": Value("string"),
+            "speaker_id": Value("string"),
+            "chapter_id": Value("string"),
+            "codes": [[Value("int64")]],
+        }
+    )
+    ds = ds.cast(features)
+
     typer.echo(f"Processed {len(ds)} samples")
     return ds
 
@@ -357,21 +384,18 @@ def main(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # Concatenate all splits
-    typer.echo(f"\nConcatenating {len(processed_datasets)} splits...")
-    final_ds = concatenate_datasets(processed_datasets)
-    typer.echo(f"Final dataset: {len(final_ds)} samples with codes")
-
+    # Push each split separately (allows incremental updates)
     if push:
-        typer.echo(f"\nPushing to {output_repo}...")
-        final_ds.push_to_hub(output_repo, private=False)
+        for split_name, processed in zip(split_list, processed_datasets):
+            typer.echo(f"\nPushing split '{split_name}' to {output_repo}...")
+            processed.push_to_hub(output_repo, split=split_name, private=False)
 
         typer.echo("Updating dataset card...")
         create_dataset_card(
             output_repo,
             input_dataset,
             split_list,
-            len(final_ds),
+            total_samples,
             text_column,
         )
 

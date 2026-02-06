@@ -49,10 +49,10 @@ class TestAudioHeadInit:
 
         assert head.llm_dim == 1536
 
-    def test_pre_nn_created(self, small_audio_head):
-        """Test that Pre-NN is created."""
-        assert hasattr(small_audio_head, "pre_nn")
-        assert small_audio_head.pre_nn is not None
+    def test_depformer_created(self, small_audio_head):
+        """Test that Depformer is created."""
+        assert hasattr(small_audio_head, "depformer")
+        assert small_audio_head.depformer is not None
 
     def test_ar_decoder_created(self, small_audio_head):
         """Test that AR decoder is created."""
@@ -106,8 +106,9 @@ class TestAudioHeadStateDict:
 
         expected_prefixes = {
             "input_proj",
-            "pre_nn",
+            "embedding",
             "ar_decoder",
+            "depformer",
         }
         assert expected_prefixes.issubset(prefixes)
 
@@ -145,7 +146,8 @@ class TestForwardTraining:
         )
         lengths = torch.tensor([30, 25])
 
-        loss = small_audio_head(hidden, codec_targets=targets, codec_lengths=lengths)
+        # Pass hidden as both embeddings and text_embeddings
+        loss = small_audio_head(hidden, hidden, codec_targets=targets, codec_lengths=lengths)
 
         assert loss.dim() == 0, "Loss should be a scalar"
         assert not torch.isnan(loss), "Loss should not be NaN"
@@ -162,7 +164,7 @@ class TestForwardTraining:
         )
         lengths = torch.tensor([30, 25])
 
-        loss = small_audio_head(hidden, codec_targets=targets, codec_lengths=lengths)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets, codec_lengths=lengths)
         loss.backward()
 
         assert hidden.grad is not None
@@ -175,7 +177,7 @@ class TestForwardTraining:
         targets = torch.randint(0, small_audio_head.vocab_size, (1, num_codebooks, 30))
         lengths = torch.tensor([30])
 
-        loss = small_audio_head(hidden, codec_targets=targets, codec_lengths=lengths)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets, codec_lengths=lengths)
 
         assert loss.dim() == 0
         assert not torch.isnan(loss)
@@ -190,7 +192,7 @@ class TestForwardTraining:
             0, small_audio_head.vocab_size, (batch_size, num_codebooks, audio_len)
         )
 
-        loss = small_audio_head(hidden, codec_targets=targets, codec_lengths=None)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets, codec_lengths=None)
 
         assert loss.dim() == 0
         assert not torch.isnan(loss)
@@ -206,7 +208,7 @@ class TestForwardInference:
 
         hidden = torch.randn(1, 10, small_audio_head.llm_dim)
 
-        codes, _ = small_audio_head(hidden)  # No targets = inference
+        codes, _ = small_audio_head(hidden, hidden)  # No targets = inference
 
         assert codes.dtype == torch.long
         assert codes.shape[0] == 1  # Batch size preserved
@@ -219,7 +221,7 @@ class TestForwardInference:
         small_audio_head.max_tokens = 10
         hidden = torch.randn(1, 10, small_audio_head.llm_dim)
 
-        codes, _ = small_audio_head(hidden)
+        codes, _ = small_audio_head(hidden, hidden)
 
         assert codes.shape[0] == 1
 
@@ -234,7 +236,7 @@ class TestEdgeCases:
         targets = torch.randint(0, small_audio_head.vocab_size, (1, num_codebooks, 3))
         lengths = torch.tensor([3])
 
-        loss = small_audio_head(hidden, codec_targets=targets, codec_lengths=lengths)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets, codec_lengths=lengths)
 
         assert not torch.isnan(loss)
 
@@ -245,7 +247,7 @@ class TestEdgeCases:
         targets = torch.randint(0, small_audio_head.vocab_size, (1, num_codebooks, 200))
         lengths = torch.tensor([200])
 
-        loss = small_audio_head(hidden, codec_targets=targets, codec_lengths=lengths)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets, codec_lengths=lengths)
 
         assert not torch.isnan(loss)
 
@@ -257,7 +259,7 @@ class TestEdgeCases:
         targets = torch.randint(0, small_audio_head.vocab_size, (batch_size, num_codebooks, 80))
         lengths = torch.tensor([80, 60, 40])
 
-        loss = small_audio_head(hidden, codec_targets=targets, codec_lengths=lengths)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets, codec_lengths=lengths)
 
         assert not torch.isnan(loss)
 
@@ -284,7 +286,7 @@ class TestDevicePlacement:
         )
         lengths = torch.tensor([30, 25], device=device)
 
-        loss = small_audio_head(hidden, codec_targets=targets, codec_lengths=lengths)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets, codec_lengths=lengths)
 
         assert loss.device == device
 
@@ -329,16 +331,16 @@ class TestARTraining:
         optimizer = torch.optim.Adam(small_audio_head.parameters(), lr=1e-3)
 
         # Get initial loss
-        loss_initial = small_audio_head(hidden, codec_targets=targets).item()
+        loss_initial = small_audio_head(hidden, hidden, codec_targets=targets).item()
 
         # Train for a few steps
         for _ in range(10):
             optimizer.zero_grad()
-            loss = small_audio_head(hidden, codec_targets=targets)
+            loss = small_audio_head(hidden, hidden, codec_targets=targets)
             loss.backward()
             optimizer.step()
 
-        loss_final = small_audio_head(hidden, codec_targets=targets).item()
+        loss_final = small_audio_head(hidden, hidden, codec_targets=targets).item()
 
         # Loss should decrease (model is learning)
         assert loss_final < loss_initial
@@ -357,7 +359,7 @@ class TestNumericalStability:
             0, small_audio_head.vocab_size, (batch_size, num_codebooks, audio_len)
         )
 
-        loss = small_audio_head(hidden, codec_targets=targets)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets)
 
         assert not torch.isnan(loss), "NaN with large inputs"
         assert not torch.isinf(loss), "Inf with large inputs"
@@ -372,7 +374,7 @@ class TestNumericalStability:
             0, small_audio_head.vocab_size, (batch_size, num_codebooks, audio_len)
         )
 
-        loss = small_audio_head(hidden, codec_targets=targets)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets)
 
         assert not torch.isnan(loss), "NaN with small inputs"
 
@@ -393,7 +395,7 @@ class TestBatchSizeEdgeCases:
         )
         lengths = torch.randint(20, audio_len + 1, (batch_size,))
 
-        loss = small_audio_head(hidden, codec_targets=targets, codec_lengths=lengths)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets, codec_lengths=lengths)
 
         assert not torch.isnan(loss)
         assert loss.dim() == 0
@@ -408,7 +410,7 @@ class TestGradientFlow:
         hidden = torch.randn(2, 10, small_audio_head.llm_dim, requires_grad=True)
         targets = torch.randint(0, small_audio_head.vocab_size, (2, num_codebooks, 30))
 
-        loss = small_audio_head(hidden, codec_targets=targets)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets)
         loss.backward()
 
         # Check all trainable parameters have gradients
@@ -423,7 +425,7 @@ class TestGradientFlow:
         hidden = torch.randn(2, 10, small_audio_head.llm_dim, requires_grad=True)
         targets = torch.randint(0, small_audio_head.vocab_size, (2, num_codebooks, 30))
 
-        loss = small_audio_head(hidden, codec_targets=targets)
+        loss = small_audio_head(hidden, hidden, codec_targets=targets)
         loss.backward()
 
         for name, param in small_audio_head.named_parameters():
@@ -472,7 +474,7 @@ class TestGenerationParameters:
         hidden = torch.randn(1, 5, 256)
 
         # Should not crash with low top_k
-        codes, _ = head(hidden)
+        codes, _ = head(hidden, hidden)
         assert codes.shape[0] == 1
 
     def test_temperature_affects_generation(self, audio_head_config):
@@ -484,7 +486,7 @@ class TestGenerationParameters:
         hidden = torch.randn(1, 5, 256)
 
         # Should not crash with low temperature
-        codes, _ = head(hidden)
+        codes, _ = head(hidden, hidden)
         assert codes.shape[0] == 1
 
     def test_repetition_penalty_affects_generation(self, audio_head_config):
@@ -496,5 +498,5 @@ class TestGenerationParameters:
         hidden = torch.randn(1, 5, 256)
 
         # Should not crash with high repetition penalty
-        codes, _ = head(hidden)
+        codes, _ = head(hidden, hidden)
         assert codes.shape[0] == 1

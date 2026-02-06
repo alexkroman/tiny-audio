@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Iterator, Optional
 import torch
 import torch.nn as nn
 
-from .modules.ar_decoder import CodecARDecoder, PreNN
+from .modules.ar_decoder import CodecARDecoder
 from .modules.depformer import Depformer
 from .modules.prefix_bridge import PrefixBridge
 
@@ -37,11 +37,78 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def delay_sequence(
+    delays: torch.Tensor,
+    codes: torch.Tensor,
+    initial_token: int,
+) -> torch.Tensor:
+    """Apply per-codebook delays to a sequence (Moshi-style).
+
+    At AR position t, we want the token for audio time (t - delay).
+    So delayed[k, t] = codes[k, t - delays[k]] if t >= delays[k] else initial_token.
+
+    Args:
+        delays: Per-codebook delays [num_codebooks]
+        codes: Input codes [batch, num_codebooks, seq_len]
+        initial_token: Token to use for positions before delay
+
+    Returns:
+        Delayed codes [batch, num_codebooks, seq_len]
+    """
+    _, num_cb, seq_len = codes.shape
+    delayed = torch.full_like(codes, initial_token)
+
+    for k in range(num_cb):
+        delay = int(delays[k].item())
+        if delay < seq_len:
+            # delayed[k, t] = codes[k, t - delay] for t >= delay
+            delayed[:, k, delay:] = codes[:, k, : seq_len - delay]
+
+    return delayed
+
+
+def undelay_sequence(
+    delays: torch.Tensor,
+    codes: torch.Tensor,
+    fill_value: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Remove per-codebook delays from a sequence (Moshi-style).
+
+    Inverse of delay_sequence. Shifts each codebook left by its delay.
+    undelayed[k, t] = codes[k, t + delays[k]] if t + delays[k] < seq_len else fill_value.
+
+    Args:
+        delays: Per-codebook delays [num_codebooks]
+        codes: Delayed codes [batch, num_codebooks, seq_len]
+        fill_value: Value for positions past end after shift
+
+    Returns:
+        Tuple of:
+            - Undelayed codes [batch, num_codebooks, seq_len]
+            - Valid mask [batch, num_codebooks, seq_len] (True where data exists)
+    """
+    batch, num_cb, seq_len = codes.shape
+    device = codes.device
+    undelayed = torch.full_like(codes, fill_value)
+    valid = torch.zeros(batch, num_cb, seq_len, dtype=torch.bool, device=device)
+
+    for k in range(num_cb):
+        delay = int(delays[k].item())
+        if delay < seq_len:
+            valid_len = seq_len - delay
+            # undelayed[k, t] = codes[k, t + delay]
+            undelayed[:, k, :valid_len] = codes[:, k, delay:]
+            valid[:, k, :valid_len] = True
+
+    return undelayed, valid
+
+
 @dataclass
 class StreamingState:
     """State for streaming audio generation (Moshi-style).
 
     Maintains all state needed between step() calls for low-latency streaming.
+    Includes delay-based cache for proper multi-codebook AR modeling.
     """
 
     # Generation context (from Pre-NN)
@@ -59,6 +126,17 @@ class StreamingState:
     semantic_tokens: list[int] = field(default_factory=list)
     ar_hidden_states: list[torch.Tensor] = field(default_factory=list)
 
+    # Delay-based cache (Moshi-style)
+    # Cache stores generated tokens with delay alignment
+    # Shape: [batch, num_codebooks, max_delay + buffer_size]
+    delay_cache: Optional[torch.Tensor] = None
+    delays: Optional[torch.Tensor] = None  # Per-codebook delays
+    offset: int = 0  # Current generation offset (AR position)
+    max_delay: int = 0  # Maximum delay across all codebooks
+
+    # Special token for ungenerated positions
+    ungenerated_token: int = -1
+
     # Streaming parameters
     chunk_size: int = 1  # Tokens per audio chunk (1 = lowest latency)
     tokens_generated: int = 0
@@ -67,14 +145,41 @@ class StreamingState:
     # Device
     device: torch.device = field(default_factory=lambda: torch.device("cpu"))
 
+    def write_to_cache(self, codebook_idx: int, token: int):
+        """Write a token to the delay cache at current offset + delay."""
+        if self.delay_cache is None or self.delays is None:
+            return
+        delay = int(self.delays[codebook_idx].item())
+        cache_size = self.delay_cache.shape[2]
+        write_pos = (self.offset + delay) % cache_size
+        self.delay_cache[0, codebook_idx, write_pos] = token
+
+    def read_from_cache(self) -> Optional[torch.Tensor]:
+        """Read aligned tokens from cache, accounting for delays.
+
+        Returns None if we haven't generated enough tokens yet (offset <= max_delay).
+        """
+        if self.delay_cache is None:
+            return None
+        if self.offset <= self.max_delay:
+            return None  # Not enough tokens generated yet
+
+        cache_size = self.delay_cache.shape[2]
+        # Read position is offset - max_delay (oldest valid position)
+        read_pos = (self.offset - self.max_delay) % cache_size
+        return self.delay_cache[:, :, read_pos]  # [1, num_codebooks]
+
+    def advance(self):
+        """Advance the offset after generating all codebooks for this step."""
+        self.offset += 1
+
 
 class AudioHead(nn.Module):
     """AR codec head: LLM embeddings -> Mimi codes -> audio.
 
-    Architecture:
+    Architecture (Freeze-Omni style):
         - input_proj: Projects LLM embeddings to hidden_dim
-        - pre_nn: 3-layer bidirectional transformer for context processing
-        - ar_decoder: 6-layer causal transformer for semantic codebook 0
+        - ar_decoder: Includes Pre-NN (num_layers//2 bidirectional) + AR layers (causal)
         - depformer: 4-layer transformer for acoustic codebooks 1-7
         - Mimi decoder (frozen) for codes -> audio
 
@@ -99,10 +204,8 @@ class AudioHead(nn.Module):
     INTERMEDIATE_DIM = 2048  # FFN intermediate dimension (4x hidden)
     NUM_HEADS = 8  # Attention heads (64 dim per head)
 
-    # Pre-NN config (Freeze-Omni doesn't have this, keep minimal)
-    PRE_NN_LAYERS = 2
-
     # AR Decoder config (for semantic codebook 0) - matches Freeze-Omni's 4 layers
+    # Pre-NN layers are AR_LAYERS // 2 (built into CodecARDecoder, Freeze-Omni style)
     AR_LAYERS = 4
     VOCAB_SIZE = 2048  # Mimi codebook size
 
@@ -122,6 +225,20 @@ class AudioHead(nn.Module):
     DEFAULT_TOP_K = 50
     DEFAULT_TEMPERATURE = 1.0
     DEFAULT_REPETITION_PENALTY = 1.1
+    DEFAULT_CFG_COEF = 1.0  # 1.0 = no CFG, >1.0 = stronger conditioning
+
+    # Moshi-style delays for multi-codebook AR (audio-time alignment)
+    # delays[k] = how many AR steps codebook k is delayed
+    # Semantic (codebook 0): delay 0 (generated first, sets the content)
+    # Acoustic (codebooks 1-7): delay 1 (can condition on semantic at same audio time)
+    # This flat delay pattern enables parallel acoustic generation after semantic
+    DELAYS = [0, 1, 1, 1, 1, 1, 1, 1]  # [semantic, acoustic_1, ..., acoustic_7]
+
+    # Cache buffer size for streaming (must be > max_delay)
+    DELAY_CACHE_BUFFER = 4
+
+    # Dropout rate (Freeze-Omni style)
+    DROPOUT_RATE = 0.1
 
     # Mimi codec constants
     MIMI_SAMPLE_RATE = 24000  # Expected sample rate for Mimi
@@ -147,12 +264,17 @@ class AudioHead(nn.Module):
         self.repetition_penalty = getattr(
             config, "audio_repetition_penalty", self.DEFAULT_REPETITION_PENALTY
         )
+        self.cfg_coef = getattr(config, "audio_cfg_coef", self.DEFAULT_CFG_COEF)
 
         # Input projection: LLM dim -> hidden dim (identity if dims match)
         if self.llm_dim != self.hidden_dim:
             self.input_proj = nn.Linear(self.llm_dim, self.hidden_dim, bias=False)
         else:
             self.input_proj = nn.Identity()
+
+        # Hidden state dropout (Freeze-Omni style)
+        # Applied after input projection, before Pre-NN processing
+        self.hidden_dropout = nn.Dropout(p=self.DROPOUT_RATE)
 
         # Shared embedding for all tokens (Freeze-Omni style)
         # vocab_size + 4 special tokens: BOS, SOS, EOS, PAD
@@ -163,15 +285,8 @@ class AudioHead(nn.Module):
             padding_idx=self.vocab_size + 3,  # PAD token
         )
 
-        # Pre-NN: Process LLM hidden states with bidirectional attention
-        self.pre_nn = PreNN(
-            hidden_size=self.hidden_dim,
-            num_layers=self.PRE_NN_LAYERS,
-            num_heads=self.NUM_HEADS,
-            intermediate_size=self.INTERMEDIATE_DIM,
-        )
-
         # AR Decoder: Generate semantic codebook 0 autoregressively
+        # Includes Pre-NN layers internally (Freeze-Omni style: num_layers // 2)
         # Uses shared embedding from AudioHead
         self.ar_decoder = CodecARDecoder(
             hidden_size=self.hidden_dim,
@@ -250,7 +365,7 @@ class AudioHead(nn.Module):
 
         When enabled:
         - Prefix bridge layers are trainable (if present)
-        - Main components (input_proj, pre_nn, ar_decoder, depformer) are frozen
+        - Main components (input_proj, ar_decoder with pre_nn, depformer) are frozen
 
         This enables efficient fine-tuning where only the prefix bridge
         learns to transfer text-space hidden states to audio decoder space.
@@ -265,19 +380,19 @@ class AudioHead(nn.Module):
             )
 
         if freeze_main_components:
-            # Freeze main components
+            # Freeze main components (ar_decoder includes pre_nn layers)
             self.input_proj.requires_grad_(False)
-            self.pre_nn.requires_grad_(False)
             self.ar_decoder.requires_grad_(False)
             self.depformer.requires_grad_(False)
 
             # Set to eval mode to disable dropout etc.
             self.input_proj.eval()
-            self.pre_nn.eval()
             self.ar_decoder.eval()
             self.depformer.eval()
 
-            logger.info("Prefix tuning enabled: froze input_proj, pre_nn, ar_decoder, depformer")
+            logger.info(
+                "Prefix tuning enabled: froze input_proj, ar_decoder (with pre_nn), depformer"
+            )
 
         # Ensure prefix bridge is trainable
         self.prefix_bridge.requires_grad_(True)
@@ -288,14 +403,32 @@ class AudioHead(nn.Module):
     def disable_prefix_tuning(self):
         """Disable prefix tuning mode, making all components trainable."""
         self.input_proj.requires_grad_(True)
-        self.pre_nn.requires_grad_(True)
-        self.ar_decoder.requires_grad_(True)
+        self.ar_decoder.requires_grad_(True)  # Includes pre_nn layers
         self.depformer.requires_grad_(True)
 
         if self.prefix_bridge is not None:
             self.prefix_bridge.requires_grad_(True)
 
         logger.info("Prefix tuning disabled: all components are trainable")
+
+    def set_cfg(self, cfg_coef: float):
+        """Set the classifier-free guidance coefficient at runtime.
+
+        CFG steers generation toward conditioned output by blending conditioned
+        and unconditioned logits: logits = uncond + cfg_coef * (cond - uncond)
+
+        Args:
+            cfg_coef: Guidance strength.
+                - 1.0: No guidance (default, uses conditioned logits only)
+                - >1.0: Stronger guidance toward conditioning
+                - <1.0: Weaker guidance (unusual)
+
+        Example:
+            >>> audio_head.set_cfg(1.5)  # Moderate guidance
+            >>> audio_head.set_cfg(2.0)  # Strong guidance
+        """
+        self.cfg_coef = cfg_coef
+        logger.info(f"Set CFG coefficient to {cfg_coef}")
 
     def state_dict(self, destination=None, prefix="", keep_vars=False):
         """Save state dict, excluding tied ar_decoder.embedding (shares with self.embedding)."""
@@ -357,10 +490,10 @@ class AudioHead(nn.Module):
     def forward(
         self,
         embeddings: torch.Tensor,
+        text_embeddings: torch.Tensor,
         codec_targets: Optional[torch.Tensor] = None,
         codec_lengths: Optional[torch.Tensor] = None,
         embeddings_mask: Optional[torch.Tensor] = None,
-        text_embeddings: Optional[torch.Tensor] = None,
         text_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for training or inference.
@@ -371,61 +504,45 @@ class AudioHead(nn.Module):
         - Path 2 (Conditioning): embeddings → Prefix Bridge → KV cache
           Provides prosodic/stylistic conditioning (how to say it)
 
-        If text_embeddings is not provided, falls back to single-path mode
-        where embeddings is used for both paths.
-
         Args:
             embeddings: LLM hidden states [batch, seq_len, llm_dim]
                 Used for prefix bridge conditioning (prosody/style)
+            text_embeddings: Text token embeddings [batch, text_len, llm_dim]
+                Used for Pre-NN context (linguistic content)
             codec_targets: Target Mimi codes for training.
                 - [batch, 8, audio_seq_len] for full training (all codebooks)
                 - [batch, audio_seq_len] for legacy (codebook 0 only)
             codec_lengths: Actual audio lengths per sample [batch]
             embeddings_mask: Mask for embeddings [batch, seq_len]
-            text_embeddings: Optional text token embeddings [batch, text_len, llm_dim]
-                Used for Pre-NN context (linguistic content)
-                If None, uses embeddings for context instead (single-path mode)
-            text_mask: Optional mask for text_embeddings [batch, text_len]
+            text_mask: Mask for text_embeddings [batch, text_len]
 
         Returns:
             Training: scalar cross-entropy loss (weighted combination of all codebooks)
             Inference: tuple of (generated codes [batch, 8, gen_len], empty tensor)
         """
-        # Dual-path processing:
+        # Dual-path processing (Freeze-Omni style):
         # Path 1: Text embeddings → Pre-NN → context (what to say)
         # Path 2: Hidden states → Prefix Bridge → KV cache (how to say it)
 
-        if text_embeddings is not None:
-            # Dual-path mode: separate inputs for context and conditioning
-            context_input = text_embeddings
-            context_mask = text_mask
-            conditioning_input = embeddings
-            conditioning_mask = embeddings_mask
-        else:
-            # Single-path mode: same input for both (backward compatible)
-            context_input = embeddings
-            context_mask = embeddings_mask
-            conditioning_input = embeddings
-            conditioning_mask = embeddings_mask
+        # Path 1: Project text embeddings → context (what to say)
+        context = self.input_proj(text_embeddings)
+        context = self.hidden_dropout(context)  # Freeze-Omni style dropout
 
-        # Path 1: Project and process through Pre-NN for context
-        hidden = self.input_proj(context_input)
-        context = self.pre_nn(hidden, attention_mask=context_mask)
-
-        # Path 2: Compute prefix KV cache from conditioning input
+        # Path 2: Compute prefix KV cache from embeddings (how to say it)
         prefix_kv_cache = None
         if self.prefix_bridge is not None:
-            conditioning_hidden = self.input_proj(conditioning_input)
+            conditioning_hidden = self.input_proj(embeddings)
+            conditioning_hidden = self.hidden_dropout(conditioning_hidden)
             _, prefix_kv_cache = self.prefix_bridge(
                 hidden_states=conditioning_hidden,
-                attention_mask=conditioning_mask,
+                attention_mask=embeddings_mask,
             )
 
         if codec_targets is not None:
             return self._compute_loss(
-                context, context_mask, codec_targets, codec_lengths, prefix_kv_cache
+                context, text_mask, codec_targets, codec_lengths, prefix_kv_cache
             )
-        return self._generate(context, context_mask, prefix_kv_cache)
+        return self._generate(context, text_mask, prefix_kv_cache)
 
     def _compute_loss(
         self,
@@ -537,6 +654,7 @@ class AudioHead(nn.Module):
             repetition_penalty=self.repetition_penalty,
             return_hidden=True,
             prefix_kv_cache=prefix_kv_cache,
+            cfg_coef=self.cfg_coef,  # Classifier-free guidance
         ):
             semantic_tokens.append(token)
             ar_hidden_states.append(hidden)
@@ -550,6 +668,7 @@ class AudioHead(nn.Module):
         semantic = torch.tensor([semantic_tokens], device=device)  # [1, seq_len]
         # Stack AR hidden states: [1, seq_len, hidden_dim]
         ar_hidden = torch.cat(ar_hidden_states, dim=1)
+        seq_len = semantic.shape[1]
 
         # Generate acoustic codebooks 1-7 using Depformer
         # Now using position-specific AR decoder hidden states
@@ -560,8 +679,30 @@ class AudioHead(nn.Module):
             top_k=self.top_k,
         )  # [1, 7, seq_len]
 
-        # Combine semantic + acoustic: [1, 8, seq_len]
+        # Combine all codebooks: [1, 8, seq_len]
         all_codes = torch.cat([semantic.unsqueeze(1), acoustic], dim=1)
+
+        # Apply Moshi-style delay alignment using undelay_sequence
+        # This shifts each codebook to align audio time
+        delays = torch.tensor(self.DELAYS, dtype=torch.long, device=device)
+        max_delay = int(delays.max().item())
+
+        if max_delay > 0 and seq_len > max_delay:
+            # Undelay to align all codebooks to audio time
+            aligned_codes, valid_mask = undelay_sequence(delays, all_codes, fill_value=0)
+
+            # Trim to valid length (seq_len - max_delay)
+            valid_len = seq_len - max_delay
+            aligned_codes = aligned_codes[:, :, :valid_len]
+
+            # Fill trailing invalid positions by repeating last valid frame
+            # This avoids audio artifacts from abrupt endings
+            if valid_len > 0:
+                last_frame = aligned_codes[:, :, -1:]
+                padding = last_frame.expand(-1, -1, max_delay)
+                aligned_codes = torch.cat([aligned_codes, padding], dim=2)
+
+            return aligned_codes, torch.empty(0, device=device)
 
         return all_codes, torch.empty(0, device=device)
 
@@ -620,8 +761,8 @@ class AudioHead(nn.Module):
     def start_streaming(
         self,
         embeddings: torch.Tensor,
+        text_embeddings: torch.Tensor,
         embeddings_mask: Optional[torch.Tensor] = None,
-        text_embeddings: Optional[torch.Tensor] = None,
         text_mask: Optional[torch.Tensor] = None,
         chunk_size: int = 1,
     ) -> StreamingState:
@@ -630,62 +771,75 @@ class AudioHead(nn.Module):
         Call this once with the LLM embeddings, then call step() repeatedly
         to generate audio chunks with minimal latency.
 
+        Dual-path processing (Freeze-Omni style):
+        - Path 1 (Context): text_embeddings → Pre-NN → AR decoder context
+        - Path 2 (Conditioning): embeddings → Prefix Bridge → KV cache
+
         Args:
             embeddings: LLM hidden states [batch, seq_len, llm_dim]
+                Used for prefix bridge conditioning (prosody/style)
+            text_embeddings: Text token embeddings [batch, text_len, llm_dim]
+                Used for Pre-NN context (linguistic content)
             embeddings_mask: Mask for embeddings [batch, seq_len]
-            text_embeddings: Optional text embeddings for dual-path
-            text_mask: Optional mask for text embeddings
+            text_mask: Mask for text embeddings [batch, text_len]
             chunk_size: Number of tokens per audio chunk (1 = lowest latency)
 
         Returns:
             StreamingState to pass to step() calls
         """
-        # Dual-path processing (same as forward())
-        if text_embeddings is not None:
-            context_input = text_embeddings
-            context_mask = text_mask
-            conditioning_input = embeddings
-            conditioning_mask = embeddings_mask
-        else:
-            context_input = embeddings
-            context_mask = embeddings_mask
-            conditioning_input = embeddings
-            conditioning_mask = embeddings_mask
+        # Path 1: Project text embeddings → context (what to say)
+        context = self.input_proj(text_embeddings)
+        context = self.hidden_dropout(context)  # Freeze-Omni style dropout
 
-        # Path 1: Project and process through Pre-NN for context
-        hidden = self.input_proj(context_input)
-        context = self.pre_nn(hidden, attention_mask=context_mask)
-
-        # Path 2: Compute prefix KV cache from conditioning input
+        # Path 2: Compute prefix KV cache from embeddings (how to say it)
         prefix_kv_cache = None
         if self.prefix_bridge is not None:
-            conditioning_hidden = self.input_proj(conditioning_input)
+            conditioning_hidden = self.input_proj(embeddings)
+            conditioning_hidden = self.hidden_dropout(conditioning_hidden)
             _, prefix_kv_cache = self.prefix_bridge(
                 hidden_states=conditioning_hidden,
-                attention_mask=conditioning_mask,
+                attention_mask=embeddings_mask,
             )
 
         device = context.device
 
-        # Create streaming state
-        state = StreamingState(
-            context=context,
-            context_mask=context_mask,
-            prefix_kv_cache=prefix_kv_cache,
-            chunk_size=chunk_size,
+        # Initialize Moshi-style delays
+        delays = torch.tensor(self.DELAYS, dtype=torch.long, device=device)
+        max_delay = int(delays.max().item())
+
+        # Initialize delay cache: [1, num_codebooks, max_delay + buffer]
+        cache_size = max_delay + self.DELAY_CACHE_BUFFER
+        delay_cache = torch.full(
+            (1, self.num_codebooks, cache_size),
+            -1,  # Ungenerated token marker
+            dtype=torch.long,
             device=device,
         )
 
-        # Initialize AR decoder generator
+        # Create streaming state with delay cache
+        state = StreamingState(
+            context=context,
+            context_mask=text_mask,
+            prefix_kv_cache=prefix_kv_cache,
+            chunk_size=chunk_size,
+            device=device,
+            delay_cache=delay_cache,
+            delays=delays,
+            max_delay=max_delay,
+            ungenerated_token=-1,
+        )
+
+        # Initialize AR decoder generator with CFG
         state.ar_generator = self.ar_decoder.generate(
             context=context,
-            context_mask=context_mask,
+            context_mask=text_mask,
             max_tokens=self.max_tokens,
             top_k=self.top_k,
             temperature=self.temperature,
             repetition_penalty=self.repetition_penalty,
             return_hidden=True,
             prefix_kv_cache=prefix_kv_cache,
+            cfg_coef=self.cfg_coef,  # Classifier-free guidance
         )
 
         # Load Mimi if not already loaded
@@ -695,58 +849,118 @@ class AudioHead(nn.Module):
         return state
 
     def step(self, state: StreamingState) -> Optional[torch.Tensor]:
-        """Generate one chunk of audio (Moshi-style streaming).
+        """Generate one chunk of audio (Moshi-style delay-based streaming).
+
+        Uses delay-based cache for proper multi-codebook AR modeling.
+        Each codebook has its own delay, allowing acoustic codebooks to
+        condition on semantic tokens at the same audio time.
 
         Call this repeatedly after start_streaming() to generate audio
-        with minimal latency. Returns None when generation is complete.
+        with minimal latency. Returns None until enough tokens are generated
+        to produce aligned output (offset > max_delay).
 
         Args:
             state: StreamingState from start_streaming()
 
         Returns:
-            Audio waveform chunk [1, samples] or None if finished
+            Audio waveform chunk [1, samples] or None if not ready/finished
         """
         if state.finished:
-            return None
+            # Flush remaining tokens from delay cache
+            return self._flush_delay_cache(state)
 
-        # Generate chunk_size tokens
-        tokens_this_chunk = []
-        hidden_this_chunk = []
+        # Generate chunk_size AR steps
+        output_codes_list = []
 
         for _ in range(state.chunk_size):
             try:
-                token, hidden = next(state.ar_generator)
-                tokens_this_chunk.append(token)
-                hidden_this_chunk.append(hidden)
-                state.semantic_tokens.append(token)
+                # Step 1: Generate semantic token (codebook 0) from AR decoder
+                semantic_token, hidden = next(state.ar_generator)
+                state.semantic_tokens.append(semantic_token)
                 state.ar_hidden_states.append(hidden)
                 state.tokens_generated += 1
+
+                # Step 2: Write semantic token to delay cache
+                state.write_to_cache(0, semantic_token)
+
+                # Step 3: Generate acoustic tokens (codebooks 1-7) using Depformer
+                # Depformer needs hidden state from AR decoder
+                ar_hidden = hidden  # [1, 1, hidden_dim]
+                semantic_tensor = torch.tensor([[semantic_token]], device=state.device)
+
+                acoustic = self.depformer.generate_batch(
+                    main_hidden=ar_hidden,
+                    semantic_tokens=semantic_tensor,
+                    temperature=self.temperature,
+                    top_k=self.top_k,
+                )  # [1, 7, 1]
+
+                # Step 4: Write acoustic tokens to delay cache
+                for cb_idx in range(self.NUM_ACOUSTIC_CODEBOOKS):
+                    token = int(acoustic[0, cb_idx, 0].item())
+                    state.write_to_cache(cb_idx + 1, token)  # +1 for offset past semantic
+
+                # Step 5: Try to read aligned output from cache
+                aligned_codes = state.read_from_cache()
+                if aligned_codes is not None:
+                    output_codes_list.append(aligned_codes)
+
+                # Step 6: Advance offset for next step
+                state.advance()
+
             except StopIteration:
                 state.finished = True
                 break
 
-        if not tokens_this_chunk:
+        if not output_codes_list:
+            # Not enough tokens generated yet (offset <= max_delay)
             return None
 
-        # Convert to tensors
-        semantic = torch.tensor([tokens_this_chunk], device=state.device)  # [1, chunk]
-        ar_hidden = torch.cat(hidden_this_chunk, dim=1)  # [1, chunk, hidden]
-
-        # Generate acoustic codebooks for this chunk
-        acoustic = self.depformer.generate_batch(
-            main_hidden=ar_hidden,
-            semantic_tokens=semantic,
-            temperature=self.temperature,
-            top_k=self.top_k,
-        )  # [1, 7, chunk]
-
-        # Combine: [1, 8, chunk]
-        codes = torch.cat([semantic.unsqueeze(1), acoustic], dim=1)
+        # Stack aligned codes: [1, num_codebooks, num_frames]
+        codes = torch.stack(output_codes_list, dim=2)
 
         # Decode to audio
         with torch.no_grad():
             output = self.mimi.decode(codes)
             return output.audio_values.squeeze(1)  # [1, samples]
+
+    def _flush_delay_cache(self, state: StreamingState) -> Optional[torch.Tensor]:
+        """Flush remaining tokens from delay cache after generation ends.
+
+        Called when AR decoder finishes to output any remaining aligned frames.
+        """
+        if state.delay_cache is None:
+            return None
+
+        # Collect remaining valid frames from cache
+        output_codes_list = []
+        cache_size = state.delay_cache.shape[2]
+
+        # Continue reading until we've exhausted all generated positions
+        while True:
+            read_pos = (state.offset - state.max_delay) % cache_size
+            codes = state.delay_cache[:, :, read_pos]
+
+            # Check if this position has valid data (not ungenerated)
+            if (codes == state.ungenerated_token).any():
+                break
+
+            output_codes_list.append(codes)
+            state.offset += 1
+
+            # Safety: don't loop forever
+            if len(output_codes_list) > state.max_delay + 10:
+                break
+
+        if not output_codes_list:
+            return None
+
+        # Stack and decode
+        codes = torch.stack(output_codes_list, dim=2)
+
+        with torch.no_grad():
+            output = self.mimi.decode(codes)
+            return output.audio_values.squeeze(1)
 
     def stop_streaming(self, state: StreamingState) -> None:
         """Clean up streaming state.
@@ -761,13 +975,15 @@ class AudioHead(nn.Module):
         state.prefix_kv_cache = None
         state.semantic_tokens.clear()
         state.ar_hidden_states.clear()
+        state.delay_cache = None
+        state.delays = None
         state.finished = True
 
     def generate_streaming(
         self,
         embeddings: torch.Tensor,
+        text_embeddings: torch.Tensor,
         embeddings_mask: Optional[torch.Tensor] = None,
-        text_embeddings: Optional[torch.Tensor] = None,
         text_mask: Optional[torch.Tensor] = None,
         chunk_size: int = 1,
     ) -> Iterator[torch.Tensor]:
@@ -775,11 +991,17 @@ class AudioHead(nn.Module):
 
         Yields audio chunks as they're generated for low-latency output.
 
+        Dual-path processing (Freeze-Omni style):
+        - Path 1 (Context): text_embeddings → Pre-NN → AR decoder context
+        - Path 2 (Conditioning): embeddings → Prefix Bridge → KV cache
+
         Args:
             embeddings: LLM hidden states [batch, seq_len, llm_dim]
+                Used for prefix bridge conditioning (prosody/style)
+            text_embeddings: Text token embeddings [batch, text_len, llm_dim]
+                Used for Pre-NN context (linguistic content)
             embeddings_mask: Mask for embeddings
-            text_embeddings: Optional text embeddings for dual-path
-            text_mask: Optional mask for text embeddings
+            text_mask: Mask for text embeddings
             chunk_size: Tokens per chunk (1 = lowest latency, higher = better quality)
 
         Yields:
@@ -787,8 +1009,8 @@ class AudioHead(nn.Module):
         """
         state = self.start_streaming(
             embeddings=embeddings,
-            embeddings_mask=embeddings_mask,
             text_embeddings=text_embeddings,
+            embeddings_mask=embeddings_mask,
             text_mask=text_mask,
             chunk_size=chunk_size,
         )

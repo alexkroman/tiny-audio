@@ -1,7 +1,7 @@
 """Autoregressive decoder for codec token generation.
 
 Based on Freeze-Omni's LLM2TTSCodecAR architecture:
-- Pre-NN layers process LLM hidden states (bidirectional)
+- Pre-NN layers process LLM hidden states (bidirectional) - half of AR decoder layers
 - AR decoder generates codec tokens autoregressively (causal)
 - Uses LlamaDecoderLayer from transformers for efficiency
 """
@@ -19,118 +19,21 @@ from transformers.models.llama.modeling_llama import (
 )
 
 
-class PreNN(nn.Module):
-    """Pre-processing network for LLM hidden states.
-
-    Processes LLM embeddings with bidirectional attention before
-    they're used as context for the AR decoder.
-
-    Args:
-        hidden_size: Model hidden dimension
-        num_layers: Number of transformer layers
-        num_heads: Number of attention heads
-        intermediate_size: FFN intermediate dimension
-        dropout: Dropout rate
-    """
-
-    def __init__(
-        self,
-        hidden_size: int = 1024,
-        num_layers: int = 3,
-        num_heads: int = 16,
-        intermediate_size: int = 4096,
-        dropout: float = 0.0,
-    ):
-        super().__init__()
-
-        config = LlamaConfig(
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            num_hidden_layers=num_layers,
-            num_attention_heads=num_heads,
-            num_key_value_heads=num_heads,  # No GQA
-            max_position_embeddings=4096,
-            attention_dropout=dropout,
-            _attn_implementation="sdpa",
-        )
-
-        self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config, layer_idx=i) for i in range(num_layers)]
-        )
-        # Note: No output norm here - Freeze-Omni applies norm only in AR decoder
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Process hidden states with bidirectional attention.
-
-        Args:
-            hidden_states: [batch, seq_len, hidden_size]
-            attention_mask: Optional mask [batch, seq_len]
-
-        Returns:
-            Processed hidden states [batch, seq_len, hidden_size]
-        """
-        _, seq_len, _ = hidden_states.shape
-        device = hidden_states.device
-
-        # Position IDs
-        position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
-
-        # Compute rotary embeddings
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        # Create bidirectional attention mask (all positions attend to all)
-        if attention_mask is not None:
-            # Expand mask for attention: [batch, 1, seq, seq]
-            attn_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            attn_mask = attn_mask.expand(-1, -1, seq_len, -1).contiguous()
-            attn_mask = attn_mask & attention_mask.unsqueeze(1).unsqueeze(-1)
-            # IMPORTANT: contiguous() and correct dtype required to avoid CUBLAS errors with BF16 on GPU
-            dtype = hidden_states.dtype
-            attn_mask = torch.where(
-                attn_mask,
-                torch.tensor(0.0, device=hidden_states.device, dtype=dtype),
-                torch.tensor(torch.finfo(dtype).min, device=hidden_states.device, dtype=dtype),
-            )
-        else:
-            attn_mask = None
-
-        # Forward through layers
-        for layer in self.layers:
-            layer_outputs = layer(
-                hidden_states,
-                attention_mask=attn_mask,
-                position_ids=position_ids,
-                past_key_value=None,
-                output_attentions=False,
-                use_cache=False,
-                position_embeddings=position_embeddings,
-            )
-            # Handle both tensor (transformers 5.0+) and tuple (older) outputs
-            hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
-
-        # Note: Freeze-Omni does NOT apply norm here - norm is applied
-        # only in the AR decoder after the full forward pass
-        return hidden_states
-
-
 class CodecARDecoder(nn.Module):
     """Autoregressive decoder for generating codec tokens.
 
-    Uses causal attention to generate tokens one at a time,
-    conditioned on LLM context from PreNN.
+    Includes Pre-NN layers internally (Freeze-Omni style):
+    - Pre-NN: num_layers // 2 bidirectional transformer layers
+    - AR decoder: num_layers causal transformer layers
 
     Args:
         hidden_size: Model hidden dimension
-        num_layers: Number of transformer layers
+        num_layers: Number of AR transformer layers
         num_heads: Number of attention heads
         intermediate_size: FFN intermediate dimension
         vocab_size: Codec vocabulary size (default 2048 for Mimi)
-        dropout: Dropout rate
+        dropout: Dropout rate for attention
+        embedding: Optional shared embedding layer
     """
 
     # Special token offsets from vocab_size
@@ -147,13 +50,14 @@ class CodecARDecoder(nn.Module):
         num_heads: int = 16,
         intermediate_size: int = 4096,
         vocab_size: int = 2048,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
         embedding: nn.Embedding = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
         self.total_vocab = vocab_size + self.NUM_SPECIAL
+        self.num_layers = num_layers
 
         # Special token IDs
         self.bos_token_id = vocab_size + self.BOS_OFFSET
@@ -187,7 +91,15 @@ class CodecARDecoder(nn.Module):
                 padding_idx=self.pad_token_id,
             )
 
-        # Transformer layers
+        # Pre-NN layers (Freeze-Omni style): num_layers // 2 bidirectional layers
+        # Processes LLM hidden states before AR decoding
+        num_pre_nn_layers = num_layers // 2
+        self.pre_nn_layers = nn.ModuleList(
+            [LlamaDecoderLayer(config, layer_idx=i) for i in range(num_pre_nn_layers)]
+        )
+        self.pre_nn_rotary_emb = LlamaRotaryEmbedding(config=config)
+
+        # AR Transformer layers (causal)
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config, layer_idx=i) for i in range(num_layers)]
         )
@@ -197,6 +109,62 @@ class CodecARDecoder(nn.Module):
         # Output projection
         self.output_proj = nn.Linear(hidden_size, self.total_vocab, bias=False)
 
+    def forward_pre_nn(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Process hidden states through Pre-NN with bidirectional attention.
+
+        Args:
+            hidden_states: [batch, seq_len, hidden_size]
+            attention_mask: Optional mask [batch, seq_len] (True = valid)
+
+        Returns:
+            Processed hidden states [batch, seq_len, hidden_size]
+        """
+        _, seq_len, _ = hidden_states.shape
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+
+        # Position IDs
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+
+        # Compute rotary embeddings
+        position_embeddings = self.pre_nn_rotary_emb(hidden_states, position_ids)
+
+        # Create bidirectional attention mask (all positions attend to all)
+        if attention_mask is not None:
+            # Expand mask for attention: [batch, 1, seq, seq]
+            attn_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            attn_mask = attn_mask.expand(-1, -1, seq_len, -1).contiguous()
+            attn_mask = attn_mask & attention_mask.unsqueeze(1).unsqueeze(-1)
+            # IMPORTANT: contiguous() and correct dtype required to avoid CUBLAS errors
+            attn_mask = torch.where(
+                attn_mask,
+                torch.tensor(0.0, device=device, dtype=dtype),
+                torch.tensor(torch.finfo(dtype).min, device=device, dtype=dtype),
+            )
+        else:
+            attn_mask = None
+
+        # Forward through Pre-NN layers
+        for layer in self.pre_nn_layers:
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=attn_mask,
+                position_ids=position_ids,
+                past_key_value=None,
+                output_attentions=False,
+                use_cache=False,
+                position_embeddings=position_embeddings,
+            )
+            hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
+
+        # Note: Freeze-Omni does NOT apply norm here - norm is applied
+        # only in the AR decoder after the full forward pass
+        return hidden_states
+
     def forward(
         self,
         context: torch.Tensor,
@@ -205,6 +173,7 @@ class CodecARDecoder(nn.Module):
         target_mask: Optional[torch.Tensor] = None,
         return_hidden: bool = False,
         prefix_kv_cache: Optional["DynamicCache"] = None,
+        skip_pre_nn: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass for training.
 
@@ -219,18 +188,23 @@ class CodecARDecoder(nn.Module):
         - Enables efficient transfer from text to audio space
 
         Args:
-            context: Pre-NN output [batch, context_len, hidden_size]
+            context: LLM hidden states or Pre-NN output [batch, context_len, hidden_size]
             context_mask: Mask for context [batch, context_len]
             target_ids: Target codec tokens [batch, target_len]
             target_mask: Mask for targets [batch, target_len]
             return_hidden: If True, also return hidden states for Depformer
             prefix_kv_cache: Optional pre-computed KV cache from PrefixBridge
+            skip_pre_nn: If True, skip Pre-NN (context is already processed)
 
         Returns:
             logits: [batch, target_len + 1, vocab_size]
             loss: Cross-entropy loss
             hidden_states (if return_hidden): [batch, target_len, hidden_size]
         """
+        # Process through Pre-NN if not already done
+        if not skip_pre_nn:
+            context = self.forward_pre_nn(context, context_mask)
+
         batch_size, context_len, _ = context.shape
         device = context.device
         dtype = context.dtype
@@ -389,6 +363,8 @@ class CodecARDecoder(nn.Module):
         penalty_window: int = 20,
         return_hidden: bool = False,
         prefix_kv_cache: Optional[DynamicCache] = None,
+        skip_pre_nn: bool = False,
+        cfg_coef: float = 1.0,
     ):
         """Generate codec tokens autoregressively.
 
@@ -397,8 +373,13 @@ class CodecARDecoder(nn.Module):
         - Audio tokens attend to prefix + context during generation
         - Enables efficient transfer from text to audio space
 
+        Classifier-Free Guidance (CFG):
+        - When cfg_coef != 1.0, runs both conditioned and unconditioned forward
+        - Final logits = logits_uncond + cfg_coef * (logits_cond - logits_uncond)
+        - Higher cfg_coef steers generation more strongly toward conditioned output
+
         Args:
-            context: Pre-NN output [batch, context_len, hidden_size]
+            context: LLM hidden states or Pre-NN output [batch, context_len, hidden_size]
             context_mask: Mask for context [batch, context_len]
             max_tokens: Maximum tokens to generate
             top_k: Top-k sampling parameter
@@ -407,15 +388,25 @@ class CodecARDecoder(nn.Module):
             penalty_window: Window size for repetition penalty
             return_hidden: If True, yield (token, hidden_state) tuples for Depformer
             prefix_kv_cache: Optional pre-computed KV cache from PrefixBridge
+            skip_pre_nn: If True, skip Pre-NN (context is already processed)
+            cfg_coef: Classifier-free guidance coefficient (1.0 = no guidance)
 
         Yields:
             If return_hidden=False: Generated token IDs one at a time
             If return_hidden=True: Tuples of (token_id, hidden_state [1, 1, hidden_size])
         """
+        # Process through Pre-NN if not already done
+        if not skip_pre_nn:
+            context = self.forward_pre_nn(context, context_mask)
+
         batch_size = context.shape[0]
         device = context.device
+        dtype = context.dtype
 
         assert batch_size == 1, "Streaming generation only supports batch_size=1"
+
+        # CFG setup: need separate caches for conditioned and unconditioned paths
+        use_cfg = cfg_coef != 1.0 and prefix_kv_cache is not None
 
         # Get prefix length if provided
         prefix_len = prefix_kv_cache.get_seq_length() if prefix_kv_cache is not None else 0
@@ -426,14 +417,17 @@ class CodecARDecoder(nn.Module):
         context_len = context.shape[1]
 
         # Initialize or clone KV cache (don't modify the original prefix cache)
+        import copy
+
         if prefix_kv_cache is not None:
             # Clone the prefix cache so we don't modify the original
-            # Handle different transformers versions
-            import copy
-
             past_key_values = copy.deepcopy(prefix_kv_cache)
         else:
             past_key_values = DynamicCache()
+
+        # For CFG: maintain a separate unconditioned cache (no prefix)
+        if use_cfg:
+            past_key_values_uncond = DynamicCache()
 
         # First pass: process context
         # Position IDs offset by prefix length
@@ -479,6 +473,36 @@ class CodecARDecoder(nn.Module):
             # Handle both tensor (transformers 5.0+) and tuple (older) outputs
             hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
 
+        # CFG: also process context through unconditioned path (no prefix)
+        if use_cfg:
+            # Position IDs for unconditioned path (no prefix offset)
+            position_ids_uncond = torch.arange(context_len, device=device).unsqueeze(0)
+            position_embeddings_uncond = self.rotary_emb(context, position_ids_uncond)
+
+            # Unconditioned context mask (no prefix positions)
+            if context_mask is not None:
+                bos_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
+                uncond_mask = torch.cat([bos_mask, context_mask], dim=1)
+                context_attn_mask_uncond = uncond_mask.unsqueeze(1).unsqueeze(2)
+                context_attn_mask_uncond = (~context_attn_mask_uncond) * torch.finfo(dtype).min
+            else:
+                context_attn_mask_uncond = None
+
+            hidden_states_uncond = context
+            for layer in self.layers:
+                layer_outputs = layer(
+                    hidden_states_uncond,
+                    attention_mask=context_attn_mask_uncond,
+                    position_ids=position_ids_uncond,
+                    past_key_value=past_key_values_uncond,
+                    output_attentions=False,
+                    use_cache=True,
+                    position_embeddings=position_embeddings_uncond,
+                )
+                hidden_states_uncond = (
+                    layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
+                )
+
         # Start with SOS token
         current_token = torch.full((1, 1), self.sos_token_id, device=device)
         generated: list[int] = []
@@ -499,6 +523,16 @@ class CodecARDecoder(nn.Module):
             )
         else:
             base_valid_mask = None
+
+        # CFG: build unconditioned base mask (no prefix positions)
+        if use_cfg:
+            if context_mask is not None:
+                bos_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
+                base_valid_mask_uncond = torch.cat([bos_mask, context_mask], dim=1)
+            else:
+                base_valid_mask_uncond = torch.ones(1, context_len, dtype=torch.bool, device=device)
+        else:
+            base_valid_mask_uncond = None
 
         for _ in range(max_tokens):
             # Embed current token
@@ -527,7 +561,7 @@ class CodecARDecoder(nn.Module):
             else:
                 step_attn_mask = None
 
-            # Forward through layers
+            # Forward through layers (conditioned path)
             hidden_states = token_emb
             for layer in self.layers:
                 layer_outputs = layer(
@@ -546,8 +580,51 @@ class CodecARDecoder(nn.Module):
 
             hidden_states = self.norm(hidden_states)
 
-            # Project to vocab
-            logits = self.output_proj(hidden_states[:, -1, :])  # [1, vocab]
+            # CFG: also run unconditioned path and blend logits
+            if use_cfg:
+                # Unconditioned position (no prefix offset)
+                pos_uncond = past_key_values_uncond.get_seq_length()
+                position_ids_uncond = torch.tensor([[pos_uncond]], device=device)
+                position_embeddings_uncond = self.rotary_emb(token_emb, position_ids_uncond)
+
+                # Unconditioned attention mask (no prefix positions)
+                if base_valid_mask_uncond is not None:
+                    num_gen_uncond = pos_uncond - context_len
+                    if num_gen_uncond > 0:
+                        gen_mask = torch.ones(1, num_gen_uncond, dtype=torch.bool, device=device)
+                        step_mask_uncond = torch.cat([base_valid_mask_uncond, gen_mask], dim=1)
+                    else:
+                        step_mask_uncond = base_valid_mask_uncond
+                    step_attn_mask_uncond = step_mask_uncond.unsqueeze(1).unsqueeze(2)
+                    step_attn_mask_uncond = (~step_attn_mask_uncond) * torch.finfo(dtype).min
+                else:
+                    step_attn_mask_uncond = None
+
+                hidden_states_uncond = token_emb
+                for layer in self.layers:
+                    layer_outputs = layer(
+                        hidden_states_uncond,
+                        attention_mask=step_attn_mask_uncond,
+                        position_ids=position_ids_uncond,
+                        past_key_value=past_key_values_uncond,
+                        output_attentions=False,
+                        use_cache=True,
+                        position_embeddings=position_embeddings_uncond,
+                    )
+                    hidden_states_uncond = (
+                        layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
+                    )
+                hidden_states_uncond = self.norm(hidden_states_uncond)
+
+                # Compute logits for both paths
+                logits_cond = self.output_proj(hidden_states[:, -1, :])  # [1, vocab]
+                logits_uncond = self.output_proj(hidden_states_uncond[:, -1, :])  # [1, vocab]
+
+                # Apply CFG: logits = uncond + cfg_coef * (cond - uncond)
+                logits = logits_uncond + cfg_coef * (logits_cond - logits_uncond)
+            else:
+                # Project to vocab
+                logits = self.output_proj(hidden_states[:, -1, :])  # [1, vocab]
 
             # Mask special tokens (BOS, SOS, PAD) to ensure valid Mimi codes
             # EOS is kept since we check for it to stop generation

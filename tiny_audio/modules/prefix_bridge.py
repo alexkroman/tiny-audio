@@ -54,7 +54,7 @@ class PrefixBridge(nn.Module):
         num_heads: int = 16,
         intermediate_size: int = 4096,
         input_dim: Optional[int] = None,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
     ):
         super().__init__()
         self.hidden_size = hidden_size

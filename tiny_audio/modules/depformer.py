@@ -32,13 +32,13 @@ class Depformer(nn.Module):
     - Processes all codebooks in parallel during training
     - Supports acoustic delays for improved audio quality
 
-    With acoustic delays enabled (default, Moshi-style flat delays):
-    - CB0 (semantic) at AR position t is for audio time t
-    - CB1-CB7 at AR position t are all for audio time t - 1
+    With acoustic delays enabled (default, Moshi-style):
+    - At AR position t, inputs (previous codebook tokens) are from time t-1
+    - At AR position t, we predict targets for time t
+    - This ensures causality: we only condition on tokens already generated
 
-    This flat delay pattern (vs progressive delays) allows all acoustic
-    codebooks to be decoded in parallel after CB0, reducing latency for
-    streaming/real-time generation.
+    This matches Moshi's production config where acoustic codebooks have delay=1,
+    meaning the input sequence is shifted so we see past tokens when predicting.
 
     Args:
         num_codebooks: Number of codebooks to predict (default: 7 for cb 1-7)
@@ -48,7 +48,6 @@ class Depformer(nn.Module):
         num_layers: Number of transformer layers
         num_heads: Number of attention heads
         intermediate_size: FFN intermediate dimension
-        dropout: Dropout rate
         use_delays: Whether to use acoustic delays (default: True)
     """
 
@@ -61,7 +60,6 @@ class Depformer(nn.Module):
         num_layers: int = 4,
         num_heads: int = 8,
         intermediate_size: int = 2048,
-        dropout: float = 0.0,
         use_delays: bool = True,
     ):
         super().__init__()
@@ -71,17 +69,19 @@ class Depformer(nn.Module):
         self.hidden_size = hidden_size
         self.use_delays = use_delays
 
-        # Moshi-style flat delays: all acoustic codebooks at same delay
-        # Input delays: [0, 0, 0, 0, 0, 0, 0] - all use same input timing
-        # Target delays: [1, 1, 1, 1, 1, 1, 1] - all predict same target timing
-        # This enables parallel decoding of all acoustic codebooks
+        # Moshi-style input delays: delay inputs, not targets
+        # Input delays: [1, 1, 1, 1, 1, 1, 1] - inputs are from time t-1
+        # Target delays: [0, 0, 0, 0, 0, 0, 0] - predict for current time t
+        # This matches Moshi's production config: delays=[0,0,1,1,1,1,1,1,1,...]
+        # where acoustic codebooks (indices 2+) have delay=1
         if use_delays:
-            self.register_buffer("input_delays", torch.zeros(num_codebooks, dtype=torch.long))
-            self.register_buffer("target_delays", torch.ones(num_codebooks, dtype=torch.long))
+            self.register_buffer("input_delays", torch.ones(num_codebooks, dtype=torch.long))
+            self.register_buffer("target_delays", torch.zeros(num_codebooks, dtype=torch.long))
         else:
             self.register_buffer("input_delays", torch.zeros(num_codebooks, dtype=torch.long))
             self.register_buffer("target_delays", torch.zeros(num_codebooks, dtype=torch.long))
 
+        # Moshi's Depformer uses no dropout (dropout_p=0.0 in attention)
         config = LlamaConfig(
             vocab_size=vocab_size,
             hidden_size=hidden_size,
@@ -90,7 +90,7 @@ class Depformer(nn.Module):
             num_attention_heads=num_heads,
             num_key_value_heads=num_heads,
             max_position_embeddings=64,  # Small context for depformer
-            attention_dropout=dropout,
+            attention_dropout=0.0,  # No dropout, matching Moshi
             rope_theta=10000.0,
             _attn_implementation="eager",  # Use eager for small sequences
         )
@@ -124,8 +124,8 @@ class Depformer(nn.Module):
 
     @property
     def max_delay(self) -> int:
-        """Maximum delay across all target codebooks."""
-        return int(self.target_delays.max().item())
+        """Maximum delay across all input codebooks."""
+        return int(self.input_delays.max().item())
 
     def _apply_delay(
         self, tensor: torch.Tensor, delay: int, dim: int = -1
@@ -172,11 +172,11 @@ class Depformer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for training - process all codebooks in parallel.
 
-        With Moshi-style flat delays enabled:
-        - All input codebooks at AR position t use audio time t (delay=0)
-        - All target codebooks at AR position t are for audio time t-1 (delay=1)
+        With Moshi-style input delays enabled:
+        - Input codebooks at AR position t use tokens from time t-1 (delay=1)
+        - Target codebooks at AR position t are for time t (no delay)
 
-        This enables parallel decoding during inference.
+        This ensures causality: we only condition on previously generated tokens.
         Loss is computed only on valid positions (after delay padding).
 
         Args:
@@ -273,25 +273,11 @@ class Depformer(nn.Module):
         # Stack logits: [B, K, T, vocab]
         all_logits = torch.stack(logits_list, dim=1)
 
-        # Apply delays to targets and compute loss with masking
-        raw_targets = codebook_targets[:, 1:, :]  # [B, K, T]
+        # Targets are not delayed - we predict for current time t
+        targets = codebook_targets[:, 1:, :]  # [B, K, T]
 
-        # Apply target delays and build validity mask
-        shifted_targets = []
-        target_valid_masks = []
-
-        for cb_idx in range(self.num_codebooks):
-            delay = int(self.target_delays[cb_idx].item())
-            shifted, valid = self._apply_delay(raw_targets[:, cb_idx, :], delay, dim=-1)
-            shifted_targets.append(shifted)
-            target_valid_masks.append(valid)
-
-        targets = torch.stack(shifted_targets, dim=1)  # [B, K, T]
-
-        # Combine validity masks: position is valid if both input and target are valid
-        combined_valid = torch.stack(
-            [iv & tv for iv, tv in zip(input_valid_masks, target_valid_masks)], dim=0
-        )  # [K, T]
+        # Validity mask: position is valid if input is valid (has delayed token available)
+        combined_valid = torch.stack(input_valid_masks, dim=0)  # [K, T]
         combined_valid = combined_valid.unsqueeze(0).expand(batch_size, -1, -1)  # [B, K, T]
 
         # Mark out-of-range target values as invalid (targets may have special tokens)
@@ -327,10 +313,10 @@ class Depformer(nn.Module):
         Processes all timesteps in parallel, using sequential codebook generation
         with KV caching and position IDs matching training (0, 1, 2, ..., 6).
 
-        When delays are enabled, generates tokens at AR positions, then aligns
-        outputs to audio time by shifting left (undoing the delay). Invalid
-        positions at the end (due to delay) are filled by repeating the last
-        valid frame to avoid audio artifacts.
+        With Moshi-style input delays:
+        - At AR position t, we use input tokens from time t-1
+        - We predict output tokens for time t
+        - First position (t=0) uses a special initial token since t-1 doesn't exist
 
         Args:
             main_hidden: Hidden states from AR decoder [batch, seq_len, main_dim]
@@ -353,13 +339,6 @@ class Depformer(nn.Module):
             )
             use_delays = False
 
-        flat_batch = batch_size * seq_len
-
-        # Initialize KV cache - each item in flat_batch gets independent cache entries
-        # along the batch dimension, so this is correct for parallel processing
-        past_key_values = DynamicCache()
-
-        # Flatten semantic tokens as initial previous tokens
         # Validate token range
         out_of_range = (semantic_tokens < 0) | (semantic_tokens >= self.vocab_size)
         if out_of_range.any():
@@ -368,7 +347,25 @@ class Depformer(nn.Module):
                 f"{num_invalid} semantic tokens outside valid range [0, {self.vocab_size}). "
                 f"Clamping to valid range. This may indicate AR decoder generated special tokens."
             )
-        prev_tokens = semantic_tokens.view(flat_batch).clamp(0, self.vocab_size - 1)
+        semantic_tokens = semantic_tokens.clamp(0, self.vocab_size - 1)
+
+        # Apply input delay to semantic tokens if enabled
+        # At position t, we use token from t-1; position 0 uses initial token
+        if use_delays:
+            # Shift right: delayed[:, t] = original[:, t-1], delayed[:, 0] = initial
+            initial_token = self.vocab_size - 1  # Use last vocab token as initial
+            delayed_semantic = torch.full_like(semantic_tokens, initial_token)
+            delayed_semantic[:, 1:] = semantic_tokens[:, :-1]
+            semantic_tokens = delayed_semantic
+
+        flat_batch = batch_size * seq_len
+
+        # Initialize KV cache - each item in flat_batch gets independent cache entries
+        # along the batch dimension, so this is correct for parallel processing
+        past_key_values = DynamicCache()
+
+        # Flatten semantic tokens as initial previous tokens
+        prev_tokens = semantic_tokens.view(flat_batch)
         all_generated = []
 
         for cb_idx in range(self.num_codebooks):
@@ -419,33 +416,21 @@ class Depformer(nn.Module):
             sampled_idx = torch.multinomial(top_k_probs, 1)
             next_tokens = top_k_indices.gather(1, sampled_idx).squeeze(-1)  # [B*T]
 
-            # Store generated tokens and update prev_tokens for next codebook
-            all_generated.append(next_tokens.view(batch_size, seq_len))
-            prev_tokens = next_tokens
+            # Store generated tokens
+            generated_2d = next_tokens.view(batch_size, seq_len)
+            all_generated.append(generated_2d)
+
+            # Apply input delay to generated tokens for next codebook
+            # At position t, next codebook uses token from t-1
+            if use_delays:
+                initial_token = self.vocab_size - 1
+                delayed_tokens = torch.full_like(generated_2d, initial_token)
+                delayed_tokens[:, 1:] = generated_2d[:, :-1]
+                prev_tokens = delayed_tokens.view(flat_batch)
+            else:
+                prev_tokens = next_tokens
 
         # Stack: [B, K, T]
-        generated = torch.stack(all_generated, dim=1)
-
-        # Apply delay alignment for output if delays are enabled
-        # Generated at AR position t is for audio time t - delay
-        # To get audio-aligned output: aligned[audio_t] = generated[ar_t] where ar_t = audio_t + delay
-        # So: aligned[t] = generated[t + delay] (shift left to undo delay)
-        if use_delays:
-            aligned = torch.zeros_like(generated)
-            for cb_idx in range(self.num_codebooks):
-                delay = int(self.target_delays[cb_idx].item())
-                if delay < seq_len:
-                    # Shift left: aligned[t] = generated[t + delay]
-                    valid_len = seq_len - delay
-                    aligned[:, cb_idx, :valid_len] = generated[:, cb_idx, delay:]
-                    # Fill invalid positions at the end by repeating last valid frame
-                    # This avoids audio artifacts from zero-padding
-                    if valid_len > 0 and valid_len < seq_len:
-                        last_valid = generated[:, cb_idx, -1:]  # [B, 1]
-                        aligned[:, cb_idx, valid_len:] = last_valid.expand(-1, seq_len - valid_len)
-                elif seq_len > 0:
-                    # delay >= seq_len: no valid positions, fill with first generated token
-                    aligned[:, cb_idx, :] = generated[:, cb_idx, 0:1].expand(-1, seq_len)
-            return aligned
-
-        return generated
+        # With input delays, outputs are already aligned to correct time
+        # (we predict for time t, just using inputs from t-1)
+        return torch.stack(all_generated, dim=1)
