@@ -52,6 +52,13 @@ def register_subcommands():
 
     app.command(name="push", help="Push model to HuggingFace Hub")(push_command)
 
+    # Update config on Hub
+    from scripts.hub.update_config import main as update_config_command
+
+    app.command(name="update-config", help="Update model config on HuggingFace Hub")(
+        update_config_command
+    )
+
     # Debug
     from scripts.debug.cli import app as debug_app
 

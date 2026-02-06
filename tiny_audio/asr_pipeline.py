@@ -11,14 +11,33 @@ import transformers
 try:
     from .alignment import ForcedAligner
     from .asr_modeling import ASRModel
-    from .diarization import SpeakerDiarizer
+    from .diarization import LocalSpeakerDiarizer
 except ImportError:
     from alignment import ForcedAligner  # type: ignore[no-redef]
     from asr_modeling import ASRModel  # type: ignore[no-redef]
-    from diarization import SpeakerDiarizer  # type: ignore[no-redef]
+    from diarization import LocalSpeakerDiarizer  # type: ignore[no-redef]
 
 # Re-export for backwards compatibility
-__all__ = ["ForcedAligner", "SpeakerDiarizer", "ASRPipeline"]
+__all__ = ["ForcedAligner", "LocalSpeakerDiarizer", "ASRPipeline", "strip_thinking"]
+
+# Default TTS voice for Kokoro
+DEFAULT_TTS_VOICE = "af_heart"
+TTS_SAMPLE_RATE = 24000
+
+
+def strip_thinking(text: str) -> str:
+    """Remove <think>...</think> tags from model output.
+
+    Args:
+        text: Model output text that may contain thinking tags
+
+    Returns:
+        Text with thinking content removed
+    """
+    if not text:
+        return text
+    text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
+    return text.strip()
 
 
 class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
@@ -43,6 +62,44 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             model=model, feature_extractor=feature_extractor, tokenizer=tokenizer, **kwargs
         )
         self._current_audio = None
+        self._tts_pipeline = None
+
+    @property
+    def tts_pipeline(self):
+        """Lazy-load Kokoro TTS pipeline on first use."""
+        if self._tts_pipeline is None:
+            try:
+                from kokoro import KPipeline
+
+                self._tts_pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+            except ImportError as e:
+                raise ImportError(
+                    "Kokoro TTS is required for audio output. "
+                    "Install with: pip install kokoro>=0.9.2\n"
+                    "Also requires espeak-ng: apt-get install espeak-ng"
+                ) from e
+        return self._tts_pipeline
+
+    def text_to_speech(self, text: str, voice: str = DEFAULT_TTS_VOICE) -> dict[str, Any]:
+        """Convert text to speech using Kokoro TTS.
+
+        Args:
+            text: Text to synthesize
+            voice: Kokoro voice ID (default: "af_heart")
+
+        Returns:
+            Dict with 'audio' (numpy array) and 'sample_rate' keys
+        """
+        if not text or not text.strip():
+            return {"audio": np.array([], dtype=np.float32), "sample_rate": TTS_SAMPLE_RATE}
+
+        # Generate audio chunks and concatenate
+        audio_chunks = []
+        for _, _, audio in self.tts_pipeline(text, voice=voice):
+            audio_chunks.append(audio)
+
+        audio = np.concatenate(audio_chunks) if audio_chunks else np.array([], dtype=np.float32)
+        return {"audio": audio, "sample_rate": TTS_SAMPLE_RATE}
 
     def _sanitize_parameters(self, **kwargs):
         """Intercept our custom parameters before parent class validates them."""
@@ -54,7 +111,11 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         kwargs.pop("max_speakers", None)
         kwargs.pop("hf_token", None)
         kwargs.pop("user_prompt", None)
+        kwargs.pop("system_prompt", None)
         kwargs.pop("diarization_backend", None)
+        # TTS parameters
+        kwargs.pop("return_audio", None)
+        kwargs.pop("tts_voice", None)
 
         return super()._sanitize_parameters(**kwargs)
 
@@ -69,7 +130,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             inputs: Audio input (file path, dict with array/sampling_rate, etc.)
             return_timestamps: If True, return word-level timestamps using forced alignment
             return_speakers: If True, return speaker labels for each word
+            return_audio: If True, synthesize transcription as speech using Kokoro TTS
+            tts_voice: Kokoro voice ID for TTS output (default: "af_heart")
             user_prompt: Custom transcription prompt (default: "Transcribe: ")
+            system_prompt: Custom system prompt override (uses model's default if not provided)
             num_speakers: Exact number of speakers (if known, for diarization)
             min_speakers: Minimum number of speakers (for diarization)
             max_speakers: Maximum number of speakers (for diarization)
@@ -77,12 +141,16 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         Returns:
             Dict with 'text' key, 'words' key if return_timestamps=True,
-            and speaker labels on words if return_speakers=True
+            speaker labels on words if return_speakers=True,
+            and 'audio'/'sample_rate' keys if return_audio=True
         """
         # Extract our params before super().__call__ (which will also call _sanitize_parameters)
         return_timestamps = kwargs.pop("return_timestamps", False)
         return_speakers = kwargs.pop("return_speakers", False)
+        return_audio = kwargs.pop("return_audio", False)
+        tts_voice = kwargs.pop("tts_voice", DEFAULT_TTS_VOICE)
         user_prompt = kwargs.pop("user_prompt", None)
+        system_prompt = kwargs.pop("system_prompt", None)
         diarization_params = {
             "num_speakers": kwargs.pop("num_speakers", None),
             "min_speakers": kwargs.pop("min_speakers", None),
@@ -97,6 +165,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if user_prompt:
             original_prompt = self.model.TRANSCRIBE_PROMPT
             self.model.TRANSCRIBE_PROMPT = user_prompt
+
+        # Set custom system prompt if provided
+        original_system_prompt = None
+        if system_prompt:
+            original_system_prompt = self.model.system_prompt
+            self.model.system_prompt = system_prompt
 
         # Store audio for timestamp alignment and diarization
         if return_timestamps or return_speakers:
@@ -126,7 +200,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if return_speakers and self._current_audio is not None:
             try:
                 # Run diarization
-                speaker_segments = SpeakerDiarizer.diarize(
+                speaker_segments = LocalSpeakerDiarizer.diarize(
                     self._current_audio["array"],
                     sample_rate=self._current_audio.get("sampling_rate", 16000),
                     **{k: v for k, v in diarization_params.items() if v is not None},
@@ -135,7 +209,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
                 # Assign speakers to words
                 if result.get("words"):
-                    result["words"] = SpeakerDiarizer.assign_speakers_to_words(
+                    result["words"] = LocalSpeakerDiarizer.assign_speakers_to_words(
                         result["words"],
                         speaker_segments,
                     )
@@ -143,15 +217,41 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 result["speaker_segments"] = []
                 result["diarization_error"] = str(e)
 
+        # Synthesize transcription as speech if requested
+        if return_audio:
+            text = result.get("text", "")
+            try:
+                tts_result = self.text_to_speech(text, voice=tts_voice)
+                result["audio"] = tts_result["audio"]
+                result["sample_rate"] = tts_result["sample_rate"]
+            except Exception as e:
+                result["audio"] = np.array([], dtype=np.float32)
+                result["sample_rate"] = TTS_SAMPLE_RATE
+                result["tts_error"] = str(e)
+
         # Clean up
         self._current_audio = None
         if original_prompt is not None:
             self.model.TRANSCRIBE_PROMPT = original_prompt
+        if original_system_prompt is not None:
+            self.model.system_prompt = original_system_prompt
 
         return result
 
     def _extract_audio(self, inputs) -> dict | None:
-        """Extract audio array from various input formats using HF utilities."""
+        """Extract audio array from various input formats.
+
+        Supported input formats:
+            - str: File path to audio file
+            - bytes: Encoded audio (mp3, wav, etc.) - decoded via ffmpeg
+            - np.ndarray: Audio samples as float32 array
+            - dict with "array": Audio samples as numpy array
+            - dict with "raw": Alias for "array" (HF pipeline compat)
+            - dict with "raw_bytes": Raw PCM bytes (requires "dtype", optional "sampling_rate")
+
+        For raw PCM bytes (e.g., from pipecat), use:
+            {"raw_bytes": pcm_bytes, "dtype": "int16", "sampling_rate": 16000}
+        """
         from transformers.pipelines.audio_utils import ffmpeg_read
 
         if isinstance(inputs, dict):
@@ -165,6 +265,17 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                     "array": inputs["raw"],
                     "sampling_rate": inputs.get("sampling_rate", 16000),
                 }
+            if "raw_bytes" in inputs:
+                # Raw PCM bytes - convert to float32 array
+                dtype = inputs.get("dtype", "int16")
+                sample_rate = inputs.get("sampling_rate", 16000)
+                audio = np.frombuffer(inputs["raw_bytes"], dtype=dtype).astype(np.float32)
+                # Normalize based on dtype
+                if dtype == "int16":
+                    audio = audio / 32768.0
+                elif dtype == "int32":
+                    audio = audio / 2147483648.0
+                return {"array": audio, "sampling_rate": sample_rate}
         elif isinstance(inputs, str):
             # File path - load audio using ffmpeg (same as HF pipeline)
             with Path(inputs).open("rb") as f:
@@ -257,7 +368,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
         # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
-        text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+        text = strip_thinking(text)
         # Truncate repetitions at end of text
         text = _truncate_repetitions(text)
         return {"text": text}

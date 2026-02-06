@@ -111,6 +111,10 @@ class TestDiarizationDatasets:
         """Test that callhome is categorized as diarization."""
         assert "callhome" in DIARIZATION_DATASETS
 
+    def test_ami_diarization_is_diarization(self):
+        """Test that ami-diarization is categorized as diarization."""
+        assert "ami-diarization" in DIARIZATION_DATASETS
+
     def test_diarization_configs_have_speaker_fields(self):
         """Test that diarization datasets have speaker fields."""
         for name in DIARIZATION_DATASETS:

@@ -2,6 +2,15 @@
 
 from scripts.eval.audio import TextNormalizer
 
+from .airbench import (
+    ALL_TASKS,
+    MUSIC_TASKS,
+    SOUND_TASKS,
+    SPEECH_TASKS,
+    AIRBenchEvaluator,
+    AIRBenchResult,
+    print_airbench_metrics,
+)
 from .alignment import (
     AssemblyAIAlignmentEvaluator,
     BaseAlignmentEvaluator,
@@ -25,10 +34,6 @@ from .base import (
     EvalResult,
     Evaluator,
     setup_assemblyai,
-)
-from .classification import (
-    ClassificationEvaluator,
-    ClassificationResult,
 )
 from .diarization import (
     AssemblyAIDiarizationEvaluator,
@@ -77,7 +82,12 @@ __all__ = [
     "MCQResult",
     "MMAUEvaluator",
     "AssemblyAIMMAUEvaluator",
-    # Classification evaluators
-    "ClassificationResult",
-    "ClassificationEvaluator",
+    # AIR-Bench evaluators
+    "AIRBenchEvaluator",
+    "AIRBenchResult",
+    "print_airbench_metrics",
+    "SPEECH_TASKS",
+    "SOUND_TASKS",
+    "MUSIC_TASKS",
+    "ALL_TASKS",
 ]

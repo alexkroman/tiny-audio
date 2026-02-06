@@ -1,8 +1,10 @@
 """CLI for ASR, diarization, and alignment evaluation."""
 
 import os
+
+# Use soundfile for audio decoding instead of torchaudio (avoids compatibility issues)
+os.environ.setdefault("HF_DATASETS_AUDIO_DECODER", "soundfile")
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -13,20 +15,22 @@ from rich.table import Table
 from scripts.eval.audio import TextNormalizer
 from scripts.eval.datasets import (
     ALIGNMENT_DATASETS,
-    CLASSIFICATION_DATASETS,
     DATASET_REGISTRY,
     DIARIZATION_DATASETS,
     MCQ_DATASETS,
     load_eval_dataset,
 )
 from scripts.eval.evaluators import (
+    ALL_TASKS as AIRBENCH_ALL_TASKS,
+)
+from scripts.eval.evaluators import (
+    AIRBenchEvaluator,
+    AIRBenchResult,
     AssemblyAIAlignmentEvaluator,
     AssemblyAIDiarizationEvaluator,
     AssemblyAIEvaluator,
     AssemblyAIMMAUEvaluator,
     AssemblyAIStreamingEvaluator,
-    ClassificationEvaluator,
-    ClassificationResult,
     DeepgramAlignmentEvaluator,
     DeepgramDiarizationEvaluator,
     DeepgramEvaluator,
@@ -41,19 +45,11 @@ from scripts.eval.evaluators import (
     MCQResult,
     MMAUEvaluator,
     TimestampAlignmentEvaluator,
+    print_airbench_metrics,
 )
 
 app = typer.Typer(help="Evaluate ASR models on standard datasets")
 console = Console()
-
-
-class AssemblyAIModel(str, Enum):
-    """AssemblyAI model options."""
-
-    best = "best"
-    universal = "universal"
-    slam_1 = "slam_1"
-    nano = "nano"
 
 
 # Valid dataset choices
@@ -270,7 +266,7 @@ def print_alignment_metrics(dataset_name: str, metrics: dict):
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
 
-    table.add_row("Median AE", f"{metrics['mae'] * 1000:.1f}ms")
+    table.add_row("MAE", f"{metrics['mae'] * 1000:.1f}ms")
     table.add_row("Samples", str(metrics["num_samples"]))
     table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
 
@@ -348,64 +344,6 @@ def print_mcq_metrics(dataset_name: str, metrics: dict):
         console.print(cat_table)
 
 
-def save_classification_results(
-    model_name: str,
-    dataset_name: str,
-    results: list[ClassificationResult],
-    metrics: dict,
-    output_dir: str = "outputs",
-) -> Path:
-    """Save classification evaluation results and metrics."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
-    task = metrics.get("task", "classification")
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_{task}"
-    result_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save detailed results
-    results_file = result_dir / "results.txt"
-    with results_file.open("w") as f:
-        for i, r in enumerate(results, 1):
-            status = "correct" if r.correct else "wrong"
-            f.write(f"Sample {i} [{status}]\n")
-            f.write(f"  Instruction: {r.instruction}\n")
-            f.write(f"  Prediction: {r.prediction}\n")
-            f.write(f"  Reference: {r.reference}\n")
-            f.write(f"  Time: {r.time:.2f}s\n")
-            f.write("-" * 80 + "\n")
-
-    # Save summary metrics
-    metrics_file = result_dir / "metrics.txt"
-    with metrics_file.open("w") as f:
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        f.write(f"Task: {task}\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write("-" * 40 + "\n")
-        f.write(f"Accuracy: {metrics['accuracy']:.2f}%\n")
-        f.write(f"Correct: {metrics['correct']}/{metrics['total']}\n")
-        f.write(f"Avg Time: {metrics['avg_time']:.2f}s\n")
-        f.write(f"Num Samples: {metrics['num_samples']}\n")
-
-    console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
-    return result_dir
-
-
-def print_classification_metrics(dataset_name: str, metrics: dict):
-    """Print classification metrics using rich table."""
-    task = metrics.get("task", "classification")
-    table = Table(title=f"Results: {dataset_name} ({task})")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
-
-    table.add_row("Accuracy", f"{metrics['accuracy']:.2f}%")
-    table.add_row("Correct", f"{metrics['correct']}/{metrics['total']}")
-    table.add_row("Samples", str(metrics["num_samples"]))
-    table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
-
-    console.print(table)
-
-
 def validate_datasets(datasets: list[str]) -> list[str]:
     """Validate and expand dataset names."""
     for ds in datasets:
@@ -414,7 +352,7 @@ def validate_datasets(datasets: list[str]) -> list[str]:
             console.print(f"Valid choices: {', '.join(VALID_DATASETS)}")
             raise typer.Exit(1)
 
-    # Expand "all" to ASR datasets only (exclude diarization, alignment, MCQ, classification, expresso)
+    # Expand "all" to ASR datasets only (exclude diarization, alignment, MCQ)
     if "all" in datasets:
         return [
             k
@@ -422,10 +360,8 @@ def validate_datasets(datasets: list[str]) -> list[str]:
             if k not in DIARIZATION_DATASETS
             and k not in ALIGNMENT_DATASETS
             and k not in MCQ_DATASETS
-            and k not in CLASSIFICATION_DATASETS
-            and k != "expresso"
         ]
-    # Expand "all-full" to include diarization, alignment, MCQ, and classification datasets too
+    # Expand "all-full" to include diarization, alignment, and MCQ datasets too
     if "all-full" in datasets:
         return list(DATASET_REGISTRY.keys())
 
@@ -454,9 +390,6 @@ def main(
     endpoint: Annotated[
         bool, typer.Option("--endpoint", "-e", help="Use HF Inference Endpoint")
     ] = False,
-    assemblyai_model: Annotated[
-        AssemblyAIModel, typer.Option("--assemblyai-model", help="AssemblyAI model")
-    ] = AssemblyAIModel.slam_1,
     streaming: Annotated[
         bool, typer.Option("--streaming", "-s", help="Use streaming evaluation (for local or AAI)")
     ] = False,
@@ -491,6 +424,20 @@ def main(
         bool,
         typer.Option("--verbose", "-v", help="Show word-by-word alignment details"),
     ] = False,
+    temperature: Annotated[
+        Optional[float],
+        typer.Option("--temperature", "-t", help="Temperature for AssemblyAI SLAM-1 (e.g., 0.5)"),
+    ] = None,
+    keyterms: Annotated[
+        Optional[str],
+        typer.Option("--keyterms", "-k", help="Comma-separated key terms for AssemblyAI SLAM-1"),
+    ] = None,
+    domain: Annotated[
+        Optional[str],
+        typer.Option(
+            "--domain", help="Domain filter for MMAU: speech, sound, music, or 'all' for no filter"
+        ),
+    ] = "speech",
 ):
     """Evaluate ASR models on standard datasets."""
     # If a subcommand was invoked, skip
@@ -526,10 +473,9 @@ def main(
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
                     raise typer.Exit(1)
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = "slam-1"
                 evaluator = AssemblyAIDiarizationEvaluator(
                     api_key=api_key,
-                    model=assemblyai_model.value,
                     audio_field=cfg.audio_field,
                     speakers_field=cfg.speakers_field,
                     timestamps_start_field=cfg.timestamps_start_field,
@@ -597,14 +543,12 @@ def main(
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
                     raise typer.Exit(1)
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = "slam-1"
                 evaluator = AssemblyAIAlignmentEvaluator(
                     api_key=api_key,
-                    model=assemblyai_model.value,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
-                    verbose=verbose,
                 )
             elif model == "deepgram":
                 api_key = os.environ.get("DEEPGRAM_API_KEY", "")
@@ -617,7 +561,6 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
-                    verbose=verbose,
                 )
             elif model == "elevenlabs":
                 api_key = os.environ.get("ELEVENLABS_API_KEY", "")
@@ -632,7 +575,6 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
-                    verbose=verbose,
                 )
             else:
                 model_id = get_model_name(model)
@@ -642,7 +584,6 @@ def main(
                     text_field=cfg.text_field,
                     words_field=cfg.words_field,
                     user_prompt=user_prompt,
-                    verbose=verbose,
                 )
 
             results = evaluator.evaluate(dataset, max_samples)
@@ -657,6 +598,9 @@ def main(
 
             dataset = hf_load_dataset(cfg.path, split=actual_split, streaming=True)
 
+            # Convert 'all' to None for no filtering
+            domain_filter = None if domain == "all" else domain
+
             if model == "assemblyai":
                 api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
                 if not api_key:
@@ -664,16 +608,16 @@ def main(
                         "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
                     )
                     raise typer.Exit(1)
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = "slam-1"
                 evaluator = AssemblyAIMMAUEvaluator(
                     api_key=api_key,
-                    model=assemblyai_model.value,
                     audio_field=cfg.audio_field,
                     question_field=cfg.question_field,
                     answer_field=cfg.answer_field,
                     choices_field=cfg.choices_field,
                     category_field=cfg.category_field,
                     num_workers=num_workers,
+                    domain_filter=domain_filter,
                 )
             else:
                 model_id = get_model_name(model)
@@ -686,52 +630,13 @@ def main(
                     category_field=cfg.category_field,
                     user_prompt=user_prompt,
                     num_workers=num_workers,
+                    domain_filter=domain_filter,
                 )
 
             results = evaluator.evaluate(dataset, max_samples)
             metrics = evaluator.compute_metrics()
             save_mcq_results(model_id, dataset_name, results, metrics, output_dir)
             print_mcq_metrics(dataset_name, metrics)
-            continue
-
-        # Handle classification datasets (emotion, gender, age)
-        if dataset_name in CLASSIFICATION_DATASETS:
-            from datasets import load_dataset as hf_load_dataset
-
-            # Load with config if specified (e.g., Common Voice needs "en" config)
-            if cfg.config:
-                dataset = hf_load_dataset(cfg.path, cfg.config, split=actual_split, streaming=True)
-            else:
-                dataset = hf_load_dataset(cfg.path, split=actual_split, streaming=True)
-
-            # Determine task type from dataset name
-            if "emotion" in dataset_name:
-                task = "emotion"
-            elif "gender" in dataset_name:
-                task = "gender"
-            elif "age" in dataset_name:
-                task = "age"
-            elif "accent" in dataset_name:
-                task = "accent"
-            elif "rate" in dataset_name:
-                task = "rate"
-            else:
-                task = "classification"
-
-            model_id = get_model_name(model)
-            evaluator = ClassificationEvaluator(
-                model_path=model,
-                audio_field=cfg.audio_field,
-                instruction_field=cfg.question_field,
-                answer_field=cfg.answer_field,
-                task=task,
-                num_workers=num_workers,
-            )
-
-            results = evaluator.evaluate(dataset, max_samples)
-            metrics = evaluator.compute_metrics()
-            save_classification_results(model_id, dataset_name, results, metrics, output_dir)
-            print_classification_metrics(dataset_name, metrics)
             continue
 
         # ASR evaluation
@@ -752,11 +657,21 @@ def main(
                     num_workers=num_workers,
                 )
             else:
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = "slam-1"
+                if temperature is not None:
+                    console.print(f"[cyan]Using temperature: {temperature}[/cyan]")
+                if user_prompt is not None:
+                    console.print(f"[cyan]Using prompt: {user_prompt}[/cyan]")
+                keyterms_list = None
+                if keyterms is not None:
+                    keyterms_list = [k.strip() for k in keyterms.split(",")]
+                    console.print(f"[cyan]Using keyterms: {keyterms_list}[/cyan]")
                 evaluator = AssemblyAIEvaluator(
                     api_key=api_key,
-                    model=assemblyai_model.value,
                     base_url=base_url,
+                    temperature=temperature,
+                    prompt=user_prompt,
+                    keyterms_prompt=keyterms_list,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                     num_workers=num_workers,
@@ -813,6 +728,165 @@ def main(
         metrics = evaluator.compute_metrics()
         save_results(model_id, dataset_name, results, metrics, output_dir, base_url)
         print_asr_metrics(dataset_name, metrics)
+
+
+def save_airbench_results(
+    model_name: str,
+    task_name: str | None,
+    results: list[AIRBenchResult],
+    metrics: dict,
+    output_dir: str = "outputs",
+) -> Path:
+    """Save AIR-Bench evaluation results and metrics."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    safe_model_name = model_name.replace("/", "_")
+    task_suffix = f"_{task_name}" if task_name else "_speech"
+    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_airbench{task_suffix}"
+    result_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save detailed results
+    results_file = result_dir / "results.txt"
+    with results_file.open("w") as f:
+        for i, r in enumerate(results, 1):
+            status = "✓" if r.correct else "✗"
+            f.write(f"Sample {i} [{status}]\n")
+            f.write(f"  Task: {r.task_name}_{r.dataset_name}\n")
+            f.write(f"  Question: {r.question}\n")
+            f.write(f"  Prediction: {r.prediction}\n")
+            f.write(f"  Extracted: {r.extracted_answer} | Reference: {r.reference}\n")
+            f.write(f"  Time: {r.time:.2f}s\n")
+            f.write("-" * 80 + "\n")
+
+    # Save summary metrics
+    metrics_file = result_dir / "metrics.txt"
+    with metrics_file.open("w") as f:
+        f.write(f"Model: {model_name}\n")
+        f.write(f"Task Filter: {task_name or 'speech (all)'}\n")
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Overall Accuracy: {metrics['accuracy']:.2f}%\n")
+        f.write(f"Correct: {metrics['correct']}/{metrics['total']}\n")
+        f.write(f"Avg Time: {metrics['avg_time']:.2f}s\n")
+        f.write(f"Num Samples: {metrics['num_samples']}\n")
+
+        if metrics.get("category_accuracy"):
+            f.write("-" * 40 + "\n")
+            f.write("Per-Category Accuracy:\n")
+            for cat, acc in sorted(metrics["category_accuracy"].items()):
+                f.write(f"  {cat}: {acc:.2f}%\n")
+
+        if metrics.get("task_accuracy"):
+            f.write("-" * 40 + "\n")
+            f.write("Per-Task Accuracy:\n")
+            for task_id, task_metrics in sorted(metrics["task_accuracy"].items()):
+                f.write(
+                    f"  {task_id}: {task_metrics['accuracy']:.2f}% "
+                    f"({task_metrics['correct']}/{task_metrics['total']})\n"
+                )
+
+    console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
+    return result_dir
+
+
+@app.command()
+def airbench(
+    model: Annotated[
+        str,
+        typer.Option("--model", "-m", help="HuggingFace model path/ID"),
+    ],
+    task_name: Annotated[
+        Optional[str],
+        typer.Option(
+            "--task",
+            "-t",
+            help="Filter to specific task (e.g., 'Speaker_Gender_Recognition'). If not specified, runs all speech tasks.",
+        ),
+    ] = None,
+    max_samples: Annotated[
+        Optional[int],
+        typer.Option(
+            "--max-samples",
+            "-n",
+            help="Max samples (per task if running all tasks, total if single task)",
+        ),
+    ] = None,
+    output_dir: Annotated[
+        str,
+        typer.Option("--output-dir", "-o", help="Output directory for results"),
+    ] = "outputs",
+    list_tasks: Annotated[
+        bool,
+        typer.Option("--list-tasks", "-l", help="List available tasks and exit"),
+    ] = False,
+):
+    """Evaluate models on AIR-Bench Foundation benchmark.
+
+    AIR-Bench is a benchmark for Large Audio-Language Models with 19 tasks
+    covering speech, sound, and music understanding.
+
+    By default, runs only speech tasks. Use --task to run a specific task.
+    When running multiple tasks (no -t flag), -n limits samples PER TASK.
+    When running a single task, -n limits total samples.
+
+    Examples:
+        # Run all speech tasks
+        ta eval airbench -m mazesmazes/tiny-audio-omni
+
+        # Run 50 samples per task (450 total for 9 speech tasks)
+        ta eval airbench -m mazesmazes/tiny-audio-omni -n 50
+
+        # Run specific task (100 total samples)
+        ta eval airbench -m mazesmazes/tiny-audio-omni -t Speaker_Gender_Recognition -n 100
+
+        # List available tasks
+        ta eval airbench -m dummy --list-tasks
+    """
+    if list_tasks:
+        console.print("\n[bold]Available AIR-Bench Foundation Tasks:[/bold]\n")
+
+        console.print("[cyan]Speech Tasks:[/cyan]")
+        from scripts.eval.evaluators.airbench import SPEECH_TASKS
+
+        for task in sorted(SPEECH_TASKS):
+            console.print(f"  • {task}")
+
+        console.print("\n[cyan]Sound Tasks:[/cyan]")
+        from scripts.eval.evaluators.airbench import SOUND_TASKS
+
+        for task in sorted(SOUND_TASKS):
+            console.print(f"  • {task}")
+
+        console.print("\n[cyan]Music Tasks:[/cyan]")
+        from scripts.eval.evaluators.airbench import MUSIC_TASKS
+
+        for task in sorted(MUSIC_TASKS):
+            console.print(f"  • {task}")
+
+        return
+
+    # Validate task_name if provided
+    if task_name and task_name not in AIRBENCH_ALL_TASKS:
+        console.print(f"[red]Error: Invalid task '{task_name}'[/red]")
+        console.print(f"Valid tasks: {', '.join(sorted(AIRBENCH_ALL_TASKS))}")
+        raise typer.Exit(1)
+
+    console.print("\n[bold blue]AIR-Bench Foundation Evaluation[/bold blue]")
+    console.print(f"Model: {model}")
+    console.print(f"Task: {task_name or 'all speech tasks'}")
+    if max_samples:
+        console.print(f"Max samples: {max_samples}")
+
+    model_id = get_model_name(model)
+    evaluator = AIRBenchEvaluator(
+        model_path=model,
+        task_name=task_name,
+    )
+
+    results = evaluator.evaluate(max_samples=max_samples)
+    metrics = evaluator.compute_metrics()
+
+    save_airbench_results(model_id, task_name, results, metrics, output_dir)
+    print_airbench_metrics(metrics)
 
 
 if __name__ == "__main__":

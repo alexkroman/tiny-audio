@@ -1,0 +1,118 @@
+# Mixed SIFT + Transcription dataset configuration
+# - 69% SIFT (voice agent responses) - 1,134k samples
+# - 31% Transcription (ASR grounding) - 502k samples
+# Total: ~1.6M samples
+#
+# SIFT modes (from AZeroS approach):
+# - sift_s: Conversational response to transcription (voice assistant)
+# - sift_ssp: Empathetic response with tone awareness
+# - sit_ssp: Audio description/analysis ("Sounds like...")
+#
+# Audio head uses distillation training: learns to match CosyVoice's text encoder
+# embeddings from the sift_response text. No pre-computed codes needed!
+
+datasets:
+  # === Transcription Datasets (25% of training) ===
+  # Total target: ~410k samples
+
+  - path: speechbrain/LoquaciousSet
+    name: medium
+    audio_column: wav
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [dev]
+    target_samples: 350000
+
+  - path: edinburghcstr/ami
+    name: ihm
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 80000
+
+  - path: fixie-ai/HeySQuAD_human
+    audio_column: audio
+    text_column: answers
+    text_transform: first_answer_text
+    task: answer
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 140000
+
+  # === SIFT Datasets (75% of training) ===
+  # Total target: ~1,234k samples
+  # sift_response: Text responses used for distillation training
+
+  - path: mazesmazes/sift-audio-2
+    audio_column: audio
+    text_column: sift_response
+    task: sift
+    train_splits: [podcast]
+    eval_splits: [podcast]
+    target_samples: 400000
+
+  - path: mazesmazes/sift-audio-2
+    audio_column: audio
+    text_column: sift_response
+    task: sift
+    train_splits: [commonvoice]
+    eval_splits: [commonvoice]
+    target_samples: 300000
+
+  - path: mazesmazes/sift-audio-2
+    audio_column: audio
+    text_column: sift_response
+    task: sift
+    train_splits: [meld]
+    eval_splits: [meld]
+    target_samples: 150000
+
+  - path: mazesmazes/sift-audio-2
+    audio_column: audio
+    text_column: sift_response
+    task: sift
+    train_splits: [esd]
+    eval_splits: [esd]
+    target_samples: 150000
+
+  - path: mazesmazes/sift-audio-2
+    audio_column: audio
+    text_column: sift_response
+    task: sift
+    train_splits: [crema_d]
+    eval_splits: [crema_d]
+    target_samples: 65000
+
+  - path: mazesmazes/sift-audio-2
+    audio_column: audio
+    text_column: sift_response
+    task: sift
+    train_splits: [tess]
+    eval_splits: [tess]
+    target_samples: 40000
+
+  - path: mazesmazes/sift-audio-2
+    audio_column: audio
+    text_column: sift_response
+    task: sift
+    train_splits: [ravdess]
+    eval_splits: [ravdess]
+    target_samples: 22000
+
+  - path: mazesmazes/sift-audio-2
+    audio_column: audio
+    text_column: sift_response
+    task: sift
+    train_splits: [savee]
+    eval_splits: [savee]
+    target_samples: 7000
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+max_eval_samples: 2000

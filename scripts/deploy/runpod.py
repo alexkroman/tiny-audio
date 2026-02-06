@@ -178,6 +178,7 @@ def install_dependencies(conn: Connection) -> None:
 
     setup_commands = """
         export PATH="/root/.local/bin:$PATH"
+        export LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cusparselt/lib:${LD_LIBRARY_PATH:-}"
         export PIP_ROOT_USER_ACTION=ignore
         export POETRY_VIRTUALENVS_CREATE=false
         export PIP_BREAK_SYSTEM_PACKAGES=1
@@ -187,33 +188,34 @@ def install_dependencies(conn: Connection) -> None:
         echo -e "[global]\\nbreak-system-packages = true" > /root/.config/pip/pip.conf
 
         # Install Poetry if needed
-        command -v poetry >/dev/null 2>&1 || pip install --user poetry
-        pip install --user poetry-plugin-export
+        command -v poetry >/dev/null 2>&1 || python3 -m pip install --user poetry
+        python3 -m pip install --user poetry-plugin-export
 
         # Configure Poetry
         poetry config virtualenvs.create false
         poetry config installer.max-workers 10
 
-        # Install flash-attn if needed
-        python -c "import flash_attn" 2>/dev/null || pip install --user flash-attn --no-build-isolation
-
         # Install PyTorch with CUDA 12.8 if needed
-        python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || \
-            pip install --user torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128
+        python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || \
+            python3 -m pip install --user torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128
 
-        # Install peft for LoRA support
-        pip install --user peft
+        # Install cusparseLt library required by torch (may already be satisfied)
+        python3 -m pip install --user nvidia-cusparselt-cu12 2>&1 | grep -v "already satisfied" || true
 
-        # Export and install dependencies (excluding torch to preserve system version)
+        # Fix torchvision version mismatch if present (torch 2.8 needs torchvision 0.23)
+        python3 -m pip uninstall torchvision -y 2>/dev/null || true
+        python3 -m pip install --user torchvision~=0.23.0 --index-url=https://download.pytorch.org/whl/cu128 2>&1 | grep -v "already satisfied" || true
+
+        # Export and install dependencies (excluding torch to preserve CUDA-specific version)
         cd /workspace
         poetry export --only main --without-hashes | grep -v "^torch==" > /tmp/requirements.txt
-        pip install --user -r /tmp/requirements.txt 2>&1 | grep -v "already satisfied" || true
+        python3 -m pip install --user -r /tmp/requirements.txt 2>&1 | grep -v "already satisfied" || true
 
         # Install project in editable mode
-        pip install --user -e . --no-deps
+        python3 -m pip install --user -e . --no-deps
 
-        # Verify
-        python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+        # Verify (warn on failure but do not abort)
+        python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())" || echo "WARNING: torch verification failed"
     """
 
     conn.run(f"bash -c '{setup_commands}'", hide=False)
@@ -276,8 +278,8 @@ def build_training_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cusparselt/lib:${{LD_LIBRARY_PATH:-}}"
 export TOKENIZERS_PARALLELISM=false
 export HF_DATASETS_AUDIO_DECODER="soundfile"
 export HF_HOME=/workspace/.cache/huggingface
@@ -468,7 +470,6 @@ def build_sift_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
@@ -482,9 +483,6 @@ export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
 export TORCH_CUDNN_BENCHMARK=1
 
 cd /workspace
-
-# Install flash-attn if not present
-python -c "import flash_attn" 2>/dev/null || pip install flash-attn --no-build-isolation --quiet
 
 python -m scripts.generate_sift_dataset \\
     --output-repo {output_repo} \\
@@ -511,7 +509,7 @@ def sift(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
     port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
     output_repo: str = typer.Option(
-        "mazesmazes/sift-audio", "--output-repo", "-o", help="HuggingFace repo for output"
+        "mazesmazes/sift-audio-2", "--output-repo", "-o", help="HuggingFace repo for output"
     ),
     session_name: str | None = typer.Option(
         None, "--session-name", "-s", help="Custom tmux session name"
@@ -588,6 +586,476 @@ def sift(
 
 
 # =============================================================================
+# ClothoAQA Dataset Generation Command
+# =============================================================================
+
+
+def build_clothoaqa_script(
+    hf_token: str,
+    output_repo: str,
+    batch_size: int,
+    max_samples: int | None,
+) -> str:
+    """Generate the ClothoAQA dataset generation script content."""
+    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
+
+    return f"""#!/bin/bash
+# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
+
+ulimit -n 65536
+export PATH="/root/.local/bin:$PATH"
+export HF_HOME=/workspace/.cache/huggingface
+export HF_DATASETS_CACHE=/workspace/datasets
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_TOKEN="{hf_token}"
+
+# A40 GPU optimizations (48GB VRAM)
+export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
+export TORCH_CUDNN_BENCHMARK=1
+
+cd /workspace
+
+python -m scripts.generate_clothoaqa_dataset \\
+    --output-repo {output_repo} \\
+    --batch-size {batch_size} \\
+    {max_samples_arg}
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "===== ClothoAQA Dataset Generation Completed Successfully ====="
+else
+    echo "===== ClothoAQA Dataset Generation Failed with exit code: $EXIT_CODE ====="
+fi
+
+echo "Script finished. Session will remain active for inspection."
+sleep infinity
+"""
+
+
+@app.command()
+def clothoaqa(
+    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
+    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
+    output_repo: str = typer.Option(
+        "mazesmazes/clothoaqa", "--output-repo", "-o", help="HuggingFace repo for output"
+    ),
+    session_name: str | None = typer.Option(
+        None, "--session-name", "-s", help="Custom tmux session name"
+    ),
+    batch_size: int = typer.Option(1024, "--batch-size", "-b", help="Batch size for generation"),
+    max_samples: int | None = typer.Option(
+        None, "--max-samples", "-n", help="Max samples per split"
+    ),
+    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
+    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+):
+    """Generate enhanced ClothoAQA dataset on a remote RunPod instance.
+
+    Takes the CLAPv2/ClothoAQA dataset and generates LLM-augmented answers
+    that are more detailed than simple yes/no responses.
+    """
+    conn = get_connection(host, port)
+
+    if not test_connection(conn):
+        sys.exit(1)
+
+    # Generate session name if not provided
+    if session_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        session_name = f"clothoaqa_{timestamp}"
+
+    if force:
+        print(f"Killing existing session '{session_name}' if present...")
+        kill_tmux_session(conn, session_name)
+
+    # Get environment variables
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        print("Warning: HF_TOKEN environment variable not set.")
+
+    # Build and upload script
+    script_content = build_clothoaqa_script(hf_token, output_repo, batch_size, max_samples)
+    script_path = f"/tmp/clothoaqa_{session_name}.sh"
+
+    print(f"\nStarting ClothoAQA generation session '{session_name}'...")
+    print(f"Output repo: {output_repo}")
+    print(f"Batch size: {batch_size}")
+    if max_samples:
+        print(f"Max samples: {max_samples}")
+
+    # Write script to remote
+    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
+    conn.run(f"chmod +x {script_path}", hide=True)
+
+    # Start tmux session
+    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    if not result.ok:
+        print(f"Failed to start tmux session: {result.stderr}")
+        sys.exit(1)
+
+    print(f"\nClothoAQA generation started in session '{session_name}'.")
+    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
+
+    if not no_attach:
+        time.sleep(2)
+        attach_tmux_session(host, port, session_name)
+
+
+# =============================================================================
+# Mimi Latents Generation Command (for flow matching S2S)
+# =============================================================================
+
+
+def build_latents_script(
+    hf_token: str,
+    input_dataset: str,
+    output_repo: str,
+    dataset_config: str | None,
+    audio_column: str,
+    text_column: str,
+    splits: list[str],
+    batch_size: int,
+    max_samples: int | None,
+) -> str:
+    """Generate the Mimi latents generation script content."""
+    splits_arg = ",".join(splits)
+    config_arg = f"--dataset-config {dataset_config}" if dataset_config else ""
+    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
+
+    return f"""#!/bin/bash
+# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
+
+ulimit -n 65536
+export PATH="/root/.local/bin:$PATH"
+export HF_HOME=/workspace/.cache/huggingface
+export HF_DATASETS_CACHE=/workspace/datasets
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_TOKEN="{hf_token}"
+
+# GPU optimizations
+export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
+export TORCH_CUDNN_BENCHMARK=1
+
+cd /workspace
+
+python -m scripts.generate_mimi_latents \\
+    --input-dataset {input_dataset} \\
+    --output-dataset {output_repo} \\
+    {config_arg} \\
+    --audio-column {audio_column} \\
+    --text-column {text_column} \\
+    --splits {splits_arg} \\
+    --batch-size {batch_size} \\
+    {max_samples_arg}
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "===== Mimi Latents Generation Completed Successfully ====="
+else
+    echo "===== Mimi Latents Generation Failed with exit code: $EXIT_CODE ====="
+fi
+
+echo "Script finished. Session will remain active for inspection."
+sleep infinity
+"""
+
+
+@app.command()
+def latents(
+    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
+    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
+    input_dataset: str = typer.Option(
+        "parler-tts/libritts_r_filtered",
+        "--input-dataset",
+        "-i",
+        help="Input HuggingFace dataset",
+    ),
+    dataset_config: str | None = typer.Option(
+        "clean",
+        "--dataset-config",
+        "-c",
+        help="Dataset config/name (e.g., 'clean' or 'other' for libritts_r_filtered)",
+    ),
+    output_repo: str = typer.Option(
+        ...,
+        "--output-repo",
+        "-o",
+        help="Output HuggingFace repo for latents",
+    ),
+    audio_column: str = typer.Option("audio", "--audio-column", help="Audio column name"),
+    text_column: str = typer.Option("text_normalized", "--text-column", help="Text column name"),
+    splits: Annotated[
+        list[str] | None,
+        typer.Option("--splits", "-s", help="Dataset splits to process"),
+    ] = None,
+    batch_size: int = typer.Option(1, "--batch-size", "-b", help="Batch size for encoding"),
+    max_samples: int | None = typer.Option(
+        None, "--max-samples", "-n", help="Max samples to process (for testing)"
+    ),
+    session_name: str | None = typer.Option(
+        None, "--session-name", help="Custom tmux session name"
+    ),
+    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
+    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+):
+    """Generate continuous Mimi latents for flow matching S2S training.
+
+    Encodes audio to continuous Mimi embeddings (before quantization) for use
+    with the flow matching audio head.
+
+    Examples:
+        ta runpod latents host port -o user/libritts-latents
+        ta runpod latents host port -i parler-tts/libritts_r_filtered -c clean -o user/latents -s train.clean.100
+    """
+    conn = get_connection(host, port)
+
+    if not test_connection(conn):
+        sys.exit(1)
+
+    # Default splits
+    if splits is None:
+        splits = ["train.clean.100"]
+
+    # Generate session name if not provided
+    if session_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        session_name = f"latents_{timestamp}"
+
+    if force:
+        print(f"Killing existing session '{session_name}' if present...")
+        kill_tmux_session(conn, session_name)
+
+    # Get environment variables
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        print("Warning: HF_TOKEN environment variable not set.")
+
+    # Build and upload script
+    script_content = build_latents_script(
+        hf_token,
+        input_dataset,
+        output_repo,
+        dataset_config,
+        audio_column,
+        text_column,
+        splits,
+        batch_size,
+        max_samples,
+    )
+    script_path = f"/tmp/latents_{session_name}.sh"
+
+    print(f"\nStarting Mimi latents generation session '{session_name}'...")
+    print(f"Input dataset: {input_dataset}" + (f" ({dataset_config})" if dataset_config else ""))
+    print(f"Output repo: {output_repo}")
+    print(f"Splits: {', '.join(splits)}")
+    print(f"Batch size: {batch_size}")
+    if max_samples:
+        print(f"Max samples: {max_samples}")
+
+    # Write script to remote
+    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
+    conn.run(f"chmod +x {script_path}", hide=True)
+
+    # Start tmux session
+    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    if not result.ok:
+        print(f"Failed to start tmux session: {result.stderr}")
+        sys.exit(1)
+
+    print(f"\nLatents generation started in session '{session_name}'.")
+    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
+
+    if not no_attach:
+        time.sleep(2)
+        attach_tmux_session(host, port, session_name)
+
+
+# =============================================================================
+# Mimi Codes Generation Command (discrete codes for AR S2S)
+# =============================================================================
+
+
+def build_mimi_script(
+    hf_token: str,
+    input_dataset: str,
+    output_repo: str,
+    dataset_config: str | None,
+    audio_column: str,
+    text_column: str,
+    splits: list[str],
+    batch_size: int,
+    max_samples: int | None,
+) -> str:
+    """Generate the Mimi codes generation script content."""
+    splits_arg = ",".join(splits)
+    config_arg = f"--dataset-config {dataset_config}" if dataset_config else ""
+    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
+
+    return f"""#!/bin/bash
+# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
+
+ulimit -n 65536
+export PATH="/root/.local/bin:$PATH"
+export HF_HOME=/workspace/.cache/huggingface
+export HF_DATASETS_CACHE=/workspace/datasets
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_TOKEN="{hf_token}"
+
+# GPU optimizations
+export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
+export TORCH_CUDNN_BENCHMARK=1
+
+cd /workspace
+
+python -m scripts.generate_mimi \\
+    --input-dataset {input_dataset} \\
+    --output-repo {output_repo} \\
+    {config_arg} \\
+    --audio-column {audio_column} \\
+    --text-column {text_column} \\
+    --splits {splits_arg} \\
+    --batch-size {batch_size} \\
+    {max_samples_arg}
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "===== Mimi Codes Generation Completed Successfully ====="
+else
+    echo "===== Mimi Codes Generation Failed with exit code: $EXIT_CODE ====="
+fi
+
+echo "Script finished. Session will remain active for inspection."
+sleep infinity
+"""
+
+
+@app.command()
+def mimi(
+    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
+    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
+    input_dataset: str = typer.Option(
+        "parler-tts/libritts_r_filtered",
+        "--input-dataset",
+        "-i",
+        help="Input HuggingFace dataset",
+    ),
+    dataset_config: str | None = typer.Option(
+        "clean",
+        "--dataset-config",
+        "-c",
+        help="Dataset config/name (e.g., 'clean' or 'other')",
+    ),
+    output_repo: str = typer.Option(
+        ...,
+        "--output-repo",
+        "-o",
+        help="Output HuggingFace repo for encoded dataset",
+    ),
+    audio_column: str = typer.Option("audio", "--audio-column", help="Audio column name"),
+    text_column: str = typer.Option("text_normalized", "--text-column", help="Text column name"),
+    splits: Annotated[
+        str | None,
+        typer.Option("--splits", "-s", help="Comma-separated list of splits to process"),
+    ] = None,
+    batch_size: int = typer.Option(1, "--batch-size", "-b", help="Batch size for encoding"),
+    max_samples: int | None = typer.Option(
+        None, "--max-samples", "-n", help="Max samples per split (for testing)"
+    ),
+    session_name: str | None = typer.Option(
+        None, "--session-name", help="Custom tmux session name"
+    ),
+    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
+    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+):
+    """Generate Mimi codec codes for S2S training.
+
+    Encodes audio to discrete Mimi codes (8 codebooks) for use with the
+    autoregressive audio head in speech-to-speech training.
+
+    Examples:
+        # Process LibriTTS clean splits
+        ta runpod mimi host port -o user/libritts-mimi -s train.clean.100,train.clean.360
+
+        # Process LibriTTS other split
+        ta runpod mimi host port -i parler-tts/libritts_r_filtered -c other -o user/libritts-mimi-other -s train.other.500
+
+        # Process LibriSpeech
+        ta runpod mimi host port -i librispeech_asr -c clean -o user/librispeech-mimi -s train.100 --text-column text
+    """
+    conn = get_connection(host, port)
+
+    if not test_connection(conn):
+        sys.exit(1)
+
+    # Default splits for LibriTTS
+    if splits is None:
+        splits = "train.clean.360"
+    split_list = [s.strip() for s in splits.split(",")]
+
+    # Generate session name if not provided
+    if session_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        session_name = f"mimi_{timestamp}"
+
+    if force:
+        print(f"Killing existing session '{session_name}' if present...")
+        kill_tmux_session(conn, session_name)
+
+    # Get environment variables
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        print("Warning: HF_TOKEN environment variable not set.")
+
+    # Build and upload script
+    script_content = build_mimi_script(
+        hf_token,
+        input_dataset,
+        output_repo,
+        dataset_config,
+        audio_column,
+        text_column,
+        split_list,
+        batch_size,
+        max_samples,
+    )
+    script_path = f"/tmp/mimi_{session_name}.sh"
+
+    print(f"\nStarting Mimi codes generation session '{session_name}'...")
+    print(f"Input dataset: {input_dataset}" + (f" ({dataset_config})" if dataset_config else ""))
+    print(f"Output repo: {output_repo}")
+    print(f"Splits: {', '.join(split_list)}")
+    print(f"Batch size: {batch_size}")
+    if max_samples:
+        print(f"Max samples per split: {max_samples}")
+
+    # Write script to remote
+    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
+    conn.run(f"chmod +x {script_path}", hide=True)
+
+    # Start tmux session
+    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    if not result.ok:
+        print(f"Failed to start tmux session: {result.stderr}")
+        sys.exit(1)
+
+    print(f"\nMimi codes generation started in session '{session_name}'.")
+    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
+
+    if not no_attach:
+        time.sleep(2)
+        attach_tmux_session(host, port, session_name)
+
+
+# =============================================================================
 # Eval Command
 # =============================================================================
 
@@ -619,7 +1087,6 @@ def build_eval_script(
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-pip install hf_transfer modelscope --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets

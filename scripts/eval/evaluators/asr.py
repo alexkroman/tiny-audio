@@ -231,9 +231,23 @@ class EndpointEvaluator(Evaluator):
 class AssemblyAIEvaluator(Evaluator):
     """Evaluator for AssemblyAI API."""
 
-    def __init__(self, api_key: str, model: str = "slam_1", base_url: str | None = None, **kwargs):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str | None = None,
+        temperature: float | None = None,
+        prompt: str | None = None,
+        keyterms_prompt: list[str] | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        self.transcriber = setup_assemblyai(api_key, model, base_url=base_url)
+        self.transcriber = setup_assemblyai(
+            api_key,
+            base_url=base_url,
+            temperature=temperature,
+            prompt=prompt,
+            keyterms_prompt=keyterms_prompt,
+        )
 
     def transcribe(self, audio) -> tuple[str, float]:
         wav_bytes = prepare_wav_bytes(audio)

@@ -46,11 +46,11 @@ class TestExtractAudio:
 
 
 class TestSpeakerAssignment:
-    """Tests for SpeakerDiarizer.assign_speakers_to_words."""
+    """Tests for LocalSpeakerDiarizer.assign_speakers_to_words."""
 
     def test_exact_overlap(self):
         """Words within speaker segments get assigned correctly."""
-        from tiny_audio.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.diarization import LocalSpeakerDiarizer
 
         words = [
             {"word": "hello", "start": 0.0, "end": 0.5},
@@ -58,14 +58,14 @@ class TestSpeakerAssignment:
         ]
         segments = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0}]
 
-        result = SpeakerDiarizer.assign_speakers_to_words(words, segments)
+        result = LocalSpeakerDiarizer.assign_speakers_to_words(words, segments)
 
         assert result[0]["speaker"] == "SPEAKER_00"
         assert result[1]["speaker"] == "SPEAKER_00"
 
     def test_multiple_speakers(self):
         """Words should be assigned to correct speakers."""
-        from tiny_audio.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.diarization import LocalSpeakerDiarizer
 
         words = [
             {"word": "hello", "start": 0.0, "end": 0.5},
@@ -76,14 +76,14 @@ class TestSpeakerAssignment:
             {"speaker": "SPEAKER_01", "start": 1.5, "end": 3.0},
         ]
 
-        result = SpeakerDiarizer.assign_speakers_to_words(words, segments)
+        result = LocalSpeakerDiarizer.assign_speakers_to_words(words, segments)
 
         assert result[0]["speaker"] == "SPEAKER_00"
         assert result[1]["speaker"] == "SPEAKER_01"
 
     def test_closest_segment_fallback(self):
         """Words outside segments should be assigned to closest speaker."""
-        from tiny_audio.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.diarization import LocalSpeakerDiarizer
 
         words = [{"word": "hello", "start": 1.0, "end": 1.5}]  # Between segments
         segments = [
@@ -91,19 +91,19 @@ class TestSpeakerAssignment:
             {"speaker": "SPEAKER_01", "start": 2.0, "end": 3.0},
         ]
 
-        result = SpeakerDiarizer.assign_speakers_to_words(words, segments)
+        result = LocalSpeakerDiarizer.assign_speakers_to_words(words, segments)
         # Midpoint is 1.25, closer to SPEAKER_01 (midpoint 2.5) than SPEAKER_00 (midpoint 0.25)
         # Actually: |1.25 - 0.25| = 1.0, |1.25 - 2.5| = 1.25, so SPEAKER_00 is closer
         assert result[0]["speaker"] == "SPEAKER_00"
 
     def test_empty_segments(self):
         """Empty segments should result in None speaker."""
-        from tiny_audio.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.diarization import LocalSpeakerDiarizer
 
         words = [{"word": "hello", "start": 0.0, "end": 0.5}]
         segments = []
 
-        result = SpeakerDiarizer.assign_speakers_to_words(words, segments)
+        result = LocalSpeakerDiarizer.assign_speakers_to_words(words, segments)
 
         assert result[0]["speaker"] is None
 

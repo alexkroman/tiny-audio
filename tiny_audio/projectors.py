@@ -89,34 +89,6 @@ class SimpleAdapter(nn.Module):
         return self.fc2(self.act(self.fc1(x)))
 
 
-class SwiGLU(nn.Module):
-    """SwiGLU activation with gated linear units (used in LLaMA, Mistral, etc.)."""
-
-    def __init__(self, dim: int, hidden_dim: int, bias: bool = False):
-        super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim, bias=bias)  # Gate
-        self.w2 = nn.Linear(dim, hidden_dim, bias=bias)  # Value
-        self.w3 = nn.Linear(hidden_dim, dim, bias=bias)  # Output
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w3(F.silu(self.w1(x)) * self.w2(x))
-
-
-class AsymmetricSwiGLU(nn.Module):
-    """SwiGLU that handles different input and output dimensions."""
-
-    def __init__(
-        self, in_features: int, hidden_features: int, out_features: int, bias: bool = False
-    ):
-        super().__init__()
-        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)  # Gate
-        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)  # Value
-        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)  # Output
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w3(F.silu(self.w1(x)) * self.w2(x))
-
-
 class MOSAProjector(nn.Module):
     """MOSA-Base projector: simple 2-layer ReLU router with 4 simple adapters.
 

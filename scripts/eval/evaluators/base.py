@@ -11,24 +11,35 @@ from scripts.eval.audio import TextNormalizer
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
 
-# AssemblyAI model options
-ASSEMBLYAI_MODELS = {"best", "universal", "slam_1", "nano"}
-
 
 def setup_assemblyai(
-    api_key: str, model: str, speaker_labels: bool = False, base_url: str | None = None
+    api_key: str,
+    speaker_labels: bool = False,
+    base_url: str | None = None,
+    temperature: float | None = None,
+    prompt: str | None = None,
+    keyterms_prompt: list[str] | None = None,
 ):
-    """Initialize AssemblyAI transcriber with given model."""
+    """Initialize AssemblyAI transcriber with slam-1 model."""
     import assemblyai as aai
 
     aai.settings.api_key = api_key
     if base_url:
         aai.settings.base_url = base_url
-    if model not in ASSEMBLYAI_MODELS:
-        raise ValueError(f"Invalid model '{model}'. Choose from: {ASSEMBLYAI_MODELS}")
-    config = aai.TranscriptionConfig(
-        speech_model=getattr(aai.types.SpeechModel, model), speaker_labels=speaker_labels
-    )
+
+    # Build config kwargs directly on TranscriptionConfig
+    config_kwargs = {
+        "speech_model": aai.types.SpeechModel.slam_1,
+        "speaker_labels": speaker_labels,
+    }
+    if prompt is not None:
+        config_kwargs["prompt"] = prompt
+    if keyterms_prompt is not None:
+        config_kwargs["keyterms_prompt"] = keyterms_prompt
+    if temperature is not None:
+        config_kwargs["temperature"] = temperature
+
+    config = aai.TranscriptionConfig(**config_kwargs)
     return aai.Transcriber(config=config)
 
 

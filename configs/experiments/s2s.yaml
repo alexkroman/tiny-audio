@@ -1,0 +1,87 @@
+# @package _global_
+# Speech-to-Speech (S2S) training: AR codec token generation
+#
+# Architecture:
+#   LLM text -> embeddings -> Pre-NN -> AR Decoder -> Mimi codes -> audio
+#                    |
+#                    +-> Prefix Bridge -> KV Cache (conditions AR Decoder)
+#
+# Prefix Bridge (Freeze-Omni style): Transforms LLM hidden states into KV cache
+# entries that condition the AR decoder, bridging text→audio modality gap.
+#
+# Audio head dimensions scaled for SmolLM3-3B following Freeze-Omni ratios:
+#   - Hidden: 512 (vs 2048 LLM), Layers: 4 AR + 4 Prefix + 2 Pre-NN
+#   - Depformer: 256 hidden, 4 layers
+#   - Total trainable: ~60M params (vs ~1.1B before scaling)
+#
+# All audio_head components trained from scratch (random initialization).
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=s2s
+#
+# Prerequisites:
+#   - Pretrained ASR model at mazesmazes/tiny-audio-omni (or specify model.pretrained_model_path)
+#   - Dataset with pre-computed Mimi codes (use scripts/generate_mimi_codes.py)
+
+defaults:
+  - override /data: s2s_codes
+
+model:
+  # Start from pretrained ASR model
+  pretrained_model_path: mazesmazes/tiny-audio-s2s
+  model_dtype: bfloat16
+
+  projector_type: mlp
+  projector_pool_stride: 4
+  projector_hidden_dim: 1024
+  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  text_model_id: HuggingFaceTB/SmolLM3-3B
+
+  # Generation defaults
+  do_sample: false
+  max_new_tokens: 512
+  enable_thinking: false
+  repetition_penalty: 1.1
+
+  # Freeze projector (ASR already trained), train audio head
+  freeze_projector: true
+
+  # Audio head settings (AR codec generation)
+  use_audio_head: true
+  freeze_audio_head: false
+  use_prefix_bridge: true  # Enable prefix bridge for text→audio KV-cache fine-tuning
+  max_audio_tokens: 500  # Max codec tokens to generate
+  audio_top_k: 50  # Top-k sampling
+  audio_temperature: 1.0  # Sampling temperature
+  audio_repetition_penalty: 1.1  # Repetition penalty
+
+# S2S configuration flag
+s2s:
+  enabled: true
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-s2s"
+  group_by_length: false
+  # Track best model by eval loss
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  learning_rate: 1e-3
+  warmup_steps: 100
+  lr_scheduler_type: constant_with_warmup
+  seed: 42
+  per_device_train_batch_size: 28
+  per_device_eval_batch_size: 28
+  gradient_accumulation_steps: 2
+  num_train_epochs: 30
+  save_steps: 1000
+  eval_steps: 1000
+
+  weight_decay: 0.01
+
+  # No specaugment needed (audio understanding already learned in ASR training)
+  use_specaugment: false
+
+  # S2S uses codec_targets for AR token prediction
+  label_names: ["codec_targets"]
+  label_smoothing: 0.0

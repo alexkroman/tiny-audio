@@ -64,7 +64,7 @@ class DiarizationEvaluator:
 
         import librosa
 
-        from tiny_audio.asr_pipeline import SpeakerDiarizer
+        from tiny_audio.diarization import LocalSpeakerDiarizer
 
         # Prepare audio array - handle both decoded and raw bytes formats
         if isinstance(audio, dict):
@@ -85,7 +85,7 @@ class DiarizationEvaluator:
             audio_array = audio_array.astype(np.float32)
 
         start = time.time()
-        segments = SpeakerDiarizer.diarize(
+        segments = LocalSpeakerDiarizer.diarize(
             audio_array,
             sample_rate=sample_rate,
             num_speakers=self.num_speakers,
@@ -215,6 +215,7 @@ class DiarizationEvaluator:
                 "false_alarm": 0.0,
                 "avg_time": 0.0,
                 "num_samples": 0,
+                "total_duration": 0.0,
             }
 
         # Corpus-level: sum raw values across all samples
@@ -238,16 +239,17 @@ class DiarizationEvaluator:
             "false_alarm": corpus_false_alarm,
             "avg_time": sum(r.time for r in self.results) / len(self.results),
             "num_samples": len(self.results),
+            "total_duration": total_duration,  # For corpus-level weighting across datasets
         }
 
 
 class AssemblyAIDiarizationEvaluator(DiarizationEvaluator):
     """Evaluator for AssemblyAI speaker diarization."""
 
-    def __init__(self, api_key: str, model: str = "slam_1", **kwargs):
+    def __init__(self, api_key: str, **kwargs):
         kwargs.pop("hf_token", None)
         super().__init__(**kwargs)
-        self.transcriber = setup_assemblyai(api_key, model, speaker_labels=True)
+        self.transcriber = setup_assemblyai(api_key, speaker_labels=True)
 
     def diarize(self, audio) -> tuple[list[dict], float]:
         """Run AssemblyAI diarization on audio."""

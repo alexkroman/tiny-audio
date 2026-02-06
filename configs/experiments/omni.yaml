@@ -1,24 +1,43 @@
 # @package _global_
-# Omni training starting from pretrained ASR model
-# 60% ASR (from multiasr: loquacious, ami, switchboard, spgispeech)
-# 40% SIFT (paralinguistic: podcast, commonvoice, esd, crema_d, tess, ravdess, savee)
+# Omni training: SIFT + transcription + Audio Head (joint training)
+#
+# Stage 1: Trains projector for audio understanding. Audio head is frozen.
+# Uses SIFT dataset with text responses for distillation training.
+# No pre-computed speech codes needed - distillation from CosyVoice text encoder.
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=omni
+#
+# Architecture:
+#   Audio Input → Encoder → Projector (trained) → LLM → Text Response
+#
+# (Audio head is frozen in Stage 1, trained in Stage 2 with s2s.yaml)
 
 defaults:
-  - override /data: multitask
+  - override /data: omni
 
 model:
-  pretrained_model_path: mazesmazes/tiny-audio
   projector_type: mlp
   projector_pool_stride: 4
   projector_hidden_dim: 1024
   audio_model_id: zai-org/GLM-ASR-Nano-2512
-  text_model_id: Qwen/Qwen3-1.7B
+  text_model_id: HuggingFaceTB/SmolLM3-3B
 
-# Multitask configuration
-multitask:
+  # Generation defaults for voice agent (greedy decoding)
+  do_sample: false
+  max_new_tokens: 128
+  enable_thinking: false
+  repetition_penalty: 1.1
+
+  # Audio Head settings - Fish-Speech TTS bridge architecture
+  # Stage 1: Train projector only, audio head frozen
+  use_audio_head: true
+  freeze_audio_head: true  # Freeze audio head, train projector only
+  audio_head_hidden_dim: 512  # Bridge hidden dimension
+  freeze_tts: true  # TTS model is always frozen (pretrained)
+
+# SIFT configuration
+sift:
   enabled: true
 
 training:
@@ -30,15 +49,15 @@ training:
   lr_scheduler_kwargs:
     power: 0.5
   seed: 42
-  per_device_train_batch_size: 14
-  per_device_eval_batch_size: 14
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
   gradient_accumulation_steps: 4
   num_train_epochs: 1
   save_steps: 1000
   eval_steps: 1000
 
   label_smoothing_factor: 0.1
-  weight_decay: 0.01
+  weight_decay: 0.0
 
   use_specaugment: true
   # LibriDouble settings (2 masks each)

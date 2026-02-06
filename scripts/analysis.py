@@ -9,6 +9,7 @@ Commands:
 import contextlib
 import json
 import re
+import statistics
 from collections import defaultdict
 from pathlib import Path
 
@@ -361,7 +362,7 @@ DATASET_ORDER = [
 ]
 
 # Datasets to exclude from comparison tables
-EXCLUDED_DATASETS = {"classification", "expresso"}
+EXCLUDED_DATASETS: set[str] = set()
 
 # Short names for display
 DATASET_SHORT_NAMES = {
@@ -396,7 +397,7 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
         "display_name": display_name,
         "datasets": {},
         "by_length": defaultdict(lambda: {"samples": [], "wers": []}),
-        "diarization": None,
+        "diarization": {},  # Per-dataset diarization results
         "alignment": None,
         "mcq": {},  # MCQ results keyed by dataset name (e.g., "mmau")
         "entity_errors": defaultdict(lambda: {"found": 0, "total": 0}),
@@ -422,7 +423,8 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
         # Check for diarization/alignment/mcq results (special handling)
         if dir_name.endswith("_diarization"):
             if metrics_file.exists():
-                metrics["diarization"] = parse_metrics_file(metrics_file)
+                dataset = extract_dataset_name(dir_name)
+                metrics["diarization"][dataset] = parse_metrics_file(metrics_file)
             continue
         if dir_name.endswith("_alignment"):
             if metrics_file.exists():
@@ -516,7 +518,7 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
             metrics["corpus_ins_rate"] = output.insertions / total * 100
 
     if all_latencies:
-        metrics["avg_latency"] = sum(all_latencies) / len(all_latencies)
+        metrics["avg_latency"] = statistics.mean(all_latencies)
 
     return metrics
 
@@ -666,8 +668,7 @@ def compare(
             wc_data = data["by_length"].get(wc, {})
             wers = wc_data.get("wers", [])
             if wers:
-                avg_wer = sum(wers) / len(wers)
-                row.append(f"{avg_wer:.1f}%")
+                row.append(f"{statistics.mean(wers):.1f}%")
             else:
                 row.append("-")
         rows.append(row)
@@ -678,12 +679,31 @@ def compare(
     console.print(wc_table)
 
     # === Diarization Table ===
-    has_diarization = any(m.get("diarization") for m in model_metrics.values())
-    if has_diarization:
+    # Collect all diarization datasets across models
+    all_diar_datasets = set()
+    for m in model_metrics.values():
+        all_diar_datasets.update(m["diarization"].keys())
+
+    if all_diar_datasets:
+        # Canonical order for diarization datasets
+        diar_dataset_order = ["callhome", "ami-diarization"]
+        ordered_diar_datasets = [d for d in diar_dataset_order if d in all_diar_datasets]
+        ordered_diar_datasets += [
+            d for d in sorted(all_diar_datasets) if d not in diar_dataset_order
+        ]
+
+        # Short names for diarization datasets
+        diar_short_names = {
+            "callhome": "CallHome",
+            "ami-diarization": "AMI",
+        }
+
         console.print("\n")
-        diar_table = Table(title="Diarization")
+        diar_table = Table(title="Diarization (DER)")
         diar_table.add_column("Model", style="cyan")
-        diar_table.add_column("DER", justify="right")
+        diar_table.add_column("Corpus", justify="right", style="bold")
+        for ds in ordered_diar_datasets:
+            diar_table.add_column(diar_short_names.get(ds, ds), justify="right")
         diar_table.add_column("Confusion", justify="right")
         diar_table.add_column("Missed", justify="right")
         diar_table.add_column("False Alarm", justify="right")
@@ -691,19 +711,61 @@ def compare(
         rows = []
         for model, data in model_metrics.items():
             display_name = data.get("display_name", model)
-            diar = data.get("diarization", {})
-            if diar:
-                rows.append(
-                    [
-                        display_name,
-                        f"{diar.get('der', 0):.2f}%",
-                        f"{diar.get('confusion', 0):.2f}%",
-                        f"{diar.get('missed', 0):.2f}%",
-                        f"{diar.get('false_alarm', 0):.2f}%",
-                    ]
-                )
+            diar_results = data.get("diarization", {})
+
+            if diar_results:
+                row = [display_name]
+
+                # Calculate corpus-level DER across all diarization datasets
+                # Use weighted average by total speech duration
+                total_duration = 0.0
+                total_error = 0.0
+                total_confusion = 0.0
+                total_missed = 0.0
+                total_fa = 0.0
+
+                for ds_diar in diar_results.values():
+                    # Get raw totals if available, otherwise estimate from percentages
+                    ds_total = ds_diar.get("total_duration", ds_diar.get("num_samples", 1))
+                    ds_der = ds_diar.get("der", 0)
+                    ds_conf = ds_diar.get("confusion", 0)
+                    ds_miss = ds_diar.get("missed", 0)
+                    ds_fa = ds_diar.get("false_alarm", 0)
+
+                    total_duration += ds_total
+                    total_error += ds_der * ds_total / 100
+                    total_confusion += ds_conf * ds_total / 100
+                    total_missed += ds_miss * ds_total / 100
+                    total_fa += ds_fa * ds_total / 100
+
+                if total_duration > 0:
+                    corpus_der = total_error / total_duration * 100
+                    corpus_conf = total_confusion / total_duration * 100
+                    corpus_miss = total_missed / total_duration * 100
+                    corpus_fa = total_fa / total_duration * 100
+                    row.append(f"{corpus_der:.2f}%")
+                else:
+                    corpus_conf = corpus_miss = corpus_fa = 0
+                    row.append("-")
+
+                # Per-dataset DER columns
+                for ds in ordered_diar_datasets:
+                    ds_diar = diar_results.get(ds, {})
+                    der = ds_diar.get("der")
+                    row.append(f"{der:.2f}%" if der is not None else "-")
+
+                # Error breakdown (corpus-level)
+                row.append(f"{corpus_conf:.2f}%")
+                row.append(f"{corpus_miss:.2f}%")
+                row.append(f"{corpus_fa:.2f}%")
+
+                rows.append(row)
             else:
-                rows.append([display_name, "-", "-", "-", "-"])
+                # No diarization results
+                row = [display_name, "-"]
+                row.extend(["-"] * len(ordered_diar_datasets))
+                row.extend(["-", "-", "-"])
+                rows.append(row)
 
         for row in sorted(rows, key=lambda r: _sort_key(r[1])):
             diar_table.add_row(*row)
@@ -716,7 +778,7 @@ def compare(
         console.print("\n")
         align_table = Table(title="Timestamp Alignment")
         align_table.add_column("Model", style="cyan")
-        align_table.add_column("Median AE (ms)", justify="right")
+        align_table.add_column("MAE (ms)", justify="right")
 
         rows = []
         for model, data in model_metrics.items():

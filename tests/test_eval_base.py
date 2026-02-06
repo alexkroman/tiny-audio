@@ -3,7 +3,6 @@
 import pytest
 
 from scripts.eval.evaluators.base import (
-    ASSEMBLYAI_MODELS,
     AlignmentResult,
     DiarizationResult,
     EvalResult,
@@ -258,18 +257,3 @@ class TestMockEvaluator:
         results = evaluator.evaluate(dataset)
         assert len(results) == 1
         assert results[0].reference == "valid text"
-
-
-class TestAssemblyAIModels:
-    """Tests for AssemblyAI model constants."""
-
-    def test_available_models(self):
-        """Test that expected models are available."""
-        assert "best" in ASSEMBLYAI_MODELS
-        assert "universal" in ASSEMBLYAI_MODELS
-        assert "slam_1" in ASSEMBLYAI_MODELS
-        assert "nano" in ASSEMBLYAI_MODELS
-
-    def test_model_count(self):
-        """Test number of available models."""
-        assert len(ASSEMBLYAI_MODELS) == 4

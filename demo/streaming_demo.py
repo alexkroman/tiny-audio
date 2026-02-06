@@ -26,6 +26,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 async def main():
     # Import pipecat components
     try:
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
+        from pipecat.audio.vad.vad_analyzer import VADParams
         from pipecat.frames.frames import (
             Frame,
             InterimTranscriptionFrame,
@@ -39,8 +41,6 @@ async def main():
             LocalAudioTransport,
             LocalAudioTransportParams,
         )
-        from pipecat.audio.vad.silero import SileroVADAnalyzer
-        from pipecat.audio.vad.vad_analyzer import VADParams
     except ImportError as e:
         print(f"Error: {e}")
         print("\nPlease install pipecat with required extras:")

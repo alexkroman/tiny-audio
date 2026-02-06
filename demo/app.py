@@ -134,13 +134,13 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         # Return timestamps (with speaker labels if diarization also enabled)
         if show_timestamps and "words" in result:
             return format_words_with_timestamps(result["words"])
-        elif show_timestamps and "timestamp_error" in result:
+        if show_timestamps and "timestamp_error" in result:
             return f"Error: {result['timestamp_error']}"
 
         # Return diarization only (words with speakers, no timestamps shown)
         if show_diarization and "words" in result:
             return format_words_with_speakers(result["words"])
-        elif show_diarization and "diarization_error" in result:
+        if show_diarization and "diarization_error" in result:
             return f"Error: {result['diarization_error']}"
 
         # Default: return transcript

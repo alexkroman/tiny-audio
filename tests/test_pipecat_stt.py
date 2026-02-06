@@ -1,7 +1,7 @@
 """Tests for TinyAudioSTTService pipecat integration.
 
-Note: These tests require pipecat to be installed. Tests for _ensure_model
-and run_stt would require extensive mocking of the lazy ASRModel import
+Note: These tests require pipecat to be installed. Tests for _ensure_pipeline
+and run_stt would require extensive mocking of the lazy ASRModel/ASRPipeline import
 and are better tested via integration tests.
 """
 
@@ -21,7 +21,7 @@ class TestTinyAudioSTTServiceInit:
         service = TinyAudioSTTService(model_id="test/model")
 
         assert service._model_id == "test/model"
-        assert service._model is None  # Lazy loaded
+        assert service._pipeline is None  # Lazy loaded
 
     def test_init_default_model_id(self):
         """Should use default model_id."""
@@ -75,11 +75,11 @@ class TestTinyAudioSTTServiceClass:
 
         assert issubclass(TinyAudioSTTService, SegmentedSTTService)
 
-    def test_has_ensure_model_method(self):
-        """Should have _ensure_model method."""
+    def test_has_ensure_pipeline_method(self):
+        """Should have _ensure_pipeline method."""
         from tiny_audio.integrations.pipecat_stt import TinyAudioSTTService
 
-        assert hasattr(TinyAudioSTTService, "_ensure_model")
+        assert hasattr(TinyAudioSTTService, "_ensure_pipeline")
 
     def test_has_run_stt_method(self):
         """Should have run_stt method."""

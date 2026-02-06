@@ -3,6 +3,11 @@
 import numpy as np
 import torch
 
+# Offset compensation for Wav2Vec2-BASE systematic bias (in seconds)
+# Calibrated on librispeech-alignments dataset (n=25, MAE=48ms)
+START_OFFSET = 0.04  # Subtract from start times (shift earlier)
+END_OFFSET = -0.04  # Subtract from end times (shift later)
+
 
 def _get_device() -> str:
     """Get best available device for non-transformers models."""
@@ -65,6 +70,11 @@ class ForcedAligner:
         trellis = torch.full((num_frames + 1, num_tokens + 1), -float("inf"))
         trellis[0, 0] = 0
 
+        # Force alignment to use all tokens by preventing staying in blank
+        # at the end when there are still tokens to emit
+        if num_tokens > 1:
+            trellis[-num_tokens + 1 :, 0] = float("inf")
+
         for t in range(num_frames):
             for j in range(num_tokens + 1):
                 # Stay: emit blank and stay at j tokens
@@ -80,7 +90,7 @@ class ForcedAligner:
     @staticmethod
     def _backtrack(
         trellis: torch.Tensor, emission: torch.Tensor, tokens: list[int], blank_id: int = 0
-    ) -> list[tuple[int, float, float]]:
+    ) -> list[tuple[int, float, float, float]]:
         """Backtrack through trellis to find optimal forced monotonic alignment.
 
         Guarantees:
@@ -88,7 +98,8 @@ class ForcedAligner:
         - Strictly monotonic: each token's frames come after previous token's
         - No frame skipping or token teleporting
 
-        Returns list of (token_id, start_frame, end_frame) for each token.
+        Returns list of (token_id, start_frame, end_frame, peak_frame) for each token.
+        The peak_frame is the frame with highest emission probability for that token.
         """
         num_frames = emission.size(0)
         num_tokens = len(tokens)
@@ -102,13 +113,18 @@ class ForcedAligner:
             # Alignment failed - fall back to uniform distribution
             frames_per_token = num_frames / num_tokens
             return [
-                (tokens[i], i * frames_per_token, (i + 1) * frames_per_token)
+                (
+                    tokens[i],
+                    i * frames_per_token,
+                    (i + 1) * frames_per_token,
+                    (i + 0.5) * frames_per_token,
+                )
                 for i in range(num_tokens)
             ]
 
         # Backtrack: find where each token transition occurred
-        # path[i] = frame where token i was first emitted
-        token_frames: list[list[int]] = [[] for _ in range(num_tokens)]
+        # Store (frame, emission_score) for each token
+        token_frames: list[list[tuple[int, float]]] = [[] for _ in range(num_tokens)]
 
         t = num_frames
         j = num_tokens
@@ -120,38 +136,40 @@ class ForcedAligner:
 
             if move_score >= stay_score:
                 # Token j-1 was emitted at frame t-1
-                token_frames[j - 1].insert(0, t - 1)
+                # Store frame and its emission probability
+                emit_prob = emission[t - 1, tokens[j - 1]].exp().item()
+                token_frames[j - 1].insert(0, (t - 1, emit_prob))
                 j -= 1
             # Always decrement time (monotonic)
             t -= 1
 
         # Handle any remaining tokens at the start (edge case)
         while j > 0:
-            token_frames[j - 1].insert(0, 0)
+            token_frames[j - 1].insert(0, (0, 0.0))
             j -= 1
 
-        # Convert to spans
-        token_spans: list[tuple[int, float, float]] = []
-        for token_idx, frames in enumerate(token_frames):
-            if not frames:
+        # Convert to spans with peak frame
+        token_spans: list[tuple[int, float, float, float]] = []
+        for token_idx, frames_with_scores in enumerate(token_frames):
+            if not frames_with_scores:
                 # Token never emitted - assign minimal span after previous
                 if token_spans:
                     prev_end = token_spans[-1][2]
-                    frames = [int(prev_end)]
+                    frames_with_scores = [(int(prev_end), 0.0)]
                 else:
-                    frames = [0]
+                    frames_with_scores = [(0, 0.0)]
 
             token_id = tokens[token_idx]
+            frames = [f for f, _ in frames_with_scores]
             start_frame = float(min(frames))
             end_frame = float(max(frames)) + 1.0
-            token_spans.append((token_id, start_frame, end_frame))
+
+            # Find peak frame (highest emission probability)
+            peak_frame, _ = max(frames_with_scores, key=lambda x: x[1])
+
+            token_spans.append((token_id, start_frame, end_frame, float(peak_frame)))
 
         return token_spans
-
-    # Offset compensation for Wav2Vec2-BASE systematic bias (in seconds)
-    # Calibrated on librispeech-alignments dataset
-    START_OFFSET = 0.06  # Subtract from start times (shift earlier)
-    END_OFFSET = -0.03  # Add to end times (shift later)
 
     @classmethod
     def align(
@@ -159,8 +177,6 @@ class ForcedAligner:
         audio: np.ndarray,
         text: str,
         sample_rate: int = 16000,
-        _language: str = "eng",
-        _batch_size: int = 16,
     ) -> list[dict]:
         """Align transcript to audio and return word-level timestamps.
 
@@ -170,8 +186,6 @@ class ForcedAligner:
             audio: Audio waveform as numpy array
             text: Transcript text to align
             sample_rate: Audio sample rate (default 16000)
-            _language: ISO-639-3 language code (default "eng" for English, unused)
-            _batch_size: Batch size for alignment model (unused)
 
         Returns:
             List of dicts with 'word', 'start', 'end' keys
@@ -229,26 +243,28 @@ class ForcedAligner:
         frame_duration = 320 / cls._bundle.sample_rate
 
         # Apply separate offset compensation for start/end (Wav2Vec2 systematic bias)
-        start_offset = cls.START_OFFSET
-        end_offset = cls.END_OFFSET
+        start_offset = START_OFFSET
+        end_offset = END_OFFSET
 
         # Group aligned tokens into words based on pipe separator
+        # Use peak emission frame for more accurate word boundaries
         words = text.split()
         word_timestamps = []
-        current_word_start = None
-        current_word_end = None
+        first_char_peak = None
+        last_char_peak = None
         word_idx = 0
         separator_id = dictionary.get("|", dictionary.get(" ", 0))
 
-        for token_id, start_frame, end_frame in alignment_path:
+        for token_id, _start_frame, _end_frame, peak_frame in alignment_path:
             if token_id == separator_id:  # Word separator
                 if (
-                    current_word_start is not None
-                    and current_word_end is not None
+                    first_char_peak is not None
+                    and last_char_peak is not None
                     and word_idx < len(words)
                 ):
-                    start_time = max(0.0, current_word_start * frame_duration - start_offset)
-                    end_time = max(0.0, current_word_end * frame_duration - end_offset)
+                    # Use peak frames for word boundaries
+                    start_time = max(0.0, first_char_peak * frame_duration - start_offset)
+                    end_time = max(0.0, (last_char_peak + 1) * frame_duration - end_offset)
                     word_timestamps.append(
                         {
                             "word": words[word_idx],
@@ -257,21 +273,17 @@ class ForcedAligner:
                         }
                     )
                     word_idx += 1
-                current_word_start = None
-                current_word_end = None
+                first_char_peak = None
+                last_char_peak = None
             else:
-                if current_word_start is None:
-                    current_word_start = start_frame
-                current_word_end = end_frame
+                if first_char_peak is None:
+                    first_char_peak = peak_frame
+                last_char_peak = peak_frame
 
         # Don't forget the last word
-        if (
-            current_word_start is not None
-            and current_word_end is not None
-            and word_idx < len(words)
-        ):
-            start_time = max(0.0, current_word_start * frame_duration - start_offset)
-            end_time = max(0.0, current_word_end * frame_duration - end_offset)
+        if first_char_peak is not None and last_char_peak is not None and word_idx < len(words):
+            start_time = max(0.0, first_char_peak * frame_duration - start_offset)
+            end_time = max(0.0, (last_char_peak + 1) * frame_duration - end_offset)
             word_timestamps.append(
                 {
                     "word": words[word_idx],

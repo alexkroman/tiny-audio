@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Training script for ASR models using Hydra configuration.
+"""Training script for audio-language models using Hydra configuration.
 
-This script handles:
-- Loading and preparing datasets from multiple sources
-- Creating ASR models with configurable projector types
-- Training with HuggingFace Trainer and optional WandB logging
-- Checkpoint saving and Hub pushing
+Supports two training modes:
+- Transcription (ASR): +experiments=transcription
+- SIFT (AZeroS-style): +experiments=omni
 
 Usage:
     poetry run python scripts/train.py +experiments=transcription
-    poetry run python scripts/train.py training.learning_rate=1e-4
+    poetry run python scripts/train.py +experiments=omni
 """
 
 import contextlib
@@ -19,6 +17,8 @@ from dataclasses import fields
 from typing import Any
 
 os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
+# Use soundfile for audio decoding instead of torchaudio (avoids compatibility issues)
+os.environ.setdefault("HF_DATASETS_AUDIO_DECODER", "soundfile")
 
 import hydra
 import torch
@@ -43,24 +43,32 @@ from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
 # Prompts for ASR training (transcription task)
-# Focus on exact words only - no mention of description/emotion
-TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
+# Target: lowercased verbatim transcription of speech
+TRANSCRIBE_PROMPTS = [
+    "Transcribe: ",
+]
 
-# Prompts for SIFT training (description task)
-# Focus on characteristics/delivery - the response naturally includes words
-DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
+# SIFT instructions by mode (matching AZeroS exactly)
+# - sift_s / sift_ssp: No instruction (empty string)
+# - sit_ssp: Fixed instruction to describe audio
+SIFT_INSTRUCTIONS = {
+    "sift_s": "",  # No instruction - conversational response
+    "sift_ssp": "",  # No instruction - empathetic response
+    "sit_ssp": "Describe all information you can hear: ",  # Fixed description instruction
+}
 
 
 class DatasetLoader:
     """Loads and prepares datasets for training."""
 
-    def __init__(self, config: DictConfig, multitask_enabled: bool = False):
+    def __init__(self, config: DictConfig, sift_enabled: bool = False, s2s_enabled: bool = False):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
         self.num_proc = self.config.get("num_proc", 16)
-        self.multitask_enabled = multitask_enabled
+        self.sift_enabled = sift_enabled
+        self.s2s_enabled = s2s_enabled
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
@@ -76,44 +84,79 @@ class DatasetLoader:
             trust_remote_code=True,
         )
 
-        # Normalize column names for audio and text
-        col_map = {
-            "text": dataset_cfg.get("text_column", "text"),
-            "audio": dataset_cfg.get("audio_column", "audio"),
-        }
+        # Filter by column value if specified (e.g., single speaker training)
+        filter_column = dataset_cfg.get("filter_column")
+        filter_value = dataset_cfg.get("filter_value")
+        if filter_column and filter_value:
+            ds = ds.filter(
+                lambda x: str(x[filter_column]) == str(filter_value),
+                num_proc=self.num_proc,
+            )
+
+        # Apply text transform if specified (e.g., extract text from nested structures)
+        text_transform = dataset_cfg.get("text_transform")
+        if text_transform == "first_answer_text":
+            # Extract text from SQuAD-style answers: [{"answer_start": N, "text": "..."}]
+            text_column = dataset_cfg.get("text_column", "text")
+            ds = ds.map(
+                lambda x: {"text": x[text_column][0]["text"] if x[text_column] else ""},
+                num_proc=self.num_proc,
+            )
+            # Override text_column since we've already extracted to "text"
+            dataset_cfg = OmegaConf.to_container(dataset_cfg, resolve=True)
+            dataset_cfg["text_column"] = "text"
+            dataset_cfg = OmegaConf.create(dataset_cfg)
+
+        # Normalize column names for text (and audio if present)
+        col_map = {"text": dataset_cfg.get("text_column", "text")}
+
+        # Only map audio column if not TTS mode or if audio column exists
+        audio_column = dataset_cfg.get("audio_column")
+        if audio_column and audio_column in ds.column_names:
+            col_map["audio"] = audio_column
+
+        # Map codes column if specified (for S2S AR codec training)
+        codes_column = dataset_cfg.get("codes_column")
+        if codes_column and codes_column in ds.column_names:
+            col_map["codes"] = codes_column
+
         for target, source in col_map.items():
             if source != target and source in ds.column_names:
                 if target in ds.column_names:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
 
-        ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
-
-        # For multitask, keep sift_response and add task column
-        if self.multitask_enabled:
-            task = dataset_cfg.get("task", "transcribe")  # Default to transcribe
-            # Add task column to identify ASR vs SIFT samples
-            ds = ds.add_column("task", [task] * len(ds))
-            keep_cols = {"audio", "text", "duration", "sift_response", "task"}
-            extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
+        # Remove extra columns BEFORE casting to avoid schema mismatch errors
+        # (some datasets have complex column types that can't be cast)
+        if self.sift_enabled:
+            # SIFT training: include codes for audio head if present
+            keep_cols = {
+                "audio",
+                "text",
+                "duration",
+                "sift_response",
+                "mode",
+                "task",
+                "codes",
+            }
+        elif self.s2s_enabled:
+            # S2S training: need codes column for audio head (AR codec generation)
+            keep_cols = {"audio", "text", "duration", "task", "codes"}
         else:
-            # Remove extra columns, keep only audio, text, and duration (for group_by_length)
-            extra_cols = [
-                c for c in (ds.column_names or []) if c not in {"audio", "text", "duration"}
-            ]
+            # Standard ASR training
+            keep_cols = {"audio", "text", "duration", "task"}
+        extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
-        # Filter TEDLIUM ignore markers only for TEDLIUM dataset
-        # Duration filtering happens in DataCollator to avoid loading all audio upfront
-        if "tedlium" in dataset_path.lower():
+        # Add task column if specified in config (use map for robustness after filter)
+        task = dataset_cfg.get("task", "transcribe")
+        ds = ds.map(lambda x: {"task": task}, num_proc=self.num_proc)
 
-            def filter_tedlium(text):
-                return text.strip() != "ignore_time_segment_in_scoring"
-
-            ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
-
+        # Cast audio column after removing problematic columns (skip for TTS)
+        if "audio" in ds.column_names:
+            return ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
         return ds
 
     def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
@@ -144,7 +187,8 @@ class DatasetLoader:
                 train_datasets.append(ds)
 
             for eval_split in eval_splits:
-                val_datasets.append(self._prepare_split(d_cfg, eval_split))
+                ds = self._prepare_split(d_cfg, eval_split)
+                val_datasets.append(ds)
 
         # Concatenate and shuffle
         train_ds = (
@@ -259,12 +303,16 @@ class DataCollator:
         return batch
 
 
-# SIFT configuration for multi-task training
+# SIFT configuration (AZeroS-style training)
 SIFT_SYSTEM_MESSAGE = ""  # No system message
 
 
-class MultiTaskDataCollator(DataCollator):
-    """Collates audio and text data for multi-task training."""
+class SIFTDataCollator(DataCollator):
+    """Collates audio, text, and optional Mimi codes for SIFT training.
+
+    Supports joint training of projector (audio understanding) and audio head
+    (speaking responses) when codes are available in the dataset.
+    """
 
     def __init__(
         self,
@@ -273,6 +321,7 @@ class MultiTaskDataCollator(DataCollator):
         sample_rate: int,
         projector: Any = None,
         encoder_conv_layers: list = None,
+        use_audio_head: bool = False,
     ):
         super().__init__(
             tokenizer=tokenizer,
@@ -282,6 +331,7 @@ class MultiTaskDataCollator(DataCollator):
             projector=projector,
             encoder_conv_layers=encoder_conv_layers,
         )
+        self.use_audio_head = use_audio_head
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         # Process audio
@@ -321,22 +371,32 @@ class MultiTaskDataCollator(DataCollator):
             num_tokens = self.projector.get_output_length(encoder_len)
             audio_token_counts.append(num_tokens)
 
-        # Build messages - differentiate between ASR and SIFT tasks using task column
+        # Build messages for each sample based on task type
         text_features = []
         for f, num_audio_tokens in zip(valid_features, audio_token_counts):
             audio_placeholder = "<audio>" * num_audio_tokens
-            task = f.get("task", "transcribe")
+            task = f.get("task", "sift")
 
-            if task == "sift":
-                # SIFT task: describe audio
-                response = (f.get("sift_response") or f.get("text") or "").strip()
-                prompt = random.choice(DESCRIBE_PROMPTS)
-            else:
-                # ASR task: transcription
+            if task == "transcribe":
+                # Transcription task: use transcription prompt
                 response = (f.get("text") or "").strip().lower()
                 prompt = random.choice(TRANSCRIBE_PROMPTS)
+                user_content = audio_placeholder + " " + prompt
+            elif task == "answer":
+                # Answer extraction task: empty prompt, lowercased text target
+                response = (f.get("text") or "").strip().lower()
+                user_content = audio_placeholder
+            else:
+                # SIFT task: use AZeroS-style fixed instructions based on mode
+                mode = f.get("mode", "")
+                response = (f.get("sift_response") or f.get("text") or "").strip()
+                instruction = SIFT_INSTRUCTIONS.get(mode, "")
 
-            user_content = f"{audio_placeholder} {prompt}"
+                # Format: <audio_tokens> {instruction} (matching AZeroS trainer.py)
+                if instruction:
+                    user_content = f"{audio_placeholder} {instruction}"
+                else:
+                    user_content = audio_placeholder
 
             # Build messages (skip system if empty)
             messages = []
@@ -352,6 +412,288 @@ class MultiTaskDataCollator(DataCollator):
         batch["input_features"] = audio_out.input_features
         batch["audio_attention_mask"] = audio_out.attention_mask
 
+        # Add codec targets for audio head training (discrete Mimi codes)
+        if self.use_audio_head:
+            code_batch = self._extract_codec_targets(valid_features)
+            if code_batch is not None:
+                batch["codec_targets"] = code_batch["codec_targets"]
+                batch["codec_lengths"] = code_batch["codec_lengths"]
+
+        return batch
+
+    def _extract_codec_targets(self, features: list[dict]) -> dict | None:
+        """Extract discrete Mimi codes for audio head training.
+
+        Args:
+            features: List of feature dicts with codes
+
+        Returns:
+            Dict with codec_targets [batch, 8, seq_len] and codec_lengths tensors, or None if no codes
+        """
+        if not features or "codes" not in features[0]:
+            return None
+
+        code_list = []
+        code_lengths = []
+
+        for f in features:
+            codes = f.get("codes")
+            if codes is None:
+                continue
+
+            # Extract all 8 codebooks: codes shape [8][seq_len]
+            if isinstance(codes[0], list):
+                # codes is [8 codebooks][seq_len]
+                codes_t = torch.tensor(codes, dtype=torch.long)  # [8, seq_len]
+            else:
+                # Single codebook (legacy format) - expand to [1, seq_len]
+                codes_t = torch.tensor(codes, dtype=torch.long).unsqueeze(0)
+
+            code_list.append(codes_t)
+            code_lengths.append(codes_t.shape[1])  # seq_len
+
+        if not code_list:
+            return None
+
+        # Pad to max length with pad token
+        max_len = max(code_lengths)
+        pad_token = 2048 + 3  # vocab_size + PAD_OFFSET
+        num_codebooks = code_list[0].shape[0]
+        padded = torch.full((len(code_list), num_codebooks, max_len), pad_token, dtype=torch.long)
+        for i, codes_t in enumerate(code_list):
+            padded[i, :, : codes_t.shape[1]] = codes_t
+
+        return {
+            "codec_targets": padded,  # [batch, 8, seq_len]
+            "codec_lengths": torch.tensor(code_lengths, dtype=torch.long),
+        }
+
+
+class S2SDataCollator:
+    """Data collator for S2S training: audio -> Mimi discrete codes.
+
+    This collator handles speech synthesis training where we predict
+    discrete Mimi codec tokens autoregressively.
+    Uses datasets with pre-computed codes (e.g., mazesmazes/libritts-mimi).
+    """
+
+    # Mimi vocab size per codebook
+    VOCAB_SIZE = 2048
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        feature_extractor: Any,
+        sample_rate: int,
+        projector: Any = None,
+        encoder_conv_layers: list = None,
+        system_prompt: str = None,
+        text_column: str = "text",
+        codes_column: str = "codes",
+        use_codebook: int = 0,  # Which codebook to use (0 = semantic)
+    ):
+        self.tokenizer = tokenizer
+        self.feature_extractor = feature_extractor
+        self.sample_rate = sample_rate
+        self.projector = projector
+        self.encoder_conv_layers = encoder_conv_layers or [(1, 3, 1), (1, 3, 2)]
+        self.system_prompt = system_prompt
+        self.text_column = text_column
+        self.codes_column = codes_column
+        self.use_codebook = use_codebook
+
+        # Use trl's DataCollatorForChatML for label masking
+        self.text_collator = DataCollatorForChatML(
+            tokenizer=tokenizer,
+            max_length=2048,
+        )
+
+    def _compute_encoder_output_length(self, mel_length: int) -> int:
+        """Compute encoder output length using conv layer formulas."""
+        length = mel_length
+        for padding, kernel_size, stride in self.encoder_conv_layers:
+            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
+        return length
+
+    def _convert_to_right_padding(self, batch: dict) -> dict:
+        """Convert left-padded batch to right-padded.
+
+        DataCollatorForChatML uses left-padding which causes NaN in attention computation
+        when padding positions try to attend (all -inf in attention scores -> NaN after softmax).
+        This converts to right-padding where padding is at the end, avoiding the issue.
+        """
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+        labels = batch.get("labels")
+
+        batch_size, seq_len = input_ids.shape
+        pad_token_id = self.tokenizer.pad_token_id
+
+        # For each sample, find where content starts (first non-pad) and shift right
+        new_input_ids = torch.full_like(input_ids, pad_token_id)
+        new_attention_mask = torch.zeros_like(attention_mask)
+        new_labels: torch.Tensor | None = None
+        if labels is not None:
+            new_labels = torch.full_like(labels, -100)
+
+        for i in range(batch_size):
+            # Find first non-padding position
+            non_pad_mask = attention_mask[i] == 1
+            content_length = non_pad_mask.sum().item()
+
+            if content_length > 0:
+                # Copy content to the beginning (right-padding style)
+                content_ids = input_ids[i][non_pad_mask]
+                content_attn = attention_mask[i][non_pad_mask]
+
+                new_input_ids[i, :content_length] = content_ids
+                new_attention_mask[i, :content_length] = content_attn
+
+                if labels is not None and new_labels is not None:
+                    content_labels = labels[i][non_pad_mask]
+                    new_labels[i, :content_length] = content_labels
+
+        batch["input_ids"] = new_input_ids
+        batch["attention_mask"] = new_attention_mask
+        if new_labels is not None:
+            batch["labels"] = new_labels
+
+        return batch
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        # Process audio (required for S2S training)
+        audio_arrays = []
+        valid_features = []
+
+        for f in features:
+            try:
+                audio = f["audio"]["array"]
+                if hasattr(audio, "numpy"):
+                    audio = audio.numpy()
+                audio = audio.squeeze()
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=0)
+                audio_arrays.append(audio)
+                valid_features.append(f)
+            except Exception:
+                continue
+            finally:
+                f["audio"] = None
+
+        if not audio_arrays:
+            raise ValueError("No valid audio samples in batch - S2S requires audio input")
+
+        audio_out = self.feature_extractor(
+            audio_arrays,
+            sampling_rate=self.sample_rate,
+            padding="longest",
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+
+        # Compute per-sample audio token counts
+        mel_lengths = audio_out.attention_mask.sum(dim=-1)
+        audio_token_counts = []
+        for mel_len in mel_lengths:
+            encoder_len = self._compute_encoder_output_length(int(mel_len.item()))
+            num_tokens = self.projector.get_output_length(encoder_len)
+            audio_token_counts.append(num_tokens)
+
+        # Get text for each sample using configured text column
+        processed_texts = [(f.get(self.text_column) or "").strip().lower() for f in valid_features]
+
+        # Build messages for each sample
+        text_features = []
+        for text, num_audio_tokens in zip(processed_texts, audio_token_counts):
+            audio_placeholder = "<audio>" * num_audio_tokens
+            user_content = audio_placeholder + " Transcribe: "
+
+            messages = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": user_content})
+            messages.append({"role": "assistant", "content": text})
+
+            text_features.append({"messages": messages})
+
+        # Let trl handle tokenization, label masking, and padding
+        batch = self.text_collator(text_features)
+
+        # Convert left-padding to right-padding: DataCollatorForChatML uses left-padding
+        # which causes NaN in attention (padding positions attend to all -inf -> NaN softmax)
+        batch = self._convert_to_right_padding(batch)
+
+        # Create assistant mask from labels before removing them
+        # Labels have actual token IDs at assistant positions, -100 elsewhere
+        # We use this mask to extract only assistant hidden states for audio head
+        if "labels" in batch:
+            batch["assistant_mask"] = batch["labels"] != -100
+            # Remove labels since we don't compute LM loss (label_names=[] in config)
+            del batch["labels"]
+
+        batch["input_features"] = audio_out.input_features
+        batch["audio_attention_mask"] = audio_out.attention_mask
+
+        # Process Mimi codec codes (required for S2S AR training)
+        # codes shape from dataset: [8 codebooks][seq_len]
+        # We extract all 8 codebooks for Depformer training
+        code_list = []
+        code_lengths = []
+
+        for f in valid_features:
+            codes = f.get(self.codes_column)
+            if codes is None:
+                raise ValueError(
+                    f"No codec codes found - S2S requires '{self.codes_column}' column. "
+                    "Use scripts/generate_libritts_mimi.py to create dataset."
+                )
+
+            # Extract all 8 codebooks: codes shape [8][seq_len]
+            if isinstance(codes[0], list):
+                # codes is [8 codebooks][seq_len]
+                codes_t = torch.tensor(codes, dtype=torch.long)  # [8, seq_len]
+            else:
+                # Single codebook (legacy format) - expand to [1, seq_len]
+                codes_t = torch.tensor(codes, dtype=torch.long).unsqueeze(0)
+
+            code_list.append(codes_t)
+            code_lengths.append(codes_t.shape[1])  # seq_len
+
+        # Pad to max length with pad token (vocab_size + 3)
+        max_len = max(code_lengths)
+        pad_token = self.VOCAB_SIZE + 3  # Matches AudioHead.pad_token_id
+        num_codebooks = code_list[0].shape[0]
+        padded = torch.full((len(code_list), num_codebooks, max_len), pad_token, dtype=torch.long)
+        for i, codes_t in enumerate(code_list):
+            padded[i, :, : codes_t.shape[1]] = codes_t
+
+        batch["codec_targets"] = padded  # [batch, 8, seq_len]
+        batch["codec_lengths"] = torch.tensor(code_lengths, dtype=torch.long)
+
+        # Dual-path: Tokenize text for TTS (Freeze-Omni style)
+        # Path 1: Text embeddings → Pre-NN → context (what to say)
+        # Path 2: LLM hidden states → Prefix Bridge → KV cache (how to say it)
+        tts_text_ids_list = []
+        for text in processed_texts:
+            # Tokenize just the text (no chat template)
+            tokens = self.tokenizer.encode(text, add_special_tokens=False)
+            tts_text_ids_list.append(torch.tensor(tokens, dtype=torch.long))
+
+        # Pad text tokens
+        max_text_len = max(len(t) for t in tts_text_ids_list)
+        tts_text_ids = torch.full(
+            (len(tts_text_ids_list), max_text_len),
+            self.tokenizer.pad_token_id,
+            dtype=torch.long,
+        )
+        tts_text_mask = torch.zeros(len(tts_text_ids_list), max_text_len, dtype=torch.bool)
+        for i, tokens in enumerate(tts_text_ids_list):
+            tts_text_ids[i, : len(tokens)] = tokens
+            tts_text_mask[i, : len(tokens)] = True
+
+        batch["tts_text_ids"] = tts_text_ids
+        batch["tts_text_mask"] = tts_text_mask
+
         return batch
 
 
@@ -366,6 +708,8 @@ class ASRTrainer(Trainer):
         it incorrectly uses shift_labels=False, causing misaligned predictions.
         This override forces shift_labels=True for correct causal LM behavior.
         """
+        _ = num_items_in_batch  # Unused but required by Trainer signature
+
         # Pop labels if using label smoothing (matches Trainer behavior)
         if self.label_smoother is not None and "labels" in inputs:
             labels = inputs.pop("labels")
@@ -383,7 +727,37 @@ class ASRTrainer(Trainer):
         else:
             loss = outputs.loss
 
+        # Fail fast with helpful error if loss is None
+        if loss is None:
+            # Get debug info - handle wrapped model (DDP/Accelerator)
+            underlying_model = getattr(model, "module", model)
+            has_audio_head = getattr(underlying_model, "audio_head", None) is not None
+            has_codec_targets = "codec_targets" in inputs
+            has_labels = "labels" in inputs
+            raise ValueError(
+                f"Model returned None loss. This usually means the forward pass didn't compute a loss. "
+                f"Debug info: has_labels={has_labels}, has_audio_head={has_audio_head}, "
+                f"has_codec_targets={has_codec_targets}. "
+                f"Input keys: {list(inputs.keys())}"
+            )
+
         return (loss, outputs) if return_outputs else loss
+
+
+class GradientDebugCallback(TrainerCallback):
+    """Debug callback to check gradients after backward pass."""
+
+    def on_pre_optimizer_step(self, args, state, control, model=None, **kwargs):
+        """Called right before optimizer.step(), after backward."""
+        if model is None:
+            return
+        underlying = getattr(model, "module", model)
+        # Check ALL parameters, not just audio_head
+        for name, param in underlying.named_parameters():
+            if param.grad is not None and torch.isnan(param.grad).any():
+                print(f"GRAD DEBUG step {state.global_step}: NaN grad in {name}")
+                print(f"  param requires_grad: {param.requires_grad}")
+                break
 
 
 class PushToHubCallback(TrainerCallback):
@@ -465,6 +839,10 @@ def main(cfg: DictConfig) -> None:
     else:
         model = ASRModel(asr_config)
 
+    # Validate generation config early to catch conflicts before training starts
+    # (e.g., do_sample=False with temperature/top_p/top_k set)
+    model.generation_config.validate()
+
     model.config.use_cache = False
 
     # Store hub_model_id in config so save_pretrained() can set base_model_name_or_path correctly
@@ -481,20 +859,51 @@ def main(cfg: DictConfig) -> None:
             "true",  # Always disable thinking
         )
 
-    # Check if multi-task training is enabled
-    multitask_enabled = cfg.get("multitask", {}).get("enabled", False)
+    # Check if SIFT training is enabled (AZeroS-style)
+    sift_enabled = cfg.get("sift", {}).get("enabled", False)
+
+    # Check if audio head training is enabled (jointly with projector)
+    use_audio_head = cfg.model.get("use_audio_head", False)
+
+    # Validate audio head exists when expected
+    if use_audio_head and model.audio_head is None:
+        raise ValueError(
+            f"use_audio_head=True but model.audio_head is None. "
+            f"Config use_audio_head={model.config.use_audio_head}. "
+            "Check that the config is being passed correctly to the model."
+        )
+
+    # Check if S2S training mode (audio head with Mimi codes via AR decoder)
+    s2s_mode = use_audio_head and cfg.get("s2s", {}).get("enabled", False)
 
     # Load datasets
-    train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
+    train_dataset, val_dataset = DatasetLoader(
+        cfg, sift_enabled=sift_enabled, s2s_enabled=s2s_mode
+    ).load()
 
-    # Create data collator (multi-task or standard)
-    if multitask_enabled:
-        data_collator = MultiTaskDataCollator(
+    # Create data collator (S2S, SIFT, or standard ASR)
+    if s2s_mode:
+        # S2S training with Mimi discrete codes (AR generation)
+        # DatasetLoader renames text_column to "text", so always use "text"
+        text_column = "text"
+        data_collator = S2SDataCollator(
             tokenizer=model.tokenizer,
             feature_extractor=model.feature_extractor,
             sample_rate=cfg.data.sample_rate,
             projector=model.projector,
             encoder_conv_layers=model.config.encoder_conv_layers,
+            system_prompt=cfg.model.system_prompt,
+            text_column=text_column,
+        )
+    elif sift_enabled:
+        # SIFT training with optional audio head for speaking responses
+        data_collator = SIFTDataCollator(
+            tokenizer=model.tokenizer,
+            feature_extractor=model.feature_extractor,
+            sample_rate=cfg.data.sample_rate,
+            projector=model.projector,
+            encoder_conv_layers=model.config.encoder_conv_layers,
+            use_audio_head=use_audio_head,
         )
     else:
         data_collator = DataCollator(
@@ -507,7 +916,7 @@ def main(cfg: DictConfig) -> None:
         )
 
     # Setup callbacks
-    callbacks = []
+    callbacks = [GradientDebugCallback()]  # Debug NaN gradients
     if cfg.early_stopping.patience:
         callbacks.append(
             EarlyStoppingCallback(
