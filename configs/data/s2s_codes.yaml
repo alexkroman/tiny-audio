@@ -10,6 +10,8 @@ datasets:
   - path: mazesmazes/libritts-mimi
     train_splits:
       - train.clean.100
+      - train.clean.360
+      - train.other.500
     eval_splits:
       - train.clean.100  # Use subset of train for eval (no separate eval split)
     # Column mappings

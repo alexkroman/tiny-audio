@@ -28,7 +28,7 @@ defaults:
 
 model:
   # Start from pretrained ASR model
-  pretrained_model_path: mazesmazes/tiny-audio-omni
+  pretrained_model_path: mazesmazes/tiny-audio-s2s
   model_dtype: bfloat16
 
   projector_type: mlp
@@ -66,20 +66,18 @@ training:
   load_best_model_at_end: true
   metric_for_best_model: eval_loss
   greater_is_better: false
-  learning_rate: 1e-4
-  warmup_steps: 500
-  lr_scheduler_type: polynomial
-  lr_scheduler_kwargs:
-    power: 0.5
+  learning_rate: 1e-3
+  warmup_steps: 100
+  lr_scheduler_type: constant_with_warmup
   seed: 42
-  per_device_train_batch_size: 18
-  per_device_eval_batch_size: 18
-  gradient_accumulation_steps: 3
+  per_device_train_batch_size: 28
+  per_device_eval_batch_size: 28
+  gradient_accumulation_steps: 2
   num_train_epochs: 30
   save_steps: 1000
   eval_steps: 1000
 
-  weight_decay: 0.0
+  weight_decay: 0.01
 
   # No specaugment needed (audio understanding already learned in ASR training)
   use_specaugment: false

@@ -345,9 +345,12 @@ class CodecARDecoder(nn.Module):
 
         if return_hidden:
             # Return hidden states aligned with target positions
-            # target_hidden has shape [batch, target_len + 1, hidden]
-            # We want [batch, target_len, hidden] (excluding EOS position)
-            return logits, loss, target_hidden[:, :-1, :]
+            # target_hidden has shape [batch, target_len + 1, hidden] for positions:
+            #   [SOS, target_0, target_1, ..., target_{n-1}]
+            # Hidden at position i contains context AFTER processing input at position i
+            # For Depformer conditioning at time t, we need hidden AFTER seeing semantic[t]
+            # So we return positions 1..n (after target_0..target_{n-1}), not 0..n-1
+            return logits, loss, target_hidden[:, 1:, :]
 
         return logits, loss
 

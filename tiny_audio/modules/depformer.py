@@ -92,7 +92,7 @@ class Depformer(nn.Module):
             max_position_embeddings=64,  # Small context for depformer
             attention_dropout=0.0,  # No dropout, matching Moshi
             rope_theta=10000.0,
-            _attn_implementation="eager",  # Use eager for small sequences
+            _attn_implementation="sdpa",  # Use SDPA for efficiency
         )
 
         # Per-codebook input projections from main AR decoder (Moshi-style multi-linear)

@@ -771,28 +771,36 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # Extract only assistant-position hidden states using assistant_mask
             # This mask identifies text output positions (where LLM generates response)
             assistant_mask = kwargs.get("assistant_mask")
+            embeddings_mask = None
             if assistant_mask is not None:
                 batch_size = all_hidden_states.shape[0]
+                device = all_hidden_states.device
 
                 # Extract assistant hidden states for each sample
                 assistant_hidden_list = []
+                assistant_lengths = []
                 for i in range(batch_size):
                     mask_i = assistant_mask[i]  # [seq_len]
                     hidden_i = all_hidden_states[i][mask_i]  # [num_assistant_tokens, hidden_dim]
                     assistant_hidden_list.append(hidden_i)
+                    assistant_lengths.append(hidden_i.shape[0])
 
                 # Pad sequences
                 embeddings = torch.nn.utils.rnn.pad_sequence(
                     assistant_hidden_list, batch_first=True, padding_value=0.0
                 )
+
+                # Create embeddings_mask for padded sequences [batch, max_len]
+                max_len = embeddings.shape[1]
+                positions = torch.arange(max_len, device=device).unsqueeze(0)
+                lengths_tensor = torch.tensor(assistant_lengths, device=device).unsqueeze(1)
+                embeddings_mask = positions < lengths_tensor
             else:
                 embeddings = all_hidden_states
 
             # Dual-path processing for S2S (Freeze-Omni style):
             # Path 1: Text hidden states → Pre-NN → context (what to say)
             # Path 2: LLM hidden states → Prefix Bridge → KV cache (how to say it)
-            text_hidden_states = None
-            text_mask = None
             if tts_text_ids is not None:
                 # Run text through LLM to get hidden states (Freeze-Omni style)
                 # This gives the model full LLM context for the text, not just raw embeddings
@@ -806,13 +814,19 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     # Use last hidden state as text representation
                     text_hidden_states = text_outputs.hidden_states[-1]
                 text_mask = tts_text_mask
+            else:
+                # Fallback: use embeddings as both context and conditioning
+                # This is useful when tts_text_ids not provided (e.g., simple training setups)
+                text_hidden_states = embeddings
+                text_mask = embeddings_mask
 
             # Compute loss: embeddings condition the AR decoder to generate codec_targets
             audio_head_loss = self.audio_head(
                 embeddings,
+                text_embeddings=text_hidden_states,
                 codec_targets=codec_targets,
                 codec_lengths=codec_lengths,
-                text_embeddings=text_hidden_states,  # LLM-processed hidden states
+                embeddings_mask=embeddings_mask,
                 text_mask=text_mask,
             )
 
@@ -1122,7 +1136,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             embeddings = lm_output.hidden_states[-1]  # [batch, seq_len, hidden_dim]
 
         # Generate Mimi codec codes from hidden states via AR decoder
-        codes, _ = self.audio_head(embeddings)
+        # Use embeddings as both context and conditioning (same source)
+        codes, _ = self.audio_head(embeddings, text_embeddings=embeddings)
 
         # Load Mimi decoder if not already loaded
         if self.audio_head.mimi is None:
@@ -1200,7 +1215,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             embeddings = lm_output.hidden_states[-1]  # [batch, seq_len, hidden_dim]
 
         # Generate Mimi codec codes from hidden states via AR decoder
-        codes, _ = self.audio_head(embeddings)
+        # Use embeddings as both context and conditioning (same source)
+        codes, _ = self.audio_head(embeddings, text_embeddings=embeddings)
 
         # Load Mimi decoder if not already loaded
         if self.audio_head.mimi is None:
@@ -1366,8 +1382,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             embeddings = lm_output.hidden_states[-1]
 
         # Stream audio chunks (Moshi-style low-latency output)
+        # Use embeddings as both context and conditioning (same source)
         for audio_chunk in self.audio_head.generate_streaming(
             embeddings=embeddings,
+            text_embeddings=embeddings,
             chunk_size=1,  # Lowest latency
         ):
             # Check for interruption during audio generation

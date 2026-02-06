@@ -466,6 +466,7 @@ class FullDuplexSession:
 
                 for audio_chunk in self.model.audio_head.generate_streaming(
                     embeddings=embeddings,
+                    text_embeddings=embeddings,  # Use same embeddings for both paths
                     chunk_size=self.config.audio_chunk_size,
                 ):
                     if self._state.stop_generate:
