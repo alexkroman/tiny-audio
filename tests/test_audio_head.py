@@ -104,8 +104,8 @@ class TestAudioHeadStateDict:
             prefix = key.split(".")[0]
             prefixes.add(prefix)
 
+        # input_proj removed - caller now projects to hidden_dim
         expected_prefixes = {
-            "input_proj",
             "embedding",
             "ar_decoder",
             "depformer",
@@ -116,9 +116,9 @@ class TestAudioHeadStateDict:
         """Test loading state dict restores weights."""
         original_state = small_audio_head.state_dict()
 
-        # Modify weights
+        # Modify weights (use embedding instead of removed input_proj)
         with torch.no_grad():
-            for param in small_audio_head.input_proj.parameters():
+            for param in small_audio_head.embedding.parameters():
                 param.fill_(0.0)
                 break
 

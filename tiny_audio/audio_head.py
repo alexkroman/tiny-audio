@@ -1,19 +1,18 @@
 """Autoregressive audio head for speech-to-speech.
 
 Generates audio from LLM embeddings via discrete codec tokens:
-  LLM embeddings -> Pre-NN -> AR Decoder -> Depformer -> Mimi codes -> audio
+  LLM embeddings -> AR Decoder -> Depformer -> Mimi codes -> audio
 
-Architecture (Freeze-Omni style concatenation):
-- Input: Concatenate conditioning embeddings + text embeddings
-- Pre-NN transformer (bidirectional) processes combined context
+Architecture (simplified for gradient flow):
+- Input: Concatenate conditioning embeddings + text embeddings (already projected)
 - AR decoder (causal) generates semantic codebook 0 autoregressively
 - Depformer predicts acoustic codebooks 1-7 conditioned on codebook 0
 - Mimi decoder converts all 8 codebooks to audio waveform
 
-This uses Freeze-Omni's simpler concatenation + masking approach for:
-- Shorter gradient path for faster convergence
-- Simpler optimization landscape
-- Single unified forward pass
+Design choices for fast convergence:
+- No Pre-NN layers (shorter gradient path)
+- No internal projections (caller projects to hidden_dim)
+- Simple concatenation + attention masking
 
 Streaming Support (Moshi-style):
 - StreamingState holds generation state between steps
@@ -42,7 +41,7 @@ class StreamingState:
     Includes delay-based cache for proper multi-codebook AR modeling.
     """
 
-    # Generation context (from Pre-NN)
+    # Generation context
     context: torch.Tensor  # [1, context_len, hidden_dim]
     context_mask: Optional[torch.Tensor]  # [1, context_len]
 
@@ -107,17 +106,17 @@ class StreamingState:
 class AudioHead(nn.Module):
     """AR codec head: LLM embeddings -> Mimi codes -> audio.
 
-    Architecture (Freeze-Omni style concatenation):
-        - input_proj: Projects LLM embeddings to hidden_dim
+    Architecture (simplified for gradient flow):
+        - Input: Already-projected embeddings at hidden_dim (caller projects)
         - Concatenate conditioning + text embeddings as combined context
-        - ar_decoder: Includes Pre-NN (bidirectional) + AR layers (causal)
+        - ar_decoder: Causal transformer layers
         - depformer: 4-layer transformer for acoustic codebooks 1-7
         - Mimi decoder (frozen) for codes -> audio
 
-    Uses simple concatenation + attention masking (like Freeze-Omni) for:
-        - Shorter gradient paths
-        - Faster convergence
-        - Simpler optimization
+    Design choices for fast convergence:
+        - No Pre-NN layers (shorter gradient path)
+        - No internal projections (caller projects)
+        - Simple concatenation + attention masking
 
     Args:
         config: ASRConfig with:
@@ -125,23 +124,22 @@ class AudioHead(nn.Module):
         llm_dim: Override for LLM dimension (takes precedence over config)
     """
 
-    # Architecture dimensions (scaled for SmolLM3-3B following Freeze-Omni ratios)
-    # Freeze-Omni uses ~0.22x LLM hidden dim (896 for 4096-dim Qwen2-7B)
-    # For SmolLM3-3B (2048 hidden): 2048 * 0.25 = 512
-    HIDDEN_DIM = 512  # Transformer hidden dimension
-    INTERMEDIATE_DIM = 2048  # FFN intermediate dimension (4x hidden)
-    NUM_HEADS = 8  # Attention heads (64 dim per head)
+    # Architecture dimensions (matching Freeze-Omni defaults)
+    # Freeze-Omni: hidden=256, intermediate=1024, heads=4, layers=6
+    HIDDEN_DIM = 256  # Transformer hidden dimension
+    INTERMEDIATE_DIM = 1024  # FFN intermediate dimension (4x hidden)
+    NUM_HEADS = 4  # Attention heads (64 dim per head)
 
-    # AR Decoder config (for semantic codebook 0) - matches Freeze-Omni's 4 layers
-    # Pre-NN layers are AR_LAYERS // 2 (built into CodecARDecoder, Freeze-Omni style)
-    AR_LAYERS = 4
+    # AR Decoder config (for semantic codebook 0)
+    # No Pre-NN for simpler gradient flow
+    AR_LAYERS = 6
     VOCAB_SIZE = 2048  # Mimi codebook size
 
-    # Depformer config (for acoustic codebooks 1-7) - scaled down proportionally
-    DEPFORMER_DIM = 256
+    # Depformer config (for acoustic codebooks 1-7) - smaller than AR decoder
+    DEPFORMER_DIM = 128
     DEPFORMER_LAYERS = 4
-    DEPFORMER_HEADS = 4  # 64 dim per head
-    DEPFORMER_INTERMEDIATE = 1024  # 4x hidden
+    DEPFORMER_HEADS = 4  # 32 dim per head
+    DEPFORMER_INTERMEDIATE = 512  # 4x hidden
     NUM_ACOUSTIC_CODEBOOKS = 7  # Codebooks 1-7
 
     # Loss weighting (equal weights following Moshi's approach)
@@ -185,35 +183,27 @@ class AudioHead(nn.Module):
             config, "audio_repetition_penalty", self.DEFAULT_REPETITION_PENALTY
         )
 
-        # Input projection: LLM dim -> hidden dim (identity if dims match)
-        if self.llm_dim != self.hidden_dim:
-            self.input_proj = nn.Linear(self.llm_dim, self.hidden_dim, bias=False)
-        else:
-            self.input_proj = nn.Identity()
-
         # Hidden state dropout (Freeze-Omni style)
-        # Applied after input projection, before Pre-NN processing
         self.hidden_dropout = nn.Dropout(p=self.DROPOUT_RATE)
 
         # Shared embedding for all tokens (Freeze-Omni style)
+        # No projection needed - caller projects LLM hidden states before passing in
         # vocab_size + 4 special tokens: BOS, SOS, EOS, PAD
         self.total_vocab = self.vocab_size + 4  # BOS=+0, SOS=+1, EOS=+2, PAD=+3
         self.embedding = nn.Embedding(
             self.total_vocab,
-            self.hidden_dim,
+            self.hidden_dim,  # Same dim as input - no projection needed
             padding_idx=self.vocab_size + 3,  # PAD token
         )
 
         # AR Decoder: Generate semantic codebook 0 autoregressively
-        # Includes Pre-NN layers internally (Freeze-Omni style: num_layers // 2)
-        # Uses shared embedding from AudioHead
         self.ar_decoder = CodecARDecoder(
             hidden_size=self.hidden_dim,
             num_layers=self.AR_LAYERS,
             num_heads=self.NUM_HEADS,
             intermediate_size=self.INTERMEDIATE_DIM,
             vocab_size=self.vocab_size,
-            embedding=self.embedding,  # Share embedding
+            embedding=self.embedding,
         )
 
         # Depformer: Generate acoustic codebooks 1-7
@@ -333,15 +323,14 @@ class AudioHead(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for training or inference.
 
-        Concatenation approach (Freeze-Omni style):
+        Concatenation approach:
         - Concatenate conditioning embeddings + text embeddings
-        - Project combined context through input_proj
-        - Let Pre-NN and AR decoder handle via attention masking
+        - AR decoder handles via attention masking
 
         Args:
-            embeddings: LLM hidden states [batch, seq_len, llm_dim]
-                Conditioning information (prosody/style)
-            text_embeddings: Text token embeddings [batch, text_len, llm_dim]
+            embeddings: LLM hidden states [batch, seq_len, hidden_dim]
+                Conditioning information (prosody/style) - already projected by caller
+            text_embeddings: Text token embeddings [batch, text_len, hidden_dim]
                 Linguistic content (what to say)
             codec_targets: Target Mimi codes for training.
                 - [batch, 8, audio_seq_len] for full training (all codebooks)
@@ -356,8 +345,8 @@ class AudioHead(nn.Module):
         """
         # Simple concatenation approach (Freeze-Omni style)
         # Concatenate conditioning + text, let attention masking handle separation
-        combined = torch.cat([embeddings, text_embeddings], dim=1)
-        context = self.input_proj(combined)
+        # Input already projected by caller - no projection needed here
+        context = torch.cat([embeddings, text_embeddings], dim=1)
         context = self.hidden_dropout(context)
 
         # Combine masks
@@ -581,8 +570,8 @@ class AudioHead(nn.Module):
             StreamingState to pass to step() calls
         """
         # Simple concatenation approach (Freeze-Omni style)
-        combined = torch.cat([embeddings, text_embeddings], dim=1)
-        context = self.input_proj(combined)
+        # Input already projected by caller - no projection needed here
+        context = torch.cat([embeddings, text_embeddings], dim=1)
         context = self.hidden_dropout(context)
 
         # Combine masks

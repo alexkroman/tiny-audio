@@ -1,20 +1,20 @@
 # @package _global_
 # Speech-to-Speech (S2S) training: AR codec token generation
 #
-# Architecture (Freeze-Omni style concatenation):
-#   Conditioning embeddings + Text embeddings -> concat -> Pre-NN -> AR Decoder -> Mimi codes -> audio
-#                                                                        |
-#                                                                        +-> Depformer -> acoustic codebooks
+# Architecture (simplified for gradient flow):
+#   Conditioning embeddings + Text embeddings -> concat -> AR Decoder -> Mimi codes -> audio
+#                                                                 |
+#                                                                 +-> Depformer -> acoustic codebooks
 #
-# Uses simple concatenation + attention masking (like Freeze-Omni) for:
-#   - Shorter gradient paths
-#   - Faster convergence
-#   - Simpler optimization
+# Design choices for fast convergence:
+#   - No Pre-NN layers (shorter gradient path)
+#   - No internal projections (caller projects to hidden_dim)
+#   - Simple concatenation + attention masking
 #
-# Audio head dimensions scaled for SmolLM3-3B following Freeze-Omni ratios:
-#   - Hidden: 512 (vs 2048 LLM), Layers: 4 AR + 2 Pre-NN
-#   - Depformer: 256 hidden, 4 layers
-#   - Total trainable: ~41M params
+# Audio head dimensions (matching Freeze-Omni):
+#   - Hidden: 256, Layers: 6 AR (no Pre-NN)
+#   - Depformer: 128 hidden, 4 layers
+#   - Total trainable: ~12.3M params
 #
 # All audio_head components trained from scratch (random initialization).
 #
@@ -79,6 +79,7 @@ training:
   eval_steps: 1000
 
   weight_decay: 0.01
+  max_grad_norm: 1.0  # Clip gradients for stability
 
   # No specaugment needed (audio understanding already learned in ASR training)
   use_specaugment: false

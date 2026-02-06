@@ -670,9 +670,9 @@ class S2SDataCollator:
         batch["codec_targets"] = padded  # [batch, 8, seq_len]
         batch["codec_lengths"] = torch.tensor(code_lengths, dtype=torch.long)
 
-        # Dual-path: Tokenize text for TTS (Freeze-Omni style)
-        # Path 1: Text embeddings → Pre-NN → context (what to say)
-        # Path 2: LLM hidden states → Prefix Bridge → KV cache (how to say it)
+        # Dual-path: Tokenize text for TTS
+        # Path 1: Text embeddings → context (what to say)
+        # Path 2: LLM hidden states → conditioning (how to say it)
         tts_text_ids_list = []
         for text in processed_texts:
             # Tokenize just the text (no chat template)

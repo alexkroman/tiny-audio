@@ -122,6 +122,10 @@ class Depformer(nn.Module):
             [nn.Linear(hidden_size, vocab_size, bias=False) for _ in range(num_codebooks)]
         )
 
+        # Small init for output projections (smoother early training)
+        for proj in self.output_projs:
+            nn.init.normal_(proj.weight, std=0.02)
+
     @property
     def max_delay(self) -> int:
         """Maximum delay across all input codebooks."""

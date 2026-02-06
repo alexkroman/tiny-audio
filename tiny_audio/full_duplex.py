@@ -463,10 +463,12 @@ class FullDuplexSession:
                         output_hidden_states=True,
                     )
                     embeddings = lm_output.hidden_states[-1]
+                    # Project to AudioHead hidden dim
+                    projected = self.model.audio_head_proj(embeddings)
 
                 for audio_chunk in self.model.audio_head.generate_streaming(
-                    embeddings=embeddings,
-                    text_embeddings=embeddings,  # Use same embeddings for both paths
+                    embeddings=projected,
+                    text_embeddings=projected,  # Use same embeddings for both paths
                     chunk_size=self.config.audio_chunk_size,
                 ):
                     if self._state.stop_generate:

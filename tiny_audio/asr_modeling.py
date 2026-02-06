@@ -206,10 +206,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 device=device, dtype=target_dtype
             )
 
+            # Projection from LLM dim to AudioHead hidden dim
+            # AudioHead expects pre-projected input at hidden_dim
+            self.audio_head_proj = torch.nn.Linear(
+                llm_dim, self.audio_head.hidden_dim, bias=False
+            ).to(device=device, dtype=target_dtype)
+
             if getattr(config, "freeze_audio_head", False):
                 self.audio_head.requires_grad_(False)
+                self.audio_head_proj.requires_grad_(False)
         else:
             self.audio_head = None
+            self.audio_head_proj = None
 
         # Silero VAD for interruption detection (Freeze-Omni style)
         # Loaded lazily on first use to avoid startup cost
@@ -598,10 +606,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
 
     def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
-        """Save trainable weights (projector + audio_head if present)."""
+        """Save trainable weights (projector + audio_head + audio_head_proj if present)."""
         state = {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
         if self.audio_head is not None:
             state.update({f"audio_head.{k}": v for k, v in self.audio_head.state_dict().items()})
+        if self.audio_head_proj is not None:
+            state.update(
+                {f"audio_head_proj.{k}": v for k, v in self.audio_head_proj.state_dict().items()}
+            )
         return state
 
     def _compute_encoder_output_lengths(
@@ -798,9 +810,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             else:
                 embeddings = all_hidden_states
 
-            # Dual-path processing for S2S (Freeze-Omni style):
-            # Path 1: Text hidden states → Pre-NN → context (what to say)
-            # Path 2: LLM hidden states → Prefix Bridge → KV cache (how to say it)
+            # Dual-path processing for S2S:
+            # Path 1: Text hidden states → context (what to say)
+            # Path 2: LLM hidden states → conditioning (how to say it)
             if tts_text_ids is not None:
                 # Run text through LLM to get hidden states (Freeze-Omni style)
                 # This gives the model full LLM context for the text, not just raw embeddings
@@ -820,10 +832,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 text_hidden_states = embeddings
                 text_mask = embeddings_mask
 
+            # Project LLM hidden states to AudioHead hidden dim
+            projected_embeddings = self.audio_head_proj(embeddings)
+            projected_text = self.audio_head_proj(text_hidden_states)
+
             # Compute loss: embeddings condition the AR decoder to generate codec_targets
             audio_head_loss = self.audio_head(
-                embeddings,
-                text_embeddings=text_hidden_states,
+                projected_embeddings,
+                text_embeddings=projected_text,
                 codec_targets=codec_targets,
                 codec_lengths=codec_lengths,
                 embeddings_mask=embeddings_mask,
@@ -1135,9 +1151,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
             embeddings = lm_output.hidden_states[-1]  # [batch, seq_len, hidden_dim]
 
-        # Generate Mimi codec codes from hidden states via AR decoder
-        # Use embeddings as both context and conditioning (same source)
-        codes, _ = self.audio_head(embeddings, text_embeddings=embeddings)
+        # Project to AudioHead hidden dim and generate codes
+        projected = self.audio_head_proj(embeddings)
+        codes, _ = self.audio_head(projected, text_embeddings=projected)
 
         # Load Mimi decoder if not already loaded
         if self.audio_head.mimi is None:
@@ -1214,9 +1230,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
             embeddings = lm_output.hidden_states[-1]  # [batch, seq_len, hidden_dim]
 
-        # Generate Mimi codec codes from hidden states via AR decoder
-        # Use embeddings as both context and conditioning (same source)
-        codes, _ = self.audio_head(embeddings, text_embeddings=embeddings)
+        # Project to AudioHead hidden dim and generate codes
+        projected = self.audio_head_proj(embeddings)
+        codes, _ = self.audio_head(projected, text_embeddings=projected)
 
         # Load Mimi decoder if not already loaded
         if self.audio_head.mimi is None:
@@ -1381,11 +1397,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
             embeddings = lm_output.hidden_states[-1]
 
-        # Stream audio chunks (Moshi-style low-latency output)
-        # Use embeddings as both context and conditioning (same source)
+        # Project to AudioHead hidden dim and stream audio chunks
+        projected = self.audio_head_proj(embeddings)
         for audio_chunk in self.audio_head.generate_streaming(
-            embeddings=embeddings,
-            text_embeddings=embeddings,
+            embeddings=projected,
+            text_embeddings=projected,
             chunk_size=1,  # Lowest latency
         ):
             # Check for interruption during audio generation
