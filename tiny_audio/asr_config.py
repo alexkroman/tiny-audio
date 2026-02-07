@@ -70,12 +70,11 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,
         freeze_projector: bool = False,
         label_smoothing: float = 0.0,
-        # Audio Head settings (AR codec generation)
+        # Audio Head settings (Dia TTS decoder)
         use_audio_head: bool = False,
-        freeze_audio_head: bool = False,  # Freeze entire audio head
-        max_audio_tokens: int = 500,  # Maximum codec tokens to generate
-        audio_top_k: int = 50,  # Top-k sampling for audio generation
-        audio_temperature: float = 1.0,  # Sampling temperature for audio generation
+        freeze_audio_head: bool = False,
+        max_audio_tokens: int = 500,
+        dia_model_id: str = "nari-labs/Dia-1.6B-0626",
         **kwargs,
     ):
         # Merge generation defaults with kwargs (kwargs takes precedence)
@@ -140,12 +139,11 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_projector = freeze_projector
         self.label_smoothing = label_smoothing
 
-        # Audio Head settings (AR codec generation)
+        # Audio Head settings (Dia TTS decoder)
         self.use_audio_head = use_audio_head
         self.freeze_audio_head = freeze_audio_head
         self.max_audio_tokens = max_audio_tokens
-        self.audio_top_k = audio_top_k
-        self.audio_temperature = audio_temperature
+        self.dia_model_id = dia_model_id
 
         # Generation parameters (from kwargs after merge with defaults)
         self.num_beams = kwargs.pop("num_beams")

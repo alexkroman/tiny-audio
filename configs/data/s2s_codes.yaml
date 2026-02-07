@@ -1,5 +1,5 @@
-# S2S Codes training dataset: LibriTTS with pre-computed Mimi codes
-# Used for AR codec token generation training
+# S2S Codes training dataset: LibriTTS with pre-computed DAC codes
+# Used for MLP projector + codebook heads training
 
 sample_rate: 16000  # Input audio sample rate (for ASR encoder)
 dataset_cache_dir: null
@@ -7,16 +7,15 @@ max_eval_samples: 500
 num_proc: 8
 
 datasets:
-  - path: mazesmazes/libritts-mimi
+  - path: mazesmazes/libritts-dac
     train_splits:
       - train.clean.100
       - train.clean.360
       - train.other.500
     eval_splits:
-      - train.clean.100  # Use subset of train for eval (no separate eval split)
+      - train.clean.100
     # Column mappings
     audio_column: audio
     text_column: text
-    codes_column: codes  # Mimi codes [8 codebooks][seq_len]
-    # Limit eval samples from train split
+    codes_column: codes  # DAC codes [9 codebooks][seq_len]
     eval_max_samples: 500

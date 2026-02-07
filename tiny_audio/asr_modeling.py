@@ -201,7 +201,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Audio head for S2S (flow matching)
         if getattr(config, "use_audio_head", False):
-            from .audio_head import AudioHead, PreNN
+            from .audio_head import AudioHead
 
             device = next(self.language_model.parameters()).device
             llm_dim = self.language_model.config.hidden_size
@@ -210,23 +210,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 device=device, dtype=target_dtype
             )
 
-            # Pre-NN: Linear projection + transformer layers (Freeze-Omni style)
-            # Transforms LLM hidden states into contextualized conditioning for AudioHead
-            self.audio_head_proj = PreNN(
-                llm_dim=llm_dim,
-                hidden_dim=self.audio_head.hidden_dim,
-                num_layers=self.audio_head.AR_LAYERS // 2,
-                num_heads=self.audio_head.NUM_HEADS,
-                intermediate_size=self.audio_head.INTERMEDIATE_DIM,
-                dropout=self.audio_head.DROPOUT_RATE,
-            ).to(device=device, dtype=target_dtype)
-
             if getattr(config, "freeze_audio_head", False):
                 self.audio_head.requires_grad_(False)
-                self.audio_head_proj.requires_grad_(False)
         else:
             self.audio_head = None
-            self.audio_head_proj = None
 
         # Silero VAD for interruption detection (Freeze-Omni style)
         # Loaded lazily on first use to avoid startup cost
@@ -237,9 +224,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
     def _tie_weights(self):
-        """Tie weights between AudioHead embedding and AR decoder embedding."""
-        if self.audio_head is not None:
-            self.audio_head.ar_decoder.embedding = self.audio_head.embedding
+        """No-op: Dia-based AudioHead has no shared embeddings."""
+        pass
 
     def _create_feature_extractor(self, config: ASRConfig):
         """Create the appropriate feature extractor for the audio encoder."""
@@ -615,14 +601,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
 
     def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
-        """Save trainable weights (projector + audio_head + audio_head_proj if present)."""
+        """Save trainable weights (projector + audio_head if present)."""
         state = {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
         if self.audio_head is not None:
             state.update({f"audio_head.{k}": v for k, v in self.audio_head.state_dict().items()})
-        if self.audio_head_proj is not None:
-            state.update(
-                {f"audio_head_proj.{k}": v for k, v in self.audio_head_proj.state_dict().items()}
-            )
         return state
 
     def _compute_encoder_output_lengths(
@@ -714,16 +696,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
-        codec_targets: Optional[torch.Tensor] = None,
-        codec_lengths: Optional[torch.Tensor] = None,
+        dia_labels: Optional[torch.Tensor] = None,
+        dia_decoder_input_ids: Optional[torch.Tensor] = None,
+        dia_decoder_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference.
 
         For S2S training with audio head, pass these in kwargs:
             assistant_mask: Boolean mask [batch, seq_len] identifying assistant output positions
-            text_position_mask: Boolean mask [batch, seq_len] identifying text token positions
-                (extracted from same forward pass for conversational grounding)
         """
         # Get text embeddings if not provided
         if inputs_embeds is None:
@@ -750,8 +731,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
             )
 
-        # Request hidden states if training audio head with codec targets
-        if self.audio_head is not None and codec_targets is not None:
+        # Request hidden states for audio head training
+        if self.audio_head is not None and dia_labels is not None:
             kwargs["output_hidden_states"] = True
 
         # Remove TRL-specific keys that shouldn't go to the LLM
@@ -776,100 +757,41 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if aux_loss is not None and aux_loss.numel() > 0:
                 outputs.loss = outputs.loss + aux_loss.to(outputs.loss.device)
 
-        # Compute audio head loss if training S2S with codec targets
-        if self.audio_head is not None and codec_targets is not None:
-            # Use LLM hidden states for conditioning (not raw token embeddings)
-            # Hidden states contain rich contextualized representations from the transformer
-            # This follows Moshi/Freeze-Omni which use processed hidden states
+        # Compute audio head loss if training S2S with Dia labels
+        if self.audio_head is not None and dia_labels is not None:
             if outputs.hidden_states is None:
                 raise ValueError(
                     "hidden_states required for audio head training. "
                     "Ensure output_hidden_states=True is set."
                 )
 
-            # Get last layer hidden states (most processed representations)
+            # Get last layer hidden states (contextualized representations)
             all_hidden_states = outputs.hidden_states[-1]  # [batch, seq_len, hidden_dim]
 
-            # Extract only assistant-position hidden states using assistant_mask
-            # This mask identifies text output positions (where LLM generates response)
+            # Extract assistant-position hidden states using assistant_mask
             assistant_mask = kwargs.get("assistant_mask")
-            embeddings_mask = None
-            if assistant_mask is not None:
-                batch_size = all_hidden_states.shape[0]
-                device = all_hidden_states.device
-
-                # Extract assistant hidden states for each sample
-                assistant_hidden_list = []
-                assistant_lengths = []
-                for i in range(batch_size):
-                    mask_i = assistant_mask[i]  # [seq_len]
-                    hidden_i = all_hidden_states[i][mask_i]  # [num_assistant_tokens, hidden_dim]
-                    assistant_hidden_list.append(hidden_i)
-                    assistant_lengths.append(hidden_i.shape[0])
-
-                # Pad sequences
-                embeddings = torch.nn.utils.rnn.pad_sequence(
-                    assistant_hidden_list, batch_first=True, padding_value=0.0
+            if assistant_mask is None:
+                raise ValueError(
+                    "assistant_mask is required for audio head training. "
+                    "Ensure the data collator provides it (S2SDataCollator creates it automatically)."
                 )
 
-                # Create embeddings_mask for padded sequences [batch, max_len]
-                max_len = embeddings.shape[1]
-                positions = torch.arange(max_len, device=device).unsqueeze(0)
-                lengths_tensor = torch.tensor(assistant_lengths, device=device).unsqueeze(1)
-                embeddings_mask = positions < lengths_tensor
-            else:
-                embeddings = all_hidden_states
+            batch_size = all_hidden_states.shape[0]
+            assistant_hidden_list = []
+            for i in range(batch_size):
+                mask_i = assistant_mask[i]  # [seq_len]
+                hidden_i = all_hidden_states[i][mask_i]  # [num_assistant_tokens, hidden_dim]
+                assistant_hidden_list.append(hidden_i)
 
-            # Dual-path processing for S2S:
-            # Path 1: Text hidden states → context (what to say)
-            # Path 2: LLM hidden states → conditioning (how to say it)
-            #
-            # Extract text positions from the SAME forward pass so text has full
-            # audio context (conversational grounding). This is more efficient than
-            # a separate LLM forward pass and produces better representations.
-            text_position_mask = kwargs.get("text_position_mask")
-            if text_position_mask is not None:
-                # Extract text-position hidden states from the main forward pass
-                # These have full conversational context (audio + preceding text)
-                batch_size = all_hidden_states.shape[0]
-                device = all_hidden_states.device
+            embeddings = torch.nn.utils.rnn.pad_sequence(
+                assistant_hidden_list, batch_first=True, padding_value=0.0
+            )
 
-                text_hidden_list = []
-                text_lengths = []
-                for i in range(batch_size):
-                    mask_i = text_position_mask[i]  # [seq_len]
-                    hidden_i = all_hidden_states[i][mask_i]  # [num_text_tokens, hidden_dim]
-                    text_hidden_list.append(hidden_i)
-                    text_lengths.append(hidden_i.shape[0])
-
-                # Pad sequences
-                text_hidden_states = torch.nn.utils.rnn.pad_sequence(
-                    text_hidden_list, batch_first=True, padding_value=0.0
-                )
-
-                # Create text_mask for padded sequences [batch, max_len]
-                max_text_len = text_hidden_states.shape[1]
-                text_positions = torch.arange(max_text_len, device=device).unsqueeze(0)
-                text_lengths_tensor = torch.tensor(text_lengths, device=device).unsqueeze(1)
-                text_mask = text_positions < text_lengths_tensor
-            else:
-                # Fallback: use embeddings as both context and conditioning
-                # This is useful when text_position_mask not provided (e.g., simple training setups)
-                text_hidden_states = embeddings
-                text_mask = embeddings_mask
-
-            # Project LLM hidden states to AudioHead hidden dim via Pre-NN
-            projected_embeddings = self.audio_head_proj(embeddings, mask=embeddings_mask)
-            projected_text = self.audio_head_proj(text_hidden_states, mask=text_mask)
-
-            # Compute loss: embeddings condition the AR decoder to generate codec_targets
             audio_head_loss = self.audio_head(
-                projected_embeddings,
-                text_embeddings=projected_text,
-                codec_targets=codec_targets,
-                codec_lengths=codec_lengths,
-                embeddings_mask=embeddings_mask,
-                text_mask=text_mask,
+                embeddings,
+                dia_labels=dia_labels,
+                dia_decoder_input_ids=dia_decoder_input_ids,
+                dia_decoder_attention_mask=dia_decoder_attention_mask,
             )
 
             # Combine with LLM loss if present (e.g., joint ASR+S2S training)
@@ -1134,7 +1056,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         Returns:
             Dict with:
                 - text: Decoded text strings (list of str)
-                - audio: Audio waveform at 24kHz (batch, samples)
+                - audio: Audio waveform at 44.1kHz (batch, samples)
         """
         if self.audio_head is None:
             raise ValueError("Audio head not configured. Set use_audio_head=True in config.")
@@ -1177,13 +1099,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
             embeddings = lm_output.hidden_states[-1]  # [batch, seq_len, hidden_dim]
 
-        # Project to AudioHead hidden dim and generate codes
-        projected = self.audio_head_proj(embeddings)
-        codes, _ = self.audio_head(projected, text_embeddings=projected)
+        codes, _ = self.audio_head(embeddings)
 
-        # Load Mimi decoder if not already loaded
-        if self.audio_head.mimi is None:
-            self.audio_head.load_mimi_decoder(device=device)
+        # Load Dia decoder if not already loaded
+        if self.audio_head.dia_model is None:
+            self.audio_head.load_dia_decoder(device=device)
 
         # Decode codes to audio waveform
         audio = self.audio_head.decode_to_audio(codes)
@@ -1198,7 +1118,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         text: str,
         system_prompt: str | None = None,
         **generate_kwargs,
-    ) -> dict[str, torch.Tensor | str]:
+    ) -> dict[str, list[torch.Tensor] | str]:
         """Generate speech from text (Text-to-Speech).
 
         Args:
@@ -1209,7 +1129,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         Returns:
             Dict with:
                 - text: Generated response text (str)
-                - audio: Audio waveform at 24kHz (batch, samples)
+                - audio: Audio waveform at 44.1kHz (batch, samples)
         """
         if self.audio_head is None:
             raise ValueError("Audio head not configured. Set use_audio_head=True in config.")
@@ -1256,15 +1176,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
             embeddings = lm_output.hidden_states[-1]  # [batch, seq_len, hidden_dim]
 
-        # Project to AudioHead hidden dim and generate codes
-        projected = self.audio_head_proj(embeddings)
-        codes, _ = self.audio_head(projected, text_embeddings=projected)
+        codes, _ = self.audio_head(embeddings)
 
-        # Load Mimi decoder if not already loaded
-        if self.audio_head.mimi is None:
-            self.audio_head.load_mimi_decoder(device=device)
+        if self.audio_head.dia_model is None:
+            self.audio_head.load_dia_decoder(device=device)
 
-        # Decode codes to audio waveform
         audio = self.audio_head.decode_to_audio(codes)
 
         return {
@@ -1423,11 +1339,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
             embeddings = lm_output.hidden_states[-1]
 
-        # Project to AudioHead hidden dim and stream audio chunks
-        projected = self.audio_head_proj(embeddings)
         for audio_chunk in self.audio_head.generate_streaming(
-            embeddings=projected,
-            text_embeddings=projected,
+            embeddings=embeddings,
             chunk_size=1,  # Lowest latency
         ):
             # Check for interruption during audio generation
@@ -1597,13 +1510,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         full_duplex_path = src_dir / "full_duplex.py"
         if full_duplex_path.exists():
             shutil.copy(full_duplex_path, save_dir / "full_duplex.py")
-        # Copy modules directory (for audio head dependencies)
-        modules_dir = src_dir / "modules"
-        if modules_dir.exists():
-            save_modules_dir = save_dir / "modules"
-            save_modules_dir.mkdir(exist_ok=True)
-            for module_file in modules_dir.glob("*.py"):
-                shutil.copy(module_file, save_modules_dir / module_file.name)
 
     def push_to_hub(self, repo_id: str, **kwargs) -> str:
         """Push model to HuggingFace Hub, ensuring adapter_config points to repo.

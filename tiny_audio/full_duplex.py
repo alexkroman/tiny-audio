@@ -67,7 +67,7 @@ class FullDuplexConfig:
     # Audio settings
     sample_rate: int = 16000
     chunk_size: int = 512  # Samples per chunk (32ms at 16kHz)
-    output_sample_rate: int = 24000  # Mimi output rate
+    output_sample_rate: int = 44100  # DAC output rate
 
     # VAD settings
     vad_threshold: float = 0.5
@@ -463,13 +463,9 @@ class FullDuplexSession:
                         output_hidden_states=True,
                     )
                     embeddings = lm_output.hidden_states[-1]
-                    # Project to AudioHead hidden dim
-                    projected = self.model.audio_head_proj(embeddings)
 
                 for audio_chunk in self.model.audio_head.generate_streaming(
-                    embeddings=projected,
-                    text_embeddings=projected,  # Use same embeddings for both paths
-                    chunk_size=self.config.audio_chunk_size,
+                    embeddings=embeddings,
                 ):
                     if self._state.stop_generate:
                         return
