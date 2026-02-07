@@ -14,7 +14,6 @@ class MockAudioHeadConfig:
         self.max_audio_tokens = kwargs.get("max_audio_tokens", 500)
         self.audio_top_k = kwargs.get("audio_top_k", 50)
         self.audio_temperature = kwargs.get("audio_temperature", 1.0)
-        self.audio_repetition_penalty = kwargs.get("audio_repetition_penalty", 1.1)
 
 
 @pytest.fixture
@@ -26,8 +25,8 @@ def audio_head_config():
 @pytest.fixture
 def small_audio_head(audio_head_config):
     """Create a small AudioHead for testing."""
-    config = audio_head_config(llm_dim=256)
-    return AudioHead(config, llm_dim=256)
+    config = audio_head_config(llm_dim=512)
+    return AudioHead(config, llm_dim=512)
 
 
 class TestAudioHeadInit:
@@ -612,6 +611,99 @@ class TestFullPipelineGradients:
         assert ratio < 1e6, f"Gradient norm ratio too large: {ratio:.1f}"
 
 
+class TestParameterCount:
+    """Test and display parameter counts per component."""
+
+    @pytest.fixture
+    def prenn_and_head(self):
+        """Create a PreNN + AudioHead pair matching real config."""
+        llm_dim = 512
+        hidden_dim = AudioHead.HIDDEN_DIM
+
+        config = MockAudioHeadConfig(llm_dim=llm_dim)
+        head = AudioHead(config, llm_dim=hidden_dim)
+        prenn = PreNN(
+            llm_dim=llm_dim,
+            hidden_dim=hidden_dim,
+            num_layers=head.AR_LAYERS // 2,
+            num_heads=head.NUM_HEADS,
+            intermediate_size=head.INTERMEDIATE_DIM,
+        )
+        return prenn, head
+
+    def test_param_counts_per_component(self, prenn_and_head):
+        """Show parameter counts grouped by component with per-parameter detail."""
+        prenn, head = prenn_and_head
+
+        component_params: dict[str, list[tuple[str, tuple, int, bool]]] = {}
+
+        for prefix, module in [("prenn", prenn), ("audio_head", head)]:
+            for name, param in module.named_parameters():
+                parts = name.split(".")
+                if prefix == "prenn":
+                    if parts[0] == "proj":
+                        component = "prenn.proj"
+                    elif parts[0] == "layers":
+                        component = f"prenn.layer_{parts[1]}"
+                    elif parts[0] == "norm":
+                        component = "prenn.norm"
+                    else:
+                        component = f"prenn.{parts[0]}"
+                else:
+                    if parts[0] == "ar_decoder" and len(parts) > 1:
+                        if parts[1] == "layers":
+                            component = f"ar_decoder.layer_{parts[2]}"
+                        else:
+                            component = f"ar_decoder.{parts[1]}"
+                    elif parts[0] == "depformer":
+                        component = "depformer"
+                    elif parts[0] == "embedding":
+                        component = "embedding"
+                    else:
+                        component = parts[0]
+
+                full_name = f"{prefix}.{name}"
+                if component not in component_params:
+                    component_params[component] = []
+                component_params[component].append(
+                    (full_name, tuple(param.shape), param.numel(), param.requires_grad)
+                )
+
+        # Compute grand total for percentages
+        grand_total = sum(p[2] for entries in component_params.values() for p in entries)
+
+        # Print detailed report
+        print("\n" + "=" * 90)
+        print(f"{'Parameter':<55} {'Shape':>15} {'Count':>12}")
+        print("=" * 90)
+
+        grand_trainable = 0
+        for component in sorted(component_params.keys()):
+            entries = component_params[component]
+            comp_total = sum(e[2] for e in entries)
+            comp_pct = 100 * comp_total / max(grand_total, 1)
+            print(f"\n  {component} ({comp_total:,} params, {comp_pct:.1f}%)")
+            print(f"  {'-' * 86}")
+            for full_name, shape, count, trainable in entries:
+                shape_str = str(list(shape))
+                frozen = "" if trainable else " (frozen)"
+                print(f"    {full_name:<51} {shape_str:>15} {count:>12,}{frozen}")
+                if trainable:
+                    grand_trainable += count
+
+        print("\n" + "=" * 90)
+        print(f"  {'TOTAL':<53} {'':<15} {grand_total:>12,}")
+        print(f"  {'TRAINABLE':<53} {'':<15} {grand_trainable:>12,}")
+        print(
+            f"  {'TRAINABLE %':<53} {'':<15} {100 * grand_trainable / max(grand_total, 1):>11.1f}%"
+        )
+        print("=" * 90)
+
+        # Basic sanity checks
+        assert grand_total > 0, "Model has no parameters"
+        assert grand_trainable == grand_total, "All audio head params should be trainable"
+
+
 class TestConfigPriority:
     """Tests for config parameter priority."""
 
@@ -645,11 +737,11 @@ class TestGenerationParameters:
 
     def test_top_k_affects_generation(self, audio_head_config):
         """Test that top_k parameter affects generation diversity."""
-        config = audio_head_config(llm_dim=256, audio_top_k=5)
-        head = AudioHead(config, llm_dim=256)
+        config = audio_head_config(llm_dim=512, audio_top_k=5)
+        head = AudioHead(config, llm_dim=512)
         head.max_tokens = 10
 
-        hidden = torch.randn(1, 5, 256)
+        hidden = torch.randn(1, 5, 512)
 
         # Should not crash with low top_k
         codes, _ = head(hidden, hidden)
@@ -657,24 +749,12 @@ class TestGenerationParameters:
 
     def test_temperature_affects_generation(self, audio_head_config):
         """Test that temperature parameter affects generation."""
-        config = audio_head_config(llm_dim=256, audio_temperature=0.5)
-        head = AudioHead(config, llm_dim=256)
+        config = audio_head_config(llm_dim=512, audio_temperature=0.5)
+        head = AudioHead(config, llm_dim=512)
         head.max_tokens = 10
 
-        hidden = torch.randn(1, 5, 256)
+        hidden = torch.randn(1, 5, 512)
 
         # Should not crash with low temperature
-        codes, _ = head(hidden, hidden)
-        assert codes.shape[0] == 1
-
-    def test_repetition_penalty_affects_generation(self, audio_head_config):
-        """Test that repetition penalty parameter affects generation."""
-        config = audio_head_config(llm_dim=256, audio_repetition_penalty=2.0)
-        head = AudioHead(config, llm_dim=256)
-        head.max_tokens = 10
-
-        hidden = torch.randn(1, 5, 256)
-
-        # Should not crash with high repetition penalty
         codes, _ = head(hidden, hidden)
         assert codes.shape[0] == 1

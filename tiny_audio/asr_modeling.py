@@ -173,6 +173,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Audio projector (trainable unless freeze_projector is set)
         self.projector = self._create_projector(config, target_dtype)
 
+        # Learned padding embedding for audio tokens (used when projector output is short)
+        # Using a learned embedding instead of zeros keeps values in the embedding distribution
+        self.audio_pad_embedding = nn.Parameter(torch.randn(1, config.llm_dim) * 0.02)
+
         # Setup LoRA if enabled (Stage 2 fine-tuning)
         # Skip if loading from pretrained - from_pretrained will handle adapter loading
         if getattr(config, "use_lora", False) and not getattr(
@@ -682,19 +686,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Extract embeddings matching expected token counts per sample
         batch_size = audio_embeds.shape[0]
-        hidden_dim = audio_embeds.shape[2]
 
         result_embeds = []
         for i in range(batch_size):
             count = int(token_counts[i].item())
             sample_embeds = audio_embeds[i, :count, :]  # Take first 'count' embeddings
-            # Pad with zeros if we don't have enough embeddings
+            # Pad with learned embedding if we don't have enough embeddings
             if sample_embeds.shape[0] < count:
-                padding = torch.zeros(
-                    count - sample_embeds.shape[0],
-                    hidden_dim,
-                    device=audio_embeds.device,
-                    dtype=audio_embeds.dtype,
+                pad_count = count - sample_embeds.shape[0]
+                padding = self.audio_pad_embedding.expand(pad_count, -1).to(
+                    device=audio_embeds.device, dtype=audio_embeds.dtype
                 )
                 sample_embeds = torch.cat([sample_embeds, padding], dim=0)
             result_embeds.append(sample_embeds)
@@ -715,11 +716,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         cache_position: Optional[torch.Tensor] = None,
         codec_targets: Optional[torch.Tensor] = None,
         codec_lengths: Optional[torch.Tensor] = None,
-        tts_text_ids: Optional[torch.Tensor] = None,
-        tts_text_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
-        """Forward pass for training and inference."""
+        """Forward pass for training and inference.
+
+        For S2S training with audio head, pass these in kwargs:
+            assistant_mask: Boolean mask [batch, seq_len] identifying assistant output positions
+            text_position_mask: Boolean mask [batch, seq_len] identifying text token positions
+                (extracted from same forward pass for conversational grounding)
+        """
         # Get text embeddings if not provided
         if inputs_embeds is None:
             inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
@@ -818,22 +823,38 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # Dual-path processing for S2S:
             # Path 1: Text hidden states → context (what to say)
             # Path 2: LLM hidden states → conditioning (how to say it)
-            if tts_text_ids is not None:
-                # Run text through LLM to get hidden states (Freeze-Omni style)
-                # This gives the model full LLM context for the text, not just raw embeddings
-                with torch.no_grad():  # Don't backprop through this path
-                    text_outputs = self.language_model(
-                        input_ids=tts_text_ids,
-                        attention_mask=tts_text_mask,
-                        output_hidden_states=True,
-                        return_dict=True,
-                    )
-                    # Use last hidden state as text representation
-                    text_hidden_states = text_outputs.hidden_states[-1]
-                text_mask = tts_text_mask
+            #
+            # Extract text positions from the SAME forward pass so text has full
+            # audio context (conversational grounding). This is more efficient than
+            # a separate LLM forward pass and produces better representations.
+            text_position_mask = kwargs.get("text_position_mask")
+            if text_position_mask is not None:
+                # Extract text-position hidden states from the main forward pass
+                # These have full conversational context (audio + preceding text)
+                batch_size = all_hidden_states.shape[0]
+                device = all_hidden_states.device
+
+                text_hidden_list = []
+                text_lengths = []
+                for i in range(batch_size):
+                    mask_i = text_position_mask[i]  # [seq_len]
+                    hidden_i = all_hidden_states[i][mask_i]  # [num_text_tokens, hidden_dim]
+                    text_hidden_list.append(hidden_i)
+                    text_lengths.append(hidden_i.shape[0])
+
+                # Pad sequences
+                text_hidden_states = torch.nn.utils.rnn.pad_sequence(
+                    text_hidden_list, batch_first=True, padding_value=0.0
+                )
+
+                # Create text_mask for padded sequences [batch, max_len]
+                max_text_len = text_hidden_states.shape[1]
+                text_positions = torch.arange(max_text_len, device=device).unsqueeze(0)
+                text_lengths_tensor = torch.tensor(text_lengths, device=device).unsqueeze(1)
+                text_mask = text_positions < text_lengths_tensor
             else:
                 # Fallback: use embeddings as both context and conditioning
-                # This is useful when tts_text_ids not provided (e.g., simple training setups)
+                # This is useful when text_position_mask not provided (e.g., simple training setups)
                 text_hidden_states = embeddings
                 text_mask = embeddings_mask
 

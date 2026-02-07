@@ -227,15 +227,16 @@ class AudioHead(nn.Module):
         llm_dim: Override for LLM dimension (takes precedence over config)
     """
 
-    # Architecture dimensions (matching Freeze-Omni defaults)
-    # Freeze-Omni: hidden=256, intermediate=1024, heads=4, layers=6
-    HIDDEN_DIM = 256  # Transformer hidden dimension
-    INTERMEDIATE_DIM = 1024  # FFN intermediate dimension (4x hidden)
-    NUM_HEADS = 4  # Attention heads (64 dim per head)
+    # Architecture dimensions (scaled to match Freeze-Omni's 1/4 compression ratio)
+    # Freeze-Omni: 896 hidden for Qwen2-7B (3584 LLM dim) = 1/4 ratio
+    # Us: 512 hidden for SmolLM3 (2048 LLM dim) = 1/4 ratio
+    HIDDEN_DIM = 512  # Transformer hidden dimension
+    INTERMEDIATE_DIM = 2048  # FFN intermediate dimension (4x hidden)
+    NUM_HEADS = 8  # Attention heads (64 dim per head)
 
     # AR Decoder config (for semantic codebook 0)
     # No Pre-NN for simpler gradient flow
-    AR_LAYERS = 6
+    AR_LAYERS = 4
     VOCAB_SIZE = 2048  # Mimi codebook size
 
     # Depformer config (for acoustic codebooks 1-7) - smaller than AR decoder
@@ -253,7 +254,6 @@ class AudioHead(nn.Module):
     DEFAULT_MAX_TOKENS = 500
     DEFAULT_TOP_K = 50
     DEFAULT_TEMPERATURE = 1.0
-    DEFAULT_REPETITION_PENALTY = 1.1
 
     # Moshi-style delays for multi-codebook AR (audio-time alignment)
     # delays[k] = how many AR steps codebook k is delayed
@@ -282,9 +282,6 @@ class AudioHead(nn.Module):
         self.max_tokens = getattr(config, "max_audio_tokens", self.DEFAULT_MAX_TOKENS)
         self.top_k = getattr(config, "audio_top_k", self.DEFAULT_TOP_K)
         self.temperature = getattr(config, "audio_temperature", self.DEFAULT_TEMPERATURE)
-        self.repetition_penalty = getattr(
-            config, "audio_repetition_penalty", self.DEFAULT_REPETITION_PENALTY
-        )
 
         # Hidden state dropout (Freeze-Omni style)
         self.hidden_dropout = nn.Dropout(p=self.DROPOUT_RATE)
@@ -526,7 +523,12 @@ class AudioHead(nn.Module):
             codebook_targets=targets,
         )
 
-        return self.SEMANTIC_LOSS_WEIGHT * semantic_loss + self.ACOUSTIC_LOSS_WEIGHT * acoustic_loss
+        # Normalize by total weight so loss is on ~1.0 scale
+        total_weight = self.SEMANTIC_LOSS_WEIGHT + self.ACOUSTIC_LOSS_WEIGHT
+        weighted_loss = (
+            self.SEMANTIC_LOSS_WEIGHT * semantic_loss + self.ACOUSTIC_LOSS_WEIGHT * acoustic_loss
+        )
+        return weighted_loss / total_weight
 
     def _generate(
         self,
@@ -559,7 +561,6 @@ class AudioHead(nn.Module):
             max_tokens=self.max_tokens,
             top_k=self.top_k,
             temperature=self.temperature,
-            repetition_penalty=self.repetition_penalty,
             return_hidden=True,
         ):
             semantic_tokens.append(token)
@@ -721,7 +722,6 @@ class AudioHead(nn.Module):
             max_tokens=self.max_tokens,
             top_k=self.top_k,
             temperature=self.temperature,
-            repetition_penalty=self.repetition_penalty,
             return_hidden=True,
         )
 

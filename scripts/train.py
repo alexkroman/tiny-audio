@@ -670,29 +670,9 @@ class S2SDataCollator:
         batch["codec_targets"] = padded  # [batch, 8, seq_len]
         batch["codec_lengths"] = torch.tensor(code_lengths, dtype=torch.long)
 
-        # Dual-path: Tokenize text for TTS
-        # Path 1: Text embeddings → context (what to say)
-        # Path 2: LLM hidden states → conditioning (how to say it)
-        tts_text_ids_list = []
-        for text in processed_texts:
-            # Tokenize just the text (no chat template)
-            tokens = self.tokenizer.encode(text, add_special_tokens=False)
-            tts_text_ids_list.append(torch.tensor(tokens, dtype=torch.long))
-
-        # Pad text tokens
-        max_text_len = max(len(t) for t in tts_text_ids_list)
-        tts_text_ids = torch.full(
-            (len(tts_text_ids_list), max_text_len),
-            self.tokenizer.pad_token_id,
-            dtype=torch.long,
-        )
-        tts_text_mask = torch.zeros(len(tts_text_ids_list), max_text_len, dtype=torch.bool)
-        for i, tokens in enumerate(tts_text_ids_list):
-            tts_text_ids[i, : len(tokens)] = tokens
-            tts_text_mask[i, : len(tokens)] = True
-
-        batch["tts_text_ids"] = tts_text_ids
-        batch["tts_text_mask"] = tts_text_mask
+        # Note: Text position extraction now happens in the model's forward pass
+        # using assistant_mask. This avoids a redundant LLM forward pass and gives
+        # the text hidden states full conversational context (audio + text).
 
         return batch
 

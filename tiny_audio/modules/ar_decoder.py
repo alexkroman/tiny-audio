@@ -275,8 +275,6 @@ class CodecARDecoder(nn.Module):
         max_tokens: int = 500,
         top_k: int = 50,
         temperature: float = 1.0,
-        repetition_penalty: float = 1.1,
-        penalty_window: int = 20,
         return_hidden: bool = False,
     ):
         """Generate codec tokens autoregressively.
@@ -287,8 +285,6 @@ class CodecARDecoder(nn.Module):
             max_tokens: Maximum tokens to generate
             top_k: Top-k sampling parameter
             temperature: Sampling temperature
-            repetition_penalty: Penalty for repeated tokens
-            penalty_window: Window size for repetition penalty
             return_hidden: If True, yield (token, hidden_state) tuples for Depformer
 
         Yields:
@@ -393,15 +389,6 @@ class CodecARDecoder(nn.Module):
             logits[:, self.bos_token_id] = float("-inf")
             logits[:, self.sos_token_id] = float("-inf")
             logits[:, self.pad_token_id] = float("-inf")
-
-            # Apply repetition penalty
-            if penalty_window > 0 and len(generated) > 0:
-                recent = generated[-penalty_window:]
-                for token_id in set(recent):
-                    if logits[0, token_id] > 0:
-                        logits[0, token_id] /= repetition_penalty
-                    else:
-                        logits[0, token_id] *= repetition_penalty
 
             # Temperature scaling
             if temperature != 1.0:

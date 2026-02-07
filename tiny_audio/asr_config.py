@@ -76,7 +76,6 @@ class ASRConfig(transformers.PretrainedConfig):
         max_audio_tokens: int = 500,  # Maximum codec tokens to generate
         audio_top_k: int = 50,  # Top-k sampling for audio generation
         audio_temperature: float = 1.0,  # Sampling temperature for audio generation
-        audio_repetition_penalty: float = 1.1,  # Repetition penalty for audio tokens
         **kwargs,
     ):
         # Merge generation defaults with kwargs (kwargs takes precedence)
@@ -147,7 +146,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.max_audio_tokens = max_audio_tokens
         self.audio_top_k = audio_top_k
         self.audio_temperature = audio_temperature
-        self.audio_repetition_penalty = audio_repetition_penalty
 
         # Generation parameters (from kwargs after merge with defaults)
         self.num_beams = kwargs.pop("num_beams")
