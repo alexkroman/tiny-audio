@@ -2,10 +2,9 @@
 # Speech-to-Speech (S2S) training: MLP projector + frozen Dia TTS decoder
 #
 # Architecture:
-#   LLM hidden states -> MLP (2048->1024) -> codebook heads -> DAC codes loss
-#   At inference: MLP output -> frozen Dia decoder -> DAC codes -> audio (44.1kHz)
+#   LLM hidden states -> MLP (2048->1024) -> frozen Dia decoder -> DAC codes -> audio (44.1kHz)
 #
-# Only the MLP projector + codebook heads are trained (~17M params).
+# Only the MLP projector is trained (~330K params).
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=s2s
@@ -70,6 +69,6 @@ training:
 
   use_specaugment: false
 
-  # S2S uses codec_targets for DAC token prediction
-  label_names: ["codec_targets"]
+  # S2S computes loss in model forward (audio_head), not via Trainer label handling
+  label_names: []
   label_smoothing: 0.0

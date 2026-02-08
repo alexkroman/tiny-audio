@@ -16,8 +16,6 @@ Usage:
 import argparse
 import asyncio
 import os
-from typing import Optional
-
 import numpy as np
 import scipy.signal
 import torch
@@ -33,7 +31,7 @@ app = FastAPI(title="Tiny Audio S2S Demo")
 model = None
 
 # Audio settings
-OUTPUT_SAMPLE_RATE = 24000  # Mimi native
+OUTPUT_SAMPLE_RATE = 44100  # DAC native
 BROWSER_SAMPLE_RATE = 48000  # Browser playback
 
 SYSTEM_PROMPT = """You are a helpful voice assistant. Keep responses brief - 1-2 sentences. Be friendly and natural."""
@@ -216,15 +214,15 @@ def load_model(model_id: str):
     print(f"Model on {device}")
 
     if model.audio_head:
-        model.audio_head.load_mimi_decoder(device=device)
-        print("Mimi decoder loaded")
+        model.audio_head.load_dia_decoder(device=device)
+        print("Dia decoder loaded")
 
     model.load_vad()
     print("VAD loaded")
 
 
 def resample_to_browser(audio: np.ndarray) -> bytes:
-    """Resample from Mimi (24kHz) to browser (48kHz)."""
+    """Resample from DAC (44.1kHz) to browser (48kHz)."""
     mx = max(abs(audio.min()), abs(audio.max()))
     if mx > 0:
         audio = audio / mx * 0.9

@@ -46,7 +46,7 @@ class TestSubcommandHelp:
             (["deploy"], ["repo-id"]),  # Now a direct command
             (["push"], ["repo-id"]),  # Now a direct command
             (["runpod"], ["deploy", "train", "attach"]),  # Top-level command
-            (["debug"], ["check-mosa", "analyze-lora"]),
+            (["debug"], ["analyze-weights"]),
             (["demo"], ["model", "port"]),
             (["dev"], ["lint", "format", "test", "handler"]),
         ],
@@ -71,8 +71,7 @@ class TestNestedCommands:
             (["runpod", "attach"], "host"),
             (["runpod", "checkpoint"], "host"),
             # Debug subcommands
-            (["debug", "check-mosa"], "model"),
-            (["debug", "analyze-lora"], "repo"),
+            (["debug", "analyze-weights"], "model"),
             # Analysis subcommands
             (["analysis", "high-wer"], "threshold"),
             (["analysis", "compare"], "models"),
@@ -143,8 +142,7 @@ class TestCLIStructure:
             ["runpod", "attach"],
             ["runpod", "checkpoint"],
             # Debug subcommands
-            ["debug", "check-mosa"],
-            ["debug", "analyze-lora"],
+            ["debug", "analyze-weights"],
             # Analysis subcommands
             ["analysis", "high-wer"],
             ["analysis", "compare"],

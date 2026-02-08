@@ -1,5 +1,5 @@
 # S2S Codes training dataset: LibriTTS with pre-computed DAC codes
-# Used for MLP projector + codebook heads training
+# Used for AudioHead MLP projector training (frozen Dia decoder)
 
 sample_rate: 16000  # Input audio sample rate (for ASR encoder)
 dataset_cache_dir: null
@@ -11,7 +11,6 @@ datasets:
     train_splits:
       - train.clean.100
       - train.clean.360
-      - train.other.500
     eval_splits:
       - train.clean.100
     # Column mappings

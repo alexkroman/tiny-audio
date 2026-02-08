@@ -43,31 +43,12 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_type: str = "mlp",
         projector_pool_stride: int = 4,
         projector_hidden_dim: Optional[int] = None,
-        projector_num_layers: int = 2,
-        projector_init_std: float = 0.02,
-        projector_dropout: float = 0.0,
-        # MoE projector settings
-        num_experts: int = 4,
-        num_experts_per_tok: int = 2,
-        router_aux_loss_coef: float = 0.01,
-        # QFormer projector settings
-        qformer_window_size: int = 15,
-        qformer_hidden_size: Optional[int] = None,
-        qformer_num_layers: int = 2,
-        qformer_num_heads: int = 16,
-        qformer_intermediate_size: Optional[int] = None,
-        downsample_rate: int = 5,
         # Training settings (not saved to config.json for inference)
         use_specaugment: bool = False,
         num_time_masks: int = 2,
         time_mask_length: int = 10,
         num_freq_masks: int = 0,
         freq_mask_length: int = 10,
-        use_lora: bool = False,
-        lora_rank: int = 8,
-        lora_alpha: int = 32,
-        lora_dropout: float = 0.0,
-        lora_target_modules: Optional[list] = None,
         freeze_projector: bool = False,
         label_smoothing: float = 0.0,
         # Audio Head settings (Dia TTS decoder)
@@ -100,22 +81,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_type = projector_type
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
-        self.projector_num_layers = projector_num_layers
-        self.projector_init_std = projector_init_std
-        self.projector_dropout = projector_dropout
-
-        # MoE settings
-        self.num_experts = num_experts
-        self.num_experts_per_tok = num_experts_per_tok
-        self.router_aux_loss_coef = router_aux_loss_coef
-
-        # QFormer settings
-        self.qformer_window_size = qformer_window_size
-        self.qformer_hidden_size = qformer_hidden_size
-        self.qformer_num_layers = qformer_num_layers
-        self.qformer_num_heads = qformer_num_heads
-        self.qformer_intermediate_size = qformer_intermediate_size
-        self.downsample_rate = downsample_rate
 
         # Training settings
         self.use_specaugment = use_specaugment
@@ -123,19 +88,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.time_mask_length = time_mask_length
         self.num_freq_masks = num_freq_masks
         self.freq_mask_length = freq_mask_length
-        self.use_lora = use_lora
-        self.lora_rank = lora_rank
-        self.lora_alpha = lora_alpha
-        self.lora_dropout = lora_dropout
-        self.lora_target_modules = lora_target_modules or [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ]
         self.freeze_projector = freeze_projector
         self.label_smoothing = label_smoothing
 

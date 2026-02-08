@@ -147,7 +147,7 @@ class TestPackageImports:
             "scripts.hub",
             "scripts.hub.push",
             "scripts.debug",
-            "scripts.debug.check_mosa",
+            "scripts.debug.analyze_weights",
         ],
     )
     def test_module_importable(self, module_path):

@@ -167,32 +167,6 @@ def base_asr_model(base_asr_config):
     return ASRModel(base_asr_config)
 
 
-@pytest.fixture(scope="session")
-def lora_asr_config():
-    """Session-scoped LoRA ASR config - loaded once per test session."""
-    from tiny_audio.asr_config import ASRConfig
-
-    return ASRConfig(
-        audio_model_id="openai/whisper-tiny",
-        text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-        projector_type="mlp",
-        model_dtype="float32",
-        attn_implementation="eager",
-        lora_enabled=True,
-        lora_r=8,
-        lora_alpha=16,
-        lora_dropout=0.1,
-    )
-
-
-@pytest.fixture(scope="session")
-def lora_asr_model(lora_asr_config):
-    """Session-scoped LoRA ASR model - loaded once per test session."""
-    from tiny_audio.asr_modeling import ASRModel
-
-    return ASRModel(lora_asr_config)
-
-
 # =============================================================================
 # Projector Test Utilities
 # =============================================================================
@@ -211,24 +185,6 @@ class MockProjectorConfig:
         self.llm_dim = kwargs.get("llm_dim", 512)
         self.projector_hidden_dim = kwargs.get("projector_hidden_dim", 1024)
         self.projector_pool_stride = kwargs.get("projector_pool_stride", 4)
-        self.projector_dropout = kwargs.get("projector_dropout", 0.0)
-        self.projector_num_layers = kwargs.get("projector_num_layers", 2)
-        self.projector_init_std = kwargs.get("projector_init_std", 0.02)
-
-        # MoE settings
-        self.num_experts = kwargs.get("num_experts", 4)
-        self.num_experts_per_tok = kwargs.get("num_experts_per_tok", 2)
-        self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 0.02)
-        self.router_z_loss_coef = kwargs.get("router_z_loss_coef", 0.001)
-        self.adapter_hidden_dim = kwargs.get("adapter_hidden_dim", 1024)
-
-        # QFormer settings
-        self.qformer_window_size = kwargs.get("qformer_window_size", 15)
-        self.downsample_rate = kwargs.get("downsample_rate", 5)
-        self.qformer_hidden_size = kwargs.get("qformer_hidden_size")
-        self.qformer_num_layers = kwargs.get("qformer_num_layers", 2)
-        self.qformer_num_heads = kwargs.get("qformer_num_heads", 8)
-        self.qformer_intermediate_size = kwargs.get("qformer_intermediate_size")
 
 
 @pytest.fixture

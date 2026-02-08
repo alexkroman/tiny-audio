@@ -767,19 +767,12 @@ def main(cfg: DictConfig) -> None:
     # Add training params that affect model behavior
     training_model_params = [
         "label_smoothing",
-        "projector_dropout",
         "use_specaugment",
         "num_time_masks",
         "time_mask_length",
         "num_freq_masks",
         "freq_mask_length",
         "attn_implementation",
-        # LoRA params (Stage 2 fine-tuning)
-        "use_lora",
-        "lora_rank",
-        "lora_alpha",
-        "lora_dropout",
-        "lora_target_modules",
         "freeze_projector",
     ]
     for param in training_model_params:
