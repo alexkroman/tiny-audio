@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Generate dataset with DAC codec codes (for Dia TTS decoder training).
+"""Generate dataset with Mimi codec codes (for trainable AR decoder training).
 
-Encodes audio from any HuggingFace dataset to DAC codec tokens (9 codebooks).
+Encodes audio from any HuggingFace dataset to Mimi codec tokens (8 codebooks).
 Each split is pushed separately, so running again with a new split will add/update
 only that split without overwriting existing splits.
 
 Usage:
     # LibriTTS (default)
-    python -m scripts.generate_dac --output-repo user/libritts-dac
+    python -m scripts.generate_mimi --output-repo user/libritts-mimi
 
     # Process specific splits
-    python -m scripts.generate_dac \
+    python -m scripts.generate_mimi \
         --input-dataset parler-tts/libritts_r_filtered \
         --dataset-config clean \
         --splits train.clean.100,train.clean.360 \
-        --output-repo user/libritts-dac
+        --output-repo user/libritts-mimi
 
     # Test with limited samples
-    python -m scripts.generate_dac --max-samples 100
+    python -m scripts.generate_mimi --max-samples 100
 """
 
 import os
@@ -32,10 +32,10 @@ from datasets import Audio, Dataset, Features, Value, load_dataset
 from huggingface_hub import DatasetCard, DatasetCardData
 from tqdm import tqdm
 
-app = typer.Typer(help="Generate dataset with DAC codec codes")
+app = typer.Typer(help="Generate dataset with Mimi codec codes")
 
-DAC_SAMPLE_RATE = 44100
-NUM_CODEBOOKS = 9
+MIMI_SAMPLE_RATE = 24000
+NUM_CODEBOOKS = 8
 
 
 def create_dataset_card(
@@ -50,8 +50,8 @@ def create_dataset_card(
         language=["en"],
         license="cc-by-4.0",
         task_categories=["text-to-speech", "audio-to-audio"],
-        tags=["audio", "speech", "dac", "codec", "s2s", "dia"],
-        pretty_name="Dataset with DAC Codes",
+        tags=["audio", "speech", "mimi", "codec", "s2s"],
+        pretty_name="Dataset with Mimi Codes",
     )
 
     splits_str = ", ".join(splits)
@@ -59,15 +59,15 @@ def create_dataset_card(
 {card_data.to_yaml()}
 ---
 
-# Dataset with DAC Codes
+# Dataset with Mimi Codes
 
-This dataset adds DAC codec codes to [{input_dataset}](https://huggingface.co/datasets/{input_dataset}).
+This dataset adds Mimi codec codes to [{input_dataset}](https://huggingface.co/datasets/{input_dataset}).
 
 ## Dataset Description
 
 Each sample contains:
-- **audio**: Audio resampled to 44.1kHz (DAC's native rate)
-- **codes**: 9-layer DAC codec codes (list of 9 lists of integers, vocab 0-1027)
+- **audio**: Audio resampled to 24kHz (Mimi's native rate)
+- **codes**: 8-layer Mimi codec codes (list of 8 lists of integers, vocab 0-2047)
 - **text**: Text transcription (from `{text_column}` column)
 
 ## Stats
@@ -75,8 +75,8 @@ Each sample contains:
 - **Source**: {input_dataset}
 - **Splits**: {splits_str}
 - **Samples**: {num_samples:,}
-- **Audio Sample Rate**: 44.1kHz
-- **Codec**: DAC (descript-audio-codec) with 9 codebooks, vocab size 1028
+- **Audio Sample Rate**: 24kHz
+- **Codec**: Mimi (kyutai/mimi) with 8 codebooks, vocab size 2048, 12.5 tokens/sec
 
 ## Usage
 
@@ -85,7 +85,7 @@ from datasets import load_dataset
 
 ds = load_dataset("{repo_id}", split="train")
 sample = ds[0]
-codes = sample["codes"]  # 9 lists of codec indices
+codes = sample["codes"]  # 8 lists of codec indices
 text = sample["text"]
 ```
 
@@ -97,76 +97,67 @@ Same as source dataset.
     card.push_to_hub(repo_id)
 
 
-class DACEncoder:
-    """Encodes audio to DAC codec tokens using transformers DacModel."""
+class MimiEncoder:
+    """Encodes audio to Mimi codec tokens using transformers MimiModel."""
 
-    DAC_MODEL_ID = "descript/dac_44khz"
+    MIMI_MODEL_ID = "kyutai/mimi"
 
     def __init__(self, device: str = "cpu"):
         self.device = device
         self.model = None
-        self.processor = None
 
     def _load_model(self):
-        """Lazy load DAC model from transformers."""
+        """Lazy load Mimi model from transformers."""
         if self.model is not None:
             return
 
-        from transformers import AutoProcessor, DacModel
+        from transformers import MimiModel
 
-        typer.echo("Loading DAC model...")
-        self.model = DacModel.from_pretrained(self.DAC_MODEL_ID, torch_dtype=torch.bfloat16).to(
+        typer.echo("Loading Mimi model...")
+        self.model = MimiModel.from_pretrained(self.MIMI_MODEL_ID, torch_dtype=torch.float32).to(
             self.device
         )
-        self.processor = AutoProcessor.from_pretrained(self.DAC_MODEL_ID)
         self.model.eval()
-        if self.device == "cuda":
-            self.model = torch.compile(self.model)
-        typer.echo(f"DAC loaded on {self.device}")
+        typer.echo(f"Mimi loaded on {self.device}")
 
     def encode(self, audio: torch.Tensor) -> list[list[int]]:
-        """Encode a single audio tensor to DAC codes.
+        """Encode a single audio tensor to Mimi codes.
 
         Args:
-            audio: 1-D audio tensor at DAC_SAMPLE_RATE
+            audio: 1-D audio tensor at MIMI_SAMPLE_RATE (24kHz)
 
         Returns:
-            List of 9 lists of codec indices (one per codebook)
+            List of 8 lists of codec indices (first 8 codebooks)
         """
         self._load_model()
 
-        # Pad to multiple of hop_length (same as DacFeatureExtractor but on GPU)
-        hop_length = self.processor.hop_length
-        remainder = audio.shape[-1] % hop_length
-        if remainder:
-            audio = torch.nn.functional.pad(audio, (0, hop_length - remainder))
-
-        input_values = audio.unsqueeze(0).unsqueeze(0).to(device=self.device, dtype=torch.bfloat16)
+        input_values = audio.unsqueeze(0).unsqueeze(0).to(device=self.device, dtype=torch.float32)
 
         with torch.no_grad():
             encoder_outputs = self.model.encode(input_values)
-            codes = encoder_outputs.audio_codes  # [1, 9, seq_len]
+            codes = encoder_outputs.audio_codes  # [1, num_codebooks, seq_len]
 
-        return codes.squeeze(0).cpu().tolist()  # [9, seq_len]
+        # Take first 8 codebooks only
+        return codes.squeeze(0)[:NUM_CODEBOOKS].cpu().tolist()  # [8, seq_len]
 
 
 def process_split(
     ds: Dataset,
-    encoder: DACEncoder,
+    encoder: MimiEncoder,
     audio_column: str,
     text_column: str,
     max_samples: int | None = None,
 ) -> Dataset:
-    """Process a single dataset split and add DAC codes."""
+    """Process a single dataset split and add Mimi codes."""
     if max_samples and len(ds) > max_samples:
         ds = ds.select(range(max_samples))
         typer.echo(f"Limited to {len(ds)} samples")
 
-    # Ensure audio is at DAC sample rate
-    typer.echo(f"Ensuring audio is at {DAC_SAMPLE_RATE}Hz...")
-    ds = ds.cast_column(audio_column, Audio(sampling_rate=DAC_SAMPLE_RATE))
+    # Ensure audio is at Mimi sample rate
+    typer.echo(f"Ensuring audio is at {MIMI_SAMPLE_RATE}Hz...")
+    ds = ds.cast_column(audio_column, Audio(sampling_rate=MIMI_SAMPLE_RATE))
 
-    typer.echo("Encoding audio to DAC codes...")
+    typer.echo("Encoding audio to Mimi codes...")
     all_codes = []
 
     for i in tqdm(range(len(ds)), desc="Processing"):
@@ -198,7 +189,7 @@ def process_split(
     # Cast to explicit features
     features = Features(
         {
-            "audio": Audio(sampling_rate=DAC_SAMPLE_RATE),
+            "audio": Audio(sampling_rate=MIMI_SAMPLE_RATE),
             "text": Value("string"),
             "text_original": Value("string"),
             "speaker_id": Value("string"),
@@ -231,13 +222,13 @@ def main(
     ] = "text_normalized",
     output_repo: Annotated[
         str, typer.Option("--output-repo", "-o", help="HuggingFace repo ID for output")
-    ] = "mazesmazes/libritts-dac",
+    ] = "mazesmazes/libritts-mimi",
     max_samples: Annotated[
         int | None, typer.Option("--max-samples", "-n", help="Max samples per split")
     ] = None,
     push: Annotated[bool, typer.Option(help="Push to HuggingFace Hub")] = True,
 ):
-    """Generate dataset with DAC codec codes for Dia TTS training."""
+    """Generate dataset with Mimi codec codes for AR decoder training."""
     split_list = [s.strip() for s in splits.split(",")]
 
     typer.echo(f"Input: {input_dataset}" + (f" ({dataset_config})" if dataset_config else ""))
@@ -248,7 +239,7 @@ def main(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     typer.echo(f"Using device: {device}")
-    encoder = DACEncoder(device=device)
+    encoder = MimiEncoder(device=device)
 
     processed_datasets = []
     total_samples = 0

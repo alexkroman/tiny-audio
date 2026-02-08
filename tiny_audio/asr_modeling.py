@@ -167,7 +167,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
     def _tie_weights(self):
-        """No-op: Dia-based AudioHead has no shared embeddings."""
+        """No-op: AudioHead manages its own embeddings."""
         pass
 
     def _create_feature_extractor(self, config: ASRConfig):
@@ -500,9 +500,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
-        dia_labels: Optional[torch.Tensor] = None,
-        dia_decoder_input_ids: Optional[torch.Tensor] = None,
-        dia_decoder_attention_mask: Optional[torch.Tensor] = None,
+        codec_labels: Optional[torch.Tensor] = None,
+        codec_input_ids: Optional[torch.Tensor] = None,
+        codec_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference.
@@ -536,7 +536,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
 
         # Request hidden states for audio head training
-        if self.audio_head is not None and dia_labels is not None:
+        if self.audio_head is not None and codec_labels is not None:
             kwargs["output_hidden_states"] = True
 
         # Remove TRL-specific keys that shouldn't go to the LLM
@@ -555,8 +555,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             **kwargs,
         )
 
-        # Compute audio head loss if training S2S with Dia labels
-        if self.audio_head is not None and dia_labels is not None:
+        # Compute audio head loss if training S2S with codec labels
+        if self.audio_head is not None and codec_labels is not None:
             if outputs.hidden_states is None:
                 raise ValueError(
                     "hidden_states required for audio head training. "
@@ -585,11 +585,21 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 assistant_hidden_list, batch_first=True, padding_value=0.0
             )
 
+            # Build attention mask so audio head ignores padded positions
+            lengths = torch.tensor(
+                [h.shape[0] for h in assistant_hidden_list], device=embeddings.device
+            )
+            encoder_attention_mask = (
+                torch.arange(embeddings.shape[1], device=embeddings.device).unsqueeze(0)
+                < lengths.unsqueeze(1)
+            ).long()
+
             audio_head_loss = self.audio_head(
                 embeddings,
-                dia_labels=dia_labels,
-                dia_decoder_input_ids=dia_decoder_input_ids,
-                dia_decoder_attention_mask=dia_decoder_attention_mask,
+                attention_mask=encoder_attention_mask,
+                codec_labels=codec_labels,
+                codec_input_ids=codec_input_ids,
+                codec_attention_mask=codec_attention_mask,
             )
 
             # Combine with LLM loss if present (e.g., joint ASR+S2S training)
@@ -604,9 +614,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             return CausalLMOutputWithPast(
                 loss=total_loss,
                 logits=outputs.logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                attentions=outputs.attentions,
             )
 
         return outputs

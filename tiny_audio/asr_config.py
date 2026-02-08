@@ -51,11 +51,15 @@ class ASRConfig(transformers.PretrainedConfig):
         freq_mask_length: int = 10,
         freeze_projector: bool = False,
         label_smoothing: float = 0.0,
-        # Audio Head settings (Dia TTS decoder)
+        # Audio Head settings (trainable AR decoder + Mimi codec)
         use_audio_head: bool = False,
         freeze_audio_head: bool = False,
         max_audio_tokens: int = 500,
-        dia_model_id: str = "nari-labs/Dia-1.6B-0626",
+        num_codebooks: int = 8,
+        decoder_dim: int = 512,
+        decoder_layers: int = 6,
+        decoder_heads: int = 8,
+        mimi_model_id: str = "kyutai/mimi",
         **kwargs,
     ):
         # Merge generation defaults with kwargs (kwargs takes precedence)
@@ -91,11 +95,15 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_projector = freeze_projector
         self.label_smoothing = label_smoothing
 
-        # Audio Head settings (Dia TTS decoder)
+        # Audio Head settings (trainable AR decoder + Mimi codec)
         self.use_audio_head = use_audio_head
         self.freeze_audio_head = freeze_audio_head
         self.max_audio_tokens = max_audio_tokens
-        self.dia_model_id = dia_model_id
+        self.num_codebooks = num_codebooks
+        self.decoder_dim = decoder_dim
+        self.decoder_layers = decoder_layers
+        self.decoder_heads = decoder_heads
+        self.mimi_model_id = mimi_model_id
 
         # Generation parameters (from kwargs after merge with defaults)
         self.num_beams = kwargs.pop("num_beams")

@@ -1,14 +1,15 @@
-"""Audio head for speech-to-speech using frozen Dia TTS decoder.
+"""Audio head for speech-to-speech using a trainable AR decoder + Mimi codec.
 
-Generates audio from LLM embeddings via a trainable MLP projector and
-a frozen pretrained Dia decoder:
-  LLM hidden (2048) -> MLP (2048->1024) -> frozen Dia decoder -> DAC codes -> audio (44.1kHz)
+Generates audio from LLM embeddings via a trainable LlamaModel decoder:
+  LLM hidden (2048) -> Linear (2048->512) -> LlamaModel (6 layers) -> 8 codebook heads -> Mimi codes -> audio (24kHz)
 
-Only the MLP projector is trained (~330K params). The frozen Dia decoder
-handles temporal alignment via cross-attention (no interpolation needed).
+All decoder parameters are trained (~30M params). Direct gradient path from loss to all params.
 
-Training: S2SDataCollator prepares Dia-ready labels (delay pattern, teacher forcing).
-AudioHead just projects and delegates to frozen Dia.
+Training: S2SDataCollator prepares codec_input_ids/codec_labels (simple BOS + codes + EOS format).
+AudioHead concatenates projected LLM hidden states with codec token embeddings, runs through
+the decoder, and predicts per-codebook logits.
+
+Inference: Autoregressive generation with KV cache.
 """
 
 import logging
@@ -16,147 +17,299 @@ from typing import Iterator, Optional
 
 import torch
 import torch.nn as nn
-from transformers.modeling_outputs import BaseModelOutput
+from torch.nn import functional as F  # noqa: N812
 
 logger = logging.getLogger(__name__)
 
-# DAC codec constants (used by Dia)
-DAC_VOCAB_SIZE = 1028
-NUM_DAC_CODEBOOKS = 9
-DAC_SAMPLE_RATE = 44100
+# Mimi codec constants
+MIMI_VOCAB_SIZE = 2048
+NUM_MIMI_CODEBOOKS = 8
+MIMI_SAMPLE_RATE = 24000
+
+# Special tokens (above vocab range)
+BOS_TOKEN = 2048
+EOS_TOKEN = 2049
+PAD_TOKEN = 2050
+TOTAL_VOCAB = MIMI_VOCAB_SIZE + 3  # 2051
 
 
 class AudioHead(nn.Module):
-    """MLP projector for audio generation via frozen Dia decoder.
+    """Trainable AR decoder for audio generation via Mimi codec.
 
-    Training: projects LLM hidden states -> Dia encoder space, then Dia computes
-    cross-entropy loss from pre-computed labels (prepared by S2SDataCollator).
+    Training: projects LLM hidden states, concatenates with codec token embeddings,
+    runs through LlamaModel, predicts per-codebook logits with cross-entropy loss.
 
-    Inference: projects -> Dia generate() -> DAC codes -> audio waveform.
+    Inference: autoregressive generation with KV cache, then Mimi decode to audio.
 
     Args:
-        config: ASRConfig with llm_dim, dia_model_id
+        config: ASRConfig with llm_dim, num_codebooks, decoder_dim, etc.
         llm_dim: Override for LLM dimension
     """
-
-    DIA_DIM = 1024
-    DEFAULT_MAX_TOKENS = 500
 
     def __init__(self, config, llm_dim: int = None):
         super().__init__()
         self.llm_dim = llm_dim or getattr(config, "llm_dim", None) or 2048
-        self.dia_model_id = getattr(config, "dia_model_id", "nari-labs/Dia-1.6B-0626")
-        self.vocab_size = DAC_VOCAB_SIZE
-        self.num_codebooks = NUM_DAC_CODEBOOKS
-        self.max_tokens = getattr(config, "max_audio_tokens", self.DEFAULT_MAX_TOKENS)
+        self.num_codebooks = getattr(config, "num_codebooks", NUM_MIMI_CODEBOOKS)
+        self.decoder_dim = getattr(config, "decoder_dim", 512)
+        self.max_tokens = getattr(config, "max_audio_tokens", 500)
+        self.vocab_size = MIMI_VOCAB_SIZE
 
-        # MLP projector: LLM dim -> Dia dim (only trainable component)
-        self.projector = nn.Sequential(
-            nn.Linear(self.llm_dim, self.llm_dim),
-            nn.GELU(),
-            nn.Linear(self.llm_dim, self.DIA_DIM),
+        # Project LLM hidden states to decoder dim
+        self.input_proj = nn.Linear(self.llm_dim, self.decoder_dim)
+
+        # Codec token embedding (shared across codebooks, summed at each timestep)
+        self.token_embedding = nn.Embedding(TOTAL_VOCAB, self.decoder_dim)
+
+        # Small LlamaModel as decoder backbone (from config, NOT pretrained)
+        from transformers import LlamaConfig, LlamaModel
+
+        num_layers = getattr(config, "decoder_layers", 6)
+        num_heads = getattr(config, "decoder_heads", 8)
+        llama_config = LlamaConfig(
+            hidden_size=self.decoder_dim,
+            intermediate_size=self.decoder_dim * 4,
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            vocab_size=TOTAL_VOCAB,
+            max_position_embeddings=4096,
+        )
+        self.decoder = LlamaModel(llama_config)
+        # We handle embeddings ourselves, remove the unused one to save memory
+        self.decoder.embed_tokens = None
+
+        # Per-codebook prediction heads (predict full vocab including special tokens)
+        self.heads = nn.ModuleList(
+            [nn.Linear(self.decoder_dim, TOTAL_VOCAB) for _ in range(self.num_codebooks)]
         )
 
-        # Dia model and processor (loaded lazily)
-        self.dia_model = None
-        self.dia_processor = None
-
-    def train(self, mode=True):
-        super().train(mode)
-        if self.dia_model is not None:
-            self.dia_model.eval()
-        return self
-
-    def state_dict(self, *args, **kwargs):
-        return {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
-
-    def load_state_dict(self, state_dict, strict=True, assign=False):
-        projector_state = {
-            k.removeprefix("projector."): v
-            for k, v in state_dict.items()
-            if k.startswith("projector.")
-        }
-        return self.projector.load_state_dict(projector_state, strict=strict)
-
-    def load_dia_decoder(self, device: torch.device = None, dtype: torch.dtype = None):
-        from transformers import DiaForConditionalGeneration, DiaProcessor
-
-        self.dia_model = DiaForConditionalGeneration.from_pretrained(self.dia_model_id)
-        self.dia_processor = DiaProcessor.from_pretrained(self.dia_model_id)
-        self.dia_model.requires_grad_(False)
-        self.dia_model.eval()
-
-        if device is not None or dtype is not None:
-            self.dia_model = self.dia_model.to(device=device, dtype=dtype)
-
-        logger.info(f"Loaded frozen Dia model from {self.dia_model_id}")
+        # Mimi model (loaded lazily, frozen, inference only)
+        self.mimi_model = None
 
     def forward(
         self,
         embeddings: torch.Tensor,
-        dia_labels: Optional[torch.Tensor] = None,
-        dia_decoder_input_ids: Optional[torch.Tensor] = None,
-        dia_decoder_attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        codec_labels: Optional[torch.Tensor] = None,
+        codec_input_ids: Optional[torch.Tensor] = None,
+        codec_attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for training or inference.
 
         Args:
             embeddings: LLM hidden states [batch, seq_len, hidden_dim]
-            dia_labels: Pre-computed labels [batch*9, seq_len] from S2SDataCollator
-            dia_decoder_input_ids: Teacher-forced decoder inputs [batch, seq_len, 9]
-            dia_decoder_attention_mask: Decoder attention mask [batch, seq_len]
+            attention_mask: Encoder attention mask [batch, seq_len] (1=real, 0=padding)
+            codec_labels: Target codes [batch, audio_len, num_codebooks] (-100 for ignore)
+            codec_input_ids: Teacher-forced input [batch, audio_len, num_codebooks]
+            codec_attention_mask: Codec attention mask [batch, audio_len]
 
         Returns:
-            Training (dia_labels provided): scalar cross-entropy loss
-            Inference (no dia_labels): tuple of (codes [batch, gen_len, 9], empty tensor)
+            Training (codec_labels provided): scalar cross-entropy loss
+            Inference (no codec_labels): tuple of (codes [batch, gen_len, num_codebooks], empty tensor)
         """
-        if self.dia_model is None:
-            self.load_dia_decoder(device=embeddings.device, dtype=embeddings.dtype)
+        # Project LLM hidden states
+        prefix = self.input_proj(embeddings)  # [batch, text_len, decoder_dim]
+        batch_size, text_len, _ = prefix.shape
 
-        projected = self.projector(embeddings)  # [batch, seq_len, DIA_DIM]
-        encoder_outputs = BaseModelOutput(last_hidden_state=projected)
+        if codec_labels is not None:
+            # Teacher forcing: embed codec input tokens, sum across codebooks
+            # codec_input_ids: [batch, audio_len, num_codebooks]
+            token_emb = self.token_embedding(codec_input_ids)  # [batch, audio_len, num_cb, dim]
+            token_emb = token_emb.sum(dim=2)  # [batch, audio_len, dim]
 
-        if dia_labels is not None:
-            output = self.dia_model(
-                encoder_outputs=encoder_outputs,
-                decoder_input_ids=dia_decoder_input_ids,
-                decoder_attention_mask=dia_decoder_attention_mask,
-                labels=dia_labels,
+            audio_len = token_emb.shape[1]
+
+            # Concatenate prefix + codec tokens
+            hidden = torch.cat([prefix, token_emb], dim=1)  # [batch, text+audio, dim]
+
+            # Build combined attention mask
+            # Prefix mask: from encoder attention_mask (or all ones)
+            if attention_mask is not None:
+                prefix_mask = attention_mask  # [batch, text_len]
+            else:
+                prefix_mask = torch.ones(
+                    batch_size, text_len, device=hidden.device, dtype=torch.long
+                )
+
+            # Codec mask
+            if codec_attention_mask is not None:
+                audio_mask = codec_attention_mask  # [batch, audio_len]
+            else:
+                audio_mask = torch.ones(
+                    batch_size, audio_len, device=hidden.device, dtype=torch.long
+                )
+
+            combined_mask = torch.cat([prefix_mask, audio_mask], dim=1)  # [batch, total_len]
+
+            # Build causal mask for codec positions while prefix attends bidirectionally
+            total_len = text_len + audio_len
+            # Start with causal mask (lower triangular)
+            causal_mask = torch.triu(
+                torch.full((total_len, total_len), float("-inf"), device=hidden.device),
+                diagonal=1,
             )
-            return output.loss
+            # Allow prefix positions to attend bidirectionally to each other
+            causal_mask[:text_len, :text_len] = 0.0
+            # Expand for batch: [batch, 1, total_len, total_len]
+            causal_mask = causal_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1)
 
-        # Inference: Dia handles delay pattern, sampling, multi-codebook internally
-        with torch.no_grad():
-            output = self.dia_model.generate(
-                encoder_outputs=encoder_outputs,
-                max_new_tokens=self.max_tokens,
+            # Apply padding mask: positions where combined_mask == 0 should not be attended to
+            padding_mask = (1 - combined_mask).bool()  # True where padded
+            # Expand to [batch, 1, 1, total_len] for broadcasting
+            padding_mask_expanded = padding_mask.unsqueeze(1).unsqueeze(2).expand_as(causal_mask)
+            causal_mask = causal_mask.masked_fill(padding_mask_expanded, float("-inf"))
+
+            # Position IDs
+            position_ids = (
+                torch.arange(total_len, device=hidden.device).unsqueeze(0).expand(batch_size, -1)
             )
-        codes = output if isinstance(output, torch.Tensor) else output.sequences
-        return codes, torch.empty(0, device=projected.device)
+
+            # Run through LlamaModel
+            outputs = self.decoder(
+                inputs_embeds=hidden,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+            )
+
+            # Extract audio positions only
+            audio_hidden = outputs.last_hidden_state[:, text_len:]  # [batch, audio_len, dim]
+
+            # Predict per codebook and compute loss
+            # codec_labels: [batch, audio_len, num_codebooks]
+            # Clamp labels to valid range to prevent CUDA device-side asserts
+            safe_labels = codec_labels.clone()
+            valid_mask = safe_labels != -100
+            safe_labels[valid_mask] = safe_labels[valid_mask].clamp(0, TOTAL_VOCAB - 1)
+
+            loss = torch.tensor(0.0, device=hidden.device, dtype=audio_hidden.dtype)
+            for cb, head in enumerate(self.heads):
+                logits = head(audio_hidden)  # [batch, audio_len, total_vocab]
+                cb_labels = safe_labels[:, :, cb].reshape(-1)  # [batch * audio_len]
+                loss = loss + F.cross_entropy(
+                    logits.reshape(-1, TOTAL_VOCAB),
+                    cb_labels,
+                    ignore_index=-100,
+                )
+            return loss / self.num_codebooks
+
+        # Inference: autoregressive generation
+        return self._generate(prefix, attention_mask)
+
+    def _generate(
+        self, prefix: torch.Tensor, prefix_mask: Optional[torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """AR generation: predict one timestep at a time with KV cache."""
+        batch_size, text_len, _ = prefix.shape
+        device = prefix.device
+
+        # Start with BOS token for all codebooks
+        current_tokens = torch.full(
+            (batch_size, 1, self.num_codebooks), BOS_TOKEN, dtype=torch.long, device=device
+        )
+        all_codes = []
+
+        # Build initial input: prefix + BOS embedding
+        bos_emb = self.token_embedding(current_tokens).sum(dim=2)  # [batch, 1, dim]
+        hidden = torch.cat([prefix, bos_emb], dim=1)  # [batch, text_len+1, dim]
+
+        # Position IDs for initial forward
+        position_ids = torch.arange(text_len + 1, device=device).unsqueeze(0).expand(batch_size, -1)
+
+        # Initial forward pass (no KV cache yet)
+        outputs = self.decoder(
+            inputs_embeds=hidden,
+            position_ids=position_ids,
+            use_cache=True,
+        )
+        past_key_values = outputs.past_key_values
+
+        # Get prediction from last position
+        last_hidden = outputs.last_hidden_state[:, -1:]  # [batch, 1, dim]
+
+        for step in range(self.max_tokens):
+            # Predict codes for current timestep from each head
+            step_codes = []
+            for head in self.heads:
+                logits = head(last_hidden.squeeze(1))  # [batch, vocab]
+                tokens = logits.argmax(dim=-1)  # [batch]
+                step_codes.append(tokens)
+
+            # Stack: [batch, num_codebooks]
+            step_codes = torch.stack(step_codes, dim=1)
+
+            # Check for EOS
+            if (step_codes == EOS_TOKEN).any(dim=1).all():
+                break
+
+            all_codes.append(step_codes)
+
+            # Embed predicted tokens for next step
+            # [batch, 1, num_codebooks]
+            next_input = step_codes.unsqueeze(1)
+            next_emb = self.token_embedding(next_input).sum(dim=2)  # [batch, 1, dim]
+
+            # Next position
+            next_pos = torch.full(
+                (batch_size, 1), text_len + 1 + step + 1, dtype=torch.long, device=device
+            )
+
+            # Forward with KV cache
+            outputs = self.decoder(
+                inputs_embeds=next_emb,
+                position_ids=next_pos,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            past_key_values = outputs.past_key_values
+            last_hidden = outputs.last_hidden_state  # [batch, 1, dim]
+
+        if all_codes:
+            codes = torch.stack(all_codes, dim=1)  # [batch, gen_len, num_codebooks]
+        else:
+            codes = torch.empty(batch_size, 0, self.num_codebooks, dtype=torch.long, device=device)
+
+        return codes, torch.empty(0, device=device)
+
+    def _load_mimi(self):
+        """Load frozen Mimi model for audio decoding."""
+        from transformers import MimiModel
+
+        self.mimi_model = MimiModel.from_pretrained("kyutai/mimi")
+        self.mimi_model.eval()
+        self.mimi_model.requires_grad_(False)
+        logger.info("Loaded frozen Mimi model for audio decoding")
 
     def decode_to_audio(self, codes: torch.Tensor) -> list[torch.Tensor]:
-        """Decode DAC codec tokens to audio waveforms via DiaProcessor.
+        """Decode Mimi codec tokens to audio waveforms.
 
         Args:
-            codes: Codec tokens [batch, seq_len, 9] (Dia's native format)
+            codes: Codec tokens [batch, seq_len, num_codebooks]
 
         Returns:
             List of audio waveform tensors (one per batch item)
         """
-        if self.dia_processor is None:
-            raise RuntimeError("Dia not loaded. Call load_dia_decoder() first.")
-        return self.dia_processor.batch_decode(codes)
+        if self.mimi_model is None:
+            self._load_mimi()
+        assert self.mimi_model is not None
+
+        # codes: [batch, seq_len, num_codebooks] -> [batch, num_codebooks, seq_len]
+        codes_transposed = codes.transpose(1, 2).to(self.mimi_model.device)
+        with torch.no_grad():
+            decoder_output = self.mimi_model.decode(codes_transposed)
+            audio_values = decoder_output.audio_values  # [batch, 1, samples]
+            assert audio_values is not None
+
+        return [audio_values[i, 0] for i in range(audio_values.shape[0])]
 
     def generate_streaming(
         self,
         embeddings: torch.Tensor,
-        chunk_samples: int = 44100,
+        chunk_samples: int = 24000,
     ) -> Iterator[torch.Tensor]:
         """Generate audio and yield waveform chunks for streaming playback.
 
         Args:
             embeddings: LLM hidden states [batch, seq_len, llm_dim]
-            chunk_samples: Audio samples per chunk (default 1s at 44.1kHz)
+            chunk_samples: Audio samples per chunk (default 1s at 24kHz)
 
         Yields:
             Audio waveform chunks [samples]

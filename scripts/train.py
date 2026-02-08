@@ -409,20 +409,19 @@ class SIFTDataCollator(DataCollator):
 
 
 class S2SDataCollator:
-    """Data collator for S2S training: audio -> DAC discrete codes.
+    """Data collator for S2S training: audio -> Mimi discrete codes.
 
     This collator handles speech synthesis training where we predict
-    discrete DAC codec tokens via codebook heads.
-    Uses datasets with pre-computed DAC codes (e.g., from scripts/generate_dac.py).
+    discrete Mimi codec tokens via a trainable AR decoder with per-codebook heads.
+    Uses datasets with pre-computed Mimi codes (e.g., from scripts/generate_mimi.py).
     """
 
-    # Dia constants for delay pattern and special tokens
-    DELAY_PATTERN = [0, 8, 9, 10, 11, 12, 13, 14, 15]
-    PAD_TOKEN = 1025
-    BOS_TOKEN = 1026
-    EOS_TOKEN = 1024
-    NUM_CODEBOOKS = 9
-    MAX_DELAY = max(DELAY_PATTERN)
+    # Mimi constants
+    MIMI_VOCAB = 2048
+    BOS_TOKEN = 2048
+    EOS_TOKEN = 2049
+    PAD_TOKEN = 2050
+    NUM_CODEBOOKS = 8
 
     def __init__(
         self,
@@ -434,7 +433,6 @@ class S2SDataCollator:
         system_prompt: str = None,
         text_column: str = "text",
         codes_column: str = "codes",
-        use_codebook: int = 0,  # Which codebook to use (0 = semantic)
     ):
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
@@ -444,7 +442,6 @@ class S2SDataCollator:
         self.system_prompt = system_prompt
         self.text_column = text_column
         self.codes_column = codes_column
-        self.use_codebook = use_codebook
 
         # Use trl's DataCollatorForChatML for label masking
         self.text_collator = DataCollatorForChatML(
@@ -578,10 +575,7 @@ class S2SDataCollator:
         batch["input_features"] = audio_out.input_features
         batch["audio_attention_mask"] = audio_out.attention_mask
 
-        # Process DAC codec codes into Dia-ready decoder inputs and labels
-        # Uses DiaProcessor's delay pattern logic for correct label preparation
-        from transformers.models.dia.processing_dia import DiaProcessor
-
+        # Process Mimi codec codes into simple teacher-forced inputs and labels
         code_list = []
         code_lengths = []
 
@@ -590,63 +584,45 @@ class S2SDataCollator:
             if codes is None:
                 raise ValueError(
                     f"No codec codes found - S2S requires '{self.codes_column}' column. "
-                    "Use scripts/generate_dac.py to create dataset."
+                    "Use scripts/generate_mimi.py to create dataset."
                 )
 
-            # codes is [9 codebooks][seq_len] → [seq_len, 9]
+            # codes is [num_codebooks][seq_len] -> [seq_len, num_codebooks]
             codes_t = torch.tensor(codes, dtype=torch.long)
             if codes_t.dim() == 1:
                 codes_t = codes_t.unsqueeze(0)
-            code_list.append(codes_t.T)  # [seq_len, 9]
+            code_list.append(codes_t.T)  # [seq_len, num_codebooks]
             code_lengths.append(codes_t.shape[1])
 
         batch_size = len(code_list)
         max_audio_len = max(code_lengths)
+        num_codebooks = self.NUM_CODEBOOKS
 
-        # Build [batch, seq_len, 9] with BOS + codes + EOS + PAD for delay
-        total_len = max_audio_len + 2 + self.MAX_DELAY  # +2 for BOS and EOS
-        prefill = torch.full(
-            (batch_size, total_len, self.NUM_CODEBOOKS), self.PAD_TOKEN, dtype=torch.long
+        # Build teacher-forced inputs and labels
+        # Input: [BOS, c0, c1, ..., cN, PAD...]  (length = max_len + 1)
+        # Labels: [c0, c1, ..., cN, EOS, -100...]  (length = max_len + 1)
+        padded_len = max_audio_len + 1  # +1 for BOS/EOS shift
+
+        codec_input_ids = torch.full(
+            (batch_size, padded_len, num_codebooks), self.PAD_TOKEN, dtype=torch.long
         )
-        for i, codes_t in enumerate(code_list):
-            seq_len = codes_t.shape[0]
-            prefill[i, 0] = self.BOS_TOKEN
-            prefill[i, 1 : 1 + seq_len] = codes_t
-            prefill[i, 1 + seq_len] = self.EOS_TOKEN
+        codec_labels = torch.full((batch_size, padded_len, num_codebooks), -100, dtype=torch.long)
+        codec_attention_mask = torch.zeros(batch_size, padded_len, dtype=torch.long)
 
-        # Apply delay pattern using Dia's static methods
-        precomputed_idx = DiaProcessor.build_indices(
-            bsz=batch_size,
-            seq_len=total_len,
-            num_channels=self.NUM_CODEBOOKS,
-            delay_pattern=self.DELAY_PATTERN,
-            revert=False,
-        )
-        delayed = DiaProcessor.apply_audio_delay(
-            audio=prefill,
-            pad_token_id=self.PAD_TOKEN,
-            bos_token_id=self.BOS_TOKEN,
-            precomputed_idx=precomputed_idx,
-        )
+        for i, codes in enumerate(code_list):
+            seq_len = codes.shape[0]
+            # Input: BOS at position 0, then codes
+            codec_input_ids[i, 0] = self.BOS_TOKEN
+            codec_input_ids[i, 1 : seq_len + 1] = codes
+            # Labels: codes starting at position 0, then EOS
+            codec_labels[i, :seq_len] = codes
+            codec_labels[i, seq_len] = self.EOS_TOKEN
+            # Attention mask: 1 for BOS + codes positions
+            codec_attention_mask[i, : seq_len + 1] = 1
 
-        # Labels: shift left, mask special tokens, flatten channels into batch dim
-        labels = delayed[:, 1:].clone()
-        labels[labels == self.PAD_TOKEN] = -100
-        labels[labels == self.BOS_TOKEN] = -100
-        batch["dia_labels"] = (
-            labels.transpose(1, 2).reshape(batch_size * self.NUM_CODEBOOKS, -1).contiguous().long()
-        )
-
-        # Decoder input (teacher-forced)
-        batch["dia_decoder_input_ids"] = delayed[:, :-1]
-
-        # Decoder attention mask
-        mask_len = total_len - 1
-        decoder_attention_mask = torch.zeros(batch_size, mask_len, dtype=torch.long)
-        for i in range(batch_size):
-            valid = code_lengths[i] + 2 + self.MAX_DELAY
-            decoder_attention_mask[i, : min(valid, mask_len)] = 1
-        batch["dia_decoder_attention_mask"] = decoder_attention_mask
+        batch["codec_input_ids"] = codec_input_ids
+        batch["codec_labels"] = codec_labels
+        batch["codec_attention_mask"] = codec_attention_mask
 
         return batch
 
@@ -686,12 +662,12 @@ class ASRTrainer(Trainer):
             # Get debug info - handle wrapped model (DDP/Accelerator)
             underlying_model = getattr(model, "module", model)
             has_audio_head = getattr(underlying_model, "audio_head", None) is not None
-            has_dia_labels = "dia_labels" in inputs
+            has_codec_labels = "codec_labels" in inputs
             has_labels = "labels" in inputs
             raise ValueError(
                 f"Model returned None loss. This usually means the forward pass didn't compute a loss. "
                 f"Debug info: has_labels={has_labels}, has_audio_head={has_audio_head}, "
-                f"has_dia_labels={has_dia_labels}. "
+                f"has_codec_labels={has_codec_labels}. "
                 f"Input keys: {list(inputs.keys())}"
             )
 
@@ -820,7 +796,7 @@ def main(cfg: DictConfig) -> None:
             "Check that the config is being passed correctly to the model."
         )
 
-    # Check if S2S training mode (audio head with DAC codes via Dia decoder)
+    # Check if S2S training mode (audio head with Mimi codes via trainable AR decoder)
     s2s_mode = use_audio_head and cfg.get("s2s", {}).get("enabled", False)
 
     # Load datasets
@@ -830,7 +806,7 @@ def main(cfg: DictConfig) -> None:
 
     # Create data collator (S2S, SIFT, or standard ASR)
     if s2s_mode:
-        # S2S training with DAC discrete codes (Dia decoder)
+        # S2S training with Mimi discrete codes (trainable AR decoder)
         # DatasetLoader renames text_column to "text", so always use "text"
         text_column = "text"
         data_collator = S2SDataCollator(
