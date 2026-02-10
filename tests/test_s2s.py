@@ -1,7 +1,7 @@
 """Tests for standalone AudioHead S2S training path.
 
-Tests the standalone pipeline: AudioHead with text tokens + NeuCodec codes,
-and S2SDataCollator.
+Tests the standalone pipeline: frozen neutts-nano backbone + trainable projector
+with text tokens + NeuCodec codes, and S2SDataCollator.
 """
 
 import numpy as np
@@ -17,18 +17,13 @@ from tiny_audio.audio_head import (
     AudioHeadOutput,
 )
 
-TEXT_VOCAB_SIZE = 1000
-DECODER_DIM = 64
-
 
 @pytest.fixture(scope="session")
 def audio_head():
     config = AudioHeadConfig(
-        decoder_dim=DECODER_DIM,
-        decoder_layers=2,
-        decoder_heads=2,
-        text_vocab_size=TEXT_VOCAB_SIZE,
-        max_audio_tokens=50,
+        tts_model_id="neuphonic/neutts-nano",
+        projector_hidden=128,  # Small for fast tests
+        max_audio_tokens=20,
     )
     return AudioHead(config)
 
@@ -38,6 +33,7 @@ def _make_codec_inputs(batch_size, audio_len):
     codec_input_ids = torch.randint(0, NEUCODEC_VOCAB_SIZE, (batch_size, audio_len))
     codec_input_ids[:, 0] = BOS_TOKEN
     codec_labels = torch.randint(0, NEUCODEC_VOCAB_SIZE, (batch_size, audio_len))
+    codec_labels[:, -1] = EOS_TOKEN
     codec_attention_mask = torch.ones(batch_size, audio_len, dtype=torch.long)
     return codec_labels, codec_input_ids, codec_attention_mask
 
@@ -46,7 +42,7 @@ class TestStandaloneForward:
     """Test AudioHead forward pass with text tokens directly."""
 
     def test_returns_loss(self, audio_head):
-        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (2, 10))
+        tokens = torch.randint(0, 1000, (2, 10))
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
         output = audio_head(
             tokens,
@@ -60,7 +56,7 @@ class TestStandaloneForward:
         assert not torch.isnan(output.loss)
 
     def test_loss_is_differentiable(self, audio_head):
-        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (2, 10))
+        tokens = torch.randint(0, 1000, (2, 10))
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
         output = audio_head(
             tokens,
@@ -69,11 +65,13 @@ class TestStandaloneForward:
             codec_attention_mask=attn_mask,
         )
         output.loss.backward()
-        assert audio_head.text_embedding.weight.grad is not None
+        # Gradients should flow to projector
+        has_grad = any(p.grad is not None for p in audio_head.projector.parameters())
+        assert has_grad, "Projector should have gradients"
         audio_head.zero_grad()
 
     def test_inference_returns_codes(self, audio_head):
-        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (1, 10))
+        tokens = torch.randint(0, 1000, (1, 10))
         audio_head.eval()
         with torch.no_grad():
             output = audio_head(tokens)
@@ -93,8 +91,9 @@ class TestS2SDataCollator:
 
         from scripts.train import S2SDataCollator
 
+        # Use neutts-nano tokenizer (matches new architecture)
         tokenizer = AutoTokenizer.from_pretrained(
-            "HuggingFaceTB/SmolLM2-135M-Instruct", trust_remote_code=True
+            "neuphonic/neutts-nano", trust_remote_code=True
         )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -148,7 +147,7 @@ class TestTrainerCompatibility:
     """Test that AudioHead works directly with HF Trainer (no wrapper needed)."""
 
     def test_forward_with_collator_keys(self, audio_head):
-        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (2, 10))
+        tokens = torch.randint(0, 1000, (2, 10))
         text_mask = torch.ones(2, 10, dtype=torch.long)
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
 
@@ -165,11 +164,14 @@ class TestTrainerCompatibility:
         assert not torch.isnan(output.loss)
 
     def test_training_step(self, audio_head):
-        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (2, 10))
+        tokens = torch.randint(0, 1000, (2, 10))
         text_mask = torch.ones(2, 10, dtype=torch.long)
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
 
-        weights_before = audio_head.text_embedding.weight.data.clone()
+        # Only projector weights should change
+        projector_before = {
+            k: v.clone() for k, v in audio_head.projector.named_parameters()
+        }
 
         optimizer = torch.optim.Adam(audio_head.parameters(), lr=1e-3)
         optimizer.zero_grad()
@@ -184,5 +186,10 @@ class TestTrainerCompatibility:
         output.loss.backward()
         optimizer.step()
 
-        weights_after = audio_head.text_embedding.weight.data
-        assert not torch.equal(weights_before, weights_after)
+        # Projector weights should have changed
+        for name, param in audio_head.projector.named_parameters():
+            assert not torch.equal(projector_before[name], param.data), (
+                f"Projector param {name} should have changed after training step"
+            )
+
+        audio_head.zero_grad()

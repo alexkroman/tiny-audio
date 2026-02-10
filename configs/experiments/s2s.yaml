@@ -1,11 +1,12 @@
 # @package _global_
 # Standalone AudioHead training: text tokens -> NeuCodec FSQ codes
 #
-# Architecture:
-#   Text tokens -> Embedding -> LlamaModel (4 layers, 256 dim, 4 heads)
-#   -> head -> NeuCodec FSQ codes -> audio (24kHz)
+# Architecture (Freeze-Omni style):
+#   Text tokens -> neutts-nano embed_tokens (frozen) -> Projector MLP (trainable)
+#   -> Concat with codec embeddings -> neutts-nano backbone (frozen)
+#   -> lm_head -> speech token logits -> NeuCodec codes -> audio (24kHz)
 #
-# ~30M trainable params. No encoder, no LLM.
+# ~1.2M trainable params (projector only). Backbone is frozen neutts-nano (~117M).
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=s2s
@@ -17,14 +18,17 @@ defaults:
   - override /data: s2s_neucodec
 
 model:
-  # Tokenizer must match the base ASR model's LLM (SmolLM3-3B)
-  text_model_id: HuggingFaceTB/SmolLM3-3B
+  # Frozen TTS backbone (pretrained LlamaForCausalLM for NeuCodec generation)
+  tts_model_id: neuphonic/neutts-nano
+
+  # Projector MLP: backbone_dim -> projector_hidden -> backbone_dim
+  # backbone_dim (576) is auto-detected from neutts-nano config
+  projector_hidden: 1024
+
+  # Text tokenization (uses neutts-nano's tokenizer)
   max_text_length: 256
 
-  # AudioHead architecture
-  decoder_dim: 256
-  decoder_layers: 4
-  decoder_heads: 4
+  # Audio generation limits
   max_audio_tokens: 500
 
 # S2S mode flag (triggers standalone AudioHead training)
@@ -45,10 +49,11 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
 
-  # Batch size (can be large since no encoder/LLM in memory)
-  per_device_train_batch_size: 32
-  per_device_eval_batch_size: 32
-  gradient_accumulation_steps: 2
+  # Batch size (backbone is frozen so less VRAM for gradients,
+  # but neutts-nano is ~117M params in memory)
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 4
 
   # Training duration
   num_train_epochs: 1
@@ -68,6 +73,7 @@ training:
   group_by_length: false
   bf16: true
   tf32: true
+  gradient_checkpointing: true
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_drop_last: true

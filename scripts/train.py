@@ -634,9 +634,12 @@ class PushAudioHeadCallback(TrainerCallback):
 def train_s2s(cfg: DictConfig) -> None:
     """Standalone AudioHead training: text tokens -> NeuCodec codes.
 
-    No encoder, no LLM. Just the AudioHead transformer.
-    On each checkpoint save, pushes AudioHead weights to Hub (if hub_model_id is set).
-    Use `ta assemble-s2s` to combine with a base ASRModel after training.
+    Architecture: frozen neutts-nano backbone + trainable projector MLP (~1.2M params).
+    Text is tokenized using neutts-nano's own tokenizer, embedded through its frozen
+    embedding table, then adapted through the trainable projector before being fed to
+    the frozen backbone.
+
+    On each checkpoint save, pushes AudioHead projector weights to Hub (if hub_model_id is set).
     """
     from transformers import AutoTokenizer
 
@@ -649,26 +652,21 @@ def train_s2s(cfg: DictConfig) -> None:
             config=OmegaConf.to_container(cfg, resolve=True),
         )
 
-    # Load tokenizer (just for text tokenization, no LLM needed)
-    text_model_id = cfg.model.get("text_model_id", "Qwen/Qwen3-0.6B")
-    tokenizer = AutoTokenizer.from_pretrained(text_model_id, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # Add <audio> token to match ASRModel's tokenizer (ensures text_vocab_size consistency)
-    existing_special = getattr(tokenizer, "additional_special_tokens", None) or []
-    if "<audio>" not in existing_special:
-        tokenizer.add_special_tokens({"additional_special_tokens": existing_special + ["<audio>"]})
-
-    # Create AudioHead directly (no ASRModel needed)
+    # Load neutts-nano's tokenizer for text tokenization.
+    # In Stage 1, text is embedded through neutts-nano's own embedding table,
+    # so we must use its tokenizer to get correct token IDs.
     model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_cfg, dict)
 
+    tts_model_id = model_cfg.get("tts_model_id", "neuphonic/neutts-nano")
+    tokenizer = AutoTokenizer.from_pretrained(tts_model_id, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Create AudioHead: frozen neutts-nano + trainable projector
     audio_head_config = AudioHeadConfig(
-        decoder_dim=model_cfg.get("decoder_dim", 512),
-        decoder_layers=model_cfg.get("decoder_layers", 6),
-        decoder_heads=model_cfg.get("decoder_heads", 8),
-        text_vocab_size=len(tokenizer),
+        tts_model_id=tts_model_id,
+        projector_hidden=model_cfg.get("projector_hidden", 1024),
         max_audio_tokens=model_cfg.get("max_audio_tokens", 500),
         temperature=model_cfg.get("temperature", 1.0),
         top_k=model_cfg.get("top_k", 50),
@@ -677,12 +675,16 @@ def train_s2s(cfg: DictConfig) -> None:
     model = AudioHead(audio_head_config)
 
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"AudioHead parameters: {total_params:,} (all trainable)")
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    frozen_params = total_params - trainable_params
+    print(f"AudioHead parameters: {total_params:,} total")
+    print(f"  Trainable (projector): {trainable_params:,}")
+    print(f"  Frozen (backbone):     {frozen_params:,}")
 
     # Load datasets
     train_dataset, val_dataset = DatasetLoader(cfg, s2s_enabled=True).load()
 
-    # Data collator: just text tokenization + NeuCodec codes
+    # Data collator: text tokenization (via neutts-nano tokenizer) + NeuCodec codes
     data_collator = S2SDataCollator(
         tokenizer=tokenizer,
         max_text_length=cfg.model.get("max_text_length", 256),
@@ -704,18 +706,16 @@ def train_s2s(cfg: DictConfig) -> None:
             )
         )
 
-    # Push AudioHead weights to Hub on every checkpoint save
+    # Push AudioHead projector weights to Hub on every checkpoint save
     hub_model_id = cfg.training.get("hub_model_id")
     if hub_model_id:
         callbacks.append(
             PushAudioHeadCallback(
                 hub_model_id=hub_model_id,
                 audio_head_config_dict={
-                    "decoder_dim": model_cfg.get("decoder_dim", 512),
-                    "decoder_layers": model_cfg.get("decoder_layers", 6),
-                    "decoder_heads": model_cfg.get("decoder_heads", 8),
+                    "tts_model_id": tts_model_id,
+                    "projector_hidden": model_cfg.get("projector_hidden", 1024),
                     "max_audio_tokens": model_cfg.get("max_audio_tokens", 500),
-                    "text_vocab_size": len(tokenizer),
                     "temperature": model_cfg.get("temperature", 1.0),
                     "top_k": model_cfg.get("top_k", 50),
                 },
