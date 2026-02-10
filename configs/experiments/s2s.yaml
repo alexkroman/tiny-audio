@@ -1,80 +1,83 @@
 # @package _global_
-# Speech-to-Speech (S2S) training: trainable AR decoder + Mimi codec
+# Standalone AudioHead training: text tokens -> NeuCodec FSQ codes
 #
 # Architecture:
-#   LLM hidden states -> Linear (2048->1024) -> LlamaModel (4 layers, 1024 dim, 8 heads)
-#   -> 8 codebook heads -> Mimi codes -> audio (24kHz)
+#   Text tokens -> Embedding -> LlamaModel (4 layers, 256 dim, 4 heads)
+#   -> head -> NeuCodec FSQ codes -> audio (24kHz)
 #
-# All decoder parameters are trained (~50M params). Direct gradient path.
+# ~30M trainable params. No encoder, no LLM.
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=s2s
 #
-# Prerequisites:
-#   - Pretrained ASR model at mazesmazes/tiny-audio-omni (or specify model.pretrained_model_path)
-#   - Dataset with pre-computed Mimi codes (use scripts/generate_mimi.py)
+# To assemble the full S2S model after training:
+#   ta assemble-s2s --audio-head mazesmazes/tiny-audio-head --output mazesmazes/tiny-audio-s2s
 
 defaults:
-  - override /data: s2s_mimi
+  - override /data: s2s_neucodec
 
 model:
-  # Start from pretrained ASR model
-  pretrained_model_path: mazesmazes/tiny-audio-omni
-  model_dtype: bfloat16
-
-  projector_type: mlp
-  projector_pool_stride: 4
-  projector_hidden_dim: 1024
-  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  # Tokenizer must match the base ASR model's LLM (SmolLM3-3B)
   text_model_id: HuggingFaceTB/SmolLM3-3B
+  max_text_length: 256
 
-  # Generation defaults
-  do_sample: false
-  max_new_tokens: 512
-  enable_thinking: false
-  repetition_penalty: 1.1
-
-  # Freeze projector (ASR already trained), train audio head
-  freeze_projector: true
-
-  # Audio head settings (trainable AR decoder + Mimi)
-  use_audio_head: true
-  freeze_audio_head: false
+  # AudioHead architecture
+  decoder_dim: 256
+  decoder_layers: 4
+  decoder_heads: 4
   max_audio_tokens: 500
-  num_codebooks: 8
-  decoder_dim: 512
-  decoder_layers: 6
-  decoder_heads: 8
-  mimi_model_id: "kyutai/mimi"
 
-# S2S configuration flag
+# S2S mode flag (triggers standalone AudioHead training)
 s2s:
   enabled: true
 
 training:
-  hub_model_id: "mazesmazes/tiny-audio-s2s"
-  group_by_length: false
-  # Track best model by eval loss
-  load_best_model_at_end: true
-  metric_for_best_model: eval_loss
-  greater_is_better: false
+  output_dir: ./outputs/audio_head
+  hub_model_id: "mazesmazes/tiny-audio-head"
+  report_to: wandb
+  wandb_project: tiny-audio-s2s
+
+  # Optimizer
+  optim: adamw_torch_fused
   learning_rate: 1e-3
   warmup_steps: 100
   lr_scheduler_type: cosine
-  seed: 42
-  per_device_train_batch_size: 24
-  per_device_eval_batch_size: 24
-  gradient_accumulation_steps: 4
-  num_train_epochs: 30
-  save_steps: 500
-  eval_steps: 500
-
   weight_decay: 0.01
   max_grad_norm: 1.0
 
-  use_specaugment: false
+  # Batch size (can be large since no encoder/LLM in memory)
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 2
 
-  # Tell Trainer that codec_labels is the label key so eval_loss is computed
+  # Training duration
+  num_train_epochs: 1
+  seed: 42
+
+  # Eval & save
+  eval_strategy: steps
+  eval_steps: 10000
+  save_strategy: steps
+  save_steps: 10000
+  save_total_limit: 5
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+
+  # Performance
+  group_by_length: false
+  bf16: true
+  tf32: true
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_drop_last: true
+
+  # Tell Trainer that codec_labels is the label key
   label_names:
     - codec_labels
-  label_smoothing: 0.0
+
+  remove_unused_columns: false
+  logging_steps: 50
+  logging_first_step: true
+  disable_tqdm: false
+  push_to_hub: false

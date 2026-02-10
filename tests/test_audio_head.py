@@ -5,33 +5,24 @@ import torch
 
 from tiny_audio.audio_head import (
     BOS_TOKEN,
-    MIMI_VOCAB_SIZE,
-    NUM_MIMI_CODEBOOKS,
+    NEUCODEC_VOCAB_SIZE,
     AudioHead,
+    AudioHeadConfig,
+    AudioHeadOutput,
 )
 
-TEST_DIM = 256
+TEXT_VOCAB_SIZE = 1000
 DECODER_DIM = 64  # Small for fast tests
 
 
-class MockConfig:
-    def __init__(self, **kwargs):
-        self.llm_dim = kwargs.get("llm_dim", 2048)
-        self.num_codebooks = kwargs.get("num_codebooks", NUM_MIMI_CODEBOOKS)
-        self.decoder_dim = kwargs.get("decoder_dim", DECODER_DIM)
-        self.decoder_layers = kwargs.get("decoder_layers", 2)
-        self.decoder_heads = kwargs.get("decoder_heads", 2)
-        self.max_audio_tokens = kwargs.get("max_audio_tokens", 50)
-
-
-def _make_codec_inputs(batch_size=2, audio_len=20, num_codebooks=NUM_MIMI_CODEBOOKS):
+def _make_codec_inputs(batch_size=2, audio_len=20):
     """Build synthetic codec inputs (mimicking S2SDataCollator output)."""
-    codec_input_ids = torch.randint(0, MIMI_VOCAB_SIZE, (batch_size, audio_len, num_codebooks))
-    codec_input_ids[:, 0, :] = BOS_TOKEN  # BOS at start
+    codec_input_ids = torch.randint(0, NEUCODEC_VOCAB_SIZE, (batch_size, audio_len))
+    codec_input_ids[:, 0] = BOS_TOKEN  # BOS at start
 
-    codec_labels = torch.randint(0, MIMI_VOCAB_SIZE, (batch_size, audio_len, num_codebooks))
+    codec_labels = torch.randint(0, NEUCODEC_VOCAB_SIZE, (batch_size, audio_len))
     # Mask ~20% as padding
-    mask = torch.rand(batch_size, audio_len, num_codebooks) > 0.8
+    mask = torch.rand(batch_size, audio_len) > 0.8
     codec_labels[mask] = -100
 
     codec_attention_mask = torch.ones(batch_size, audio_len, dtype=torch.long)
@@ -39,37 +30,46 @@ def _make_codec_inputs(batch_size=2, audio_len=20, num_codebooks=NUM_MIMI_CODEBO
     return codec_labels, codec_input_ids, codec_attention_mask
 
 
+def _make_config(**kwargs):
+    """Create an AudioHeadConfig with test defaults."""
+    defaults = {
+        "decoder_dim": DECODER_DIM,
+        "decoder_layers": 2,
+        "decoder_heads": 2,
+        "text_vocab_size": TEXT_VOCAB_SIZE,
+        "max_audio_tokens": 50,
+    }
+    defaults.update(kwargs)
+    return AudioHeadConfig(**defaults)
+
+
 @pytest.fixture
 def config():
-    return MockConfig
+    return _make_config
 
 
 @pytest.fixture
 def head(config):
     """Create a small AudioHead for testing."""
-    return AudioHead(
-        config(llm_dim=TEST_DIM, decoder_dim=DECODER_DIM, decoder_layers=2, decoder_heads=2),
-        llm_dim=TEST_DIM,
-    )
+    return AudioHead(config())
 
 
 class TestInit:
-    def test_default_dim(self, config):
-        head = AudioHead(config())
-        assert head.llm_dim == 2048
+    def test_default_vocab(self):
+        cfg = AudioHeadConfig()
+        head = AudioHead(cfg)
+        assert head.text_vocab_size == 32000
 
-    def test_custom_dim(self, config):
-        head = AudioHead(config(llm_dim=512), llm_dim=512)
-        assert head.llm_dim == 512
+    def test_custom_vocab(self):
+        cfg = _make_config(text_vocab_size=1000)
+        head = AudioHead(cfg)
+        assert head.text_vocab_size == 1000
 
     def test_vocab_size(self, head):
-        assert head.vocab_size == MIMI_VOCAB_SIZE
+        assert head.vocab_size == NEUCODEC_VOCAB_SIZE
 
-    def test_num_codebooks(self, head):
-        assert head.num_codebooks == NUM_MIMI_CODEBOOKS
-
-    def test_input_proj_exists(self, head):
-        assert hasattr(head, "input_proj")
+    def test_text_embedding_exists(self, head):
+        assert hasattr(head, "text_embedding")
 
     def test_token_embedding_exists(self, head):
         assert hasattr(head, "token_embedding")
@@ -77,87 +77,94 @@ class TestInit:
     def test_decoder_exists(self, head):
         assert hasattr(head, "decoder")
 
-    def test_heads_exist(self, head):
-        assert hasattr(head, "heads")
-        assert len(head.heads) == NUM_MIMI_CODEBOOKS
+    def test_uses_token_embedding_as_head(self, head):
+        assert hasattr(head, "token_embedding")
+        assert not hasattr(head, "head")
 
-    def test_no_mimi_model_by_default(self, head):
-        assert head.mimi_model is None
+    def test_no_neucodec_model_by_default(self, head):
+        assert head.neucodec_model is None
+
+    def test_is_pretrained_model(self, head):
+        from transformers import PreTrainedModel
+
+        assert isinstance(head, PreTrainedModel)
+
+    def test_config_class(self):
+        assert AudioHead.config_class is AudioHeadConfig
 
 
-class TestInputProjShape:
-    def test_proj_output_dim(self, head):
-        x = torch.randn(1, 10, TEST_DIM)
-        out = head.input_proj(x)
+class TestTextEmbeddingShape:
+    def test_embed_output_dim(self, head):
+        x = torch.randint(0, TEXT_VOCAB_SIZE, (1, 10))
+        out = head.text_embedding(x)
         assert out.shape == (1, 10, DECODER_DIM)
 
-    def test_proj_batch(self, head):
-        x = torch.randn(4, 5, TEST_DIM)
-        out = head.input_proj(x)
+    def test_embed_batch(self, head):
+        x = torch.randint(0, TEXT_VOCAB_SIZE, (4, 5))
+        out = head.text_embedding(x)
         assert out.shape == (4, 5, DECODER_DIM)
 
 
 class TestForwardTraining:
-    def test_returns_scalar_loss(self, head):
-        hidden = torch.randn(2, 10, TEST_DIM)
+    def test_returns_audio_head_output(self, head):
+        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (2, 10))
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
-        loss = head(
-            hidden,
+        output = head(
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
         )
-        assert loss.dim() == 0
-        assert not torch.isnan(loss)
-        assert not torch.isinf(loss)
+        assert isinstance(output, AudioHeadOutput)
+        assert output.loss is not None
+        assert output.loss.dim() == 0
+        assert not torch.isnan(output.loss)
+        assert not torch.isinf(output.loss)
 
     def test_loss_differentiable(self, head):
-        hidden = torch.randn(2, 10, TEST_DIM, requires_grad=True)
+        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (2, 10))
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
-        loss = head(
-            hidden,
+        output = head(
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
         )
-        loss.backward()
-        assert hidden.grad is not None
-        assert hidden.grad.shape == hidden.shape
+        output.loss.backward()
+        assert head.text_embedding.weight.grad is not None
 
     def test_batch_size_one(self, head):
-        hidden = torch.randn(1, 10, TEST_DIM)
+        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (1, 10))
         labels, inp_ids, attn_mask = _make_codec_inputs(1, 20)
-        loss = head(
-            hidden,
+        output = head(
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
         )
-        assert loss.dim() == 0
-        assert not torch.isnan(loss)
+        assert output.loss.dim() == 0
+        assert not torch.isnan(output.loss)
 
 
 class TestForwardInference:
     def test_no_targets_returns_codes(self, head):
-        hidden = torch.randn(1, 10, TEST_DIM)
-        codes, _ = head(hidden)
-        assert codes.dim() == 3
-        assert codes.shape[0] == 1
-        assert codes.shape[2] == NUM_MIMI_CODEBOOKS
+        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (1, 10))
+        output = head(tokens)
+        assert isinstance(output, AudioHeadOutput)
+        assert output.codes is not None
+        assert output.codes.dim() == 2
+        assert output.codes.shape[0] == 1
 
 
 class TestStateDict:
     def test_contains_all_trainable_params(self, head):
         state = head.state_dict()
-        # Should contain input_proj, token_embedding, decoder, and heads
-        has_input_proj = any(k.startswith("input_proj.") for k in state)
-        has_embedding = any(k.startswith("token_embedding.") for k in state)
+        has_text_emb = any(k.startswith("text_embedding.") for k in state)
+        has_codec_emb = any(k.startswith("token_embedding.") for k in state)
         has_decoder = any(k.startswith("decoder.") for k in state)
-        has_heads = any(k.startswith("heads.") for k in state)
-        assert has_input_proj
-        assert has_embedding
+        assert has_text_emb
+        assert has_codec_emb
         assert has_decoder
-        assert has_heads
 
     def test_not_empty(self, head):
         state = head.state_dict()
@@ -165,11 +172,8 @@ class TestStateDict:
 
     def test_load_state_dict(self, head):
         original = head.state_dict()
-        # Zero out a param
         with torch.no_grad():
-            for p in head.input_proj.parameters():
-                p.fill_(0.0)
-                break
+            head.text_embedding.weight.fill_(0.0)
         head.load_state_dict(original)
         restored = head.state_dict()
         for key in original:
@@ -178,23 +182,19 @@ class TestStateDict:
 
 class TestGradientFlow:
     def test_gradients_flow_to_all_components(self, head):
-        hidden = torch.randn(2, 10, TEST_DIM, requires_grad=True)
+        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (2, 10))
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
-        loss = head(
-            hidden,
+        output = head(
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
         )
-        loss.backward()
+        output.loss.backward()
 
-        # Check input_proj
-        for name, param in head.input_proj.named_parameters():
-            if param.requires_grad:
-                assert param.grad is not None, f"No gradient for input_proj.{name}"
-                assert not torch.isnan(param.grad).any(), f"NaN gradient for input_proj.{name}"
+        assert head.text_embedding.weight.grad is not None, "No gradient for text_embedding"
+        assert not torch.isnan(head.text_embedding.weight.grad).any()
 
-        # Check decoder
         has_decoder_grad = False
         for name, param in head.decoder.named_parameters():
             if param.requires_grad and param.grad is not None:
@@ -202,22 +202,21 @@ class TestGradientFlow:
                 assert not torch.isnan(param.grad).any(), f"NaN gradient for decoder.{name}"
         assert has_decoder_grad, "Decoder should have gradients"
 
-        # Check heads
-        for i, h in enumerate(head.heads):
-            for name, param in h.named_parameters():
-                if param.requires_grad:
-                    assert param.grad is not None, f"No gradient for heads[{i}].{name}"
+        # token_embedding is used as both embedding and output head (weight tying)
+        assert head.token_embedding.weight.grad is not None, (
+            "token_embedding should have gradients (used as output head)"
+        )
 
     def test_gradient_magnitude_reasonable(self, head):
-        hidden = torch.randn(2, 10, TEST_DIM, requires_grad=True)
+        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (2, 10))
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
-        loss = head(
-            hidden,
+        output = head(
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
         )
-        loss.backward()
+        output.loss.backward()
         for name, param in head.named_parameters():
             if param.grad is not None:
                 grad_norm = param.grad.norm()
@@ -234,121 +233,112 @@ class TestParameterCount:
         trainable = sum(p.numel() for p in head.parameters() if p.requires_grad)
         assert trainable == total
 
-    def test_param_count_report(self, head):
-        total = sum(p.numel() for p in head.parameters())
-        input_proj_params = sum(p.numel() for p in head.input_proj.parameters())
-        embedding_params = sum(p.numel() for p in head.token_embedding.parameters())
-        decoder_params = sum(p.numel() for p in head.decoder.parameters())
-        heads_params = sum(p.numel() for p in head.heads.parameters())
-        print(f"\n{'Component':<20} {'Params':>12}")
-        print("-" * 35)
-        print(f"{'input_proj':<20} {input_proj_params:>12,}")
-        print(f"{'token_embedding':<20} {embedding_params:>12,}")
-        print(f"{'decoder':<20} {decoder_params:>12,}")
-        print(f"{'heads':<20} {heads_params:>12,}")
-        print(f"{'TOTAL (trainable)':<20} {total:>12,}")
-        assert total > 0
+    def test_no_separate_head_layer(self):
+        """Prediction uses token_embedding weight directly (no separate head)."""
+        cfg = _make_config()
+        head = AudioHead(cfg)
+        assert not hasattr(head, "head"), (
+            "head layer should not exist; uses token_embedding.weight via F.linear"
+        )
 
 
 class TestTrainMode:
     def test_train_mode(self, head):
         head.train()
         assert head.training is True
-        assert head.input_proj.training is True
+        assert head.text_embedding.training is True
         assert head.decoder.training is True
 
     def test_eval_mode(self, head):
         head.eval()
         assert head.training is False
-        assert head.input_proj.training is False
+        assert head.text_embedding.training is False
         assert head.decoder.training is False
 
 
 class TestLossDecreases:
     def test_loss_decreases(self, head):
-        hidden = torch.randn(2, 10, TEST_DIM)
+        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (2, 10))
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
 
         head.train()
         optimizer = torch.optim.Adam(head.parameters(), lr=1e-3)
 
         loss_initial = head(
-            hidden,
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
-        ).item()
+        ).loss.item()
 
         for _ in range(10):
             optimizer.zero_grad()
-            loss = head(
-                hidden,
+            output = head(
+                tokens,
                 codec_labels=labels,
                 codec_input_ids=inp_ids,
                 codec_attention_mask=attn_mask,
             )
-            loss.backward()
+            output.loss.backward()
             optimizer.step()
 
         loss_final = head(
-            hidden,
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
-        ).item()
+        ).loss.item()
         assert loss_final < loss_initial
 
 
 class TestEdgeCases:
     def test_short_sequence(self, head):
-        hidden = torch.randn(1, 1, TEST_DIM)
-        labels, inp_ids, attn_mask = _make_codec_inputs(1, 3)
-        loss = head(
-            hidden,
+        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (1, 3))
+        labels, inp_ids, attn_mask = _make_codec_inputs(1, 5)
+        output = head(
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
         )
-        assert not torch.isnan(loss)
+        assert not torch.isnan(output.loss)
 
     def test_long_sequence(self, head):
-        hidden = torch.randn(1, 50, TEST_DIM)
+        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (1, 50))
         labels, inp_ids, attn_mask = _make_codec_inputs(1, 100)
-        loss = head(
-            hidden,
+        output = head(
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
         )
-        assert not torch.isnan(loss)
+        assert not torch.isnan(output.loss)
 
-    def test_large_input_values(self, head):
-        hidden = torch.randn(2, 10, TEST_DIM) * 100
+    def test_high_token_ids(self, head):
+        tokens = torch.randint(TEXT_VOCAB_SIZE - 10, TEXT_VOCAB_SIZE, (2, 10))
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
-        loss = head(
-            hidden,
+        output = head(
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
         )
-        assert not torch.isnan(loss)
-        assert not torch.isinf(loss)
+        assert not torch.isnan(output.loss)
+        assert not torch.isinf(output.loss)
 
-    def test_small_input_values(self, head):
-        hidden = torch.randn(2, 10, TEST_DIM) * 1e-6
+    def test_zero_token_ids(self, head):
+        tokens = torch.zeros(2, 10, dtype=torch.long)
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
-        loss = head(
-            hidden,
+        output = head(
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
         )
-        assert not torch.isnan(loss)
+        assert not torch.isnan(output.loss)
 
-    def test_decode_without_mimi_raises(self, head):
-        # mimi_model is None by default, so decode should fail gracefully
-        # (it will try to load the model which may fail in test env)
-        assert head.mimi_model is None
+    def test_decode_without_neucodec_raises(self, head):
+        assert head.neucodec_model is None
 
 
 class TestDevicePlacement:
@@ -360,13 +350,32 @@ class TestDevicePlacement:
     def test_forward_respects_device(self, head):
         device = torch.device("cpu")
         head.to(device)
-        hidden = torch.randn(2, 10, TEST_DIM, device=device)
+        tokens = torch.randint(0, TEXT_VOCAB_SIZE, (2, 10), device=device)
         labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
         labels, inp_ids, attn_mask = labels.to(device), inp_ids.to(device), attn_mask.to(device)
-        loss = head(
-            hidden,
+        output = head(
+            tokens,
             codec_labels=labels,
             codec_input_ids=inp_ids,
             codec_attention_mask=attn_mask,
         )
-        assert loss.device == device
+        assert output.loss.device == device
+
+
+class TestSaveLoad:
+    def test_save_and_load_pretrained(self, head, tmp_path):
+        head.save_pretrained(tmp_path)
+        loaded = AudioHead.from_pretrained(tmp_path)
+        assert isinstance(loaded, AudioHead)
+        assert loaded.config.decoder_dim == head.config.decoder_dim
+        assert loaded.config.text_vocab_size == head.config.text_vocab_size
+        for key in head.state_dict():
+            assert torch.allclose(head.state_dict()[key], loaded.state_dict()[key]), (
+                f"Mismatch for {key}"
+            )
+
+    def test_config_serialization(self, head, tmp_path):
+        head.config.save_pretrained(tmp_path)
+        loaded_config = AudioHeadConfig.from_pretrained(tmp_path)
+        assert loaded_config.decoder_dim == head.config.decoder_dim
+        assert loaded_config.text_vocab_size == head.config.text_vocab_size

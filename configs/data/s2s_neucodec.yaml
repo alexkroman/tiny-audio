@@ -1,0 +1,17 @@
+# S2S training dataset: Emilia-YODAS with pre-computed NeuCodec codes
+# Text + NeuCodec FSQ codes only (no audio processing needed)
+
+sample_rate: 16000  # Not used for S2S but required by DatasetLoader
+dataset_cache_dir: null
+max_eval_samples: 500
+num_proc: 8
+
+datasets:
+  - path: neuphonic/emilia-yodas-english-neucodec
+    train_splits:
+      - "train[:40%]"
+    eval_splits:
+      - "train[:1%]"
+    text_column: text
+    codes_column: codes  # NeuCodec FSQ codes [seq_len] (1D)
+    eval_max_samples: 500

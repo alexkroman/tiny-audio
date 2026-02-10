@@ -8020,4 +8020,4 @@ local = ["pyaudio"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "e856881f57c8efdc3e024032d78b2c4460ff981e930ee76a1615b90b08ff85d8"
+content-hash = "1451e7da802ff62525086b9fb1511f6b2b8cad40b86772e36829b11d76cb67c5"

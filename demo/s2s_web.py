@@ -10,7 +10,7 @@ Implements Freeze-Omni style full-duplex conversation:
 
 Usage:
     python demo/s2s_web.py
-    python demo/s2s_web.py --model mazesmazes/tiny-audio-s2s --port 8000
+    python demo/s2s_web.py --model mazesmazes/tiny-audio-s2s-full --port 8000
 """
 
 import argparse
@@ -213,11 +213,13 @@ def load_model(model_id: str):
 
     print(f"Model on {device}")
 
-    if model.audio_head:
-        print("Audio head ready")
-
     model.load_vad()
     print("VAD loaded")
+
+    if model.audio_head:
+        model.audio_head._load_neucodec()
+        model.audio_head.neucodec_model = model.audio_head.neucodec_model.to(device)
+        print("NeuCodec loaded")
 
 
 def resample_to_browser(audio: np.ndarray) -> bytes:
@@ -317,7 +319,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", "-m", default="mazesmazes/tiny-audio-s2s")
+    parser.add_argument("--model", "-m", default="mazesmazes/tiny-audio-s2s-full")
     parser.add_argument("--port", "-p", type=int, default=8000)
     parser.add_argument("--host", default="0.0.0.0")
     args = parser.parse_args()

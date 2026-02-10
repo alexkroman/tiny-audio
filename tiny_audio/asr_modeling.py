@@ -142,16 +142,23 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         else:
             self.spec_augment = None
 
-        # Audio head for S2S (flow matching)
+        # Audio head for S2S (trainable AR decoder + NeuCodec)
         if getattr(config, "use_audio_head", False):
-            from .audio_head import AudioHead
+            from .audio_head import AudioHead, AudioHeadConfig
 
             device = next(self.language_model.parameters()).device
-            llm_dim = self.language_model.config.hidden_size
 
-            self.audio_head = AudioHead(config, llm_dim=llm_dim).to(
-                device=device, dtype=target_dtype
+            audio_head_config = AudioHeadConfig(
+                decoder_dim=config.decoder_dim,
+                decoder_layers=config.decoder_layers,
+                decoder_heads=config.decoder_heads,
+                text_vocab_size=len(self.tokenizer),
+                max_audio_tokens=config.max_audio_tokens,
+                neucodec_model_id=getattr(config, "neucodec_model_id", "neuphonic/neucodec"),
+                temperature=getattr(config, "audio_head_temperature", 1.0),
+                top_k=getattr(config, "audio_head_top_k", 50),
             )
+            self.audio_head = AudioHead(audio_head_config).to(device=device, dtype=target_dtype)
 
             if getattr(config, "freeze_audio_head", False):
                 self.audio_head.requires_grad_(False)
@@ -281,7 +288,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             self.tokenizer.add_special_tokens(
                 {"additional_special_tokens": existing_special + ["<audio>"]}
             )
-            self.language_model.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
+            self.language_model.resize_token_embeddings(
+                len(self.tokenizer), mean_resizing=False, pad_to_multiple_of=64
+            )
 
         self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<audio>")
         self.tokenizer.padding_side = "right"
@@ -500,16 +509,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
-        codec_labels: Optional[torch.Tensor] = None,
-        codec_input_ids: Optional[torch.Tensor] = None,
-        codec_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
-        """Forward pass for training and inference.
-
-        For S2S training with audio head, pass these in kwargs:
-            assistant_mask: Boolean mask [batch, seq_len] identifying assistant output positions
-        """
+        """Forward pass for training and inference."""
         # Get text embeddings if not provided
         if inputs_embeds is None:
             inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
@@ -535,16 +537,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
             )
 
-        # Request hidden states for audio head training
-        if self.audio_head is not None and codec_labels is not None:
-            kwargs["output_hidden_states"] = True
-
         # Remove TRL-specific keys that shouldn't go to the LLM
         kwargs.pop("prompts", None)
         kwargs.pop("prompt_attention_mask", None)
 
         # Run through language model (let it compute loss if labels provided)
-        outputs = self.language_model(
+        return self.language_model(
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
@@ -554,69 +552,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             cache_position=cache_position,
             **kwargs,
         )
-
-        # Compute audio head loss if training S2S with codec labels
-        if self.audio_head is not None and codec_labels is not None:
-            if outputs.hidden_states is None:
-                raise ValueError(
-                    "hidden_states required for audio head training. "
-                    "Ensure output_hidden_states=True is set."
-                )
-
-            # Get last layer hidden states (contextualized representations)
-            all_hidden_states = outputs.hidden_states[-1]  # [batch, seq_len, hidden_dim]
-
-            # Extract assistant-position hidden states using assistant_mask
-            assistant_mask = kwargs.get("assistant_mask")
-            if assistant_mask is None:
-                raise ValueError(
-                    "assistant_mask is required for audio head training. "
-                    "Ensure the data collator provides it (S2SDataCollator creates it automatically)."
-                )
-
-            batch_size = all_hidden_states.shape[0]
-            assistant_hidden_list = []
-            for i in range(batch_size):
-                mask_i = assistant_mask[i]  # [seq_len]
-                hidden_i = all_hidden_states[i][mask_i]  # [num_assistant_tokens, hidden_dim]
-                assistant_hidden_list.append(hidden_i)
-
-            embeddings = torch.nn.utils.rnn.pad_sequence(
-                assistant_hidden_list, batch_first=True, padding_value=0.0
-            )
-
-            # Build attention mask so audio head ignores padded positions
-            lengths = torch.tensor(
-                [h.shape[0] for h in assistant_hidden_list], device=embeddings.device
-            )
-            encoder_attention_mask = (
-                torch.arange(embeddings.shape[1], device=embeddings.device).unsqueeze(0)
-                < lengths.unsqueeze(1)
-            ).long()
-
-            audio_head_loss = self.audio_head(
-                embeddings,
-                attention_mask=encoder_attention_mask,
-                codec_labels=codec_labels,
-                codec_input_ids=codec_input_ids,
-                codec_attention_mask=codec_attention_mask,
-            )
-
-            # Combine with LLM loss if present (e.g., joint ASR+S2S training)
-            if outputs.loss is not None:
-                total_loss = outputs.loss + audio_head_loss
-            else:
-                total_loss = audio_head_loss
-
-            # Return new output object (direct assignment doesn't work with Accelerator/DDP)
-            from transformers.modeling_outputs import CausalLMOutputWithPast
-
-            return CausalLMOutputWithPast(
-                loss=total_loss,
-                logits=outputs.logits,
-            )
-
-        return outputs
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
         """Prepare inputs for generation, handling audio features for cached decoding."""

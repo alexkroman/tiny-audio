@@ -83,10 +83,10 @@ ten-vad = ">=1.0.6"
 speechbrain = ">=1.0.3"
 pytz = "*"
 sounddevice = ">=0.4.6"  # Audio I/O for voice demos
+neucodec = "*"  # NeuCodec FSQ codec for S2S audio generation
 
-# Moshi/Mimi codec NOT included due to huggingface-hub version conflict with transformers 5.0
-# Training uses pre-computed codes from jkeisling/libritts-r-mimi dataset (no moshi needed)
-# For inference (decoding codes to audio), install separately: pip install moshi --no-deps
+# NeuCodec is used for S2S audio generation (FSQ codec, 50 tokens/sec, 24kHz output)
+# Training uses pre-computed codes from neuphonic/emilia-yodas-english-neucodec dataset
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]

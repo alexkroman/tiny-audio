@@ -59,6 +59,13 @@ def register_subcommands():
         update_config_command
     )
 
+    # Assemble S2S model
+    from scripts.hub.assemble_s2s import main as assemble_s2s_command
+
+    app.command(name="assemble-s2s", help="Assemble full S2S model from base + AudioHead")(
+        assemble_s2s_command
+    )
+
     # Debug
     from scripts.debug.cli import app as debug_app
 

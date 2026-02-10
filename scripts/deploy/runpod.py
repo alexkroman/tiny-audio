@@ -1076,6 +1076,122 @@ def checkpoint(
 
 
 # =============================================================================
+# Assemble S2S Command
+# =============================================================================
+
+
+def build_assemble_script(
+    hf_token: str,
+    base_model: str,
+    audio_head: str,
+    output: str,
+) -> str:
+    """Generate the S2S assembly script content."""
+    return f"""#!/bin/bash
+# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
+
+ulimit -n 65536
+export PATH="/root/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cusparselt/lib:${{LD_LIBRARY_PATH:-}}"
+export HF_HOME=/workspace/.cache/huggingface
+export HF_DATASETS_CACHE=/workspace/datasets
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_TOKEN="{hf_token}"
+
+cd /workspace
+
+python -m scripts.hub.assemble_s2s \\
+    --base-model {base_model} \\
+    --audio-head {audio_head} \\
+    --output {output}
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "===== Assembly Completed Successfully ====="
+else
+    echo "===== Assembly Failed with exit code: $EXIT_CODE ====="
+fi
+
+echo "Script finished. Session will remain active for inspection."
+sleep infinity
+"""
+
+
+@app.command()
+def assemble(
+    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
+    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
+    base_model: str = typer.Option(
+        "mazesmazes/tiny-audio-omni", "--base-model", "-b", help="Base ASRModel HF repo ID"
+    ),
+    audio_head: str = typer.Option(
+        "mazesmazes/tiny-audio-head",
+        "--audio-head",
+        "-a",
+        help="AudioHead weights (HF repo ID or remote path like /workspace/outputs/audio_head/checkpoint-500)",
+    ),
+    output: str = typer.Option(
+        "mazesmazes/tiny-audio-s2s-full", "--output", "-o", help="Output HF repo ID"
+    ),
+    session_name: str | None = typer.Option(
+        None, "--session-name", "-s", help="Custom tmux session name"
+    ),
+    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
+    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+):
+    """Assemble full S2S model on a remote RunPod instance.
+
+    Loads the base ASRModel + trained AudioHead, pushes assembled model to Hub.
+    Safe to run multiple times. Does not affect AudioHead training.
+
+    Examples:
+        ta runpod assemble host port
+        ta runpod assemble host port -a /workspace/outputs/audio_head/checkpoint-500
+        ta runpod assemble host port -a mazesmazes/tiny-audio-s2s -o mazesmazes/tiny-audio-s2s-full
+    """
+    conn = get_connection(host, port)
+
+    if not test_connection(conn):
+        sys.exit(1)
+
+    if session_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        session_name = f"assemble_{timestamp}"
+
+    if force:
+        print(f"Killing existing session '{session_name}' if present...")
+        kill_tmux_session(conn, session_name)
+
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        print("Warning: HF_TOKEN environment variable not set.")
+
+    script_content = build_assemble_script(hf_token, base_model, audio_head, output)
+    script_path = f"/tmp/assemble_{session_name}.sh"
+
+    print(f"\nStarting S2S assembly session '{session_name}'...")
+    print(f"Base model: {base_model}")
+    print(f"AudioHead: {audio_head}")
+    print(f"Output: {output}")
+
+    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
+    conn.run(f"chmod +x {script_path}", hide=True)
+
+    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    if not result.ok:
+        print(f"Failed to start tmux session: {result.stderr}")
+        sys.exit(1)
+
+    print(f"\nAssembly started in session '{session_name}'.")
+    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
+
+    if not no_attach:
+        time.sleep(2)
+        attach_tmux_session(host, port, session_name)
+
+
+# =============================================================================
 # CLI Entry Point
 # =============================================================================
 

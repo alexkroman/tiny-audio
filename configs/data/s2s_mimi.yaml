@@ -1,7 +1,7 @@
-# S2S Mimi training dataset: LibriTTS with pre-computed Mimi codes
-# Used for AudioHead trainable AR decoder training
+# S2S training dataset: LibriTTS with pre-computed Mimi codes
+# Text + Mimi codes only (no audio processing needed)
 
-sample_rate: 16000  # Input audio sample rate (for ASR encoder)
+sample_rate: 16000  # Not used for S2S but required by DatasetLoader
 dataset_cache_dir: null
 max_eval_samples: 500
 num_proc: 8
@@ -15,7 +15,6 @@ datasets:
     eval_splits:
       - train.clean.100
     # Column mappings
-    audio_column: audio
     text_column: text
     codes_column: codes  # Mimi codes [8 codebooks][seq_len]
     eval_max_samples: 500

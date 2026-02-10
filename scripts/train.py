@@ -139,8 +139,8 @@ class DatasetLoader:
                 "task",
             }
         elif self.s2s_enabled:
-            # S2S training: need codes column for audio head (AR codec generation)
-            keep_cols = {"audio", "text", "duration", "task", "codes"}
+            # S2S training: text + codes only (no audio needed)
+            keep_cols = {"text", "duration", "task", "codes"}
         else:
             # Standard ASR training
             keep_cols = {"audio", "text", "duration", "task"}
@@ -149,9 +149,9 @@ class DatasetLoader:
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
-        # Add task column if specified in config (use map for robustness after filter)
+        # Add task column if specified in config
         task = dataset_cfg.get("task", "transcribe")
-        ds = ds.map(lambda x: {"task": task}, num_proc=self.num_proc)
+        ds = ds.add_column("task", [task] * len(ds))
 
         # Cast audio column after removing problematic columns (skip for TTS)
         if "audio" in ds.column_names:
@@ -409,204 +409,72 @@ class SIFTDataCollator(DataCollator):
 
 
 class S2SDataCollator:
-    """Data collator for S2S training: audio -> Mimi discrete codes.
+    """Data collator for standalone AudioHead training: text tokens + NeuCodec codes.
 
-    This collator handles speech synthesis training where we predict
-    discrete Mimi codec tokens via a trainable AR decoder with per-codebook heads.
-    Uses datasets with pre-computed Mimi codes (e.g., from scripts/generate_mimi.py).
+    No audio processing, no encoder, no LLM. Just tokenizes text and prepares
+    NeuCodec FSQ teacher-forced inputs/labels for the AudioHead transformer.
     """
-
-    # Mimi constants
-    MIMI_VOCAB = 2048
-    BOS_TOKEN = 2048
-    EOS_TOKEN = 2049
-    PAD_TOKEN = 2050
-    NUM_CODEBOOKS = 8
 
     def __init__(
         self,
         tokenizer: Any,
-        feature_extractor: Any,
-        sample_rate: int,
-        projector: Any = None,
-        encoder_conv_layers: list = None,
-        system_prompt: str = None,
+        max_text_length: int = 256,
         text_column: str = "text",
         codes_column: str = "codes",
     ):
+        from tiny_audio.audio_head import BOS_TOKEN, EOS_TOKEN, PAD_TOKEN
+
         self.tokenizer = tokenizer
-        self.feature_extractor = feature_extractor
-        self.sample_rate = sample_rate
-        self.projector = projector
-        self.encoder_conv_layers = encoder_conv_layers or [(1, 3, 1), (1, 3, 2)]
-        self.system_prompt = system_prompt
+        self.max_text_length = max_text_length
         self.text_column = text_column
         self.codes_column = codes_column
-
-        # Use trl's DataCollatorForChatML for label masking
-        self.text_collator = DataCollatorForChatML(
-            tokenizer=tokenizer,
-            max_length=2048,
-        )
-
-    def _compute_encoder_output_length(self, mel_length: int) -> int:
-        """Compute encoder output length using conv layer formulas."""
-        length = mel_length
-        for padding, kernel_size, stride in self.encoder_conv_layers:
-            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
-        return length
-
-    def _convert_to_right_padding(self, batch: dict) -> dict:
-        """Convert left-padded batch to right-padded.
-
-        DataCollatorForChatML uses left-padding which causes NaN in attention computation
-        when padding positions try to attend (all -inf in attention scores -> NaN after softmax).
-        This converts to right-padding where padding is at the end, avoiding the issue.
-        """
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
-        labels = batch.get("labels")
-
-        batch_size, seq_len = input_ids.shape
-        pad_token_id = self.tokenizer.pad_token_id
-
-        # For each sample, find where content starts (first non-pad) and shift right
-        new_input_ids = torch.full_like(input_ids, pad_token_id)
-        new_attention_mask = torch.zeros_like(attention_mask)
-        new_labels: torch.Tensor | None = None
-        if labels is not None:
-            new_labels = torch.full_like(labels, -100)
-
-        for i in range(batch_size):
-            # Find first non-padding position
-            non_pad_mask = attention_mask[i] == 1
-            content_length = non_pad_mask.sum().item()
-
-            if content_length > 0:
-                # Copy content to the beginning (right-padding style)
-                content_ids = input_ids[i][non_pad_mask]
-                content_attn = attention_mask[i][non_pad_mask]
-
-                new_input_ids[i, :content_length] = content_ids
-                new_attention_mask[i, :content_length] = content_attn
-
-                if labels is not None and new_labels is not None:
-                    content_labels = labels[i][non_pad_mask]
-                    new_labels[i, :content_length] = content_labels
-
-        batch["input_ids"] = new_input_ids
-        batch["attention_mask"] = new_attention_mask
-        if new_labels is not None:
-            batch["labels"] = new_labels
-
-        return batch
+        self.BOS_TOKEN = BOS_TOKEN
+        self.EOS_TOKEN = EOS_TOKEN
+        self.PAD_TOKEN = PAD_TOKEN
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Process audio (required for S2S training)
-        audio_arrays = []
-        valid_features = []
-
-        for f in features:
-            try:
-                audio = f["audio"]["array"]
-                if hasattr(audio, "numpy"):
-                    audio = audio.numpy()
-                audio = audio.squeeze()
-                if audio.ndim > 1:
-                    audio = audio.mean(axis=0)
-                audio_arrays.append(audio)
-                valid_features.append(f)
-            except Exception:
-                continue
-            finally:
-                f["audio"] = None
-
-        if not audio_arrays:
-            raise ValueError("No valid audio samples in batch - S2S requires audio input")
-
-        audio_out = self.feature_extractor(
-            audio_arrays,
-            sampling_rate=self.sample_rate,
-            padding="longest",
-            return_attention_mask=True,
+        # Tokenize text
+        texts = [(f.get(self.text_column) or "").strip().lower() for f in features]
+        text_enc = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=self.max_text_length,
             return_tensors="pt",
         )
+        batch = {
+            "text_token_ids": text_enc.input_ids,
+            "attention_mask": text_enc.attention_mask,
+        }
 
-        # Compute per-sample audio token counts
-        mel_lengths = audio_out.attention_mask.sum(dim=-1)
-        audio_token_counts = []
-        for mel_len in mel_lengths:
-            encoder_len = self._compute_encoder_output_length(int(mel_len.item()))
-            num_tokens = self.projector.get_output_length(encoder_len)
-            audio_token_counts.append(num_tokens)
-
-        # Get text for each sample using configured text column
-        processed_texts = [(f.get(self.text_column) or "").strip().lower() for f in valid_features]
-
-        # Build messages for each sample
-        text_features = []
-        for text, num_audio_tokens in zip(processed_texts, audio_token_counts):
-            audio_placeholder = "<audio>" * num_audio_tokens
-            user_content = audio_placeholder + " Transcribe: "
-
-            messages = []
-            if self.system_prompt:
-                messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": user_content})
-            messages.append({"role": "assistant", "content": text})
-
-            text_features.append({"messages": messages})
-
-        # Let trl handle tokenization, label masking, and padding
-        batch = self.text_collator(text_features)
-
-        # Convert left-padding to right-padding: DataCollatorForChatML uses left-padding
-        # which causes NaN in attention (padding positions attend to all -inf -> NaN softmax)
-        batch = self._convert_to_right_padding(batch)
-
-        # Create assistant mask from labels before removing them
-        # Labels have actual token IDs at assistant positions, -100 elsewhere
-        # We use this mask to extract only assistant hidden states for audio head
-        if "labels" in batch:
-            batch["assistant_mask"] = batch["labels"] != -100
-            # Remove labels since we don't compute LM loss (label_names=[] in config)
-            del batch["labels"]
-
-        batch["input_features"] = audio_out.input_features
-        batch["audio_attention_mask"] = audio_out.attention_mask
-
-        # Process Mimi codec codes into simple teacher-forced inputs and labels
+        # Process NeuCodec FSQ codes into teacher-forced inputs and labels
         code_list = []
         code_lengths = []
 
-        for f in valid_features:
+        for f in features:
             codes = f.get(self.codes_column)
             if codes is None:
                 raise ValueError(
-                    f"No codec codes found - S2S requires '{self.codes_column}' column. "
-                    "Use scripts/generate_mimi.py to create dataset."
+                    f"No codec codes found - S2S requires '{self.codes_column}' column."
                 )
 
-            # codes is [num_codebooks][seq_len] -> [seq_len, num_codebooks]
+            # codes is 1D [seq_len]
             codes_t = torch.tensor(codes, dtype=torch.long)
-            if codes_t.dim() == 1:
-                codes_t = codes_t.unsqueeze(0)
-            code_list.append(codes_t.T)  # [seq_len, num_codebooks]
-            code_lengths.append(codes_t.shape[1])
+            if codes_t.dim() > 1:
+                codes_t = codes_t.squeeze()
+            code_list.append(codes_t)  # [seq_len]
+            code_lengths.append(codes_t.shape[0])
 
         batch_size = len(code_list)
         max_audio_len = max(code_lengths)
-        num_codebooks = self.NUM_CODEBOOKS
 
         # Build teacher-forced inputs and labels
         # Input: [BOS, c0, c1, ..., cN, PAD...]  (length = max_len + 1)
         # Labels: [c0, c1, ..., cN, EOS, -100...]  (length = max_len + 1)
         padded_len = max_audio_len + 1  # +1 for BOS/EOS shift
 
-        codec_input_ids = torch.full(
-            (batch_size, padded_len, num_codebooks), self.PAD_TOKEN, dtype=torch.long
-        )
-        codec_labels = torch.full((batch_size, padded_len, num_codebooks), -100, dtype=torch.long)
+        codec_input_ids = torch.full((batch_size, padded_len), self.PAD_TOKEN, dtype=torch.long)
+        codec_labels = torch.full((batch_size, padded_len), -100, dtype=torch.long)
         codec_attention_mask = torch.zeros(batch_size, padded_len, dtype=torch.long)
 
         for i, codes in enumerate(code_list):
@@ -717,17 +585,169 @@ def get_valid_training_args(config: dict) -> dict:
     return {k: v for k, v in config.items() if k in valid_fields}
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="config")
-def main(cfg: DictConfig) -> None:
-    # Check HF_TOKEN is set if pushing to hub
-    if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
-        import os
+class PushAudioHeadCallback(TrainerCallback):
+    """On every checkpoint save, push AudioHead weights + config to the Hub.
 
-        if not os.environ.get("HF_TOKEN"):
-            raise ValueError(
-                "HF_TOKEN environment variable is required when push_to_hub is enabled. "
-                "Set it with: export HF_TOKEN=your_token"
+    Only uploads the small AudioHead (not the full multi-GB base model),
+    so saves complete in seconds rather than hanging on large uploads.
+    """
+
+    def __init__(self, hub_model_id: str, audio_head_config_dict: dict):
+        self.hub_model_id = hub_model_id
+        self.audio_head_config_dict = audio_head_config_dict
+
+    def on_save(self, args, state, control, model=None, **kwargs):
+        if model is None:
+            return control
+
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from huggingface_hub import HfApi
+
+        api = HfApi()
+        api.create_repo(self.hub_model_id, exist_ok=True)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+
+            # Save AudioHead weights
+            from safetensors.torch import save_file
+
+            save_file(model.state_dict(), tmp_path / "audio_head.safetensors")
+
+            # Save AudioHead config
+            with (tmp_path / "audio_head_config.json").open("w") as f:
+                json.dump(self.audio_head_config_dict, f, indent=2)
+
+            print(f"Pushing AudioHead to {self.hub_model_id} (step {state.global_step})")
+            api.upload_folder(
+                folder_path=tmp_dir,
+                repo_id=self.hub_model_id,
+                commit_message=f"AudioHead weights - step {state.global_step}",
             )
+
+        return control
+
+
+def train_s2s(cfg: DictConfig) -> None:
+    """Standalone AudioHead training: text tokens -> NeuCodec codes.
+
+    No encoder, no LLM. Just the AudioHead transformer.
+    On each checkpoint save, pushes AudioHead weights to Hub (if hub_model_id is set).
+    Use `ta assemble-s2s` to combine with a base ASRModel after training.
+    """
+    from transformers import AutoTokenizer
+
+    from tiny_audio.audio_head import AudioHead, AudioHeadConfig
+
+    # Initialize wandb
+    if cfg.training.get("report_to") == "wandb":
+        wandb.init(
+            project=cfg.training.get("wandb_project", "tiny-audio-s2s"),
+            config=OmegaConf.to_container(cfg, resolve=True),
+        )
+
+    # Load tokenizer (just for text tokenization, no LLM needed)
+    text_model_id = cfg.model.get("text_model_id", "Qwen/Qwen3-0.6B")
+    tokenizer = AutoTokenizer.from_pretrained(text_model_id, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Add <audio> token to match ASRModel's tokenizer (ensures text_vocab_size consistency)
+    existing_special = getattr(tokenizer, "additional_special_tokens", None) or []
+    if "<audio>" not in existing_special:
+        tokenizer.add_special_tokens({"additional_special_tokens": existing_special + ["<audio>"]})
+
+    # Create AudioHead directly (no ASRModel needed)
+    model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
+    assert isinstance(model_cfg, dict)
+
+    audio_head_config = AudioHeadConfig(
+        decoder_dim=model_cfg.get("decoder_dim", 512),
+        decoder_layers=model_cfg.get("decoder_layers", 6),
+        decoder_heads=model_cfg.get("decoder_heads", 8),
+        text_vocab_size=len(tokenizer),
+        max_audio_tokens=model_cfg.get("max_audio_tokens", 500),
+        temperature=model_cfg.get("temperature", 1.0),
+        top_k=model_cfg.get("top_k", 50),
+    )
+
+    model = AudioHead(audio_head_config)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"AudioHead parameters: {total_params:,} (all trainable)")
+
+    # Load datasets
+    train_dataset, val_dataset = DatasetLoader(cfg, s2s_enabled=True).load()
+
+    # Data collator: just text tokenization + NeuCodec codes
+    data_collator = S2SDataCollator(
+        tokenizer=tokenizer,
+        max_text_length=cfg.model.get("max_text_length", 256),
+    )
+
+    # Training args
+    training_config = OmegaConf.to_container(cfg.training, resolve=True)
+    assert isinstance(training_config, dict)
+    valid_args = get_valid_training_args(training_config)
+    training_args = TrainingArguments(**valid_args)
+
+    # Callbacks
+    callbacks = [GradientDebugCallback()]
+    if cfg.early_stopping.patience:
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=cfg.early_stopping.patience,
+                early_stopping_threshold=cfg.early_stopping.threshold,
+            )
+        )
+
+    # Push AudioHead weights to Hub on every checkpoint save
+    hub_model_id = cfg.training.get("hub_model_id")
+    if hub_model_id:
+        callbacks.append(
+            PushAudioHeadCallback(
+                hub_model_id=hub_model_id,
+                audio_head_config_dict={
+                    "decoder_dim": model_cfg.get("decoder_dim", 512),
+                    "decoder_layers": model_cfg.get("decoder_layers", 6),
+                    "decoder_heads": model_cfg.get("decoder_heads", 8),
+                    "max_audio_tokens": model_cfg.get("max_audio_tokens", 500),
+                    "text_vocab_size": len(tokenizer),
+                    "temperature": model_cfg.get("temperature", 1.0),
+                    "top_k": model_cfg.get("top_k", 50),
+                },
+            )
+        )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        processing_class=tokenizer,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        data_collator=data_collator,
+        callbacks=callbacks,
+    )
+
+    trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
+    trainer.save_model()
+
+
+def train_asr(cfg: DictConfig) -> None:
+    """Standard ASR/SIFT training with full ASRModel."""
+    # Check HF_TOKEN is set if pushing to hub
+    if (
+        cfg.training.get("push_to_hub")
+        and cfg.training.get("hub_model_id")
+        and not os.environ.get("HF_TOKEN")
+    ):
+        raise ValueError(
+            "HF_TOKEN environment variable is required when push_to_hub is enabled. "
+            "Set it with: export HF_TOKEN=your_token"
+        )
 
     # Initialize wandb
     if cfg.training.get("report_to") == "wandb":
@@ -737,10 +757,8 @@ def main(cfg: DictConfig) -> None:
         )
 
     # Create model config from hydra config
-    # Merge model config with training config for model-specific params
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_config_dict, dict), "model config must be a dict"
-    # Add training params that affect model behavior
     training_model_params = [
         "label_smoothing",
         "use_specaugment",
@@ -762,64 +780,26 @@ def main(cfg: DictConfig) -> None:
     else:
         model = ASRModel(asr_config)
 
-    # Validate generation config early to catch conflicts before training starts
-    # (e.g., do_sample=False with temperature/top_p/top_k set)
     model.generation_config.validate()
-
     model.config.use_cache = False
 
-    # Store hub_model_id in config so save_pretrained() can set base_model_name_or_path correctly
     if hub_model_id := cfg.training.get("hub_model_id"):
         model.config.pretrained_model_path = hub_model_id
 
-    # Disable Qwen3 thinking mode by patching the chat template
-    # This is a workaround for TRL's DataCollatorForChatML not passing enable_thinking=False
-    # See: https://github.com/huggingface/trl/issues/3387
+    # Disable Qwen3 thinking mode
     if model.tokenizer.chat_template and "enable_thinking" in model.tokenizer.chat_template:
-        # Replace the conditional check with a hardcoded False
         model.tokenizer.chat_template = model.tokenizer.chat_template.replace(
             "enable_thinking is defined and enable_thinking is false",
-            "true",  # Always disable thinking
+            "true",
         )
 
-    # Check if SIFT training is enabled (AZeroS-style)
     sift_enabled = cfg.get("sift", {}).get("enabled", False)
 
-    # Check if audio head training is enabled (jointly with projector)
-    use_audio_head = cfg.model.get("use_audio_head", False)
-
-    # Validate audio head exists when expected
-    if use_audio_head and model.audio_head is None:
-        raise ValueError(
-            f"use_audio_head=True but model.audio_head is None. "
-            f"Config use_audio_head={model.config.use_audio_head}. "
-            "Check that the config is being passed correctly to the model."
-        )
-
-    # Check if S2S training mode (audio head with Mimi codes via trainable AR decoder)
-    s2s_mode = use_audio_head and cfg.get("s2s", {}).get("enabled", False)
-
     # Load datasets
-    train_dataset, val_dataset = DatasetLoader(
-        cfg, sift_enabled=sift_enabled, s2s_enabled=s2s_mode
-    ).load()
+    train_dataset, val_dataset = DatasetLoader(cfg, sift_enabled=sift_enabled).load()
 
-    # Create data collator (S2S, SIFT, or standard ASR)
-    if s2s_mode:
-        # S2S training with Mimi discrete codes (trainable AR decoder)
-        # DatasetLoader renames text_column to "text", so always use "text"
-        text_column = "text"
-        data_collator = S2SDataCollator(
-            tokenizer=model.tokenizer,
-            feature_extractor=model.feature_extractor,
-            sample_rate=cfg.data.sample_rate,
-            projector=model.projector,
-            encoder_conv_layers=model.config.encoder_conv_layers,
-            system_prompt=cfg.model.system_prompt,
-            text_column=text_column,
-        )
-    elif sift_enabled:
-        # SIFT training (audio head trained separately via S2S)
+    # Create data collator
+    if sift_enabled:
         data_collator = SIFTDataCollator(
             tokenizer=model.tokenizer,
             feature_extractor=model.feature_extractor,
@@ -838,7 +818,7 @@ def main(cfg: DictConfig) -> None:
         )
 
     # Setup callbacks
-    callbacks = [GradientDebugCallback()]  # Debug NaN gradients
+    callbacks = [GradientDebugCallback()]
     if cfg.early_stopping.patience:
         callbacks.append(
             EarlyStoppingCallback(
@@ -859,7 +839,6 @@ def main(cfg: DictConfig) -> None:
         )
         torch._inductor.config.compile_threads = compile_config.get("compile_threads", 4)
 
-    # Create trainer with only valid TrainingArguments
     valid_args = get_valid_training_args(training_config)
     trainer = ASRTrainer(
         model=model,
@@ -874,12 +853,20 @@ def main(cfg: DictConfig) -> None:
     trainer.save_model()
 
     if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
-        # Use model's push_to_hub which properly sets base_model_name_or_path in adapter_config.json
         trainer.model.push_to_hub(
             cfg.training.hub_model_id,
             commit_message="Training complete - final model",
             private=cfg.training.get("hub_private_repo", False),
         )
+
+
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
+def main(cfg: DictConfig) -> None:
+    s2s_mode = cfg.get("s2s", {}).get("enabled", False)
+    if s2s_mode:
+        train_s2s(cfg)
+    else:
+        train_asr(cfg)
 
 
 if __name__ == "__main__":

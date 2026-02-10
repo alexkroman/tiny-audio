@@ -457,15 +457,8 @@ class FullDuplexSession:
             if self.model.audio_head is not None:
                 self._set_state(ConversationState.SPEAKING)
 
-                with torch.no_grad():
-                    lm_output = self.model.language_model(
-                        input_ids=text_ids,
-                        output_hidden_states=True,
-                    )
-                    embeddings = lm_output.hidden_states[-1]
-
                 for audio_chunk in self.model.audio_head.generate_streaming(
-                    embeddings=embeddings,
+                    text_token_ids=text_ids,
                 ):
                     if self._state.stop_generate:
                         return
