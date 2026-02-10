@@ -387,6 +387,12 @@ class TestGenerateLoop:
         audio_head.generate_streaming.return_value = iter([torch.randn(1000), torch.randn(1000)])
         model.audio_head = audio_head
 
+        # Mock generate to return dict-like output with sequences and hidden_states
+        gen_output = MagicMock()
+        gen_output.sequences = torch.ones(1, 40, dtype=torch.long)
+        gen_output.hidden_states = tuple((torch.randn(1, 1, 512),) for _ in range(10))
+        model.language_model.generate.return_value = gen_output
+
         session = FullDuplexSession(model, on_state_change=states.append)
 
         speech = np.random.randn(16000).astype(np.float32)
@@ -406,6 +412,12 @@ class TestGenerateLoop:
         audio_head.generate_streaming.return_value = iter([chunk1, chunk2])
         model.audio_head = audio_head
 
+        # Mock generate to return dict-like output with sequences and hidden_states
+        gen_output = MagicMock()
+        gen_output.sequences = torch.ones(1, 40, dtype=torch.long)
+        gen_output.hidden_states = tuple((torch.randn(1, 1, 512),) for _ in range(10))
+        model.language_model.generate.return_value = gen_output
+
         session = FullDuplexSession(model, on_audio=chunks.append)
 
         speech = np.random.randn(16000).astype(np.float32)
@@ -424,10 +436,13 @@ class TestGenerateLoop:
         session = FullDuplexSession(model)
 
         # Set stop flag when language_model.generate is called (after text, before audio)
-        def set_stop_on_generate(**_: Any) -> torch.Tensor:
+        def set_stop_on_generate(**_: Any):
             with session._state_lock:
                 session._state.stop_generate = True
-            return torch.ones(1, 40, dtype=torch.long)
+            gen_output = MagicMock()
+            gen_output.sequences = torch.ones(1, 40, dtype=torch.long)
+            gen_output.hidden_states = tuple((torch.randn(1, 1, 512),) for _ in range(10))
+            return gen_output
 
         model.language_model.generate.side_effect = set_stop_on_generate
 

@@ -142,23 +142,30 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         else:
             self.spec_augment = None
 
-        # Audio head for S2S (trainable AR decoder + NeuCodec)
+        # Audio head for S2S (frozen LLM + projector + frozen neutts-nano)
         if getattr(config, "use_audio_head", False):
             from .audio_head import AudioHead, AudioHeadConfig
 
             device = next(self.language_model.parameters()).device
 
             audio_head_config = AudioHeadConfig(
-                decoder_dim=config.decoder_dim,
-                decoder_layers=config.decoder_layers,
-                decoder_heads=config.decoder_heads,
-                text_vocab_size=len(self.tokenizer),
+                tts_model_id=getattr(config, "tts_model_id", "neuphonic/neutts-nano"),
+                llm_model_id=config.text_model_id,
+                projector_hidden=getattr(config, "audio_head_projector_hidden", 1024),
                 max_audio_tokens=config.max_audio_tokens,
                 neucodec_model_id=getattr(config, "neucodec_model_id", "neuphonic/neucodec"),
                 temperature=getattr(config, "audio_head_temperature", 1.0),
                 top_k=getattr(config, "audio_head_top_k", 50),
             )
             self.audio_head = AudioHead(audio_head_config).to(device=device, dtype=target_dtype)
+
+            # Free the duplicate LLM — in pipeline mode, ASRModel provides
+            # pre-computed hidden states via self.language_model.
+            import gc
+
+            del self.audio_head.llm
+            self.audio_head.llm = None
+            gc.collect()
 
             if getattr(config, "freeze_audio_head", False):
                 self.audio_head.requires_grad_(False)

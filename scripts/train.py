@@ -411,8 +411,8 @@ class SIFTDataCollator(DataCollator):
 class S2SDataCollator:
     """Data collator for standalone AudioHead training: text tokens + NeuCodec codes.
 
-    No audio processing, no encoder, no LLM. Just tokenizes text and prepares
-    NeuCodec FSQ teacher-forced inputs/labels for the AudioHead transformer.
+    Tokenizes text using the LLM tokenizer and prepares NeuCodec FSQ teacher-forced
+    inputs/labels. The frozen LLM forward pass happens inside AudioHead.forward().
     """
 
     def __init__(
@@ -433,7 +433,8 @@ class S2SDataCollator:
         self.PAD_TOKEN = PAD_TOKEN
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Tokenize text
+        # Tokenize text WITHOUT special tokens — AudioHead prepends its own
+        # chat-template prompt prefix that includes start-of-sequence tokens.
         texts = [(f.get(self.text_column) or "").strip().lower() for f in features]
         text_enc = self.tokenizer(
             texts,
@@ -441,6 +442,7 @@ class S2SDataCollator:
             truncation=True,
             max_length=self.max_text_length,
             return_tensors="pt",
+            add_special_tokens=False,
         )
         batch = {
             "text_token_ids": text_enc.input_ids,
@@ -632,12 +634,13 @@ class PushAudioHeadCallback(TrainerCallback):
 
 
 def train_s2s(cfg: DictConfig) -> None:
-    """Standalone AudioHead training: text tokens -> NeuCodec codes.
+    """Standalone AudioHead training: text -> frozen LLM -> projector -> neutts-nano -> speech codes.
 
-    Architecture: frozen neutts-nano backbone + trainable projector MLP (~1.2M params).
-    Text is tokenized using neutts-nano's own tokenizer, embedded through its frozen
-    embedding table, then adapted through the trainable projector before being fed to
-    the frozen backbone.
+    Architecture: frozen SmolLM3 (text->hidden states) + trainable projector MLP
+    + frozen neutts-nano backbone (hidden states->speech codes).
+
+    Text is tokenized using the LLM's tokenizer, run through the frozen LLM to get
+    hidden states, then projected into neutts-nano's input space via the trainable projector.
 
     On each checkpoint save, pushes AudioHead projector weights to Hub (if hub_model_id is set).
     """
@@ -652,20 +655,22 @@ def train_s2s(cfg: DictConfig) -> None:
             config=OmegaConf.to_container(cfg, resolve=True),
         )
 
-    # Load neutts-nano's tokenizer for text tokenization.
-    # In Stage 1, text is embedded through neutts-nano's own embedding table,
-    # so we must use its tokenizer to get correct token IDs.
     model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_cfg, dict)
 
     tts_model_id = model_cfg.get("tts_model_id", "neuphonic/neutts-nano")
-    tokenizer = AutoTokenizer.from_pretrained(tts_model_id, trust_remote_code=True)
+    llm_model_id = model_cfg.get("llm_model_id", "HuggingFaceTB/SmolLM3-3B")
+
+    # Load the LLM's tokenizer for text tokenization.
+    # Text is run through the frozen LLM to get hidden states for the projector.
+    tokenizer = AutoTokenizer.from_pretrained(llm_model_id, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Create AudioHead: frozen neutts-nano + trainable projector
+    # Create AudioHead: frozen LLM + frozen neutts-nano + trainable projector
     audio_head_config = AudioHeadConfig(
         tts_model_id=tts_model_id,
+        llm_model_id=llm_model_id,
         projector_hidden=model_cfg.get("projector_hidden", 1024),
         max_audio_tokens=model_cfg.get("max_audio_tokens", 500),
         temperature=model_cfg.get("temperature", 1.0),
@@ -679,12 +684,12 @@ def train_s2s(cfg: DictConfig) -> None:
     frozen_params = total_params - trainable_params
     print(f"AudioHead parameters: {total_params:,} total")
     print(f"  Trainable (projector): {trainable_params:,}")
-    print(f"  Frozen (backbone):     {frozen_params:,}")
+    print(f"  Frozen (LLM+backbone): {frozen_params:,}")
 
     # Load datasets
     train_dataset, val_dataset = DatasetLoader(cfg, s2s_enabled=True).load()
 
-    # Data collator: text tokenization (via neutts-nano tokenizer) + NeuCodec codes
+    # Data collator: text tokenization (via LLM tokenizer) + NeuCodec codes
     data_collator = S2SDataCollator(
         tokenizer=tokenizer,
         max_text_length=cfg.model.get("max_text_length", 256),
@@ -714,6 +719,7 @@ def train_s2s(cfg: DictConfig) -> None:
                 hub_model_id=hub_model_id,
                 audio_head_config_dict={
                     "tts_model_id": tts_model_id,
+                    "llm_model_id": llm_model_id,
                     "projector_hidden": model_cfg.get("projector_hidden", 1024),
                     "max_audio_tokens": model_cfg.get("max_audio_tokens", 500),
                     "temperature": model_cfg.get("temperature", 1.0),

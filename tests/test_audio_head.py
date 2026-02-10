@@ -1,7 +1,8 @@
-"""Tests for AudioHead: frozen neutts-nano backbone + trainable projector.
+"""Tests for AudioHead: frozen LLM + frozen neutts-nano backbone + trainable projector.
 
 Architecture under test:
-  Text tokens → neutts-nano embed_tokens (frozen) → Projector MLP (trainable)
+  Text tokens → frozen LLM (SmolLM3) → hidden states (llm_dim)
+  → Projector MLP (trainable, llm_dim → backbone_dim)
   → Concat with codec embeddings → neutts-nano backbone (frozen)
   → lm_head → speech token logits → NeuCodec codes
 """
@@ -21,9 +22,10 @@ from tiny_audio.audio_head import (
 
 @pytest.fixture(scope="session")
 def config():
-    """AudioHeadConfig using real neutts-nano (downloaded once per session)."""
+    """AudioHeadConfig using real models (downloaded once per session)."""
     return AudioHeadConfig(
         tts_model_id="neuphonic/neutts-nano",
+        llm_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",  # Small LLM for fast tests
         projector_hidden=128,  # Small for fast tests
         max_audio_tokens=20,
     )
@@ -31,11 +33,11 @@ def config():
 
 @pytest.fixture(scope="session")
 def head(config):
-    """Create AudioHead with real frozen neutts-nano backbone."""
+    """Create AudioHead with real frozen models."""
     return AudioHead(config)
 
 
-def _make_codec_inputs(head, batch_size=2, audio_len=20):
+def _make_codec_inputs(batch_size=2, audio_len=20):
     """Build synthetic codec inputs (mimicking S2SDataCollator output).
 
     Uses BOS_TOKEN/EOS_TOKEN constants that the S2SDataCollator produces.
@@ -55,10 +57,15 @@ def _make_codec_inputs(head, batch_size=2, audio_len=20):
 
 
 def _make_text_tokens(head, batch_size=2, seq_len=10):
-    """Create random text tokens within neutts-nano's text vocab range."""
-    # Use a safe range that's within the backbone's text vocabulary
-    # neutts-nano has ~128K text tokens before speech tokens start
+    """Create random text tokens within the LLM's vocab range."""
+    # Use a safe range within the LLM's vocabulary
     return torch.randint(0, 1000, (batch_size, seq_len))
+
+
+def _make_llm_hidden_states(head, batch_size=2, seq_len=10):
+    """Create synthetic LLM hidden states matching the LLM's hidden dim."""
+    llm_dim = head.llm.config.hidden_size
+    return torch.randn(batch_size, seq_len, llm_dim, dtype=torch.bfloat16)
 
 
 class TestInit:
@@ -66,6 +73,11 @@ class TestInit:
         """All backbone parameters should have requires_grad=False."""
         for name, param in head.backbone.named_parameters():
             assert not param.requires_grad, f"Backbone param {name} should be frozen"
+
+    def test_llm_is_frozen(self, head):
+        """All LLM parameters should have requires_grad=False."""
+        for name, param in head.llm.named_parameters():
+            assert not param.requires_grad, f"LLM param {name} should be frozen"
 
     def test_projector_is_trainable(self, head):
         """All projector parameters should have requires_grad=True."""
@@ -75,6 +87,10 @@ class TestInit:
     def test_backbone_in_eval_mode(self, head):
         """Backbone should be in eval mode (no dropout, etc.)."""
         assert not head.backbone.training
+
+    def test_llm_in_eval_mode(self, head):
+        """LLM should be in eval mode."""
+        assert not head.llm.training
 
     def test_speech_token_offset_resolved(self, head):
         """speech_token_offset should be a valid token ID."""
@@ -88,14 +104,17 @@ class TestInit:
         assert head.speech_end_id > 0
 
     def test_projector_shape(self, head):
-        """Projector should map backbone_dim → hidden → backbone_dim."""
+        """Projector: Linear → RMSNorm → GELU → Linear → RMSNorm."""
         backbone_dim = head.backbone.config.hidden_size
-        # First linear: backbone_dim → projector_hidden
-        assert head.projector[0].in_features == backbone_dim
+        llm_dim = head.llm.config.hidden_size
+        # First linear: llm_dim → projector_hidden
+        assert head.projector[0].in_features == llm_dim
         assert head.projector[0].out_features == head.config.projector_hidden
-        # Second linear: projector_hidden → backbone_dim
-        assert head.projector[2].in_features == head.config.projector_hidden
-        assert head.projector[2].out_features == backbone_dim
+        # Second linear: projector_hidden → backbone_dim (index 3)
+        assert head.projector[3].in_features == head.config.projector_hidden
+        assert head.projector[3].out_features == backbone_dim
+        # Final RMSNorm on backbone_dim (index 4)
+        assert head.projector[4].weight.shape[0] == backbone_dim
 
     def test_no_neucodec_model_by_default(self, head):
         assert head.neucodec_model is None
@@ -160,9 +179,10 @@ class TestTokenMapping:
 
 
 class TestForwardTraining:
-    def test_returns_audio_head_output(self, head):
+    def test_with_text_token_ids(self, head):
+        """Forward with text_token_ids runs through frozen LLM."""
         tokens = _make_text_tokens(head, 2, 10)
-        labels, inp_ids, attn_mask = _make_codec_inputs(head, 2, 20)
+        labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
         output = head(
             tokens,
             codec_labels=labels,
@@ -175,9 +195,24 @@ class TestForwardTraining:
         assert not torch.isnan(output.loss)
         assert not torch.isinf(output.loss)
 
+    def test_with_llm_hidden_states(self, head):
+        """Forward with pre-computed LLM hidden states (pipeline mode)."""
+        hidden = _make_llm_hidden_states(head, 2, 10)
+        labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
+        output = head(
+            llm_hidden_states=hidden,
+            codec_labels=labels,
+            codec_input_ids=inp_ids,
+            codec_attention_mask=attn_mask,
+        )
+        assert isinstance(output, AudioHeadOutput)
+        assert output.loss is not None
+        assert output.loss.dim() == 0
+        assert not torch.isnan(output.loss)
+
     def test_loss_differentiable(self, head):
         tokens = _make_text_tokens(head, 2, 10)
-        labels, inp_ids, attn_mask = _make_codec_inputs(head, 2, 20)
+        labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
         output = head(
             tokens,
             codec_labels=labels,
@@ -186,15 +221,13 @@ class TestForwardTraining:
         )
         output.loss.backward()
         # Projector should have gradients
-        has_projector_grad = any(
-            p.grad is not None for p in head.projector.parameters()
-        )
+        has_projector_grad = any(p.grad is not None for p in head.projector.parameters())
         assert has_projector_grad, "Projector should have gradients"
         head.zero_grad()
 
     def test_batch_size_one(self, head):
         tokens = _make_text_tokens(head, 1, 10)
-        labels, inp_ids, attn_mask = _make_codec_inputs(head, 1, 20)
+        labels, inp_ids, attn_mask = _make_codec_inputs(1, 20)
         output = head(
             tokens,
             codec_labels=labels,
@@ -203,6 +236,16 @@ class TestForwardTraining:
         )
         assert output.loss.dim() == 0
         assert not torch.isnan(output.loss)
+
+    def test_raises_without_input(self, head):
+        """Must provide either text_token_ids or llm_hidden_states."""
+        labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
+        with pytest.raises(ValueError, match="Either text_token_ids or llm_hidden_states"):
+            head(
+                codec_labels=labels,
+                codec_input_ids=inp_ids,
+                codec_attention_mask=attn_mask,
+            )
 
 
 class TestForwardInference:
@@ -228,12 +271,22 @@ class TestForwardInference:
             assert (output.codes < NEUCODEC_VOCAB_SIZE).all()
         head.train()
 
+    def test_inference_with_hidden_states(self, head):
+        """Inference works with pre-computed hidden states."""
+        hidden = _make_llm_hidden_states(head, 1, 10)
+        head.eval()
+        with torch.no_grad():
+            output = head(llm_hidden_states=hidden)
+        assert output.codes is not None
+        assert output.codes.dim() == 2
+        head.train()
+
 
 class TestGradientFlow:
     def test_gradients_only_flow_to_projector(self, head):
-        """Backbone should be frozen; only projector gets gradients."""
+        """Backbone and LLM should be frozen; only projector gets gradients."""
         tokens = _make_text_tokens(head, 2, 10)
-        labels, inp_ids, attn_mask = _make_codec_inputs(head, 2, 20)
+        labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
 
         head.zero_grad()
         output = head(
@@ -256,11 +309,15 @@ class TestGradientFlow:
         for name, param in head.backbone.named_parameters():
             assert param.grad is None, f"Backbone param {name} should not have gradients"
 
+        # LLM should NOT have gradients (frozen)
+        for name, param in head.llm.named_parameters():
+            assert param.grad is None, f"LLM param {name} should not have gradients"
+
         head.zero_grad()
 
     def test_gradient_magnitude_reasonable(self, head):
         tokens = _make_text_tokens(head, 2, 10)
-        labels, inp_ids, attn_mask = _make_codec_inputs(head, 2, 20)
+        labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
 
         head.zero_grad()
         output = head(
@@ -288,11 +345,13 @@ class TestStateDict:
             assert key.startswith("projector."), f"Unexpected key in state_dict: {key}"
 
     def test_projector_weight_count(self, head):
-        """Should have weights + biases for 2 linear layers."""
+        """Should have weights + biases for 2 linear layers + 2 RMSNorm weights."""
         state = head.state_dict()
-        # projector = Sequential(Linear, SiLU, Linear)
-        # Linear has weight + bias = 2 params each → 4 total
-        assert len(state) == 4, f"Expected 4 projector params, got {len(state)}: {list(state.keys())}"
+        # projector = Sequential(Linear, RMSNorm, GELU, Linear, RMSNorm)
+        # Linear has weight + bias = 2 params each → 4, 2x RMSNorm weight → 2 = 6 total
+        assert len(state) == 6, (
+            f"Expected 6 projector params, got {len(state)}: {list(state.keys())}"
+        )
 
 
 class TestParameterCount:
@@ -303,19 +362,20 @@ class TestParameterCount:
         assert trainable == projector_params
 
     def test_total_much_larger_than_trainable(self, head):
-        """Total params should be >> trainable (backbone is ~117M)."""
+        """Total params should be >> trainable (LLM + backbone are frozen)."""
         total = sum(p.numel() for p in head.parameters())
         trainable = sum(p.numel() for p in head.parameters() if p.requires_grad)
-        assert total > trainable * 10, "Backbone should dwarf projector in param count"
+        assert total > trainable * 10, "Frozen models should dwarf projector in param count"
 
 
 class TestTrainMode:
-    def test_train_mode_keeps_backbone_eval(self, head):
-        """Even in train mode, backbone should stay in eval mode."""
+    def test_train_mode_keeps_frozen_models_eval(self, head):
+        """Even in train mode, backbone and LLM should stay in eval mode."""
         head.train()
         assert head.training is True
-        # Backbone should remain in eval mode to disable dropout etc.
+        # Backbone and LLM should remain in eval mode to disable dropout etc.
         assert not head.backbone.training
+        assert not head.llm.training
 
     def test_eval_mode(self, head):
         head.eval()
@@ -326,7 +386,7 @@ class TestTrainMode:
 class TestEdgeCases:
     def test_short_sequence(self, head):
         tokens = _make_text_tokens(head, 1, 3)
-        labels, inp_ids, attn_mask = _make_codec_inputs(head, 1, 5)
+        labels, inp_ids, attn_mask = _make_codec_inputs(1, 5)
         output = head(
             tokens,
             codec_labels=labels,
@@ -337,7 +397,7 @@ class TestEdgeCases:
 
     def test_long_sequence(self, head):
         tokens = _make_text_tokens(head, 1, 50)
-        labels, inp_ids, attn_mask = _make_codec_inputs(head, 1, 100)
+        labels, inp_ids, attn_mask = _make_codec_inputs(1, 100)
         output = head(
             tokens,
             codec_labels=labels,
@@ -348,7 +408,7 @@ class TestEdgeCases:
 
     def test_zero_token_ids(self, head):
         tokens = torch.zeros(2, 10, dtype=torch.long)
-        labels, inp_ids, attn_mask = _make_codec_inputs(head, 2, 20)
+        labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
         output = head(
             tokens,
             codec_labels=labels,
@@ -368,7 +428,7 @@ class TestDevicePlacement:
         device = torch.device("cpu")
         head.to(device)
         tokens = _make_text_tokens(head, 2, 10).to(device)
-        labels, inp_ids, attn_mask = _make_codec_inputs(head, 2, 20)
+        labels, inp_ids, attn_mask = _make_codec_inputs(2, 20)
         labels, inp_ids, attn_mask = labels.to(device), inp_ids.to(device), attn_mask.to(device)
         output = head(
             tokens,
@@ -385,6 +445,7 @@ class TestSaveLoad:
         loaded = AudioHead.from_pretrained(tmp_path)
         assert isinstance(loaded, AudioHead)
         assert loaded.config.tts_model_id == head.config.tts_model_id
+        assert loaded.config.llm_model_id == head.config.llm_model_id
         assert loaded.config.projector_hidden == head.config.projector_hidden
         # Projector weights should match
         for key in head.state_dict():
@@ -396,5 +457,6 @@ class TestSaveLoad:
         head.config.save_pretrained(tmp_path)
         loaded_config = AudioHeadConfig.from_pretrained(tmp_path)
         assert loaded_config.tts_model_id == head.config.tts_model_id
+        assert loaded_config.llm_model_id == head.config.llm_model_id
         assert loaded_config.projector_hidden == head.config.projector_hidden
         assert loaded_config.max_audio_tokens == head.config.max_audio_tokens

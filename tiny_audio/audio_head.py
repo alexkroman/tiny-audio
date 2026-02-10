@@ -1,13 +1,18 @@
 """Audio head for speech-to-speech using a frozen pretrained TTS backbone.
 
-Architecture (Freeze-Omni style):
-  Text tokens → neutts-nano embed_tokens (frozen) → Projector MLP (trainable)
+Architecture:
+  Text → frozen LLM (SmolLM3-3B) → hidden states (llm_dim)
+  → Projector MLP (trainable, llm_dim → backbone_dim)
   → Concat with codec embeddings → neutts-nano LlamaForCausalLM (frozen)
   → lm_head → speech token logits → NeuCodec codes → audio
 
+The frozen LLM is loaded for standalone S2S training. When used inside a full
+ASR pipeline (ASRModel), pre-computed LLM hidden states are passed directly
+and the internal LLM is not used.
+
 neutts-nano (neuphonic/neutts-nano) is a pretrained 24-layer LlamaForCausalLM
 (dim=576, ~117M params) that generates NeuCodec codes as <|speech_N|> tokens.
-Only the projector MLP (~1.2M params) is trained.
+Only the projector MLP is trained.
 
 NeuCodec uses a single FSQ codebook (levels=[4]*8, vocab=65536) at 50 tokens/sec,
 outputting 24kHz audio. Codes 0-65535 map to neutts-nano tokens <|speech_0|>..<|speech_65535|>.
@@ -30,7 +35,7 @@ NEUCODEC_VOCAB_SIZE = 65536
 NEUCODEC_SAMPLE_RATE = 24000
 
 # Special token IDs used by S2SDataCollator (above NeuCodec vocab range)
-BOS_TOKEN = NEUCODEC_VOCAB_SIZE      # 65536
+BOS_TOKEN = NEUCODEC_VOCAB_SIZE  # 65536
 EOS_TOKEN = NEUCODEC_VOCAB_SIZE + 1  # 65537
 PAD_TOKEN = NEUCODEC_VOCAB_SIZE + 2  # 65538
 TOTAL_VOCAB = NEUCODEC_VOCAB_SIZE + 3  # 65539 (for backwards compat)
@@ -44,8 +49,8 @@ class AudioHeadConfig(PretrainedConfig):
     def __init__(
         self,
         tts_model_id: str = "neuphonic/neutts-nano",
+        llm_model_id: str = "HuggingFaceTB/SmolLM3-3B",
         projector_hidden: int = 1024,
-        text_vocab_size: int = 32000,
         max_audio_tokens: int = 500,
         neucodec_model_id: str = "neuphonic/neucodec",
         temperature: float = 1.0,
@@ -53,8 +58,8 @@ class AudioHeadConfig(PretrainedConfig):
         **kwargs,
     ):
         self.tts_model_id = tts_model_id
+        self.llm_model_id = llm_model_id
         self.projector_hidden = projector_hidden
-        self.text_vocab_size = text_vocab_size
         self.max_audio_tokens = max_audio_tokens
         self.neucodec_model_id = neucodec_model_id
         self.temperature = temperature
@@ -79,11 +84,11 @@ class AudioHead(PreTrainedModel):
     """Frozen TTS backbone + trainable projector for speech generation.
 
     Loads neutts-nano (a pretrained LlamaForCausalLM that generates NeuCodec tokens)
-    and freezes it entirely. Only a small MLP projector is trained to adapt
-    text embeddings for the backbone's input space.
+    and freezes it entirely. A frozen LLM converts text to hidden states, and a
+    trainable MLP projector maps those hidden states into neutts-nano's input space.
 
-    Stage 1: text_token_ids → backbone embed_tokens → projector → backbone → speech codes
-    Stage 2 (later): LLM hidden states → projector(3072→576) → backbone → speech codes
+    Standalone training: text_token_ids → frozen LLM → hidden states → projector → backbone → speech codes
+    Pipeline inference: llm_hidden_states → projector → backbone → speech codes
     """
 
     config_class = AudioHeadConfig
@@ -110,14 +115,15 @@ class AudioHead(PreTrainedModel):
             return False
 
     def _load_backbone(self, config: AudioHeadConfig) -> None:
-        """Load the frozen TTS backbone and initialize the projector."""
+        """Load the frozen TTS backbone, frozen LLM, and initialize the projector."""
         if self._backbone_loaded:
             return
 
+        # Load frozen TTS backbone (neutts-nano)
         logger.info("Loading TTS backbone: %s", config.tts_model_id)
         self.backbone = AutoModelForCausalLM.from_pretrained(
             config.tts_model_id,
-            torch_dtype=torch.float32,
+            torch_dtype=torch.bfloat16,
         )
         self.backbone.requires_grad_(False)
         self.backbone.eval()
@@ -130,19 +136,51 @@ class AudioHead(PreTrainedModel):
         self.speech_start_id = self.tts_tokenizer.convert_tokens_to_ids(
             "<|SPEECH_GENERATION_START|>"
         )
-        self.speech_end_id = self.tts_tokenizer.convert_tokens_to_ids(
-            "<|SPEECH_GENERATION_END|>"
-        )
+        self.speech_end_id = self.tts_tokenizer.convert_tokens_to_ids("<|SPEECH_GENERATION_END|>")
 
-        # Backbone hidden size (auto-detected)
+        # Load frozen LLM for standalone training (text → hidden states).
+        # In pipeline mode (ASRModel), the duplicate is freed after creation
+        # since ASRModel provides pre-computed hidden states.
+        logger.info("Loading frozen LLM: %s", config.llm_model_id)
+        self.llm = AutoModelForCausalLM.from_pretrained(
+            config.llm_model_id,
+            torch_dtype=torch.bfloat16,
+        )
+        self.llm.requires_grad_(False)
+        self.llm.eval()
+
+        # Cache a prompt prefix so training hidden states are conditioned on
+        # conversational context (matching inference where LLM sees full prompt).
+        llm_tokenizer = AutoTokenizer.from_pretrained(config.llm_model_id, trust_remote_code=True)
+        prompt_enc = llm_tokenizer(
+            "Speak the following text aloud: ",
+            return_tensors="pt",
+            add_special_tokens=True,
+        )
+        self.register_buffer(
+            "_prompt_prefix_ids",
+            prompt_enc.input_ids,
+            persistent=False,
+        )
+        self._prompt_len = prompt_enc.input_ids.shape[1]
+
+        llm_dim = self.llm.config.hidden_size
+
+        # Auto-detect dimensions
         backbone_dim = self.backbone.config.hidden_size  # 576 for neutts-nano
 
-        # Trainable projector: 2-layer MLP (backbone_dim → hidden → backbone_dim)
+        # Trainable projector: 2-layer MLP (llm_dim → hidden → backbone_dim)
+        # Linear → RMSNorm → GELU → Linear → RMSNorm
+        # Final RMSNorm matches output scale to neutts-nano embedding norms.
+        from transformers.models.llama.modeling_llama import LlamaRMSNorm
+
         self.projector = nn.Sequential(
-            nn.Linear(backbone_dim, config.projector_hidden),
-            nn.SiLU(),
+            nn.Linear(llm_dim, config.projector_hidden),
+            LlamaRMSNorm(config.projector_hidden, eps=1e-6),
+            nn.GELU(),
             nn.Linear(config.projector_hidden, backbone_dim),
-        )
+            LlamaRMSNorm(backbone_dim, eps=1e-6),
+        ).to(torch.bfloat16)
 
         # Sampling parameters for inference
         self.temperature = config.temperature
@@ -155,12 +193,18 @@ class AudioHead(PreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        """Load AudioHead: config + projector weights from disk, backbone from HF Hub."""
+        """Load AudioHead: config + projector weights from disk/Hub, backbone from HF Hub."""
         from pathlib import Path
 
         from safetensors.torch import load_file
 
         path = Path(pretrained_model_name_or_path)
+
+        # If not a local directory, download from Hub
+        if not path.is_dir():
+            from huggingface_hub import snapshot_download
+
+            path = Path(snapshot_download(pretrained_model_name_or_path))
 
         # Load config
         config = AudioHeadConfig.from_pretrained(path)
@@ -178,10 +222,12 @@ class AudioHead(PreTrainedModel):
         return model
 
     def train(self, mode: bool = True):
-        """Override to keep backbone in eval mode (disables dropout, etc.)."""
+        """Override to keep backbone and LLM in eval mode (disables dropout, etc.)."""
         super().train(mode)
-        # Always keep backbone in eval mode regardless of parent training state
+        # Always keep frozen models in eval mode regardless of parent training state
         self.backbone.eval()
+        if self.llm is not None:
+            self.llm.eval()
         return self
 
     def _embed_tokens(self, token_ids: torch.Tensor) -> torch.Tensor:
@@ -198,8 +244,9 @@ class AudioHead(PreTrainedModel):
 
     def forward(
         self,
-        text_token_ids: torch.Tensor,
+        text_token_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        llm_hidden_states: Optional[torch.Tensor] = None,
         codec_labels: Optional[torch.Tensor] = None,
         codec_input_ids: Optional[torch.Tensor] = None,
         codec_attention_mask: Optional[torch.Tensor] = None,
@@ -208,8 +255,12 @@ class AudioHead(PreTrainedModel):
         """Forward pass for training or inference.
 
         Args:
-            text_token_ids: Text token IDs [batch, seq_len] (neutts-nano tokenizer vocab)
+            text_token_ids: Text token IDs [batch, seq_len] (LLM tokenizer vocab).
+                Run through frozen LLM to get hidden states. Mutually exclusive
+                with llm_hidden_states.
             attention_mask: Text attention mask [batch, seq_len] (1=real, 0=padding)
+            llm_hidden_states: Pre-computed LLM hidden states [batch, seq_len, llm_dim].
+                Used in pipeline mode when ASRModel provides hidden states directly.
             codec_labels: Target NeuCodec codes [batch, audio_len] (-100 for ignore)
             codec_input_ids: Teacher-forced NeuCodec codes [batch, audio_len]
             codec_attention_mask: Codec attention mask [batch, audio_len]
@@ -218,15 +269,41 @@ class AudioHead(PreTrainedModel):
         Returns:
             AudioHeadOutput with loss (training) or codes (inference).
         """
-        batch_size, text_len = text_token_ids.shape
-        device = text_token_ids.device
+        # Get LLM hidden states: either pre-computed or from frozen LLM
+        if llm_hidden_states is not None:
+            hidden_states = llm_hidden_states
+        elif text_token_ids is not None:
+            # Prepend cached prompt prefix so hidden states are conditioned on
+            # conversational context (matching inference where LLM sees full prompt).
+            batch_size = text_token_ids.shape[0]
+            device = text_token_ids.device
+            prompt = self._prompt_prefix_ids.expand(batch_size, -1).to(device)
+            full_ids = torch.cat([prompt, text_token_ids], dim=1)
 
-        # Embed text through frozen backbone embedding, then adapt via trainable projector.
-        # We use no_grad for embed_tokens since it's a lookup (no grad needed for the
-        # embedding table itself — it's frozen). Gradients flow through the projector.
-        with torch.no_grad():
-            text_emb = self._embed_tokens(text_token_ids)  # [batch, text_len, 576]
-        prefix = self.projector(text_emb)  # [batch, text_len, 576] — trainable
+            if attention_mask is not None:
+                prompt_mask = torch.ones(
+                    batch_size, self._prompt_len, device=device, dtype=attention_mask.dtype
+                )
+                full_mask = torch.cat([prompt_mask, attention_mask], dim=1)
+            else:
+                full_mask = None
+
+            with torch.no_grad():
+                llm_out = self.llm.model(
+                    input_ids=full_ids,
+                    attention_mask=full_mask,
+                )
+                # Extract hidden states for text tokens only (skip prompt prefix)
+                hidden_states = llm_out.last_hidden_state[:, self._prompt_len :]
+        else:
+            raise ValueError("Either text_token_ids or llm_hidden_states must be provided")
+
+        batch_size, text_len = hidden_states.shape[:2]
+        device = hidden_states.device
+
+        # Project LLM hidden states into neutts-nano's input space via trainable projector.
+        # Gradients flow through the projector (LLM hidden states are detached).
+        prefix = self.projector(hidden_states)  # [batch, text_len, backbone_dim]
 
         if codec_labels is None:
             # Inference: autoregressive generation
@@ -234,9 +311,7 @@ class AudioHead(PreTrainedModel):
             return AudioHeadOutput(codes=codes)
 
         # Training: teacher forcing
-        assert codec_input_ids is not None, (
-            "codec_input_ids required when codec_labels provided"
-        )
+        assert codec_input_ids is not None, "codec_input_ids required when codec_labels provided"
 
         # Map NeuCodec codes to neutts speech token IDs for embedding
         # codec_input_ids contains: BOS_TOKEN (65536), codec codes (0-65535), PAD (65538)
@@ -253,11 +328,15 @@ class AudioHead(PreTrainedModel):
         hidden = torch.cat([prefix, token_emb], dim=1)
 
         # Build 2D padding mask — backbone handles causal masking internally
-        prefix_mask = attention_mask if attention_mask is not None else torch.ones(
-            batch_size, text_len, device=device, dtype=torch.long
+        prefix_mask = (
+            attention_mask
+            if attention_mask is not None
+            else torch.ones(batch_size, text_len, device=device, dtype=torch.long)
         )
-        audio_mask = codec_attention_mask if codec_attention_mask is not None else torch.ones(
-            batch_size, audio_len, device=device, dtype=torch.long
+        audio_mask = (
+            codec_attention_mask
+            if codec_attention_mask is not None
+            else torch.ones(batch_size, audio_len, device=device, dtype=torch.long)
         )
         combined_mask = torch.cat([prefix_mask, audio_mask], dim=1)
 
@@ -345,7 +424,9 @@ class AudioHead(PreTrainedModel):
 
         return result
 
-    def _generate(self, prefix: torch.Tensor, prefix_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _generate(
+        self, prefix: torch.Tensor, prefix_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """AR generation with KV cache on frozen backbone.
 
         Args:
@@ -366,9 +447,7 @@ class AudioHead(PreTrainedModel):
         start_emb = self._embed_tokens(start_token)  # [batch, 1, 576]
         hidden = torch.cat([prefix, start_emb], dim=1)  # [batch, text_len+1, 576]
 
-        position_ids = torch.arange(
-            text_len + 1, device=device
-        ).unsqueeze(0).expand(batch_size, -1)
+        position_ids = torch.arange(text_len + 1, device=device).unsqueeze(0).expand(batch_size, -1)
 
         # Initial forward through frozen backbone
         with torch.no_grad():
@@ -385,11 +464,12 @@ class AudioHead(PreTrainedModel):
                 logits = self.backbone.lm_head(last_hidden.squeeze(1))  # [batch, vocab]
 
                 # Mask to speech tokens only
-                speech_logits = logits[:, self.speech_token_offset:
-                                       self.speech_token_offset + NEUCODEC_VOCAB_SIZE]
+                speech_logits = logits[
+                    :, self.speech_token_offset : self.speech_token_offset + NEUCODEC_VOCAB_SIZE
+                ]
 
                 # Also check speech_end token
-                end_logit = logits[:, self.speech_end_id:self.speech_end_id + 1]
+                end_logit = logits[:, self.speech_end_id : self.speech_end_id + 1]
 
                 # Combine speech + end logits for sampling
                 combined = torch.cat([speech_logits, end_logit], dim=-1)  # [batch, 65537]
@@ -418,13 +498,13 @@ class AudioHead(PreTrainedModel):
                 # For EOS items, use speech_end_id (won't matter as we'll stop)
                 next_token_id[is_eos] = self.speech_end_id
 
-                next_emb = self._embed_tokens(
-                    next_token_id.unsqueeze(1)
-                )  # [batch, 1, 576]
+                next_emb = self._embed_tokens(next_token_id.unsqueeze(1))  # [batch, 1, 576]
 
                 next_pos = torch.full(
-                    (batch_size, 1), text_len + 1 + step + 1,
-                    dtype=torch.long, device=device,
+                    (batch_size, 1),
+                    text_len + 1 + step + 1,
+                    dtype=torch.long,
+                    device=device,
                 )
 
                 outputs = self.backbone.model(
@@ -479,11 +559,12 @@ class AudioHead(PreTrainedModel):
 
     def generate_streaming(
         self,
-        text_token_ids: torch.Tensor,
+        text_token_ids: Optional[torch.Tensor] = None,
+        llm_hidden_states: Optional[torch.Tensor] = None,
         chunk_samples: int = 24000,
     ) -> Iterator[torch.Tensor]:
         """Generate audio and yield waveform chunks for streaming playback."""
-        output = self(text_token_ids)
+        output = self(text_token_ids=text_token_ids, llm_hidden_states=llm_hidden_states)
         codes = output.codes
         audios = self.decode_to_audio(codes)
 

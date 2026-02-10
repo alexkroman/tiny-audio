@@ -436,13 +436,16 @@ class FullDuplexSession:
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
                     generation_config=self.model.generation_config,
+                    output_hidden_states=self.model.audio_head is not None,
+                    return_dict_in_generate=self.model.audio_head is not None,
                 )
 
             if self._state.stop_generate:
                 return
 
             # Extract text
-            text_ids = output[:, input_ids.shape[1] :]
+            sequences = output.sequences if self.model.audio_head is not None else output
+            text_ids = sequences[:, input_ids.shape[1] :]
             text = self.model.tokenizer.decode(text_ids[0], skip_special_tokens=True)
 
             with self._state_lock:
@@ -453,12 +456,22 @@ class FullDuplexSession:
             if self._state.stop_generate:
                 return
 
-            # Generate audio
+            # Generate audio from LLM hidden states
             if self.model.audio_head is not None:
                 self._set_state(ConversationState.SPEAKING)
 
+                # Extract LLM hidden states for the generated tokens.
+                # output.hidden_states is a tuple of per-step tuples of per-layer tensors.
+                # Step 0 is the prefill (prompt) — skip it.
+                # Steps 1..N-1 each processed gen[0]..gen[N-2], giving their hidden states.
+                # Note: gen[N-1] was never processed so its hidden state is unavailable.
+                with torch.no_grad():
+                    llm_hidden = torch.cat(
+                        [step[-1] for step in output.hidden_states[1:]], dim=1
+                    )  # [batch, num_generated-1, llm_dim]
+
                 for audio_chunk in self.model.audio_head.generate_streaming(
-                    text_token_ids=text_ids,
+                    llm_hidden_states=llm_hidden,
                 ):
                     if self._state.stop_generate:
                         return
