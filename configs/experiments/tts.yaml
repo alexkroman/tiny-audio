@@ -1,0 +1,72 @@
+# @package _global_
+# LLASA-style TTS: Qwen3-0.6B with expanded xcodec2 vocabulary
+#
+# Architecture:
+#   Text + xcodec2 speech tokens → Qwen3-0.6B (all params trainable)
+#   → next-token prediction, loss on speech tokens only
+#
+# The LLM vocab is expanded with 65536 speech tokens + 8 special tokens.
+# Standard CausalLM training with label masking on the text portion.
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=tts
+
+defaults:
+  - override /data: tts_xcodec2
+
+model:
+  # Base LLM
+  llm_model_id: Qwen/Qwen3-0.6B
+  max_seq_length: 2048
+
+tts:
+  enabled: true
+
+training:
+  output_dir: ./outputs/tts
+  hub_model_id: "mazesmazes/tiny-audio-tts"
+  report_to: wandb
+  wandb_project: tiny-audio-tts
+
+  # Optimizer
+  optim: adamw_torch_fused
+  learning_rate: 5e-5
+  warmup_steps: 500
+  lr_scheduler_type: cosine
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # Batch size (0.6B model, all trainable)
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 8
+
+  # Training duration
+  num_train_epochs: 1
+  seed: 42
+
+  # Eval & save
+  eval_strategy: steps
+  eval_steps: 1000
+  save_strategy: steps
+  save_steps: 1000
+  save_total_limit: 5
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+
+  # Performance
+  group_by_length: false
+  torch_compile: true
+  bf16: true
+  tf32: true
+  gradient_checkpointing: true
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_drop_last: true
+
+  remove_unused_columns: false
+  logging_steps: 25
+  logging_first_step: true
+  disable_tqdm: false
+  push_to_hub: false

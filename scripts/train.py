@@ -61,7 +61,13 @@ SIFT_INSTRUCTIONS = {
 class DatasetLoader:
     """Loads and prepares datasets for training."""
 
-    def __init__(self, config: DictConfig, sift_enabled: bool = False, s2s_enabled: bool = False):
+    def __init__(
+        self,
+        config: DictConfig,
+        sift_enabled: bool = False,
+        s2s_enabled: bool = False,
+        tts_enabled: bool = False,
+    ):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
@@ -69,6 +75,7 @@ class DatasetLoader:
         self.num_proc = self.config.get("num_proc", 16)
         self.sift_enabled = sift_enabled
         self.s2s_enabled = s2s_enabled
+        self.tts_enabled = tts_enabled
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str):
         dataset_path = dataset_cfg.get("path")
@@ -138,8 +145,8 @@ class DatasetLoader:
                 "mode",
                 "task",
             }
-        elif self.s2s_enabled:
-            # S2S training: text + codes only (no audio needed)
+        elif self.s2s_enabled or self.tts_enabled:
+            # S2S / TTS training: text + codes only (no audio needed)
             keep_cols = {"text", "duration", "task", "codes"}
         else:
             # Standard ASR training
@@ -742,6 +749,120 @@ def train_s2s(cfg: DictConfig) -> None:
     trainer.save_model()
 
 
+def train_tts(cfg: DictConfig) -> None:
+    """LLASA-style TTS training with TRL SFTTrainer and sequence packing.
+
+    Uses prompt-completion format with packing for efficient training.
+    Loss is computed only on the completion (speech) tokens.
+    """
+    from trl import SFTConfig, SFTTrainer
+
+    from tiny_audio.tts import setup_tts_model
+
+    # Initialize wandb
+    if cfg.training.get("report_to") == "wandb":
+        wandb.init(
+            project=cfg.training.get("wandb_project", "tiny-audio-tts"),
+            config=OmegaConf.to_container(cfg, resolve=True),
+        )
+
+    model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
+    assert isinstance(model_cfg, dict)
+
+    llm_model_id = model_cfg.get("llm_model_id", "HuggingFaceTB/SmolLM2-135M")
+
+    # Setup model with expanded vocabulary
+    model, tokenizer, _ = setup_tts_model(
+        model_id=llm_model_id,
+        dtype=torch.bfloat16 if cfg.training.get("bf16") else torch.float32,
+    )
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"TTS parameters: {total_params:,} total, {trainable_params:,} trainable")
+
+    # Load datasets
+    train_dataset, val_dataset = DatasetLoader(cfg, tts_enabled=True).load()
+
+    # Pre-tokenize into input_ids + completion_mask (bypasses slow string construction)
+    # Resolve special token IDs once
+    text_start_id = tokenizer.convert_tokens_to_ids("<|TEXT_UNDERSTANDING_START|>")
+    text_end_id = tokenizer.convert_tokens_to_ids("<|TEXT_UNDERSTANDING_END|>")
+    speech_start_id = tokenizer.convert_tokens_to_ids("<|SPEECH_GENERATION_START|>")
+    speech_end_id = tokenizer.convert_tokens_to_ids("<|SPEECH_GENERATION_END|>")
+    speech_offset = tokenizer.convert_tokens_to_ids("<|s_0|>")
+    max_seq_length = cfg.model.get("max_seq_length", 2048)
+
+    def tokenize_tts_example(example):
+        text = (example.get("text") or "").strip()
+        codes = example.get("codes")
+        if codes is None:
+            return {"input_ids": [], "completion_mask": []}
+
+        # Flatten nested codes: [[c0, c1, ...]] → [c0, c1, ...]
+        if isinstance(codes, (list, tuple)) and codes and isinstance(codes[0], (list, tuple)):
+            codes = [c for sublist in codes for c in sublist]
+
+        # Tokenize text portion
+        text_token_ids = tokenizer.encode(text, add_special_tokens=False)
+
+        # Build prompt token IDs: TEXT_START + text + TEXT_END + SPEECH_START
+        prompt_ids = [text_start_id] + text_token_ids + [text_end_id, speech_start_id]
+
+        # Build completion token IDs: speech codes + SPEECH_END
+        completion_ids = [speech_offset + c for c in codes] + [speech_end_id]
+
+        input_ids = prompt_ids + completion_ids
+        input_ids = input_ids[:max_seq_length]
+
+        # completion_mask: 0 for prompt, 1 for completion
+        prompt_len = min(len(prompt_ids), len(input_ids))
+        completion_mask = [0] * prompt_len + [1] * (len(input_ids) - prompt_len)
+
+        return {"input_ids": input_ids, "completion_mask": completion_mask}
+
+    train_dataset = train_dataset.map(
+        tokenize_tts_example, remove_columns=train_dataset.column_names
+    )
+    if val_dataset is not None:
+        val_dataset = val_dataset.map(tokenize_tts_example, remove_columns=val_dataset.column_names)
+
+    # SFTConfig: extends TrainingArguments with packing + max_seq_length
+    training_config = OmegaConf.to_container(cfg.training, resolve=True)
+    assert isinstance(training_config, dict)
+    valid_fields = {f.name for f in fields(SFTConfig)}
+    valid_args = {k: v for k, v in training_config.items() if k in valid_fields}
+    valid_args["packing"] = True
+    valid_args["max_seq_length"] = cfg.model.get("max_seq_length", 2048)
+
+    sft_config = SFTConfig(**valid_args)
+
+    # Callbacks
+    callbacks = []
+    if cfg.early_stopping.patience:
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=cfg.early_stopping.patience,
+                early_stopping_threshold=cfg.early_stopping.threshold,
+            )
+        )
+
+    trainer = SFTTrainer(
+        model=model,
+        args=sft_config,
+        processing_class=tokenizer,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        callbacks=callbacks,
+    )
+
+    trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
+    trainer.save_model()
+
+    # Save tokenizer alongside model (needed for inference with expanded vocab)
+    tokenizer.save_pretrained(sft_config.output_dir)
+
+
 def train_asr(cfg: DictConfig) -> None:
     """Standard ASR/SIFT training with full ASRModel."""
     # Check HF_TOKEN is set if pushing to hub
@@ -868,8 +989,11 @@ def train_asr(cfg: DictConfig) -> None:
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
+    tts_mode = cfg.get("tts", {}).get("enabled", False)
     s2s_mode = cfg.get("s2s", {}).get("enabled", False)
-    if s2s_mode:
+    if tts_mode:
+        train_tts(cfg)
+    elif s2s_mode:
         train_s2s(cfg)
     else:
         train_asr(cfg)

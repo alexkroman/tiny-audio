@@ -1,0 +1,16 @@
+# TTS training dataset: Emilia English with pre-computed xcodec2 codes
+# Text + xcodec2 codes only (no audio processing needed)
+
+sample_rate: 16000  # Not used for TTS but required by DatasetLoader
+dataset_cache_dir: null
+max_eval_samples: 500
+num_proc: 8
+
+datasets:
+  - path: minato-ryan/emilia-en-xcodec2
+    train_splits:
+      - "train"
+    eval_splits:
+      - "train[:1%]"
+    text_column: text
+    codes_column: ids  # nested [[c0, c1, ...]], flattened in collator
