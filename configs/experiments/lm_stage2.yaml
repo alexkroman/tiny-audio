@@ -1,32 +1,33 @@
 # @package _global_
-# LLASA-style TTS: Qwen3-0.6B with expanded xcodec2 vocabulary
+# LM-Stage2: Cross-modal instruction fine-tuning (SpeechGPT-style)
 #
-# Architecture:
-#   Text + xcodec2 speech tokens → Qwen3-0.6B (all params trainable)
-#   → next-token prediction, loss on speech tokens only
+# Produces TWO training samples per data point:
+#   - Transcribe: speech codes → text (ASR direction)
+#   - Speak: text → speech codes (TTS direction)
+# Loss is only on the output side (completion_mask masks the input).
 #
-# The LLM vocab is expanded with 65536 speech tokens + 8 special tokens.
-# Standard CausalLM training with label masking on the text portion.
+# Uses emilia-en-xcodec2 (pre-computed xcodec2 codes).
 #
 # Usage:
-#   poetry run python scripts/train.py +experiments=tts
+#   poetry run python scripts/train.py +experiments=lm_stage2 tts.stage1_checkpoint=./outputs/lm-stage1
 
 defaults:
   - override /data: tts_xcodec2
 
 model:
-  # Base LLM
+  # Base LLM (used if no stage1_checkpoint provided)
   llm_model_id: Qwen/Qwen3-0.6B
   max_seq_length: 2048
 
 tts:
   enabled: true
+  stage: 2
+  stage1_checkpoint: null  # Override on CLI: tts.stage1_checkpoint=./outputs/lm-stage1
 
 training:
-  output_dir: ./outputs/tts
-  hub_model_id: "mazesmazes/tiny-audio-tts"
+  output_dir: ./outputs/lm-stage2
   report_to: wandb
-  wandb_project: tiny-audio-tts
+  wandb_project: tiny-audio-lm-stage2
 
   # Optimizer
   optim: adamw_torch_fused
@@ -36,10 +37,11 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
 
-  # Batch size (0.6B model, all trainable)
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 8
-  gradient_accumulation_steps: 8
+  # Batch size (135M model, all trainable)
+  per_device_train_batch_size: 24
+  per_device_eval_batch_size: 24
+  gradient_accumulation_steps: 1
+  auto_find_batch_size: true
 
   # Training duration
   num_train_epochs: 1
@@ -60,11 +62,12 @@ training:
   torch_compile: true
   bf16: true
   tf32: true
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_drop_last: true
 
+  use_liger: true
   remove_unused_columns: false
   logging_steps: 25
   logging_first_step: true

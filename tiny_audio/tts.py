@@ -1,7 +1,7 @@
 """LLASA-style TTS: a single LLM with expanded vocabulary for text-to-speech.
 
 Architecture:
-  Text tokens + xcodec2 speech tokens → SmolLM2-135M (all params trainable)
+  Text tokens + xcodec2 speech tokens → SmolLM3-3B (all params trainable)
   → next-token prediction, loss on speech tokens only
 
 The LLM's vocabulary is expanded with 65536 xcodec2 speech tokens (<|s_0|>..<|s_65535|>)
@@ -11,11 +11,14 @@ with labels masked to -100 for the text portion.
 Dataset: minato-ryan/emilia-en-xcodec2 (17.3M samples with pre-computed xcodec2 codes).
 """
 
+import importlib
 import logging
 from typing import Optional
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+_FLASH_ATTN_AVAILABLE = importlib.util.find_spec("flash_attn") is not None
 
 logger = logging.getLogger(__name__)
 
@@ -40,34 +43,51 @@ SPEECH_TOKENS = [f"<|s_{i}|>" for i in range(XCODEC2_VOCAB_SIZE)]
 
 
 def setup_tts_model(
-    model_id: str = "HuggingFaceTB/SmolLM2-135M",
+    model_id: str = "HuggingFaceTB/SmolLM3-3B",
     dtype: torch.dtype = torch.bfloat16,
+    checkpoint_path: Optional[str] = None,
 ) -> tuple:
     """Load an LLM and expand its vocabulary with xcodec2 speech tokens.
 
     Args:
         model_id: HuggingFace model ID for the base LLM.
         dtype: Model dtype.
+        checkpoint_path: If provided, load model+tokenizer from this checkpoint
+            (already has expanded vocab from Stage1 training). Skips vocab expansion.
 
     Returns:
         (model, tokenizer, token_ids) where token_ids is a dict mapping
         special token names to their IDs.
     """
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    if checkpoint_path:
+        # Load from a previous training checkpoint (e.g. Stage1 → Stage2)
+        # Tokenizer already has expanded vocab, model already has resized embeddings
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            checkpoint_path,
+            dtype=dtype,
+            attn_implementation="flash_attention_2" if _FLASH_ATTN_AVAILABLE else "eager",
+            trust_remote_code=True,
+        )
+        logger.info(f"Loaded TTS model from checkpoint: {checkpoint_path}")
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-    # Add special tokens + speech tokens
-    num_added = tokenizer.add_tokens(SPECIAL_TOKENS + SPEECH_TOKENS)
-    logger.info(f"Added {num_added} tokens to tokenizer (8 special + {XCODEC2_VOCAB_SIZE} speech)")
+        # Add special tokens + speech tokens
+        num_added = tokenizer.add_tokens(SPECIAL_TOKENS + SPEECH_TOKENS)
+        logger.info(
+            f"Added {num_added} tokens to tokenizer (8 special + {XCODEC2_VOCAB_SIZE} speech)"
+        )
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        dtype=dtype,
-        attn_implementation="sdpa",
-        trust_remote_code=True,
-    )
-    model.resize_token_embeddings(len(tokenizer))
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            dtype=dtype,
+            attn_implementation="flash_attention_2" if _FLASH_ATTN_AVAILABLE else "eager",
+            trust_remote_code=True,
+        )
+        model.resize_token_embeddings(len(tokenizer))
 
     # Build token_ids dict for quick lookup
     token_ids = {tok: tokenizer.convert_tokens_to_ids(tok) for tok in SPECIAL_TOKENS}

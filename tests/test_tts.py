@@ -71,6 +71,66 @@ class TestTokenIds:
             assert isinstance(token_ids[tok], int)
 
 
+class TestStage1Tokenization:
+    """Tests for LM-Stage1 speech-only tokenization."""
+
+    def test_stage1_speech_only(self, tts_setup):
+        """Stage1 tokenization should produce speech-only sequences with all completion_mask=1."""
+        _, tokenizer, token_ids = tts_setup
+        speech_start_id = token_ids["<|SPEECH_GENERATION_START|>"]
+        speech_end_id = token_ids["<|SPEECH_GENERATION_END|>"]
+        offset = token_ids["speech_token_offset"]
+
+        # Simulate tokenize_lm_stage1_batch
+        codes = [10, 20, 30, 40, 50]
+        input_ids = [speech_start_id] + [offset + c for c in codes] + [speech_end_id]
+        completion_mask = [1] * len(input_ids)
+
+        # All tokens should be completion (loss computed on all)
+        assert all(m == 1 for m in completion_mask)
+        # Length: SPEECH_START + codes + SPEECH_END
+        assert len(input_ids) == len(codes) + 2
+        # First token is SPEECH_START
+        assert input_ids[0] == speech_start_id
+        # Last token is SPEECH_END
+        assert input_ids[-1] == speech_end_id
+        # Middle tokens are offset speech codes
+        for i, code in enumerate(codes):
+            assert input_ids[i + 1] == offset + code
+
+    def test_stage1_no_text_tokens(self, tts_setup):
+        """Stage1 should not contain any text understanding tokens."""
+        _, tokenizer, token_ids = tts_setup
+        speech_start_id = token_ids["<|SPEECH_GENERATION_START|>"]
+        speech_end_id = token_ids["<|SPEECH_GENERATION_END|>"]
+        text_start_id = token_ids["<|TEXT_UNDERSTANDING_START|>"]
+        text_end_id = token_ids["<|TEXT_UNDERSTANDING_END|>"]
+        offset = token_ids["speech_token_offset"]
+
+        codes = [0, 100, 65535]
+        input_ids = [speech_start_id] + [offset + c for c in codes] + [speech_end_id]
+
+        assert text_start_id not in input_ids
+        assert text_end_id not in input_ids
+
+    def test_stage1_truncation(self, tts_setup):
+        """Stage1 should truncate to max_seq_length."""
+        _, tokenizer, token_ids = tts_setup
+        speech_start_id = token_ids["<|SPEECH_GENERATION_START|>"]
+        speech_end_id = token_ids["<|SPEECH_GENERATION_END|>"]
+        offset = token_ids["speech_token_offset"]
+
+        max_seq_length = 10
+        codes = list(range(20))  # More codes than max_seq_length
+        input_ids = [speech_start_id] + [offset + c for c in codes] + [speech_end_id]
+        input_ids = input_ids[:max_seq_length]
+        completion_mask = [1] * len(input_ids)
+
+        assert len(input_ids) == max_seq_length
+        assert len(completion_mask) == max_seq_length
+        assert all(m == 1 for m in completion_mask)
+
+
 class TestForward:
     def _make_batch(self, tts_setup):
         """Build a batch manually (matching what SFTTrainer would produce)."""

@@ -1,0 +1,70 @@
+# @package _global_
+# LM-Stage1: Speech-only language modeling on xcodec2 codes
+#
+# Teaches the model the statistical structure of speech by training on
+# speech codes only (no text). Following SpeechGPT's two-stage approach.
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=lm_stage1
+
+defaults:
+  - override /data: tts_xcodec2
+
+model:
+  # Base LLM
+  llm_model_id: Qwen/Qwen3-0.6B
+  max_seq_length: 2048
+
+tts:
+  enabled: true
+  stage: 1
+
+training:
+  output_dir: ./outputs/lm-stage1
+  report_to: wandb
+  wandb_project: tiny-audio-lm-stage1
+
+  # Optimizer
+  optim: adamw_torch_fused
+  learning_rate: 5e-5
+  warmup_steps: 500
+  lr_scheduler_type: cosine
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # Batch size (135M model, all trainable)
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 8
+  auto_find_batch_size: true
+
+  # Training duration
+  num_train_epochs: 1
+  seed: 42
+
+  # Eval & save
+  eval_strategy: steps
+  eval_steps: 1000
+  save_strategy: steps
+  save_steps: 1000
+  save_total_limit: 5
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+
+  # Performance
+  group_by_length: false
+  torch_compile: true
+  bf16: true
+  tf32: true
+  gradient_checkpointing: false
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_drop_last: true
+
+  use_liger: true
+  remove_unused_columns: false
+  logging_steps: 25
+  logging_first_step: true
+  disable_tqdm: false
+  push_to_hub: false

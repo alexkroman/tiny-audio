@@ -19,28 +19,34 @@ from typing import Any
 os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
 # Use soundfile for audio decoding instead of torchaudio (avoids compatibility issues)
 os.environ.setdefault("HF_DATASETS_AUDIO_DECODER", "soundfile")
+# Allow torch.compile to capture .item() calls (used by TRL packing internals)
+os.environ.setdefault("TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS", "1")
 
-import hydra
-import torch
-import wandb
-from datasets import (
+import logging
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+import hydra  # noqa: E402
+import torch  # noqa: E402
+import wandb  # noqa: E402
+from datasets import (  # noqa: E402
     Audio,
     Dataset,
     concatenate_datasets,
     load_dataset,
 )
-from omegaconf import DictConfig, OmegaConf
-from tqdm.auto import tqdm
-from transformers import (
+from omegaconf import DictConfig, OmegaConf  # noqa: E402
+from tqdm.auto import tqdm  # noqa: E402
+from transformers import (  # noqa: E402
     EarlyStoppingCallback,
     Trainer,
     TrainerCallback,
     TrainingArguments,
 )
-from trl.experimental.utils import DataCollatorForChatML
+from trl.experimental.utils import DataCollatorForChatML  # noqa: E402
 
-from tiny_audio.asr_config import ASRConfig
-from tiny_audio.asr_modeling import ASRModel
+from tiny_audio.asr_config import ASRConfig  # noqa: E402
+from tiny_audio.asr_modeling import ASRModel  # noqa: E402
 
 # Prompts for ASR training (transcription task)
 # Target: lowercased verbatim transcription of speech
@@ -752,80 +758,151 @@ def train_s2s(cfg: DictConfig) -> None:
 def train_tts(cfg: DictConfig) -> None:
     """LLASA-style TTS training with TRL SFTTrainer and sequence packing.
 
+    Supports two stages (following SpeechGPT):
+    - Stage 1: Speech-only LM on xcodec2 codes (no text). Learns speech structure.
+    - Stage 2: Text→speech training. Loads Stage1 checkpoint for fine-tuning.
+
     Uses prompt-completion format with packing for efficient training.
-    Loss is computed only on the completion (speech) tokens.
     """
     from trl import SFTConfig, SFTTrainer
 
     from tiny_audio.tts import setup_tts_model
 
+    stage = cfg.tts.get("stage", 2)
+
     # Initialize wandb
     if cfg.training.get("report_to") == "wandb":
         wandb.init(
-            project=cfg.training.get("wandb_project", "tiny-audio-tts"),
+            project=cfg.training.get("wandb_project", f"tiny-audio-lm-stage{stage}"),
             config=OmegaConf.to_container(cfg, resolve=True),
         )
 
     model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_cfg, dict)
 
-    llm_model_id = model_cfg.get("llm_model_id", "HuggingFaceTB/SmolLM2-135M")
+    llm_model_id = model_cfg.get("llm_model_id", "HuggingFaceTB/SmolLM3-3B")
+    stage1_checkpoint = cfg.tts.get("stage1_checkpoint")
 
     # Setup model with expanded vocabulary
     model, tokenizer, _ = setup_tts_model(
         model_id=llm_model_id,
         dtype=torch.bfloat16 if cfg.training.get("bf16") else torch.float32,
+        checkpoint_path=stage1_checkpoint,
     )
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"TTS parameters: {total_params:,} total, {trainable_params:,} trainable")
+    print(f"TTS Stage {stage} parameters: {total_params:,} total, {trainable_params:,} trainable")
+    if stage1_checkpoint:
+        print(f"  Loaded Stage1 checkpoint: {stage1_checkpoint}")
 
     # Load datasets
     train_dataset, val_dataset = DatasetLoader(cfg, tts_enabled=True).load()
 
-    # Pre-tokenize into input_ids + completion_mask (bypasses slow string construction)
-    # Resolve special token IDs once
-    text_start_id = tokenizer.convert_tokens_to_ids("<|TEXT_UNDERSTANDING_START|>")
-    text_end_id = tokenizer.convert_tokens_to_ids("<|TEXT_UNDERSTANDING_END|>")
+    # Token IDs for tokenization
     speech_start_id = tokenizer.convert_tokens_to_ids("<|SPEECH_GENERATION_START|>")
     speech_end_id = tokenizer.convert_tokens_to_ids("<|SPEECH_GENERATION_END|>")
     speech_offset = tokenizer.convert_tokens_to_ids("<|s_0|>")
     max_seq_length = cfg.model.get("max_seq_length", 2048)
 
-    def tokenize_tts_example(example):
-        text = (example.get("text") or "").strip()
-        codes = example.get("codes")
-        if codes is None:
-            return {"input_ids": [], "completion_mask": []}
+    if stage == 1:
+        # Stage 1: Speech-only language modeling — no text, just speech codes
+        def tokenize_lm_stage1_batch(batch):
+            all_codes = batch["codes"]
+            all_input_ids = []
+            all_completion_mask = []
 
-        # Flatten nested codes: [[c0, c1, ...]] → [c0, c1, ...]
-        if isinstance(codes, (list, tuple)) and codes and isinstance(codes[0], (list, tuple)):
-            codes = [c for sublist in codes for c in sublist]
+            for codes in all_codes:
+                if codes is None:
+                    all_input_ids.append([])
+                    all_completion_mask.append([])
+                    continue
 
-        # Tokenize text portion
-        text_token_ids = tokenizer.encode(text, add_special_tokens=False)
+                # Flatten nested codes: [[c0, c1, ...]] → [c0, c1, ...]
+                if isinstance(codes[0], (list, tuple)):
+                    codes = [c for sublist in codes for c in sublist]
 
-        # Build prompt token IDs: TEXT_START + text + TEXT_END + SPEECH_START
-        prompt_ids = [text_start_id] + text_token_ids + [text_end_id, speech_start_id]
+                input_ids = [speech_start_id] + [speech_offset + c for c in codes] + [speech_end_id]
+                input_ids = input_ids[:max_seq_length]
+                completion_mask = [1] * len(input_ids)
 
-        # Build completion token IDs: speech codes + SPEECH_END
-        completion_ids = [speech_offset + c for c in codes] + [speech_end_id]
+                all_input_ids.append(input_ids)
+                all_completion_mask.append(completion_mask)
 
-        input_ids = prompt_ids + completion_ids
-        input_ids = input_ids[:max_seq_length]
+            return {"input_ids": all_input_ids, "completion_mask": all_completion_mask}
 
-        # completion_mask: 0 for prompt, 1 for completion
-        prompt_len = min(len(prompt_ids), len(input_ids))
-        completion_mask = [0] * prompt_len + [1] * (len(input_ids) - prompt_len)
+        tokenize_fn = tokenize_lm_stage1_batch
+    else:
+        # Stage 2: Cross-modal instruction fine-tuning (SpeechGPT-style)
+        # Produces TWO samples per data point:
+        #   - Transcribe: <speech_start> codes <speech_end> <text_start> text <text_end>
+        #   - Speak:      <text_start> text <text_end> <speech_start> codes <speech_end>
+        # Loss is only on the output (completion) side.
+        text_start_id = tokenizer.convert_tokens_to_ids("<|TEXT_UNDERSTANDING_START|>")
+        text_end_id = tokenizer.convert_tokens_to_ids("<|TEXT_UNDERSTANDING_END|>")
 
-        return {"input_ids": input_ids, "completion_mask": completion_mask}
+        def tokenize_cross_modal_batch(batch):
+            texts = [t.strip() if t else "" for t in batch["text"]]
+            all_codes = batch["codes"]
 
+            # Batch-tokenize all texts at once (much faster than one-by-one)
+            encoded = tokenizer(texts, add_special_tokens=False)["input_ids"]
+
+            all_input_ids = []
+            all_completion_mask = []
+
+            for text_token_ids, codes in zip(encoded, all_codes):
+                if codes is None:
+                    continue
+
+                # Flatten nested codes: [[c0, c1, ...]] → [c0, c1, ...]
+                if isinstance(codes[0], (list, tuple)):
+                    codes = [c for sublist in codes for c in sublist]
+
+                speech_ids = [speech_offset + c for c in codes]
+
+                # --- Transcribe direction: speech → text ---
+                transcribe_prompt = [speech_start_id] + speech_ids + [speech_end_id, text_start_id]
+                transcribe_completion = text_token_ids + [text_end_id]
+                transcribe_seq = (transcribe_prompt + transcribe_completion)[:max_seq_length]
+                t_prompt_len = min(len(transcribe_prompt), len(transcribe_seq))
+                transcribe_mask = [0] * t_prompt_len + [1] * (len(transcribe_seq) - t_prompt_len)
+
+                all_input_ids.append(transcribe_seq)
+                all_completion_mask.append(transcribe_mask)
+
+                # --- Speak direction: text → speech ---
+                speak_prompt = [text_start_id] + text_token_ids + [text_end_id, speech_start_id]
+                speak_completion = speech_ids + [speech_end_id]
+                speak_seq = (speak_prompt + speak_completion)[:max_seq_length]
+                s_prompt_len = min(len(speak_prompt), len(speak_seq))
+                speak_mask = [0] * s_prompt_len + [1] * (len(speak_seq) - s_prompt_len)
+
+                all_input_ids.append(speak_seq)
+                all_completion_mask.append(speak_mask)
+
+            return {"input_ids": all_input_ids, "completion_mask": all_completion_mask}
+
+        tokenize_fn = tokenize_cross_modal_batch
+
+    # writer_batch_size flushes Arrow batches to disk to bound memory on large datasets
     train_dataset = train_dataset.map(
-        tokenize_tts_example, remove_columns=train_dataset.column_names
+        tokenize_fn,
+        batched=True,
+        batch_size=1000,
+        remove_columns=train_dataset.column_names,
+        num_proc=4,
+        writer_batch_size=1000,
     )
     if val_dataset is not None:
-        val_dataset = val_dataset.map(tokenize_tts_example, remove_columns=val_dataset.column_names)
+        val_dataset = val_dataset.map(
+            tokenize_fn,
+            batched=True,
+            batch_size=1000,
+            remove_columns=val_dataset.column_names,
+            num_proc=4,
+            writer_batch_size=1000,
+        )
 
     # SFTConfig: extends TrainingArguments with packing + max_seq_length
     training_config = OmegaConf.to_container(cfg.training, resolve=True)
@@ -833,7 +910,7 @@ def train_tts(cfg: DictConfig) -> None:
     valid_fields = {f.name for f in fields(SFTConfig)}
     valid_args = {k: v for k, v in training_config.items() if k in valid_fields}
     valid_args["packing"] = True
-    valid_args["max_seq_length"] = cfg.model.get("max_seq_length", 2048)
+    valid_args["max_length"] = cfg.model.get("max_seq_length", 2048)
 
     sft_config = SFTConfig(**valid_args)
 

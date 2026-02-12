@@ -202,6 +202,12 @@ def install_dependencies(conn: Connection) -> None:
         # Install cusparseLt library required by torch (may already be satisfied)
         python3 -m pip install --user nvidia-cusparselt-cu12 2>&1 | grep -v "already satisfied" || true
 
+        # Install flash-attn (requires torch + CUDA, builds from source)
+        python3 -m pip install --user flash-attn --no-build-isolation 2>&1 | grep -v "already satisfied" || true
+
+        # Install liger-kernel (fused cross-entropy for large vocab)
+        python3 -m pip install --user liger-kernel 2>&1 | grep -v "already satisfied" || true
+
         # Fix torchvision version mismatch if present (torch 2.8 needs torchvision 0.23)
         python3 -m pip uninstall torchvision -y 2>/dev/null || true
         python3 -m pip install --user torchvision~=0.23.0 --index-url=https://download.pytorch.org/whl/cu128 2>&1 | grep -v "already satisfied" || true
