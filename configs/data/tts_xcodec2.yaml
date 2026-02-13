@@ -9,7 +9,7 @@ num_proc: 8
 datasets:
   - path: minato-ryan/emilia-en-xcodec2
     train_splits:
-      - "train[:20%]"
+      - "train"
     eval_splits:
       - "train[:1%]"
     text_column: text

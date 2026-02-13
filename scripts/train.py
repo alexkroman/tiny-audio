@@ -133,6 +133,20 @@ class DatasetLoader:
         if codes_column and codes_column in ds.column_names:
             col_map["codes"] = codes_column
 
+        # Map Stage 3 columns (chain-of-modality instruction fine-tuning)
+        input_codes_column = dataset_cfg.get("input_codes_column")
+        if input_codes_column and input_codes_column in ds.column_names:
+            col_map["input_codes"] = input_codes_column
+        output_codes_column = dataset_cfg.get("output_codes_column")
+        if output_codes_column and output_codes_column in ds.column_names:
+            col_map["output_codes"] = output_codes_column
+        input_text_column = dataset_cfg.get("input_text_column")
+        if input_text_column and input_text_column in ds.column_names:
+            col_map["instruction"] = input_text_column
+        input_field_column = dataset_cfg.get("input_field_column")
+        if input_field_column and input_field_column in ds.column_names:
+            col_map["input_field"] = input_field_column
+
         for target, source in col_map.items():
             if source != target and source in ds.column_names:
                 if target in ds.column_names:
@@ -153,7 +167,17 @@ class DatasetLoader:
             }
         elif self.s2s_enabled or self.tts_enabled:
             # S2S / TTS training: text + codes only (no audio needed)
-            keep_cols = {"text", "duration", "task", "codes"}
+            # Stage 3 also needs input_codes, output_codes, instruction, input_field
+            keep_cols = {
+                "text",
+                "duration",
+                "task",
+                "codes",
+                "input_codes",
+                "output_codes",
+                "instruction",
+                "input_field",
+            }
         else:
             # Standard ASR training
             keep_cols = {"audio", "text", "duration", "task"}
@@ -766,7 +790,7 @@ def train_tts(cfg: DictConfig) -> None:
     """
     from trl import SFTConfig, SFTTrainer
 
-    from tiny_audio.tts import setup_tts_model
+    from tiny_audio.lm import setup_tts_model
 
     stage = cfg.tts.get("stage", 2)
 
@@ -783,13 +807,11 @@ def train_tts(cfg: DictConfig) -> None:
     llm_model_id = model_cfg.get("llm_model_id", "HuggingFaceTB/SmolLM3-3B")
     stage1_checkpoint = cfg.tts.get("stage1_checkpoint")
 
-    # Setup model with expanded vocabulary
     model, tokenizer, _ = setup_tts_model(
         model_id=llm_model_id,
         dtype=torch.bfloat16 if cfg.training.get("bf16") else torch.float32,
         checkpoint_path=stage1_checkpoint,
     )
-
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"TTS Stage {stage} parameters: {total_params:,} total, {trainable_params:,} trainable")
@@ -832,7 +854,7 @@ def train_tts(cfg: DictConfig) -> None:
             return {"input_ids": all_input_ids, "completion_mask": all_completion_mask}
 
         tokenize_fn = tokenize_lm_stage1_batch
-    else:
+    elif stage == 2:
         # Stage 2: Cross-modal instruction fine-tuning (SpeechGPT-style)
         # Produces TWO samples per data point:
         #   - Transcribe: <speech_start> codes <speech_end> <text_start> text <text_end>
@@ -884,24 +906,118 @@ def train_tts(cfg: DictConfig) -> None:
             return {"input_ids": all_input_ids, "completion_mask": all_completion_mask}
 
         tokenize_fn = tokenize_cross_modal_batch
+    elif stage == 3:
+        # Stage 3: Chain-of-modality instruction fine-tuning (SpeechGPT-style)
+        # Produces FOUR samples per data point:
+        #   1. Speech→Speech: spoken instruction → spoken response
+        #   2. Speech→Text:   spoken instruction → text response
+        #   3. Text→Speech:   text instruction → spoken response
+        #   4. Text→Text:     text instruction → text response
+        # Loss is only on the output (completion) side.
+        text_start_id = tokenizer.convert_tokens_to_ids("<|TEXT_UNDERSTANDING_START|>")
+        text_end_id = tokenizer.convert_tokens_to_ids("<|TEXT_UNDERSTANDING_END|>")
 
-    # writer_batch_size flushes Arrow batches to disk to bound memory on large datasets
+        def _flatten_codes(codes):
+            """Flatten nested codes: [[c0, c1, ...]] → [c0, c1, ...]."""
+            if codes and isinstance(codes[0], (list, tuple)):
+                return [c for sublist in codes for c in sublist]
+            return codes
+
+        def tokenize_chain_of_modality_batch(batch):
+            # Output text (response)
+            output_texts = [t.strip() if t else "" for t in batch["text"]]
+            # Input text: instruction + input field
+            instructions = [t.strip() if t else "" for t in batch["instruction"]]
+            input_fields = [
+                t.strip() if t else "" for t in batch.get("input_field", [""] * len(output_texts))
+            ]
+            input_texts = [
+                f"{inst}\n{inp}".strip() if inp else inst
+                for inst, inp in zip(instructions, input_fields)
+            ]
+
+            all_input_codes = batch["input_codes"]
+            all_output_codes = batch["output_codes"]
+
+            # Batch-tokenize all texts at once
+            encoded_inputs = tokenizer(input_texts, add_special_tokens=False)["input_ids"]
+            encoded_outputs = tokenizer(output_texts, add_special_tokens=False)["input_ids"]
+
+            all_input_ids = []
+            all_completion_mask = []
+
+            for input_text_ids, output_text_ids, in_codes, out_codes in zip(
+                encoded_inputs, encoded_outputs, all_input_codes, all_output_codes
+            ):
+                if in_codes is None or out_codes is None:
+                    continue
+
+                in_codes = _flatten_codes(in_codes)
+                out_codes = _flatten_codes(out_codes)
+                in_speech_ids = [speech_offset + c for c in in_codes]
+                out_speech_ids = [speech_offset + c for c in out_codes]
+
+                # 1. Speech→Speech: spoken instruction → spoken response
+                s2s_prompt = [speech_start_id] + in_speech_ids + [speech_end_id, speech_start_id]
+                s2s_completion = out_speech_ids + [speech_end_id]
+                s2s_seq = (s2s_prompt + s2s_completion)[:max_seq_length]
+                s2s_plen = min(len(s2s_prompt), len(s2s_seq))
+                all_input_ids.append(s2s_seq)
+                all_completion_mask.append([0] * s2s_plen + [1] * (len(s2s_seq) - s2s_plen))
+
+                # 2. Speech→Text: spoken instruction → text response
+                s2t_prompt = [speech_start_id] + in_speech_ids + [speech_end_id, text_start_id]
+                s2t_completion = output_text_ids + [text_end_id]
+                s2t_seq = (s2t_prompt + s2t_completion)[:max_seq_length]
+                s2t_plen = min(len(s2t_prompt), len(s2t_seq))
+                all_input_ids.append(s2t_seq)
+                all_completion_mask.append([0] * s2t_plen + [1] * (len(s2t_seq) - s2t_plen))
+
+                # 3. Text→Speech: text instruction → spoken response
+                t2s_prompt = [text_start_id] + input_text_ids + [text_end_id, speech_start_id]
+                t2s_completion = out_speech_ids + [speech_end_id]
+                t2s_seq = (t2s_prompt + t2s_completion)[:max_seq_length]
+                t2s_plen = min(len(t2s_prompt), len(t2s_seq))
+                all_input_ids.append(t2s_seq)
+                all_completion_mask.append([0] * t2s_plen + [1] * (len(t2s_seq) - t2s_plen))
+
+                # 4. Text→Text: text instruction → text response
+                t2t_prompt = [text_start_id] + input_text_ids + [text_end_id, text_start_id]
+                t2t_completion = output_text_ids + [text_end_id]
+                t2t_seq = (t2t_prompt + t2t_completion)[:max_seq_length]
+                t2t_plen = min(len(t2t_prompt), len(t2t_seq))
+                all_input_ids.append(t2t_seq)
+                all_completion_mask.append([0] * t2t_plen + [1] * (len(t2t_seq) - t2t_plen))
+
+            return {"input_ids": all_input_ids, "completion_mask": all_completion_mask}
+
+        tokenize_fn = tokenize_chain_of_modality_batch
+    else:
+        raise ValueError(f"Unknown TTS stage: {stage}. Supported: 1, 2, 3")
+
+    # Compute max_steps from dataset size before converting to iterable
+    num_epochs = cfg.training.get("num_train_epochs", 1)
+    batch_size = cfg.training.get("per_device_train_batch_size", 8)
+    grad_accum = cfg.training.get("gradient_accumulation_steps", 1)
+    num_gpus = max(1, torch.cuda.device_count())
+    effective_batch = batch_size * grad_accum * num_gpus
+    max_steps = (len(train_dataset) * num_epochs + effective_batch - 1) // effective_batch
+    print(
+        f"Dataset size: {len(train_dataset):,} samples, effective batch: {effective_batch}, max_steps: {max_steps:,}"
+    )
+
+    # Convert to IterableDataset so .map() is lazy (zero memory).
+    # Tokenization happens on-the-fly during training instead of materializing a new Arrow table.
+    train_columns = train_dataset.column_names
+    train_dataset = train_dataset.to_iterable_dataset(num_shards=64)
     train_dataset = train_dataset.map(
-        tokenize_fn,
-        batched=True,
-        batch_size=1000,
-        remove_columns=train_dataset.column_names,
-        num_proc=4,
-        writer_batch_size=1000,
+        tokenize_fn, batched=True, batch_size=1000, remove_columns=train_columns
     )
     if val_dataset is not None:
+        val_columns = val_dataset.column_names
+        val_dataset = val_dataset.to_iterable_dataset(num_shards=16)
         val_dataset = val_dataset.map(
-            tokenize_fn,
-            batched=True,
-            batch_size=1000,
-            remove_columns=val_dataset.column_names,
-            num_proc=4,
-            writer_batch_size=1000,
+            tokenize_fn, batched=True, batch_size=1000, remove_columns=val_columns
         )
 
     # SFTConfig: extends TrainingArguments with packing + max_seq_length
@@ -910,6 +1026,7 @@ def train_tts(cfg: DictConfig) -> None:
     valid_fields = {f.name for f in fields(SFTConfig)}
     valid_args = {k: v for k, v in training_config.items() if k in valid_fields}
     valid_args["packing"] = True
+    valid_args["max_steps"] = max_steps
     valid_args["max_length"] = cfg.model.get("max_seq_length", 2048)
 
     sft_config = SFTConfig(**valid_args)
@@ -934,6 +1051,7 @@ def train_tts(cfg: DictConfig) -> None:
     )
 
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
+
     trainer.save_model()
 
     # Save tokenizer alongside model (needed for inference with expanded vocab)

@@ -21,24 +21,28 @@ tts:
 
 training:
   output_dir: ./outputs/lm-stage1
+  hub_model_id: "mazesmazes/tiny-audio-lm-stage1"
   report_to: wandb
   wandb_project: tiny-audio-lm-stage1
 
   # Optimizer
   optim: adamw_torch_fused
-  learning_rate: 5e-5
-  warmup_steps: 500
-  lr_scheduler_type: cosine
+  adam_beta2: 0.95
+  learning_rate: 1e-4
+  warmup_steps: 100
+  lr_scheduler_type: polynomial
+  lr_scheduler_kwargs:
+    power: 0.5
   weight_decay: 0.01
   max_grad_norm: 1.0
 
   # Batch size (135M model, all trainable)
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 8
-  gradient_accumulation_steps: 8
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 4
   auto_find_batch_size: true
 
-  # Training duration
+  # Training duration (max_steps computed from dataset size in train.py)
   num_train_epochs: 1
   seed: 42
 
@@ -54,17 +58,17 @@ training:
 
   # Performance
   group_by_length: false
-  torch_compile: true
   bf16: true
   tf32: true
   gradient_checkpointing: false
+  torch_compile: true
+  use_liger: true
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_drop_last: true
 
-  use_liger: true
   remove_unused_columns: false
   logging_steps: 25
   logging_first_step: true
   disable_tqdm: false
-  push_to_hub: false
+  push_to_hub: true

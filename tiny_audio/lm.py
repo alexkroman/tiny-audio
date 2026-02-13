@@ -18,9 +18,9 @@ from typing import Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-_FLASH_ATTN_AVAILABLE = importlib.util.find_spec("flash_attn") is not None
-
 logger = logging.getLogger(__name__)
+
+_ATTN_IMPL = "flash_attention_2" if importlib.util.find_spec("flash_attn") else "sdpa"
 
 # xcodec2 constants
 XCODEC2_VOCAB_SIZE = 65536
@@ -62,13 +62,13 @@ def setup_tts_model(
     if checkpoint_path:
         # Load from a previous training checkpoint (e.g. Stage1 → Stage2)
         # Tokenizer already has expanded vocab, model already has resized embeddings
-        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             checkpoint_path,
-            dtype=dtype,
-            attn_implementation="flash_attention_2" if _FLASH_ATTN_AVAILABLE else "eager",
+            torch_dtype=dtype,
             trust_remote_code=True,
+            attn_implementation=_ATTN_IMPL,
         )
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, trust_remote_code=True)
         logger.info(f"Loaded TTS model from checkpoint: {checkpoint_path}")
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
@@ -83,11 +83,29 @@ def setup_tts_model(
 
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            dtype=dtype,
-            attn_implementation="flash_attention_2" if _FLASH_ATTN_AVAILABLE else "eager",
+            torch_dtype=dtype,
             trust_remote_code=True,
+            attn_implementation=_ATTN_IMPL,
         )
+        # Resize embeddings, then initialize new tokens from the mean of existing embeddings.
+        # This puts speech tokens in-distribution for the model's pretrained attention patterns,
+        # rather than random noise which is out-of-distribution and slows convergence.
+        orig_vocab_size = model.get_input_embeddings().weight.shape[0]
         model.resize_token_embeddings(len(tokenizer))
+
+        with torch.no_grad():
+            embed = model.get_input_embeddings().weight
+            mean_embed = embed[:orig_vocab_size].mean(dim=0)
+            embed[orig_vocab_size:] = mean_embed
+
+            lm_head = model.get_output_embeddings()
+            if lm_head is not None and not model.config.tie_word_embeddings:
+                mean_head = lm_head.weight[:orig_vocab_size].mean(dim=0)
+                lm_head.weight[orig_vocab_size:] = mean_head
+
+        logger.info(
+            f"Initialized {len(tokenizer) - orig_vocab_size} new embeddings from mean of existing embeddings"
+        )
 
     # Build token_ids dict for quick lookup
     token_ids = {tok: tokenizer.convert_tokens_to_ids(tok) for tok in SPECIAL_TOKENS}
@@ -101,8 +119,8 @@ def setup_tts_model(
 
 
 def generate_speech(
-    model: AutoModelForCausalLM,
-    tokenizer: AutoTokenizer,
+    model,
+    tokenizer,
     text: str,
     token_ids: dict,
     max_new_tokens: int = 2000,

@@ -1,18 +1,20 @@
 # @package _global_
-# LM-Stage2: Cross-modal instruction fine-tuning (SpeechGPT-style)
+# LM-Stage3: Chain-of-modality instruction fine-tuning (SpeechGPT-style)
 #
-# Produces TWO training samples per data point:
-#   - Transcribe: speech codes → text (ASR direction)
-#   - Speak: text → speech codes (TTS direction)
-# Loss is only on the output side (completion_mask masks the input).
+# Produces FOUR training samples per data point:
+#   - Speech→Speech: spoken instruction → spoken response
+#   - Speech→Text:   spoken instruction → text response
+#   - Text→Speech:   text instruction → spoken response
+#   - Text→Text:     text instruction → text response
+# Loss is only on the output (completion) side.
 #
-# Uses emilia-en-xcodec2 (pre-computed xcodec2 codes).
+# Uses spoken-alpaca-gpt4-xcodec2 (pre-computed xcodec2 codes).
 #
 # Usage:
-#   poetry run python scripts/train.py +experiments=lm_stage2 tts.stage1_checkpoint=./outputs/lm-stage1
+#   poetry run python scripts/train.py +experiments=lm_stage3 tts.stage1_checkpoint=./outputs/lm-stage2
 
 defaults:
-  - override /data: tts_xcodec2
+  - override /data: lm_stage3
 
 model:
   # Base LLM (used if no stage1_checkpoint provided)
@@ -21,14 +23,14 @@ model:
 
 tts:
   enabled: true
-  stage: 2
-  stage1_checkpoint: null  # Override on CLI: tts.stage1_checkpoint=./outputs/lm-stage1
+  stage: 3
+  stage1_checkpoint: null  # Override on CLI: tts.stage1_checkpoint=./outputs/lm-stage2
 
 training:
-  output_dir: ./outputs/lm-stage2
-  hub_model_id: "mazesmazes/tiny-audio-lm-stage2"
+  output_dir: ./outputs/lm-stage3
+  hub_model_id: "mazesmazes/tiny-audio-lm-stage3"
   report_to: wandb
-  wandb_project: tiny-audio-lm-stage2
+  wandb_project: tiny-audio-lm-stage3
 
   # Optimizer
   optim: adamw_torch_fused
@@ -41,21 +43,21 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
 
-  # Batch size (135M model, all trainable)
-  per_device_train_batch_size: 24
-  per_device_eval_batch_size: 24
-  gradient_accumulation_steps: 1
+  # Batch size
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 2
   auto_find_batch_size: true
 
   # Training duration
-  num_train_epochs: 1
+  num_train_epochs: 3
   seed: 42
 
   # Eval & save
   eval_strategy: steps
-  eval_steps: 1000
+  eval_steps: 500
   save_strategy: steps
-  save_steps: 1000
+  save_steps: 500
   save_total_limit: 5
   load_best_model_at_end: true
   metric_for_best_model: eval_loss

@@ -1,0 +1,21 @@
+# LM Stage 3: Chain-of-modality instruction fine-tuning
+# Dataset: spoken-alpaca-gpt4 with pre-computed xcodec2 codes
+# Produces 4 training samples per data point:
+#   Speech→Speech, Speech→Text, Text→Speech, Text→Text
+
+sample_rate: 16000  # Not used for TTS but required by DatasetLoader
+dataset_cache_dir: null
+max_eval_samples: 500
+num_proc: 8
+
+datasets:
+  - path: mazesmazes/spoken-alpaca-gpt4-xcodec2
+    text_column: output              # text response
+    input_text_column: instruction   # text instruction
+    input_field_column: input        # optional input field (concatenated with instruction)
+    input_codes_column: input_audio_codes
+    output_codes_column: output_audio_codes
+    train_splits:
+      - "train[:95%]"
+    eval_splits:
+      - "train[95%:]"

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from tiny_audio.tts import (
+from tiny_audio.lm import (
     SPECIAL_TOKENS,
     XCODEC2_VOCAB_SIZE,
     setup_tts_model,
@@ -129,6 +129,155 @@ class TestStage1Tokenization:
         assert len(input_ids) == max_seq_length
         assert len(completion_mask) == max_seq_length
         assert all(m == 1 for m in completion_mask)
+
+
+class TestStage3Tokenization:
+    """Tests for LM-Stage3 chain-of-modality tokenization."""
+
+    def test_stage3_produces_four_samples(self, tts_setup):
+        """Stage3 tokenization should produce 4 samples per data point."""
+        _, tokenizer, token_ids = tts_setup
+        speech_start_id = token_ids["<|SPEECH_GENERATION_START|>"]
+        speech_end_id = token_ids["<|SPEECH_GENERATION_END|>"]
+        text_start_id = token_ids["<|TEXT_UNDERSTANDING_START|>"]
+        text_end_id = token_ids["<|TEXT_UNDERSTANDING_END|>"]
+        offset = token_ids["speech_token_offset"]
+        max_seq_length = 2048
+
+        # Simulate one data point
+        in_codes = [10, 20, 30]
+        out_codes = [40, 50, 60]
+        input_text = "What is the capital of France?"
+        output_text = "The capital of France is Paris."
+
+        input_text_ids = tokenizer.encode(input_text, add_special_tokens=False)
+        output_text_ids = tokenizer.encode(output_text, add_special_tokens=False)
+        in_speech_ids = [offset + c for c in in_codes]
+        out_speech_ids = [offset + c for c in out_codes]
+
+        all_input_ids = []
+        all_completion_mask = []
+
+        # 1. Speech→Speech
+        s2s_prompt = [speech_start_id] + in_speech_ids + [speech_end_id, speech_start_id]
+        s2s_completion = out_speech_ids + [speech_end_id]
+        s2s_seq = (s2s_prompt + s2s_completion)[:max_seq_length]
+        s2s_plen = min(len(s2s_prompt), len(s2s_seq))
+        all_input_ids.append(s2s_seq)
+        all_completion_mask.append([0] * s2s_plen + [1] * (len(s2s_seq) - s2s_plen))
+
+        # 2. Speech→Text
+        s2t_prompt = [speech_start_id] + in_speech_ids + [speech_end_id, text_start_id]
+        s2t_completion = output_text_ids + [text_end_id]
+        s2t_seq = (s2t_prompt + s2t_completion)[:max_seq_length]
+        s2t_plen = min(len(s2t_prompt), len(s2t_seq))
+        all_input_ids.append(s2t_seq)
+        all_completion_mask.append([0] * s2t_plen + [1] * (len(s2t_seq) - s2t_plen))
+
+        # 3. Text→Speech
+        t2s_prompt = [text_start_id] + input_text_ids + [text_end_id, speech_start_id]
+        t2s_completion = out_speech_ids + [speech_end_id]
+        t2s_seq = (t2s_prompt + t2s_completion)[:max_seq_length]
+        t2s_plen = min(len(t2s_prompt), len(t2s_seq))
+        all_input_ids.append(t2s_seq)
+        all_completion_mask.append([0] * t2s_plen + [1] * (len(t2s_seq) - t2s_plen))
+
+        # 4. Text→Text
+        t2t_prompt = [text_start_id] + input_text_ids + [text_end_id, text_start_id]
+        t2t_completion = output_text_ids + [text_end_id]
+        t2t_seq = (t2t_prompt + t2t_completion)[:max_seq_length]
+        t2t_plen = min(len(t2t_prompt), len(t2t_seq))
+        all_input_ids.append(t2t_seq)
+        all_completion_mask.append([0] * t2t_plen + [1] * (len(t2t_seq) - t2t_plen))
+
+        assert len(all_input_ids) == 4
+        assert len(all_completion_mask) == 4
+
+    def test_stage3_speech_to_speech_structure(self, tts_setup):
+        """Speech→Speech should have speech delimiters on both sides."""
+        _, tokenizer, token_ids = tts_setup
+        speech_start_id = token_ids["<|SPEECH_GENERATION_START|>"]
+        speech_end_id = token_ids["<|SPEECH_GENERATION_END|>"]
+        text_start_id = token_ids["<|TEXT_UNDERSTANDING_START|>"]
+        text_end_id = token_ids["<|TEXT_UNDERSTANDING_END|>"]
+        offset = token_ids["speech_token_offset"]
+
+        in_codes = [10, 20]
+        out_codes = [30, 40]
+        in_speech = [offset + c for c in in_codes]
+        out_speech = [offset + c for c in out_codes]
+
+        seq = (
+            [speech_start_id]
+            + in_speech
+            + [speech_end_id, speech_start_id]
+            + out_speech
+            + [speech_end_id]
+        )
+
+        # Should start with speech_start
+        assert seq[0] == speech_start_id
+        # Should end with speech_end
+        assert seq[-1] == speech_end_id
+        # Should not contain text tokens
+        assert text_start_id not in seq
+        assert text_end_id not in seq
+
+    def test_stage3_completion_mask_covers_output_only(self, tts_setup):
+        """Completion mask should be 0 for input, 1 for output."""
+        _, tokenizer, token_ids = tts_setup
+        speech_start_id = token_ids["<|SPEECH_GENERATION_START|>"]
+        speech_end_id = token_ids["<|SPEECH_GENERATION_END|>"]
+        text_start_id = token_ids["<|TEXT_UNDERSTANDING_START|>"]
+        text_end_id = token_ids["<|TEXT_UNDERSTANDING_END|>"]
+        offset = token_ids["speech_token_offset"]
+
+        in_codes = [10, 20, 30]
+        out_text_ids = tokenizer.encode("Hello", add_special_tokens=False)
+        in_speech = [offset + c for c in in_codes]
+
+        # Speech→Text
+        prompt = [speech_start_id] + in_speech + [speech_end_id, text_start_id]
+        completion = out_text_ids + [text_end_id]
+        seq = prompt + completion
+        mask = [0] * len(prompt) + [1] * len(completion)
+
+        assert len(mask) == len(seq)
+        # Prompt part should all be 0
+        assert all(m == 0 for m in mask[: len(prompt)])
+        # Completion part should all be 1
+        assert all(m == 1 for m in mask[len(prompt) :])
+
+    def test_stage3_text_to_text_no_speech_tokens(self, tts_setup):
+        """Text→Text should not contain any speech code tokens."""
+        _, tokenizer, token_ids = tts_setup
+        text_start_id = token_ids["<|TEXT_UNDERSTANDING_START|>"]
+        text_end_id = token_ids["<|TEXT_UNDERSTANDING_END|>"]
+        speech_start_id = token_ids["<|SPEECH_GENERATION_START|>"]
+        speech_end_id = token_ids["<|SPEECH_GENERATION_END|>"]
+        offset = token_ids["speech_token_offset"]
+
+        input_text_ids = tokenizer.encode("What is 2+2?", add_special_tokens=False)
+        output_text_ids = tokenizer.encode("4", add_special_tokens=False)
+
+        seq = (
+            [text_start_id]
+            + input_text_ids
+            + [text_end_id, text_start_id]
+            + output_text_ids
+            + [text_end_id]
+        )
+
+        # Should not contain speech delimiters
+        assert speech_start_id not in seq
+        assert speech_end_id not in seq
+        # Should not contain any speech offset tokens
+        for tok_id in seq:
+            assert (
+                tok_id < offset
+                or tok_id >= offset + 65536
+                or tok_id in {text_start_id, text_end_id}
+            ), f"Unexpected speech token {tok_id} in Text→Text sequence"
 
 
 class TestForward:
