@@ -235,6 +235,7 @@ class AssemblyAIEvaluator(Evaluator):
         self,
         api_key: str,
         base_url: str | None = None,
+        speech_models: list[str] | None = None,
         temperature: float | None = None,
         prompt: str | None = None,
         keyterms_prompt: list[str] | None = None,
@@ -244,6 +245,7 @@ class AssemblyAIEvaluator(Evaluator):
         self.transcriber = setup_assemblyai(
             api_key,
             base_url=base_url,
+            speech_models=speech_models,
             temperature=temperature,
             prompt=prompt,
             keyterms_prompt=keyterms_prompt,

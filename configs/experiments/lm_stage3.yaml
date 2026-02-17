@@ -1,30 +1,28 @@
 # @package _global_
 # LM-Stage3: Chain-of-modality instruction fine-tuning (SpeechGPT-style)
 #
+# Uses apply_chat_template with trl's training template and optional reasoning.
 # Produces FOUR training samples per data point:
-#   - Speech→Speech: spoken instruction → spoken response
-#   - Speech→Text:   spoken instruction → text response
-#   - Text→Speech:   text instruction → spoken response
-#   - Text→Text:     text instruction → text response
-# Loss is only on the output (completion) side.
+#   1. Speech→Speech, 2. Speech→Text, 3. Text→Speech, 4. Text→Text
+# Reasoning is embedded as <think>\n{reasoning}\n</think>\n\n in assistant content.
+# If no reasoning column, the training template adds empty <think>\n\n</think>\n\n.
+# Loss is only on the completion side (after assistant header).
 #
 # Uses spoken-alpaca-gpt4-xcodec2 (pre-computed xcodec2 codes).
 #
 # Usage:
-#   poetry run python scripts/train.py +experiments=lm_stage3 tts.stage1_checkpoint=./outputs/lm-stage2
+#   poetry run python scripts/train.py +experiments=lm_stage3
 
 defaults:
   - override /data: lm_stage3
 
 model:
-  # Base LLM (used if no stage1_checkpoint provided)
-  llm_model_id: Qwen/Qwen3-0.6B
   max_seq_length: 2048
 
 tts:
   enabled: true
   stage: 3
-  stage1_checkpoint: null  # Override on CLI: tts.stage1_checkpoint=./outputs/lm-stage2
+  stage1_checkpoint: "mazesmazes/tiny-audio-lm-stage2"
 
 training:
   output_dir: ./outputs/lm-stage3

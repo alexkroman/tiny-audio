@@ -16,11 +16,12 @@ def setup_assemblyai(
     api_key: str,
     speaker_labels: bool = False,
     base_url: str | None = None,
+    speech_models: list[str] | None = None,
     temperature: float | None = None,
     prompt: str | None = None,
     keyterms_prompt: list[str] | None = None,
 ):
-    """Initialize AssemblyAI transcriber with slam-1 model."""
+    """Initialize AssemblyAI transcriber."""
     import assemblyai as aai
 
     aai.settings.api_key = api_key
@@ -29,9 +30,13 @@ def setup_assemblyai(
 
     # Build config kwargs directly on TranscriptionConfig
     config_kwargs = {
-        "speech_model": aai.types.SpeechModel.slam_1,
         "speaker_labels": speaker_labels,
     }
+    if speech_models:
+        config_kwargs["speech_models"] = speech_models
+        config_kwargs["language_detection"] = True
+    else:
+        config_kwargs["speech_model"] = aai.types.SpeechModel.slam_1
     if prompt is not None:
         config_kwargs["prompt"] = prompt
     if keyterms_prompt is not None:

@@ -1,15 +1,13 @@
 # @package _global_
-# LM-Stage2: Cross-modal instruction fine-tuning (SpeechGPT-style)
+# LM-Stage2-TTS: Text-to-speech only fine-tuning
 #
-# Uses apply_chat_template with trl's training template. Produces TWO samples per data point:
-#   - Transcribe: speech → text
-#   - Speak: text → speech
-# Loss is only on the completion side (after assistant header).
+# Like lm_stage2 but only the speak direction (text → speech).
+# One sample per data point instead of two.
 #
 # Uses emilia-en-xcodec2 (pre-computed xcodec2 codes).
 #
 # Usage:
-#   poetry run python scripts/train.py +experiments=lm_stage2
+#   poetry run python scripts/train.py +experiments=lm_stage2_tts
 
 defaults:
   - override /data: tts_xcodec2
@@ -20,29 +18,28 @@ model:
 tts:
   enabled: true
   stage: 2
+  tts_only: true
   stage1_checkpoint: "mazesmazes/tiny-audio-lm-stage1"
 
 training:
-  output_dir: ./outputs/lm-stage2
-  hub_model_id: "mazesmazes/tiny-audio-lm-stage2"
+  output_dir: ./outputs/lm-stage2-tts
+  hub_model_id: "mazesmazes/tiny-audio-lm-stage2-tts"
   report_to: wandb
-  wandb_project: tiny-audio-lm-stage2
+  wandb_project: tiny-audio-lm-stage2-tts
 
   # Optimizer
   optim: adamw_torch_fused
   adam_beta2: 0.95
   learning_rate: 1e-4
   warmup_steps: 100
-  lr_scheduler_type: polynomial
-  lr_scheduler_kwargs:
-    power: 0.5
+  lr_scheduler_type: cosine
   weight_decay: 0.01
   max_grad_norm: 1.0
 
-  # Batch size (135M model, all trainable)
-  per_device_train_batch_size: 6
-  per_device_eval_batch_size: 6
-  gradient_accumulation_steps: 4
+  # Batch size — 1 sample per data point (vs 2 in lm_stage2), so can increase
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 1
   auto_find_batch_size: false
 
   # Training duration

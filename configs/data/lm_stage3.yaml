@@ -15,6 +15,7 @@ datasets:
     input_field_column: input        # optional input field (concatenated with instruction)
     input_codes_column: input_audio_codes
     output_codes_column: output_audio_codes
+    # reasoning_column: reasoning    # optional: chain-of-thought reasoning (if present in dataset)
     train_splits:
       - "train[:95%]"
     eval_splits:

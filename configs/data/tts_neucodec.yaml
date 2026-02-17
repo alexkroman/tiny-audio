@@ -1,0 +1,16 @@
+# TTS training dataset: Emilia+YODAS English with pre-computed NeuCodec codes
+# Text + NeuCodec codes only (no audio processing needed)
+
+sample_rate: 16000  # Not used for TTS but required by DatasetLoader
+dataset_cache_dir: null
+max_eval_samples: 500
+num_proc: 8
+
+datasets:
+  - path: neuphonic/emilia-yodas-english-neucodec
+    train_splits:
+      - "train[:10%]"
+    eval_splits:
+      - "train[:1%]"
+    text_column: text
+    codes_column: codes  # nested [[c0, c1, ...]], flattened in collator

@@ -145,13 +145,13 @@ class TestTokenMapping:
         assert torch.equal(codes, recovered)
 
     def test_map_collator_ids_bos(self, head):
-        """BOS_TOKEN (65536) should map to SPEECH_GENERATION_START."""
+        """BOS_TOKEN (65536) should map to audio_start."""
         ids = torch.tensor([[BOS_TOKEN]])
         mapped = head._map_collator_ids_to_speech(ids)
         assert mapped[0, 0].item() == head.speech_start_id
 
     def test_map_collator_ids_eos(self, head):
-        """EOS_TOKEN (65537) should map to SPEECH_GENERATION_END."""
+        """EOS_TOKEN (65537) should map to audio_end."""
         ids = torch.tensor([[EOS_TOKEN]])
         mapped = head._map_collator_ids_to_speech(ids)
         assert mapped[0, 0].item() == head.speech_end_id
@@ -172,7 +172,7 @@ class TestTokenMapping:
         assert mapped[0, 2].item() == -100
 
     def test_map_collator_labels_eos(self, head):
-        """EOS_TOKEN in labels should map to SPEECH_GENERATION_END."""
+        """EOS_TOKEN in labels should map to audio_end."""
         labels = torch.tensor([[42, EOS_TOKEN]])
         mapped = head._map_collator_labels_to_speech(labels)
         assert mapped[0, 1].item() == head.speech_end_id

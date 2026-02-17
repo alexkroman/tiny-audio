@@ -440,7 +440,7 @@ class AudioHead(PreTrainedModel):
 
         all_codes = []
 
-        # Build initial input: prefix + SPEECH_GENERATION_START token
+        # Build initial input: prefix + audio_start token
         start_token = torch.full(
             (batch_size, 1), self.speech_start_id, dtype=torch.long, device=device
         )

@@ -208,9 +208,12 @@ def install_dependencies(conn: Connection) -> None:
         # Install liger-kernel (fused cross-entropy for large vocab)
         python3 -m pip install --user liger-kernel 2>&1 | grep -v "already satisfied" || true
 
+        # Install torchao matching torch 2.8 from PyTorch index (system version may be stale)
+        python3 -m pip install --user torchao --index-url=https://download.pytorch.org/whl/cu128 2>&1 | grep -v "already satisfied" || true
+
         # Export and install dependencies (excluding torch to preserve CUDA install)
         cd /workspace
-        poetry export --only main --without-hashes | grep -v "^torch==" > /tmp/requirements.txt
+        poetry export --only main --without-hashes | grep -v "^torch==" | grep -v "^torchao==" > /tmp/requirements.txt
         python3 -m pip install --user -r /tmp/requirements.txt 2>&1 | grep -v "already satisfied" || true
 
         # Install project in editable mode
@@ -861,6 +864,219 @@ def dac(
         sys.exit(1)
 
     print(f"\nDAC codes generation started in session '{session_name}'.")
+    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
+
+    if not no_attach:
+        time.sleep(2)
+        attach_tmux_session(host, port, session_name)
+
+
+# =============================================================================
+# NeuCodec ChatML TTS Dataset Generation Command
+# =============================================================================
+
+
+def build_neucodec_script(
+    hf_token: str,
+    input_dataset: str,
+    output_repo: str,
+    dataset_config: str | None,
+    split: str | None,
+    audio_column: str,
+    text_column: str,
+    speaker_column: str | None,
+    max_ref_codes: int,
+    batch_size: int,
+    both_directions: bool,
+    max_samples: int | None,
+    save_every: int,
+) -> str:
+    """Generate the NeuCodec ChatML encoding script content."""
+    config_arg = f"--config {dataset_config}" if dataset_config else ""
+    split_arg = f"--split {split}" if split else ""
+    speaker_arg = f"--speaker-column {speaker_column}" if speaker_column else ""
+    both_dir_arg = "--chatml-both-directions" if both_directions else ""
+    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
+
+    return f"""#!/bin/bash
+# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
+
+ulimit -n 65536
+export PATH="/root/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cusparselt/lib:${{LD_LIBRARY_PATH:-}}"
+export HF_HOME=/workspace/.cache/huggingface
+export HF_DATASETS_CACHE=/workspace/datasets
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_TOKEN="{hf_token}"
+
+# GPU optimizations
+export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
+export TORCH_CUDNN_BENCHMARK=1
+
+cd /workspace
+
+# Remove stale system torchvision (conflicts with user-level torch)
+python3 -m pip uninstall torchvision -y 2>/dev/null || true
+
+python -m scripts.encode_neucodec \\
+    --dataset {input_dataset} \\
+    --output-repo {output_repo} \\
+    --chatml-tts \\
+    --audio-column {audio_column} \\
+    --text-column {text_column} \\
+    --max-ref-codes {max_ref_codes} \\
+    --batch-size {batch_size} \\
+    --save-every {save_every} \\
+    --checkpoint-dir /workspace/neucodec_checkpoints \\
+    {config_arg} \\
+    {split_arg} \\
+    {speaker_arg} \\
+    {both_dir_arg} \\
+    {max_samples_arg}
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "===== NeuCodec ChatML Dataset Generation Completed Successfully ====="
+else
+    echo "===== NeuCodec ChatML Dataset Generation Failed with exit code: $EXIT_CODE ====="
+fi
+
+echo "Script finished. Session will remain active for inspection."
+sleep infinity
+"""
+
+
+@app.command()
+def neucodec(
+    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
+    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
+    input_dataset: str = typer.Option(
+        "parler-tts/libritts_r_filtered",
+        "--input-dataset",
+        "-i",
+        help="Input HuggingFace dataset",
+    ),
+    dataset_config: str | None = typer.Option(
+        "clean",
+        "--dataset-config",
+        "-c",
+        help="Dataset config/name (e.g., 'clean', 'all')",
+    ),
+    split: str | None = typer.Option(
+        "train.clean.360",
+        "--split",
+        help="Dataset split to process",
+    ),
+    output_repo: str = typer.Option(
+        "mazesmazes/tiny-audio-corpus",
+        "--output-repo",
+        "-o",
+        help="Output HuggingFace repo for ChatML dataset",
+    ),
+    audio_column: str = typer.Option("audio", "--audio-column", help="Audio column name"),
+    text_column: str = typer.Option("text_normalized", "--text-column", help="Text column name"),
+    speaker_column: str | None = typer.Option(
+        "speaker_id",
+        "--speaker-column",
+        help="Speaker ID column for voice cloning (set to empty string to disable)",
+    ),
+    max_ref_codes: int = typer.Option(
+        500, "--max-ref-codes", help="Max codes for voice reference (~50 codes/sec)"
+    ),
+    batch_size: int = typer.Option(
+        128, "--batch-size", "-b", help="Encoding batch size (default: 128, tuned for A40 48GB)"
+    ),
+    both_directions: bool = typer.Option(
+        False,
+        "--both-directions",
+        help="Include transcribe direction (only without --speaker-column)",
+    ),
+    max_samples: int | None = typer.Option(
+        None, "--max-samples", "-n", help="Max samples to process (for testing)"
+    ),
+    save_every: int = typer.Option(
+        50000, "--save-every", help="Checkpoint every N samples for resumability (default: 50000)"
+    ),
+    session_name: str | None = typer.Option(
+        None, "--session-name", help="Custom tmux session name"
+    ),
+    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
+    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+):
+    """Encode audio dataset to NeuCodec ChatML format for TRL TTS training.
+
+    Produces a single `messages` column dataset ready for SFTTrainer.
+    With --speaker-column, pairs samples by speaker for voice cloning:
+      user: <voice_ref_audio> {text}  ->  assistant: <target_audio>
+
+    Examples:
+        ta runpod neucodec host port -o user/libritts-tts-chatml
+        ta runpod neucodec host port -i mythicinfinity/libritts -c clean --split train.clean.360 -o user/libritts-tts
+        ta runpod neucodec host port --speaker-column "" -o user/libritts-tts-nospeaker
+    """
+    conn = get_connection(host, port)
+
+    if not test_connection(conn):
+        sys.exit(1)
+
+    # Treat empty string as None for speaker_column
+    if speaker_column == "":
+        speaker_column = None
+
+    if session_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        session_name = f"neucodec_{timestamp}"
+
+    if force:
+        print(f"Killing existing session '{session_name}' if present...")
+        kill_tmux_session(conn, session_name)
+
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        print("Warning: HF_TOKEN environment variable not set.")
+
+    script_content = build_neucodec_script(
+        hf_token,
+        input_dataset,
+        output_repo,
+        dataset_config,
+        split,
+        audio_column,
+        text_column,
+        speaker_column,
+        max_ref_codes,
+        batch_size,
+        both_directions,
+        max_samples,
+        save_every,
+    )
+    script_path = f"/tmp/neucodec_{session_name}.sh"
+
+    print(f"\nStarting NeuCodec ChatML encoding session '{session_name}'...")
+    print(f"Input dataset: {input_dataset}" + (f" ({dataset_config})" if dataset_config else ""))
+    if split:
+        print(f"Split: {split}")
+    print(f"Output repo: {output_repo}")
+    if speaker_column:
+        print(f"Voice cloning mode: pairing by {speaker_column} (max {max_ref_codes} ref codes)")
+    else:
+        print("Simple mode: text -> speech (no voice reference)")
+    print(f"Batch size: {batch_size}")
+    if max_samples:
+        print(f"Max samples: {max_samples}")
+
+    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
+    conn.run(f"chmod +x {script_path}", hide=True)
+
+    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    if not result.ok:
+        print(f"Failed to start tmux session: {result.stderr}")
+        sys.exit(1)
+
+    print(f"\nNeuCodec encoding started in session '{session_name}'.")
     print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
 
     if not no_attach:

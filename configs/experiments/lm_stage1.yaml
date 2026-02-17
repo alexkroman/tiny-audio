@@ -4,6 +4,9 @@
 # Teaches the model the statistical structure of speech by training on
 # speech codes only (no text). Following SpeechGPT's two-stage approach.
 #
+# Format (ChatML-wrapped, loss on assistant completion only):
+#   <|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n<|audio_start|>[codes]<|audio_end|><|im_end|>
+#
 # Usage:
 #   poetry run python scripts/train.py +experiments=lm_stage1
 
@@ -28,19 +31,17 @@ training:
   # Optimizer
   optim: adamw_torch_fused
   adam_beta2: 0.95
-  learning_rate: 1e-4
+  learning_rate: 2e-4
   warmup_steps: 100
-  lr_scheduler_type: polynomial
-  lr_scheduler_kwargs:
-    power: 0.5
+  lr_scheduler_type: cosine
   weight_decay: 0.01
   max_grad_norm: 1.0
 
   # Batch size (135M model, all trainable)
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 4
-  auto_find_batch_size: true
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 1
+  auto_find_batch_size: false
 
   # Training duration (max_steps computed from dataset size in train.py)
   num_train_epochs: 1

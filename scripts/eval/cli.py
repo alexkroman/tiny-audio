@@ -432,6 +432,13 @@ def main(
         Optional[str],
         typer.Option("--keyterms", "-k", help="Comma-separated key terms for AssemblyAI SLAM-1"),
     ] = None,
+    assemblyai_model: Annotated[
+        Optional[str],
+        typer.Option(
+            "--assemblyai-model",
+            help="AssemblyAI speech model (e.g., 'universal-3-pro')",
+        ),
+    ] = None,
     domain: Annotated[
         Optional[str],
         typer.Option(
@@ -657,7 +664,8 @@ def main(
                     num_workers=num_workers,
                 )
             else:
-                model_id = "slam-1"
+                model_id = assemblyai_model or "slam-1"
+                speech_models = [assemblyai_model] if assemblyai_model else None
                 if temperature is not None:
                     console.print(f"[cyan]Using temperature: {temperature}[/cyan]")
                 if user_prompt is not None:
@@ -669,6 +677,7 @@ def main(
                 evaluator = AssemblyAIEvaluator(
                     api_key=api_key,
                     base_url=base_url,
+                    speech_models=speech_models,
                     temperature=temperature,
                     prompt=user_prompt,
                     keyterms_prompt=keyterms_list,

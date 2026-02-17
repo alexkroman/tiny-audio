@@ -1,0 +1,75 @@
+# @package _global_
+# TTS: Text-to-speech from scratch with Qwen3-0.6B + NeuCodec
+#
+# Single-stage text→speech training. No prior speech-only stage required.
+# Full 0.6B model is trainable. Uses neuphonic/emilia-yodas-english-neucodec
+# (30.6M samples with pre-computed NeuCodec codes, 65536 vocab FSQ).
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=tts
+
+defaults:
+  - override /data: tts_neucodec
+
+model:
+  llm_model_id: "Qwen/Qwen3-0.6B"
+  max_seq_length: 2048
+
+tts:
+  enabled: true
+  stage: 2
+  tts_only: true
+  # No stage1_checkpoint — training from scratch
+
+training:
+  output_dir: ./outputs/tts
+  hub_model_id: "mazesmazes/tiny-audio-tts"
+  report_to: wandb
+  wandb_project: tiny-audio-tts
+
+  # Optimizer
+  optim: adamw_torch_fused
+  adam_beta2: 0.95
+  learning_rate: 1e-4
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # Batch size
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 8
+  auto_find_batch_size: false
+
+  # Training duration
+  num_train_epochs: 1
+  seed: 42
+
+  # Eval & save
+  eval_strategy: steps
+  eval_steps: 500
+  save_strategy: steps
+  save_steps: 500
+  save_total_limit: 5
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+
+  # Performance
+  group_by_length: true
+  length_column_name: duration
+  bf16: true
+  tf32: true
+  gradient_checkpointing: false
+  torch_compile: true
+  use_liger: true
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_drop_last: true
+
+  remove_unused_columns: false
+  logging_steps: 25
+  logging_first_step: true
+  disable_tqdm: false
+  push_to_hub: true
