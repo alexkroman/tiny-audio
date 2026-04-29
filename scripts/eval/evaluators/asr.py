@@ -1,5 +1,6 @@
 """ASR evaluator implementations."""
 
+import contextlib
 import io
 import os
 import shutil
@@ -17,7 +18,7 @@ from .base import Evaluator, console, setup_assemblyai
 
 try:
     from CoreFoundation import CFRunLoopRunInMode, kCFRunLoopDefaultMode
-    from Foundation import NSLocale, NSURL
+    from Foundation import NSURL, NSLocale
     from Speech import (
         SFSpeechRecognizer,
         SFSpeechRecognizerAuthorizationStatusAuthorized,
@@ -527,9 +528,7 @@ class AppleSpeechEvaluator(Evaluator):
                     done_event.set()
 
             start = time.time()
-            task = self.recognizer.recognitionTaskWithRequest_resultHandler_(
-                request, handler
-            )
+            task = self.recognizer.recognitionTaskWithRequest_resultHandler_(request, handler)
 
             if not _pump_run_loop_until(done_event, self.TRANSCRIBE_TIMEOUT_SECONDS):
                 task.cancel()
@@ -542,10 +541,8 @@ class AppleSpeechEvaluator(Evaluator):
                 raise RuntimeError(f"SFSpeechRecognizer error: {error_box[0]}")
             return text_box[0], elapsed
         finally:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+            with contextlib.suppress(OSError):
+                Path(temp_path).unlink()
 
     def close(self) -> None:
         if getattr(self, "temp_dir", None):

@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 _AUTHORIZED = 3
 _DENIED = 1
 
@@ -16,16 +15,12 @@ def fake_speech_frameworks(monkeypatch):
     Linux CI without pyobjc-framework-Speech installed."""
     fake_speech = MagicMock(name="Speech")
     fake_speech.SFSpeechRecognizerAuthorizationStatusAuthorized = _AUTHORIZED
-    fake_speech.SFSpeechRecognizer.requestAuthorization_.side_effect = (
-        lambda cb: cb(_AUTHORIZED)
-    )
+    fake_speech.SFSpeechRecognizer.requestAuthorization_.side_effect = lambda cb: cb(_AUTHORIZED)
 
     recognizer = MagicMock(name="SFSpeechRecognizer-instance")
     recognizer.supportsOnDeviceRecognition.return_value = True
     recognizer.isAvailable.return_value = True
-    fake_speech.SFSpeechRecognizer.alloc.return_value.initWithLocale_.return_value = (
-        recognizer
-    )
+    fake_speech.SFSpeechRecognizer.alloc.return_value.initWithLocale_.return_value = recognizer
 
     fake_corefoundation = MagicMock(name="CoreFoundation")
     fake_corefoundation.CFRunLoopRunInMode.return_value = 0
@@ -75,7 +70,9 @@ class TestAppleSpeechEvaluator:
             fake_speech_frameworks["asr"].AppleSpeechEvaluator()
 
     def test_unsupported_locale_raises(self, fake_speech_frameworks):
-        fake_speech_frameworks["Speech"].SFSpeechRecognizer.alloc.return_value.initWithLocale_.return_value = None
+        fake_speech_frameworks[
+            "Speech"
+        ].SFSpeechRecognizer.alloc.return_value.initWithLocale_.return_value = None
         with pytest.raises(ValueError, match="Unsupported locale"):
             fake_speech_frameworks["asr"].AppleSpeechEvaluator(locale="zz-ZZ")
 
@@ -111,7 +108,7 @@ class TestAppleSpeechEvaluator:
             ev.transcribe(audio={"array": [], "sampling_rate": 16000})
 
     def test_transcribe_cleans_up_temp_wav(self, fake_speech_frameworks, mocker):
-        import os
+        from pathlib import Path
 
         mocker.patch.object(
             fake_speech_frameworks["asr"], "prepare_wav_bytes", return_value=b"WAVDATA"
@@ -119,23 +116,23 @@ class TestAppleSpeechEvaluator:
         ev = fake_speech_frameworks["asr"].AppleSpeechEvaluator()
         _stage_transcription(ev.recognizer)
 
-        before = set(os.listdir(ev.temp_dir))
+        before = set(Path(ev.temp_dir).iterdir())
         ev.transcribe(audio={"array": [], "sampling_rate": 16000})
-        after = set(os.listdir(ev.temp_dir))
+        after = set(Path(ev.temp_dir).iterdir())
 
         assert before == after, f"temp wav not cleaned up: {after - before}"
 
     def test_close_removes_temp_dir(self, fake_speech_frameworks):
-        import os
+        from pathlib import Path
 
         ev = fake_speech_frameworks["asr"].AppleSpeechEvaluator()
         temp_dir = ev.temp_dir
-        assert os.path.isdir(temp_dir)
+        assert Path(temp_dir).is_dir()
 
         ev.close()
 
         assert ev.temp_dir is None
-        assert not os.path.exists(temp_dir)
+        assert not Path(temp_dir).exists()
 
     def test_close_idempotent(self, fake_speech_frameworks):
         ev = fake_speech_frameworks["asr"].AppleSpeechEvaluator()
