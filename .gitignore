@@ -1,6 +1,7 @@
 .env
 audio/
 CLAUDE.md
+docs/superpowers/
 datasets_cache
 myenv
 test_output
