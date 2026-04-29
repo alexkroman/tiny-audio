@@ -1,7 +1,10 @@
 """ASR evaluator implementations."""
 
 import io
+import os
+import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -11,6 +14,19 @@ import torch
 from scripts.eval.audio import prepare_wav_bytes
 
 from .base import Evaluator, console, setup_assemblyai
+
+try:
+    from CoreFoundation import CFRunLoopRunInMode, kCFRunLoopDefaultMode
+    from Foundation import NSLocale, NSURL
+    from Speech import (
+        SFSpeechRecognizer,
+        SFSpeechRecognizerAuthorizationStatusAuthorized,
+        SFSpeechURLRecognitionRequest,
+    )
+
+    _APPLE_SPEECH_AVAILABLE = True
+except ImportError:
+    _APPLE_SPEECH_AVAILABLE = False
 
 
 def print_generation_config(model, model_path: str):
@@ -412,3 +428,126 @@ class ElevenLabsEvaluator(Evaluator):
         # Extract text from transcription response
         text = transcription.text if hasattr(transcription, "text") else str(transcription)
         return text or "", elapsed
+
+
+def _pump_run_loop_until(event: threading.Event, timeout_seconds: float) -> bool:
+    """Pump the main CF run loop in 50ms slices until event is set or timeout.
+
+    Speech.framework delivers callbacks via the main run loop; a plain
+    threading.Event.wait() starves the framework's XPC delivery and the
+    callback never fires.
+    """
+    deadline = time.time() + timeout_seconds
+    while not event.is_set():
+        if time.time() >= deadline:
+            return False
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, True)
+    return True
+
+
+class AppleSpeechEvaluator(Evaluator):
+    """Evaluator for Apple SFSpeechRecognizer (on-device, macOS only)."""
+
+    AUTH_TIMEOUT_SECONDS = 300.0
+    TRANSCRIBE_TIMEOUT_SECONDS = 60.0
+
+    def __init__(self, locale: str = "en-US", **kwargs):
+        if not _APPLE_SPEECH_AVAILABLE:
+            raise ImportError(
+                "Apple SFSpeechRecognizer backend requires PyObjC on macOS. "
+                "Install with: pip install pyobjc-framework-Speech"
+            )
+
+        if kwargs.get("num_workers", 1) > 1:
+            console.print(
+                "[yellow]Warning: AppleSpeechEvaluator forces num_workers=1 "
+                "(SFSpeechRecognizer is single-task)[/yellow]"
+            )
+            kwargs["num_workers"] = 1
+        super().__init__(**kwargs)
+
+        self.locale = locale
+        self.temp_dir = tempfile.mkdtemp(prefix="apple-speech-")
+        self._authorize()
+        self.recognizer = self._build_recognizer(locale)
+
+    def _authorize(self) -> None:
+        auth_event = threading.Event()
+        status_box = [None]
+
+        def handler(status):
+            status_box[0] = status
+            auth_event.set()
+
+        SFSpeechRecognizer.requestAuthorization_(handler)
+        if not _pump_run_loop_until(auth_event, self.AUTH_TIMEOUT_SECONDS):
+            raise TimeoutError("Speech recognition authorization request timed out")
+        if status_box[0] != SFSpeechRecognizerAuthorizationStatusAuthorized:
+            raise RuntimeError(
+                f"Speech recognition not authorized (status={status_box[0]}). "
+                "Approve at System Settings > Privacy & Security > Speech Recognition."
+            )
+
+    def _build_recognizer(self, locale: str):
+        ns_locale = NSLocale.alloc().initWithLocaleIdentifier_(locale)
+        recognizer = SFSpeechRecognizer.alloc().initWithLocale_(ns_locale)
+        if recognizer is None:
+            raise ValueError(f"Unsupported locale: {locale}")
+        if not recognizer.supportsOnDeviceRecognition():
+            raise RuntimeError(f"On-device recognition unavailable for locale {locale}")
+        if not recognizer.isAvailable():
+            raise RuntimeError("SFSpeechRecognizer not available right now")
+        return recognizer
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        wav_bytes = prepare_wav_bytes(audio)
+        fd, temp_path = tempfile.mkstemp(suffix=".wav", dir=self.temp_dir)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(wav_bytes)
+
+            url = NSURL.fileURLWithPath_(temp_path)
+            request = SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
+            request.setRequiresOnDeviceRecognition_(True)
+            request.setShouldReportPartialResults_(False)
+
+            done_event = threading.Event()
+            text_box = [""]
+            error_box = [None]
+
+            def handler(result, error):
+                if error is not None:
+                    error_box[0] = str(error)
+                    done_event.set()
+                    return
+                if result is None:
+                    return
+                if result.isFinal():
+                    text_box[0] = str(result.bestTranscription().formattedString())
+                    done_event.set()
+
+            start = time.time()
+            task = self.recognizer.recognitionTaskWithRequest_resultHandler_(
+                request, handler
+            )
+
+            if not _pump_run_loop_until(done_event, self.TRANSCRIBE_TIMEOUT_SECONDS):
+                task.cancel()
+                raise RuntimeError(
+                    f"Recognition timed out after {self.TRANSCRIBE_TIMEOUT_SECONDS}s"
+                )
+            elapsed = time.time() - start
+
+            if error_box[0]:
+                raise RuntimeError(f"SFSpeechRecognizer error: {error_box[0]}")
+            return text_box[0], elapsed
+        finally:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        if getattr(self, "temp_dir", None):
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+            self.temp_dir = None

@@ -11,6 +11,7 @@ from .alignment import (
     align_words_to_reference,
 )
 from .asr import (
+    AppleSpeechEvaluator,
     AssemblyAIEvaluator,
     AssemblyAIStreamingEvaluator,
     DeepgramEvaluator,
@@ -60,6 +61,7 @@ __all__ = [
     "AssemblyAIStreamingEvaluator",
     "DeepgramEvaluator",
     "ElevenLabsEvaluator",
+    "AppleSpeechEvaluator",
     # Diarization evaluators
     "DiarizationEvaluator",
     "AssemblyAIDiarizationEvaluator",

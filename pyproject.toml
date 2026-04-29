@@ -75,6 +75,7 @@ torchaudio = ">=2.0.0"
 pyannote-core = ">=6.0.0"  # For DER metric calculation
 pyannote-metrics = ">=4.0.0"  # For DER metric calculation
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
+pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
 fabric = ">=3.0.0"
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
 spacy = "^3.8.11"
