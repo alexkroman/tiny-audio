@@ -162,6 +162,18 @@ poetry run ta analysis high-wer mazesmazes/tiny-audio --threshold 30
 poetry run ta analysis compare model1 model2
 ```
 
+### Apple SFSpeechRecognizer (macOS, on-device)
+
+```bash
+poetry run ta eval -m apple-speech -d loquacious -n 1000
+poetry run ta eval -m apple-speech --locale es-ES -d loquacious -n 100
+```
+
+Calls Apple's on-device `SFSpeechRecognizer` via PyObjC. macOS-only —
+`pyobjc-framework-Speech` is auto-installed on macOS via the Poetry
+`sys_platform == 'darwin'` marker. First run prompts for Speech Recognition
+consent (System Settings → Privacy & Security → Speech Recognition).
+
 ## CLI Reference
 
 All commands available via `tiny-audio` (or `ta` for short):

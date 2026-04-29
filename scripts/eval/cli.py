@@ -20,6 +20,7 @@ from scripts.eval.datasets import (
     load_eval_dataset,
 )
 from scripts.eval.evaluators import (
+    AppleSpeechEvaluator,
     AssemblyAIAlignmentEvaluator,
     AssemblyAIDiarizationEvaluator,
     AssemblyAIEvaluator,
@@ -437,7 +438,11 @@ def main(
     ctx: typer.Context,
     model: Annotated[
         Optional[str],
-        typer.Option("--model", "-m", help="Model path/ID, 'assemblyai', or 'deepgram'"),
+        typer.Option(
+            "--model",
+            "-m",
+            help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', or 'apple-speech'",
+        ),
     ] = None,
     datasets: Annotated[
         Optional[list[str]],
@@ -483,6 +488,13 @@ def main(
         Optional[str],
         typer.Option("--base-url", help="Custom API base URL (for AssemblyAI sandbox)"),
     ] = None,
+    locale: Annotated[
+        str,
+        typer.Option(
+            "--locale",
+            help="Locale for apple-speech (e.g. en-US, es-ES, fr-FR)",
+        ),
+    ] = "en-US",
     num_workers: Annotated[
         int,
         typer.Option("--num-workers", "-w", help="Number of parallel workers for API evaluations"),
@@ -784,6 +796,13 @@ def main(
                 audio_field=cfg.audio_field,
                 text_field=cfg.text_field,
                 num_workers=num_workers,
+            )
+        elif model == "apple-speech":
+            model_id = "apple-speech"
+            evaluator = AppleSpeechEvaluator(
+                locale=locale,
+                audio_field=cfg.audio_field,
+                text_field=cfg.text_field,
             )
         elif endpoint:
             model_id = get_model_name(model)
