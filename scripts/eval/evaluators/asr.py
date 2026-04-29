@@ -80,16 +80,21 @@ class LocalStreamingEvaluator(Evaluator):
         super().__init__(**kwargs)
         from transformers import pipeline
 
-        # Determine best device and dtype
+        # Determine best device, dtype, and attention implementation.
+        # flash_attention_2 is CUDA-only; on MPS/CPU it silently falls back to
+        # a slower path, so force sdpa to get the real Metal/CPU kernels.
         if torch.cuda.is_available():
             device = 0
             dtype = torch.bfloat16
+            attn_impl = "flash_attention_2"
         elif torch.backends.mps.is_available():
             device = "mps"
             dtype = torch.float16
+            attn_impl = "sdpa"
         else:
             device = -1
             dtype = torch.float32
+            attn_impl = "sdpa"
 
         self.pipe = pipeline(
             "automatic-speech-recognition",
@@ -97,12 +102,13 @@ class LocalStreamingEvaluator(Evaluator):
             trust_remote_code=True,
             device=device,
             torch_dtype=dtype,
+            model_kwargs={"attn_implementation": attn_impl},
         )
         self.model = self.pipe.model
         self.model.eval()
         self.processor = self.model.get_processor()
         self.user_prompt = user_prompt
-        console.print(f"[dim]Using device: {device}, dtype: {dtype}[/dim]")
+        console.print(f"[dim]Using device: {device}, dtype: {dtype}, attn: {attn_impl}[/dim]")
 
         # Track timing stats
         self.ttfb_times: list[float] = []
