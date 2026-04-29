@@ -38,6 +38,10 @@ training:
   dataloader_num_workers: 16
   dataloader_prefetch_factor: 4
 
+  # SDPA (PyTorch-native, cuDNN flash backend on Blackwell) — avoids the slow
+  # flash-attn source build on RunPod and is fast enough at our seq lengths.
+  attn_implementation: sdpa
+
   label_smoothing_factor: 0.1
   weight_decay: 0.0
 

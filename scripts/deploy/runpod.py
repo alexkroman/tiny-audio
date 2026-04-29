@@ -194,9 +194,6 @@ def install_dependencies(conn: Connection) -> None:
         poetry config virtualenvs.create false
         poetry config installer.max-workers 10
 
-        # Install flash-attn if needed
-        python -c "import flash_attn" 2>/dev/null || pip install --user flash-attn --no-build-isolation
-
         # Install PyTorch with CUDA 12.8 if needed
         python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || \
             pip install --user torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128
@@ -482,9 +479,6 @@ export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
 export TORCH_CUDNN_BENCHMARK=1
 
 cd /workspace
-
-# Install flash-attn if not present
-python -c "import flash_attn" 2>/dev/null || pip install flash-attn --no-build-isolation --quiet
 
 python -m scripts.generate_sift_dataset \\
     --output-repo {output_repo} \\
