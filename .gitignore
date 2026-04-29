@@ -204,3 +204,5 @@ observations.txt
 
 # DVC
 /dvc.lock
+# Git worktrees
+.worktrees/
