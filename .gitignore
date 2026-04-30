@@ -206,3 +206,13 @@ observations.txt
 /dvc.lock
 # Git worktrees
 .worktrees/
+
+# Swift / SwiftPM / Xcode build artifacts
+swift/.build/
+swift/.swiftpm/
+**/xcuserdata/
+**/DerivedData/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+# Note: swift/Package.resolved is intentionally tracked to pin transitive
+# deps for reproducible builds.
