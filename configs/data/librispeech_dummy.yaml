@@ -1,0 +1,20 @@
+# Tiny LibriSpeech sample (73 utterances) for local smoke tests on MPS / CPU.
+# The only split available is 'validation' — we reuse it for train and eval.
+
+datasets:
+  - path: hf-internal-testing/librispeech_asr_dummy
+    name: clean
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits:
+      - validation
+    eval_splits:
+      - validation
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+max_eval_samples: 8
