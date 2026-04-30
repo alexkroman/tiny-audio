@@ -69,3 +69,31 @@ def test_orchestrator_streaming_concat_equals_oneshot():
     one_shot = model.transcribe(audio, max_new_tokens=15)
     streamed = "".join(model.transcribe_streaming(audio, max_new_tokens=15))
     assert streamed == one_shot
+
+
+@pytest.mark.slow
+def test_audio_token_id_never_in_output():
+    """Sharp-edge: <audio> placeholder token id must never appear in the
+    decoded output. The trained projector replaces these embedding rows
+    before the LM ever sees them, but a poorly trained model could in
+    principle still emit `audio_token_id` (151669 on Qwen3) as an output
+    token. This test runs N synthetic-audio transcribes and asserts that
+    none of the produced token ids are the audio token id.
+    """
+    from tiny_audio.mlx import MLXASRModel
+
+    try:
+        model = MLXASRModel.from_pretrained("mazesmazes/tiny-audio-embedded")
+    except ValueError as e:
+        if "Rev 3" in str(e):
+            pytest.skip(f"No Rev 3 checkpoint published yet: {e}")
+        raise
+
+    audio_token_id = model.audio_token_id
+    rng = np.random.default_rng(0)
+    for seed in range(5):
+        audio = rng.standard_normal(16000 * 2).astype(np.float32)
+        token_ids = list(model._iter_token_ids(audio, max_new_tokens=20, system_prompt=None))
+        assert audio_token_id not in token_ids, (
+            f"<audio> token id {audio_token_id} leaked into output for seed {seed}: {token_ids}"
+        )
