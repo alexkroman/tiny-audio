@@ -1,0 +1,34 @@
+{
+  "mel": {
+    "shape": [
+      1,
+      128,
+      600
+    ],
+    "dtype": "float32"
+  },
+  "encoder_out": {
+    "shape": [
+      1,
+      300,
+      1280
+    ],
+    "dtype": "float32"
+  },
+  "projector_out": {
+    "shape": [
+      1,
+      75,
+      1024
+    ],
+    "dtype": "float32"
+  },
+  "spliced": {
+    "shape": [
+      1,
+      87,
+      1024
+    ],
+    "dtype": "float32"
+  }
+}
