@@ -134,10 +134,10 @@ class GlmAsrAttention(nn.Module):
 
         q, k = _apply_partial_rope(q, k, cos, sin)
 
-        scores = (q @ k.transpose(0, 1, 3, 2)) * self.scale
-        # PT eager_attention_forward casts softmax to float32 then back.
-        attn = mx.softmax(scores.astype(mx.float32), axis=-1).astype(x.dtype)
-        out = (attn @ v).transpose(0, 2, 1, 3).reshape(b, t, self.num_heads * self.head_dim)
+        # Fused softmax(scale * q @ k.T) @ v in a single Metal kernel,
+        # replacing the manual 3-kernel matmul -> softmax -> matmul chain.
+        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
+        out = out.transpose(0, 2, 1, 3).reshape(b, t, self.num_heads * self.head_dim)
         return self.o_proj(out)
 
 
