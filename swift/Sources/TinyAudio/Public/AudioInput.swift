@@ -12,6 +12,6 @@ public enum AudioInput: @unchecked Sendable {
     case file(URL)
     /// A pre-decoded PCM buffer at any sample rate / channel layout.
     case pcm(buffer: AVAudioPCMBuffer)
-    /// Raw `Float32` samples at a known sample rate. Mono if 1D, deinterleaved-mono if 2D.
+    /// Raw mono `Float32` samples at a known sample rate.
     case samples([Float], sampleRate: Double)
 }

@@ -25,8 +25,9 @@ let package = Package(
                 .product(name: "MLXRandom", package: "mlx-swift"),
                 .product(name: "Transformers", package: "swift-transformers"),
                 // NOTE: swift-transformers does not expose a standalone "Hub" product;
-                // Hub functionality is bundled inside "Transformers". Removed "Hub" here.
-                // TODO(Task 8+): Re-evaluate if a future swift-transformers version adds a Hub product.
+                // Hub functionality is bundled inside "Transformers". Code that needs
+                // Hub APIs should `import Transformers` instead. Re-evaluate when
+                // swift-transformers ships Hub as a separate library product.
             ],
             path: "Sources/TinyAudio"
             // TODO(Task 8): Re-enable once MelFilterbank.json is generated and committed.
