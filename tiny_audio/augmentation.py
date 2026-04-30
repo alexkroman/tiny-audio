@@ -1,37 +1,80 @@
 """Audio data augmentation utilities for training.
 
 RIR (Room Impulse Response) convolution simulates far-field / reverberant
-recording conditions. Used to close the meeting / distant-mic WER gap when
-training mostly on close-talk audio. Standard RIR corpus is OpenSLR-28
-(https://www.openslr.org/28/) — both real (~325) and simulated (~60k) RIRs
-work; simulated_rirs gives broader coverage of room geometries.
+recording conditions to close the meeting / distant-mic WER gap when training
+mostly on close-talk audio.
+
+RIRs are loaded from a Hugging Face dataset (auto-downloaded, no manual setup).
+Default corpus is the MIT IR Survey (Traer & McDermott 2016) — 271 real
+environmental RIRs at 16kHz spanning bedroom, office, classroom, outdoor, etc.
+Small enough (~4MB) to preload into memory at init.
 """
 
 from __future__ import annotations
 
 import random
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
-import torchaudio
 from torchaudio import functional as taf
+
+if TYPE_CHECKING:
+    from datasets import Dataset
+
+
+DEFAULT_RIR_DATASET = "benjamin-paine/mit-impulse-response-survey-16khz"
 
 
 class RIRAugmentation:
-    """Convolve audio with a random RIR sampled from a directory of WAV files.
+    """Convolve audio with a random RIR from a HuggingFace dataset.
 
-    Output is trimmed to the same length as the input (aligned to the RIR's
-    direct-path peak) and clipped-amplitude-normalized.
+    All RIRs are decoded, resampled, energy-normalized, and held in memory at
+    init (the default dataset is only a few MB). Output is trimmed to the input
+    length aligned to the RIR's direct-path peak so frame timing is preserved.
     """
 
-    def __init__(self, rir_dir: str, sample_rate: int = 16000, prob: float = 0.4):
-        rir_paths = sorted(Path(rir_dir).rglob("*.wav"))
-        if not rir_paths:
-            raise ValueError(f"No .wav files found under {rir_dir}")
-        self.rir_paths = rir_paths
+    def __init__(
+        self,
+        hf_dataset: str = DEFAULT_RIR_DATASET,
+        *,
+        config: str | None = None,
+        split: str = "train",
+        audio_column: str = "audio",
+        sample_rate: int = 16000,
+        prob: float = 0.4,
+        cache_dir: str | None = None,
+        dataset: Dataset | None = None,
+    ):
+        if dataset is None:
+            from datasets import load_dataset
+
+            dataset = load_dataset(hf_dataset, name=config, split=split, cache_dir=cache_dir)
+
+        self.rirs = self._extract_rirs(dataset, audio_column, sample_rate)
+        if not self.rirs:
+            raise ValueError(f"No usable RIRs in {hf_dataset}")
         self.sample_rate = sample_rate
         self.prob = prob
+
+    @staticmethod
+    def _extract_rirs(dataset: Dataset, audio_column: str, sample_rate: int) -> list[torch.Tensor]:
+        rirs: list[torch.Tensor] = []
+        for sample in dataset:
+            audio = sample[audio_column]
+            rir = torch.from_numpy(np.asarray(audio["array"], dtype=np.float32))
+            sr = audio["sampling_rate"]
+            if sr != sample_rate:
+                rir = taf.resample(rir, sr, sample_rate)
+            if rir.ndim > 1:
+                rir = rir.mean(dim=0)
+            peak_idx = int(rir.abs().argmax().item())
+            rir = rir[peak_idx:]
+            norm = torch.linalg.norm(rir)
+            if norm < 1e-8:
+                continue
+            rirs.append(rir / norm)
+        return rirs
 
     def __call__(self, audio: np.ndarray) -> np.ndarray:
         if random.random() > self.prob:
@@ -45,18 +88,7 @@ class RIRAugmentation:
                 audio_t = audio_t.mean(dim=0)
         n = audio_t.shape[-1]
 
-        rir_path = random.choice(self.rir_paths)
-        rir, sr = torchaudio.load(str(rir_path))
-        if sr != self.sample_rate:
-            rir = taf.resample(rir, sr, self.sample_rate)
-        rir = rir.mean(dim=0)
-        peak_idx = int(rir.abs().argmax().item())
-        rir = rir[peak_idx:]
-        rir_norm = torch.linalg.norm(rir)
-        if rir_norm < 1e-8:
-            return audio
-        rir = rir / rir_norm
-
+        rir = random.choice(self.rirs)
         out = taf.fftconvolve(audio_t, rir, mode="full")[:n]
         peak = float(out.abs().max())
         if peak > 1.0:

@@ -67,11 +67,12 @@ use_specaugment: true
 label_smoothing: 0.0
 
 # RIR (Room Impulse Response) augmentation — simulates far-field / reverberant
-# audio by convolving with a random RIR. Off by default; enable per-experiment
-# when RIRs are available locally. Standard corpus: OpenSLR-28 (rirs_noises.zip).
+# audio by convolving with a random RIR. RIRs auto-download from HuggingFace
+# (default: MIT IR Survey, ~4MB, 271 real environmental RIRs at 16kHz).
+# Off by default; flip enabled=true to use.
 rir_augmentation:
   enabled: false
-  rir_dir: null
+  hf_dataset: benjamin-paine/mit-impulse-response-survey-16khz
   prob: 0.4
 
 # Misc

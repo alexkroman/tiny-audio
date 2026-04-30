@@ -390,9 +390,15 @@ def main(cfg: DictConfig) -> None:
     rir_cfg = cfg.training.get("rir_augmentation") or {}
     if rir_cfg.get("enabled"):
         rir_aug = RIRAugmentation(
-            rir_dir=rir_cfg["rir_dir"],
+            hf_dataset=rir_cfg.get(
+                "hf_dataset", "benjamin-paine/mit-impulse-response-survey-16khz"
+            ),
+            config=rir_cfg.get("config"),
+            split=rir_cfg.get("split", "train"),
+            audio_column=rir_cfg.get("audio_column", "audio"),
             sample_rate=cfg.data.sample_rate,
             prob=rir_cfg.get("prob", 0.4),
+            cache_dir=cfg.data.get("dataset_cache_dir"),
         )
 
         def _apply_rir(batch):
