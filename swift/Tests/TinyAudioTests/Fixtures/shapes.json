@@ -10,7 +10,7 @@
   "encoder_out": {
     "shape": [
       1,
-      300,
+      301,
       1280
     ],
     "dtype": "float32"
