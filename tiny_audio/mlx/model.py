@@ -279,7 +279,7 @@ class MLXASRModel:
         self,
         audio: AudioInput,
         *,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 96,
         system_prompt: str | None = None,
     ) -> str:
         """Run greedy decoding to completion and return the decoded string."""
@@ -294,7 +294,7 @@ class MLXASRModel:
         self,
         audio: AudioInput,
         *,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 96,
         system_prompt: str | None = None,
     ) -> Iterator[str]:
         """Greedy decode, yielding incremental string deltas.
@@ -328,56 +328,65 @@ class MLXASRModel:
     ) -> Iterator[int]:
         from mlx_lm.models import cache as mlx_cache
 
-        audio_np = self._prepare_audio(audio)
-        audio_embeds, num_audio = self._encode_audio(audio_np)
+        # MLX's Metal allocator is a pool that only grows to peak working set.
+        # Across many transcribe() calls with variable-length audio, the pool
+        # ratchets up until OOM. Mirror mlx-lm's reference generate.py and
+        # release the pool at the call boundary, regardless of how the
+        # generator exits (normal, EOS, exception, GeneratorExit).
+        try:
+            audio_np = self._prepare_audio(audio)
+            audio_embeds, num_audio = self._encode_audio(audio_np)
 
-        input_ids_np = build_prompt_input_ids(
-            self.tokenizer,
-            num_audio_tokens=num_audio,
-            system_prompt=system_prompt or "",
-        )
-        audio_positions = np.where(input_ids_np[0] == self.audio_token_id)[0]
-        if len(audio_positions) != num_audio:
-            raise RuntimeError(
-                f"Prompt has {len(audio_positions)} <audio> placeholders but "
-                f"projector emitted {num_audio} audio frames. The chat template "
-                f"may have stripped or duplicated placeholders."
+            input_ids_np = build_prompt_input_ids(
+                self.tokenizer,
+                num_audio_tokens=num_audio,
+                system_prompt=system_prompt or "",
             )
+            audio_positions = np.where(input_ids_np[0] == self.audio_token_id)[0]
+            if len(audio_positions) != num_audio:
+                raise RuntimeError(
+                    f"Prompt has {len(audio_positions)} <audio> placeholders but "
+                    f"projector emitted {num_audio} audio frames. The chat template "
+                    f"may have stripped or duplicated placeholders."
+                )
 
-        # The audio token id may be out-of-range for the embed table on some
-        # tokenizers (when add_special_tokens grows past the model's embedding
-        # rows). Replace those positions with id 0 before lookup; we splice the
-        # audio embeddings in immediately afterward so the value never matters.
-        safe_input_ids_np = input_ids_np.copy()
-        safe_input_ids_np[input_ids_np == self.audio_token_id] = 0
-        safe_input_ids_mx = mx.array(safe_input_ids_np)
+            # The audio token id may be out-of-range for the embed table on some
+            # tokenizers (when add_special_tokens grows past the model's embedding
+            # rows). Replace those positions with id 0 before lookup; we splice the
+            # audio embeddings in immediately afterward so the value never matters.
+            safe_input_ids_np = input_ids_np.copy()
+            safe_input_ids_np[input_ids_np == self.audio_token_id] = 0
+            safe_input_ids_mx = mx.array(safe_input_ids_np)
 
-        text_embeds = self.decoder.model.embed_tokens(safe_input_ids_mx)
-        prefill_embeds = splice_audio_embeds(text_embeds, audio_embeds, audio_positions)
+            text_embeds = self.decoder.model.embed_tokens(safe_input_ids_mx)
+            prefill_embeds = splice_audio_embeds(text_embeds, audio_embeds, audio_positions)
 
-        # Initialize KV cache and prefill via input_embeddings.
-        cache = mlx_cache.make_prompt_cache(self.decoder)
-        logits = self.decoder(safe_input_ids_mx, cache=cache, input_embeddings=prefill_embeds)
+            # Initialize KV cache and prefill via input_embeddings.
+            cache = mlx_cache.make_prompt_cache(self.decoder)
+            logits = self.decoder(safe_input_ids_mx, cache=cache, input_embeddings=prefill_embeds)
 
-        # Async-eval pipeline: keep tokens as mx.arrays (no Python int round-trip
-        # in the inner loop) and kick off step N+1 computation before syncing
-        # step N's result. The .item() sync then overlaps with the next forward
-        # pass, hiding the host<-device wait. Same pattern as mlx_lm.generate.
-        y = mx.argmax(logits[:, -1:, :], axis=-1)  # [1, 1] mx.array
-        mx.async_eval(y)
+            # Pipelined async dispatch: keep tokens as mx.arrays (no Python int
+            # round-trip in the inner loop) and kick off step N+1 computation
+            # before syncing step N's result. The .item() sync then overlaps
+            # with the next forward pass, hiding the host<-device wait. Same
+            # pattern as mlx_lm.generate.
+            y = mx.argmax(logits[:, -1:, :], axis=-1)  # [1, 1] mx.array
+            mx.async_eval(y)
 
-        for n in range(max_new_tokens):
-            if n < max_new_tokens - 1:
-                next_logits = self.decoder(y, cache=cache)
-                next_y = mx.argmax(next_logits[:, -1:, :], axis=-1)
-                mx.async_eval(next_y)
+            for n in range(max_new_tokens):
+                if n < max_new_tokens - 1:
+                    next_logits = self.decoder(y, cache=cache)
+                    next_y = mx.argmax(next_logits[:, -1:, :], axis=-1)
+                    mx.async_eval(next_y)
 
-            y_int = int(y.item())  # sync on y; overlaps with next compute above
-            yield y_int
-            if y_int in self.eos_token_ids:
-                return
-            if n < max_new_tokens - 1:
-                y = next_y
+                y_int = int(y.item())  # sync on y; overlaps with next compute above
+                yield y_int
+                if y_int in self.eos_token_ids:
+                    return
+                if n < max_new_tokens - 1:
+                    y = next_y
+        finally:
+            mx.clear_cache()
 
     # ------------------------------------------------------------- helpers
 

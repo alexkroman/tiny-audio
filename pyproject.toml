@@ -88,6 +88,7 @@ local = ["pyaudio>=0.2.14"]
 mlx = [
     "mlx>=0.20.0; sys_platform == 'darwin'",
     "mlx-lm>=0.20.0; sys_platform == 'darwin'",
+    "mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git ; sys_platform == 'darwin'",
 ]
 
 [tool.poetry.group.dev.dependencies]
