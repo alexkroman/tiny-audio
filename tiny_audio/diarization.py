@@ -154,8 +154,6 @@ class SpeakerClusterer:
         Returns:
             Cluster labels of shape [N]
         """
-        import warnings
-
         if len(embeddings.shape) != 2:
             raise ValueError(f"Expected 2D array, got shape {embeddings.shape}")
 

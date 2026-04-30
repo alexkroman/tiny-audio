@@ -13,10 +13,10 @@ class TestComputeEncoderOutputLength:
     @pytest.fixture
     def processor_method(self):
         """Get the method without creating full processor."""
-        from tiny_audio.asr_processing import ASRProcessor
+        from tiny_audio.asr_config import DEFAULT_ENCODER_CONV_LAYERS
 
         class MockProcessor:
-            encoder_conv_layers = ASRProcessor.DEFAULT_ENCODER_CONV_LAYERS
+            encoder_conv_layers = DEFAULT_ENCODER_CONV_LAYERS
 
             def _compute_encoder_output_length(self, mel_length: int) -> int:
                 length = mel_length
@@ -64,10 +64,10 @@ class TestProcessorConstants:
 
     def test_default_conv_layers(self):
         """DEFAULT_ENCODER_CONV_LAYERS should match Whisper."""
-        from tiny_audio.asr_processing import ASRProcessor
+        from tiny_audio.asr_config import DEFAULT_ENCODER_CONV_LAYERS
 
         expected = [(1, 3, 1), (1, 3, 2)]
-        assert expected == ASRProcessor.DEFAULT_ENCODER_CONV_LAYERS
+        assert expected == DEFAULT_ENCODER_CONV_LAYERS
 
 
 class TestProcessorInit:
@@ -88,11 +88,12 @@ class TestProcessorInit:
         self, mock_feature_extractor, mock_tokenizer, mock_projector
     ):
         """Should use default conv layers when not specified."""
+        from tiny_audio.asr_config import DEFAULT_ENCODER_CONV_LAYERS
         from tiny_audio.asr_processing import ASRProcessor
 
         processor = ASRProcessor(mock_feature_extractor, mock_tokenizer, mock_projector)
 
-        assert processor.encoder_conv_layers == ASRProcessor.DEFAULT_ENCODER_CONV_LAYERS
+        assert processor.encoder_conv_layers == DEFAULT_ENCODER_CONV_LAYERS
 
     def test_init_accepts_custom_conv_layers(
         self, mock_feature_extractor, mock_tokenizer, mock_projector

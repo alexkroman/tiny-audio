@@ -18,6 +18,20 @@ app = typer.Typer(help="Analyze model weights for training health")
 console = Console()
 
 
+def _section(title: str, width: int = 70) -> None:
+    console.print("\n" + "=" * width)
+    console.print(f"[bold]{title}[/bold]")
+    console.print("=" * width)
+
+
+def _threshold_status(value: float, warn: float, high: float) -> str:
+    if value < warn:
+        return "✅ OK"
+    if value < high:
+        return "⚠️  WARNING"
+    return "❌ HIGH"
+
+
 def estimate_effective_rank(tensor: torch.Tensor, threshold: float = 0.99) -> tuple[int, int]:
     """Estimate effective rank of a weight matrix using SVD.
 
@@ -28,21 +42,17 @@ def estimate_effective_rank(tensor: torch.Tensor, threshold: float = 0.99) -> tu
         return (0, 0)
 
     t = tensor.float()
-    # Use randomized SVD for large matrices
     try:
         if min(t.shape) > 1000:
-            # Sample for very large matrices
             _, singular_values, _ = torch.svd_lowrank(t, q=min(500, min(t.shape)))
         else:
             _, singular_values, _ = torch.linalg.svd(t, full_matrices=False)
     except Exception:
         return (0, min(t.shape))
 
-    # Compute variance explained
     total_var = (singular_values**2).sum()
     cumvar = torch.cumsum(singular_values**2, dim=0) / total_var
 
-    # Find rank needed for threshold variance
     effective_rank = (cumvar < threshold).sum().item() + 1
     full_rank = min(t.shape)
 
@@ -166,29 +176,14 @@ def print_tensor_analysis(stats: dict, verbose: bool = False):
             bar = "█" * int(data["pct"] / 2)
             console.print(f"    |x| {key:15s}: {data['count']:>12,} ({data['pct']:>6.2f}%) {bar}")
 
-    # Health checks
     console.print("\n  🔍 Health Checks:")
     nan_status = "❌ CRITICAL" if stats["nan_count"] > 0 else "✅ OK"
     inf_status = "❌ CRITICAL" if stats["inf_count"] > 0 else "✅ OK"
-    zero_status = (
-        "✅ OK"
-        if stats["exact_zero_pct"] < 1
-        else ("⚠️  WARNING" if stats["exact_zero_pct"] < 10 else "❌ HIGH")
-    )
-    near_zero_status = (
-        "✅ OK"
-        if stats["near_zero_pct"] < 1
-        else ("⚠️  WARNING" if stats["near_zero_pct"] < 10 else "❌ HIGH")
-    )
-    large_status = (
-        "✅ OK"
-        if stats["large_pct"] < 5
-        else ("⚠️  WARNING" if stats["large_pct"] < 20 else "❌ HIGH")
-    )
+    zero_status = _threshold_status(stats["exact_zero_pct"], 1, 10)
+    near_zero_status = _threshold_status(stats["near_zero_pct"], 1, 10)
+    large_status = _threshold_status(stats["large_pct"], 5, 20)
     very_large_pct = 100 * stats["very_large_count"] / stats["numel"]
-    very_large_status = (
-        "✅ OK" if very_large_pct < 1 else ("⚠️  WARNING" if very_large_pct < 5 else "❌ HIGH")
-    )
+    very_large_status = _threshold_status(very_large_pct, 1, 5)
 
     console.print(f"    NaN values:        {stats['nan_count']:>12,} {nan_status}")
     console.print(f"    Inf values:        {stats['inf_count']:>12,} {inf_status}")
@@ -280,11 +275,8 @@ def analyze_weights(
     verbose: bool = False,
 ):
     """Analyze model weights for training health."""
-    console.print("=" * 70)
-    console.print(f"[bold]Weight Analysis: {model_id}[/bold]")
-    console.print("=" * 70)
+    _section(f"Weight Analysis: {model_id}")
 
-    # Download model files
     try:
         config_path = hf_hub_download(repo_id=model_id, filename="config.json")
         weights_path = hf_hub_download(repo_id=model_id, filename="model.safetensors")
@@ -292,7 +284,6 @@ def analyze_weights(
         console.print(f"[red]Error downloading model: {e}[/red]")
         return False
 
-    # Load config
     with Path(config_path).open() as f:
         config = json.load(f)
 
@@ -312,10 +303,8 @@ def analyze_weights(
         if key in config:
             console.print(f"  {key}: {config[key]}")
 
-    # Load weights
     weights = load_file(weights_path)
 
-    # Filter weights if prefix specified
     if filter_prefix:
         weights = {k: v for k, v in weights.items() if filter_prefix in k}
         if not weights:
@@ -323,10 +312,7 @@ def analyze_weights(
             return False
         console.print(f"\nFiltering to weights containing '{filter_prefix}'")
 
-    # Print all tensors summary
-    console.print(f"\n{'=' * 70}")
-    console.print("[bold]WEIGHT TENSORS[/bold]")
-    console.print("=" * 70)
+    _section("WEIGHT TENSORS")
 
     total_params = 0
     trainable_params = 0
@@ -354,10 +340,7 @@ def analyze_weights(
     console.print(f"  Trainable parameters: {trainable_params:,}")
     console.print(f"  Frozen parameters:    {total_params - trainable_params:,}")
 
-    # Detailed analysis
-    console.print(f"\n{'=' * 70}")
-    console.print("[bold]DETAILED WEIGHT ANALYSIS[/bold]")
-    console.print("=" * 70)
+    _section("DETAILED WEIGHT ANALYSIS")
 
     all_stats = []
     for name in sorted(weights.keys()):
@@ -365,12 +348,8 @@ def analyze_weights(
         all_stats.append(stats)
         print_tensor_analysis(stats, verbose=verbose)
 
-    # Overall summary
-    console.print(f"\n{'=' * 70}")
-    console.print("[bold]OVERALL TRAINING HEALTH SUMMARY[/bold]")
-    console.print("=" * 70)
+    _section("OVERALL TRAINING HEALTH SUMMARY")
 
-    # Aggregate checks
     total_nans = sum(s["nan_count"] for s in all_stats)
     total_infs = sum(s["inf_count"] for s in all_stats)
     total_zeros = sum(s["exact_zero_count"] for s in all_stats)
@@ -396,10 +375,8 @@ def analyze_weights(
             f"     {short_name:25s}: mean={s['mean']:>10.6f}, std={s['std']:>8.6f}, range=[{s['min']:>8.4f}, {s['max']:>7.4f}]"
         )
 
-    # Training capacity analysis
     console.print("\n  📈 Training Capacity Analysis:")
 
-    # Collect rank utilization stats
     rank_stats = [
         (s["name"], s["effective_rank"], s["full_rank"], s["rank_utilization"])
         for s in all_stats
@@ -421,7 +398,6 @@ def analyze_weights(
             f"\n     Summary: avg={avg_rank_util:.1%}, min={min_rank_util:.1%}, max={max_rank_util:.1%}"
         )
 
-        # Interpret capacity
         if avg_rank_util < 0.4:
             capacity_status = "🟢 HIGH CAPACITY REMAINING"
             capacity_msg = "Model is using < 40% of its representational capacity. Significant room for continued training."
@@ -442,7 +418,6 @@ def analyze_weights(
         console.print(f"\n     {capacity_status}")
         console.print(f"     {capacity_msg}")
 
-    # Weight divergence from initialization
     xavier_ratios = [s["xavier_ratio"] for s in all_stats if "xavier_ratio" in s]
     if xavier_ratios:
         avg_xavier = sum(xavier_ratios) / len(xavier_ratios)
@@ -459,7 +434,6 @@ def analyze_weights(
         else:
             console.print("       ⚠️  Very high divergence - check for instability")
 
-    # Final verdict
     issues = []
     if total_nans > 0:
         issues.append("NaN values detected")

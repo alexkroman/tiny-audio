@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""Training script for ASR models using Hydra configuration.
-
-This script handles:
-- Loading and preparing datasets from multiple sources
-- Creating ASR models with configurable projector types
-- Training with HuggingFace Trainer and optional WandB logging
-- Checkpoint saving and Hub pushing
-
-Usage:
-    poetry run python scripts/train.py +experiments=transcription
-    poetry run python scripts/train.py training.learning_rate=1e-4
-"""
+"""Training script for ASR models using Hydra configuration."""
 
 import contextlib
 import os
@@ -42,12 +31,7 @@ from trl.experimental.utils import DataCollatorForChatML
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
-# Prompts for ASR training (transcription task)
-# Focus on exact words only - no mention of description/emotion
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
-
-# Prompts for SIFT training (description task)
-# Focus on characteristics/delivery - the response naturally includes words
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
 
 
@@ -162,7 +146,6 @@ class DatasetLoader:
 class DataCollator:
     """Collates audio and text data for training."""
 
-    # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
     DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
 
     def __init__(
@@ -180,31 +163,22 @@ class DataCollator:
         self.system_prompt = system_prompt
         self.projector = projector
         self.encoder_conv_layers = encoder_conv_layers or self.DEFAULT_ENCODER_CONV_LAYERS
-        # Whisper's encoder requires a fixed 3000 mel frames; pad to its
-        # built-in max_length. GLM-ASR and other variable-length encoders
-        # only need padding to the longest sample in the batch.
+        # Whisper's encoder requires a fixed 3000 mel frames; other encoders
+        # (GLM-ASR) accept variable-length input, so only pad to longest.
         self._audio_padding = (
             "max_length"
             if type(feature_extractor).__name__ == "WhisperFeatureExtractor"
             else "longest"
         )
-
-        # Use trl's DataCollatorForChatML for label masking
-        # max_length needs to accommodate audio tokens (1500 for 30s) + prompt + response
-        self.text_collator = DataCollatorForChatML(
-            tokenizer=tokenizer,
-            max_length=2048,
-        )
+        self.text_collator = DataCollatorForChatML(tokenizer=tokenizer, max_length=2048)
 
     def _compute_encoder_output_length(self, mel_length: int) -> int:
-        """Compute encoder output length using conv layer formulas."""
         length = mel_length
         for padding, kernel_size, stride in self.encoder_conv_layers:
             length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
         return length
 
-    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Process audio
+    def _extract_audio_arrays(self, features):
         audio_arrays = []
         valid_features = []
         for f in features:
@@ -221,9 +195,26 @@ class DataCollator:
                 continue
             finally:
                 f["audio"] = None
-
         if not audio_arrays:
             raise ValueError("No valid audio samples in batch")
+        return audio_arrays, valid_features
+
+    def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
+        """Build a single chat sample. Subclasses can override for task-specific prompts."""
+        text = (feature.get("text") or "").strip().lower()
+        return self._make_messages(num_audio_tokens, random.choice(TRANSCRIBE_PROMPTS), text)
+
+    def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
+        user_content = ("<audio>" * num_audio_tokens) + " " + prompt
+        messages = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        messages.append({"role": "user", "content": user_content})
+        messages.append({"role": "assistant", "content": response})
+        return {"messages": messages}
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        audio_arrays, valid_features = self._extract_audio_arrays(features)
 
         audio_out = self.feature_extractor(
             audio_arrays,
@@ -233,46 +224,24 @@ class DataCollator:
             return_tensors="pt",
         )
 
-        # Compute per-sample audio token counts (like GlmAsr)
-        mel_lengths = audio_out.attention_mask.sum(dim=-1)  # Per-sample mel lengths
-        audio_token_counts = []
-        for mel_len in mel_lengths:
-            encoder_len = self._compute_encoder_output_length(int(mel_len.item()))
-            num_tokens = self.projector.get_output_length(encoder_len)
-            audio_token_counts.append(num_tokens)
+        mel_lengths = audio_out.attention_mask.sum(dim=-1)
+        audio_token_counts = [
+            self.projector.get_output_length(self._compute_encoder_output_length(int(m.item())))
+            for m in mel_lengths
+        ]
 
-        # Lowercase all training texts
-        processed_texts = [(f.get("text") or "").strip().lower() for f in valid_features]
+        text_features = [
+            self._build_sample(f, n) for f, n in zip(valid_features, audio_token_counts)
+        ]
 
-        # Build messages for each sample with per-sample audio token counts
-        text_features = []
-        for text, num_audio_tokens in zip(processed_texts, audio_token_counts):
-            audio_placeholder = "<audio>" * num_audio_tokens
-            prompt = random.choice(TRANSCRIBE_PROMPTS)
-            user_content = audio_placeholder + " " + prompt
-
-            messages = []
-            if self.system_prompt:
-                messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": user_content})
-            messages.append({"role": "assistant", "content": text})
-
-            text_features.append({"messages": messages})
-
-        # Let trl handle tokenization, label masking, and padding
         batch = self.text_collator(text_features)
         batch["input_features"] = audio_out.input_features
         batch["audio_attention_mask"] = audio_out.attention_mask
-
         return batch
 
 
-# SIFT configuration for multi-task training
-SIFT_SYSTEM_MESSAGE = ""  # No system message
-
-
 class MultiTaskDataCollator(DataCollator):
-    """Collates audio and text data for multi-task training."""
+    """Collates audio and text data for multi-task ASR + SIFT training."""
 
     def __init__(
         self,
@@ -286,81 +255,19 @@ class MultiTaskDataCollator(DataCollator):
             tokenizer=tokenizer,
             feature_extractor=feature_extractor,
             sample_rate=sample_rate,
-            system_prompt=SIFT_SYSTEM_MESSAGE,
+            system_prompt="",
             projector=projector,
             encoder_conv_layers=encoder_conv_layers,
         )
 
-    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Process audio
-        audio_arrays = []
-        valid_features = []
-        for f in features:
-            try:
-                audio = f["audio"]["array"]
-                if hasattr(audio, "numpy"):
-                    audio = audio.numpy()
-                audio = audio.squeeze()
-                if audio.ndim > 1:
-                    audio = audio.mean(axis=0)
-                audio_arrays.append(audio)
-                valid_features.append(f)
-            except Exception:
-                continue
-            finally:
-                f["audio"] = None
-
-        if not audio_arrays:
-            raise ValueError("No valid audio samples in batch")
-
-        audio_out = self.feature_extractor(
-            audio_arrays,
-            sampling_rate=self.sample_rate,
-            padding=self._audio_padding,
-            return_attention_mask=True,
-            return_tensors="pt",
-        )
-
-        # Compute per-sample audio token counts
-        mel_lengths = audio_out.attention_mask.sum(dim=-1)
-        audio_token_counts = []
-        for mel_len in mel_lengths:
-            encoder_len = self._compute_encoder_output_length(int(mel_len.item()))
-            num_tokens = self.projector.get_output_length(encoder_len)
-            audio_token_counts.append(num_tokens)
-
-        # Build messages - differentiate between ASR and SIFT tasks using task column
-        text_features = []
-        for f, num_audio_tokens in zip(valid_features, audio_token_counts):
-            audio_placeholder = "<audio>" * num_audio_tokens
-            task = f.get("task", "transcribe")
-
-            if task == "sift":
-                # SIFT task: describe audio
-                response = (f.get("sift_response") or f.get("text") or "").strip()
-                prompt = random.choice(DESCRIBE_PROMPTS)
-            else:
-                # ASR task: transcription
-                response = (f.get("text") or "").strip().lower()
-                prompt = random.choice(TRANSCRIBE_PROMPTS)
-
-            user_content = f"{audio_placeholder} {prompt}"
-
-            # Build messages (skip system if empty)
-            messages = []
-            if self.system_prompt:
-                messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": user_content})
-            messages.append({"role": "assistant", "content": response})
-
-            text_features.append({"messages": messages})
-
-        # Let trl handle tokenization, label masking, and padding
-        batch = self.text_collator(text_features)
-        batch["input_features"] = audio_out.input_features
-        batch["audio_attention_mask"] = audio_out.attention_mask
-
-        return batch
+    def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
+        if feature.get("task") == "sift":
+            response = (feature.get("sift_response") or feature.get("text") or "").strip()
+            prompt = random.choice(DESCRIBE_PROMPTS)
+        else:
+            response = (feature.get("text") or "").strip().lower()
+            prompt = random.choice(TRANSCRIBE_PROMPTS)
+        return self._make_messages(num_audio_tokens, prompt, response)
 
 
 class ASRTrainer(Trainer):
@@ -374,18 +281,14 @@ class ASRTrainer(Trainer):
         it incorrectly uses shift_labels=False, causing misaligned predictions.
         This override forces shift_labels=True for correct causal LM behavior.
         """
-        # Pop labels if using label smoothing (matches Trainer behavior)
-        if self.label_smoother is not None and "labels" in inputs:
-            labels = inputs.pop("labels")
-        else:
-            labels = None
+        labels = (
+            inputs.pop("labels") if self.label_smoother is not None and "labels" in inputs else None
+        )
 
         outputs = model(**inputs)
 
         if labels is not None:
-            # Force shift_labels=True since ASRModel is a causal LM
             loss = self.label_smoother(outputs, labels, shift_labels=True)
-            # Scale loss for gradient accumulation (Trainer expects this)
             if self.args.gradient_accumulation_steps > 1:
                 loss = loss / self.args.gradient_accumulation_steps
         else:
@@ -421,53 +324,46 @@ def get_valid_training_args(config: dict) -> dict:
     return {k: v for k, v in config.items() if k in valid_fields}
 
 
+TRAINING_MODEL_PARAMS = [
+    "label_smoothing",
+    "projector_dropout",
+    "use_specaugment",
+    "num_time_masks",
+    "time_mask_length",
+    "num_freq_masks",
+    "freq_mask_length",
+    "attn_implementation",
+    "use_lora",
+    "lora_rank",
+    "lora_alpha",
+    "lora_dropout",
+    "lora_target_modules",
+    "freeze_projector",
+]
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
-    # Check HF_TOKEN is set if pushing to hub
-    if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
-        import os
+    push_to_hub = cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id")
+    if push_to_hub and not os.environ.get("HF_TOKEN"):
+        raise ValueError(
+            "HF_TOKEN environment variable is required when push_to_hub is enabled. "
+            "Set it with: export HF_TOKEN=your_token"
+        )
 
-        if not os.environ.get("HF_TOKEN"):
-            raise ValueError(
-                "HF_TOKEN environment variable is required when push_to_hub is enabled. "
-                "Set it with: export HF_TOKEN=your_token"
-            )
-
-    # Initialize wandb
     if cfg.training.get("report_to") == "wandb":
         wandb.init(
             project=cfg.training.get("wandb_project", "tiny-audio"),
             config=OmegaConf.to_container(cfg, resolve=True),
         )
 
-    # Create model config from hydra config
-    # Merge model config with training config for model-specific params
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_config_dict, dict), "model config must be a dict"
-    # Add training params that affect model behavior
-    training_model_params = [
-        "label_smoothing",
-        "projector_dropout",
-        "use_specaugment",
-        "num_time_masks",
-        "time_mask_length",
-        "num_freq_masks",
-        "freq_mask_length",
-        "attn_implementation",
-        # LoRA params (Stage 2 fine-tuning)
-        "use_lora",
-        "lora_rank",
-        "lora_alpha",
-        "lora_dropout",
-        "lora_target_modules",
-        "freeze_projector",
-    ]
-    for param in training_model_params:
+    for param in TRAINING_MODEL_PARAMS:
         if cfg.training.get(param) is not None:
             model_config_dict[param] = cfg.training[param]
     asr_config = ASRConfig(**model_config_dict)
 
-    # Load or create model
     if cfg.model.get("pretrained_model_path"):
         model = ASRModel.from_pretrained(cfg.model.pretrained_model_path, config=asr_config)
     else:
@@ -475,27 +371,21 @@ def main(cfg: DictConfig) -> None:
 
     model.config.use_cache = False
 
-    # Store hub_model_id in config so save_pretrained() can set base_model_name_or_path correctly
     if hub_model_id := cfg.training.get("hub_model_id"):
         model.config.pretrained_model_path = hub_model_id
 
-    # Disable Qwen3 thinking mode by patching the chat template
-    # This is a workaround for TRL's DataCollatorForChatML not passing enable_thinking=False
-    # See: https://github.com/huggingface/trl/issues/3387
+    # Workaround: TRL's DataCollatorForChatML doesn't pass enable_thinking=False to Qwen3.
+    # See https://github.com/huggingface/trl/issues/3387
     if model.tokenizer.chat_template and "enable_thinking" in model.tokenizer.chat_template:
-        # Replace the conditional check with a hardcoded False
         model.tokenizer.chat_template = model.tokenizer.chat_template.replace(
             "enable_thinking is defined and enable_thinking is false",
-            "true",  # Always disable thinking
+            "true",
         )
 
-    # Check if multi-task training is enabled
     multitask_enabled = cfg.get("multitask", {}).get("enabled", False)
 
-    # Load datasets
     train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
 
-    # Create data collator (multi-task or standard)
     if multitask_enabled:
         data_collator = MultiTaskDataCollator(
             tokenizer=model.tokenizer,
@@ -514,7 +404,6 @@ def main(cfg: DictConfig) -> None:
             encoder_conv_layers=model.config.encoder_conv_layers,
         )
 
-    # Setup callbacks
     callbacks = []
     if cfg.early_stopping.patience:
         callbacks.append(
@@ -523,10 +412,9 @@ def main(cfg: DictConfig) -> None:
                 early_stopping_threshold=cfg.early_stopping.threshold,
             )
         )
-    if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
+    if push_to_hub:
         callbacks.append(PushToHubCallback())
 
-    # Configure torch.compile if specified
     training_config = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_config, dict)
     if compile_config := training_config.pop("torch_compile_config", None):
@@ -536,11 +424,9 @@ def main(cfg: DictConfig) -> None:
         )
         torch._inductor.config.compile_threads = compile_config.get("compile_threads", 4)
 
-    # Create trainer with only valid TrainingArguments
-    valid_args = get_valid_training_args(training_config)
     trainer = ASRTrainer(
         model=model,
-        args=TrainingArguments(**valid_args),
+        args=TrainingArguments(**get_valid_training_args(training_config)),
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=data_collator,
@@ -550,8 +436,7 @@ def main(cfg: DictConfig) -> None:
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
     trainer.save_model()
 
-    if cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id"):
-        # Use model's push_to_hub which properly sets base_model_name_or_path in adapter_config.json
+    if push_to_hub:
         trainer.model.push_to_hub(
             cfg.training.hub_model_id,
             commit_message="Training complete - final model",

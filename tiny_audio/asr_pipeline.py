@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import torch
 import transformers
+from transformers.pipelines.audio_utils import ffmpeg_read
 
 try:
     from .alignment import ForcedAligner
@@ -19,6 +20,13 @@ except ImportError:
 
 # Re-export for backwards compatibility
 __all__ = ["ForcedAligner", "SpeakerDiarizer", "ASRPipeline"]
+
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
+_DEFAULT_MIN_REPEATS = 3
+_TRAILING_CHAR_RE = re.compile(r"(.)\1{" + str(_DEFAULT_MIN_REPEATS - 1) + r",}$")
+_TRAILING_WORD_RE = re.compile(
+    r"\b(\w+)(?:\s+\1){" + str(_DEFAULT_MIN_REPEATS - 1) + r",}\s*$", re.IGNORECASE
+)
 
 
 class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
@@ -152,8 +160,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
     def _extract_audio(self, inputs) -> dict | None:
         """Extract audio array from various input formats using HF utilities."""
-        from transformers.pipelines.audio_utils import ffmpeg_read
-
         if isinstance(inputs, dict):
             if "array" in inputs:
                 return {
@@ -257,8 +263,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
         # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
-        text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
-        # Truncate repetitions at end of text
+        if "<think>" in text:
+            text = _THINK_TAG_RE.sub("", text).strip()
         text = _truncate_repetitions(text)
         return {"text": text}
 
@@ -281,14 +287,16 @@ def _truncate_repetitions(text: str, min_repeats: int = 3) -> str:
     if not text:
         return text
 
-    # 1. Truncate repeated characters at end (e.g., "444444" -> "4")
-    char_pattern = re.compile(r"(.)\1{" + str(min_repeats - 1) + r",}$")
-    text = char_pattern.sub(r"\1", text)
+    if min_repeats == _DEFAULT_MIN_REPEATS:
+        char_pattern = _TRAILING_CHAR_RE
+        word_pattern = _TRAILING_WORD_RE
+    else:
+        char_pattern = re.compile(r"(.)\1{" + str(min_repeats - 1) + r",}$")
+        word_pattern = re.compile(
+            r"\b(\w+)(?:\s+\1){" + str(min_repeats - 1) + r",}\s*$", re.IGNORECASE
+        )
 
-    # 2. Truncate repeated words at end (e.g., "the the the" -> "the")
-    word_pattern = re.compile(
-        r"\b(\w+)(?:\s+\1){" + str(min_repeats - 1) + r",}\s*$", re.IGNORECASE
-    )
+    text = char_pattern.sub(r"\1", text)
     while word_pattern.search(text):
         text = word_pattern.sub(r"\1", text)
 

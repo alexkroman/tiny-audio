@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
-"""Development commands for tiny-audio.
-
-Commands:
-    lint         Run linters (Poetry + Python + YAML + TOML)
-    format       Format code with black, ruff, and mdformat
-    type-check   Run type checkers (mypy and pyright)
-    test         Run fast pytest tests (skips slow model-loading tests)
-    test-slow    Run only slow pytest tests
-    test-all     Run all pytest tests
-    coverage     Run tests with coverage report
-    check        Run all checks (lint + type-check + security + docstrings)
-    build        Build package (wheel and sdist)
-    precommit    Pre-commit quality gate
-    security     Run security checks with bandit
-    dead-code    Find dead/unused code with vulture
-    docstrings   Check docstring coverage with interrogate
-    install-hooks Install pre-commit hooks
-    handler      Test inference endpoint handler locally
-"""
+"""Development commands for tiny-audio."""
 
 import subprocess
 from pathlib import Path
@@ -31,6 +13,23 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+CODE_PATHS = ["tiny_audio", "scripts", "tests"]
+LIB_PATH = "tiny_audio"
+
+LINT_COMMANDS = [
+    ["poetry", "check"],
+    ["ruff", "check", *CODE_PATHS],
+    ["yamllint", "configs/"],
+    ["taplo", "check", "pyproject.toml"],
+]
+TYPE_CHECK_COMMANDS = [
+    ["mypy", LIB_PATH],
+    ["pyright", LIB_PATH],
+]
+SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"]
+DOCSTRINGS_COMMAND = ["interrogate", LIB_PATH, "--fail-under", "50"]
+CHECK_COMMANDS = [*LINT_COMMANDS, *TYPE_CHECK_COMMANDS, SECURITY_COMMAND, DOCSTRINGS_COMMAND]
 
 
 def run(*args: str) -> int:
@@ -51,23 +50,16 @@ def run_all(*commands: list[str]) -> int:
 @app.command()
 def lint():
     """Run linters (Poetry + Python + YAML + TOML)."""
-    code = run_all(
-        ["poetry", "check"],
-        ["ruff", "check", "tiny_audio", "scripts", "tests"],
-        ["yamllint", "configs/"],
-        ["taplo", "check", "pyproject.toml"],
-    )
-    raise typer.Exit(code)
+    raise typer.Exit(run_all(*LINT_COMMANDS))
 
 
 @app.command("format")
 def format_code():
     """Format code with black, ruff, and mdformat."""
-    run("black", "tiny_audio", "scripts", "tests")
-    run("ruff", "format", "tiny_audio", "scripts", "tests")
-    run("ruff", "check", "--fix", "tiny_audio", "scripts", "tests")
+    run("black", *CODE_PATHS)
+    run("ruff", "format", *CODE_PATHS)
+    run("ruff", "check", "--fix", *CODE_PATHS)
 
-    # Format markdown files
     md_files = [
         str(f)
         for f in Path().rglob("*.md")
@@ -80,11 +72,7 @@ def format_code():
 @app.command("type-check")
 def type_check():
     """Run type checkers (mypy and pyright)."""
-    code = run_all(
-        ["mypy", "tiny_audio"],
-        ["pyright", "tiny_audio"],
-    )
-    raise typer.Exit(code)
+    raise typer.Exit(run_all(*TYPE_CHECK_COMMANDS))
 
 
 @app.command()
@@ -99,7 +87,7 @@ def coverage():
     raise typer.Exit(
         run(
             "pytest",
-            "--cov=tiny_audio",
+            f"--cov={LIB_PATH}",
             "--cov-report=term-missing",
             "--cov-report=html",
             "-v",
@@ -110,17 +98,7 @@ def coverage():
 @app.command()
 def check():
     """Run all checks (lint + type-check + security + docstrings)."""
-    code = run_all(
-        ["poetry", "check"],
-        ["ruff", "check", "tiny_audio", "scripts", "tests"],
-        ["yamllint", "configs/"],
-        ["taplo", "check", "pyproject.toml"],
-        ["mypy", "tiny_audio"],
-        ["pyright", "tiny_audio"],
-        ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"],
-        ["interrogate", "tiny_audio", "--fail-under", "50"],
-    )
-    raise typer.Exit(code)
+    raise typer.Exit(run_all(*CHECK_COMMANDS))
 
 
 @app.command()
@@ -132,23 +110,8 @@ def build():
 @app.command()
 def precommit():
     """Pre-commit quality gate (format, lint, type-check, security, docstrings, test, build)."""
-    # Format first (doesn't fail)
     format_code()
-
-    # Then run all checks
-    code = run_all(
-        ["poetry", "check"],
-        ["ruff", "check", "tiny_audio", "scripts", "tests"],
-        ["yamllint", "configs/"],
-        ["taplo", "check", "pyproject.toml"],
-        ["mypy", "tiny_audio"],
-        ["pyright", "tiny_audio"],
-        ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"],
-        ["interrogate", "tiny_audio", "--fail-under", "50"],
-        ["pytest", "-v"],
-        ["poetry", "build"],
-    )
-    raise typer.Exit(code)
+    raise typer.Exit(run_all(*CHECK_COMMANDS, ["pytest", "-v"], ["poetry", "build"]))
 
 
 @app.command("install-hooks")
@@ -160,7 +123,7 @@ def install_hooks():
 @app.command()
 def security():
     """Run security checks with bandit."""
-    raise typer.Exit(run("bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"))
+    raise typer.Exit(run(*SECURITY_COMMAND))
 
 
 @app.command("dead-code")
@@ -172,11 +135,10 @@ def dead_code():
 @app.command()
 def docstrings():
     """Check docstring coverage with interrogate."""
-    raise typer.Exit(run("interrogate", "tiny_audio", "-v", "--fail-under", "50"))
+    raise typer.Exit(run("interrogate", LIB_PATH, "-v", "--fail-under", "50"))
 
 
 def _register_handler():
-    """Register handler subcommand (lazy import)."""
     from scripts.deploy.handler_local import test as handler_test
 
     app.command(name="handler", help="Test inference endpoint handler locally")(handler_test)
