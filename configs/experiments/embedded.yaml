@@ -13,7 +13,10 @@ model:
   projector_pool_stride: 4
   projector_hidden_dim: 512
   audio_model_id: openai/whisper-base
-  text_model_id: HuggingFaceTB/SmolLM2-360M
+  # Instruct variant: ships with a chat_template, which DataCollatorForChatML
+  # requires. The base SmolLM2-360M doesn't have one, and the LM is frozen
+  # here anyway, so the instruct fine-tune is a strict win.
+  text_model_id: HuggingFaceTB/SmolLM2-360M-Instruct
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-embedded"
