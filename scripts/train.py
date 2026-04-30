@@ -66,6 +66,11 @@ class DatasetLoader:
             "text": dataset_cfg.get("text_column", "text"),
             "audio": dataset_cfg.get("audio_column", "audio"),
         }
+        # duration_column is optional: only remap if explicitly configured
+        duration_source = dataset_cfg.get("duration_column")
+        if duration_source:
+            col_map["duration"] = duration_source
+
         for target, source in col_map.items():
             if source != target and source in ds.column_names:
                 if target in ds.column_names:
