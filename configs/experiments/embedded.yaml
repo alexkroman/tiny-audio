@@ -1,0 +1,60 @@
+# @package _global_
+# ASR transcription training with whisper-base + SmolLM2-360M
+# Same recipe as transcription.yaml, smaller encoder/decoder for comparison
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=embedded
+
+defaults:
+  - override /data: multiasr
+
+model:
+  projector_type: mlp
+  projector_pool_stride: 4
+  projector_hidden_dim: 512
+  audio_model_id: openai/whisper-base
+  # Instruct variant: ships with a chat_template, which DataCollatorForChatML
+  # requires. The base SmolLM2-360M doesn't have one, and the LM is frozen
+  # here anyway, so the instruct fine-tune is a strict win.
+  text_model_id: HuggingFaceTB/SmolLM2-360M-Instruct
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-embedded"
+  group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
+  # Tuned for RTX PRO 6000 Blackwell Server Edition (96 GB).
+  # Effective batch = 64. Per-device capped at 64 because of the combined cost
+  # of SmolLM2-360M's 30 layers × 2560-dim FFN activations, the ~12 GB
+  # cross-entropy logits/loss buffer over its 49k vocab, and dataloader
+  # prefetch — these push past 96 GB at higher per-device batches.
+  # LR/warmup mirror transcription.yaml for comparability.
+  learning_rate: 1e-3
+  warmup_steps: 500
+  lr_scheduler_type: polynomial
+  lr_scheduler_kwargs:
+    power: 0.5
+  seed: 42
+  auto_find_batch_size: false
+  per_device_train_batch_size: 64
+  per_device_eval_batch_size: 64
+  gradient_accumulation_steps: 1
+  num_train_epochs: 1
+  save_steps: 1000
+  eval_steps: 1000
+
+  # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck at this batch size.
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 4
+
+  # SDPA (PyTorch-native, cuDNN flash backend on Blackwell) — avoids the slow
+  # flash-attn source build on RunPod and is fast enough at our seq lengths.
+  attn_implementation: sdpa
+
+  label_smoothing_factor: 0.1
+  weight_decay: 0.0
+
+  use_specaugment: true
+  # LibriDouble settings (2 masks each)
+  num_time_masks: 2
+  time_mask_length: 100
+  num_freq_masks: 2
+  freq_mask_length: 27

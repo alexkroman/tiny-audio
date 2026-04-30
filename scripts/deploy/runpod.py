@@ -147,11 +147,16 @@ RSYNC_EXCLUDES = [
 
 
 def setup_remote_environment(conn: Connection) -> None:
-    """Install system dependencies on the remote."""
+    """Install system dependencies the base RunPod image is missing.
+
+    apt-get install is idempotent, so this is a no-op when packages are already
+    present in the image. Anything the image already ships (PyTorch, CUDA,
+    Python, common libs) we leave alone.
+    """
     print("\nSetting up remote environment...")
     conn.run("apt-get update -qq || true", hide=True)
     conn.run(
-        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 ninja-build portaudio19-dev",
+        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 portaudio19-dev",
         hide=True,
     )
     print("Remote environment setup complete!")
@@ -173,50 +178,60 @@ def sync_project(conn: Connection, project_root: Path) -> None:
 
 
 def install_dependencies(conn: Connection) -> None:
-    """Install Python dependencies from poetry.lock."""
+    """Install Python dependencies on top of the base RunPod image.
+
+    Trusts the base image to provide a CUDA-enabled PyTorch and Python; we only
+    fill in the gaps (Poetry tooling + project deps).
+    """
     print("\nInstalling Python dependencies...")
 
-    setup_commands = """
-        export PATH="/root/.local/bin:$PATH"
-        export PIP_ROOT_USER_ACTION=ignore
-        export POETRY_VIRTUALENVS_CREATE=false
-        export PIP_BREAK_SYSTEM_PACKAGES=1
+    setup_script = """\
+#!/bin/bash
+set -e
 
-        # Configure pip
-        mkdir -p /root/.config/pip
-        echo -e "[global]\\nbreak-system-packages = true" > /root/.config/pip/pip.conf
+export PATH="/root/.local/bin:$PATH"
+export PIP_ROOT_USER_ACTION=ignore
+export POETRY_VIRTUALENVS_CREATE=false
+export PIP_BREAK_SYSTEM_PACKAGES=1
 
-        # Install Poetry if needed
-        command -v poetry >/dev/null 2>&1 || pip install --user poetry
-        pip install --user poetry-plugin-export
+# Configure pip
+mkdir -p /root/.config/pip
+echo -e "[global]\\nbreak-system-packages = true" > /root/.config/pip/pip.conf
 
-        # Configure Poetry
-        poetry config virtualenvs.create false
-        poetry config installer.max-workers 10
+# Verify the base image actually ships a CUDA-enabled PyTorch — fail loudly
+# rather than silently reinstalling a different version on top.
+python -c "import torch; assert torch.cuda.is_available()" || {
+    echo "ERROR: base image is missing a CUDA-enabled PyTorch. Pick a runpod/pytorch:* image." >&2
+    exit 1
+}
 
-        # Install flash-attn if needed
-        python -c "import flash_attn" 2>/dev/null || pip install --user flash-attn --no-build-isolation
+# Poetry tooling — only install what's missing
+command -v poetry >/dev/null 2>&1 || pip install --user poetry
+python -c "import poetry_plugin_export" 2>/dev/null || pip install --user poetry-plugin-export
+poetry config virtualenvs.create false
+poetry config installer.max-workers 10
 
-        # Install PyTorch with CUDA 12.8 if needed
-        python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null || \
-            pip install --user torch~=2.8.0 --index-url=https://download.pytorch.org/whl/cu128
+# Project deps — pip skips packages already satisfied by the base image
+cd /workspace
+poetry export --only main --without-hashes | grep -v "^torch==" > /tmp/requirements.txt
+pip install --user -r /tmp/requirements.txt 2>&1 | grep -v "already satisfied" || true
 
-        # Install peft for LoRA support
-        pip install --user peft
+# Install project in editable mode
+pip install --user -e . --no-deps
 
-        # Export and install dependencies (excluding torch to preserve system version)
-        cd /workspace
-        poetry export --only main --without-hashes | grep -v "^torch==" > /tmp/requirements.txt
-        pip install --user -r /tmp/requirements.txt 2>&1 | grep -v "already satisfied" || true
+# Verify
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+"""
 
-        # Install project in editable mode
-        pip install --user -e . --no-deps
-
-        # Verify
-        python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-    """
-
-    conn.run(f"bash -c '{setup_commands}'", hide=False)
+    # Upload the script via a single-quoted heredoc so apostrophes, dollar
+    # signs, and other shell metachars in the body are preserved verbatim.
+    # This avoids the entire class of `bash -c '...'` quoting bugs.
+    script_path = "/tmp/tiny_audio_install_deps.sh"
+    conn.run(
+        f"cat > {script_path} << 'INSTALL_DEPS_EOF'\n{setup_script}\nINSTALL_DEPS_EOF",
+        hide=True,
+    )
+    conn.run(f"bash {script_path}", hide=False)
     print("Dependencies installed successfully!")
 
 
@@ -482,9 +497,6 @@ export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
 export TORCH_CUDNN_BENCHMARK=1
 
 cd /workspace
-
-# Install flash-attn if not present
-python -c "import flash_attn" 2>/dev/null || pip install flash-attn --no-build-isolation --quiet
 
 python -m scripts.generate_sift_dataset \\
     --output-repo {output_repo} \\
