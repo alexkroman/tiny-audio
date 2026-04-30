@@ -29,11 +29,10 @@ let package = Package(
                 // Hub APIs should `import Transformers` instead. Re-evaluate when
                 // swift-transformers ships Hub as a separate library product.
             ],
-            path: "Sources/TinyAudio"
-            // TODO(Task 8): Re-enable once MelFilterbank.json is generated and committed.
-            // resources: [
-            //     .process("Mel/MelFilterbank.json"),
-            // ]
+            path: "Sources/TinyAudio",
+            resources: [
+                .process("Mel/MelFilterbank.json"),
+            ]
         ),
         .testTarget(
             name: "TinyAudioTests",
