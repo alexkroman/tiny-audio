@@ -296,12 +296,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """Initialize tokenizer with audio token."""
         self.tokenizer = AutoTokenizer.from_pretrained(config.text_model_id, trust_remote_code=True)
 
-        # Set pad token
+        # Set pad token. Prefer a dedicated pad token if the tokenizer has one
+        # (e.g. Qwen's <|finetune_right_pad_id|>); otherwise fall back to
+        # eos_token, which is the standard pattern for Llama-style tokenizers
+        # (SmolLM2, Llama, etc.) that ship without a separate pad token.
         if (
             self.tokenizer.pad_token is None
             or self.tokenizer.pad_token_id == self.tokenizer.eos_token_id
-        ) and "<|finetune_right_pad_id|>" in self.tokenizer.get_vocab():
-            self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
+        ):
+            if "<|finetune_right_pad_id|>" in self.tokenizer.get_vocab():
+                self.tokenizer.pad_token = "<|finetune_right_pad_id|>"
+            elif self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Add audio token
         existing_special = getattr(self.tokenizer, "additional_special_tokens", None) or []
