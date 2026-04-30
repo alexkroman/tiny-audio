@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""Generate SIFT datasets for paralinguistic training.
-
-This script processes audio datasets with paralinguistic metadata (emotion, gender, age)
-and generates natural language responses using an LLM.
-
-Uses SIT_SSP mode: System message + instruction + semantic + paralinguistic
-
-Usage:
-    python -m scripts.generate_sift_dataset --output-repo user/sift-dataset
-
-    # On RunPod via CLI:
-    ta runpod sift <host> <port> --output-repo user/sift-dataset
-"""
+"""Generate SIFT datasets for paralinguistic training."""
 
 import os
 import re
@@ -29,16 +17,22 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig, pipeline
 from transformers.pipelines.pt_utils import KeyDataset
 
-# System prompt for audio understanding (optimized through iterative testing with Qwen3-4B)
-# Produces natural, human-like descriptions with voice quality details
 SIFT_SYSTEM_PROMPT = (
     'Describe the audio in one sentence starting with "Sounds like".\n'
     "Include: emotion, speaker gender, what they said (quoted), and voice quality.\n"
     "Example: \"Sounds like an angry man saying 'leave me alone' in a harsh, loud voice.\""
 )
-
-# Simple instruction to trigger description
 SIFT_INSTRUCTION = "/no_think"
+
+MISSING_VALUE_SENTINELS = frozenset({"", "na", "null", "unk", "unknown", "nan", "none"})
+
+
+def _clean_string(value: object) -> str | None:
+    """Lowercase and strip a value; return None if it represents a missing value."""
+    if value is None:
+        return None
+    cleaned = str(value).lower().strip()
+    return None if cleaned in MISSING_VALUE_SENTINELS else cleaned
 
 
 @dataclass
@@ -181,133 +175,87 @@ def age_to_group(age: str | int | None) -> str | None:
         return None
     try:
         age_int = int(age)
-        if 0 < age_int < 18:
-            return "teenager"
-        if age_int < 40:
-            return "young adult"
-        if age_int <= 60:
-            return "middle-age adult"
-        if 60 < age_int < 200:
-            return "senior"
-        return None
     except (ValueError, TypeError):
-        # Already a string like "young adult"
-        if isinstance(age, str) and age.lower() not in ("", "na", "null", "unk", "unknown", "nan"):
-            return age.lower()
-        return None
+        return _clean_string(age)
+    if 0 < age_int < 18:
+        return "teenager"
+    if age_int < 40:
+        return "young adult"
+    if age_int <= 60:
+        return "middle-age adult"
+    if 60 < age_int < 200:
+        return "senior"
+    return None
 
 
 def volume_to_label(relative_db: float | None) -> str | None:
     """Convert relative_db to volume label.
 
-    Thresholds derived from AbstractTTS dataset distributions:
-    - Quiet: < -16.4 dB (below 25th percentile)
-    - Normal: -16.4 to -10.0 dB (25th to 75th percentile)
-    - Loud: > -10.0 dB (above 75th percentile)
-
-    Returns None for normal volume (don't mention unremarkable features).
+    Thresholds (AbstractTTS dataset distributions):
+      - quiet: < -16.4 dB (below 25th percentile)
+      - loud:  > -10.0 dB (above 75th percentile)
+      - normal: between (returns None — don't mention unremarkable features)
     """
     if relative_db is None:
         return None
-
     if relative_db < -16.4:
         return "quiet"
     if relative_db > -10.0:
         return "loud"
-    return None  # Normal volume - don't mention
+    return None
 
 
 def pace_to_label(rate: str | float | None) -> str | None:
-    """Convert numeric speaking rate to text label. Returns None for missing/invalid values.
+    """Convert numeric speaking rate to text label.
 
-    Speaking rate thresholds based on AbstractTTS dataset distributions:
-    - Data ranges from ~3-17 with median ~7-10
-    - Slow: < 6.0 (bottom ~25%)
-    - Normal: 6.0 - 9.0 (middle ~50%)
-    - Fast: > 9.0 (top ~25%)
+    Thresholds (AbstractTTS dataset distributions, range ~3-17):
+      - slow:   < 6.0
+      - normal: 6.0 - 9.0
+      - fast:   > 9.0
     """
     if rate is None:
         return None
     try:
         rate_float = float(rate)
-        if rate_float <= 0:
-            return None
-        if rate_float < 6.0:
-            return "slow"
-        if rate_float <= 9.0:
-            return "normal"
-        return "fast"
     except (ValueError, TypeError):
-        # Already a string like "fast", "slow", "normal"
-        if isinstance(rate, str) and rate.lower() not in (
-            "",
-            "na",
-            "null",
-            "unk",
-            "unknown",
-            "nan",
-        ):
-            return rate.lower()
+        return _clean_string(rate)
+    if rate_float <= 0:
         return None
+    if rate_float < 6.0:
+        return "slow"
+    if rate_float <= 9.0:
+        return "normal"
+    return "fast"
 
 
 def normalize_label(value: str | None) -> str | None:
     """Normalize a label value. Returns None for missing/invalid values."""
-    if value is None:
-        return None
-    value_str = str(value).lower().strip()
-    if value_str in ("", "na", "null", "unk", "unknown", "nan", "none"):
-        return None
-    return value_str
+    return _clean_string(value)
 
 
-# Emotion label normalization mapping
-# Maps various dataset-specific labels to consistent canonical forms
 EMOTION_NORMALIZATION = {
-    # Anger variants
-    "angry": "angry",
     "anger": "angry",
-    # Happiness variants
-    "happy": "happy",
     "happiness": "happy",
-    # Sadness variants
-    "sad": "sad",
     "sadness": "sad",
-    # Surprise variants
-    "surprise": "surprise",
     "surprised": "surprise",
     "pleasant surprise": "surprise",
-    # Standard labels (no change needed)
-    "neutral": "neutral",
-    "fear": "fear",
-    "disgust": "disgust",
 }
 
 
 def normalize_emotion(value: str | None) -> str | None:
-    """Normalize emotion labels to consistent canonical forms.
-
-    Different datasets use different labels for the same emotion:
-    - TESS: angry, happy, sad, pleasant surprise
-    - SAVEE: anger, happiness, sadness, surprise
-    - CREMA-D: anger, happy, sad
-
-    This normalizes them to: angry, happy, sad, surprise, neutral, fear, disgust
-    """
-    if value is None:
+    """Normalize dataset-specific emotion labels (e.g. anger→angry, happiness→happy)."""
+    cleaned = _clean_string(value)
+    if cleaned is None:
         return None
-    value_lower = str(value).lower().strip()
-    if value_lower in ("", "na", "null", "unk", "unknown", "nan", "none"):
-        return None
-    return EMOTION_NORMALIZATION.get(value_lower, value_lower)
+    return EMOTION_NORMALIZATION.get(cleaned, cleaned)
 
 
-# MELD emotion mapping (integer to string)
+# MELD uses integer emotion labels; joy maps to "happy" for consistency with other datasets.
 MELD_EMOTION_MAP = {
     0: "angry",
     1: "disgust",
     2: "fear",
-    3: "happy",  # joy -> happy for consistency
+    3: "happy",
     4: "neutral",
     5: "sad",
     6: "surprise",
@@ -315,13 +263,13 @@ MELD_EMOTION_MAP = {
 
 
 def normalize_meld_emotion(value: int | str | None) -> str | None:
-    """Convert MELD emotion integer to string label."""
-    if value is None:
-        return None
+    """Convert MELD emotion integer (or string) to canonical label."""
     if isinstance(value, int):
-        label = MELD_EMOTION_MAP.get(value)
-        return normalize_emotion(label) if label else None
+        return normalize_emotion(MELD_EMOTION_MAP.get(value))
     return normalize_emotion(value)
+
+
+METADATA_KEYS = ("text", "emotion", "gender", "age", "pace", "accent", "volume")
 
 
 def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
@@ -330,97 +278,55 @@ def extract_metadata(sample: dict, config: DatasetConfig) -> dict:
     Returns empty strings instead of None to ensure consistent schema
     across multiprocessing batches in datasets.map().
     """
-    metadata = {
-        "text": "",
-        "emotion": "",
-        "gender": "",
-        "age": "",
-        "pace": "",
-        "accent": "",
-        "volume": "",
-    }
+    metadata: dict = dict.fromkeys(METADATA_KEYS, "")
 
-    # Extract text transcription
-    if config.text_field and config.text_field in sample:
-        text = sample[config.text_field]
-        if text:
-            metadata["text"] = str(text).strip().lower()
+    if config.text_field and (text := sample.get(config.text_field)):
+        metadata["text"] = str(text).strip().lower()
 
-    # Extract emotion (handle integer labels for MELD)
     if config.emotion_field and config.emotion_field in sample:
-        raw_emotion = sample[config.emotion_field]
-        if config.emotion_is_int:
-            metadata["emotion"] = normalize_meld_emotion(raw_emotion)
-        else:
-            metadata["emotion"] = normalize_emotion(raw_emotion)
+        raw = sample[config.emotion_field]
+        metadata["emotion"] = (
+            normalize_meld_emotion(raw) if config.emotion_is_int else normalize_emotion(raw)
+        )
 
-    # Extract gender
     if config.gender_field and config.gender_field in sample:
         gender = normalize_label(sample[config.gender_field])
-        # Normalize gender values
         if gender in ("m", "male"):
             gender = "male"
         elif gender in ("f", "female"):
             gender = "female"
         metadata["gender"] = gender
 
-    # Extract age
     if config.age_field and config.age_field in sample:
         metadata["age"] = age_to_group(sample[config.age_field])
 
-    # Extract speaking rate (convert numeric to label if needed)
     if config.pace_field and config.pace_field in sample:
-        raw_rate = sample[config.pace_field]
-        metadata["pace"] = pace_to_label(raw_rate)
+        metadata["pace"] = pace_to_label(sample[config.pace_field])
 
-    # Extract accent
     if config.accent_field and config.accent_field in sample:
-        accent = normalize_label(sample[config.accent_field])
-        metadata["accent"] = accent
+        metadata["accent"] = normalize_label(sample[config.accent_field])
 
-    # Extract volume (relative dB)
     if config.volume_field and config.volume_field in sample:
-        raw_volume = sample[config.volume_field]
-        metadata["volume"] = volume_to_label(raw_volume)
+        metadata["volume"] = volume_to_label(sample[config.volume_field])
 
     return metadata
 
 
+# Order: demographics first, then voice characteristics, then content-related.
+PARA_ORDER = ("age", "gender", "volume", "pace", "emotion", "accent")
+
+
 def build_audio_context(metadata: dict) -> str:
-    """Build audio context with metadata for the LLM.
-
-    Args:
-        metadata: Extracted metadata from the audio sample
-
-    Returns:
-        Audio context string with metadata in tags
-    """
-    # Build paralinguistic metadata
-    # Order: demographics first, then voice characteristics, then content-related
-    para_parts = []
-    for key in [
-        "age",
-        "gender",
-        "volume",
-        "pace",
-        "emotion",
-        "accent",
-    ]:
-        value = metadata.get(key)
-        if value:  # Skip empty strings and None
-            display_key = key.replace("_", " ")
-            para_parts.append(f"{display_key}: {value}")
-
-    # Format input with audio tags
-    if para_parts and metadata["text"]:
-        para_text = ", ".join(para_parts)
-        return f"<audio><meta>{para_text}</meta><text>{metadata['text']}</text></audio>"
+    """Build audio context with metadata for the LLM."""
+    para_parts = [
+        f"{key.replace('_', ' ')}: {value}" for key in PARA_ORDER if (value := metadata.get(key))
+    ]
+    inner = ""
     if para_parts:
-        para_text = ", ".join(para_parts)
-        return f"<audio><meta>{para_text}</meta></audio>"
+        inner += f"<meta>{', '.join(para_parts)}</meta>"
     if metadata["text"]:
-        return f"<audio><text>{metadata['text']}</text></audio>"
-    return "<audio></audio>"
+        inner += f"<text>{metadata['text']}</text>"
+    return f"<audio>{inner}</audio>"
 
 
 def create_dataset_card(repo_id: str, splits: list[str]) -> None:
@@ -513,41 +419,23 @@ def process_dataset(
         trust_remote_code=True,
     )
 
-    # Limit samples first (faster than filtering all)
-    if config.max_samples is not None and max_samples is not None:
-        effective_max = min(config.max_samples, max_samples)
-    elif config.max_samples is not None:
-        effective_max = config.max_samples
-    elif max_samples is not None:
-        effective_max = max_samples
-    else:
-        effective_max = None
-
+    caps = [m for m in (config.max_samples, max_samples) if m is not None]
+    effective_max = min(caps) if caps else None
     if effective_max and len(ds) > effective_max:
         ds = ds.select(range(effective_max))
 
     print(f"  Loaded {len(ds)} samples")
-
-    # Extract metadata and build prompts (simple loop is faster than multiprocess map for this)
     print("  Preparing prompts...")
+
     prompts = []
-    metadata_lists = {
-        "text": [],
-        "emotion": [],
-        "gender": [],
-        "age": [],
-        "pace": [],
-        "accent": [],
-        "volume": [],
-    }
+    metadata_lists: dict[str, list] = {key: [] for key in METADATA_KEYS}
 
     for sample in tqdm(ds, desc="Preparing", total=len(ds)):
         metadata = extract_metadata(sample, config)
         for key in metadata_lists:
             metadata_lists[key].append(metadata[key])
 
-        audio_context = build_audio_context(metadata)
-        user_content = f"{audio_context}\n\n{SIFT_INSTRUCTION}"
+        user_content = f"{build_audio_context(metadata)}\n\n{SIFT_INSTRUCTION}"
         messages = [
             {"role": "system", "content": SIFT_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
@@ -558,17 +446,10 @@ def process_dataset(
             )
         )
 
-    # Add columns to dataset
     ds = ds.add_column("prompt", prompts)
-    ds = ds.add_column("meta_text", metadata_lists["text"])
-    ds = ds.add_column("meta_emotion", metadata_lists["emotion"])
-    ds = ds.add_column("meta_gender", metadata_lists["gender"])
-    ds = ds.add_column("meta_age", metadata_lists["age"])
-    ds = ds.add_column("meta_pace", metadata_lists["pace"])
-    ds = ds.add_column("meta_accent", metadata_lists["accent"])
-    ds = ds.add_column("meta_volume", metadata_lists["volume"])
+    for key, values in metadata_lists.items():
+        ds = ds.add_column(f"meta_{key}", values)
 
-    # Generate responses using pipeline with dataset (more efficient than .map())
     print("  Generating instructions and responses...")
     thinking_pattern = re.compile(r"<think>.*?</think>", re.DOTALL)
     generation_config = GenerationConfig(
@@ -589,66 +470,24 @@ def process_dataset(
         total=len(ds),
         desc="Generating",
     ):
-        text = thinking_pattern.sub("", out[0]["generated_text"]).strip()
-        responses.append(text)
+        responses.append(thinking_pattern.sub("", out[0]["generated_text"]).strip())
 
     ds = ds.add_column("sift_response", responses)
 
-    # Remove original columns that would conflict with our renamed columns
-    conflict_cols = [
-        c
-        for c in [
-            "text",
-            "emotion",
-            "gender",
-            "age",
-            "pace",
-            "accent",
-            "volume",
-        ]
-        if c in ds.column_names
-    ]
+    conflict_cols = [c for c in METADATA_KEYS if c in ds.column_names]
     if conflict_cols:
         ds = ds.remove_columns(conflict_cols)
 
-    # Rename meta columns to final names
-    ds = ds.rename_columns(
-        {
-            "meta_text": "text",
-            "meta_emotion": "emotion",
-            "meta_gender": "gender",
-            "meta_age": "age",
-            "meta_pace": "pace",
-            "meta_accent": "accent",
-            "meta_volume": "volume",
-        }
-    )
+    ds = ds.rename_columns({f"meta_{key}": key for key in METADATA_KEYS})
     ds = ds.add_column("source_dataset", [config.name] * len(ds))
 
-    # Keep only needed columns
-    keep_cols = [
-        "audio",
-        "text",
-        "emotion",
-        "gender",
-        "age",
-        "pace",
-        "accent",
-        "volume",
-        "sift_response",
-        "source_dataset",
-    ]
+    keep_cols = ("audio", *METADATA_KEYS, "sift_response", "source_dataset")
     remove_cols = [c for c in ds.column_names if c not in keep_cols]
     if remove_cols:
         ds = ds.remove_columns(remove_cols)
 
-    # Cast columns to consistent types
-    ds = ds.cast_column("emotion", Value("string"))
-    ds = ds.cast_column("gender", Value("string"))
-    ds = ds.cast_column("age", Value("string"))
-    ds = ds.cast_column("pace", Value("string"))
-    ds = ds.cast_column("accent", Value("string"))
-    ds = ds.cast_column("volume", Value("string"))
+    for col in ("emotion", "gender", "age", "pace", "accent", "volume"):
+        ds = ds.cast_column(col, Value("string"))
     return ds.cast_column("audio", Audio(sampling_rate=16000))
 
 
@@ -672,15 +511,9 @@ def main(
     push_every: Annotated[int, typer.Option(help="Push to hub every N datasets")] = 1,
 ):
     """Generate SIFT datasets for paralinguistic training."""
-    # Filter datasets if specified (support comma-separated values)
     configs = DATASET_CONFIGS
     if datasets:
-        # Expand comma-separated values: ["a,b", "c"] -> ["a", "b", "c"]
-        expanded = []
-        for d in datasets:
-            expanded.extend(d.split(","))
-        dataset_names = [d.strip() for d in expanded if d.strip()]
-
+        dataset_names = {name.strip() for d in datasets for name in d.split(",") if name.strip()}
         configs = [c for c in configs if c.name in dataset_names]
         if not configs:
             typer.echo(
@@ -692,7 +525,6 @@ def main(
     typer.echo(f"Model: {model_name}")
     typer.echo(f"Output: {output_repo}")
 
-    # Load tokenizer and create pipeline
     typer.echo(f"\nLoading model {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     if tokenizer.pad_token is None:
@@ -707,11 +539,8 @@ def main(
         model_kwargs={"attn_implementation": "flash_attention_2"},
     )
 
-    # Process each dataset
     all_datasets = {}
-    datasets_processed = 0
-
-    for config in configs:
+    for i, config in enumerate(configs, start=1):
         try:
             ds = process_dataset(
                 config=config,
@@ -721,17 +550,6 @@ def main(
                 max_samples=max_samples,
                 max_new_tokens=max_new_tokens,
             )
-
-            if ds is not None:
-                all_datasets[config.name] = ds
-                datasets_processed += 1
-
-                # Push periodically
-                if datasets_processed % push_every == 0:
-                    typer.echo(f"\nPushing {len(all_datasets)} splits to {output_repo}...")
-                    dataset_dict = DatasetDict(all_datasets)
-                    dataset_dict.push_to_hub(output_repo, private=False)
-
         except Exception as e:
             import traceback
 
@@ -739,19 +557,25 @@ def main(
             traceback.print_exc()
             continue
 
-    # Final push
-    if all_datasets:
-        typer.echo(f"\nFinal push: {len(all_datasets)} splits to {output_repo}...")
-        dataset_dict = DatasetDict(all_datasets)
-        dataset_dict.push_to_hub(output_repo, private=False)
+        if ds is None:
+            continue
+        all_datasets[config.name] = ds
 
-        # Update dataset card
-        typer.echo("Updating dataset card...")
-        create_dataset_card(output_repo, list(all_datasets.keys()))
+        if i % push_every == 0:
+            typer.echo(f"\nPushing {len(all_datasets)} splits to {output_repo}...")
+            DatasetDict(all_datasets).push_to_hub(output_repo, private=False)
 
-        typer.echo("Done!")
-    else:
+    if not all_datasets:
         typer.echo("No datasets were successfully processed.")
+        return
+
+    typer.echo(f"\nFinal push: {len(all_datasets)} splits to {output_repo}...")
+    DatasetDict(all_datasets).push_to_hub(output_repo, private=False)
+
+    typer.echo("Updating dataset card...")
+    create_dataset_card(output_repo, list(all_datasets.keys()))
+
+    typer.echo("Done!")
 
 
 if __name__ == "__main__":

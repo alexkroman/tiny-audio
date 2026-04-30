@@ -17,14 +17,13 @@ from safetensors.torch import load_file
 app = typer.Typer(help="Check MoE model for router health")
 console = Console()
 
-# Target metrics for MoE with shared expert + sparse routed experts
 TARGETS = {
-    "entropy_min": 0.50,  # Minimum healthy entropy for routed experts
-    "entropy_max": 0.90,  # Maximum (above = uniform, not specialized)
-    "entropy_ideal": 0.70,  # Ideal entropy
-    "expert_min": 0.15,  # Minimum routed expert selection rate
-    "expert_max": 0.60,  # Maximum (one expert shouldn't dominate)
-    "load_balance_max": 0.3,  # Maximum load imbalance (std of expert usage)
+    "entropy_min": 0.50,
+    "entropy_max": 0.90,
+    "entropy_ideal": 0.70,
+    "expert_min": 0.15,
+    "expert_max": 0.60,
+    "load_balance_max": 0.3,
 }
 
 
@@ -64,7 +63,6 @@ def analyze_routing(probs, top_k_indices, num_experts, top_k, label=""):
         console.print(f"\n{label}")
         console.print("-" * 40)
 
-    # Sigmoid probabilities (before top-k)
     mean_probs = probs.mean(dim=0)
     std_probs = probs.std(dim=0)
 
@@ -76,15 +74,10 @@ def analyze_routing(probs, top_k_indices, num_experts, top_k, label=""):
         bar = "█" * int(mean_p * 40)
         console.print(f"  Expert {i}: {mean_p * 100:5.1f}% {std_p * 100:5.1f}%  {bar}")
 
-    # Top-k selection frequency
     console.print(f"\nTop-{top_k} Selection Frequency:")
-    selection_counts = torch.zeros(num_experts)
-    for k in range(top_k):
-        for expert_idx in range(num_experts):
-            selection_counts[expert_idx] += (top_k_indices[:, k] == expert_idx).sum().item()
-
+    selection_counts = torch.bincount(top_k_indices.flatten(), minlength=num_experts).float()
     total_selections = top_k_indices.numel()
-    selection_freq = selection_counts / total_selections * top_k  # Normalize to percentage
+    selection_freq = selection_counts / total_selections * top_k
 
     console.print(f"  {'Expert':<8} {'Selected':>10} {'Frequency':>10}  Distribution")
     console.print(f"  {'-' * 8} {'-' * 10} {'-' * 10}  {'-' * 20}")
@@ -93,7 +86,6 @@ def analyze_routing(probs, top_k_indices, num_experts, top_k, label=""):
         bar = "█" * int(freq * 40)
         console.print(f"  Expert {i}: {int(count):>10} {freq * 100:>8.1f}%  {bar}")
 
-    # Load balance analysis
     load_balance_std = selection_freq.std().item()
     ideal_freq = 1.0 / num_experts
     console.print("\nLoad Balance:")
@@ -104,7 +96,6 @@ def analyze_routing(probs, top_k_indices, num_experts, top_k, label=""):
     else:
         console.print("  -> Imbalanced (some experts over/under-used)")
 
-    # Entropy of selection (how uniform is top-k choice)
     selection_probs = selection_freq / selection_freq.sum()
     entropy = -(selection_probs * (selection_probs + 1e-10).log()).sum()
     max_entropy = torch.log(torch.tensor(float(num_experts)))
@@ -138,7 +129,6 @@ def check_moe(
     console.print(f"[bold]MoE Health Check: {model_id}[/bold]")
     console.print("=" * 80)
 
-    # Download latest model
     if force_download:
         cache_path = (
             Path.home() / ".cache/huggingface/hub" / f"models--{model_id.replace('/', '--')}"
@@ -152,7 +142,6 @@ def check_moe(
 
     weights = load_file(f"{path}/model.safetensors")
 
-    # Check if this is an MoE model
     router_key = "projector.moe.router.weight"
     if router_key not in weights:
         console.print("[red]ERROR: Router weight not found. Available keys:[/red]")
@@ -169,23 +158,19 @@ def check_moe(
     console.print(f"  Router input dim: {input_dim}")
     console.print(f"  Number of routed experts: {num_experts}")
 
-    # Check for shared expert
     shared_expert_key = "projector.moe.shared_expert.fc1.weight"
     has_shared_expert = shared_expert_key in weights
     console.print(f"  Has shared expert: {has_shared_expert}")
 
-    # Get top_k from config
     config_path = Path(path) / "config.json"
     with config_path.open() as f:
         config = json.load(f)
     top_k = config.get("num_experts_per_tok", 2)
     console.print(f"  Top-k routing: {top_k}")
 
-    # Download sample audio
     console.print()
     samples = download_sample_audio(num_samples)
 
-    # Get encoder model from config
     encoder_id = config.get("audio_model_id", "zai-org/GLM-ASR-Nano-2512")
 
     console.print(f"\nLoading encoder: {encoder_id}")
@@ -194,21 +179,17 @@ def check_moe(
 
     feature_extractor = AutoFeatureExtractor.from_pretrained(encoder_id, trust_remote_code=True)
 
-    # Get projector config
     pool_stride = config.get("projector_pool_stride", 4)
 
-    # Process all samples and collect routing data
     all_probs = []
     all_top_k_indices = []
     per_sample_stats = []
     model_dtype = next(encoder.parameters()).dtype
 
     for i, (audio, sr, _) in enumerate(samples):
-        # Resample to 16kHz if needed
         if sr != 16000:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
 
-        # Get encoder outputs
         inputs = feature_extractor(audio, sampling_rate=16000, return_tensors="pt")
 
         with torch.no_grad():
@@ -222,24 +203,17 @@ def check_moe(
                 encoder_outputs = encoder(input_features)
             hidden_states = encoder_outputs.last_hidden_state
 
-        # Apply frame stacking (matches MoE projector)
         x = hidden_states.squeeze(0).float()
         seq_len = x.shape[0]
         out_len = (seq_len - pool_stride) // pool_stride + 1
-        x = x[: out_len * pool_stride, :]
-        x = x.reshape(out_len, -1)  # Frame stacking
+        x = x[: out_len * pool_stride, :].reshape(out_len, -1)
 
-        # Run through router (sigmoid routing)
         router_logits = functional.linear(x, router_weight)
         router_probs = torch.sigmoid(router_logits)
-
-        # Top-k selection
         _, top_k_indices = torch.topk(router_probs, top_k, dim=-1)
 
         all_probs.append(router_probs)
         all_top_k_indices.append(top_k_indices)
-
-        # Per-sample stats
         per_sample_stats.append(
             {
                 "sample_idx": i,
@@ -249,7 +223,6 @@ def check_moe(
             }
         )
 
-    # Concatenate all routing data
     probs = torch.cat(all_probs, dim=0)
     top_k_indices = torch.cat(all_top_k_indices, dim=0)
 
@@ -257,29 +230,22 @@ def check_moe(
         f"\nProcessed {len(samples)} samples, {probs.shape[0]} total tokens (after frame stacking)"
     )
 
-    # Analyze routing
     console.print(f"\n1. ROUTER BEHAVIOR ({len(samples)} sample(s), {probs.shape[0]} tokens)")
     selection_freq, entropy_ratio, load_balance_std = analyze_routing(
         probs, top_k_indices, num_experts, top_k
     )
 
-    # Show per-sample variation
     if len(samples) > 1:
         console.print("\nPer-sample top-k selection patterns (first 10 samples):")
         for stat in per_sample_stats[:10]:
-            # Count which experts are selected most often in this sample
             sample_selections = torch.tensor(stat["top_k_selection"])
-            sample_counts = torch.zeros(num_experts)
-            for k in range(top_k):
-                for expert_idx in range(num_experts):
-                    sample_counts[expert_idx] += (
-                        (sample_selections[:, k] == expert_idx).sum().item()
-                    )
+            sample_counts = torch.bincount(
+                sample_selections.flatten(), minlength=num_experts
+            ).float()
             sample_freq = sample_counts / sample_counts.sum()
             freq_str = " ".join([f"E{i}:{f * 100:.0f}%" for i, f in enumerate(sample_freq)])
             console.print(f"  Sample {stat['sample_idx']}: {freq_str}")
 
-    # Expert weight differentiation
     console.print("\n2. EXPERT DIFFERENTIATION")
     console.print("-" * 40)
 
@@ -315,7 +281,6 @@ def check_moe(
         else:
             console.print("[green]Good expert diversity[/green]")
 
-    # Check shared expert vs routed experts
     if has_shared_expert:
         console.print("\n3. SHARED EXPERT ANALYSIS")
         console.print("-" * 40)
@@ -329,14 +294,12 @@ def check_moe(
             sim = (shared_norm @ ew_norm).item()
             console.print(f"  Shared <-> Expert {i}: {sim:.4f}")
 
-    # Summary
     console.print("\n" + "=" * 80)
     console.print("[bold]SUMMARY[/bold]")
     console.print("=" * 80)
 
     issues = []
 
-    # Check for expert collapse
     min_selection = selection_freq.min().item()
     if min_selection < TARGETS["expert_min"]:
         issues.append(
@@ -363,7 +326,6 @@ def check_moe(
     else:
         console.print("[green]No issues detected.[/green]")
 
-    # MoE health summary
     console.print("\nMoE Health:")
     console.print(f"  Routed experts: {num_experts}")
     console.print(f"  Top-k: {top_k}")

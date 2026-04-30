@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Debug and analysis CLI.
-
-Commands:
-    check-moe        Check MoE model for router health
-    check-mosa       Check MOSA model for router collapse
-    analyze-lora     Analyze LoRA adapter weights
-    analyze-weights  Analyze model weights for training health
-"""
+"""Debug and analysis CLI."""
 
 import typer
 

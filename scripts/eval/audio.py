@@ -23,26 +23,26 @@ def audio_to_wav_bytes(audio_array: np.ndarray | torch.Tensor, sample_rate: int)
     return buffer.getvalue()
 
 
+def _read_path_to_wav(path: str) -> bytes:
+    audio_array, sample_rate = sf.read(path)
+    return audio_to_wav_bytes(audio_array, sample_rate)
+
+
 def prepare_wav_bytes(wav_data) -> bytes:
     """Convert various audio formats to WAV bytes."""
-    # Dict with array (most common HF datasets format)
     if isinstance(wav_data, dict):
         if "array" in wav_data and "sampling_rate" in wav_data:
             return audio_to_wav_bytes(wav_data["array"], wav_data["sampling_rate"])
         if "bytes" in wav_data:
             return wav_data["bytes"]
         if "path" in wav_data and wav_data["path"]:
-            audio_array, sample_rate = sf.read(wav_data["path"])
-            return audio_to_wav_bytes(audio_array, sample_rate)
+            return _read_path_to_wav(wav_data["path"])
 
-    # Audio object with array/sampling_rate attributes
     if hasattr(wav_data, "array") and hasattr(wav_data, "sampling_rate"):
         return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
 
-    # AudioDecoder - try to get path and load with soundfile
     if hasattr(wav_data, "path") and wav_data.path:
-        audio_array, sample_rate = sf.read(wav_data.path)
-        return audio_to_wav_bytes(audio_array, sample_rate)
+        return _read_path_to_wav(wav_data.path)
 
     raise ValueError(f"Unsupported audio format: {type(wav_data)}")
 
@@ -66,11 +66,15 @@ class TextNormalizer:
         tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
         self._normalizer = EnglishTextNormalizer(tokenizer.english_spelling_normalizer)
 
+    _SPELLING_FIXES = {
+        "okay": "ok",
+        "all right": "alright",
+        "kinda": "kind of",
+    }
+
     def normalize(self, text: str) -> str:
         """Normalize text for WER calculation."""
         text = self._normalizer(text)
-        # Normalize common spelling variants
-        text = text.replace("okay", "ok")
-        text = text.replace("all right", "alright")
-        text = text.replace("kinda", "kind of")
+        for src, dst in self._SPELLING_FIXES.items():
+            text = text.replace(src, dst)
         return re.sub(r"'s\b", " is", text)

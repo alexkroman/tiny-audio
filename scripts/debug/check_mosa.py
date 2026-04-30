@@ -201,17 +201,15 @@ def check_mosa(
     # Use feature extractor (works for both Whisper and GLM-ASR)
     feature_extractor = AutoFeatureExtractor.from_pretrained(encoder_id, trust_remote_code=True)
 
-    # Process all samples and collect routing probabilities
     all_probs = []
+    all_logits = []
     per_sample_stats = []
     model_dtype = next(encoder.parameters()).dtype
 
     for i, (audio, sr, _text) in enumerate(samples):
-        # Resample to 16kHz if needed
         if sr != 16000:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
 
-        # Get encoder outputs
         inputs = feature_extractor(audio, sampling_rate=16000, return_tensors="pt")
 
         with torch.no_grad():
@@ -225,29 +223,26 @@ def check_mosa(
                 encoder_outputs = encoder(input_features)
             hidden_states = encoder_outputs.last_hidden_state
 
-        # Run through router
         x_real = hidden_states.squeeze(0).float()
         logits = forward_router(x_real)
         probs = functional.softmax(logits, dim=-1)
+        all_logits.append(logits)
         all_probs.append(probs)
 
-        # Per-sample stats
-        mean_probs = probs.mean(dim=0)
         per_sample_stats.append(
             {
                 "sample_idx": i,
                 "num_tokens": probs.shape[0],
-                "expert_means": mean_probs.tolist(),
+                "expert_means": probs.mean(dim=0).tolist(),
                 "expert_stds": probs.std(dim=0).tolist(),
             }
         )
 
-    # Concatenate all routing probs across samples
     probs = torch.cat(all_probs, dim=0)
+    logits = torch.cat(all_logits, dim=0)
     console.print(f"\nProcessed {len(samples)} samples, {probs.shape[0]} total tokens")
     console.print(f"Router expects: {encoder_dim}-dim input, {num_experts} experts")
 
-    # Identify shared expert (highest mean usage) per MOSA architecture
     mean_probs_all = probs.mean(dim=0)
     shared_expert = mean_probs_all.argmax().item()
     specialist_experts = [i for i in range(num_experts) if i != shared_expert]
@@ -258,7 +253,6 @@ def check_mosa(
     )
     console.print(f"  Specialist experts: {specialist_experts}")
 
-    # Show per-sample variation if multiple samples
     if len(samples) > 1:
         console.print("\nPer-sample expert distribution (mean %):")
         header = f"  {'Sample':<8}"
@@ -266,7 +260,7 @@ def check_mosa(
             label = f"E{e}*" if e == shared_expert else f"E{e}"
             header += f" {label:>7}"
         console.print(header)
-        for stat in per_sample_stats[:10]:  # Show first 10
+        for stat in per_sample_stats[:10]:
             line = f"  {stat['sample_idx']:<8}"
             for m in stat["expert_means"]:
                 line += f"   {m * 100:5.1f}%"
@@ -274,7 +268,6 @@ def check_mosa(
         if len(per_sample_stats) > 10:
             console.print(f"  ... and {len(per_sample_stats) - 10} more samples")
 
-        # Cross-sample variance
         expert_means_per_sample = torch.tensor([s["expert_means"] for s in per_sample_stats])
         cross_sample_std = expert_means_per_sample.std(dim=0)
         console.print("\nCross-sample consistency (std of expert means across samples):")
@@ -282,7 +275,6 @@ def check_mosa(
             consistency = "consistent" if cross_sample_std[e] < 0.05 else "varies"
             console.print(f"  Expert {e}: {cross_sample_std[e] * 100:.1f}% std ({consistency})")
 
-    # Within-sample routing dynamics
     console.print("\nWithin-sample routing dynamics:")
     avg_within_sample_std = torch.tensor([s["expert_stds"] for s in per_sample_stats]).mean(dim=0)
     for e in range(num_experts):
@@ -295,10 +287,8 @@ def check_mosa(
                 f"  Expert {e} (specialist): {avg_within_sample_std[e] * 100:.1f}% avg std within samples"
             )
 
-    # Specialist activation analysis
     console.print("\nSpecialist expert activation:")
     for e in specialist_experts:
-        # When does this expert get > 25% routing weight?
         activation_rate = (probs[:, e] > 0.25).float().mean().item()
         peak_activation = probs[:, e].max().item()
         console.print(
@@ -308,25 +298,6 @@ def check_mosa(
     console.print(f"\n1. ROUTER BEHAVIOR ({len(samples)} sample(s), {probs.shape[0]} tokens)")
     console.print("-" * 40)
 
-    # Recompute logits stats from all samples
-    all_logits = []
-    for audio, sr, _ in samples:
-        if sr != 16000:
-            audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
-        inputs = feature_extractor(audio, sampling_rate=16000, return_tensors="pt")
-        with torch.no_grad():
-            input_features = inputs.input_features.to(model_dtype)
-            if hasattr(encoder, "encoder"):
-                encoder_outputs = encoder.encoder(input_features)
-            elif hasattr(encoder, "audio_tower"):
-                encoder_outputs = encoder.audio_tower(input_features)
-            else:
-                encoder_outputs = encoder(input_features)
-            hidden_states = encoder_outputs.last_hidden_state
-        x_real = hidden_states.squeeze(0).float()
-        all_logits.append(forward_router(x_real))
-    logits = torch.cat(all_logits, dim=0)
-
     console.print(f"Logit mean: {logits.mean():.4f}, std: {logits.std():.4f}")
     console.print(f"Logit range: [{logits.min():.4f}, {logits.max():.4f}]")
 
@@ -334,9 +305,8 @@ def check_mosa(
     if logit_exploded:
         console.print("[red]WARNING: Router logits have exploded![/red]")
 
-    max_prob, min_prob, dominant_expert, entropy_ratio = analyze_routing(probs, num_experts)
+    max_prob, _min_prob, _dominant_expert, entropy_ratio = analyze_routing(probs, num_experts)
 
-    # Expert differentiation
     console.print("\n2. EXPERT DIFFERENTIATION")
     console.print("-" * 40)
 
@@ -363,12 +333,10 @@ def check_mosa(
         if avg_sim > 0.5:
             console.print("[yellow]WARNING: Experts are converging (losing diversity)[/yellow]")
 
-    # Summary
     console.print("\n" + "=" * 80)
     console.print("[bold]SUMMARY[/bold]")
     console.print("=" * 80)
 
-    # Check for critical issues (MOSA-aware)
     issues = []
     if logit_exploded:
         issues.append("Router logits exploded (std > 100)")
@@ -382,7 +350,6 @@ def check_mosa(
     else:
         console.print("[green]No issues detected.[/green]")
 
-    # MOSA health summary
     console.print("\nMOSA Health:")
     console.print(f"  Shared expert (E{shared_expert}): {max_prob * 100:.1f}% avg routing")
     console.print(f"  Specialist experts: {[f'E{e}' for e in specialist_experts]}")

@@ -57,18 +57,71 @@ class AssemblyAIModel(str, Enum):
     nano = "nano"
 
 
-# Valid dataset choices
 VALID_DATASETS = ["all", "all-full"] + list(DATASET_REGISTRY.keys())
+
+API_KEY_ENV_VARS = {
+    "assemblyai": "ASSEMBLYAI_API_KEY",
+    "deepgram": "DEEPGRAM_API_KEY",
+    "elevenlabs": "ELEVENLABS_API_KEY",
+}
 
 
 def get_model_name(model_path: str) -> str:
-    """Extract model name from a HuggingFace model path.
-
-    Examples:
-        - mazesmazes/tiny-audio -> tiny-audio
-        - /path/to/checkpoint -> checkpoint
-    """
+    """Extract model name from a HuggingFace model path."""
     return model_path.rstrip("/").split("/")[-1]
+
+
+def _require_api_key(model: str) -> str:
+    env_var = API_KEY_ENV_VARS[model]
+    api_key = os.environ.get(env_var, "")
+    if not api_key:
+        console.print(f"[red]Error: {env_var} environment variable not set[/red]")
+        raise typer.Exit(1)
+    return api_key
+
+
+def _make_result_dir(
+    model_name: str, dataset_name: str, output_dir: str, suffix: str = ""
+) -> tuple[Path, str]:
+    """Create a timestamped result directory; return (path, timestamp)."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    safe_model_name = model_name.replace("/", "_")
+    name = f"{timestamp}_{safe_model_name}_{dataset_name}{suffix}"
+    result_dir = Path(output_dir) / name
+    result_dir.mkdir(parents=True, exist_ok=True)
+    return result_dir, timestamp
+
+
+def _write_metrics_header(f, model_name: str, dataset_name: str, timestamp: str, **extra) -> None:
+    f.write(f"Model: {model_name}\n")
+    f.write(f"Dataset: {dataset_name}\n")
+    for k, v in extra.items():
+        f.write(f"{k}: {v}\n")
+    f.write(f"Timestamp: {timestamp}\n")
+    f.write("-" * 40 + "\n")
+
+
+def _write_metric_kv(f, key: str, value) -> None:
+    if isinstance(value, float):
+        f.write(f"{key}: {value:.4f}\n")
+    else:
+        f.write(f"{key}: {value}\n")
+
+
+def _base_url_suffix(base_url: str | None) -> str:
+    if not base_url:
+        return ""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    host = parsed.netloc or parsed.path
+    if not host:
+        return ""
+    parts = host.split(".")
+    for part in parts:
+        if "sandbox" in part.lower():
+            return f"_{part}"
+    return f"_{parts[0]}"
 
 
 def save_results(
@@ -81,33 +134,11 @@ def save_results(
 ) -> Path:
     """Save evaluation results and metrics to a timestamped directory."""
     normalizer = TextNormalizer()
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
+    # base_url goes in the directory name (after model, before dataset) for traceability
+    safe_model_name = model_name.replace("/", "_") + _base_url_suffix(base_url)
+    result_dir, timestamp = _make_result_dir(safe_model_name, dataset_name, output_dir)
 
-    # Extract short identifier from base_url (e.g., "sandbox013" from the URL)
-    url_suffix = ""
-    if base_url:
-        # Extract hostname and create a short identifier
-        from urllib.parse import urlparse
-
-        parsed = urlparse(base_url)
-        host = parsed.netloc or parsed.path
-        # Extract meaningful part (e.g., "sandbox013" from "api.sandbox013.assemblyai-labs.com")
-        parts = host.split(".")
-        for part in parts:
-            if "sandbox" in part.lower():
-                url_suffix = f"_{part}"
-                break
-        if not url_suffix and host:
-            # Fallback: use first part of hostname
-            url_suffix = f"_{parts[0]}"
-
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}{url_suffix}_{dataset_name}"
-    result_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save detailed results
-    results_file = result_dir / "results.txt"
-    with results_file.open("w") as f:
+    with (result_dir / "results.txt").open("w") as f:
         for i, r in enumerate(results, 1):
             norm_pred = normalizer.normalize(r.prediction)
             norm_ref = normalizer.normalize(r.reference)
@@ -116,20 +147,11 @@ def save_results(
             f.write(f"Prediction: {norm_pred}\n")
             f.write("-" * 80 + "\n")
 
-    # Save summary metrics
-    metrics_file = result_dir / "metrics.txt"
-    with metrics_file.open("w") as f:
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        if base_url:
-            f.write(f"Base URL: {base_url}\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write("-" * 40 + "\n")
+    with (result_dir / "metrics.txt").open("w") as f:
+        extras = {"Base URL": base_url} if base_url else {}
+        _write_metrics_header(f, model_name, dataset_name, timestamp, **extras)
         for key, value in metrics.items():
-            if isinstance(value, float):
-                f.write(f"{key}: {value:.4f}\n")
-            else:
-                f.write(f"{key}: {value}\n")
+            _write_metric_kv(f, key, value)
 
     console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
     return result_dir
@@ -143,14 +165,9 @@ def save_diarization_results(
     output_dir: str = "outputs",
 ) -> Path:
     """Save diarization evaluation results and metrics."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_diarization"
-    result_dir.mkdir(parents=True, exist_ok=True)
+    result_dir, timestamp = _make_result_dir(model_name, dataset_name, output_dir, "_diarization")
 
-    # Save detailed results
-    results_file = result_dir / "results.txt"
-    with results_file.open("w") as f:
+    with (result_dir / "results.txt").open("w") as f:
         for i, r in enumerate(results, 1):
             f.write(f"Sample {i}\n")
             f.write(f"  DER: {r.der:.2f}%\n")
@@ -161,18 +178,10 @@ def save_diarization_results(
             f.write(f"  Time: {r.time:.2f}s\n")
             f.write("-" * 80 + "\n")
 
-    # Save summary metrics
-    metrics_file = result_dir / "metrics.txt"
-    with metrics_file.open("w") as f:
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write("-" * 40 + "\n")
+    with (result_dir / "metrics.txt").open("w") as f:
+        _write_metrics_header(f, model_name, dataset_name, timestamp)
         for key, value in metrics.items():
-            if isinstance(value, float):
-                f.write(f"{key}: {value:.4f}\n")
-            else:
-                f.write(f"{key}: {value}\n")
+            _write_metric_kv(f, key, value)
 
     console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
     return result_dir
@@ -186,14 +195,9 @@ def save_alignment_results(
     output_dir: str = "outputs",
 ) -> Path:
     """Save alignment evaluation results and metrics."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_alignment"
-    result_dir.mkdir(parents=True, exist_ok=True)
+    result_dir, timestamp = _make_result_dir(model_name, dataset_name, output_dir, "_alignment")
 
-    # Save detailed results
-    results_file = result_dir / "results.txt"
-    with results_file.open("w") as f:
+    with (result_dir / "results.txt").open("w") as f:
         for i, r in enumerate(results, 1):
             f.write(f"Sample {i}\n")
             f.write(f"  Aligned: {r.num_aligned_words}/{r.num_ref_words} words\n")
@@ -211,18 +215,10 @@ def save_alignment_results(
             f.write(f"  Prediction: {r.predicted_text[:100]}...\n")
             f.write("-" * 80 + "\n")
 
-    # Save summary metrics
-    metrics_file = result_dir / "metrics.txt"
-    with metrics_file.open("w") as f:
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write("-" * 40 + "\n")
+    with (result_dir / "metrics.txt").open("w") as f:
+        _write_metrics_header(f, model_name, dataset_name, timestamp)
         for key, value in metrics.items():
-            if isinstance(value, float):
-                f.write(f"{key}: {value:.4f}\n")
-            else:
-                f.write(f"{key}: {value}\n")
+            _write_metric_kv(f, key, value)
 
     console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
     return result_dir
@@ -286,14 +282,9 @@ def save_mcq_results(
     output_dir: str = "outputs",
 ) -> Path:
     """Save MCQ evaluation results and metrics."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_mcq"
-    result_dir.mkdir(parents=True, exist_ok=True)
+    result_dir, timestamp = _make_result_dir(model_name, dataset_name, output_dir, "_mcq")
 
-    # Save detailed results
-    results_file = result_dir / "results.txt"
-    with results_file.open("w") as f:
+    with (result_dir / "results.txt").open("w") as f:
         for i, r in enumerate(results, 1):
             status = "✓" if r.correct else "✗"
             f.write(f"Sample {i} [{status}]\n")
@@ -306,13 +297,8 @@ def save_mcq_results(
             f.write(f"  Time: {r.time:.2f}s\n")
             f.write("-" * 80 + "\n")
 
-    # Save summary metrics
-    metrics_file = result_dir / "metrics.txt"
-    with metrics_file.open("w") as f:
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write("-" * 40 + "\n")
+    with (result_dir / "metrics.txt").open("w") as f:
+        _write_metrics_header(f, model_name, dataset_name, timestamp)
         f.write(f"Accuracy: {metrics['accuracy']:.2f}%\n")
         f.write(f"Correct: {metrics['correct']}/{metrics['total']}\n")
         f.write(f"Avg Time: {metrics['avg_time']:.2f}s\n")
@@ -357,15 +343,10 @@ def save_classification_results(
     output_dir: str = "outputs",
 ) -> Path:
     """Save classification evaluation results and metrics."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
     task = metrics.get("task", "classification")
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_{task}"
-    result_dir.mkdir(parents=True, exist_ok=True)
+    result_dir, timestamp = _make_result_dir(model_name, dataset_name, output_dir, f"_{task}")
 
-    # Save detailed results
-    results_file = result_dir / "results.txt"
-    with results_file.open("w") as f:
+    with (result_dir / "results.txt").open("w") as f:
         for i, r in enumerate(results, 1):
             status = "correct" if r.correct else "wrong"
             f.write(f"Sample {i} [{status}]\n")
@@ -375,14 +356,8 @@ def save_classification_results(
             f.write(f"  Time: {r.time:.2f}s\n")
             f.write("-" * 80 + "\n")
 
-    # Save summary metrics
-    metrics_file = result_dir / "metrics.txt"
-    with metrics_file.open("w") as f:
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        f.write(f"Task: {task}\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write("-" * 40 + "\n")
+    with (result_dir / "metrics.txt").open("w") as f:
+        _write_metrics_header(f, model_name, dataset_name, timestamp, Task=task)
         f.write(f"Accuracy: {metrics['accuracy']:.2f}%\n")
         f.write(f"Correct: {metrics['correct']}/{metrics['total']}\n")
         f.write(f"Avg Time: {metrics['avg_time']:.2f}s\n")
@@ -532,12 +507,7 @@ def main(
         if dataset_name in DIARIZATION_DATASETS:
             dataset = load_eval_dataset(dataset_name, actual_split, config, decode_audio=False)
             if model == "assemblyai":
-                api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
-                if not api_key:
-                    console.print(
-                        "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
-                    )
-                    raise typer.Exit(1)
+                api_key = _require_api_key("assemblyai")
                 model_id = assemblyai_model.value.replace("_", "-")
                 evaluator = AssemblyAIDiarizationEvaluator(
                     api_key=api_key,
@@ -549,10 +519,7 @@ def main(
                     num_workers=num_workers,
                 )
             elif model == "deepgram":
-                api_key = os.environ.get("DEEPGRAM_API_KEY", "")
-                if not api_key:
-                    console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
-                    raise typer.Exit(1)
+                api_key = _require_api_key("deepgram")
                 model_id = "nova-3"
                 evaluator = DeepgramDiarizationEvaluator(
                     api_key=api_key,
@@ -563,12 +530,7 @@ def main(
                     num_workers=num_workers,
                 )
             elif model == "elevenlabs":
-                api_key = os.environ.get("ELEVENLABS_API_KEY", "")
-                if not api_key:
-                    console.print(
-                        "[red]Error: ELEVENLABS_API_KEY environment variable not set[/red]"
-                    )
-                    raise typer.Exit(1)
+                api_key = _require_api_key("elevenlabs")
                 model_id = "scribe-v2"
                 evaluator = ElevenLabsDiarizationEvaluator(
                     api_key=api_key,
@@ -603,12 +565,7 @@ def main(
             dataset = load_eval_dataset(dataset_name, actual_split, config)
 
             if model == "assemblyai":
-                api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
-                if not api_key:
-                    console.print(
-                        "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
-                    )
-                    raise typer.Exit(1)
+                api_key = _require_api_key("assemblyai")
                 model_id = assemblyai_model.value.replace("_", "-")
                 evaluator = AssemblyAIAlignmentEvaluator(
                     api_key=api_key,
@@ -619,10 +576,7 @@ def main(
                     verbose=verbose,
                 )
             elif model == "deepgram":
-                api_key = os.environ.get("DEEPGRAM_API_KEY", "")
-                if not api_key:
-                    console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
-                    raise typer.Exit(1)
+                api_key = _require_api_key("deepgram")
                 model_id = "nova-3"
                 evaluator = DeepgramAlignmentEvaluator(
                     api_key=api_key,
@@ -632,12 +586,7 @@ def main(
                     verbose=verbose,
                 )
             elif model == "elevenlabs":
-                api_key = os.environ.get("ELEVENLABS_API_KEY", "")
-                if not api_key:
-                    console.print(
-                        "[red]Error: ELEVENLABS_API_KEY environment variable not set[/red]"
-                    )
-                    raise typer.Exit(1)
+                api_key = _require_api_key("elevenlabs")
                 model_id = "scribe-v2"
                 evaluator = ElevenLabsAlignmentEvaluator(
                     api_key=api_key,
@@ -670,12 +619,7 @@ def main(
             dataset = hf_load_dataset(cfg.path, split=actual_split, streaming=True)
 
             if model == "assemblyai":
-                api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
-                if not api_key:
-                    console.print(
-                        "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
-                    )
-                    raise typer.Exit(1)
+                api_key = _require_api_key("assemblyai")
                 model_id = assemblyai_model.value.replace("_", "-")
                 evaluator = AssemblyAIMMAUEvaluator(
                     api_key=api_key,
@@ -750,10 +694,7 @@ def main(
         dataset = load_eval_dataset(dataset_name, actual_split, config)
 
         if model == "assemblyai":
-            api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
-            if not api_key:
-                console.print("[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]")
-                raise typer.Exit(1)
+            api_key = _require_api_key("assemblyai")
 
             if streaming:
                 model_id = "universal-streaming"
@@ -774,10 +715,7 @@ def main(
                     num_workers=num_workers,
                 )
         elif model == "deepgram":
-            api_key = os.environ.get("DEEPGRAM_API_KEY", "")
-            if not api_key:
-                console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
-                raise typer.Exit(1)
+            api_key = _require_api_key("deepgram")
             model_id = "nova-3"
             evaluator = DeepgramEvaluator(
                 api_key=api_key,
@@ -786,10 +724,7 @@ def main(
                 num_workers=num_workers,
             )
         elif model == "elevenlabs":
-            api_key = os.environ.get("ELEVENLABS_API_KEY", "")
-            if not api_key:
-                console.print("[red]Error: ELEVENLABS_API_KEY environment variable not set[/red]")
-                raise typer.Exit(1)
+            api_key = _require_api_key("elevenlabs")
             model_id = "scribe-v2"
             evaluator = ElevenLabsEvaluator(
                 api_key=api_key,

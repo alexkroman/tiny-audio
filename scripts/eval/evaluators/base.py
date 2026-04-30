@@ -32,11 +32,6 @@ def setup_assemblyai(
     return aai.Transcriber(config=config)
 
 
-# =============================================================================
-# Result Types (using attrs for conciseness)
-# =============================================================================
-
-
 @attrs.define
 class EvalResult:
     """Result of a single ASR sample evaluation."""
@@ -80,9 +75,11 @@ class AlignmentResult:
     predicted_text: str
 
 
-# =============================================================================
-# Base Evaluator
-# =============================================================================
+def _is_skipped_reference(reference) -> bool:
+    """Filter out unscoreable samples (TEDLIUM markers, inaudible)."""
+    if not isinstance(reference, str):
+        return False
+    return reference.strip() == "ignore_time_segment_in_scoring" or "inaudible" in reference.lower()
 
 
 class Evaluator:
@@ -131,34 +128,36 @@ class Evaluator:
 
         return self.results
 
+    def _iter_dataset_samples(self, dataset):
+        """Yield (audio, reference) for samples that pass the skip filter."""
+        for sample in dataset:
+            reference = sample[self.text_field]
+            if _is_skipped_reference(reference):
+                continue
+            yield {"audio": sample[self.audio_field], "reference": reference}
+
+    def _print_sample_log(self, prefix: str, idx: int, result: EvalResult) -> None:
+        norm_pred = self.normalizer.normalize(result.prediction)
+        norm_ref = self.normalizer.normalize(result.reference)
+        print(f"{prefix}Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s")
+        print(f"  Ref:  {norm_ref}")
+        print(f"  Pred: {norm_pred}")
+
+    def _corpus_wer(self, results: list[EvalResult]) -> float:
+        preds = [self.normalizer.normalize(r.prediction) for r in results]
+        refs = [self.normalizer.normalize(r.reference) for r in results]
+        return jiwer.wer(refs, preds) * 100
+
     def _collect_samples(self, dataset, max_samples: int | None) -> list[dict]:
         """Collect samples for parallel processing."""
         samples_to_process = []
         target = max_samples or "all"
         console.print(f"[dim]Collecting samples (target: {target})...[/dim]")
-        for sample in dataset:
-            reference = sample[self.text_field]
-
-            # Skip TEDLIUM ignore markers
-            if isinstance(reference, str) and reference.strip() == "ignore_time_segment_in_scoring":
-                continue
-
-            # Skip samples marked as inaudible
-            if isinstance(reference, str) and "inaudible" in reference.lower():
-                continue
-
-            samples_to_process.append(
-                {
-                    "audio": sample[self.audio_field],
-                    "reference": reference,
-                }
-            )
-
-            # Progress indicator during collection
+        for s in self._iter_dataset_samples(dataset):
+            samples_to_process.append(s)
             count = len(samples_to_process)
             if count % 50 == 0 or count == max_samples:
                 console.print(f"[dim]  Collected {count} samples...[/dim]")
-
             if max_samples and count >= max_samples:
                 break
 
@@ -169,31 +168,17 @@ class Evaluator:
 
     def _evaluate_sequential_lazy(self, dataset, max_samples: int | None) -> None:
         """Run sequential evaluation lazily (no pre-collection)."""
-        idx = 0
-        for sample in dataset:
-            reference = sample[self.text_field]
-
-            # Skip TEDLIUM ignore markers
-            if isinstance(reference, str) and reference.strip() == "ignore_time_segment_in_scoring":
-                continue
-
-            # Skip samples marked as inaudible
-            if isinstance(reference, str) and "inaudible" in reference.lower():
-                continue
-
-            idx += 1
-            sample_data = {"audio": sample[self.audio_field], "reference": reference}
+        for idx, sample_data in enumerate(self._iter_dataset_samples(dataset), start=1):
             _, result = self._process_sample((idx, sample_data))
             self.results.append(result)
-
-            norm_pred = self.normalizer.normalize(result.prediction)
-            norm_ref = self.normalizer.normalize(result.reference)
-            print(f"Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s")
-            print(f"  Ref:  {norm_ref}")
-            print(f"  Pred: {norm_pred}")
+            self._print_sample_log("", idx, result)
 
             if idx % 100 == 0:
-                self._print_checkpoint(idx)
+                avg_time = sum(r.time for r in self.results) / len(self.results)
+                console.print(
+                    f"\n[bold]CHECKPOINT @ {idx}[/bold]: "
+                    f"WER={self._corpus_wer(self.results):.2f}%, Avg Time={avg_time:.2f}s\n"
+                )
 
             if max_samples and idx >= max_samples:
                 break
@@ -204,65 +189,38 @@ class Evaluator:
 
         console.print(f"[bold]Running parallel evaluation with {self.num_workers} workers[/bold]")
 
-        # Pre-allocate results list
         results_map: dict[int, EvalResult] = {}
         completed = 0
         total = len(samples)
 
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            # Submit all tasks
             futures = {
                 executor.submit(self._process_sample, (idx, sample)): idx
                 for idx, sample in enumerate(samples, 1)
             }
 
-            # Process as they complete
             for future in as_completed(futures):
                 idx, result = future.result()
                 results_map[idx] = result
                 completed += 1
 
-                norm_pred = self.normalizer.normalize(result.prediction)
-                norm_ref = self.normalizer.normalize(result.reference)
-                print(
-                    f"[{completed}/{total}] Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s"
-                )
-                print(f"  Ref:  {norm_ref}")
-                print(f"  Pred: {norm_pred}")
+                self._print_sample_log(f"[{completed}/{total}] ", idx, result)
 
                 if completed % 100 == 0:
-                    # Compute checkpoint on completed results
-                    temp_results = list(results_map.values())
-                    preds = [self.normalizer.normalize(r.prediction) for r in temp_results]
-                    refs = [self.normalizer.normalize(r.reference) for r in temp_results]
-                    corpus_wer = jiwer.wer(refs, preds) * 100
+                    corpus_wer = self._corpus_wer(list(results_map.values()))
                     console.print(
                         f"\n[bold]CHECKPOINT @ {completed}[/bold]: WER={corpus_wer:.2f}%\n"
                     )
 
-        # Store results in order
         self.results = [results_map[i] for i in sorted(results_map.keys())]
-
-    def _print_checkpoint(self, sample_count: int):
-        """Print cumulative metrics checkpoint."""
-        preds = [self.normalizer.normalize(r.prediction) for r in self.results]
-        refs = [self.normalizer.normalize(r.reference) for r in self.results]
-        corpus_wer = jiwer.wer(refs, preds) * 100
-        avg_time = sum(r.time for r in self.results) / len(self.results)
-        console.print(
-            f"\n[bold]CHECKPOINT @ {sample_count}[/bold]: WER={corpus_wer:.2f}%, Avg Time={avg_time:.2f}s\n"
-        )
 
     def compute_metrics(self) -> dict:
         """Compute final metrics."""
         if not self.results:
             return {"wer": 0.0, "avg_time": 0.0, "num_samples": 0}
 
-        preds = [self.normalizer.normalize(r.prediction) for r in self.results]
-        refs = [self.normalizer.normalize(r.reference) for r in self.results]
-
         return {
-            "wer": jiwer.wer(refs, preds) * 100,
+            "wer": self._corpus_wer(self.results),
             "avg_time": sum(r.time for r in self.results) / len(self.results),
             "num_samples": len(self.results),
         }

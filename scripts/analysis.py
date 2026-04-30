@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
-"""Analysis tools for ASR evaluation results.
+"""Analysis tools for ASR evaluation results."""
 
-Commands:
-    extract-entities - Extract named entities from reference texts for comparison
-    compare          - Generate comprehensive comparison tables for multiple models
-"""
-
-import contextlib
 import json
 import re
 from collections import defaultdict
@@ -22,10 +16,6 @@ app = typer.Typer(help="Analysis tools for ASR evaluation results")
 console = Console()
 
 KEYWORDS_FILE = "outputs/keywords.json"
-
-# =============================================================================
-# Shared utilities
-# =============================================================================
 
 
 def extract_dataset_name(dir_name: str) -> str:
@@ -102,11 +92,6 @@ def entity_itn_correct(entity_text: str, text: str) -> bool:
     entity_normalized = entity_lower.replace(":", ".").replace(",", "")
     text_normalized = text_lower.replace(":", ".").replace(",", "")
     return entity_normalized in text_normalized
-
-
-# =============================================================================
-# extract-entities command
-# =============================================================================
 
 
 @app.command("high-wer")
@@ -329,17 +314,13 @@ def extract_entities(
     }
 
     keywords_path = Path(KEYWORDS_FILE)
-    keywords_path.parent.mkdir(exist_ok=True)
+    keywords_path.parent.mkdir(parents=True, exist_ok=True)
     keywords_path.write_text(json.dumps(keywords, indent=2))
 
     console.print(f"\nExtracted entities from {len(all_references)} unique references")
     console.print(f"References with entities: {len(keywords['references'])}")
     console.print(f"Saved to [bold]{keywords_path}[/bold]")
 
-
-# =============================================================================
-# compare command - comprehensive model comparison
-# =============================================================================
 
 # Canonical dataset order for comparison tables
 DATASET_ORDER = [
@@ -383,22 +364,36 @@ DATASET_SHORT_NAMES = {
 }
 
 
+def parse_metrics_file(metrics_file: Path) -> dict:
+    """Parse a metrics.txt file into a dictionary."""
+    result = {}
+    for line in metrics_file.read_text().splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            key = key.strip().lower().replace(" ", "_")
+            value = value.strip()
+            try:
+                result[key] = float(value)
+            except ValueError:
+                result[key] = value
+    return result
+
+
 def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[str]) -> dict:
     """Collect all metrics for a model across datasets."""
     import jiwer
 
     model_dirs = find_model_dirs(outputs_dir, model_pattern, exclude, latest=True)
 
-    # Extract display name from folder structure
     display_name = extract_model_name(model_dirs[0].name) if model_dirs else model_pattern
 
     metrics = {
         "display_name": display_name,
         "datasets": {},
-        "by_length": defaultdict(lambda: {"samples": [], "wers": []}),
+        "by_length": defaultdict(lambda: {"wers": []}),
         "diarization": None,
         "alignment": None,
-        "mcq": {},  # MCQ results keyed by dataset name (e.g., "mmau")
+        "mcq": {},
         "entity_errors": defaultdict(lambda: {"found": 0, "total": 0}),
         "itn_errors": defaultdict(lambda: {"correct": 0, "total": 0}),
     }
@@ -407,7 +402,6 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
     all_preds = []
     all_latencies = []
 
-    # Load keywords for entity analysis
     keywords_path = Path(KEYWORDS_FILE)
     ref_entities = {}
     if keywords_path.exists():
@@ -419,7 +413,6 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
         metrics_file = dir_path / "metrics.txt"
         dir_name = dir_path.name
 
-        # Check for diarization/alignment/mcq results (special handling)
         if dir_name.endswith("_diarization"):
             if metrics_file.exists():
                 metrics["diarization"] = parse_metrics_file(metrics_file)
@@ -441,25 +434,21 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
 
         ds_metrics = {"refs": [], "preds": [], "avg_time": None, "wer": None}
 
-        # Parse metrics.txt
         if metrics_file.exists():
-            for line in metrics_file.read_text().splitlines():
-                if line.startswith("avg_time:"):
-                    try:
-                        ds_metrics["avg_time"] = float(line.split(":")[1].strip())
-                        all_latencies.append(ds_metrics["avg_time"])
-                    except ValueError:
-                        pass
-                elif line.startswith("wer:"):
-                    with contextlib.suppress(ValueError):
-                        ds_metrics["wer"] = float(line.split(":")[1].strip())
+            parsed = parse_metrics_file(metrics_file)
+            avg_time = parsed.get("avg_time")
+            if isinstance(avg_time, float):
+                ds_metrics["avg_time"] = avg_time
+                all_latencies.append(avg_time)
+            wer = parsed.get("wer")
+            if isinstance(wer, float):
+                ds_metrics["wer"] = wer
 
-        # Parse results
         for sample in parse_results_file(results_file):
-            ref = normalize_text(sample["ground_truth"])
-            pred = normalize_text(sample["prediction"])
             gt_raw = sample["ground_truth"]
             pred_raw = sample["prediction"]
+            ref = normalize_text(gt_raw)
+            pred = normalize_text(pred_raw)
 
             if ref:
                 ds_metrics["refs"].append(ref)
@@ -467,31 +456,23 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
                 all_refs.append(ref)
                 all_preds.append(pred)
 
-                # Track by word count
                 word_count = len(ref.split())
-                wer = sample.get("wer", 0)
-                metrics["by_length"][word_count]["samples"].append(sample)
-                metrics["by_length"][word_count]["wers"].append(wer)
+                metrics["by_length"][word_count]["wers"].append(sample.get("wer", 0))
 
-                # Track entity errors and ITN errors
                 if gt_raw in ref_entities:
                     for entity in ref_entities[gt_raw]:
                         entity_type = entity["label"]
                         entity_text = entity["text"]
 
-                        # Entity detection (normalized)
-                        found = entity_in_text(entity_text, pred_raw)
                         metrics["entity_errors"][entity_type]["total"] += 1
-                        if found:
+                        if entity_in_text(entity_text, pred_raw):
                             metrics["entity_errors"][entity_type]["found"] += 1
 
-                        # ITN accuracy (format preservation)
                         if entity_type in ITN_ENTITY_TYPES:
                             metrics["itn_errors"][entity_type]["total"] += 1
                             if entity_itn_correct(entity_text, pred_raw):
                                 metrics["itn_errors"][entity_type]["correct"] += 1
 
-        # Calculate detailed error breakdown
         if ds_metrics["refs"]:
             output = jiwer.process_words(ds_metrics["refs"], ds_metrics["preds"])
             total = output.hits + output.substitutions + output.deletions
@@ -505,7 +486,6 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
 
         metrics["datasets"][dataset] = ds_metrics
 
-    # Calculate corpus-level metrics
     if all_refs:
         output = jiwer.process_words(all_refs, all_preds)
         total = output.hits + output.substitutions + output.deletions
@@ -519,21 +499,6 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
         metrics["avg_latency"] = sum(all_latencies) / len(all_latencies)
 
     return metrics
-
-
-def parse_metrics_file(metrics_file: Path) -> dict:
-    """Parse a metrics.txt file into a dictionary."""
-    result = {}
-    for line in metrics_file.read_text().splitlines():
-        if ":" in line:
-            key, value = line.split(":", 1)
-            key = key.strip().lower().replace(" ", "_")
-            value = value.strip()
-            try:
-                result[key] = float(value)
-            except ValueError:
-                result[key] = value
-    return result
 
 
 def _sort_key(value: str) -> float:
@@ -589,11 +554,11 @@ def compare(
         display_name = data.get("display_name", model)
         row = [display_name]
         avg_lat = data.get("avg_latency")
-        row.append(f"{avg_lat * 1000:.0f}" if avg_lat else "-")
+        row.append(f"{avg_lat * 1000:.0f}" if avg_lat is not None else "-")
         for ds in ordered_datasets:
             ds_data = data["datasets"].get(ds, {})
             lat = ds_data.get("avg_time")
-            row.append(f"{lat * 1000:.0f}" if lat else "-")
+            row.append(f"{lat * 1000:.0f}" if lat is not None else "-")
         rows.append(row)
 
     for row in sorted(rows, key=lambda r: _sort_key(r[1])):
@@ -614,11 +579,13 @@ def compare(
         display_name = data.get("display_name", model)
         row = [display_name]
         corpus_wer = data.get("corpus_wer")
-        row.append(f"{corpus_wer:.2f}%" if corpus_wer else "-")
+        row.append(f"{corpus_wer:.2f}%" if corpus_wer is not None else "-")
         for ds in ordered_datasets:
             ds_data = data["datasets"].get(ds, {})
-            wer = ds_data.get("wer_calculated") or ds_data.get("wer")
-            row.append(f"{wer:.2f}%" if wer else "-")
+            wer = ds_data.get("wer_calculated")
+            if wer is None:
+                wer = ds_data.get("wer")
+            row.append(f"{wer:.2f}%" if wer is not None else "-")
         rows.append(row)
 
     for row in sorted(rows, key=lambda r: _sort_key(r[1])):
@@ -639,11 +606,11 @@ def compare(
         display_name = data.get("display_name", model)
         row = [display_name]
         avg_ins = data.get("corpus_ins_rate")
-        row.append(f"{avg_ins:.2f}%" if avg_ins else "-")
+        row.append(f"{avg_ins:.2f}%" if avg_ins is not None else "-")
         for ds in ordered_datasets:
             ds_data = data["datasets"].get(ds, {})
             ins = ds_data.get("ins_rate")
-            row.append(f"{ins:.2f}%" if ins else "-")
+            row.append(f"{ins:.2f}%" if ins is not None else "-")
         rows.append(row)
 
     for row in sorted(rows, key=lambda r: _sort_key(r[1])):

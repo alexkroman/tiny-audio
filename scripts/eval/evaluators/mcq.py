@@ -3,6 +3,7 @@
 import io
 import json
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import attrs
@@ -156,6 +157,22 @@ class MMAUEvaluator:
             category=sample["category"],
         )
 
+    def _build_sample_data(self, sample: dict) -> dict:
+        return {
+            "audio": sample[self.audio_field],
+            "question": sample[self.question_field],
+            "reference": sample[self.answer_field],
+            "choices": sample[self.choices_field],
+            "category": self._extract_category(sample.get(self.category_field, "")),
+        }
+
+    def _print_sample_log(self, prefix: str, idx: int, result: MCQResult) -> None:
+        status = "✓" if result.correct else "✗"
+        print(f"{prefix}Sample {idx}: {status} Time={result.time:.2f}s")
+        print(f"  Q: {result.question}")
+        print(f"  Pred: {result.prediction[:100]}")
+        print(f"  Match: {result.matched_choice} | Ref: {result.reference}")
+
     def evaluate(self, dataset, max_samples: int | None = None) -> list[MCQResult]:
         """Run evaluation loop on dataset."""
         self.results = []
@@ -174,15 +191,7 @@ class MMAUEvaluator:
         console.print(f"[dim]Collecting samples (target: {max_samples or 'all'})...[/dim]")
 
         for sample in dataset:
-            samples.append(
-                {
-                    "audio": sample[self.audio_field],
-                    "question": sample[self.question_field],
-                    "reference": sample[self.answer_field],
-                    "choices": sample[self.choices_field],
-                    "category": self._extract_category(sample.get(self.category_field, "")),
-                }
-            )
+            samples.append(self._build_sample_data(sample))
 
             if len(samples) % 100 == 0:
                 console.print(f"[dim]  Collected {len(samples)} samples...[/dim]")
@@ -196,22 +205,10 @@ class MMAUEvaluator:
     def _evaluate_sequential(self, dataset, max_samples: int | None) -> None:
         """Run sequential evaluation."""
         for idx, sample in enumerate(dataset, 1):
-            sample_data = {
-                "audio": sample[self.audio_field],
-                "question": sample[self.question_field],
-                "reference": sample[self.answer_field],
-                "choices": sample[self.choices_field],
-                "category": self._extract_category(sample.get(self.category_field, "")),
-            }
-
-            _, result = self._process_sample((idx, sample_data))
+            _, result = self._process_sample((idx, self._build_sample_data(sample)))
             self.results.append(result)
 
-            status = "✓" if result.correct else "✗"
-            print(f"Sample {idx}: {status} Time={result.time:.2f}s")
-            print(f"  Q: {result.question}")
-            print(f"  Pred: {result.prediction[:100]}")
-            print(f"  Match: {result.matched_choice} | Ref: {result.reference}")
+            self._print_sample_log("", idx, result)
 
             if idx % 100 == 0:
                 self._print_checkpoint(idx)
@@ -238,11 +235,7 @@ class MMAUEvaluator:
                 results_map[idx] = result
                 completed += 1
 
-                status = "✓" if result.correct else "✗"
-                print(f"[{completed}/{total}] Sample {idx}: {status} Time={result.time:.2f}s")
-                print(f"  Q: {result.question}")
-                print(f"  Pred: {result.prediction[:100]}")
-                print(f"  Match: {result.matched_choice} | Ref: {result.reference}")
+                self._print_sample_log(f"[{completed}/{total}] ", idx, result)
 
                 if completed % 100 == 0:
                     temp_results = list(results_map.values())
@@ -267,11 +260,8 @@ class MMAUEvaluator:
         total = len(self.results)
         correct = sum(1 for r in self.results if r.correct)
 
-        # Per-category accuracy
-        categories: dict[str, list[MCQResult]] = {}
+        categories: dict[str, list[MCQResult]] = defaultdict(list)
         for r in self.results:
-            if r.category not in categories:
-                categories[r.category] = []
             categories[r.category].append(r)
 
         category_acc = {

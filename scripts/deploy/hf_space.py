@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""
-Deploy the demo application to a Hugging Face Space.
-
-This script uploads the demo files (app.py, requirements.txt, README.md)
-and optionally the wav_outputs directory to a Hugging Face Space.
-
-Usage:
-    poetry run deploy-hf
-    poetry run deploy-hf --repo-id YOUR_USERNAME/YOUR_SPACE
-    poetry run deploy-hf --delete-existing
-"""
+"""Deploy the demo application to a Hugging Face Space."""
 
 from pathlib import Path
 
@@ -53,7 +43,6 @@ def deploy(
     """Deploy demo files to a Hugging Face Space."""
     repo_id = extract_repo_id(repo_id)
 
-    # Validate demo directory
     if not demo_dir.exists():
         raise typer.BadParameter(f"Demo directory not found: {demo_dir}")
 
@@ -66,8 +55,6 @@ def deploy(
     typer.echo(f"Demo directory: {demo_dir.absolute()}")
 
     api = HfApi()
-
-    # Create Space if it doesn't exist
     try:
         api.repo_info(repo_id=repo_id, repo_type="space")
         typer.echo(f"Space '{repo_id}' exists, uploading files...")
@@ -80,7 +67,6 @@ def deploy(
             private=private,
         )
 
-    # Upload the demo folder
     typer.echo("\nUploading files...")
     upload_folder(
         folder_path=str(demo_dir),

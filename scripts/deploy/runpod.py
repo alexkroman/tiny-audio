@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""
-Unified CLI for RunPod operations.
-
-Consolidates deployment, training, evaluation, session management, and checkpoint discovery.
-
-Usage:
-    runpod deploy <host> <port>          # Deploy code to remote
-    runpod train <host> <port>           # Start training in tmux
-    runpod eval <host> <port> -m <model> # Run evaluation in tmux
-    runpod attach <host> <port>          # Attach to running session
-    runpod checkpoint <host> <port>      # Find latest checkpoint
-"""
+"""Unified CLI for RunPod operations."""
 
 import os
 import subprocess
@@ -26,11 +15,35 @@ from invoke import UnexpectedExit
 
 app = typer.Typer(help="RunPod remote operations CLI")
 
-# =============================================================================
-# SSH/Tmux Utilities
-# =============================================================================
-
 SSH_KEY_PATH = "~/.ssh/id_ed25519"
+
+
+def _auto_session_name(prefix: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+    return f"{prefix}_{timestamp}"
+
+
+def _start_remote_tmux_script(
+    conn: Connection,
+    host: str,
+    port: int,
+    session_name: str,
+    script_content: str,
+    script_path: str,
+    no_attach: bool,
+) -> None:
+    """Upload a script to /tmp, start it in a tmux session, optionally attach."""
+    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
+    conn.run(f"chmod +x {script_path}", hide=True)
+    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    if not result.ok:
+        print(f"Failed to start tmux session: {result.stderr}")
+        sys.exit(1)
+    print(f"\nSession '{session_name}' started.")
+    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
+    if not no_attach:
+        time.sleep(2)
+        attach_tmux_session(host, port, session_name)
 
 
 def get_connection(host: str, port: int) -> Connection:
@@ -108,10 +121,6 @@ def attach_tmux_session(host: str, port: int, session_name: str) -> None:
     subprocess.run(cmd, shell=True)
     print(f"\nDetached from session '{session_name}'.")
 
-
-# =============================================================================
-# Deploy Command
-# =============================================================================
 
 RSYNC_EXCLUDES = [
     "__pycache__",
@@ -266,11 +275,6 @@ def deploy(
     print(f"To connect: ssh -i ~/.ssh/id_ed25519 -p {port} root@{host}")
 
 
-# =============================================================================
-# Train Command
-# =============================================================================
-
-
 def build_training_script(
     experiment: str,
     hf_token: str,
@@ -349,16 +353,13 @@ def train(
     if not test_connection(conn):
         sys.exit(1)
 
-    # Generate session name if not provided
     if session_name is None:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-        session_name = f"train_{experiment}_{timestamp}"
+        session_name = _auto_session_name(f"train_{experiment}")
 
     if force:
         print(f"Killing existing session '{session_name}' if present...")
         kill_tmux_session(conn, session_name)
 
-    # Get environment variables
     hf_token = os.environ.get("HF_TOKEN", "")
     wandb_run_id = wandb_run_id or os.environ.get("WANDB_RUN_ID")
     wandb_resume = wandb_resume or os.environ.get("WANDB_RESUME")
@@ -366,37 +367,19 @@ def train(
     if not hf_token:
         print("Warning: HF_TOKEN environment variable not set.")
 
-    # Build and upload training script
-    script_content = build_training_script(
-        experiment, hf_token, wandb_run_id, wandb_resume, extra_args or []
-    )
-    script_path = f"/tmp/train_{session_name}.sh"
-
     print(f"\nStarting training session '{session_name}' with experiment '{experiment}'...")
     if extra_args:
         print(f"Extra args: {' '.join(extra_args)}")
 
-    # Write script to remote
-    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
-    conn.run(f"chmod +x {script_path}", hide=True)
-
-    # Start tmux session
-    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
-    if not result.ok:
-        print(f"Failed to start tmux session: {result.stderr}")
-        sys.exit(1)
-
-    print(f"\nTraining started in session '{session_name}'.")
-    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
-
-    if not no_attach:
-        time.sleep(2)
-        attach_tmux_session(host, port, session_name)
-
-
-# =============================================================================
-# Attach Command
-# =============================================================================
+    _start_remote_tmux_script(
+        conn,
+        host,
+        port,
+        session_name,
+        build_training_script(experiment, hf_token, wandb_run_id, wandb_resume, extra_args or []),
+        f"/tmp/train_{session_name}.sh",
+        no_attach,
+    )
 
 
 @app.command()
@@ -425,7 +408,6 @@ def attach(
                 print(f"  - {session}")
         return
 
-    # Auto-select session if not specified
     if not session_name:
         if not sessions:
             print("\nNo active tmux sessions found. Start a training session first.")
@@ -459,11 +441,6 @@ def attach(
             print(f"Session '{session_name}' not found or an error occurred.")
     else:
         attach_tmux_session(host, port, session_name)
-
-
-# =============================================================================
-# SIFT Dataset Generation Command
-# =============================================================================
 
 
 def build_sift_script(
@@ -551,25 +528,16 @@ def sift(
     if not test_connection(conn):
         sys.exit(1)
 
-    # Generate session name if not provided
     if session_name is None:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-        session_name = f"sift_{timestamp}"
+        session_name = _auto_session_name("sift")
 
     if force:
         print(f"Killing existing session '{session_name}' if present...")
         kill_tmux_session(conn, session_name)
 
-    # Get environment variables
     hf_token = os.environ.get("HF_TOKEN", "")
     if not hf_token:
         print("Warning: HF_TOKEN environment variable not set.")
-
-    # Build and upload script
-    script_content = build_sift_script(
-        hf_token, output_repo, batch_size, max_samples, use_compile, datasets
-    )
-    script_path = f"/tmp/sift_{session_name}.sh"
 
     print(f"\nStarting SIFT generation session '{session_name}'...")
     print(f"Output repo: {output_repo}")
@@ -581,27 +549,15 @@ def sift(
     if use_compile:
         print("Using torch.compile for faster inference")
 
-    # Write script to remote
-    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
-    conn.run(f"chmod +x {script_path}", hide=True)
-
-    # Start tmux session
-    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
-    if not result.ok:
-        print(f"Failed to start tmux session: {result.stderr}")
-        sys.exit(1)
-
-    print(f"\nSIFT generation started in session '{session_name}'.")
-    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
-
-    if not no_attach:
-        time.sleep(2)
-        attach_tmux_session(host, port, session_name)
-
-
-# =============================================================================
-# Eval Command
-# =============================================================================
+    _start_remote_tmux_script(
+        conn,
+        host,
+        port,
+        session_name,
+        build_sift_script(hf_token, output_repo, batch_size, max_samples, use_compile, datasets),
+        f"/tmp/sift_{session_name}.sh",
+        no_attach,
+    )
 
 
 def build_eval_script(
@@ -708,17 +664,14 @@ def eval(
     if not test_connection(conn):
         sys.exit(1)
 
-    # Generate session name if not provided
     if session_name is None:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
         model_short = model.split("/")[-1] if "/" in model else model
-        session_name = f"eval_{model_short}_{timestamp}"
+        session_name = _auto_session_name(f"eval_{model_short}")
 
     if force:
         print(f"Killing existing session '{session_name}' if present...")
         kill_tmux_session(conn, session_name)
 
-    # Get environment variables
     hf_token = os.environ.get("HF_TOKEN", "")
     assemblyai_api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
 
@@ -729,23 +682,8 @@ def eval(
             "Warning: ASSEMBLYAI_API_KEY environment variable not set (required for assemblyai model)."
         )
 
-    # Default datasets
     if datasets is None:
         datasets = ["loquacious"]
-
-    # Build and upload script
-    script_content = build_eval_script(
-        hf_token,
-        model,
-        datasets,
-        max_samples,
-        assemblyai_api_key,
-        assemblyai_model,
-        num_workers,
-        streaming,
-        extra_args,
-    )
-    script_path = f"/tmp/eval_{session_name}.sh"
 
     print(f"\nStarting eval session '{session_name}'...")
     print(f"Model: {model}")
@@ -757,27 +695,25 @@ def eval(
     if streaming:
         print("Streaming mode enabled")
 
-    # Write script to remote
-    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
-    conn.run(f"chmod +x {script_path}", hide=True)
-
-    # Start tmux session
-    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
-    if not result.ok:
-        print(f"Failed to start tmux session: {result.stderr}")
-        sys.exit(1)
-
-    print(f"\nEvaluation started in session '{session_name}'.")
-    print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
-
-    if not no_attach:
-        time.sleep(2)
-        attach_tmux_session(host, port, session_name)
-
-
-# =============================================================================
-# Checkpoint Command
-# =============================================================================
+    _start_remote_tmux_script(
+        conn,
+        host,
+        port,
+        session_name,
+        build_eval_script(
+            hf_token,
+            model,
+            datasets,
+            max_samples,
+            assemblyai_api_key,
+            assemblyai_model,
+            num_workers,
+            streaming,
+            extra_args,
+        ),
+        f"/tmp/eval_{session_name}.sh",
+        no_attach,
+    )
 
 
 @app.command()
@@ -807,16 +743,6 @@ def checkpoint(
     else:
         print("No checkpoints found", file=sys.stderr)
         raise typer.Exit(1)
-
-
-# =============================================================================
-# CLI Entry Point
-# =============================================================================
-
-
-def cli():
-    """Entry point for pyproject.toml scripts."""
-    app()
 
 
 if __name__ == "__main__":

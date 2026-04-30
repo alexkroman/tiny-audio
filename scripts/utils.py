@@ -45,30 +45,12 @@ def parse_results_file(results_path: Path) -> list[dict]:
 def _extract_model_from_dir(dir_name: str) -> str:
     """Extract model name from directory name.
 
-    Format: {timestamp}_{model}_{dataset}[_suffix]
-    Returns the model portion, handling multi-part model names.
+    Format: {timestamp_date}_{timestamp_time}_{model}_{dataset}[_suffix]
     """
     parts = dir_name.split("_")
     if len(parts) < 3:
         return dir_name
-
-    # Skip timestamp (first 2 parts: date + time)
-    # Last part(s) are dataset + optional suffix (diarization, alignment)
-    # Everything in between is the model name
-    suffix_parts = {"diarization", "alignment"}
-    end_idx = len(parts)
-
-    # Remove suffix if present
-    if parts[-1] in suffix_parts:
-        end_idx -= 1
-
-    # The part before suffix/end is the dataset, everything between timestamp and dataset is model
-    # Format: YYYYMMDD_HHMMSS_model_dataset or YYYYMMDD_HHMMSS_model-name_dataset
-    if end_idx >= 3:
-        # Model is at index 2 (after date_time)
-        return parts[2]
-
-    return dir_name
+    return parts[2]
 
 
 def find_model_dirs(
@@ -88,12 +70,11 @@ def find_model_dirs(
     Returns:
         Sorted list of matching directory paths.
     """
-    exclude = [ex for ex in (exclude or []) if ex]  # Filter out empty strings
+    exclude = [ex for ex in (exclude or []) if ex]
     dirs = []
     for d in outputs_dir.iterdir():
         if not d.is_dir():
             continue
-        # Extract model name from directory and match exactly
         model_name = _extract_model_from_dir(d.name)
         if model_name.lower() == model_pattern.lower() and not any(
             ex.lower() in d.name.lower() for ex in exclude
@@ -101,13 +82,11 @@ def find_model_dirs(
             dirs.append(d)
 
     if latest:
-        # Group by dataset and keep only most recent (dirs are sorted by timestamp in name)
         latest_by_dataset: dict[str, Path] = {}
-        for d in sorted(dirs, reverse=True):  # Sort descending by name (timestamp first)
-            # Extract dataset from dir name: <timestamp>_<model>_<dataset>
+        for d in sorted(dirs, reverse=True):
             parts = d.name.split("_")
             if len(parts) >= 3:
-                dataset = parts[-1]  # Last part is dataset
+                dataset = parts[-1]
                 if dataset not in latest_by_dataset:
                     latest_by_dataset[dataset] = d
         dirs = list(latest_by_dataset.values())

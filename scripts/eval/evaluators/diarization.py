@@ -60,27 +60,23 @@ class DiarizationEvaluator:
 
     def diarize(self, audio) -> tuple[list[dict], float]:
         """Run diarization on audio and return (segments, inference_time)."""
-        import io
-
         import librosa
 
         from tiny_audio.asr_pipeline import SpeakerDiarizer
 
-        # Prepare audio array - handle both decoded and raw bytes formats
         if isinstance(audio, dict):
             if "array" in audio:
-                # Already decoded
                 audio_array = audio["array"]
                 sample_rate = audio.get("sampling_rate", 16000)
             elif "bytes" in audio:
-                # Raw bytes - decode with librosa (avoids torchcodec CPU issues)
+                # Raw bytes — decode with librosa to avoid torchcodec CPU issues.
                 audio_array, sample_rate = librosa.load(io.BytesIO(audio["bytes"]), sr=16000)
             else:
                 raise ValueError(f"Unsupported audio dict format: {audio.keys()}")
         else:
             raise ValueError(f"Unsupported audio format: {type(audio)}")
 
-        # Ensure float32 dtype (pyannote requires consistent dtype)
+        # pyannote requires consistent float32 dtype.
         if hasattr(audio_array, "astype"):
             audio_array = audio_array.astype(np.float32)
 
@@ -160,38 +156,29 @@ class DiarizationEvaluator:
 
         self.results = []
 
-        # Collect samples up to max_samples
         samples = []
         for i, sample in enumerate(dataset):
             if max_samples and i >= max_samples:
                 break
             samples.append((sample, i + 1))
 
+        def collect(result):
+            if result is not None:
+                self.results.append(result)
+            if len(self.results) > 0 and len(self.results) % 50 == 0:
+                self._print_checkpoint(len(self.results))
+
         if self.num_workers > 1:
-            # Parallel processing
             with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
                 futures = {
                     executor.submit(self._process_sample, sample, idx): idx
                     for sample, idx in samples
                 }
                 for future in as_completed(futures):
-                    result = future.result()
-                    if result is not None:
-                        self.results.append(result)
-
-                    # Checkpoint every 50 samples
-                    if len(self.results) % 50 == 0 and len(self.results) > 0:
-                        self._print_checkpoint(len(self.results))
+                    collect(future.result())
         else:
-            # Sequential processing
             for sample, idx in samples:
-                result = self._process_sample(sample, idx)
-                if result is not None:
-                    self.results.append(result)
-
-                # Checkpoint every 50 samples
-                if len(self.results) % 50 == 0 and len(self.results) > 0:
-                    self._print_checkpoint(len(self.results))
+                collect(self._process_sample(sample, idx))
 
         return self.results
 

@@ -253,30 +253,21 @@ class ClassificationEvaluator:
         return self._pipeline
 
     def _get_keywords(self) -> list[str]:
-        """Get keywords for current task."""
-        if self.task == "emotion":
-            return self.EMOTION_KEYWORDS
-        if self.task == "gender":
-            return self.GENDER_KEYWORDS
-        if self.task == "age":
-            return self.AGE_KEYWORDS
-        if self.task == "accent":
-            return self.ACCENT_KEYWORDS
-        if self.task == "rate":
-            return self.SPEAKING_RATE_KEYWORDS
-        return []
+        return {
+            "emotion": self.EMOTION_KEYWORDS,
+            "gender": self.GENDER_KEYWORDS,
+            "age": self.AGE_KEYWORDS,
+            "accent": self.ACCENT_KEYWORDS,
+            "rate": self.SPEAKING_RATE_KEYWORDS,
+        }.get(self.task, [])
 
     def _get_synonyms(self) -> dict[str, str]:
-        """Get synonym mapping for current task."""
-        if self.task == "emotion":
-            return self.EMOTION_SYNONYMS
-        if self.task == "gender":
-            return self.GENDER_SYNONYMS
-        if self.task == "accent":
-            return self.ACCENT_SYNONYMS
-        if self.task == "rate":
-            return self.SPEAKING_RATE_SYNONYMS
-        return {}
+        return {
+            "emotion": self.EMOTION_SYNONYMS,
+            "gender": self.GENDER_SYNONYMS,
+            "accent": self.ACCENT_SYNONYMS,
+            "rate": self.SPEAKING_RATE_SYNONYMS,
+        }.get(self.task, {})
 
     def _normalize_class(self, keyword: str) -> str:
         """Normalize keyword to canonical form using synonyms."""
@@ -375,28 +366,35 @@ class ClassificationEvaluator:
             return ""
         return str(ref)
 
+    def _build_sample_data(self, sample: dict, reference: str) -> dict:
+        return {
+            "audio": sample[self.audio_field],
+            "instruction": self._get_instruction(sample),
+            "reference": reference,
+        }
+
+    def _print_sample_log(self, prefix: str, idx: int, result: ClassificationResult) -> None:
+        status = "correct" if result.correct else "wrong"
+        print(f"{prefix}Sample {idx}: {status} Time={result.time:.2f}s")
+        print(f"  Pred: {result.prediction[:100]}")
+        print(f"  Ref: {result.reference}")
+
+    def _iter_valid_samples(self, dataset):
+        for sample in dataset:
+            reference = self._get_reference(sample)
+            if not reference:
+                continue
+            yield sample, reference
+
     def _collect_samples(self, dataset, max_samples: int | None) -> list[dict]:
         """Collect samples for parallel processing."""
         samples = []
         console.print(f"[dim]Collecting samples (target: {max_samples or 'all'})...[/dim]")
 
-        for sample in dataset:
-            reference = self._get_reference(sample)
-            # Skip samples with empty reference
-            if not reference:
-                continue
-
-            samples.append(
-                {
-                    "audio": sample[self.audio_field],
-                    "instruction": self._get_instruction(sample),
-                    "reference": reference,
-                }
-            )
-
+        for sample, reference in self._iter_valid_samples(dataset):
+            samples.append(self._build_sample_data(sample, reference))
             if len(samples) % 100 == 0:
                 console.print(f"[dim]  Collected {len(samples)} samples...[/dim]")
-
             if max_samples and len(samples) >= max_samples:
                 break
 
@@ -405,27 +403,11 @@ class ClassificationEvaluator:
 
     def _evaluate_sequential(self, dataset, max_samples: int | None) -> None:
         """Run sequential evaluation."""
-        idx = 0
-        for sample in dataset:
-            reference = self._get_reference(sample)
-            # Skip samples with empty reference
-            if not reference:
-                continue
-
-            idx += 1
-            sample_data = {
-                "audio": sample[self.audio_field],
-                "instruction": self._get_instruction(sample),
-                "reference": reference,
-            }
-
-            _, result = self._process_sample((idx, sample_data))
+        for idx, (sample, reference) in enumerate(self._iter_valid_samples(dataset), start=1):
+            _, result = self._process_sample((idx, self._build_sample_data(sample, reference)))
             self.results.append(result)
 
-            status = "correct" if result.correct else "wrong"
-            print(f"Sample {idx}: {status} Time={result.time:.2f}s")
-            print(f"  Pred: {result.prediction[:100]}")
-            print(f"  Ref: {result.reference}")
+            self._print_sample_log("", idx, result)
 
             if idx % 100 == 0:
                 self._print_checkpoint(idx)
@@ -452,10 +434,7 @@ class ClassificationEvaluator:
                 results_map[idx] = result
                 completed += 1
 
-                status = "correct" if result.correct else "wrong"
-                print(f"[{completed}/{total}] Sample {idx}: {status} Time={result.time:.2f}s")
-                print(f"  Pred: {result.prediction[:100]}")
-                print(f"  Ref: {result.reference}")
+                self._print_sample_log(f"[{completed}/{total}] ", idx, result)
 
                 if completed % 100 == 0:
                     temp_results = list(results_map.values())
