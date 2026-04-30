@@ -2,6 +2,9 @@ from typing import Optional
 
 import transformers
 
+# Default conv layers for Whisper/GLM-ASR audio encoders: [(pad, kernel, stride), ...]
+DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
+
 
 class ASRConfig(transformers.PretrainedConfig):
     """Configuration class for the ASR model.
@@ -107,8 +110,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.system_prompt = system_prompt
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
-        # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
-        self.encoder_conv_layers = encoder_conv_layers or [(1, 3, 1), (1, 3, 2)]
+        self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
         self.audio_sample_rate = audio_sample_rate
         self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
@@ -151,28 +153,18 @@ class ASRConfig(transformers.PretrainedConfig):
         ]
         self.freeze_projector = freeze_projector
 
-        # Generation parameters (use explicit value if provided, else use default)
-        self.num_beams = num_beams if num_beams is not None else generation_defaults["num_beams"]
-        self.max_new_tokens = (
-            max_new_tokens if max_new_tokens is not None else generation_defaults["max_new_tokens"]
-        )
-        self.min_new_tokens = (
-            min_new_tokens if min_new_tokens is not None else generation_defaults["min_new_tokens"]
-        )
-        self.repetition_penalty = (
-            repetition_penalty
-            if repetition_penalty is not None
-            else generation_defaults["repetition_penalty"]
-        )
-        self.length_penalty = (
-            length_penalty if length_penalty is not None else generation_defaults["length_penalty"]
-        )
-        self.no_repeat_ngram_size = (
-            no_repeat_ngram_size
-            if no_repeat_ngram_size is not None
-            else generation_defaults["no_repeat_ngram_size"]
-        )
-        self.use_cache = use_cache if use_cache is not None else generation_defaults["use_cache"]
+        explicit_generation_args = {
+            "num_beams": num_beams,
+            "max_new_tokens": max_new_tokens,
+            "min_new_tokens": min_new_tokens,
+            "repetition_penalty": repetition_penalty,
+            "length_penalty": length_penalty,
+            "no_repeat_ngram_size": no_repeat_ngram_size,
+            "use_cache": use_cache,
+        }
+        for key, default in generation_defaults.items():
+            value = explicit_generation_args[key]
+            setattr(self, key, value if value is not None else default)
         self.do_sample = do_sample
         self.temperature = temperature
         self.top_p = top_p

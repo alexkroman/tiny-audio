@@ -6,7 +6,6 @@ from typing import Iterator, Optional, Union
 import torch
 import torch.nn as nn
 from transformers import (
-    AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -482,8 +481,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if self.training and self.spec_augment is not None:
                 input_features = self.spec_augment(input_features)
 
-            # Count expected audio tokens from input_ids (ground truth from collator)
-            audio_token_counts = (input_ids == self.audio_token_id).sum(dim=-1)
+            is_audio_token = input_ids == self.audio_token_id
+            audio_token_counts = is_audio_token.sum(dim=-1)
 
             # Encode audio -> flattened (total_audio_tokens, hidden_dim)
             audio_embeds = self._encode_audio(
@@ -491,7 +490,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
 
             # Replace <audio> token placeholders with audio embeddings using masked_scatter
-            audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
+            audio_token_mask = is_audio_token.unsqueeze(-1)
             inputs_embeds = inputs_embeds.masked_scatter(
                 audio_token_mask.to(inputs_embeds.device),
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
@@ -750,9 +749,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
         """Save model, tokenizer, and processor."""
         import shutil
-        from pathlib import Path as PathlibPath
 
-        save_dir = PathlibPath(save_directory)
+        save_dir = Path(save_directory)
         save_dir.mkdir(parents=True, exist_ok=True)
 
         # Update config with actual vocab size
@@ -823,7 +821,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             json.dump(processor_config, f, indent=2)
 
         # Copy source files for auto-loading
-        src_dir = PathlibPath(__file__).parent
+        src_dir = Path(__file__).parent
         for asr_file in src_dir.glob("asr_*.py"):
             shutil.copy(asr_file, save_dir / asr_file.name)
         # Copy projectors module
@@ -847,5 +845,5 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
 
 # Register with transformers Auto classes
-AutoConfig.register("asr_model", ASRConfig)
+# (AutoConfig.register is handled in asr_config.py at module load.)
 AutoModel.register(ASRConfig, ASRModel)

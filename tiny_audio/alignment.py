@@ -120,15 +120,18 @@ class ForcedAligner:
 
             if move_score >= stay_score:
                 # Token j-1 was emitted at frame t-1
-                token_frames[j - 1].insert(0, t - 1)
+                token_frames[j - 1].append(t - 1)
                 j -= 1
-            # Always decrement time (monotonic)
             t -= 1
 
         # Handle any remaining tokens at the start (edge case)
         while j > 0:
-            token_frames[j - 1].insert(0, 0)
+            token_frames[j - 1].append(0)
             j -= 1
+
+        # We appended in reverse-time order; restore monotonic order
+        for frames in token_frames:
+            frames.reverse()
 
         # Convert to spans
         token_spans: list[tuple[int, float, float]] = []

@@ -3,6 +3,7 @@
 from typing import Optional
 
 import numpy as np
+import torch
 
 try:
     from pipecat.frames.frames import (
@@ -46,6 +47,7 @@ class TinyAudioSTTService(SegmentedSTTService):
     ):
         super().__init__(**kwargs)
         self._model = None
+        self._model_dtype: Optional[torch.dtype] = None
         self._model_id = model_id
         self._streaming = streaming
         self._device = device
@@ -53,8 +55,6 @@ class TinyAudioSTTService(SegmentedSTTService):
     def _ensure_model(self):
         """Lazy-load the model on first use."""
         if self._model is None:
-            import torch
-
             try:
                 from tiny_audio import ASRModel  # pyright: ignore[reportMissingImports]
             except ImportError:
@@ -76,10 +76,10 @@ class TinyAudioSTTService(SegmentedSTTService):
                 else:
                     self._device = torch.device("cpu")
 
-            # Load model and move to device
             self._model = ASRModel.from_pretrained(self._model_id)
             self._model.to(self._device)
             self._model.eval()
+            self._model_dtype = next(self._model.parameters()).dtype
 
     async def run_stt(self, audio: bytes):
         """Transcribe audio segment, yielding interim results if streaming enabled.
@@ -101,9 +101,6 @@ class TinyAudioSTTService(SegmentedSTTService):
             yield TranscriptionFrame(text="", user_id=self._user_id, timestamp="")
             return
 
-        # Preprocess audio through feature extractor
-        import torch
-
         inputs = self._model.feature_extractor(
             audio_array,
             sampling_rate=16000,
@@ -111,9 +108,7 @@ class TinyAudioSTTService(SegmentedSTTService):
             return_attention_mask=True,
         )
 
-        # Get model dtype and cast inputs to match
-        model_dtype = next(self._model.parameters()).dtype
-        input_features = inputs.input_features.to(self._device, dtype=model_dtype)
+        input_features = inputs.input_features.to(self._device, dtype=self._model_dtype)
         attention_mask = inputs.attention_mask.to(self._device)
 
         if self._streaming:

@@ -58,13 +58,7 @@ class MLPAudioProjector(nn.Module):
         Returns:
             Projected features of shape [batch, (seq_len - k) // k + 1, llm_dim]
         """
-        batch, seq, dim = x.shape
-        # Truncate to match GLM-ASR: use (seq - k) // k + 1 frames
-        # This drops trailing frames that don't fill a complete k-frame window
-        out_len = (seq - self.k) // self.k + 1
-        x = x[:, : out_len * self.k, :]  # Truncate to exact multiple
-        x = x.reshape(batch, out_len, dim * self.k)
-
+        x = _frame_stack(x, self.k)
         x = self.linear_1(x)
         x = self.norm(x)
         x = self.act(x)
@@ -74,6 +68,17 @@ class MLPAudioProjector(nn.Module):
 # =============================================================================
 # MoE Projector (MOSA-style)
 # =============================================================================
+
+
+def _frame_stack(x: torch.Tensor, k: int) -> torch.Tensor:
+    """Stack k adjacent frames along the feature dim.
+
+    Truncates trailing frames that don't fill a complete k-frame window,
+    matching GLM-ASR's `(seq_len - k) // k + 1` formula.
+    """
+    batch, seq, dim = x.shape
+    out_len = (seq - k) // k + 1
+    return x[:, : out_len * k, :].reshape(batch, out_len, dim * k)
 
 
 class SimpleAdapter(nn.Module):
@@ -253,13 +258,10 @@ class MoEAudioProjector(nn.Module):
         Returns:
             Projected features of shape [batch, out_len, llm_dim]
         """
-        # 1. Frame Stacking
-        batch, seq, dim = x.shape
-        out_len = (seq - self.k) // self.k + 1
-        x = x[:, : out_len * self.k, :]
-        x = x.reshape(batch, out_len, dim * self.k)
+        x = _frame_stack(x, self.k)
+        batch, out_len, _ = x.shape
 
-        # 2. Normalize stacked input (like main branch SharedMoEBlock)
+        # Normalize stacked input (like main branch SharedMoEBlock)
         x = self.norm(x)
         flat_x = x.view(-1, x.size(-1))  # [tokens, in_dim]
 
