@@ -38,7 +38,7 @@ from tiny_audio.mlx.encoder import (
     compute_mel_unpadded,
     encoder_config_from_hf,
 )
-from tiny_audio.mlx.processor import build_prompt_input_ids, compute_num_audio_tokens
+from tiny_audio.mlx.processor import build_prompt_input_ids
 from tiny_audio.mlx.projector import MLXMLPProjector
 
 AudioInput = Union[str, np.ndarray, "list[float]"]
@@ -46,6 +46,9 @@ AudioInput = Union[str, np.ndarray, "list[float]"]
 # Decoder repo: pre-quantized Qwen3-0.6B 4-bit, structurally compatible with
 # the trained Qwen/Qwen3-0.6B base used for fine-tuning.
 _DECODER_MLX_REPO = "Qwen/Qwen3-0.6B-MLX-4bit"
+
+AUDIO_TOKEN = "<audio>"
+_EOS_TOKEN_STRINGS = ("<|im_end|>", "<|endoftext|>")
 
 
 def splice_audio_embeds(
@@ -92,19 +95,17 @@ class MLXASRModel:
         projector: MLXMLPProjector,
         decoder,
         tokenizer,
+        feature_extractor,
         audio_token_id: int,
         eos_token_ids: set[int],
-        encoder_conv_layers: list[tuple[int, int, int]],
-        audio_model_id: str,
     ):
         self.encoder = encoder
         self.projector = projector
         self.decoder = decoder
         self.tokenizer = tokenizer
+        self.feature_extractor = feature_extractor
         self.audio_token_id = audio_token_id
         self.eos_token_ids = eos_token_ids
-        self.encoder_conv_layers = encoder_conv_layers
-        self.audio_model_id = audio_model_id
 
     # ------------------------------------------------------------------ load
 
@@ -133,7 +134,11 @@ class MLXASRModel:
         from huggingface_hub import snapshot_download
         from mlx_lm import load as mlx_lm_load
         from safetensors.torch import load_file as load_safetensors_pt
-        from transformers import AutoConfig, AutoModelForSeq2SeqLM
+        from transformers import (
+            AutoConfig,
+            AutoFeatureExtractor,
+            AutoModelForSeq2SeqLM,
+        )
 
         # 1. Cache directory - currently a marker-only artifact (full converted
         # weight cache is a future optimization).
@@ -157,21 +162,18 @@ class MLXASRModel:
             )
 
         audio_model_id = cfg.get("audio_model_id", "zai-org/GLM-ASR-Nano-2512")
-        encoder_conv_layers = [
-            tuple(layer) for layer in cfg.get("encoder_conv_layers", [(1, 3, 1), (1, 3, 2)])
-        ]
         projector_pool_stride = cfg.get("projector_pool_stride", 4)
         projector_hidden_dim = cfg.get("projector_hidden_dim", 1024)
 
         # 4. Load decoder + tokenizer via mlx-lm. This returns a TokenizerWrapper
         # that delegates to a HF tokenizer underneath.
         decoder, tokenizer = mlx_lm_load(_DECODER_MLX_REPO)
-        tokenizer.add_special_tokens({"additional_special_tokens": ["<audio>"]})
-        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        tokenizer.add_special_tokens({"additional_special_tokens": [AUDIO_TOKEN]})
+        audio_token_id = tokenizer.convert_tokens_to_ids(AUDIO_TOKEN)
 
         # 5. Resolve EOS ids to whatever the tokenizer actually recognizes.
         eos_token_ids: set[int] = set()
-        for eos_str in ("<|im_end|>", "<|endoftext|>"):
+        for eos_str in _EOS_TOKEN_STRINGS:
             tid = tokenizer.convert_tokens_to_ids(eos_str)
             if tid is not None and tid != tokenizer.unk_token_id:
                 eos_token_ids.add(int(tid))
@@ -219,7 +221,9 @@ class MLXASRModel:
 
         projector.update(tree_unflatten(list(flat_mlx.items())))
 
-        # 8. Cache marker (atomic).
+        # 8. Cache feature extractor (used by every transcribe call) + mark cache.
+        feature_extractor = AutoFeatureExtractor.from_pretrained(audio_model_id)
+        feature_extractor.padding = False
         mark_cache_complete(cache_dir, version=MLX_FORMAT_VERSION)
 
         return cls(
@@ -227,10 +231,9 @@ class MLXASRModel:
             projector=projector,
             decoder=decoder,
             tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
             audio_token_id=int(audio_token_id),
             eos_token_ids=eos_token_ids,
-            encoder_conv_layers=encoder_conv_layers,
-            audio_model_id=audio_model_id,
         )
 
     @staticmethod
@@ -365,12 +368,10 @@ class MLXASRModel:
         return np.asarray(audio, dtype=np.float32)
 
     def _encode_audio(self, audio_np: np.ndarray) -> tuple[mx.array, int]:
-        mel, _mel_length = compute_mel_unpadded(audio_np, audio_model_id=self.audio_model_id)
+        mel, _ = compute_mel_unpadded(audio_np, feature_extractor=self.feature_extractor)
         enc_out = self.encoder(mel)  # [1, T_enc, encoder_dim]
         proj_out = self.projector(enc_out)  # [1, T_proj, llm_dim]
-        num_audio = compute_num_audio_tokens(
-            audio_len=len(audio_np),
-            encoder_conv_layers=self.encoder_conv_layers,
-            projector=self.projector,
-        )
+        # The audio-token count is determined entirely by the projector's output
+        # length — no need to recompute via compute_num_audio_tokens here.
+        num_audio = proj_out.shape[1]
         return proj_out[0, :num_audio, :], num_audio

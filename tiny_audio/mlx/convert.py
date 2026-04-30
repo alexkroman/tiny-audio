@@ -70,8 +70,10 @@ def mark_cache_complete(cache_dir: Path, version: int = MLX_FORMAT_VERSION) -> N
     marker = _marker_path(cache_dir)
     fd, tmp = tempfile.mkstemp(prefix=".mlx_converted.", dir=str(cache_dir))
     try:
-        os.write(fd, json.dumps({"version": version}).encode())
-        os.close(fd)
+        try:
+            os.write(fd, json.dumps({"version": version}).encode())
+        finally:
+            os.close(fd)
         Path(tmp).replace(marker)
     except Exception:
         tmp_path = Path(tmp)

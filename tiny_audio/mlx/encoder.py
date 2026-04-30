@@ -67,7 +67,6 @@ def _rope_cos_sin(seq_len: int, rotary_dim: int, theta: float) -> tuple[mx.array
     """
     half = rotary_dim // 2
     inv_freq = 1.0 / (theta ** (mx.arange(0, half, dtype=mx.float32) * 2 / rotary_dim))
-    # PT: arange(0, dim, 2) / dim -> here arange(0, half) * 2 / rotary_dim. Equivalent.
     pos = mx.arange(seq_len, dtype=mx.float32)
     freqs = mx.outer(pos, inv_freq)  # [T, half]
     emb = mx.concatenate([freqs, freqs], axis=-1)  # [T, rotary_dim]
@@ -208,6 +207,7 @@ class GLMASREncoder(nn.Module):
 def compute_mel_unpadded(
     audio: np.ndarray,
     *,
+    feature_extractor=None,
     audio_model_id: str = "zai-org/GLM-ASR-Nano-2512",
     sampling_rate: int = 16000,
 ) -> tuple[mx.array, int]:
@@ -217,26 +217,25 @@ def compute_mel_unpadded(
     HF repo) so the mel is bit-exact to the PT inference pipeline. The encoder
     in this module expects shape [B, n_mels, T_mel].
 
-    Args:
-        audio: 1D float32 numpy array, 16kHz mono.
-        audio_model_id: HF repo ID for the feature extractor. Default
-            "zai-org/GLM-ASR-Nano-2512" (128-mel).
-        sampling_rate: must be 16000.
+    Pass `feature_extractor` to avoid the per-call from_pretrained cost in
+    hot paths; it must already have `padding = False` set.
 
     Returns:
         (mel, mel_length): mel is an mx.array of shape [1, n_mels, T_mel];
         mel_length is the unpadded T_mel from the extractor's attention_mask.
     """
-    from transformers import AutoFeatureExtractor
-
     if audio.ndim != 1:
         raise ValueError(f"audio must be 1D, got shape {audio.shape}")
     if audio.dtype != np.float32:
         audio = audio.astype(np.float32)
 
-    fe = AutoFeatureExtractor.from_pretrained(audio_model_id)
-    fe.padding = False
-    out = fe(
+    if feature_extractor is None:
+        from transformers import AutoFeatureExtractor
+
+        feature_extractor = AutoFeatureExtractor.from_pretrained(audio_model_id)
+        feature_extractor.padding = False
+
+    out = feature_extractor(
         audio,
         sampling_rate=sampling_rate,
         return_attention_mask=True,
