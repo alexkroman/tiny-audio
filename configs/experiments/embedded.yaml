@@ -32,7 +32,7 @@ training:
   per_device_eval_batch_size: 32
   gradient_accumulation_steps: 2
   num_train_epochs: 2
-  save_steps: 5000
+  save_steps: 1000
   eval_steps: 5000
 
   # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck at this batch size.
