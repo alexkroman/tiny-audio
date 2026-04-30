@@ -23,7 +23,6 @@ classifiers = [
 ]
 requires-python = ">=3.10,<3.13"
 dynamic = ["dependencies"]
-dependencies = ["speechbrain @ git+https://github.com/speechbrain/speechbrain.git", "torchvision (>=0.26.0,<0.27.0)"]
 
 [project.urls]
 Homepage = "https://github.com/alexkroman/tiny-audio"
@@ -72,6 +71,7 @@ typer = ">=0.19.2"
 trl = ">=0.26.0"
 peft = ">=0.13.0"  # LoRA adapters for Stage 2 fine-tuning
 torchaudio = ">=2.0.0"
+torchvision = ">=0.26.0,<0.27.0"
 pyannote-core = ">=6.0.0"  # For DER metric calculation
 pyannote-metrics = ">=4.0.0"  # For DER metric calculation
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
@@ -80,7 +80,7 @@ fabric = ">=3.0.0"
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
 spacy = "^3.8.11"
 ten-vad = ">=1.0.6"
-speechbrain = ">=1.0.3"
+speechbrain = {git = "https://github.com/speechbrain/speechbrain.git"}
 pytz = "*"
 
 [project.optional-dependencies]
