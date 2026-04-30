@@ -1,19 +1,31 @@
 # Multi-ASR dataset configuration
-# Train semantic projector on ASR data from multiple sources
-# Uses all available samples from each dataset
+# Train semantic projector on ASR data from multiple sources.
 #
-# ┌─────────────┬───────────┬─────────┐
-# │ Dataset     │ Samples   │ Percent │
-# ├─────────────┼───────────┼─────────┤
-# │ loquacious  │ 1,090,000 │  80.4%  │
-# │ ami-ihm     │   108,502 │   8.0%  │
-# │ switchboard │    80,000 │   5.9%  │
-# │ spgispeech  │    77,073 │   5.7%  │
-# └─────────────┴───────────┴─────────┘
-# Total: ~1,355,575 samples
+# Rebalanced from a Loquacious-dominant (80%) mix to a more domain-diverse
+# distribution. Loquacious medium already provides equal exposure (20% each)
+# to LibriHeavy, VoxPopuli, YODAS, People's Speech, and CommonVoice — so the
+# value of expanding non-Loquacious data is targeting domains Loquacious does
+# not cover (meetings, far-field, financial, conversational telephony).
+#
+# ┌──────────────────┬───────────┬─────────┐
+# │ Dataset          │ Samples   │ Percent │
+# ├──────────────────┼───────────┼─────────┤
+# │ loquacious med   │ 1,090,000 │   50.0% │
+# │ ami-ihm          │   305,000 │   14.0% │
+# │ ami-sdm          │   175,000 │    8.0% │
+# │ spgispeech L     │   260,000 │   12.0% │
+# │ switchboard      │   260,000 │   12.0% │
+# │ gigaspeech m     │    87,000 │    4.0% │
+# └──────────────────┴───────────┴─────────┘
+# Total: ~2,177,000 samples
+#
+# Loquacious is uncapped (full medium ~1.09M); other streams scaled to hit
+# the target proportions. AMI IHM/SDM and Switchboard upsample (~2-3x repeats)
+# since their full sizes are smaller than the proportional target.
 
 datasets:
-  # Loquacious medium - main ASR dataset
+  # Loquacious medium - balanced 5-source mix (LibriHeavy / VoxPopuli /
+  # YODAS / People's Speech / CommonVoice, 500hr each)
   - path: speechbrain/LoquaciousSet
     name: medium
     audio_column: wav
@@ -30,15 +42,29 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
+    target_samples: 305000
 
-  # SPGISpeech S - financial earnings calls, spontaneous speech
+  # AMI corpus SDM - meeting transcriptions, single distant mic (far-field).
+  # Targets AMI eval gap that IHM-only training does not close.
+  - path: edinburghcstr/ami
+    name: sdm
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 175000
+
+  # SPGISpeech L - financial earnings calls, ~5000hr (was S, ~200hr).
+  # Larger tier targets the Earnings22 eval gap.
   - path: kensho/spgispeech
-    name: S
+    name: L
     audio_column: audio
     text_column: transcript
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
+    target_samples: 260000
 
   # Switchboard - conversational telephone speech
   - path: hhoangphuoc/switchboard
@@ -47,7 +73,18 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 80000
+    target_samples: 260000
+
+  # GigaSpeech m - YouTube/podcast/audiobook mix, ~1000hr.
+  # Direct training data for the GigaSpeech eval (not in Loquacious).
+  - path: fixie-ai/gigaspeech
+    name: m
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 87000
 
 # Audio processing
 sample_rate: 16000

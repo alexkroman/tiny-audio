@@ -66,6 +66,15 @@ projector_dropout: 0.0
 use_specaugment: true
 label_smoothing: 0.0
 
+# RIR (Room Impulse Response) augmentation — simulates far-field / reverberant
+# audio by convolving with a random RIR. RIRs auto-download from HuggingFace
+# (default: MIT IR Survey, ~4MB, 271 real environmental RIRs at 16kHz).
+# Off by default; flip enabled=true to use.
+rir_augmentation:
+  enabled: false
+  hf_dataset: benjamin-paine/mit-impulse-response-survey-16khz
+  prob: 0.4
+
 # Misc
 disable_tqdm: false
 log_level: info
