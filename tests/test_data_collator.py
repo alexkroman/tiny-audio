@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+import torch
 from transformers import AutoTokenizer, WhisperFeatureExtractor
 
 from scripts.train import (
@@ -410,6 +411,23 @@ class TestMultiTaskDataCollator:
         assert "happy" in unmasked_text.lower(), (
             f"Response not found in unmasked text: {unmasked_text}"
         )
+
+
+class TestAudioTokenCountsExposed:
+    """Collator must expose audio_token_counts so the model does not recompute them."""
+
+    def test_audio_token_counts_in_batch(self, collator):
+        samples = [
+            create_sample("hello", duration_sec=1.0),
+            create_sample("world how are you", duration_sec=2.0),
+        ]
+        batch = collator(samples)
+        assert "audio_token_counts" in batch, (
+            "Collator must include audio_token_counts in the returned batch"
+        )
+        assert batch["audio_token_counts"].dtype == torch.long
+        assert batch["audio_token_counts"].shape == (2,)
+        assert (batch["audio_token_counts"] > 0).all()
 
 
 if __name__ == "__main__":

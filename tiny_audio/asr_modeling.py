@@ -469,34 +469,35 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
+        audio_token_counts: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
-        # Get text embeddings if not provided
         if inputs_embeds is None:
             inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
         if input_features is not None and input_ids is not None:
-            # Apply SpecAugment during training if enabled
             if self.training and self.spec_augment is not None:
                 input_features = self.spec_augment(input_features)
 
             is_audio_token = input_ids == self.audio_token_id
-            audio_token_counts = is_audio_token.sum(dim=-1)
+            if audio_token_counts is None:
+                audio_token_counts = is_audio_token.sum(dim=-1)
+            else:
+                audio_token_counts = audio_token_counts.to(
+                    device=input_ids.device, dtype=torch.long
+                )
 
-            # Encode audio -> flattened (total_audio_tokens, hidden_dim)
             audio_embeds = self._encode_audio(
                 input_features, audio_attention_mask, audio_token_counts
             )
 
-            # Replace <audio> token placeholders with audio embeddings using masked_scatter
             audio_token_mask = is_audio_token.unsqueeze(-1)
             inputs_embeds = inputs_embeds.masked_scatter(
                 audio_token_mask.to(inputs_embeds.device),
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
             )
 
-        # Run through language model (let it compute loss if labels provided)
         outputs = self.language_model(
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -508,7 +509,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             **kwargs,
         )
 
-        # Add auxiliary loss from MoE projectors if available
         if outputs.loss is not None and hasattr(self.projector, "get_aux_loss"):
             aux_loss = self.projector.get_aux_loss()
             if aux_loss is not None and aux_loss.numel() > 0:

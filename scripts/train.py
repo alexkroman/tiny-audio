@@ -238,6 +238,7 @@ class DataCollator:
         batch = self.text_collator(text_features)
         batch["input_features"] = audio_out.input_features
         batch["audio_attention_mask"] = audio_out.attention_mask
+        batch["audio_token_counts"] = torch.tensor(audio_token_counts, dtype=torch.long)
         return batch
 
 
