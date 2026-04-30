@@ -82,6 +82,7 @@ spacy = "^3.8.11"
 ten-vad = ">=1.0.6"
 speechbrain = {git = "https://github.com/speechbrain/speechbrain.git"}
 pytz = "*"
+torch-audiomentations = ">=0.12.0,<0.13.0"
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]
@@ -153,7 +154,11 @@ ignore_errors = true
 [tool.pyright]
 include = ["tiny_audio"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
-ignore = ["tiny_audio/asr_pipeline.py", "tiny_audio/integrations/pipecat_stt.py"]  # Optional deps
+ignore = [
+    "tiny_audio/asr_pipeline.py",
+    "tiny_audio/integrations/pipecat_stt.py",
+    "tiny_audio/mlx",  # Apple Silicon only — mlx/mlx-lm/mlx-audio not installable on Linux CI
+]
 typeCheckingMode = "basic"
 reportPrivateImportUsage = false
 reportOptionalMemberAccess = false

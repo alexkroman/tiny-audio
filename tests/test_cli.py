@@ -4,12 +4,24 @@ This file uses parametrized tests to reduce duplication while maintaining
 comprehensive coverage of all CLI commands.
 """
 
+import re
+
 import pytest
 from typer.testing import CliRunner
 
 from scripts.cli import app
 
 runner = CliRunner()
+
+# Typer/Rich injects ANSI color codes into help output (e.g. "--model" renders
+# as `\x1b[36m-\x1b[0m\x1b[36m-model\x1b[0m`), which breaks substring matching
+# on CI Linux runners even though it works on macOS where TTY detection
+# differs. Strip codes before asserting.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _clean(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 class TestMainCLI:
@@ -19,15 +31,16 @@ class TestMainCLI:
         """Test that --help shows all registered commands."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
+        output = _clean(result.output)
         expected_commands = ["eval", "analysis", "deploy", "push", "runpod", "debug", "demo", "dev"]
         for cmd in expected_commands:
-            assert cmd in result.output, f"Expected '{cmd}' in help output"
+            assert cmd in output, f"Expected '{cmd}' in help output"
 
     def test_no_args_shows_help(self):
         """Test that running without args shows help."""
         result = runner.invoke(app, [])
         assert result.exit_code in (0, 2)
-        assert "Usage:" in result.output
+        assert "Usage:" in _clean(result.output)
 
     def test_invalid_command(self):
         """Test that invalid command shows error."""
@@ -55,8 +68,9 @@ class TestSubcommandHelp:
         """Test that subcommand --help works and shows expected keywords."""
         result = runner.invoke(app, cmd + ["--help"])
         assert result.exit_code == 0, f"'{' '.join(cmd)} --help' failed: {result.output}"
+        output = _clean(result.output)
         for keyword in expected_keywords:
-            assert keyword in result.output, f"Expected '{keyword}' in {cmd} help"
+            assert keyword in output, f"Expected '{keyword}' in {cmd} help"
 
 
 class TestNestedCommands:
@@ -88,7 +102,7 @@ class TestNestedCommands:
         """Test that nested commands are accessible and show expected options."""
         result = runner.invoke(app, cmd_path + ["--help"])
         assert result.exit_code == 0, f"'{' '.join(cmd_path)} --help' failed: {result.output}"
-        assert expected_keyword.lower() in result.output.lower(), (
+        assert expected_keyword.lower() in _clean(result.output).lower(), (
             f"Expected '{expected_keyword}' in {cmd_path} help"
         )
 
@@ -100,6 +114,7 @@ class TestDevCommands:
         """Test that dev --help lists all expected subcommands."""
         result = runner.invoke(app, ["dev", "--help"])
         assert result.exit_code == 0
+        output = _clean(result.output)
         expected_commands = [
             "lint",
             "format",
@@ -116,7 +131,7 @@ class TestDevCommands:
             "handler",
         ]
         for cmd in expected_commands:
-            assert cmd in result.output, f"Expected '{cmd}' in dev --help output"
+            assert cmd in output, f"Expected '{cmd}' in dev --help output"
 
 
 class TestEvalCommand:
@@ -125,7 +140,8 @@ class TestEvalCommand:
     def test_eval_no_args_shows_error(self):
         """Test that eval without model shows helpful error."""
         result = runner.invoke(app, ["eval"])
-        assert "--model" in result.output or "-m" in result.output
+        output = _clean(result.output)
+        assert "--model" in output or "-m" in output
 
 
 class TestCLIStructure:

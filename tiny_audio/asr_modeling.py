@@ -5,6 +5,7 @@ from typing import Iterator, Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # noqa: N812
 from transformers import (
     AutoModel,
     AutoModelForCausalLM,
@@ -24,6 +25,26 @@ except ImportError:
 
 
 from torchaudio.transforms import SpecAugment
+
+
+def _gather_audio_embeds(audio_embeds: torch.Tensor, token_counts: torch.Tensor) -> torch.Tensor:
+    """Flatten per-sample audio embeddings into a packed tensor.
+
+    For each row i, takes the first ``token_counts[i]`` rows of
+    ``audio_embeds[i]`` and concatenates them. If any token count exceeds
+    ``audio_embeds.shape[1]``, the deficit is zero-padded.
+
+    Equivalent to a per-sample slice/cat loop but with O(1) host-device
+    syncs per call (one ``max().item()``) instead of one per sample.
+    """
+    _, max_len, _ = audio_embeds.shape
+    needed = int(token_counts.max().item())
+    if needed > max_len:
+        audio_embeds = F.pad(audio_embeds, (0, 0, 0, needed - max_len))
+        max_len = needed
+    indices = torch.arange(max_len, device=audio_embeds.device).unsqueeze(0)
+    mask = indices < token_counts.unsqueeze(1)
+    return audio_embeds[mask]
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -402,60 +423,26 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         audio_features: torch.Tensor,
         audio_attention_mask: torch.Tensor,
-        expected_token_counts: torch.Tensor | None = None,
+        expected_token_counts: torch.Tensor,
     ) -> torch.Tensor:
-        """Encode audio and project to LLM embedding space.
+        """Encode audio features and return flattened embeddings matching expected_token_counts.
 
         Args:
             audio_features: Mel spectrogram features (batch, n_mels, mel_len)
             audio_attention_mask: Mask indicating real vs padded mel frames (batch, mel_len)
-            expected_token_counts: Expected number of audio tokens per sample from input_ids.
-                If provided, output will match these counts exactly (padding/truncating as needed).
+            expected_token_counts: Per-sample audio token counts as int64 tensor (batch,).
 
         Returns:
-            Flattened audio embeddings of shape (total_audio_tokens, hidden_dim).
+            Flattened audio embeddings of shape (sum(expected_token_counts), hidden_dim).
         """
         with torch.no_grad():
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
-        # Project to LLM space
         audio_embeds = self.projector(hidden_states)
 
-        # Use expected token counts if provided (from input_ids), otherwise compute from audio
-        if expected_token_counts is not None:
-            token_counts = expected_token_counts
-        else:
-            # Compute per-sample encoder output lengths using conv formulas
-            encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
-            token_counts = torch.tensor(
-                [
-                    self.projector.get_output_length(int(length.item()))
-                    for length in encoder_lengths
-                ],
-                device=audio_embeds.device,
-            )
-
-        # Extract embeddings matching expected token counts per sample
-        batch_size = audio_embeds.shape[0]
-        hidden_dim = audio_embeds.shape[2]
-
-        result_embeds = []
-        for i in range(batch_size):
-            count = int(token_counts[i].item())
-            sample_embeds = audio_embeds[i, :count, :]  # Take first 'count' embeddings
-            # Pad with zeros if we don't have enough embeddings
-            if sample_embeds.shape[0] < count:
-                padding = torch.zeros(
-                    count - sample_embeds.shape[0],
-                    hidden_dim,
-                    device=audio_embeds.device,
-                    dtype=audio_embeds.dtype,
-                )
-                sample_embeds = torch.cat([sample_embeds, padding], dim=0)
-            result_embeds.append(sample_embeds)
-
-        return torch.cat(result_embeds, dim=0)
+        token_counts = expected_token_counts.to(device=audio_embeds.device, dtype=torch.long)
+        return _gather_audio_embeds(audio_embeds, token_counts)
 
     def forward(
         self,
@@ -469,34 +456,35 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
+        audio_token_counts: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
-        # Get text embeddings if not provided
         if inputs_embeds is None:
             inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
         if input_features is not None and input_ids is not None:
-            # Apply SpecAugment during training if enabled
             if self.training and self.spec_augment is not None:
                 input_features = self.spec_augment(input_features)
 
             is_audio_token = input_ids == self.audio_token_id
-            audio_token_counts = is_audio_token.sum(dim=-1)
+            if audio_token_counts is None:
+                audio_token_counts = is_audio_token.sum(dim=-1)
+            else:
+                audio_token_counts = audio_token_counts.to(
+                    device=input_ids.device, dtype=torch.long
+                )
 
-            # Encode audio -> flattened (total_audio_tokens, hidden_dim)
             audio_embeds = self._encode_audio(
                 input_features, audio_attention_mask, audio_token_counts
             )
 
-            # Replace <audio> token placeholders with audio embeddings using masked_scatter
             audio_token_mask = is_audio_token.unsqueeze(-1)
             inputs_embeds = inputs_embeds.masked_scatter(
                 audio_token_mask.to(inputs_embeds.device),
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
             )
 
-        # Run through language model (let it compute loss if labels provided)
         outputs = self.language_model(
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -508,7 +496,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             **kwargs,
         )
 
-        # Add auxiliary loss from MoE projectors if available
         if outputs.loss is not None and hasattr(self.projector, "get_aux_loss"):
             aux_loss = self.projector.get_aux_loss()
             if aux_loss is not None and aux_loss.numel() > 0:
@@ -568,7 +555,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         batch_size = input_features.shape[0]
 
         # Encode audio -> flattened embeddings
-        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+        encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
+        token_counts = torch.tensor(
+            [self.projector.get_output_length(int(length.item())) for length in encoder_lengths],
+            device=input_features.device,
+            dtype=torch.long,
+        )
+        audio_embeds = self._encode_audio(input_features, audio_attention_mask, token_counts)
 
         # If input_ids not provided, build prompt with correct number of audio tokens
         if input_ids is None:
@@ -652,7 +645,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         batch_size = input_features.shape[0]
 
         # Encode audio -> flattened embeddings
-        audio_embeds = self._encode_audio(input_features, audio_attention_mask)
+        encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
+        token_counts = torch.tensor(
+            [self.projector.get_output_length(int(length.item())) for length in encoder_lengths],
+            device=input_features.device,
+            dtype=torch.long,
+        )
+        audio_embeds = self._encode_audio(input_features, audio_attention_mask, token_counts)
 
         # Build prompt with correct number of audio tokens
         num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
