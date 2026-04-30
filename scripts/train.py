@@ -79,6 +79,24 @@ class DatasetLoader:
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
+        # Ensure every prepared split has a 'duration' column for group_by_length.
+        # If neither the source nor duration_column provides one, compute from audio length.
+        if "duration" not in ds.column_names:
+            sr = self.sample_rate
+
+            def _add_duration(batch):
+                durations = []
+                for a in batch["audio"]:
+                    arr = a["array"] if a is not None else None
+                    if arr is None:
+                        durations.append(0.0)
+                    else:
+                        n = arr.shape[0] if hasattr(arr, "shape") else len(arr)
+                        durations.append(float(n) / sr)
+                return {"duration": durations}
+
+            ds = ds.map(_add_duration, batched=True, num_proc=self.num_proc)
+
         # For multitask, keep sift_response and add task column
         if self.multitask_enabled:
             task = dataset_cfg.get("task", "transcribe")  # Default to transcribe

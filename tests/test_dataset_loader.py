@@ -83,3 +83,32 @@ class TestDurationColumnNormalization:
 
         assert "duration" in ds.column_names
         assert ds[0]["duration"] == pytest.approx(1.0)
+
+    def test_duration_computed_from_audio_when_missing(self):
+        """If neither duration nor duration_column is present, compute from audio array length."""
+        import numpy as np
+        from datasets import Audio, Dataset
+
+        # Sample is exactly 2.5 seconds at 16kHz
+        rows = {
+            "audio": [{"array": np.zeros(40000, dtype=np.float32), "sampling_rate": 16000}],
+            "text": ["hello"],
+        }
+        fake = Dataset.from_dict(rows).cast_column("audio", Audio(sampling_rate=16000))
+        cfg = _make_cfg(
+            [
+                {
+                    "path": "fake/dataset",
+                    "audio_column": "audio",
+                    "text_column": "text",
+                    "train_splits": ["train"],
+                    "eval_splits": ["validation"],
+                }
+            ]
+        )
+        loader = DatasetLoader(cfg)
+        with patch("scripts.train.load_dataset", return_value=fake):
+            ds = loader._prepare_split(cfg.data.datasets[0], "train")
+
+        assert "duration" in ds.column_names
+        assert ds[0]["duration"] == pytest.approx(2.5, abs=0.01)
