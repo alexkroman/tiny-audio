@@ -63,24 +63,50 @@ length_column_name: duration
 
 # Model training options
 projector_dropout: 0.0
-use_specaugment: true
 label_smoothing: 0.0
+
+# SpecAugment (LibriDouble settings: 2 masks each, time 100, freq 27).
+# Applied on the mel spectrogram during training.
+use_specaugment: true
+num_time_masks: 2
+time_mask_length: 100
+num_freq_masks: 2
+freq_mask_length: 27
 
 # RIR (Room Impulse Response) augmentation — simulates far-field / reverberant
 # audio by convolving with a randomly generated RIR. RIRs are produced on-the-
-# fly by gpuRIR's image method (no corpus download); a pool is materialized
-# at init with random room geometry / T60 / source-mic positions and sampled
-# per step. Requires CUDA + gpuRIR (pip install from
+# fly by gpuRIR's image method (no corpus download); a pool is materialized at
+# init with random room geometry / T60 / source-mic positions and sampled per
+# step. Requires CUDA + gpuRIR (pip install from
 # https://github.com/DavidDiazGuerra/gpuRIR). Off by default.
+#
+# Defaults follow recent (Interspeech 2024 / ICASSP 2025) ASR-robustness
+# recipes: T60 [0.1, 1.0]s spans phone-call rooms through medium auditoriums;
+# room ranges 3-10m × 3-10m × 2.4-4.0m cover offices through AMI-style
+# meeting rooms and small lecture halls; prob 0.5 ensures roughly half of
+# every batch sees reverb without overwhelming clean-speech training signal.
 rir_augmentation:
   enabled: false
-  pool_size: 1024
-  room_x_range: [3.0, 8.0]
-  room_y_range: [3.0, 8.0]
-  room_z_range: [2.4, 3.5]
-  t60_range: [0.2, 0.8]
-  prob: 0.4
+  pool_size: 2048
+  room_x_range: [3.0, 10.0]
+  room_y_range: [3.0, 10.0]
+  room_z_range: [2.4, 4.0]
+  t60_range: [0.1, 1.0]
+  prob: 0.5
   seed: null
+
+# Noise augmentation — adds synthetic colored noise (white / pink / blue /
+# violet) at random SNR via torch-audiomentations. CPU-friendly; chains after
+# RIR in the dataloader transform pipeline. Off by default.
+#
+# SNR range [0, 25] dB intentionally includes low-SNR conditions (the
+# Earnings22 / People's Speech eval gap is dominated by noisy real-world
+# audio); the lower bound is what most modern recipes use to push robustness.
+noise_augmentation:
+  enabled: false
+  prob: 0.5
+  min_snr_db: 0.0
+  max_snr_db: 25.0
 
 # Misc
 disable_tqdm: false

@@ -30,7 +30,7 @@ from trl.experimental.utils import DataCollatorForChatML
 
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.augmentation import RIRAugmentation
+from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
@@ -387,27 +387,46 @@ def main(cfg: DictConfig) -> None:
 
     train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
 
+    augmentations: list = []
     rir_cfg = cfg.training.get("rir_augmentation") or {}
     if rir_cfg.get("enabled"):
-        rir_aug = RIRAugmentation(
-            sample_rate=cfg.data.sample_rate,
-            prob=rir_cfg.get("prob", 0.4),
-            pool_size=rir_cfg.get("pool_size", 1024),
-            room_x_range=tuple(rir_cfg.get("room_x_range", [3.0, 8.0])),
-            room_y_range=tuple(rir_cfg.get("room_y_range", [3.0, 8.0])),
-            room_z_range=tuple(rir_cfg.get("room_z_range", [2.4, 3.5])),
-            t60_range=tuple(rir_cfg.get("t60_range", [0.2, 0.8])),
-            seed=rir_cfg.get("seed"),
+        augmentations.append(
+            RIRAugmentation(
+                sample_rate=cfg.data.sample_rate,
+                prob=rir_cfg.get("prob", 0.5),
+                pool_size=rir_cfg.get("pool_size", 2048),
+                room_x_range=tuple(rir_cfg.get("room_x_range", [3.0, 10.0])),
+                room_y_range=tuple(rir_cfg.get("room_y_range", [3.0, 10.0])),
+                room_z_range=tuple(rir_cfg.get("room_z_range", [2.4, 4.0])),
+                t60_range=tuple(rir_cfg.get("t60_range", [0.1, 1.0])),
+                seed=rir_cfg.get("seed"),
+            )
         )
 
-        def _apply_rir(batch):
+    noise_cfg = cfg.training.get("noise_augmentation") or {}
+    if noise_cfg.get("enabled"):
+        augmentations.append(
+            NoiseAugmentation(
+                sample_rate=cfg.data.sample_rate,
+                prob=noise_cfg.get("prob", 0.5),
+                min_snr_db=noise_cfg.get("min_snr_db", 0.0),
+                max_snr_db=noise_cfg.get("max_snr_db", 25.0),
+            )
+        )
+
+    if augmentations:
+
+        def _apply_aug(batch):
             audios = batch.get("audio") or []
             for a in audios:
                 if a and "array" in a:
-                    a["array"] = rir_aug(a["array"])
+                    arr = a["array"]
+                    for aug in augmentations:
+                        arr = aug(arr)
+                    a["array"] = arr
             return batch
 
-        train_dataset = train_dataset.with_transform(_apply_rir)
+        train_dataset = train_dataset.with_transform(_apply_aug)
 
     if multitask_enabled:
         data_collator = MultiTaskDataCollator(

@@ -1,14 +1,15 @@
-"""Tests for RIR augmentation.
+"""Tests for RIR and noise augmentation.
 
-Tests bypass gpuRIR by injecting a pre-built ``rirs=`` pool, so they run on
-machines without CUDA / gpuRIR installed (e.g. macOS dev).
+RIR tests bypass gpuRIR by injecting a pre-built ``rirs=`` pool, so they run
+on machines without CUDA / gpuRIR installed (e.g. macOS dev). Noise tests
+exercise torch-audiomentations on CPU directly.
 """
 
 import numpy as np
 import pytest
 import torch
 
-from tiny_audio.augmentation import RIRAugmentation
+from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation
 
 
 def _synthetic_rir(length: int = 1600) -> torch.Tensor:
@@ -58,3 +59,34 @@ class TestRIRAugmentation:
         assert len(aug.rirs) == len(fake_rirs)
         for got, given in zip(aug.rirs, fake_rirs):
             assert torch.equal(got, given)
+
+
+class TestNoiseAugmentation:
+    def test_output_shape_and_dtype_preserved(self):
+        aug = NoiseAugmentation(prob=1.0)
+        audio = np.random.randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        assert out.shape == audio.shape
+        assert out.dtype == audio.dtype
+
+    def test_modifies_audio_at_prob_one(self):
+        aug = NoiseAugmentation(prob=1.0)
+        audio = np.random.randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        assert not np.allclose(out, audio)
+
+    def test_passthrough_at_prob_zero(self):
+        aug = NoiseAugmentation(prob=0.0)
+        audio = np.random.randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        assert np.allclose(out, audio, atol=1e-6)
+
+    def test_snr_range_respected(self):
+        # With high SNR, output should be close to input
+        aug = NoiseAugmentation(prob=1.0, min_snr_db=60.0, max_snr_db=60.0)
+        audio = np.random.randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        # 60 dB SNR means noise is ~1000x quieter than signal, so output ~= input
+        signal_rms = float(np.sqrt(np.mean(audio**2)))
+        diff_rms = float(np.sqrt(np.mean((out - audio) ** 2)))
+        assert diff_rms < signal_rms * 0.05  # noise < 5% of signal

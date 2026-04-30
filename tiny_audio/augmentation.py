@@ -2,14 +2,17 @@
 
 RIR (Room Impulse Response) convolution simulates far-field / reverberant
 recording conditions to close the meeting / distant-mic WER gap when training
-mostly on close-talk audio.
+mostly on close-talk audio. RIRs are generated on-the-fly via gpuRIR's image
+method (CUDA required). NoiseAugmentation adds synthetic colored noise via
+torch-audiomentations and works on CPU.
 
-RIRs are generated on-the-fly via gpuRIR's image method using randomized room
-dimensions, T60, and source/receiver positions — no corpus download required.
-A pool of RIRs is materialized once at init and sampled per training step.
+Apply both via dataset.with_transform on the train split. They're decoupled
+so either can be enabled independently. RIR runs first (waveform shaping),
+then noise (additive), matching the standard far-field training recipe.
 
-gpuRIR requires CUDA; install with:
+Install:
     pip install https://github.com/DavidDiazGuerra/gpuRIR/zipball/master
+    poetry add torch-audiomentations  # already in pyproject.toml
 """
 
 from __future__ import annotations
@@ -34,12 +37,12 @@ class RIRAugmentation:
     def __init__(
         self,
         sample_rate: int = 16000,
-        prob: float = 0.4,
-        pool_size: int = 1024,
-        room_x_range: tuple[float, float] = (3.0, 8.0),
-        room_y_range: tuple[float, float] = (3.0, 8.0),
-        room_z_range: tuple[float, float] = (2.4, 3.5),
-        t60_range: tuple[float, float] = (0.2, 0.8),
+        prob: float = 0.5,
+        pool_size: int = 2048,
+        room_x_range: tuple[float, float] = (3.0, 10.0),
+        room_y_range: tuple[float, float] = (3.0, 10.0),
+        room_z_range: tuple[float, float] = (2.4, 4.0),
+        t60_range: tuple[float, float] = (0.1, 1.0),
         source_margin: float = 0.3,
         seed: int | None = None,
         rirs: list[torch.Tensor] | None = None,
@@ -141,3 +144,48 @@ class RIRAugmentation:
         if peak > 1.0:
             out = out / peak
         return out.numpy().astype(in_dtype)
+
+
+class NoiseAugmentation:
+    """Add synthetic colored noise via torch-audiomentations.
+
+    Wraps ``AddColoredNoise`` (white / pink / blue / violet, sampled per call)
+    at random SNR. Operates on torch tensors internally but accepts/returns
+    numpy arrays so it can be chained with :class:`RIRAugmentation` in the
+    dataloader transform pipeline.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        prob: float = 0.5,
+        min_snr_db: float = 0.0,
+        max_snr_db: float = 25.0,
+    ):
+        try:
+            from torch_audiomentations import AddColoredNoise
+        except ImportError as e:
+            raise ImportError(
+                "torch-audiomentations is required for noise augmentation. "
+                "Install with: pip install torch-audiomentations"
+            ) from e
+
+        self.sample_rate = sample_rate
+        self.augment = AddColoredNoise(
+            min_snr_in_db=min_snr_db,
+            max_snr_in_db=max_snr_db,
+            p=prob,
+            sample_rate=sample_rate,
+            output_type="dict",
+        )
+
+    def __call__(self, audio: np.ndarray) -> np.ndarray:
+        in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
+        audio_t = torch.from_numpy(np.asarray(audio, dtype=np.float32))
+        if audio_t.ndim > 1:
+            audio_t = audio_t.squeeze()
+            if audio_t.ndim > 1:
+                audio_t = audio_t.mean(dim=0)
+        audio_t = audio_t.unsqueeze(0).unsqueeze(0)
+        out = self.augment(audio_t).samples
+        return out.squeeze(0).squeeze(0).numpy().astype(in_dtype)

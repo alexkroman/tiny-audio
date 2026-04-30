@@ -33,10 +33,3 @@ training:
 
   label_smoothing_factor: 0.1
   weight_decay: 0.0
-
-  use_specaugment: true
-  # LibriDouble settings (2 masks each)
-  num_time_masks: 2
-  time_mask_length: 100
-  num_freq_masks: 2
-  freq_mask_length: 27
