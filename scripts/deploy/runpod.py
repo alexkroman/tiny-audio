@@ -126,6 +126,7 @@ RSYNC_EXCLUDES = [
     "__pycache__",
     "*.pyc",
     ".git",
+    ".worktrees",
     ".venv",
     "venv",
     "env",
