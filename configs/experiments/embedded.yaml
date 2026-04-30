@@ -1,6 +1,6 @@
 # @package _global_
-# ASR transcription training with whisper-base + SmolLM2-360M
-# Same recipe as transcription.yaml, smaller encoder/decoder for comparison
+# ASR transcription training with GLM-ASR-Nano-2512 + Qwen3-0.6B
+# Same recipe as transcription.yaml, ASR-pretrained encoder for stronger init.
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=embedded
@@ -11,21 +11,15 @@ defaults:
 model:
   projector_type: mlp
   projector_pool_stride: 4
-  projector_hidden_dim: 512
-  audio_model_id: openai/whisper-base
-  # Instruct variant: ships with a chat_template, which DataCollatorForChatML
-  # requires. The base SmolLM2-360M doesn't have one, and the LM is frozen
-  # here anyway, so the instruct fine-tune is a strict win.
-  text_model_id: HuggingFaceTB/SmolLM2-360M-Instruct
+  projector_hidden_dim: 1024
+  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
+  text_model_id: Qwen/Qwen3-0.6B
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-embedded"
   group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
   # Tuned for RTX PRO 6000 Blackwell Server Edition (96 GB).
-  # Effective batch = 64. Per-device capped at 64 because of the combined cost
-  # of SmolLM2-360M's 30 layers × 2560-dim FFN activations, the ~12 GB
-  # cross-entropy logits/loss buffer over its 49k vocab, and dataloader
-  # prefetch — these push past 96 GB at higher per-device batches.
   # LR/warmup mirror transcription.yaml for comparability.
   learning_rate: 1e-3
   warmup_steps: 500
@@ -34,12 +28,12 @@ training:
     power: 0.5
   seed: 42
   auto_find_batch_size: false
-  per_device_train_batch_size: 64
-  per_device_eval_batch_size: 64
-  gradient_accumulation_steps: 1
-  num_train_epochs: 1
-  save_steps: 1000
-  eval_steps: 1000
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 2
+  num_train_epochs: 2
+  save_steps: 5000
+  eval_steps: 5000
 
   # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck at this batch size.
   dataloader_num_workers: 16
