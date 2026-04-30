@@ -14,6 +14,7 @@ Runs MLXASRModel on a fixed librispeech sample and writes:
 Usage:
     python scripts/dump_swift_fixtures.py
 """
+
 from __future__ import annotations
 
 import json
@@ -73,7 +74,9 @@ def main() -> None:
     num_audio = proj_out.shape[1]
 
     print("Building prompt + splicing embeddings...")
-    input_ids_np = build_prompt_input_ids(model.tokenizer, num_audio_tokens=num_audio, system_prompt="")
+    input_ids_np = build_prompt_input_ids(
+        model.tokenizer, num_audio_tokens=num_audio, system_prompt=""
+    )
     audio_positions = np.where(input_ids_np[0] == model.audio_token_id)[0]
 
     safe_ids = input_ids_np.copy()
@@ -85,7 +88,9 @@ def main() -> None:
     )
 
     (FIXTURES_DIR / "reference_prompt_token_ids.json").write_text(
-        json.dumps({"input_ids": input_ids_np[0].tolist(), "audio_token_id": int(model.audio_token_id)})
+        json.dumps(
+            {"input_ids": input_ids_np[0].tolist(), "audio_token_id": int(model.audio_token_id)}
+        )
     )
 
     print("Greedy-decoding 20 tokens...")
