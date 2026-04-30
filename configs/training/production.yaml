@@ -48,7 +48,7 @@ hub_private_repo: false
 fp16: false
 bf16: true
 tf32: true
-torch_compile: false
+torch_compile: true
 model_dtype: bfloat16
 attn_implementation: flash_attention_2
 
