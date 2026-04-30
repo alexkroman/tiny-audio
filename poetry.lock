@@ -8349,4 +8349,4 @@ mlx = ["mlx", "mlx-audio", "mlx-lm"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "be6b52f1b9ea66463758e038e601bb775d8cb0fde35015fdc093263811e0cc34"
+content-hash = "6c350a1291f90205db599f2d7d2a60926c5b3a1cc5616e47a4bb91075c32ce60"
