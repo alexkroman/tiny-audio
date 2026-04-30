@@ -67,13 +67,20 @@ use_specaugment: true
 label_smoothing: 0.0
 
 # RIR (Room Impulse Response) augmentation — simulates far-field / reverberant
-# audio by convolving with a random RIR. RIRs auto-download from HuggingFace
-# (default: MIT IR Survey, ~4MB, 271 real environmental RIRs at 16kHz).
-# Off by default; flip enabled=true to use.
+# audio by convolving with a randomly generated RIR. RIRs are produced on-the-
+# fly by gpuRIR's image method (no corpus download); a pool is materialized
+# at init with random room geometry / T60 / source-mic positions and sampled
+# per step. Requires CUDA + gpuRIR (pip install from
+# https://github.com/DavidDiazGuerra/gpuRIR). Off by default.
 rir_augmentation:
   enabled: false
-  hf_dataset: benjamin-paine/mit-impulse-response-survey-16khz
+  pool_size: 1024
+  room_x_range: [3.0, 8.0]
+  room_y_range: [3.0, 8.0]
+  room_z_range: [2.4, 3.5]
+  t60_range: [0.2, 0.8]
   prob: 0.4
+  seed: null
 
 # Misc
 disable_tqdm: false
