@@ -5,4 +5,6 @@ import Foundation
 public enum TinyAudioError: Error, Equatable {
     case audioFormatUnsupported(reason: String)
     case audioEmpty
+    /// Prompt `<audio>` placeholder count does not match projector output length.
+    case promptAudioTokenMismatch(prompt: Int, projector: Int)
 }
