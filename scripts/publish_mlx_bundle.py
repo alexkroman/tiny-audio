@@ -30,6 +30,13 @@ from tiny_audio.mlx import MLXASRModel
 # Bump this when bundle layout changes incompatibly.
 MLX_FORMAT_VERSION = 1
 
+# Renames applied when mirroring files from the upstream decoder repo.
+# Keys are upstream filenames; values are the names used inside the bundle.
+DECODER_FILE_RENAMES = {
+    "model.safetensors": "decoder.safetensors",
+    "config.json": "decoder_config.json",
+}
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -45,17 +52,8 @@ def _save_module_safetensors(module, out_path: Path) -> None:
     mx.save_safetensors(str(out_path), flat)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--source-repo", default="mazesmazes/tiny-audio-embedded")
-    parser.add_argument("--target-repo", default="mazesmazes/tiny-audio-mlx")
-    parser.add_argument("--decoder-repo", default="Qwen/Qwen3-0.6B-MLX-4bit")
-    parser.add_argument("--dry-run", action="store_true", help="Build locally; skip push.")
-    args = parser.parse_args()
-
-    work = Path(tempfile.mkdtemp(prefix="tiny-audio-mlx-"))
-    print(f"Building bundle in {work}")
-
+def build_bundle(work: Path, args) -> None:
+    """Build the MLX bundle into *work*, writing all files except manifest.json last."""
     print(f"Loading source MLX model from {args.source_repo}...")
     model = MLXASRModel.from_pretrained(args.source_repo)
 
@@ -70,9 +68,20 @@ def main() -> None:
     for name in ("model.safetensors", "tokenizer.json", "tokenizer_config.json", "config.json"):
         src = decoder_src / name
         if src.exists():
-            shutil.copy(
-                src, work / (name if name != "model.safetensors" else "decoder.safetensors")
-            )
+            shutil.copy(src, work / DECODER_FILE_RENAMES.get(name, name))
+
+    missing = []
+    if not (work / "decoder.safetensors").exists():
+        missing.append("decoder.safetensors (from upstream model.safetensors)")
+    if not (work / "decoder_config.json").exists():
+        missing.append("decoder_config.json (from upstream config.json)")
+    if missing:
+        upstream_files = sorted(p.name for p in decoder_src.iterdir() if p.is_file())
+        raise FileNotFoundError(
+            f"Decoder mirror is missing required files: {missing}. "
+            f"Upstream {args.decoder_repo} contains: {upstream_files}. "
+            f"Sharded weights (model-XXXXX-of-NNNNN.safetensors) are not yet supported by this script."
+        )
 
     encoder_cfg = {
         "encoder_dim": int(model.encoder.cfg.hidden_size),
@@ -111,15 +120,31 @@ def main() -> None:
     }
     (work / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-repo", default="mazesmazes/tiny-audio-embedded")
+    parser.add_argument("--target-repo", default="mazesmazes/tiny-audio-mlx")
+    parser.add_argument("--decoder-repo", default="Qwen/Qwen3-0.6B-MLX-4bit")
+    parser.add_argument("--dry-run", action="store_true", help="Build locally; skip push.")
+    args = parser.parse_args()
+
     if args.dry_run:
+        work = Path(tempfile.mkdtemp(prefix="tiny-audio-mlx-"))
+        print(f"Building bundle in {work}")
+        build_bundle(work, args)
         print(f"Dry run — bundle prepared at {work}. Skipping push.")
         return
 
-    api = HfApi()
-    api.create_repo(args.target_repo, exist_ok=True)
-    print(f"Uploading to {args.target_repo}...")
-    api.upload_folder(folder_path=str(work), repo_id=args.target_repo)
-    print(f"Done. Bundle published to https://huggingface.co/{args.target_repo}")
+    with tempfile.TemporaryDirectory(prefix="tiny-audio-mlx-") as work_str:
+        work = Path(work_str)
+        print(f"Building bundle in {work}")
+        build_bundle(work, args)
+        api = HfApi()
+        api.create_repo(args.target_repo, exist_ok=True)
+        print(f"Uploading to {args.target_repo}...")
+        api.upload_folder(folder_path=str(work), repo_id=args.target_repo)
+        print(f"Done. Bundle published to https://huggingface.co/{args.target_repo}")
 
 
 if __name__ == "__main__":
