@@ -30,6 +30,16 @@ def _read_path_to_wav(path: str) -> bytes:
 
 def prepare_wav_bytes(wav_data) -> bytes:
     """Convert various audio formats to WAV bytes."""
+    # torchcodec.AudioDecoder (lazy decoder emitted by recent `datasets`):
+    # call get_all_samples() to materialize, then encode.
+    if hasattr(wav_data, "get_all_samples"):
+        samples = wav_data.get_all_samples()
+        return audio_to_wav_bytes(samples.data, int(samples.sample_rate))
+
+    # torchcodec.AudioSamples (already-decoded form).
+    if hasattr(wav_data, "data") and hasattr(wav_data, "sample_rate"):
+        return audio_to_wav_bytes(wav_data.data, int(wav_data.sample_rate))
+
     if isinstance(wav_data, dict):
         if "array" in wav_data and "sampling_rate" in wav_data:
             return audio_to_wav_bytes(wav_data["array"], wav_data["sampling_rate"])

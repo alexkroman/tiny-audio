@@ -16,26 +16,6 @@ from scripts.eval.audio import prepare_wav_bytes
 
 from .base import Evaluator, console, setup_assemblyai
 
-
-def _extract_audio_16khz(audio):
-    """Return a (mono) audio array at 16kHz from any supported audio input."""
-    if isinstance(audio, dict) and "array" in audio:
-        audio_array = audio["array"]
-        sample_rate = audio.get("sampling_rate", 16000)
-    elif isinstance(audio, dict) and "raw" in audio:
-        audio_array = audio["raw"]
-        sample_rate = audio.get("sampling_rate", 16000)
-    else:
-        wav_bytes = prepare_wav_bytes(audio)
-        audio_array, sample_rate = sf.read(io.BytesIO(wav_bytes))
-
-    if sample_rate != 16000:
-        import librosa
-
-        audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
-    return audio_array
-
-
 try:
     from CoreFoundation import CFRunLoopRunInMode, kCFRunLoopDefaultMode
     from Foundation import NSURL, NSLocale
@@ -53,21 +33,21 @@ except ImportError:
 def print_generation_config(model, model_path: str):
     """Print generation config in a visible format."""
     gen_config = model.generation_config
-    divider = "[bold cyan]" + "═" * 63 + "[/bold cyan]"
-    console.print(f"\n{divider}")
+    console.print(
+        "\n[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]"
+    )
     console.print(f"[bold]Model:[/bold] {model_path}")
     console.print("[bold cyan]Generation Config:[/bold cyan]")
-    for attr in (
-        "max_new_tokens",
-        "min_new_tokens",
-        "num_beams",
-        "do_sample",
-        "repetition_penalty",
-        "length_penalty",
-        "no_repeat_ngram_size",
-    ):
-        console.print(f"  {attr:<20} {getattr(gen_config, attr)}")
-    console.print(f"{divider}\n")
+    console.print(f"  max_new_tokens:      {gen_config.max_new_tokens}")
+    console.print(f"  min_new_tokens:      {gen_config.min_new_tokens}")
+    console.print(f"  num_beams:           {gen_config.num_beams}")
+    console.print(f"  do_sample:           {gen_config.do_sample}")
+    console.print(f"  repetition_penalty:  {gen_config.repetition_penalty}")
+    console.print(f"  length_penalty:      {gen_config.length_penalty}")
+    console.print(f"  no_repeat_ngram_size: {gen_config.no_repeat_ngram_size}")
+    console.print(
+        "[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]\n"
+    )
 
 
 class LocalEvaluator(Evaluator):
@@ -138,10 +118,28 @@ class LocalStreamingEvaluator(Evaluator):
         print_generation_config(self.model, model_path)
 
     def transcribe(self, audio) -> tuple[str, float]:
+        import threading
+
         from transformers import TextIteratorStreamer
 
-        audio_array = _extract_audio_16khz(audio)
+        # Extract audio array
+        if isinstance(audio, dict) and "array" in audio:
+            audio_array = audio["array"]
+            sample_rate = audio.get("sampling_rate", 16000)
+        elif isinstance(audio, dict) and "raw" in audio:
+            audio_array = audio["raw"]
+            sample_rate = audio.get("sampling_rate", 16000)
+        else:
+            wav_bytes = prepare_wav_bytes(audio)
+            audio_array, sample_rate = sf.read(io.BytesIO(wav_bytes))
 
+        # Resample to 16kHz if needed
+        if sample_rate != 16000:
+            import librosa
+
+            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
+
+        # Process audio (ASRProcessor handles sampling_rate internally)
         inputs = self.processor(
             audio_array,
             return_tensors="pt",
@@ -248,6 +246,8 @@ class EndpointEvaluator(Evaluator):
             temp_path.unlink(missing_ok=True)
 
     def __del__(self):
+        import shutil
+
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
 
@@ -320,12 +320,28 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         self._client.connect(StreamingParameters(sample_rate=16000, format_turns=True))
 
     def transcribe(self, audio) -> tuple[str, float]:
+        import threading
+
         import numpy as np
+        import soundfile as sf
 
         self._ensure_connected()
 
-        audio_array = _extract_audio_16khz(audio)
+        # Convert audio to raw PCM bytes (16kHz, 16-bit mono)
+        if isinstance(audio, dict) and "array" in audio:
+            audio_array = audio["array"]
+            sample_rate = audio.get("sampling_rate", 16000)
+        else:
+            wav_bytes = prepare_wav_bytes(audio)
+            audio_array, sample_rate = sf.read(io.BytesIO(wav_bytes))
 
+        # Resample to 16kHz if needed
+        if sample_rate != 16000:
+            import librosa
+
+            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
+
+        # Convert to 16-bit PCM bytes
         if isinstance(audio_array, np.ndarray):
             if audio_array.dtype != np.float32:
                 audio_array = audio_array.astype(np.float32)
@@ -538,3 +554,30 @@ class AppleSpeechEvaluator(Evaluator):
         if getattr(self, "temp_dir", None):
             shutil.rmtree(self.temp_dir, ignore_errors=True)
             self.temp_dir = None
+
+
+class MLXEvaluator(Evaluator):
+    """Evaluator for MLX inference on Apple Silicon.
+
+    Triggered by `ta eval -m mlx://<repo-id>`. Loads the trained checkpoint
+    via `MLXASRModel.from_pretrained()` (4-bit quantized encoder + decoder,
+    fp16 projector).
+    """
+
+    def __init__(self, model_path: str, **kwargs):
+        super().__init__(**kwargs)
+        from tiny_audio.mlx import MLXASRModel
+
+        self.model = MLXASRModel.from_pretrained(model_path)
+        console.print(f"[bold cyan]Loaded MLX model:[/bold cyan] {model_path}")
+        # Warm up MLX kernels so the first real sample doesn't pay JIT-compile
+        # latency (encoder + projector + decoder graphs all materialize here).
+        warm_start = time.time()
+        self.model.warmup()
+        console.print(f"[dim]MLX warmup: {time.time() - warm_start:.2f}s[/dim]")
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        start = time.time()
+        text = self.model.transcribe(audio)
+        elapsed = time.time() - start
+        return text, elapsed

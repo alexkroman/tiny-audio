@@ -19,6 +19,7 @@ from .asr import (
     EndpointEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
+    MLXEvaluator,
 )
 from .base import (
     AlignmentResult,
@@ -62,6 +63,7 @@ __all__ = [
     "DeepgramEvaluator",
     "ElevenLabsEvaluator",
     "AppleSpeechEvaluator",
+    "MLXEvaluator",
     # Diarization evaluators
     "DiarizationEvaluator",
     "AssemblyAIDiarizationEvaluator",
