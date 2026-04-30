@@ -48,7 +48,11 @@ hub_private_repo: false
 fp16: false
 bf16: true
 tf32: true
-torch_compile: false
+torch_compile: true
+# group_by_length varies the batch shape per bucket, which would otherwise
+# blow past dynamo's default cache_size_limit=8 and force eager fallback.
+torch_compile_config:
+  cache_size_limit: 256
 model_dtype: bfloat16
 attn_implementation: flash_attention_2
 

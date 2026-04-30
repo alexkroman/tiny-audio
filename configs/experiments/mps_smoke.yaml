@@ -1,0 +1,41 @@
+# @package _global_
+# Local MPS / CPU smoke test on the 73-sample librispeech dummy dataset.
+# Validates the full train loop end-to-end without GPU-only deps.
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=mps_smoke
+
+defaults:
+  - override /data: librispeech_dummy
+
+model:
+  model_dtype: float32
+
+data:
+  num_proc: 1
+
+training:
+  max_steps: 10
+  logging_steps: 1
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 1
+
+  # MPS / CPU compatibility
+  bf16: false
+  tf32: false
+  torch_compile: false
+  attn_implementation: sdpa
+  dataloader_num_workers: 0
+  dataloader_persistent_workers: false
+  dataloader_prefetch_factor: null
+  dataloader_pin_memory: false
+
+  rir_augmentation:
+    enabled: false
+
+  report_to: "none"
+  save_strategy: "no"
+  eval_strategy: "no"
+  push_to_hub: false
+  output_dir: ./outputs/mps_smoke

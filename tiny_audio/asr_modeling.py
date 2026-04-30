@@ -422,14 +422,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def _encode_audio(
         self,
         audio_features: torch.Tensor,
-        audio_attention_mask: torch.Tensor,
         expected_token_counts: torch.Tensor,
     ) -> torch.Tensor:
         """Encode audio features and return flattened embeddings matching expected_token_counts.
 
         Args:
             audio_features: Mel spectrogram features (batch, n_mels, mel_len)
-            audio_attention_mask: Mask indicating real vs padded mel frames (batch, mel_len)
             expected_token_counts: Per-sample audio token counts as int64 tensor (batch,).
 
         Returns:
@@ -475,9 +473,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     device=input_ids.device, dtype=torch.long
                 )
 
-            audio_embeds = self._encode_audio(
-                input_features, audio_attention_mask, audio_token_counts
-            )
+            audio_embeds = self._encode_audio(input_features, audio_token_counts)
 
             audio_token_mask = is_audio_token.unsqueeze(-1)
             inputs_embeds = inputs_embeds.masked_scatter(
@@ -561,7 +557,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             device=input_features.device,
             dtype=torch.long,
         )
-        audio_embeds = self._encode_audio(input_features, audio_attention_mask, token_counts)
+        audio_embeds = self._encode_audio(input_features, token_counts)
 
         # If input_ids not provided, build prompt with correct number of audio tokens
         if input_ids is None:
@@ -651,7 +647,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             device=input_features.device,
             dtype=torch.long,
         )
-        audio_embeds = self._encode_audio(input_features, audio_attention_mask, token_counts)
+        audio_embeds = self._encode_audio(input_features, token_counts)
 
         # Build prompt with correct number of audio tokens
         num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
