@@ -23,6 +23,7 @@ classifiers = [
 ]
 requires-python = ">=3.10,<3.13"
 dynamic = ["dependencies"]
+dependencies = ["speechbrain @ git+https://github.com/speechbrain/speechbrain.git", "torchvision (>=0.26.0,<0.27.0)"]
 
 [project.urls]
 Homepage = "https://github.com/alexkroman/tiny-audio"
@@ -49,9 +50,8 @@ priority = "supplemental"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
-# torch - pinned to match the RunPod default PyTorch image (cu128) so
-# `pip install -r requirements.txt` doesn't reinstall over the base image.
-torch = "~2.8.0"
+# torch - Poetry will pull from pytorch-cu128 source on Linux when available
+torch = "~2.11.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
 transformers = ">=5.0.0"
@@ -71,8 +71,7 @@ deepgram-sdk = "*"
 typer = ">=0.19.2"
 trl = ">=0.26.0"
 peft = ">=0.13.0"  # LoRA adapters for Stage 2 fine-tuning
-torchaudio = ">=2.8.0,<2.9.0"
-torchvision = ">=0.23.0,<0.24.0"
+torchaudio = ">=2.0.0"
 pyannote-core = ">=6.0.0"  # For DER metric calculation
 pyannote-metrics = ">=4.0.0"  # For DER metric calculation
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
@@ -81,11 +80,15 @@ fabric = ">=3.0.0"
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
 spacy = "^3.8.11"
 ten-vad = ">=1.0.6"
-speechbrain = { git = "https://github.com/speechbrain/speechbrain.git" }
+speechbrain = ">=1.0.3"
 pytz = "*"
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]
+mlx = [
+    "mlx>=0.20.0; sys_platform == 'darwin'",
+    "mlx-lm>=0.20.0; sys_platform == 'darwin'",
+]
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
@@ -176,6 +179,9 @@ testpaths = ["tests"]
 
 # Ignore directories
 norecursedirs = ["outputs", ".venv", "venv", ".git", "__pycache__", "*.egg-info"]
+
+# Markers for test categorization
+markers = ["slow: marks tests as slow (deselected by default)"]
 
 # Filter out third-party warnings
 filterwarnings = [
