@@ -9,7 +9,7 @@ struct MelTests {
         let url = Bundle.module.url(forResource: "librispeech_sample", withExtension: "wav", subdirectory: "Fixtures")!
         let samples = try AudioDecoder.decode(.file(url))
 
-        let mel = try LogMelSpectrogram.loadDefault()
+        let mel = LogMelSpectrogram.loadDefault()
         let (swiftFloats, swiftShape) = mel.computeFloats(samples)
 
         let referenceShape = try FixtureLoader.shape(of: "mel")

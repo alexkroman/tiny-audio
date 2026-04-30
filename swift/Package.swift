@@ -13,7 +13,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.21.0"),
-        .package(url: "https://github.com/huggingface/swift-transformers", from: "0.1.20"),
+        .package(url: "https://github.com/Blaizzy/mlx-audio-swift", from: "0.1.2"),
     ],
     targets: [
         .target(
@@ -23,16 +23,9 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
-                // NOTE: swift-transformers does not expose a standalone "Hub" product;
-                // Hub functionality is bundled inside "Transformers". Code that needs
-                // Hub APIs should `import Transformers` instead. Re-evaluate when
-                // swift-transformers ships Hub as a separate library product.
+                .product(name: "MLXAudioCore", package: "mlx-audio-swift"),
             ],
-            path: "Sources/TinyAudio",
-            resources: [
-                .process("Mel/MelFilterbank.json"),
-            ]
+            path: "Sources/TinyAudio"
         ),
         .testTarget(
             name: "TinyAudioTests",
