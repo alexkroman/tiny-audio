@@ -17,7 +17,7 @@ model:
 
 training:
   hub_model_id: "mazesmazes/tiny-audio"
-  group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
+  group_by_length: true
   learning_rate: 1e-3
   warmup_steps: 500
   lr_scheduler_type: polynomial
