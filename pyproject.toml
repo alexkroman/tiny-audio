@@ -154,7 +154,11 @@ ignore_errors = true
 [tool.pyright]
 include = ["tiny_audio"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
-ignore = ["tiny_audio/asr_pipeline.py", "tiny_audio/integrations/pipecat_stt.py"]  # Optional deps
+ignore = [
+    "tiny_audio/asr_pipeline.py",
+    "tiny_audio/integrations/pipecat_stt.py",
+    "tiny_audio/mlx",  # Apple Silicon only — mlx/mlx-lm/mlx-audio not installable on Linux CI
+]
 typeCheckingMode = "basic"
 reportPrivateImportUsage = false
 reportOptionalMemberAccess = false
