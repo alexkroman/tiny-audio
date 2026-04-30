@@ -352,19 +352,55 @@ class MLXASRModel:
 
     # ------------------------------------------------------------- helpers
 
-    def _prepare_audio(self, audio: AudioInput) -> np.ndarray:
+    def _prepare_audio(self, audio) -> np.ndarray:
+        # AudioDecoder (lazy torchcodec object emitted by recent `datasets`):
+        # call get_all_samples() -> AudioSamples (.data is a torch.Tensor [C, T]).
+        if hasattr(audio, "get_all_samples"):
+            samples = audio.get_all_samples()
+            data = samples.data.detach().cpu().numpy()  # [C, T]
+            sr = int(samples.sample_rate)
+            if data.ndim > 1:
+                data = data.mean(axis=0)
+            return self._maybe_resample(data, sr)
+
+        # AudioSamples directly (in case datasets returns it pre-decoded).
+        if hasattr(audio, "data") and hasattr(audio, "sample_rate"):
+            arr = audio.data
+            arr = arr.detach().cpu().numpy() if hasattr(arr, "detach") else np.asarray(arr)
+            if arr.ndim > 1:
+                arr = arr.mean(axis=0)
+            return self._maybe_resample(arr, int(audio.sample_rate))
+
+        # HF-dataset-style dict: {"array": np.ndarray, "sampling_rate": int}.
+        if isinstance(audio, dict):
+            data = audio.get("array", audio.get("raw"))
+            if data is None:
+                raise ValueError(f"audio dict missing 'array' or 'raw' key; got keys={list(audio)}")
+            data = np.asarray(data, dtype=np.float32)
+            if data.ndim > 1:
+                data = data.mean(axis=-1)
+            return self._maybe_resample(data, int(audio.get("sampling_rate", 16000)))
+
+        # File path.
         if isinstance(audio, str):
             import soundfile as sf
 
             data, sr = sf.read(audio, dtype="float32")
             if data.ndim > 1:
                 data = data.mean(axis=-1)
-            if sr != 16000:
-                import librosa
+            return self._maybe_resample(data, sr)
 
-                data = librosa.resample(data, orig_sr=sr, target_sr=16000)
-            return data.astype(np.float32)
+        # Fallback: numpy / list of floats.
         return np.asarray(audio, dtype=np.float32)
+
+    @staticmethod
+    def _maybe_resample(data: np.ndarray, sr: int) -> np.ndarray:
+        data = np.asarray(data, dtype=np.float32)
+        if sr != 16000:
+            import librosa
+
+            data = librosa.resample(data, orig_sr=sr, target_sr=16000)
+        return data.astype(np.float32)
 
     def _encode_audio(self, audio_np: np.ndarray) -> tuple[mx.array, int]:
         mel, _ = compute_mel_unpadded(audio_np, feature_extractor=self.feature_extractor)
