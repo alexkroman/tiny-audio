@@ -180,6 +180,14 @@ class DataCollator:
         self.system_prompt = system_prompt
         self.projector = projector
         self.encoder_conv_layers = encoder_conv_layers or self.DEFAULT_ENCODER_CONV_LAYERS
+        # Whisper's encoder requires a fixed 3000 mel frames; pad to its
+        # built-in max_length. GLM-ASR and other variable-length encoders
+        # only need padding to the longest sample in the batch.
+        self._audio_padding = (
+            "max_length"
+            if type(feature_extractor).__name__ == "WhisperFeatureExtractor"
+            else "longest"
+        )
 
         # Use trl's DataCollatorForChatML for label masking
         # max_length needs to accommodate audio tokens (1500 for 30s) + prompt + response
@@ -220,7 +228,7 @@ class DataCollator:
         audio_out = self.feature_extractor(
             audio_arrays,
             sampling_rate=self.sample_rate,
-            padding="longest",  # Pad to longest in batch, not fixed 30s
+            padding=self._audio_padding,
             return_attention_mask=True,
             return_tensors="pt",
         )
@@ -308,7 +316,7 @@ class MultiTaskDataCollator(DataCollator):
         audio_out = self.feature_extractor(
             audio_arrays,
             sampling_rate=self.sample_rate,
-            padding="longest",
+            padding=self._audio_padding,
             return_attention_mask=True,
             return_tensors="pt",
         )

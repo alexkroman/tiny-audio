@@ -189,8 +189,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         from transformers import AutoFeatureExtractor
 
         feature_extractor = AutoFeatureExtractor.from_pretrained(config.audio_model_id)
-        # Disable padding by default - use actual audio length
-        feature_extractor.padding = False
+        # Whisper's encoder requires a fixed 3000 mel frames (30s) and the
+        # feature extractor pads to that by default — leave it alone. Other
+        # encoders (e.g. GLM-ASR) accept variable-length input, so we disable
+        # padding to avoid wasting compute on silent frames.
+        if "whisper" not in config.audio_model_id.lower():
+            feature_extractor.padding = False
         return feature_extractor
 
     @classmethod
