@@ -10,14 +10,14 @@
 # ┌──────────────────┬───────────┬─────────┐
 # │ Dataset          │ Samples   │ Percent │
 # ├──────────────────┼───────────┼─────────┤
-# │ loquacious med   │ 1,090,000 │   50.0% │
-# │ ami-ihm          │   305,000 │   14.0% │
-# │ ami-sdm          │   175,000 │    8.0% │
-# │ spgispeech L     │   260,000 │   12.0% │
-# │ switchboard      │   260,000 │   12.0% │
-# │ gigaspeech m     │    87,000 │    4.0% │
+# │ loquacious med   │ 1,090,000 │   46.9% │
+# │ ami-ihm          │   305,000 │   13.1% │
+# │ ami-sdm          │   175,000 │    7.5% │
+# │ spgispeech L     │   260,000 │   11.2% │
+# │ switchboard      │   260,000 │   11.2% │
+# │ gigaspeech m     │   232,000 │   10.0% │
 # └──────────────────┴───────────┴─────────┘
-# Total: ~2,177,000 samples
+# Total: ~2,322,000 samples
 #
 # Loquacious is uncapped (full medium ~1.09M); other streams scaled to hit
 # the target proportions. AMI IHM/SDM and Switchboard upsample (~2-3x repeats)
@@ -84,7 +84,7 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 87000
+    target_samples: 232000
 
 # Audio processing
 sample_rate: 16000
