@@ -191,6 +191,12 @@ events.out.tfevents.*
 *.flac
 *.m4a
 
+# Swift SDK test fixtures: small, deterministic, source-of-truth for parity
+# tests; must be committed so CI / fresh clones can run them. The earlier
+# *.bin and *.wav patterns above otherwise filter them out.
+!swift/Tests/TinyAudioTests/Fixtures/*.bin
+!swift/Tests/TinyAudioTests/Fixtures/*.wav
+
 # Course exercise outputs
 audio_processing.png
 embedding_distributions.png
