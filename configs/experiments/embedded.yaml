@@ -11,7 +11,7 @@ defaults:
 model:
   projector_type: mlp
   projector_pool_stride: 4
-  projector_hidden_dim: 1024
+  projector_hidden_dim: 2048
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
   text_model_id: Qwen/Qwen3-0.6B
@@ -33,7 +33,7 @@ training:
   gradient_accumulation_steps: 2
   num_train_epochs: 2
   save_steps: 1000
-  eval_steps: 5000
+  eval_steps: 1000
 
   # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck at this batch size.
   dataloader_num_workers: 16
