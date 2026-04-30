@@ -5,9 +5,9 @@ import transformers
 from transformers import ProcessorMixin
 
 try:
-    from .asr_config import ASRConfig
+    from .asr_config import DEFAULT_ENCODER_CONV_LAYERS, ASRConfig
 except ImportError:
-    from asr_config import ASRConfig  # type: ignore[no-redef]
+    from asr_config import DEFAULT_ENCODER_CONV_LAYERS, ASRConfig  # type: ignore[no-redef]
 
 
 class ASRProcessor(ProcessorMixin):
@@ -18,8 +18,6 @@ class ASRProcessor(ProcessorMixin):
     tokenizer_class = "AutoTokenizer"
     AUDIO_TOKEN = "<audio>"
     TRANSCRIBE_PROMPT = ""
-    # Default conv layers for Whisper/GLM-ASR: [(pad, kernel, stride), ...]
-    DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
 
     def __init__(
         self,
@@ -40,7 +38,7 @@ class ASRProcessor(ProcessorMixin):
         self.tokenizer = tokenizer
         self.audio_token_id = tokenizer.convert_tokens_to_ids(self.AUDIO_TOKEN)
         self.projector = projector
-        self.encoder_conv_layers = encoder_conv_layers or self.DEFAULT_ENCODER_CONV_LAYERS
+        self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
 
     def _compute_encoder_output_length(self, mel_length: int) -> int:
         """Compute encoder output length using conv layer formulas."""

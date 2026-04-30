@@ -28,39 +28,29 @@ class EndpointHandler:
         import os
 
         import nltk
+        from transformers.utils import is_flash_attn_2_available
 
         nltk.download("punkt_tab", quiet=True)
 
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-        # Prepare model kwargs - let transformers handle device placement
         model_kwargs = {
             "device_map": "auto",
             "torch_dtype": "auto",
             "low_cpu_mem_usage": True,
         }
-        if self._is_flash_attn_available():
+        if is_flash_attn_2_available():
             model_kwargs["attn_implementation"] = "flash_attention_2"
 
-        # Load model (this loads the model, tokenizer, and feature extractor)
         self.model = ASRModel.from_pretrained(path, **model_kwargs)
-
-        # Get device from model for pipeline
         self.device = next(self.model.parameters()).device
 
-        # Instantiate custom pipeline - it will get feature_extractor and tokenizer from model
         self.pipe = ASRPipeline(
             model=self.model,
             feature_extractor=self.model.feature_extractor,
             tokenizer=self.model.tokenizer,
             device=self.device,
         )
-
-    def _is_flash_attn_available(self):
-        """Check if flash attention is available."""
-        import importlib.util
-
-        return importlib.util.find_spec("flash_attn") is not None
 
     def __call__(self, data: Dict[str, Any]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """Process an inference request.
