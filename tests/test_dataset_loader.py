@@ -1,6 +1,6 @@
 """Tests for DatasetLoader column normalization, especially the duration column."""
 
-from unittest.mock import MagicMock, patch  # noqa: F401
+from unittest.mock import patch
 
 import pytest
 from omegaconf import OmegaConf
