@@ -217,8 +217,15 @@ def compute_mel_unpadded(
     HF repo) so the mel is bit-exact to the PT inference pipeline. The encoder
     in this module expects shape [B, n_mels, T_mel].
 
-    Pass `feature_extractor` to avoid the per-call from_pretrained cost in
-    hot paths; it must already have `padding = False` set.
+    Args:
+        audio: 1D float32 numpy array, 16kHz mono.
+        feature_extractor: pre-loaded `WhisperFeatureExtractor` with
+            `padding=False` already set. Pass this in hot paths to avoid the
+            ~50-100ms per-call `from_pretrained` cost. If None, loads from
+            `audio_model_id`.
+        audio_model_id: HF repo id for the feature extractor when
+            `feature_extractor` is None. Default `zai-org/GLM-ASR-Nano-2512`.
+        sampling_rate: must be 16000 for Whisper-style 128-mel.
 
     Returns:
         (mel, mel_length): mel is an mx.array of shape [1, n_mels, T_mel];

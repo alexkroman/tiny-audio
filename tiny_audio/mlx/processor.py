@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+AUDIO_TOKEN = "<audio>"
+
 
 def compute_encoder_output_length(
     mel_length: int, encoder_conv_layers: list[tuple[int, int, int]]
@@ -48,7 +50,7 @@ def build_prompt_input_ids(
     `<think>...</think>` reasoning blocks. ASR responses must use enable_thinking=False
     to produce plain transcripts.
     """
-    audio_placeholder = "<audio>" * num_audio_tokens
+    audio_placeholder = AUDIO_TOKEN * num_audio_tokens
 
     messages = []
     if system_prompt:

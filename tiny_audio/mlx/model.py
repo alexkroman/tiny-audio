@@ -38,7 +38,7 @@ from tiny_audio.mlx.encoder import (
     compute_mel_unpadded,
     encoder_config_from_hf,
 )
-from tiny_audio.mlx.processor import build_prompt_input_ids
+from tiny_audio.mlx.processor import AUDIO_TOKEN, build_prompt_input_ids
 from tiny_audio.mlx.projector import MLXMLPProjector
 
 AudioInput = Union[str, np.ndarray, "list[float]"]
@@ -47,7 +47,6 @@ AudioInput = Union[str, np.ndarray, "list[float]"]
 # the trained Qwen/Qwen3-0.6B base used for fine-tuning.
 _DECODER_MLX_REPO = "Qwen/Qwen3-0.6B-MLX-4bit"
 
-AUDIO_TOKEN = "<audio>"
 _EOS_TOKEN_STRINGS = ("<|im_end|>", "<|endoftext|>")
 
 
