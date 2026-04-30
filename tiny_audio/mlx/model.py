@@ -37,6 +37,7 @@ from tiny_audio.mlx.encoder import (
     GLMASREncoder,
     compute_mel_unpadded,
     encoder_config_from_hf,
+    pt_encoder_state_to_mlx,
 )
 from tiny_audio.mlx.processor import AUDIO_TOKEN, build_prompt_input_ids
 from tiny_audio.mlx.projector import MLXMLPProjector
@@ -250,22 +251,14 @@ class MLXASRModel:
 
     @staticmethod
     def _load_pt_encoder_into_mlx(pt_encoder, mlx_encoder: GLMASREncoder) -> None:
-        """Copy PT GlmAsrEncoder weights into our MLX encoder.
+        """Load PT GlmAsrEncoder weights into our mlx-audio-based encoder.
 
-        Same logic as `tests/test_mlx_encoder.py::_copy_pt_encoder_to_mlx`:
-        fp16 array conversion, with axis-swap for conv1/conv2 weights to bridge
-        PT [out, in, kernel] -> MLX [out, kernel, in].
+        Wraps `pt_encoder_state_to_mlx`, which handles the PT-Llama-style ->
+        mlx-audio-Whisper-style name remap and the Conv1d weight axis swap.
         """
-        import torch
         from mlx.utils import tree_unflatten
 
-        sd = pt_encoder.state_dict()
-        flat: list[tuple[str, mx.array]] = []
-        for k, v in sd.items():
-            arr = v.detach().cpu().to(torch.float16).numpy()
-            if k in ("conv1.weight", "conv2.weight"):
-                arr = np.swapaxes(arr, 1, 2)
-            flat.append((k, mx.array(arr)))
+        flat = pt_encoder_state_to_mlx(pt_encoder.state_dict())
         mlx_encoder.update(tree_unflatten(flat))
 
     # ------------------------------------------------------------ inference

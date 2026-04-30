@@ -21,37 +21,23 @@ def glm_asr_pt():
     return m
 
 
-def _copy_pt_encoder_to_mlx(pt_encoder, mlx_encoder):
-    """Copy weights from PT GlmAsrEncoder to our MLX encoder.
-
-    Walks pt_encoder.state_dict() and updates mlx_encoder via tree_unflatten + update.
-    Both sides use identical parameter names.
-
-    The only fix-up: PT Conv1d weights are [out, in, kernel]; MLX Conv1d weights are
-    [out, kernel, in] (NLC channel layout). We swap axes 1 and 2 for conv1/conv2 weights.
-    """
+def test_glm_asr_encoder_matches_pt(glm_asr_pt):
+    """End-to-end parity: load PT weights into our mlx-audio-based encoder
+    and confirm forward outputs match within fp32 tolerance."""
     from mlx.utils import tree_unflatten
 
-    pt_sd = pt_encoder.state_dict()
-    flat = []
-    for k, v in pt_sd.items():
-        arr = v.detach().cpu().numpy()
-        if k in ("conv1.weight", "conv2.weight"):
-            # PT (O, I, K) -> MLX (O, K, I)
-            arr = np.swapaxes(arr, 1, 2)
-        flat.append((k, mx.array(arr)))
-    mlx_encoder.update(tree_unflatten(flat))
-
-
-def test_glm_asr_encoder_matches_pt(glm_asr_pt):
-    from tiny_audio.mlx.encoder import GLMASREncoder, encoder_config_from_hf
+    from tiny_audio.mlx.encoder import (
+        GLMASREncoder,
+        encoder_config_from_hf,
+        pt_encoder_state_to_mlx,
+    )
 
     pt_full = glm_asr_pt
     pt_encoder = pt_full.audio_tower
     cfg = encoder_config_from_hf(pt_full.config.audio_config)
 
     mlx_encoder = GLMASREncoder(cfg)
-    _copy_pt_encoder_to_mlx(pt_encoder, mlx_encoder)
+    mlx_encoder.update(tree_unflatten(pt_encoder_state_to_mlx(pt_encoder.state_dict())))
 
     # Synthetic mel input (B=1, n_mels=128, T_mel=300 = 3s of audio)
     rng = np.random.default_rng(0)
