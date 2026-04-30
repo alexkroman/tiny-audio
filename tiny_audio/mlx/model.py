@@ -65,15 +65,28 @@ def splice_audio_embeds(
     Returns:
         [1, T, D] mx.array with the same dtype as text_embeds.
 
-    Implementation: builds a dense [1, T, D] tensor with audio rows at the right
-    positions and a [1, T, 1] boolean mask, then mx.where selects between the two.
+    Implementation: builds an index lookup `[T]` mapping each prompt position
+    to its audio-embed row (or to a sentinel zero row), then a single
+    mx.gather + mx.where keeps the whole splice on the GPU. Avoids forcing a
+    host sync of `audio_embeds`, which would otherwise materialize the
+    encoder + projector lazy graph here instead of chaining into the prefill.
     """
     _, t, d = text_embeds.shape
     positions = np.asarray(audio_token_positions)
+    n = positions.shape[0]
 
-    audio_full_np = np.zeros((1, t, d), dtype=np.float32)
-    audio_full_np[0, positions, :] = np.array(audio_embeds.astype(mx.float32))
-    audio_full = mx.array(audio_full_np).astype(text_embeds.dtype)
+    # idx_np[p] = i if p == positions[i] else n (sentinel pointing to a zero
+    # row appended to audio_embeds). Built on CPU once per call; tiny.
+    idx_np = np.full(t, n, dtype=np.int32)
+    idx_np[positions] = np.arange(n, dtype=np.int32)
+    idx = mx.array(idx_np)
+
+    # [N+1, D]: append a zero row; positions not in `positions` index into it.
+    audio_with_sentinel = mx.concatenate(
+        [audio_embeds.astype(text_embeds.dtype), mx.zeros((1, d), dtype=text_embeds.dtype)],
+        axis=0,
+    )
+    audio_full = audio_with_sentinel[idx][None, :, :]  # [1, T, D]
 
     mask_np = np.zeros((1, t, 1), dtype=np.bool_)
     mask_np[0, positions, 0] = True
