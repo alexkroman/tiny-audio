@@ -352,15 +352,26 @@ class MLXASRModel:
         # Initialize KV cache and prefill via input_embeddings.
         cache = mlx_cache.make_prompt_cache(self.decoder)
         logits = self.decoder(safe_input_ids_mx, cache=cache, input_embeddings=prefill_embeds)
-        next_id = int(mx.argmax(logits[:, -1, :], axis=-1).item())
-        yield next_id
 
-        for _ in range(max_new_tokens - 1):
-            if next_id in self.eos_token_ids:
+        # Async-eval pipeline: keep tokens as mx.arrays (no Python int round-trip
+        # in the inner loop) and kick off step N+1 computation before syncing
+        # step N's result. The .item() sync then overlaps with the next forward
+        # pass, hiding the host<-device wait. Same pattern as mlx_lm.generate.
+        y = mx.argmax(logits[:, -1:, :], axis=-1)  # [1, 1] mx.array
+        mx.async_eval(y)
+
+        for n in range(max_new_tokens):
+            if n < max_new_tokens - 1:
+                next_logits = self.decoder(y, cache=cache)
+                next_y = mx.argmax(next_logits[:, -1:, :], axis=-1)
+                mx.async_eval(next_y)
+
+            y_int = int(y.item())  # sync on y; overlaps with next compute above
+            yield y_int
+            if y_int in self.eos_token_ids:
                 return
-            step_logits = self.decoder(mx.array([[next_id]]), cache=cache)
-            next_id = int(mx.argmax(step_logits[:, -1, :], axis=-1).item())
-            yield next_id
+            if n < max_new_tokens - 1:
+                y = next_y
 
     # ------------------------------------------------------------- helpers
 
