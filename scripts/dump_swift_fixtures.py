@@ -35,7 +35,10 @@ FIXTURES_DIR = Path("swift/Tests/TinyAudioTests/Fixtures")
 
 
 def _save_mx(arr: mx.array, path: Path) -> tuple[list[int], str]:
-    np_arr = np.asarray(arr).astype(np.float32)
+    # Cast inside MLX before going to numpy. Some MLX arrays (e.g. the
+    # quantized decoder's embed_tokens output) are bfloat16, which numpy
+    # cannot consume directly via np.asarray.
+    np_arr = np.asarray(arr.astype(mx.float32))
     np_arr.tofile(path)
     return list(np_arr.shape), str(np_arr.dtype)
 
