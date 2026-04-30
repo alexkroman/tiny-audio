@@ -1,8 +1,10 @@
-"""Tests for DatasetLoader column normalization, especially the duration column."""
+"""Tests for DatasetLoader column normalization and duration handling."""
 
 from unittest.mock import patch
 
+import numpy as np
 import pytest
+from datasets import Audio, Dataset
 from omegaconf import OmegaConf
 
 from scripts.train import DatasetLoader
@@ -22,93 +24,64 @@ def _make_cfg(datasets, sample_rate=16000, num_proc=1):
     )
 
 
+def _fake_dataset(audio_seconds: float, **extra_cols):
+    n = int(audio_seconds * 16000)
+    rows = {
+        "audio": [{"array": np.zeros(n, dtype=np.float32), "sampling_rate": 16000}],
+        **{k: [v] for k, v in extra_cols.items()},
+    }
+    return Dataset.from_dict(rows).cast_column("audio", Audio(sampling_rate=16000))
+
+
+def _prepare(loader, dataset_cfg, fake):
+    with patch("scripts.train.load_dataset", return_value=fake):
+        return loader._prepare_split(OmegaConf.create(dataset_cfg), "train")
+
+
 class TestDurationColumnNormalization:
     def test_duration_column_renamed_when_specified(self):
-        """If duration_column is set, the source-named column is renamed to 'duration'."""
-        import numpy as np
-        from datasets import Audio, Dataset
-
-        rows = {
-            "audio": [{"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000}],
-            "transcript": ["hello"],
-            "audio_len_secs": [1.0],
+        fake = _fake_dataset(audio_seconds=1.0, transcript="hello", audio_len_secs=1.0)
+        cfg = {
+            "path": "fake/dataset",
+            "audio_column": "audio",
+            "text_column": "transcript",
+            "duration_column": "audio_len_secs",
         }
-        fake = Dataset.from_dict(rows).cast_column("audio", Audio(sampling_rate=16000))
-
-        cfg = _make_cfg(
-            [
-                {
-                    "path": "fake/dataset",
-                    "audio_column": "audio",
-                    "text_column": "transcript",
-                    "duration_column": "audio_len_secs",
-                    "train_splits": ["train"],
-                    "eval_splits": ["validation"],
-                }
-            ]
-        )
-        loader = DatasetLoader(cfg)
-
-        with patch("scripts.train.load_dataset", return_value=fake):
-            ds = loader._prepare_split(cfg.data.datasets[0], "train")
+        loader = DatasetLoader(_make_cfg([cfg]))
+        ds = _prepare(loader, cfg, fake)
 
         assert "duration" in ds.column_names
         assert "audio_len_secs" not in ds.column_names
         assert ds[0]["duration"] == pytest.approx(1.0)
 
     def test_duration_already_named_correctly_kept(self):
-        import numpy as np
-        from datasets import Audio, Dataset
-
-        rows = {
-            "audio": [{"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000}],
-            "text": ["hi"],
-            "duration": [1.0],
-        }
-        fake = Dataset.from_dict(rows).cast_column("audio", Audio(sampling_rate=16000))
-        cfg = _make_cfg(
-            [
-                {
-                    "path": "fake/dataset",
-                    "audio_column": "audio",
-                    "text_column": "text",
-                    "train_splits": ["train"],
-                    "eval_splits": ["validation"],
-                }
-            ]
-        )
-        loader = DatasetLoader(cfg)
-        with patch("scripts.train.load_dataset", return_value=fake):
-            ds = loader._prepare_split(cfg.data.datasets[0], "train")
+        fake = _fake_dataset(audio_seconds=1.0, text="hi", duration=1.0)
+        cfg = {"path": "fake/dataset", "audio_column": "audio", "text_column": "text"}
+        loader = DatasetLoader(_make_cfg([cfg]))
+        ds = _prepare(loader, cfg, fake)
 
         assert "duration" in ds.column_names
         assert ds[0]["duration"] == pytest.approx(1.0)
 
-    def test_duration_computed_from_audio_when_missing(self):
-        """If neither duration nor duration_column is present, compute from audio array length."""
-        import numpy as np
-        from datasets import Audio, Dataset
 
-        # Sample is exactly 2.5 seconds at 16kHz
-        rows = {
-            "audio": [{"array": np.zeros(40000, dtype=np.float32), "sampling_rate": 16000}],
-            "text": ["hello"],
-        }
-        fake = Dataset.from_dict(rows).cast_column("audio", Audio(sampling_rate=16000))
-        cfg = _make_cfg(
-            [
-                {
-                    "path": "fake/dataset",
-                    "audio_column": "audio",
-                    "text_column": "text",
-                    "train_splits": ["train"],
-                    "eval_splits": ["validation"],
-                }
-            ]
-        )
-        loader = DatasetLoader(cfg)
-        with patch("scripts.train.load_dataset", return_value=fake):
-            ds = loader._prepare_split(cfg.data.datasets[0], "train")
+class TestEnsureDuration:
+    def test_computes_from_audio_when_missing(self):
+        fake = _fake_dataset(audio_seconds=2.5, text="hello")
+        cfg = {"path": "fake/dataset", "audio_column": "audio", "text_column": "text"}
+        loader = DatasetLoader(_make_cfg([cfg]))
+        ds = _prepare(loader, cfg, fake)
+        assert "duration" not in ds.column_names
+
+        ds = loader._ensure_duration(ds)
 
         assert "duration" in ds.column_names
         assert ds[0]["duration"] == pytest.approx(2.5, abs=0.01)
+
+    def test_noop_when_duration_present(self):
+        fake = _fake_dataset(audio_seconds=2.5, text="hi", duration=999.0)
+        cfg = {"path": "fake/dataset", "audio_column": "audio", "text_column": "text"}
+        loader = DatasetLoader(_make_cfg([cfg]))
+        ds = _prepare(loader, cfg, fake)
+        ds = loader._ensure_duration(ds)
+
+        assert ds[0]["duration"] == pytest.approx(999.0)

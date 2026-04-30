@@ -61,14 +61,11 @@ class DatasetLoader:
             trust_remote_code=True,
         )
 
-        # Normalize column names for audio and text
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
             "audio": dataset_cfg.get("audio_column", "audio"),
         }
-        # duration_column is optional: only remap if explicitly configured
-        duration_source = dataset_cfg.get("duration_column")
-        if duration_source:
+        if duration_source := dataset_cfg.get("duration_column"):
             col_map["duration"] = duration_source
 
         for target, source in col_map.items():
@@ -78,24 +75,6 @@ class DatasetLoader:
                 ds = ds.rename_column(source, target)
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
-
-        # Ensure every prepared split has a 'duration' column for group_by_length.
-        # If neither the source nor duration_column provides one, compute from audio length.
-        if "duration" not in ds.column_names:
-            sr = self.sample_rate
-
-            def _add_duration(batch):
-                durations = []
-                for a in batch["audio"]:
-                    arr = a["array"] if a is not None else None
-                    if arr is None:
-                        durations.append(0.0)
-                    else:
-                        n = arr.shape[0] if hasattr(arr, "shape") else len(arr)
-                        durations.append(float(n) / sr)
-                return {"duration": durations}
-
-            ds = ds.map(_add_duration, batched=True, num_proc=self.num_proc)
 
         # For multitask, keep sift_response and add task column
         if self.multitask_enabled:
@@ -137,6 +116,19 @@ class DatasetLoader:
         indices = list(range(current)) * repeats
         return ds.select(indices[:target])
 
+    def _ensure_duration(self, ds: Dataset) -> Dataset:
+        # `group_by_length` requires a `duration` column. Compute from audio
+        # length when no source field provides one. Run AFTER resampling so we
+        # don't decode samples that get trimmed.
+        if "duration" in ds.column_names:
+            return ds
+        sr = self.sample_rate
+
+        def _add_duration(batch):
+            return {"duration": [a["array"].shape[0] / sr for a in batch["audio"]]}
+
+        return ds.map(_add_duration, batched=True, num_proc=self.num_proc)
+
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
 
@@ -149,10 +141,11 @@ class DatasetLoader:
                 ds = self._prepare_split(d_cfg, train_split)
                 if target_samples:
                     ds = self._resample_to_target(ds, target_samples)
-                train_datasets.append(ds)
+                train_datasets.append(self._ensure_duration(ds))
 
             for eval_split in eval_splits:
-                val_datasets.append(self._prepare_split(d_cfg, eval_split))
+                ds = self._prepare_split(d_cfg, eval_split)
+                val_datasets.append(self._ensure_duration(ds))
 
         # Concatenate and shuffle
         train_ds = (
