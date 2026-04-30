@@ -1,5 +1,5 @@
 .env
-audio/
+/audio/
 CLAUDE.md
 docs/superpowers/
 datasets_cache
