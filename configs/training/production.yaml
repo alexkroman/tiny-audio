@@ -66,6 +66,14 @@ projector_dropout: 0.0
 use_specaugment: true
 label_smoothing: 0.0
 
+# RIR (Room Impulse Response) augmentation — simulates far-field / reverberant
+# audio by convolving with a random RIR. Off by default; enable per-experiment
+# when RIRs are available locally. Standard corpus: OpenSLR-28 (rirs_noises.zip).
+rir_augmentation:
+  enabled: false
+  rir_dir: null
+  prob: 0.4
+
 # Misc
 disable_tqdm: false
 log_level: info

@@ -30,6 +30,7 @@ from trl.experimental.utils import DataCollatorForChatML
 
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
+from tiny_audio.augmentation import RIRAugmentation
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
@@ -385,6 +386,23 @@ def main(cfg: DictConfig) -> None:
     multitask_enabled = cfg.get("multitask", {}).get("enabled", False)
 
     train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
+
+    rir_cfg = cfg.training.get("rir_augmentation") or {}
+    if rir_cfg.get("enabled"):
+        rir_aug = RIRAugmentation(
+            rir_dir=rir_cfg["rir_dir"],
+            sample_rate=cfg.data.sample_rate,
+            prob=rir_cfg.get("prob", 0.4),
+        )
+
+        def _apply_rir(batch):
+            audios = batch.get("audio") or []
+            for a in audios:
+                if a and "array" in a:
+                    a["array"] = rir_aug(a["array"])
+            return batch
+
+        train_dataset = train_dataset.with_transform(_apply_rir)
 
     if multitask_enabled:
         data_collator = MultiTaskDataCollator(
