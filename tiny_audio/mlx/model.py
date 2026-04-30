@@ -257,6 +257,20 @@ class MLXASRModel:
 
     # ------------------------------------------------------------ inference
 
+    def warmup(self, *, audio_seconds: float = 1.0, max_new_tokens: int = 4) -> None:
+        """Run one synthetic-audio inference to trigger MLX kernel compilation.
+
+        Without this, the first real transcribe() pays the full encoder +
+        projector + decoder JIT-compile cost (~5-15s on first call). Calling
+        warmup() before the eval loop pushes that cost off the critical path.
+
+        Subsequent transcribes against audio of similar shape hit the compiled
+        graph immediately.
+        """
+        synthetic = np.zeros(int(16000 * audio_seconds), dtype=np.float32)
+        # Drop the result; we only care that the graph runs once.
+        self.transcribe(synthetic, max_new_tokens=max_new_tokens)
+
     def transcribe(
         self,
         audio: AudioInput,

@@ -570,6 +570,11 @@ class MLXEvaluator(Evaluator):
 
         self.model = MLXASRModel.from_pretrained(model_path)
         console.print(f"[bold cyan]Loaded MLX model:[/bold cyan] {model_path}")
+        # Warm up MLX kernels so the first real sample doesn't pay JIT-compile
+        # latency (encoder + projector + decoder graphs all materialize here).
+        warm_start = time.time()
+        self.model.warmup()
+        console.print(f"[dim]MLX warmup: {time.time() - warm_start:.2f}s[/dim]")
 
     def transcribe(self, audio) -> tuple[str, float]:
         start = time.time()
