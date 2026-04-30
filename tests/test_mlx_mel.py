@@ -46,7 +46,9 @@ def test_compute_mel_matches_pt_feature_extractor():
 
     mx_mel, mx_len = compute_mel_unpadded(audio)
 
-    np.testing.assert_array_equal(np.array(mx_mel), pt_mel)
+    # MLX wrapper truncates to the unpadded length; compare against the
+    # equivalent slice of the PT feature extractor's padded output.
+    np.testing.assert_array_equal(np.array(mx_mel), pt_mel[:, :, :pt_len])
     assert mx_len == pt_len
 
 

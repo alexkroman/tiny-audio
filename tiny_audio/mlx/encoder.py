@@ -240,14 +240,18 @@ def compute_mel_unpadded(
         from transformers import AutoFeatureExtractor
 
         feature_extractor = AutoFeatureExtractor.from_pretrained(audio_model_id)
-        feature_extractor.padding = False
 
+    # WhisperFeatureExtractor pads to 30 s (3000 mel frames) by default; the
+    # GLM-ASR encoder doesn't need that padding (no fixed positional embed),
+    # so truncate to the real audio length to avoid ~30x wasted encoder work
+    # on short clips. The attention_mask gives us the true unpadded length.
     out = feature_extractor(
         audio,
         sampling_rate=sampling_rate,
         return_attention_mask=True,
         return_tensors="np",
     )
-    mel_np = out["input_features"]  # [1, n_mels, T_mel]
+    mel_np = out["input_features"]  # [1, n_mels, T_mel_padded]
     mel_length = int(out["attention_mask"].sum())
+    mel_np = mel_np[:, :, :mel_length]  # [1, n_mels, T_mel_real]
     return mx.array(mel_np), mel_length

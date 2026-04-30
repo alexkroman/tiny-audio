@@ -3305,6 +3305,70 @@ numpy = ">=1.14.2"
 scipy = ">=1.0.1"
 
 [[package]]
+name = "pyobjc-core"
+version = "12.1"
+description = "Python<->ObjC Interoperability Module"
+optional = false
+python-versions = ">=3.10"
+groups = ["dev"]
+markers = "sys_platform == \"darwin\""
+files = [
+    {file = "pyobjc_core-12.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:93418e79c1655f66b4352168f8c85c942707cb1d3ea13a1da3e6f6a143bacda7"},
+    {file = "pyobjc_core-12.1-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:c918ebca280925e7fcb14c5c43ce12dcb9574a33cccb889be7c8c17f3bcce8b6"},
+    {file = "pyobjc_core-12.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:818bcc6723561f207e5b5453efe9703f34bc8781d11ce9b8be286bb415eb4962"},
+    {file = "pyobjc_core-12.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:01c0cf500596f03e21c23aef9b5f326b9fb1f8f118cf0d8b66749b6cf4cbb37a"},
+    {file = "pyobjc_core-12.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:177aaca84bb369a483e4961186704f64b2697708046745f8167e818d968c88fc"},
+    {file = "pyobjc_core-12.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:844515f5d86395b979d02152576e7dee9cc679acc0b32dc626ef5bda315eaa43"},
+    {file = "pyobjc_core-12.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:453b191df1a4b80e756445b935491b974714456ae2cbae816840bd96f86db882"},
+    {file = "pyobjc_core-12.1.tar.gz", hash = "sha256:2bb3903f5387f72422145e1466b3ac3f7f0ef2e9960afa9bcd8961c5cbf8bd21"},
+]
+
+[[package]]
+name = "pyobjc-framework-cocoa"
+version = "12.1"
+description = "Wrappers for the Cocoa frameworks on macOS"
+optional = false
+python-versions = ">=3.10"
+groups = ["dev"]
+markers = "sys_platform == \"darwin\""
+files = [
+    {file = "pyobjc_framework_cocoa-12.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:9b880d3bdcd102809d704b6d8e14e31611443aa892d9f60e8491e457182fdd48"},
+    {file = "pyobjc_framework_cocoa-12.1-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:f52228bcf38da64b77328787967d464e28b981492b33a7675585141e1b0a01e6"},
+    {file = "pyobjc_framework_cocoa-12.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:547c182837214b7ec4796dac5aee3aa25abc665757b75d7f44f83c994bcb0858"},
+    {file = "pyobjc_framework_cocoa-12.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:5a3dcd491cacc2f5a197142b3c556d8aafa3963011110102a093349017705118"},
+    {file = "pyobjc_framework_cocoa-12.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:914b74328c22d8ca261d78c23ef2befc29776e0b85555973927b338c5734ca44"},
+    {file = "pyobjc_framework_cocoa-12.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:03342a60fc0015bcdf9b93ac0b4f457d3938e9ef761b28df9564c91a14f0129a"},
+    {file = "pyobjc_framework_cocoa-12.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:6ba1dc1bfa4da42d04e93d2363491275fb2e2be5c20790e561c8a9e09b8cf2cc"},
+    {file = "pyobjc_framework_cocoa-12.1.tar.gz", hash = "sha256:5556c87db95711b985d5efdaaf01c917ddd41d148b1e52a0c66b1a2e2c5c1640"},
+]
+
+[package.dependencies]
+pyobjc-core = ">=12.1"
+
+[[package]]
+name = "pyobjc-framework-speech"
+version = "12.1"
+description = "Wrappers for the framework Speech on macOS"
+optional = false
+python-versions = ">=3.10"
+groups = ["dev"]
+markers = "sys_platform == \"darwin\""
+files = [
+    {file = "pyobjc_framework_speech-12.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:be5c005595918557f17e991b2575159b8ea943e7fb08fd00b1dabccde35f8b1b"},
+    {file = "pyobjc_framework_speech-12.1-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:0301bfae5d0d09b6e69bd4dbabc5631209e291cc40bda223c69ed0c618f8f2dc"},
+    {file = "pyobjc_framework_speech-12.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:cae4b88ef9563157a6c9e66b37778fc4022ee44dd1a2a53081c2adbb69698945"},
+    {file = "pyobjc_framework_speech-12.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:49df0ac39ae6fb44a83b2f4d7f500e0fa074ff58fbc53106d8f626d325079c23"},
+    {file = "pyobjc_framework_speech-12.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:ed5455f6d9e473c08ebf904ae280ad5fd0d00a073448bf4f0a01fee5887c5537"},
+    {file = "pyobjc_framework_speech-12.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:a958b3ace1425cf9319f5d8ace920c2f3dac95a5a6d1bd8742d5b64d24671e30"},
+    {file = "pyobjc_framework_speech-12.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:893052631198c5447453f81e4ed4af8077038666a7893fbe2d6a2f72b9c44b7e"},
+    {file = "pyobjc_framework_speech-12.1.tar.gz", hash = "sha256:2a2a546ba6c52d5dd35ddcfee3fd9226a428043d1719597e8701851a6566afdd"},
+]
+
+[package.dependencies]
+pyobjc-core = ">=12.1"
+pyobjc-framework-Cocoa = ">=12.1"
+
+[[package]]
 name = "pyright"
 version = "1.1.408"
 description = "Command line wrapper for pyright"
@@ -4441,6 +4505,39 @@ files = [
 ]
 
 [[package]]
+name = "torchcodec"
+version = "0.11.1"
+description = "A video decoder for PyTorch"
+optional = false
+python-versions = ">=3.10"
+groups = ["dev"]
+files = [
+    {file = "torchcodec-0.11.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:4b9cae80e64f15bd935f322761acabd3e6659ec87495c2c5ccc4d9f5ba94d47a"},
+    {file = "torchcodec-0.11.1-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:a6d6b5a80f8846388452d54fde685bb0246d7701bb21749d59a907b0f7b5d7c5"},
+    {file = "torchcodec-0.11.1-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:35d7e07394306fbd621e452c336df9b38e89c9487e23b502ce1b7cc5fb5642db"},
+    {file = "torchcodec-0.11.1-cp310-cp310-win_amd64.whl", hash = "sha256:a9a3f8763593ed0b0e97eb592adca2a6187d1c9b09eabd4a94f17666b3fe8f31"},
+    {file = "torchcodec-0.11.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:47db9696c694c74186c5a861dbf4e5390788355f2586a1fa6af68ad56e6f1ed4"},
+    {file = "torchcodec-0.11.1-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:60fbd745235ea8899ad056d0d5433cb43b17a80ab7672ea85747cdd22d7c6dff"},
+    {file = "torchcodec-0.11.1-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:dd17e1cb3b8c6cdd2f6a522d8822031b169fb10b7ff465d0de748df9af4ea930"},
+    {file = "torchcodec-0.11.1-cp311-cp311-win_amd64.whl", hash = "sha256:30e8fb461c4551c53b51bc19ab01e7a8c118aa89aa59e7ab110548c6b9ad01ae"},
+    {file = "torchcodec-0.11.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:57056e91d1d883d0fb77ca7759e304be9c0bdb4ea0e37bde5c2e361347063b8c"},
+    {file = "torchcodec-0.11.1-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:f1aee486a84247fcaa67870ac5005aa8d382a9839e91e476fa71b5b3d9fda9b7"},
+    {file = "torchcodec-0.11.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:6c26e90e7aa982302644d0af8cb706318682bb390f48a80ecbfeab03499acd04"},
+    {file = "torchcodec-0.11.1-cp312-cp312-win_amd64.whl", hash = "sha256:3fd2d10e0e0a5f455c1c87dc1380b3bd43b77dd5eeeaf479470643b1c04a2dd2"},
+    {file = "torchcodec-0.11.1-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:915fbe20068ec77486fbbeaf0c627c89c7376445f27d215b7489c0a03c64fd4c"},
+    {file = "torchcodec-0.11.1-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:3755de03c96afd37410cba68198225d11cd6431a32f2161a0019791a4a853305"},
+    {file = "torchcodec-0.11.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:5eee69971cec1147a03b8a6b678b5dfbeff0b2c71ed7929e488391f9fbcd630c"},
+    {file = "torchcodec-0.11.1-cp313-cp313-win_amd64.whl", hash = "sha256:67b34e5733636588ebe0f15082bbb90a8ce1472ccb8bb1a656ec28958a208919"},
+    {file = "torchcodec-0.11.1-cp314-cp314-macosx_12_0_arm64.whl", hash = "sha256:a00ef79e847644f91c9995de021062adc851916b16244d26c0a7a04569710508"},
+    {file = "torchcodec-0.11.1-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:170a3efea64f0cd2c21cee0a233a9e13c67a704b5c5e7ef9aeda31e747ac6885"},
+    {file = "torchcodec-0.11.1-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:db66ddce36a6fa35f30fbe1d78b57289fcb53f8f43c1c85923edbe339540c665"},
+    {file = "torchcodec-0.11.1-cp314-cp314-win_amd64.whl", hash = "sha256:3fd9ef8302b261d3db5585e42be4a3138c5c240a822031642cdf1f82ea3db5b7"},
+]
+
+[package.extras]
+dev = ["numpy", "pillow", "pytest"]
+
+[[package]]
 name = "torchvision"
 version = "0.26.0"
 description = "image and video datasets and models for torch deep learning"
@@ -4969,4 +5066,4 @@ mlx = ["mlx", "mlx-lm"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "1cc20b9b1146801aaeda90ed4d2deaff992c67c814a25a4a72f57e39490f5518"
+content-hash = "cfbb195ad06e52f750bc7de6d8bed1099354f283e9eadf0a2a361012dc4c8801"
