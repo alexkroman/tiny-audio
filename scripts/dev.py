@@ -60,10 +60,11 @@ def format_code():
     run("ruff", "format", *CODE_PATHS)
     run("ruff", "check", "--fix", *CODE_PATHS)
 
+    md_excludes = (".venv", "docs/course", ".worktrees")
     md_files = [
         str(f)
         for f in Path().rglob("*.md")
-        if ".venv" not in str(f) and "docs/course" not in str(f) and f.name != "MODEL_CARD.md"
+        if not any(part in str(f) for part in md_excludes) and f.name != "MODEL_CARD.md"
     ]
     if md_files:
         run("mdformat", *md_files)
