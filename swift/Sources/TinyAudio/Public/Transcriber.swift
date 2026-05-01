@@ -99,6 +99,8 @@ public actor Transcriber {
         //    The bundle's decoder.safetensors is already 4-bit; quantize() here
         //    transforms the Linear modules in-place to QuantizedLinear so their
         //    parameter shapes match the stored weight layout.
+        //    The Qwen3-0.6B bundle uses group_size=128 (verified from scales shape:
+        //    v_proj scales [1024,8] from full weight [1024,1024] => 1024/8=128).
         let decoder: Qwen3Model
         let numDecoderLayers: Int
         do {
@@ -107,7 +109,7 @@ public actor Transcriber {
             let qwenConfig = try JSONDecoder().decode(Qwen3Configuration.self, from: decoderConfigData)
             numDecoderLayers = qwenConfig.hiddenLayers
             decoder = Qwen3Model(qwenConfig)
-            quantize(model: decoder, groupSize: 64, bits: 4)
+            quantize(model: decoder, groupSize: 128, bits: 4)
             let rawWeights = try MLX.loadArrays(
                 url: bundle.appendingPathComponent("decoder.safetensors")
             )
