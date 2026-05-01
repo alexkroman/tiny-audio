@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(name: "TinyAudio", targets: ["TinyAudio"]),
         .executable(name: "tiny-audio-swift-eval", targets: ["tiny-audio-swift-eval"]),
+        .executable(name: "tiny-audio-vad-bench", targets: ["tiny-audio-vad-bench"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.21.0"),
@@ -44,6 +45,11 @@ let package = Package(
             name: "tiny-audio-swift-eval",
             dependencies: ["TinyAudio"],
             path: "Sources/tiny-audio-swift-eval"
+        ),
+        .executableTarget(
+            name: "tiny-audio-vad-bench",
+            dependencies: ["TinyAudio"],
+            path: "Sources/tiny-audio-vad-bench"
         ),
         .testTarget(
             name: "TinyAudioTests",

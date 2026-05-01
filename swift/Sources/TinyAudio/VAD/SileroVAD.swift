@@ -16,10 +16,12 @@ private enum VADModelKeys {
 /// Silero VAD inference wrapper. Stateful: LSTM hidden state is carried
 /// across frames within an utterance. Call `reset()` at utterance boundaries
 /// (handled automatically by `VADStreamer`).
-final class SileroVAD {
+@_spi(Bench)
+public final class SileroVAD {
   /// Number of audio samples per VAD frame.
   /// The bundled silero_vad.mlpackage expects shape [1, 576] for `audio`.
-  static let frameSize = 576
+  @_spi(Bench)
+  public static let frameSize = 576
 
   /// LSTM hidden-state dimension (matches Silero's architecture).
   private static let stateDim = 128
@@ -36,12 +38,17 @@ final class SileroVAD {
   /// Avoids per-call MLMultiArray allocation in the hot path.
   private let audioBuffer: MLMultiArray
 
-  init() throws {
+  convenience init() throws {
+    try self.init(computeUnits: .cpuAndNeuralEngine)
+  }
+
+  @_spi(Bench)
+  public init(computeUnits: MLComputeUnits) throws {
     guard let url = VADResources.sileroVADURL else {
       throw TinyAudioError.vadModelMissing
     }
     let config = MLModelConfiguration()
-    config.computeUnits = .cpuAndNeuralEngine
+    config.computeUnits = computeUnits
 
     // Xcode-built apps get a precompiled `.mlmodelc` directly; load as-is.
     // SwiftPM's `.copy` preserves the source `.mlpackage`, which we compile once
@@ -84,7 +91,8 @@ final class SileroVAD {
 
   /// Run VAD on a frame of `frameSize` samples at 16 kHz. Returns speech probability.
   /// Updates internal LSTM state for the next call.
-  func process(_ frame: ArraySlice<Float>) throws -> Float {
+  @_spi(Bench)
+  public func process(_ frame: ArraySlice<Float>) throws -> Float {
     precondition(
       frame.count == Self.frameSize,
       "SileroVAD expects exactly \(Self.frameSize) samples per call, got \(frame.count)")

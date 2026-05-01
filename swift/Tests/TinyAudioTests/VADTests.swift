@@ -2,7 +2,7 @@
 import Foundation
 import Testing
 
-@testable import TinyAudio
+@_spi(Bench) @testable import TinyAudio
 
 @Suite("VAD")
 struct VADTests {
