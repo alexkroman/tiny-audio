@@ -265,8 +265,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
         decoder.config.use_cache = getattr(config, "use_cache", True)
-        decoder.requires_grad_(False)
-        decoder.eval()
+        if getattr(config, "freeze_language_model", True):
+            decoder.requires_grad_(False)
+            decoder.train(False)
         return decoder
 
     def _create_projector(self, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
@@ -395,8 +396,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
 
     def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
-        """Only save trainable projector weights."""
-        return {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
+        """Save trainable weights: projector, plus the language model when fine-tuned."""
+        sd = {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
+        if not getattr(self.config, "freeze_language_model", True):
+            sd.update(
+                {f"language_model.{k}": v for k, v in self.language_model.state_dict().items()}
+            )
+        return sd
 
     def _compute_encoder_output_lengths(
         self,

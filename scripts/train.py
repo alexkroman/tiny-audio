@@ -304,6 +304,67 @@ class MultiTaskDataCollator(DataCollator):
 class ASRTrainer(Trainer):
     """Trainer subclass for ASR models."""
 
+    def __init__(
+        self,
+        *args,
+        decoder_learning_rate: float | None = None,
+        decoder_weight_decay: float | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.decoder_learning_rate = decoder_learning_rate
+        self.decoder_weight_decay = decoder_weight_decay
+
+    def create_optimizer(self):
+        """Optimizer with separate LR / weight decay for the language model.
+
+        Mirrors HF Trainer.create_optimizer's decay/no-decay split, but adds a
+        second axis: parameters under `language_model.` get `decoder_learning_rate`
+        and `decoder_weight_decay` (when set), while the projector keeps
+        `args.learning_rate` and `args.weight_decay`.
+        """
+        decoder_overrides = (
+            self.decoder_learning_rate is not None or self.decoder_weight_decay is not None
+        )
+        if self.optimizer is not None or not decoder_overrides:
+            return super().create_optimizer()
+
+        from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+        from transformers.trainer_pt_utils import get_parameter_names
+
+        opt_model = self.model
+        decay_parameters = set(get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS))
+        decay_parameters = {n for n in decay_parameters if "bias" not in n}
+
+        groups: dict[tuple[bool, bool], list] = {
+            (True, True): [],  # decoder, decay
+            (True, False): [],  # decoder, no decay
+            (False, True): [],  # other, decay
+            (False, False): [],  # other, no decay
+        }
+        for name, param in opt_model.named_parameters():
+            if not param.requires_grad:
+                continue
+            is_decoder = name.startswith("language_model.")
+            decay = name in decay_parameters
+            groups[(is_decoder, decay)].append(param)
+
+        base_wd = self.args.weight_decay
+        base_lr = self.args.learning_rate
+        dec_lr = self.decoder_learning_rate if self.decoder_learning_rate is not None else base_lr
+        dec_wd = self.decoder_weight_decay if self.decoder_weight_decay is not None else base_wd
+        optimizer_grouped_parameters = [
+            {"params": groups[(False, True)], "weight_decay": base_wd, "lr": base_lr},
+            {"params": groups[(False, False)], "weight_decay": 0.0, "lr": base_lr},
+            {"params": groups[(True, True)], "weight_decay": dec_wd, "lr": dec_lr},
+            {"params": groups[(True, False)], "weight_decay": 0.0, "lr": dec_lr},
+        ]
+        optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
+
+        optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args, opt_model)
+        self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+        return self.optimizer
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """Compute loss with proper label shifting for causal LM.
 
@@ -370,6 +431,7 @@ TRAINING_MODEL_PARAMS = [
     "lora_dropout",
     "lora_target_modules",
     "freeze_projector",
+    "freeze_language_model",
 ]
 
 
@@ -491,6 +553,8 @@ def main(cfg: DictConfig) -> None:
 
     training_config = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_config, dict)
+    decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
+    decoder_weight_decay = training_config.pop("decoder_weight_decay", None)
     if compile_config := training_config.pop("torch_compile_config", None):
         torch._dynamo.config.cache_size_limit = compile_config.get("cache_size_limit", 64)
         torch._dynamo.config.capture_scalar_outputs = compile_config.get(
@@ -506,6 +570,8 @@ def main(cfg: DictConfig) -> None:
         data_collator=data_collator,
         processing_class=model.tokenizer,
         callbacks=callbacks,
+        decoder_learning_rate=decoder_learning_rate,
+        decoder_weight_decay=decoder_weight_decay,
     )
 
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
