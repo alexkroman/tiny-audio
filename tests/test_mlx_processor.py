@@ -61,9 +61,8 @@ def test_audio_token_count_matches_pt_pipeline(audio_seconds):
         projector=mlx_proj,
     )
 
-    assert mlx_count == pt_audio_token_count, (
-        f"audio_seconds={audio_seconds}, mlx={mlx_count}, pt={pt_audio_token_count}"
-    )
+    err = f"audio_seconds={audio_seconds}, mlx={mlx_count}, pt={pt_audio_token_count}"
+    assert mlx_count == pt_audio_token_count, err
 
 
 def test_chat_template_input_ids_match_pt():

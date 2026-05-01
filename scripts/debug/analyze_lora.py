@@ -34,7 +34,9 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
     """Download and analyze LoRA adapter weights."""
 
     console.print(f"Downloading adapter from {repo_id}...")
-    adapter_path = hf_hub_download(repo_id=repo_id, filename="adapter_model.safetensors")  # nosec B615
+    adapter_path = hf_hub_download(  # nosec B615
+        repo_id=repo_id, filename="adapter_model.safetensors"
+    )
 
     console.print(f"Loading weights from {adapter_path}...")
     state_dict = load_file(adapter_path)

@@ -20,6 +20,7 @@ from .asr import (
     LocalEvaluator,
     LocalStreamingEvaluator,
     MLXEvaluator,
+    SwiftSDKEvaluator,
 )
 from .base import (
     AlignmentResult,
@@ -64,6 +65,7 @@ __all__ = [
     "ElevenLabsEvaluator",
     "AppleSpeechEvaluator",
     "MLXEvaluator",
+    "SwiftSDKEvaluator",
     # Diarization evaluators
     "DiarizationEvaluator",
     "AssemblyAIDiarizationEvaluator",

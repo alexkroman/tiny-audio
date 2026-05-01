@@ -42,6 +42,7 @@ from scripts.eval.evaluators import (
     MCQResult,
     MLXEvaluator,
     MMAUEvaluator,
+    SwiftSDKEvaluator,
     TimestampAlignmentEvaluator,
 )
 
@@ -810,6 +811,14 @@ def main(
             model_id = get_model_name(repo_id)
             evaluator = MLXEvaluator(
                 model_path=repo_id,
+                audio_field=cfg.audio_field,
+                text_field=cfg.text_field,
+            )
+        elif model.startswith("swift://"):
+            repo_id = model[len("swift://") :]
+            model_id = get_model_name(repo_id)
+            evaluator = SwiftSDKEvaluator(
+                repo_id=repo_id,
                 audio_field=cfg.audio_field,
                 text_field=cfg.text_field,
             )

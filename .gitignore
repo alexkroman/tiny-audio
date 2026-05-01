@@ -1,5 +1,5 @@
 .env
-audio/
+/audio/
 CLAUDE.md
 docs/superpowers/
 datasets_cache
@@ -191,6 +191,24 @@ events.out.tfevents.*
 *.flac
 *.m4a
 
+# Swift SDK test fixtures: small, deterministic, source-of-truth for parity
+# tests; must be committed so CI / fresh clones can run them. The earlier
+# *.bin and *.wav patterns above otherwise filter them out.
+!swift/Tests/TinyAudioTests/Fixtures/*.bin
+!swift/Tests/TinyAudioTests/Fixtures/*.wav
+
+# Silero VAD Core ML model: compiled once via scripts/convert_silero_vad.py
+# and shipped as a SwiftPM resource. The *.bin rule above would filter the
+# weights file inside the .mlpackage bundle, so we un-ignore it here.
+!swift/Sources/TinyAudio/Resources/silero_vad.mlpackage/
+!swift/Sources/TinyAudio/Resources/silero_vad.mlpackage/**
+
+# TinyAudio SDK bundled model weights (LFS-tracked via .gitattributes).
+# The *.safetensors rule above would filter these out, so we un-ignore the
+# entire Model/ resource directory here.
+!swift/Sources/TinyAudio/Resources/Model/
+!swift/Sources/TinyAudio/Resources/Model/**
+
 # Course exercise outputs
 audio_processing.png
 embedding_distributions.png
@@ -206,3 +224,13 @@ observations.txt
 /dvc.lock
 # Git worktrees
 .worktrees/
+
+# Swift / SwiftPM / Xcode build artifacts
+swift/.build/
+swift/.swiftpm/
+**/xcuserdata/
+**/DerivedData/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+# Note: swift/Package.resolved is intentionally tracked to pin transitive
+# deps for reproducible builds.

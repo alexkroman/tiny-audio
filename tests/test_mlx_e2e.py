@@ -64,6 +64,5 @@ def test_pt_vs_mlx_transcripts_close():
     import jiwer
 
     wer = jiwer.wer(pt_text, mlx_text)
-    assert wer < 0.5, (
-        f"WER between PT and MLX too high: {wer:.3f}\nPT:  {pt_text!r}\nMLX: {mlx_text!r}"
-    )
+    err = f"WER between PT and MLX too high: {wer:.3f}\nPT:  {pt_text!r}\nMLX: {mlx_text!r}"
+    assert wer < 0.5, err

@@ -94,6 +94,5 @@ def test_audio_token_id_never_in_output():
     for seed in range(5):
         audio = rng.standard_normal(16000 * 2).astype(np.float32)
         token_ids = list(model._iter_token_ids(audio, max_new_tokens=20, system_prompt=None))
-        assert audio_token_id not in token_ids, (
-            f"<audio> token id {audio_token_id} leaked into output for seed {seed}: {token_ids}"
-        )
+        err = f"<audio> token id {audio_token_id} leaked into output for seed {seed}: {token_ids}"
+        assert audio_token_id not in token_ids, err

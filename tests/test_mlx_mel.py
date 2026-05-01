@@ -22,9 +22,8 @@ def test_compute_mel_unpadded_shape_and_length(audio_seconds):
     # Audio is hop_length=160 → ~100 mel frames per second
     expected_frames = int(audio_seconds * 100)
     # Allow small variance from edge effects (typically ±1 frame)
-    assert abs(mel_len - expected_frames) <= 2, (
-        f"audio_seconds={audio_seconds}, mel_len={mel_len}, expected~{expected_frames}"
-    )
+    err = f"audio_seconds={audio_seconds}, mel_len={mel_len}, expected~{expected_frames}"
+    assert abs(mel_len - expected_frames) <= 2, err
     # The unpadded length should not exceed mel.shape[2]
     assert mel_len <= mel.shape[2]
 
