@@ -2,6 +2,14 @@
 
 Fully on-device speech-to-text for iOS / macOS / visionOS, using the tiny-audio MLX model.
 
+## What ships in v1.0
+
+- File / buffer / sample transcription via `Transcriber`
+- Streaming text deltas via `transcribeStream`
+- Live mic + Silero VAD endpointing via `MicrophoneTranscriber`
+- Public API surface: 7 types, fully documented via DocC
+- Quality gates: token-ID parity test, WER parity vs Python (see `swift/docs/wer-parity.md`)
+
 ## Requirements
 
 - Xcode 15.3+ (for Swift Testing) and Swift 6.0+
@@ -13,7 +21,7 @@ Fully on-device speech-to-text for iOS / macOS / visionOS, using the tiny-audio 
 In your `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/<owner>/tiny-audio.git", from: "0.1.0"),
+.package(url: "https://github.com/<owner>/tiny-audio.git", from: "1.0.0"),
 
 // In your target dependencies:
 .product(name: "TinyAudio", package: "tiny-audio"),
@@ -44,7 +52,7 @@ for try await delta in transcriber.transcribeStream(.file(url)) {
 }
 ```
 
-## Live microphone transcription (v0.2)
+## Live microphone transcription
 
 ```swift
 import TinyAudio
@@ -100,18 +108,17 @@ let samples: [Float] = ...           // mono Float32 at any sample rate
 let text = try await transcriber.transcribe(.samples(samples, sampleRate: 16_000))
 ```
 
-## What ships in v0.1
+## Public API surface
 
-- `Transcriber` — async actor for file/buffer/sample transcription.
-- `AudioInput` — file URL, `AVAudioPCMBuffer`, or raw `[Float]` samples.
-- `TranscriptionOptions` — `maxNewTokens`, optional system prompt.
-- `WeightSource` — default Hub bundle, custom Hub repo, or local directory.
-- `TinyAudioError` — typed errors for download / verification / runtime failures.
-
-**v0.2 adds:**
-
-- `MicrophoneTranscriber` — async actor for live-mic transcription with Silero VAD endpointing.
-- `VADConfig` — public struct for tuning endpointing thresholds and durations.
+| Type | Description |
+|------|-------------|
+| `Transcriber` | Async actor for file / buffer / sample transcription |
+| `MicrophoneTranscriber` | Async actor for live-mic transcription with Silero VAD |
+| `AudioInput` | File URL, `AVAudioPCMBuffer`, or raw `[Float]` samples |
+| `TranscriptionOptions` | `maxNewTokens`, optional system prompt |
+| `WeightSource` | Default Hub bundle, custom Hub repo, or local directory |
+| `VADConfig` | Tuning knobs for Silero VAD endpointing thresholds |
+| `TinyAudioError` | Typed errors for download / verification / runtime failures |
 
 ## Model details
 
@@ -143,6 +150,37 @@ The encoder and decoder are reused from upstream Swift packages
 (`mlx-audio-swift` and a vendored copy of `mlx-swift-lm`'s Qwen3 patched to
 accept input embeddings). The trained projector that bridges audio→text is
 the only model-specific component.
+
+## Example app
+
+A minimal SwiftUI demo lives at `swift/Examples/TinyAudioDemo/`. Run it with:
+
+```bash
+swift run --package-path swift/Examples/TinyAudioDemo TinyAudioDemo
+```
+
+It demonstrates `Transcriber.load()` with progress callback and `MicrophoneTranscriber` live-mic streaming through `@Published` SwiftUI state.
+
+## Documentation
+
+Full API documentation is generated from the source as DocC. To build locally:
+
+```bash
+swift package --package-path swift generate-documentation --target TinyAudio
+```
+
+(Requires `swift-docc-plugin`; install via Package.swift if not already present.)
+
+## WER parity
+
+The Swift SDK was validated against the Python MLX reference on a 200-sample slice of loquacious:
+
+| Backend | WER % |
+|---------|-------|
+| Python MLX | 13.88 |
+| Swift SDK | 9.93 |
+
+The Swift path achieves lower WER (delta = −3.95 pp), driven by the Python path hallucinating on a small number of short clips. Full methodology, per-sample breakdown, and reproduction steps are in [`swift/docs/wer-parity.md`](docs/wer-parity.md).
 
 ## Running tests
 
