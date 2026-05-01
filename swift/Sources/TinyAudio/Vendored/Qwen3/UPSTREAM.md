@@ -104,12 +104,27 @@ The `Qwen3Model` class no longer declares conformance to `LLMModel`,
 `KVCacheDimensionProvider`, or `LoRAModel`. These are only used by the
 mlx-swift-lm inference / fine-tuning pipeline, not by TinyAudio's ASRPipeline.
 
-### 5. `attentionWithCacheUpdate` — dropped quantized KV path
+### 5. Quantized KV cache types added back
 
-`QuantizedKVCacheProtocol` and `quantizedScaledDotProductAttention` are
-omitted. ASRPipeline uses plain `KVCacheSimple`. Quantized weights
-(4-bit Qwen3-0.6B-MLX-4bit) are handled at the `Linear` / `QuantizedLinear`
-layer level; the KV cache itself is full-precision.
+`MLXLMCommonTypes.swift` now also vendors the quantized KV cache types
+that an earlier patch had dropped. `attentionWithCacheUpdate` routes
+`QuantizedKVCacheProtocol` instances through the quantized SDPA path.
+
+Vendored from upstream `Libraries/MLXLMCommon/KVCache.swift`:
+
+- `QuantizedKVCacheProtocol`           (lines 94-118)
+- `QuantizedKVCache` class             (lines 727-988)
+- `KVCacheSimple.toQuantized(...)`     (lines 407-427)
+- `quantizedScaledDotProductAttention` (lines 1532-1620)
+- `maybeQuantizeKVCache`               (lines 1636-1659)
+
+As with the rest of `MLXLMCommonTypes.swift`, visibility was lowered from
+`public` to internal (module-scoped). Helper methods on `QuantizedKVCache`
+(`treeMap`, `treeMapPair`, `initQuant`, `expandQuant`) remain `private`.
+
+These additions are purely additive: no existing call sites yet use the
+quantized cache. They are wired in by follow-up commits (KV-cache
+quantization and prefix-cache reuse).
 
 ## How to rebase
 
