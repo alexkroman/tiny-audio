@@ -62,6 +62,13 @@ class TestRIRAugmentation:
         for got, given in zip(aug.rirs, fake_rirs):
             assert torch.equal(got, given)
 
+    def test_empty_audio_passthrough(self, fake_rirs):
+        aug = RIRAugmentation(rirs=fake_rirs, prob=1.0)
+        empty = np.zeros(0, dtype=np.float32)
+        out = aug(empty)
+        assert out.shape == empty.shape
+        assert out.dtype == empty.dtype
+
 
 class TestRIRCorpusMode:
     def _write_synthetic_corpus(self, root, n: int, sample_rate: int = 16000):
@@ -130,6 +137,13 @@ class TestNoiseAugmentation:
         diff_rms = float(np.sqrt(np.mean((out - audio) ** 2)))
         assert diff_rms < signal_rms * 0.05  # noise < 5% of signal
 
+    def test_empty_audio_passthrough(self):
+        aug = NoiseAugmentation(prob=1.0)
+        empty = np.zeros(0, dtype=np.float32)
+        out = aug(empty)
+        assert out.shape == empty.shape
+        assert out.dtype == empty.dtype
+
 
 class TestNoiseCorpusMode:
     def _write_synthetic_corpus(self, root, n: int, sample_rate: int = 16000):
@@ -160,3 +174,11 @@ class TestNoiseCorpusMode:
     def test_missing_corpus_path_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path / "does-not-exist"))
+
+    def test_empty_audio_passthrough(self, tmp_path):
+        self._write_synthetic_corpus(tmp_path, n=2)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path))
+        empty = np.zeros(0, dtype=np.float32)
+        out = aug(empty)
+        assert out.shape == empty.shape
+        assert out.dtype == empty.dtype
