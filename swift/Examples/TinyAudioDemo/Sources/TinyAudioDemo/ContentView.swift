@@ -12,6 +12,7 @@ struct ContentView: View {
         #if os(macOS)
           .frame(minWidth: 480, minHeight: 320)
         #endif
+        .task { await vm.loadModel() }
     }
   }
 
@@ -30,14 +31,11 @@ struct ContentView: View {
   @ViewBuilder
   private var controlsSection: some View {
     switch vm.loadState {
-    case .idle:
-      Button("Load Model") { Task { await vm.loadModel() } }
-        .buttonStyle(.borderedProminent)
-    case .loading(let progress):
-      VStack(alignment: .leading, spacing: 8) {
-        Text("Loading model — \(Int(progress * 100))%")
-          .font(.caption)
-        ProgressView(value: progress)
+    case .loading:
+      HStack(spacing: 12) {
+        ProgressView().controlSize(.small)
+        Text("Loading model…")
+          .foregroundStyle(.secondary)
       }
     case .ready:
       HStack {
