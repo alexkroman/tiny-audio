@@ -291,7 +291,7 @@ final class KVCacheSimple: BaseKVCache {
     return new
   }
 
-  func toQuantized(groupSize: Int = 64, bits: Int = 8) -> QuantizedKVCache {
+  func toQuantized(groupSize: Int = 64, bits: Int = 4) -> QuantizedKVCache {
     let q = QuantizedKVCache(groupSize: groupSize, bits: bits)
     q.offset = self.offset
     if let keys = self.keys, let values = self.values {

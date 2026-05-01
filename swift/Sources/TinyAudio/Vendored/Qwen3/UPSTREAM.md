@@ -113,7 +113,7 @@ that an earlier patch had dropped. `attentionWithCacheUpdate` routes
 Vendored from upstream `Libraries/MLXLMCommon/KVCache.swift`:
 
 - `QuantizedKVCacheProtocol`           (lines 94-118)
-- `QuantizedKVCache` class             (lines 727-988)
+- `QuantizedKVCache` class             (lines 728-988)
 - `KVCacheSimple.toQuantized(...)`     (lines 407-427)
 - `quantizedScaledDotProductAttention` (lines 1532-1620)
 - `maybeQuantizeKVCache`               (lines 1636-1659)
@@ -135,6 +135,10 @@ quantization and prefix-cache reuse).
 - `for i in 0 ..< cache.count` in `maybeQuantizeKVCache` was tightened to
   `for i in 0..<cache.count` to match the spacing convention used elsewhere
   in `MLXLMCommonTypes.swift`.
+- The new `attentionWithCacheUpdate` quantized branch uses shorter local
+  names (`qCache`, `qK`, `qV`) than upstream `AttentionUtils.swift:54-66`,
+  which uses `quantizedKVCache`, `quantizedKeys`, `quantizedValues`. The
+  logic is identical; the rename keeps the routing block compact.
 
 When rebasing this file against upstream, re-apply the rename + spacing
 deltas (or just run `swift-format -i`).
