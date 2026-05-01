@@ -172,18 +172,34 @@ public actor Transcriber {
 
     // MARK: - Private helpers
 
-    /// Run a synthetic 1-second transcribe to JIT-compile MLX Metal kernels.
+    /// Run synthetic transcribes at several audio durations to JIT-compile MLX
+    /// Metal kernels for the shapes most likely to occur in real ASR calls.
+    ///
+    /// Warming at only 1 s means the first real call at a different duration
+    /// (e.g. 5 s or 15 s) pays a ~15 ms per-shape JIT penalty. Warming at
+    /// 1 s / 5 s / 15 s covers most short-form ASR durations and adds ~300 ms
+    /// to cold load time while eliminating that first-call JIT cost.
     /// Mirrors `MLXASRModel.warmup()` in Python. Failures are non-fatal.
     private func warmup() async {
-        let zeros = [Float](repeating: 0, count: 16_000)
-        do {
-            for try await _ in pipeline.tokenStream(
-                samples: zeros, maxNewTokens: 4, systemPrompt: nil
-            ) {
-                // discard — warmup output is meaningless
+        // Warm up MLX kernels for several audio durations. Real audio comes in
+        // many lengths; warming at one shape only triggers a JIT recompile on the
+        // first real call. 1 s / 5 s / 15 s covers most short-form ASR durations
+        // and adds ~300 ms to load time but saves ~15 ms on every first call
+        // until that shape is hit.
+        let durationsSeconds: [Int] = [1, 5, 15]
+        for seconds in durationsSeconds {
+            let zeros = [Float](repeating: 0, count: 16_000 * seconds)
+            do {
+                for try await _ in pipeline.tokenStream(
+                    samples: zeros,
+                    maxNewTokens: 4,
+                    systemPrompt: nil
+                ) {
+                    // discard
+                }
+            } catch {
+                // Warmup failures are non-fatal; surface only if real inference also fails.
             }
-        } catch {
-            // Non-fatal: surface only if real inference also fails.
         }
     }
 
