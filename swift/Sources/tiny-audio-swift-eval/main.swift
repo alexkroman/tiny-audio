@@ -16,6 +16,12 @@
 import Foundation
 import TinyAudio
 
+// MARK: - Codable message types
+
+private struct ReadyMsg: Encodable { let ready: Bool }
+private struct ResultMsg: Encodable { let text: String; let elapsed_ms: Int }
+private struct ErrorMsg: Encodable { let error: String; let path: String? }
+
 @main
 struct TinyAudioEvalCLI {
     static func main() async {
@@ -27,24 +33,30 @@ struct TinyAudioEvalCLI {
         do {
             transcriber = try await Transcriber.load(from: source, progress: nil)
         } catch {
-            emitError("load failed: \(error)")
+            emit(ErrorMsg(error: "load failed: \(error)", path: nil))
             exit(1)
         }
 
-        emit(["ready": true])
+        emit(ReadyMsg(ready: true))
 
         // Read paths from stdin until EOF.
         while let line = readLine() {
             let path = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !path.isEmpty else { continue }
+            guard !path.contains("\n") else {
+                emit(ErrorMsg(error: "path contains newline", path: nil))
+                continue
+            }
             let url = URL(fileURLWithPath: path)
-            let started = Date()
+            let started = ContinuousClock.now
             do {
                 let text = try await transcriber.transcribe(.file(url))
-                let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
-                emit(["text": text, "elapsed_ms": elapsedMs])
+                let elapsed = started.duration(to: ContinuousClock.now)
+                let ns = elapsed.components.seconds * 1_000_000_000 + elapsed.components.attoseconds / 1_000_000_000
+                let elapsedMs = Int(ns / 1_000_000)
+                emit(ResultMsg(text: text, elapsed_ms: elapsedMs))
             } catch {
-                emit(["error": "\(error)", "path": path])
+                emit(ErrorMsg(error: "\(error)", path: path))
             }
         }
     }
@@ -72,16 +84,13 @@ struct TinyAudioEvalCLI {
         return .defaultHub
     }
 
-    private static func emit(_ object: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
-            FileHandle.standardError.write(Data("emit failed for \(object)\n".utf8))
-            return
+    private static func emit<T: Encodable>(_ msg: T) {
+        do {
+            var data = try JSONEncoder().encode(msg)
+            data.append(0x0a)  // '\n'
+            FileHandle.standardOutput.write(data)
+        } catch {
+            FileHandle.standardError.write(Data("emit failed: \(error)\n".utf8))
         }
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write(Data("\n".utf8))
-    }
-
-    private static func emitError(_ msg: String) {
-        emit(["error": msg])
     }
 }

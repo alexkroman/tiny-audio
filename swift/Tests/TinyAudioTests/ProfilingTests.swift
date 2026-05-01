@@ -26,11 +26,10 @@ struct ProfilingTests {
         print("[load]    \(loadMs) ms (cold start: download check + verify + module load + warmup)")
 
         // Use the librispeech sample fixture (~6 s of audio).
-        let url = Bundle.module.url(
-            forResource: "librispeech_sample",
-            withExtension: "wav",
-            subdirectory: "Fixtures"
-        )!
+        let url = try #require(
+            Bundle.module.url(forResource: "librispeech_sample", withExtension: "wav", subdirectory: "Fixtures"),
+            "librispeech_sample.wav fixture is missing"
+        )
 
         // Run multiple iterations so JIT effects settle on the first run.
         // The first iteration includes any per-shape kernel compile; subsequent

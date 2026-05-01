@@ -234,6 +234,8 @@ def main() -> None:
     encoder = inner.encoder
     rnn = inner.decoder.rnn
     conv_layer = list(inner.decoder.decoder.children())[2]
+    if not isinstance(conv_layer, torch.nn.Conv1d):
+        raise AssertionError(f"Expected Conv1d at decoder.decoder[2], got {type(conv_layer)}")
     conv_w = conv_layer.weight.detach().clone()
     conv_b = conv_layer.bias.detach().clone()
     lstm_gates = _split_lstm_weights(

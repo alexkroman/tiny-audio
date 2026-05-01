@@ -1,8 +1,11 @@
 import Foundation
 import TinyAudio
 
-// A Sendable wrapper that forwards Progress values back to the main actor.
-// Captures an `AsyncStream.Continuation` which is `Sendable`, so no data races.
+/// `@unchecked Sendable` — this class is constructed once per `loadModel()`
+/// call and only the `update(_:)` method writes to the AsyncStream
+/// continuation, which itself is thread-safe. The closure passed to
+/// `Transcriber.load(progress:)` runs on a non-main concurrency context;
+/// `update(_:)` simply yields a Double through to the actor side.
 private final class ProgressRelay: @unchecked Sendable {
     private let continuation: AsyncStream<Double>.Continuation
 

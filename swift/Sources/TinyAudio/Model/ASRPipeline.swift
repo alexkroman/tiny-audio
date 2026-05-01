@@ -19,7 +19,7 @@ import Tokenizers
 /// does the work happen if you had to pay it all up front?"
 private struct PipelineProfile {
     private var phases: [(name: String, ms: Int)] = []
-    private var lastTime: Date = Date()
+    private var lastTime = ContinuousClock.now
     let isEnabled: Bool
 
     init() {
@@ -29,13 +29,15 @@ private struct PipelineProfile {
     mutating func reset() {
         guard isEnabled else { return }
         phases = []
-        lastTime = Date()
+        lastTime = ContinuousClock.now
     }
 
     mutating func mark(_ name: String) {
         guard isEnabled else { return }
-        let now = Date()
-        let ms = Int(now.timeIntervalSince(lastTime) * 1000)
+        let now = ContinuousClock.now
+        let elapsed = lastTime.duration(to: now)
+        let ns = elapsed.components.seconds * 1_000_000_000 + elapsed.components.attoseconds / 1_000_000_000
+        let ms = Int(ns / 1_000_000)
         phases.append((name, ms))
         lastTime = now
     }

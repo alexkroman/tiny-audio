@@ -2,6 +2,17 @@
 import CoreML
 import Foundation
 
+// MARK: - Model key constants
+
+private enum VADModelKeys {
+    static let audio = "audio"
+    static let h = "h"
+    static let c = "c"
+    static let prob = "prob"
+    static let hOut = "h_out"
+    static let cOut = "c_out"
+}
+
 /// Silero VAD inference wrapper. Stateful: LSTM hidden state is carried
 /// across frames within an utterance. Call `reset()` at utterance boundaries
 /// (handled automatically by `VADStreamer`).
@@ -13,6 +24,11 @@ final class SileroVAD {
     /// LSTM hidden-state dimension (matches Silero's architecture).
     private static let stateDim = 128
 
+    /// Cache compiled model URL across instances so recompile only happens once per process.
+    /// Protected by `compileLock`; nonisolated(unsafe) because the lock guarantees safety.
+    private nonisolated(unsafe) static var cachedCompiledURL: URL?
+    private static let compileLock = NSLock()
+
     private let model: MLModel
     private var hState: MLMultiArray
     private var cState: MLMultiArray
@@ -23,13 +39,27 @@ final class SileroVAD {
         }
         let config = MLModelConfiguration()
         config.computeUnits = .cpuAndNeuralEngine
+
+        let compiledURL: URL
+        Self.compileLock.lock()
+        defer { Self.compileLock.unlock() }
+        if let cached = Self.cachedCompiledURL, FileManager.default.fileExists(atPath: cached.path) {
+            compiledURL = cached
+        } else {
+            do {
+                compiledURL = try MLModel.compileModel(at: url)
+                Self.cachedCompiledURL = compiledURL
+            } catch {
+                throw TinyAudioError.mlxModuleLoadFailed(name: "SileroVAD", underlying: AnyError(error))
+            }
+        }
+
         do {
-            // .mlpackage must be compiled to .mlmodelc before loading.
-            let compiledURL = try MLModel.compileModel(at: url)
             self.model = try MLModel(contentsOf: compiledURL, configuration: config)
         } catch {
             throw TinyAudioError.mlxModuleLoadFailed(name: "SileroVAD", underlying: AnyError(error))
         }
+
         self.hState = try Self.zeroState()
         self.cState = try Self.zeroState()
     }
@@ -46,10 +76,11 @@ final class SileroVAD {
         precondition(frame.count == Self.frameSize,
                      "SileroVAD expects exactly \(Self.frameSize) samples per call, got \(frame.count)")
 
-        // Model expects audio as [1, frameSize].
+        // Fill via the raw Float32 data pointer, no per-element NSNumber boxing.
         let audioArray = try MLMultiArray(shape: [1, NSNumber(value: Self.frameSize)], dataType: .float32)
-        for i in 0 ..< Self.frameSize {
-            audioArray[i] = NSNumber(value: frame[i])
+        frame.withUnsafeBufferPointer { src in
+            let dst = audioArray.dataPointer.assumingMemoryBound(to: Float32.self)
+            dst.update(from: src.baseAddress!, count: Self.frameSize)
         }
 
         // Input keys: "audio", "h", "c"; outputs: "prob", "h_out", "c_out".
@@ -59,11 +90,11 @@ final class SileroVAD {
         do {
             output = try model.prediction(from: input)
         } catch {
-            throw TinyAudioError.mlxModuleLoadFailed(name: "SileroVAD.process", underlying: AnyError(error))
+            throw TinyAudioError.audioFormatUnsupported(reason: "SileroVAD prediction failed: \(error)")
         }
 
         // Extract prob.
-        guard let probValue = output.featureValue(for: "prob") else {
+        guard let probValue = output.featureValue(for: VADModelKeys.prob) else {
             throw TinyAudioError.audioFormatUnsupported(reason: "SileroVAD output missing 'prob'")
         }
         let prob: Float
@@ -76,10 +107,10 @@ final class SileroVAD {
         }
 
         // Update state.
-        if let newH = output.featureValue(for: "h_out")?.multiArrayValue {
+        if let newH = output.featureValue(for: VADModelKeys.hOut)?.multiArrayValue {
             hState = newH
         }
-        if let newC = output.featureValue(for: "c_out")?.multiArrayValue {
+        if let newC = output.featureValue(for: VADModelKeys.cOut)?.multiArrayValue {
             cState = newC
         }
 
@@ -88,9 +119,9 @@ final class SileroVAD {
 
     private static func zeroState() throws -> MLMultiArray {
         let arr = try MLMultiArray(shape: [1, NSNumber(value: stateDim)], dataType: .float32)
-        for i in 0 ..< stateDim {
-            arr[i] = NSNumber(value: 0.0)
-        }
+        // Fill via the raw Float32 data pointer, no per-element NSNumber boxing.
+        let dst = arr.dataPointer.assumingMemoryBound(to: Float32.self)
+        dst.initialize(repeating: 0, count: stateDim)
         return arr
     }
 }
@@ -107,12 +138,12 @@ private final class SileroVADInput: MLFeatureProvider {
         self.c = c
     }
 
-    var featureNames: Set<String> { ["audio", "h", "c"] }
+    var featureNames: Set<String> { [VADModelKeys.audio, VADModelKeys.h, VADModelKeys.c] }
     func featureValue(for featureName: String) -> MLFeatureValue? {
         switch featureName {
-        case "audio": return MLFeatureValue(multiArray: audio)
-        case "h": return MLFeatureValue(multiArray: h)
-        case "c": return MLFeatureValue(multiArray: c)
+        case VADModelKeys.audio: return MLFeatureValue(multiArray: audio)
+        case VADModelKeys.h: return MLFeatureValue(multiArray: h)
+        case VADModelKeys.c: return MLFeatureValue(multiArray: c)
         default: return nil
         }
     }

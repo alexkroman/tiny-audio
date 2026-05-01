@@ -43,7 +43,7 @@ public struct VADConfig: Sendable {
     /// utterance, in milliseconds.
     ///
     /// Prevents the first syllable of an utterance from being clipped.
-    /// Requires ``minSpeechDurationMs`` of lookahead to be buffered.
+    /// The ring buffer that holds this pre-roll audio is sized to this value.
     public var preSpeechPaddingMs: Int = 200
 
     /// Create a `VADConfig` with explicit field values.

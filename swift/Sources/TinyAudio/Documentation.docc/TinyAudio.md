@@ -1,4 +1,4 @@
-# ``TinyAudio``
+# `TinyAudio`
 
 Fully on-device speech-to-text for iOS, macOS, and visionOS, using a 4-bit quantized
 GLM-ASR encoder + Qwen3-0.6B decoder via Apple's MLX framework.
@@ -11,14 +11,13 @@ samples, or live microphone capture.
 
 The headline entry points:
 
-- ``Transcriber/load(from:progress:)`` — async actor construction. Downloads,
+- `Transcriber/load(from:progress:)` — async actor construction. Downloads,
   verifies, and loads the model.
-- ``Transcriber/transcribe(_:options:)`` — single-shot file/buffer transcription
+- `Transcriber/transcribe(_:options:)` — single-shot file/buffer transcription
   returning a `String`.
-- ``Transcriber/transcribeStream(_:options:)`` — `AsyncThrowingStream<String,
-  Error>` of incremental text deltas.
-- ``MicrophoneTranscriber/start()`` — live-mic transcription with Silero VAD
-  endpointing. Per-utterance results stream as ``MicrophoneTranscriber/Event``.
+- `Transcriber/transcribeStream(_:options:)` — `AsyncThrowingStream<String, Error>` of incremental text deltas.
+- `MicrophoneTranscriber/start()` — live-mic transcription with Silero VAD
+  endpointing. Per-utterance results stream as `MicrophoneTranscriber/Event`.
 
 ## Quickstart
 
@@ -50,20 +49,20 @@ for await event in mic.events {
 
 ### Transcribing files and buffers
 
-- ``Transcriber``
-- ``AudioInput``
-- ``TranscriptionOptions``
+- `Transcriber`
+- `AudioInput`
+- `TranscriptionOptions`
 
 ### Live microphone
 
-- ``MicrophoneTranscriber``
-- ``VADConfig``
+- `MicrophoneTranscriber`
+- `VADConfig`
 
 ### Loading
 
-- ``WeightSource``
+- `WeightSource`
 
 ### Errors
 
-- ``TinyAudioError``
-- ``AnyError``
+- `TinyAudioError`
+- `AnyError`

@@ -7,7 +7,7 @@ import Foundation
 /// `MicrophoneTranscriber` wires `AVAudioEngine`, a Silero Voice Activity
 /// Detector, and a ``Transcriber`` into a single actor.  Audio captured from
 /// the default input device is resampled to 16 kHz mono Float32, sliced into
-/// VAD frames, and fed through ``VADStreamer``.  When the VAD declares an
+/// VAD frames, and fed through the internal VAD endpointer.  When the VAD declares an
 /// utterance has ended, the accumulated audio is dispatched to
 /// ``Transcriber/transcribeStream(_:options:)`` and each text delta is
 /// surfaced through ``events`` as an ``Event/partial(utteranceID:delta:)``
@@ -105,7 +105,6 @@ public actor MicrophoneTranscriber {
 
     private let continuation: AsyncStream<Event>.Continuation
 
-    private var running: Bool = false
     /// Leftover samples that didn't fill a complete VAD frame yet.
     private var pendingFrameTail: [Float] = []
 
@@ -126,8 +125,15 @@ public actor MicrophoneTranscriber {
         self.streamer = VADStreamer(vad: self.vad, config: config)
 
         var localCont: AsyncStream<Event>.Continuation!
-        self.events = AsyncStream { c in localCont = c }
+        self.events = AsyncStream(bufferingPolicy: .unbounded) { c in localCont = c }
         self.continuation = localCont
+        // Attach onTermination after all stored properties are initialized so
+        // [weak self] is valid. The continuation is already live; setting
+        // onTermination at the end of init is safe — it fires only when the
+        // stream is cancelled or finished, which cannot happen before init returns.
+        localCont.onTermination = { @Sendable [weak self] _ in
+            Task { await self?.stop() }
+        }
     }
 
     // MARK: - Public lifecycle
@@ -159,7 +165,7 @@ public actor MicrophoneTranscriber {
     ///   `AVAudioEngine` cannot start (e.g. no input device, audio session
     ///   conflict on iOS).
     public func start() async throws {
-        guard !running else { return }
+        guard !engine.isRunning else { return }
 
         // 1. Request microphone permission (iOS 17+ / macOS 14+).
         let granted = await Self.requestPermission()
@@ -212,7 +218,6 @@ public actor MicrophoneTranscriber {
             inputNode.removeTap(onBus: 0)
             throw TinyAudioError.audioSessionConfigurationFailed(underlying: AnyError(error))
         }
-        running = true
     }
 
     /// Stop capturing audio and finish the ``events`` stream.
@@ -228,10 +233,9 @@ public actor MicrophoneTranscriber {
     /// before the stream loop can observe the finish, because the child `Task`
     /// for each utterance holds a reference to the continuation independently.
     public func stop() async {
-        if running {
+        if engine.isRunning {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
-            running = false
         }
         continuation.finish()
     }

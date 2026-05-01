@@ -29,6 +29,7 @@ regression. The underlying cause is explained in the Discussion section.
 - Different transcripts, different WER: 88 / 200
 
 Per-sample WER delta stats (Swift − Python):
+
 - Mean per-sample delta: −7.43 percentage points
 - Max absolute delta on a single sample: 733.34 pp (sample 54: Python hallucinated; Swift got it right)
 
@@ -67,7 +68,7 @@ poetry run ta eval -m swift://mazesmazes/tiny-audio-mlx -d loquacious -n 200 --o
 
 Logs: `outputs/wer-mlx/run.log`, `outputs/wer-swift/run.log`
 Results: `outputs/wer-mlx/20260501_044258_tiny-audio-embedded_loquacious/`
-         `outputs/wer-swift/20260501_044352_tiny-audio-mlx_loquacious/`
+`outputs/wer-swift/20260501_044352_tiny-audio-mlx_loquacious/`
 
 The Swift binary used is the pre-built release binary at
 `swift/.build/release/tiny-audio-swift-eval` (M4 Max, arm64-apple-macosx).

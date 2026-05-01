@@ -116,8 +116,8 @@ layer level; the KV cache itself is full-precision.
 When rebasing to a newer mlx-swift-lm commit:
 
 1. Download the new `Qwen3.swift` from `Libraries/MLXLLM/Models/`.
-2. Strip `import MLXLMCommon`, lower visibility (`public` → nothing).
-3. Re-apply the `inputEmbeddings` patch to `Qwen3ModelInner` and `Qwen3Model`.
-4. Drop `LLMModel` / `KVCacheDimensionProvider` / `LoRAModel` conformances.
-5. Update the commit SHA in this file and in `Qwen3Model.swift`'s header comment.
-6. `swift build` + `swift test` to verify.
+1. Strip `import MLXLMCommon`, lower visibility (`public` → nothing).
+1. Re-apply the `inputEmbeddings` patch to `Qwen3ModelInner` and `Qwen3Model`.
+1. Drop `LLMModel` / `KVCacheDimensionProvider` / `LoRAModel` conformances.
+1. Update the commit SHA in this file and in `Qwen3Model.swift`'s header comment.
+1. `swift build` + `swift test` to verify.

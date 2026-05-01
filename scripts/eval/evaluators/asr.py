@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -626,9 +627,10 @@ class SwiftSDKEvaluator(Evaluator):
         # If it's missing, find it from the debug XCTest bundle and copy it.
         binary_dir = binary.parent
         if not (binary_dir / "mlx.metallib").exists():
+            arch = platform.machine()  # "arm64" on Apple Silicon, "x86_64" on Intel
             xctest_bundle = (
                 swift_build
-                / "arm64-apple-macosx"
+                / f"{arch}-apple-macosx"
                 / "debug"
                 / "TinyAudioPackageTests.xctest"
                 / "Contents"
@@ -698,10 +700,15 @@ class SwiftSDKEvaluator(Evaluator):
             if not line:
                 err = self.proc.stderr.read()
                 raise RuntimeError(f"Swift binary closed unexpectedly. stderr:\n{err}")
-            msg = json.loads(line)
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Swift binary emitted non-JSON line: {line!r}") from exc
             if "error" in msg:
                 raise RuntimeError(f"Swift transcribe failed: {msg['error']}")
-            return msg["text"], msg["elapsed_ms"] / 1000.0
+            text = msg.get("text", "")
+            elapsed_ms = msg.get("elapsed_ms", 0)
+            return text, elapsed_ms / 1000.0
         finally:
             if is_temp:
                 Path(path).unlink(missing_ok=True)
@@ -762,3 +769,5 @@ class SwiftSDKEvaluator(Evaluator):
                 self.proc.wait(timeout=5)
             except Exception:
                 self.proc.kill()
+                with contextlib.suppress(Exception):
+                    self.proc.wait(timeout=1)
