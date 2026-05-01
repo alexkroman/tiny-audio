@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 AUDIO_TOKEN = "<audio>"
+TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 
 
 def compute_encoder_output_length(
@@ -51,11 +52,14 @@ def build_prompt_input_ids(
     to produce plain transcripts.
     """
     audio_placeholder = AUDIO_TOKEN * num_audio_tokens
+    user_content = audio_placeholder
+    if TRANSCRIBE_PROMPT:
+        user_content += " " + TRANSCRIBE_PROMPT
 
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": audio_placeholder})
+    messages.append({"role": "user", "content": user_content})
 
     out = tokenizer.apply_chat_template(
         messages,

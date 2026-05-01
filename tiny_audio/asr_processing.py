@@ -17,7 +17,7 @@ class ASRProcessor(ProcessorMixin):
     feature_extractor_class = "AutoFeatureExtractor"
     tokenizer_class = "AutoTokenizer"
     AUDIO_TOKEN = "<audio>"
-    TRANSCRIBE_PROMPT = ""
+    TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 
     def __init__(
         self,
