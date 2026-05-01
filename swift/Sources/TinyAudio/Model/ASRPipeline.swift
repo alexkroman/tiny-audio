@@ -1,8 +1,6 @@
 import Foundation
 import MLX
 import MLXNN
-import MLXLMCommon
-import MLXAudioSTT
 import Tokenizers
 
 // MARK: - Concurrency helpers
@@ -18,28 +16,21 @@ private struct SendableBox<T>: @unchecked Sendable {
 ///
 /// Wires:
 ///   audio → mel → `GLMASREncoder` → `MLPProjector` → splice →
-///   `Qwen3ASRTextModel` (prefill, then greedy decode) → token IDs
+///   vendored `Qwen3Model` (prefill, then greedy decode) → token IDs
 ///
-/// ## Access-level note
-/// `Qwen3ASRTextModel.embedTokens` and `.layers` are `internal` in the
-/// mlx-audio-swift package. `ASRPipeline` therefore owns a standalone
-/// `Embedding` (initialised from the same weight slice as the decoder) and
-/// derives the layer count from `Qwen3TextConfig.numHiddenLayers` rather than
-/// from the text model's property directly.
+/// The decoder is the vendored mlx-swift-lm `Qwen3Model` (Apple's Swift
+/// counterpart to Python's `mlx-lm`), patched to accept `inputEmbeddings`.
+/// This aligns with the Python reference which calls `mlx_lm.load("Qwen/Qwen3-0.6B-MLX-4bit")`.
+///
+/// mlx-audio-swift's `Qwen3ASRTextModel` (Prince Canuma's port) has been
+/// replaced to guarantee architectural parity with the Python reference.
 final class ASRPipeline {
     let encoder: GLMASREncoder
     let projector: MLPProjector
-    /// Qwen3 text-transformer backbone (public `callAsFunction`).
-    /// Returns **hidden states** `[B, T, hiddenSize]` (not logits).
-    let decoder: Qwen3ASRTextModel
-    /// Embedding table cloned from the decoder's `embed_tokens` weight.
-    /// Owned here because `Qwen3ASRTextModel.embedTokens` is `internal`.
-    /// Used for (a) text-token lookup during prefill construction, and
-    /// (b) tied lm_head projection via `asLinear(_:)`.
-    let embedTokens: Embedding
-    /// Separate lm_head `Linear` when `tie_word_embeddings == false`.
-    /// `nil` for Qwen3-0.6B (tied embeddings).
-    let lmHead: Linear?
+    /// Vendored mlx-swift-lm Qwen3 backbone.
+    /// `callAsFunction(_:cache:inputEmbeddings:)` returns logits `[B, T, vocabSize]`
+    /// (lm_head or tied-embedding projection is applied inside `Qwen3Model`).
+    let decoder: Qwen3Model
     let tokenizer: any Tokenizer
     let mel: LogMelSpectrogram
     let audioTokenId: Int32
@@ -50,9 +41,7 @@ final class ASRPipeline {
     init(
         encoder: GLMASREncoder,
         projector: MLPProjector,
-        decoder: Qwen3ASRTextModel,
-        embedTokens: Embedding,
-        lmHead: Linear?,
+        decoder: Qwen3Model,
         tokenizer: any Tokenizer,
         mel: LogMelSpectrogram,
         audioTokenId: Int32,
@@ -62,8 +51,6 @@ final class ASRPipeline {
         self.encoder = encoder
         self.projector = projector
         self.decoder = decoder
-        self.embedTokens = embedTokens
-        self.lmHead = lmHead
         self.tokenizer = tokenizer
         self.mel = mel
         self.audioTokenId = audioTokenId
@@ -136,24 +123,25 @@ final class ASRPipeline {
                     let audioMask = inputIds .== MLXArray(pipeline.audioTokenId)
                     let safeIds = MLX.where(audioMask, MLXArray.zeros(like: inputIds), inputIds)
 
-                    // 5. Embed text tokens, splice projected audio at <audio> positions.
-                    let textEmbeds = pipeline.embedTokens(safeIds)          // [1, T, D]
-                    let audioFrames = projOut[0, 0 ..< numAudio, 0...]      // [N, D]
+                    // 5. Embed text tokens via the decoder's inner embed_tokens table,
+                    //    then splice projected audio at <audio> positions.
+                    let textEmbeds = pipeline.decoder.model.embedTokens(safeIds)  // [1, T, D]
+                    let audioFrames = projOut[0, 0 ..< numAudio, 0...]            // [N, D]
                     let prefill = AudioEmbeddingSplice.splice(
                         textEmbeds: textEmbeds,
                         audioEmbeds: audioFrames,
                         audioPositions: audioPositions
                     )  // [1, T, D]
 
-                    // 6. Prefill: one forward pass over the full prompt via inputsEmbeds.
-                    //    Decoder returns hidden states [1, T, hiddenSize].
+                    // 6. Prefill: one forward pass over the full prompt via inputEmbeddings.
+                    //    Decoder returns logits [1, T, vocabSize] directly — lm_head is
+                    //    applied inside Qwen3Model.callAsFunction.
                     let cache = pipeline.makeCache()
-                    let prefillHidden = pipeline.decoder(
-                        inputIds: nil,
-                        inputsEmbeds: prefill,
-                        cache: cache
-                    )
-                    let prefillLogits = pipeline.applyLMHead(prefillHidden)  // [1, T, vocabSize]
+                    let prefillLogits = pipeline.decoder(
+                        nil,
+                        cache: cache,
+                        inputEmbeddings: prefill
+                    )  // [1, T, vocabSize]
 
                     // 7. First greedy step: argmax over the last token position.
                     //    Slice keeps the sequence dim ([1, 1, V]) so the shape
@@ -171,12 +159,7 @@ final class ASRPipeline {
                     for n in 0 ..< maxNewTokens {
                         var nextY: MLXArray? = nil
                         if n < maxNewTokens - 1 {
-                            let nextHidden = pipeline.decoder(
-                                inputIds: y,
-                                inputsEmbeds: nil,
-                                cache: cache
-                            )
-                            let nextLogits = pipeline.applyLMHead(nextHidden)
+                            let nextLogits = pipeline.decoder(y, cache: cache)
                             nextY = MLX.argMax(
                                 pipeline.maskAudioLogit(nextLogits[0..., (-1)..., 0...]),
                                 axis: -1
@@ -206,13 +189,6 @@ final class ASRPipeline {
     /// Build one `KVCacheSimple` per decoder transformer layer.
     private func makeCache() -> [KVCacheSimple] {
         (0 ..< numDecoderLayers).map { _ in KVCacheSimple() }
-    }
-
-    /// Apply lm_head or the tied embedding projection to produce logits.
-    private func applyLMHead(_ hiddenStates: MLXArray) -> MLXArray {
-        if let lmHead { return lmHead(hiddenStates) }
-        // Tied weights: project via the transposed embedding weight matrix.
-        return embedTokens.asLinear(hiddenStates)
     }
 
     /// Add a −∞ bias at the audio-token position so it can never be sampled.

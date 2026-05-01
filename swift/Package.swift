@@ -28,7 +28,11 @@ let package = Package(
                 .product(name: "MLXAudioSTT", package: "mlx-audio-swift"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
-            path: "Sources/TinyAudio"
+            path: "Sources/TinyAudio",
+            exclude: [
+                "Vendored/Qwen3/LICENSE",
+                "Vendored/Qwen3/UPSTREAM.md",
+            ]
         ),
         .testTarget(
             name: "TinyAudioTests",
