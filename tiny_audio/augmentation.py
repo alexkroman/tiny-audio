@@ -203,6 +203,8 @@ class RIRAugmentation:
         in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
         audio_t = torch.from_numpy(_to_mono_float32(audio))
         n = audio_t.shape[-1]
+        if n == 0:
+            return audio
 
         rir = random.choice(self.rirs)
         out = taf.fftconvolve(audio_t, rir, mode="full")[:n]
