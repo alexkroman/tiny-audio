@@ -22,6 +22,19 @@ struct ContentView: View {
             await vm.stopMic()
           }
         }
+        .alert(
+          "Error",
+          isPresented: Binding(
+            get: { vm.blockingError != nil },
+            set: { if !$0 { vm.blockingError = nil } }
+          ),
+          actions: {
+            Button("OK", role: .cancel) { vm.blockingError = nil }
+          },
+          message: {
+            Text(vm.blockingError ?? "")
+          }
+        )
     }
   }
 
@@ -31,7 +44,12 @@ struct ContentView: View {
       controlsSection
       Divider()
       transcriptScroll
-      if let err = vm.lastError {
+      if vm.permissionDenied {
+        Text("Microphone permission denied. Please enable it in Settings.")
+          .foregroundStyle(.orange)
+          .font(.caption)
+      }
+      if let err = vm.transientError {
         Text("Error: \(err)").foregroundStyle(.orange).font(.caption)
       }
     }
