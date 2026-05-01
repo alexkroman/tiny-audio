@@ -112,6 +112,9 @@ public actor MicrophoneTranscriber {
   /// `nonisolated(unsafe)` is fine because tap fires on a single private
   /// AVAudioEngine thread.
   nonisolated(unsafe) private static var tapCounter: UInt64 = 0
+  /// Counter used by `feed()` for throttled NSLog output. Single actor
+  /// invocation, so `nonisolated(unsafe)` is safe.
+  nonisolated(unsafe) private static var feedCounter: UInt64 = 0
 
   // MARK: - Init
 
@@ -289,9 +292,18 @@ public actor MicrophoneTranscriber {
   /// Append new samples, slice into `SileroVAD.frameSize`-sample frames,
   /// run each frame through the VAD streamer.
   private func feed(samples: [Float]) {
+    Self.feedCounter &+= 1
+    if Self.feedCounter % 10 == 1 {
+      NSLog(
+        "[TinyAudio] feed #\(Self.feedCounter) samplesIn=\(samples.count) tail=\(pendingFrameTail.count)"
+      )
+    }
     pendingFrameTail.append(contentsOf: samples)
     let frameSize = SileroVAD.frameSize
     let completeFrames = pendingFrameTail.count / frameSize
+    if Self.feedCounter % 10 == 1 {
+      NSLog("[TinyAudio] feed: completeFrames=\(completeFrames) frameSize=\(frameSize)")
+    }
     for i in 0..<completeFrames {
       let start = i * frameSize
       let frame = Array(pendingFrameTail[start..<start + frameSize])
@@ -299,6 +311,7 @@ public actor MicrophoneTranscriber {
       do {
         vadEvents = try streamer.process(frame)
       } catch {
+        NSLog("[TinyAudio] streamer.process threw: \(error)")
         emitError(error)
         continue
       }
