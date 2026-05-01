@@ -66,6 +66,7 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_dropout: float = 0.0,
         lora_target_modules: Optional[list] = None,  # Default: all linear layers
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
+        freeze_language_model: bool = True,  # False = full decoder fine-tuning
         do_sample: bool = False,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -152,6 +153,7 @@ class ASRConfig(transformers.PretrainedConfig):
             "down_proj",
         ]
         self.freeze_projector = freeze_projector
+        self.freeze_language_model = freeze_language_model
 
         explicit_generation_args = {
             "num_beams": num_beams,

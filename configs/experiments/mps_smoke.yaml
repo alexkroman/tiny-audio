@@ -1,6 +1,8 @@
 # @package _global_
 # Local MPS / CPU smoke test on the 73-sample librispeech dummy dataset.
-# Validates the full train loop end-to-end without GPU-only deps.
+# Validates the full train loop end-to-end without GPU-only deps, including
+# the full-decoder fine-tuning path with a separate LR for the LM (the same
+# flags used by configs/experiments/embedded.yaml).
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=mps_smoke
@@ -17,9 +19,23 @@ data:
 training:
   max_steps: 10
   logging_steps: 1
-  per_device_train_batch_size: 2
-  per_device_eval_batch_size: 2
+  # Batch size 1 — full Qwen3-0.6B fine-tuning in float32 adds ~7 GB of
+  # gradient + AdamW state on top of the frozen-LM smoke test footprint.
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
   gradient_accumulation_steps: 1
+  # Trade compute for memory so this fits comfortably in unified memory.
+  gradient_checkpointing: true
+
+  # Exercise the decoder fine-tuning path. The two LRs must differ so the
+  # parameter-group split in ASRTrainer.create_optimizer is actually taken.
+  freeze_language_model: false
+  learning_rate: 1e-3
+  decoder_learning_rate: 1e-5
+  decoder_weight_decay: 0.01
+  # Default `adamw_torch_fused` is CUDA-only; use the plain implementation
+  # so the optimizer constructs on MPS / CPU.
+  optim: adamw_torch
 
   # MPS / CPU compatibility
   bf16: false
@@ -32,6 +48,8 @@ training:
   dataloader_pin_memory: false
 
   rir_augmentation:
+    enabled: false
+  noise_augmentation:
     enabled: false
 
   report_to: "none"
