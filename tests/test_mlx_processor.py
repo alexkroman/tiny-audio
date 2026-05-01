@@ -71,9 +71,14 @@ def test_chat_template_input_ids_match_pt():
 
     tok = _qwen3_tokenizer()
 
+    from tiny_audio.mlx.processor import TRANSCRIBE_PROMPT
+
     num_audio = 17
     audio_placeholder = "<audio>" * num_audio
-    messages = [{"role": "user", "content": audio_placeholder}]
+    user_content = audio_placeholder
+    if TRANSCRIBE_PROMPT:
+        user_content += " " + TRANSCRIBE_PROMPT
+    messages = [{"role": "user", "content": user_content}]
 
     pt_out = tok.apply_chat_template(
         messages,

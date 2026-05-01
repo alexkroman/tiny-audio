@@ -56,11 +56,11 @@ class TestProcessorConstants:
         assert ASRProcessor.AUDIO_TOKEN == "<audio>"
 
     def test_transcribe_prompt_defined(self):
-        """TRANSCRIBE_PROMPT constant should be defined (empty for instruction-free)."""
+        """TRANSCRIBE_PROMPT must match the prompt used in training (scripts/train.py)."""
         from tiny_audio.asr_processing import ASRProcessor
 
         assert hasattr(ASRProcessor, "TRANSCRIBE_PROMPT")
-        assert ASRProcessor.TRANSCRIBE_PROMPT == ""
+        assert ASRProcessor.TRANSCRIBE_PROMPT == "Transcribe the speech to text"
 
     def test_default_conv_layers(self):
         """DEFAULT_ENCODER_CONV_LAYERS should match Whisper."""

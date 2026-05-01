@@ -24,6 +24,7 @@ All required packages are listed in pyproject.toml; no extra install steps.
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,20 @@ def _to_mono_float32(audio: np.ndarray) -> np.ndarray:
     if arr.ndim > 1:
         arr = arr.mean(axis=tuple(range(arr.ndim - 1)))
     return arr
+
+
+def _resolve_corpus_roots(corpus_path: str | Sequence[str], hint: str = "") -> list[Path]:
+    paths = [corpus_path] if isinstance(corpus_path, str) else list(corpus_path)
+    roots: list[Path] = []
+    for p in paths:
+        root = Path(p).expanduser()
+        if not root.exists():
+            msg = f"Corpus path not found: {root}"
+            if hint:
+                msg = f"{msg}. {hint}"
+            raise FileNotFoundError(msg)
+        roots.append(root)
+    return roots
 
 
 class RIRAugmentation:
@@ -59,7 +74,7 @@ class RIRAugmentation:
         sample_rate: int = 16000,
         prob: float = 0.5,
         pool_size: int = 2048,
-        corpus_path: str | None = None,
+        corpus_path: str | Sequence[str] | None = None,
         room_x_range: tuple[float, float] = (3.0, 10.0),
         room_y_range: tuple[float, float] = (3.0, 10.0),
         room_z_range: tuple[float, float] = (2.4, 4.0),
@@ -95,20 +110,20 @@ class RIRAugmentation:
 
     @staticmethod
     def _load_corpus_pool(
-        corpus_path: str,
+        corpus_path: str | Sequence[str],
         sample_rate: int,
         pool_size: int,
         seed: int | None,
     ) -> list[torch.Tensor]:
-        root = Path(corpus_path).expanduser()
-        if not root.exists():
-            raise FileNotFoundError(
-                f"RIR corpus_path not found: {root}. Run `ta dev download-rirs` "
-                "to fetch OpenSLR-28."
-            )
-        wav_paths = sorted(root.rglob("*.wav"))
+        roots = _resolve_corpus_roots(
+            corpus_path, hint="Run `ta dev download-rirs` to fetch OpenSLR-28."
+        )
+        wav_paths: list[Path] = []
+        for root in roots:
+            wav_paths.extend(root.rglob("*.wav"))
+        wav_paths = sorted(wav_paths)
         if not wav_paths:
-            raise ValueError(f"No .wav files found under {root}")
+            raise ValueError(f"No .wav files found under {[str(r) for r in roots]}")
 
         rng = np.random.default_rng(seed)
         if pool_size and pool_size < len(wav_paths):
@@ -186,7 +201,7 @@ class RIRAugmentation:
             room.add_source(pos_src)
             room.add_microphone(pos_rcv)
             room.compute_rir()
-            assert room.rir is not None, "compute_rir() did not populate room.rir"
+            assert room.rir is not None
             rir_np = np.asarray(room.rir[0][0], dtype=np.float32)
             rir_t = torch.from_numpy(rir_np)
             peak_idx = int(rir_t.abs().argmax().item())
@@ -237,7 +252,7 @@ class NoiseAugmentation:
         prob: float = 0.5,
         min_snr_db: float = 0.0,
         max_snr_db: float = 25.0,
-        corpus_path: str | None = None,
+        corpus_path: str | Sequence[str] | None = None,
     ):
         self.sample_rate = sample_rate
         self.prob = prob
@@ -247,15 +262,15 @@ class NoiseAugmentation:
         self.augment = None
 
         if corpus_path is not None:
-            corpus = Path(corpus_path).expanduser()
-            if not corpus.exists():
-                raise FileNotFoundError(
-                    f"Noise corpus_path not found: {corpus}. "
-                    "Run `ta dev download-musan` to fetch MUSAN."
-                )
-            self.noise_paths = sorted(corpus.rglob("*.wav"))
+            roots = _resolve_corpus_roots(
+                corpus_path, hint="Run `ta dev download-musan` to fetch MUSAN."
+            )
+            collected: list[Path] = []
+            for root in roots:
+                collected.extend(root.rglob("*.wav"))
+            self.noise_paths = sorted(collected)
             if not self.noise_paths:
-                raise ValueError(f"No .wav files found under {corpus}")
+                raise ValueError(f"No .wav files found under {[str(r) for r in roots]}")
         else:
             try:
                 from torch_audiomentations import AddColoredNoise

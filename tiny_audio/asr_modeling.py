@@ -58,7 +58,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     _is_loading_from_pretrained: bool = False
     _pretrained_model_path: Optional[str] = None
 
-    TRANSCRIBE_PROMPT = ""
+    TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: str, *args, **kwargs) -> "ASRModel":

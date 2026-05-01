@@ -91,7 +91,13 @@ freq_mask_length: 27
 # every batch sees reverb without overwhelming clean-speech training signal.
 rir_augmentation:
   enabled: true
-  corpus_path: ~/.cache/openslr-28/real_rirs_isotropic_noises
+  # Combine OpenSLR-28's real RIRs with its much larger simulated_rirs set
+  # (~60K simulated impulses) so pool_size sub-samples from the full corpus
+  # each run. pointsource_noises is intentionally excluded — those are noise
+  # clips, not impulse responses.
+  corpus_path:
+    - ~/.cache/openslr-28/real_rirs_isotropic_noises
+    - ~/.cache/openslr-28/simulated_rirs
   pool_size: 2048
   room_x_range: [3.0, 10.0]
   room_y_range: [3.0, 10.0]
@@ -114,7 +120,11 @@ rir_augmentation:
 # audio); the lower bound is what most modern recipes use to push robustness.
 noise_augmentation:
   enabled: true
-  corpus_path: ~/.cache/musan/musan
+  # MUSAN (music + speech + noise, ~109h) plus OpenSLR-28's pointsource_noises
+  # (~843 clips) — the canonical Kaldi/NeMo noise pool.
+  corpus_path:
+    - ~/.cache/musan/musan
+    - ~/.cache/openslr-28/pointsource_noises
   prob: 0.5
   min_snr_db: 0.0
   max_snr_db: 25.0

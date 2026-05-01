@@ -106,6 +106,20 @@ class TestRIRCorpusMode:
         with pytest.raises(ValueError, match="No .wav files"):
             RIRAugmentation(corpus_path=str(tmp_path), prob=1.0)
 
+    def test_loads_from_multiple_corpus_paths(self, tmp_path):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        self._write_synthetic_corpus(a, n=2)
+        self._write_synthetic_corpus(b, n=3)
+        aug = RIRAugmentation(corpus_path=[str(a), str(b)], pool_size=10, prob=1.0)
+        assert len(aug.rirs) == 5
+
+    def test_multiple_corpus_paths_one_missing_raises(self, tmp_path):
+        a = tmp_path / "a"
+        self._write_synthetic_corpus(a, n=2)
+        with pytest.raises(FileNotFoundError):
+            RIRAugmentation(corpus_path=[str(a), str(tmp_path / "does-not-exist")], prob=1.0)
+
 
 class TestNoiseAugmentation:
     def test_output_shape_and_dtype_preserved(self):
@@ -182,3 +196,17 @@ class TestNoiseCorpusMode:
         out = aug(empty)
         assert out.shape == empty.shape
         assert out.dtype == empty.dtype
+
+    def test_loads_from_multiple_corpus_paths(self, tmp_path):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        self._write_synthetic_corpus(a, n=2)
+        self._write_synthetic_corpus(b, n=3)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=[str(a), str(b)])
+        assert len(aug.noise_paths) == 5
+
+    def test_multiple_corpus_paths_one_missing_raises(self, tmp_path):
+        a = tmp_path / "a"
+        self._write_synthetic_corpus(a, n=2)
+        with pytest.raises(FileNotFoundError):
+            NoiseAugmentation(prob=1.0, corpus_path=[str(a), str(tmp_path / "does-not-exist")])
