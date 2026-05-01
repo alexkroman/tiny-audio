@@ -15,7 +15,7 @@
 # │ ami-sdm          │   175,000 │    7.5% │
 # │ spgispeech L     │   260,000 │   11.2% │
 # │ switchboard      │   260,000 │   11.2% │
-# │ gigaspeech m     │   232,000 │   10.0% │
+# │ gigaspeech xl    │   232,000 │   10.0% │
 # └──────────────────┴───────────┴─────────┘
 # Total: ~2,322,000 samples
 #
@@ -58,7 +58,7 @@ datasets:
   # SPGISpeech L - financial earnings calls, ~5000hr (was S, ~200hr).
   # Larger tier targets the Earnings22 eval gap.
   - path: kensho/spgispeech
-    name: L
+    name: M
     audio_column: audio
     text_column: transcript
     task: transcribe
@@ -75,10 +75,13 @@ datasets:
     eval_splits: [validation]
     target_samples: 260000
 
-  # GigaSpeech m - YouTube/podcast/audiobook mix, ~1000hr.
+  # GigaSpeech XL (empty-audio-removed) - YouTube/podcast/audiobook mix.
   # Direct training data for the GigaSpeech eval (not in Loquacious).
+  # fixie-ai/gigaspeech only ships {dev, xl, xl-empty-audio-removed} — no
+  # smaller subsets — so we stream from the full XL pool and cap with
+  # target_samples for the desired ~10% mix share.
   - path: fixie-ai/gigaspeech
-    name: m
+    name: xl-empty-audio-removed
     audio_column: audio
     text_column: text
     task: transcribe
