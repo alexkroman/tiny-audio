@@ -23,6 +23,13 @@ final class VADStreamer {
   private var silenceMs = 0
   private var speechMs = 0
 
+  #if DEBUG
+    /// Counter for throttling debug-log output. Single-actor access in practice
+    /// (the VADStreamer is only fed from one MicrophoneTranscriber actor), so
+    /// `nonisolated(unsafe)` is fine.
+    nonisolated(unsafe) private static var debugFrameCounter: UInt64 = 0
+  #endif
+
   /// Frame duration in ms (36 ms for 576 samples at 16 kHz).
   private static let frameMs = (SileroVAD.frameSize * 1000) / 16_000
 
@@ -37,6 +44,24 @@ final class VADStreamer {
   func process(_ frame: [Float]) throws -> [Event] {
     let prob = try vad.process(frame)
     let isSpeech = prob >= config.speechThreshold
+
+    #if DEBUG
+      // Print every ~10 frames (~360 ms) so the log isn't overwhelmed.
+      // Helps diagnose "no transcription" — if rms is ~0, mic is dead;
+      // if prob never crosses speechThreshold, the threshold is too strict.
+      Self.debugFrameCounter &+= 1
+      if Self.debugFrameCounter % 10 == 0 {
+        var sumSq: Float = 0
+        for s in frame { sumSq += s * s }
+        let rms = (frame.isEmpty ? 0 : (sumSq / Float(frame.count)).squareRoot())
+        print(
+          "[VAD] prob=\(String(format: "%.3f", prob)) "
+            + "rms=\(String(format: "%.4f", rms)) "
+            + "state=\(state) "
+            + "speechMs=\(speechMs) silenceMs=\(silenceMs)"
+        )
+      }
+    #endif
 
     var events: [Event] = []
     switch state {
