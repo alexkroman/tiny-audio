@@ -1,21 +1,58 @@
 // swift/Sources/TinyAudio/Public/VADConfig.swift
 import Foundation
 
-/// Endpointer tuning. Defaults are sensible for typical conversational ASR.
+/// Silero Voice Activity Detection endpointer tuning for ``MicrophoneTranscriber``.
+///
+/// The defaults are calibrated for typical conversational speech at 16 kHz.
+/// Increase ``minSilenceDurationMs`` to avoid splitting long natural pauses
+/// into separate utterances; decrease it for faster endpointing in interview
+/// or command-and-control scenarios.
+///
+/// ```swift
+/// let config = VADConfig(
+///     speechThreshold: 0.6,
+///     minSilenceDurationMs: 800,
+///     minSpeechDurationMs: 150,
+///     preSpeechPaddingMs: 300
+/// )
+/// let mic = try MicrophoneTranscriber(transcriber: transcriber, vad: config)
+/// ```
 public struct VADConfig: Sendable {
-    /// Silero VAD output > this is considered "speech" for the current frame.
-    /// Default 0.5 matches Silero's standard threshold.
+    /// Silero confidence score above which a frame is classified as speech.
+    ///
+    /// Range `[0, 1]`.  The standard Silero recommendation is `0.5`.  Raise
+    /// toward `0.7–0.8` in noisy environments to reduce false positives.
     public var speechThreshold: Float = 0.5
 
-    /// Minimum continuous silence (ms) before declaring an utterance has ended.
+    /// Minimum consecutive silence (in milliseconds) before an utterance is
+    /// declared complete.
+    ///
+    /// Shorter values produce faster endpointing but may split utterances at
+    /// natural pauses.  Longer values tolerate pauses between words but add
+    /// latency before transcription begins.
     public var minSilenceDurationMs: Int = 500
 
-    /// Minimum continuous speech (ms) before declaring an utterance has started.
+    /// Minimum consecutive speech (in milliseconds) before an onset is declared.
+    ///
+    /// Filters brief non-speech sounds (clicks, pops) from triggering an
+    /// utterance.  Raise this value in environments with frequent impulsive
+    /// noise.
     public var minSpeechDurationMs: Int = 200
 
-    /// Audio captured before the detected onset, in ms.
+    /// Audio captured *before* the detected speech onset to include in the
+    /// utterance, in milliseconds.
+    ///
+    /// Prevents the first syllable of an utterance from being clipped.
+    /// Requires ``minSpeechDurationMs`` of lookahead to be buffered.
     public var preSpeechPaddingMs: Int = 200
 
+    /// Create a `VADConfig` with explicit field values.
+    ///
+    /// - Parameters:
+    ///   - speechThreshold: Silero score threshold.  Defaults to `0.5`.
+    ///   - minSilenceDurationMs: Silence duration before endpointing.  Defaults to `500`.
+    ///   - minSpeechDurationMs: Speech duration before onset.  Defaults to `200`.
+    ///   - preSpeechPaddingMs: Pre-roll audio before onset.  Defaults to `200`.
     public init(
         speechThreshold: Float = 0.5,
         minSilenceDurationMs: Int = 500,
@@ -28,5 +65,7 @@ public struct VADConfig: Sendable {
         self.preSpeechPaddingMs = preSpeechPaddingMs
     }
 
+    /// Default endpointer config: 0.5 threshold, 500 ms silence, 200 ms speech,
+    /// 200 ms pre-roll.
     public static let `default` = VADConfig()
 }

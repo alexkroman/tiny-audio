@@ -4,15 +4,23 @@ import MLX
 import MLXNN
 import Tokenizers
 
-/// Main entry point for on-device ASR transcription.
+/// On-device speech recognition backed by a 4-bit quantized GLM-ASR encoder and Qwen3-0.6B decoder.
 ///
-/// `Transcriber` downloads (or reads from cache) a tiny-audio-mlx weight bundle,
-/// verifies its integrity, builds and quantizes the encoder + decoder, loads the
-/// fp16 projector, wires the full `ASRPipeline`, and runs a synthetic warmup to
-/// JIT-compile MLX Metal kernels — all in a single `load` call.
+/// `Transcriber` is the primary entry point for file and buffer transcription.
+/// Call ``load(from:progress:)`` once to download, verify, and warm-up the
+/// model, then reuse the returned actor for all subsequent transcription calls.
 ///
-/// Subsequent `transcribe` / `transcribeStream` calls (Task 27) are dispatched
-/// through `pipeline`.
+/// The actor is `Sendable` — it may be shared freely across concurrent tasks.
+/// All calls to ``transcribe(_:options:)`` and ``transcribeStream(_:options:)``
+/// are serialised through the actor's executor, so concurrent callers queue up
+/// rather than racing.
+///
+/// ```swift
+/// // Typical app-start initialisation
+/// let transcriber = try await Transcriber.load { p in
+///     print("Loaded \(Int(p.fractionCompleted * 100))%")
+/// }
+/// ```
 public actor Transcriber {
     internal let pipeline: ASRPipeline
 
@@ -22,15 +30,42 @@ public actor Transcriber {
 
     // MARK: - Public factory
 
-    /// Download (if needed) and load the model into memory. Subsequent
-    /// `transcribe` calls run against the loaded model.
+    /// Download (if needed), verify, and load the model, returning a warmed-up `Transcriber`.
+    ///
+    /// On the first call the ~460 MB MLX bundle is downloaded from HuggingFace
+    /// Hub (or from a custom ``WeightSource``) and cached in the system's
+    /// application-support directory.  Subsequent calls skip the download when
+    /// the cached bundle passes its SHA-256 manifest check.
+    ///
+    /// After loading, the actor runs a short synthetic warmup at 1 s, 5 s, and
+    /// 15 s of audio to JIT-compile Metal kernels for the shapes most common in
+    /// real ASR — adding ~300 ms to cold load time but eliminating the first-call
+    /// JIT penalty.
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// // Show a progress bar during the initial download.
+    /// let transcriber = try await Transcriber.load(from: .defaultHub) { progress in
+    ///     ProgressView(value: progress.fractionCompleted)
+    /// }
+    ///
+    /// // Or load silently from a local directory (e.g. in tests or offline builds).
+    /// let local = try await Transcriber.load(from: .localDirectory(bundleURL))
+    /// ```
     ///
     /// - Parameters:
-    ///   - source: Where to source weights from. Defaults to the public Hub bundle
-    ///             (`mazesmazes/tiny-audio-mlx`).
-    ///   - progress: Optional callback receiving Foundation `Progress` updates
-    ///     during download. Pass `nil` for silent loads.
-    /// - Returns: A fully initialised, warmed-up `Transcriber`.
+    ///   - source: Where to source model weights from. Defaults to
+    ///     ``WeightSource/defaultHub`` (`mazesmazes/tiny-audio-mlx` on HuggingFace).
+    ///   - progress: Optional callback invoked with a Foundation `Progress` object
+    ///     during download.  Called on an unspecified queue; update UI on the main
+    ///     actor explicitly.  Pass `nil` for a silent load.
+    /// - Returns: A fully initialised and warmed-up `Transcriber` ready for
+    ///   immediate inference calls.
+    /// - Throws: ``TinyAudioError/weightDownloadFailed(underlying:)`` on network
+    ///   failure, ``TinyAudioError/manifestMismatch(file:expected:actual:)`` on
+    ///   corrupt cache, or ``TinyAudioError/mlxModuleLoadFailed(name:underlying:)``
+    ///   if a model component cannot be built.
     public static func load(
         from source: WeightSource = .defaultHub,
         progress: ((Progress) -> Void)? = nil
@@ -329,15 +364,30 @@ private enum ConfigError: Error {
 // MARK: - Transcription public API
 
 extension Transcriber {
-    /// Run greedy decode to completion and return the final transcript.
+    /// Transcribe audio to text, waiting for the full transcript before returning.
     ///
-    /// This is the convenience wrapper around `transcribeStream`. It collects
-    /// all yielded deltas and returns the concatenated result.
+    /// A convenience wrapper around ``transcribeStream(_:options:)`` that
+    /// collects all token deltas and returns the concatenated result.  Use
+    /// ``transcribeStream(_:options:)`` directly when you want incremental output
+    /// as tokens are generated.
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// let url = Bundle.main.url(forResource: "recording", withExtension: "wav")!
+    /// let text = try await transcriber.transcribe(.file(url))
+    /// print(text)   // "Hello from on-device ASR."
+    /// ```
     ///
     /// - Parameters:
-    ///   - audio: The audio input to transcribe.
-    ///   - options: Transcription options (max tokens, system prompt).
-    /// - Returns: The full transcript string.
+    ///   - audio: The audio to transcribe.  Any ``AudioInput`` case is accepted;
+    ///     the SDK normalises to 16 kHz mono Float32 internally.
+    ///   - options: Decoding options.  Defaults to ``TranscriptionOptions/default``
+    ///     (96 max tokens, no system prompt).
+    /// - Returns: The complete transcript as a single `String`.
+    /// - Throws: ``TinyAudioError/audioEmpty`` if the decoded audio contains no
+    ///   samples, ``TinyAudioError/audioFormatUnsupported(reason:)`` for
+    ///   unreadable audio, or an MLX runtime error during decoding.
     public func transcribe(
         _ audio: AudioInput,
         options: TranscriptionOptions = .default
@@ -349,20 +399,39 @@ extension Transcriber {
         return collected
     }
 
-    /// Run greedy decode and yield text deltas as tokens are emitted.
+    /// Transcribe audio and yield incremental text deltas as tokens are generated.
     ///
-    /// Each yielded `String` is the *delta* since the last yield. Concatenating
-    /// all deltas reconstructs the full transcript (this is the contract the
-    /// `transcribe(...)` convenience uses).
+    /// Each yielded `String` is the *delta* since the previous yield —
+    /// concatenating all deltas produces the complete transcript.  The stream
+    /// finishes when an EOS token is produced or ``TranscriptionOptions/maxNewTokens``
+    /// is reached.
     ///
-    /// The method is `nonisolated` so callers can consume the stream from any
-    /// actor context without an explicit `await`. The actor hop happens inside
-    /// the Task when `self.pipeline` is accessed.
+    /// The method is `nonisolated` so the returned stream can be iterated from
+    /// any actor context without an initial `await` on the actor.  The actor hop
+    /// occurs inside the spawned `Task` when `pipeline` is accessed.
+    ///
+    /// Token detokenization uses a fast single-token path for the common BPE
+    /// case and falls back to a full-prefix decode when a multi-byte UTF-8
+    /// boundary may have been split across tokens (e.g. surrogate pairs, combining
+    /// marks, or zero-width joiners).
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// var transcript = ""
+    /// for try await delta in transcriber.transcribeStream(.file(audioURL)) {
+    ///     transcript += delta
+    ///     print(delta, terminator: "")  // stream tokens to the console
+    /// }
+    /// print()  // newline after final token
+    /// ```
     ///
     /// - Parameters:
-    ///   - audio: The audio input to transcribe.
-    ///   - options: Transcription options (max tokens, system prompt).
-    /// - Returns: An `AsyncThrowingStream` of text deltas.
+    ///   - audio: The audio to transcribe.  Any ``AudioInput`` case is accepted.
+    ///   - options: Decoding options.  Defaults to ``TranscriptionOptions/default``.
+    /// - Returns: An `AsyncThrowingStream<String, Error>` of incremental text
+    ///   deltas.  Errors thrown inside the stream are surfaced as the stream's
+    ///   `failure` case.
     public nonisolated func transcribeStream(
         _ audio: AudioInput,
         options: TranscriptionOptions = .default
@@ -413,8 +482,19 @@ extension Transcriber {
         }
     }
 
-    /// Test-only accessor: yields raw token IDs instead of text deltas.
-    /// Surfaced via `@_spi(Testing)` so application code can't see it.
+    /// Return raw token IDs for a given audio input, without detokenization.
+    ///
+    /// This accessor is gated behind `@_spi(Testing)` and is not visible to
+    /// application code.  It is used by the SDK's own test suite to verify that
+    /// the model produces the expected token sequence for a known audio input.
+    ///
+    /// - Parameters:
+    ///   - audio: The audio to process.
+    ///   - maxNewTokens: Hard cap on tokens generated.
+    ///   - systemPrompt: Optional system prompt string prepended to the chat
+    ///     template.  Pass `nil` for default formatting.
+    /// - Returns: All token IDs produced before EOS or the token limit, in order.
+    /// - Throws: Any error from audio decoding or the MLX pipeline.
     @_spi(Testing)
     public func tokenIDsForTesting(
         _ audio: AudioInput,

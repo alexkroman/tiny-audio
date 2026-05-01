@@ -2,29 +2,31 @@
 @preconcurrency import AVFoundation
 import Foundation
 
-/// A live-mic ASR actor that wires `AVAudioEngine` + Silero VAD + `Transcriber`.
+/// Live-microphone speech recognition with Silero VAD endpointing.
 ///
-/// Audio from the default input device is resampled to 16 kHz mono Float32 via
-/// `AVAudioConverter`, sliced into `SileroVAD.frameSize`-sample frames, and fed
-/// through `VADStreamer`. When the streamer emits a `.offset(audio:)` event the
-/// accumulated utterance is dispatched to `Transcriber.transcribeStream`, and
-/// each text delta is surfaced through `events` as a `.partial` followed by a
-/// final `.final` event.
+/// `MicrophoneTranscriber` wires `AVAudioEngine`, a Silero Voice Activity
+/// Detector, and a ``Transcriber`` into a single actor.  Audio captured from
+/// the default input device is resampled to 16 kHz mono Float32, sliced into
+/// VAD frames, and fed through ``VADStreamer``.  When the VAD declares an
+/// utterance has ended, the accumulated audio is dispatched to
+/// ``Transcriber/transcribeStream(_:options:)`` and each text delta is
+/// surfaced through ``events`` as an ``Event/partial(utteranceID:delta:)``
+/// message, followed by an ``Event/final(utteranceID:text:)`` message.
 ///
-/// Per-utterance transcription failures emit an `.error(Error)` event rather
-/// than terminating the stream, so a single bad utterance never ends the
-/// session.
+/// Per-utterance transcription failures emit ``Event/error(_:)`` rather than
+/// terminating the stream, so a single bad utterance never ends the session.
 ///
 /// ## Lifecycle
+///
 /// ```swift
 /// let transcriber = try await Transcriber.load()
 /// let mic = try MicrophoneTranscriber(transcriber: transcriber)
 /// try await mic.start()
 /// for await event in mic.events {
 ///     switch event {
-///     case .partial(let id, let delta): ...
-///     case .final(let id, let text):   ...
-///     case .error(let err):            ...
+///     case .partial(let id, let delta): print(delta, terminator: "")
+///     case .final(let id, let text):   print("\n[\(id)] \(text)")
+///     case .error(let err):            print("Error: \(err)")
 ///     }
 /// }
 /// await mic.stop()
@@ -32,21 +34,65 @@ import Foundation
 public actor MicrophoneTranscriber {
     // MARK: - Public types
 
-    /// Events emitted on `events`.
+    /// Events emitted on ``MicrophoneTranscriber/events``.
+    ///
+    /// Each detected utterance has a stable `utteranceID` (`UUID`) that lets
+    /// callers correlate partial deltas with their final transcript.  The
+    /// sequence for a single utterance is one or more ``partial(utteranceID:delta:)``
+    /// events followed by exactly one ``final(utteranceID:text:)``.
+    ///
+    /// `Event` is `Sendable` so it can be forwarded across actor boundaries
+    /// without copying.  However, the associated `Error` in ``error(_:)`` is
+    /// not itself constrained to `Sendable`; handle it promptly rather than
+    /// storing it across async suspension points.
     public enum Event: Sendable {
-        /// A partial text delta for the utterance identified by `utteranceID`.
+        /// An incremental text fragment for the utterance with `utteranceID`.
+        ///
+        /// Concatenating all deltas for the same `utteranceID` in order
+        /// produces the same string as the subsequent ``final(utteranceID:text:)``
+        /// event.
         case partial(utteranceID: UUID, delta: String)
-        /// The complete transcript for the utterance identified by `utteranceID`.
+        /// The complete, settled transcript for the utterance with `utteranceID`.
+        ///
+        /// Always emitted exactly once per utterance, after all
+        /// ``partial(utteranceID:delta:)`` events for that utterance.
         case final(utteranceID: UUID, text: String)
-        /// A per-utterance error. The session continues.
+        /// A transcription failure for one utterance.
+        ///
+        /// The session continues after this event; subsequent utterances
+        /// produce new events normally.  Check ``TinyAudioError`` for
+        /// recoverable cases (e.g. ``TinyAudioError/audioEmpty``).
         case error(Error)
     }
 
     // MARK: - Public properties
 
-    /// Non-throwing async stream of `Event` values.
+    /// A non-throwing async stream that delivers ``Event`` values as speech is detected.
     ///
-    /// `nonisolated` so callers can subscribe without an `await`.
+    /// The stream is `nonisolated` so callers can begin iterating from any
+    /// actor context without an initial `await` on `MicrophoneTranscriber`.
+    /// The stream remains open until ``stop()`` is called, which calls
+    /// `continuation.finish()` and causes the `for await` loop to exit
+    /// naturally.
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// let mic = try MicrophoneTranscriber(transcriber: transcriber)
+    /// try await mic.start()
+    ///
+    /// Task {
+    ///     for await event in mic.events {
+    ///         if case let .final(_, text) = event {
+    ///             print("Utterance: \(text)")
+    ///         }
+    ///     }
+    ///     print("Stream ended.")
+    /// }
+    ///
+    /// // Later…
+    /// await mic.stop()
+    /// ```
     public nonisolated let events: AsyncStream<Event>
 
     // MARK: - Private state
@@ -86,12 +132,32 @@ public actor MicrophoneTranscriber {
 
     // MARK: - Public lifecycle
 
-    /// Request microphone permission and start capturing audio.
+    /// Request microphone permission and begin capturing audio.
     ///
-    /// - Throws:
-    ///   - `TinyAudioError.micPermissionDenied` when the user denies access.
-    ///   - `TinyAudioError.audioSessionConfigurationFailed` when `AVAudioEngine`
-    ///     cannot start (e.g. no input device, audio session conflict).
+    /// This method is idempotent — calling it when the engine is already
+    /// running is a no-op.  On first call it prompts the user for microphone
+    /// permission (iOS / macOS system dialog) and then starts `AVAudioEngine`.
+    ///
+    /// Audio is captured from the default system input device.  The engine
+    /// resamples to 16 kHz mono Float32, feeds frames through the Silero VAD,
+    /// and dispatches completed utterances to ``Transcriber/transcribeStream(_:options:)``.
+    /// Results appear on ``events``.
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// let mic = try MicrophoneTranscriber(transcriber: transcriber)
+    /// try await mic.start()
+    /// for await event in mic.events {
+    ///     if case let .partial(_, delta) = event { print(delta, terminator: "") }
+    /// }
+    /// ```
+    ///
+    /// - Throws: ``TinyAudioError/micPermissionDenied`` when the user denies
+    ///   microphone access, or
+    ///   ``TinyAudioError/audioSessionConfigurationFailed(underlying:)`` when
+    ///   `AVAudioEngine` cannot start (e.g. no input device, audio session
+    ///   conflict on iOS).
     public func start() async throws {
         guard !running else { return }
 
@@ -149,7 +215,18 @@ public actor MicrophoneTranscriber {
         running = true
     }
 
-    /// Stop capturing audio and finish the `events` stream.
+    /// Stop capturing audio and finish the ``events`` stream.
+    ///
+    /// Removes the `AVAudioEngine` tap, stops the engine, and calls
+    /// `continuation.finish()` so any active `for await` loop over ``events``
+    /// exits cleanly.  Calling `stop()` when the engine is already stopped is
+    /// safe and has no effect beyond finishing the stream a second time
+    /// (which is itself a no-op in `AsyncStream`).
+    ///
+    /// Any utterances that are mid-transcription when `stop()` is called will
+    /// still complete and emit their ``Event/final(utteranceID:text:)`` event
+    /// before the stream loop can observe the finish, because the child `Task`
+    /// for each utterance holds a reference to the continuation independently.
     public func stop() async {
         if running {
             engine.inputNode.removeTap(onBus: 0)
