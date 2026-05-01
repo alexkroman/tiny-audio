@@ -44,6 +44,46 @@ for try await delta in transcriber.transcribeStream(.file(url)) {
 }
 ```
 
+## Live microphone transcription (v0.2)
+
+```swift
+import TinyAudio
+
+let transcriber = try await Transcriber.load()
+let mic = try MicrophoneTranscriber(transcriber: transcriber)
+
+try await mic.start()
+for await event in mic.events {
+    switch event {
+    case let .partial(_, delta):
+        print(delta, terminator: "")
+    case let .final(id, text):
+        print("\n[utterance \(id): \(text)]")
+    case let .error(error):
+        print("\n[error: \(error)]")
+    }
+}
+```
+
+The `MicrophoneTranscriber` actor uses `AVAudioEngine` to capture the system mic, runs Silero VAD (on-device, ~600 KB Core ML model bundled with the SDK) to chop the stream into utterances, and routes each utterance through the `Transcriber` model. The `events` stream is non-throwing — per-utterance failures emit `.error(_)` events but the session continues until you call `stop()`.
+
+### Permission
+
+The host app must declare `NSMicrophoneUsageDescription` in its `Info.plist`. `MicrophoneTranscriber.start()` triggers the standard permission prompt; if the user denies, it throws `TinyAudioError.micPermissionDenied`.
+
+### Tuning the VAD
+
+`MicrophoneTranscriber(transcriber:vad:)` accepts an optional `VADConfig`:
+
+```swift
+var config = VADConfig.default
+config.minSilenceDurationMs = 800   // wait longer before declaring offset
+config.preSpeechPaddingMs = 300     // capture more lead-in audio
+let mic = try MicrophoneTranscriber(transcriber: transcriber, vad: config)
+```
+
+Defaults: 0.5 speech threshold, 500 ms minimum silence to end an utterance, 200 ms minimum speech to start one, 200 ms of pre-speech audio captured before the detected onset.
+
 ## In-memory PCM buffers
 
 ```swift
@@ -68,7 +108,10 @@ let text = try await transcriber.transcribe(.samples(samples, sampleRate: 16_000
 - `WeightSource` — default Hub bundle, custom Hub repo, or local directory.
 - `TinyAudioError` — typed errors for download / verification / runtime failures.
 
-Live-microphone transcription with VAD endpointing ships in **v0.2**.
+**v0.2 adds:**
+
+- `MicrophoneTranscriber` — async actor for live-mic transcription with Silero VAD endpointing.
+- `VADConfig` — public struct for tuning endpointing thresholds and durations.
 
 ## Model details
 
