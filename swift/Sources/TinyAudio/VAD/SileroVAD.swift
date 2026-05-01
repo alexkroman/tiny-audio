@@ -40,17 +40,24 @@ final class SileroVAD {
     let config = MLModelConfiguration()
     config.computeUnits = .cpuAndNeuralEngine
 
+    // Xcode-built apps get a precompiled `.mlmodelc` directly; load as-is.
+    // SwiftPM's `.copy` preserves the source `.mlpackage`, which we compile once
+    // per process and cache for subsequent SileroVAD instances.
     let compiledURL: URL
-    Self.compileLock.lock()
-    defer { Self.compileLock.unlock() }
-    if let cached = Self.cachedCompiledURL, FileManager.default.fileExists(atPath: cached.path) {
-      compiledURL = cached
+    if VADResources.isPrecompiled(url) {
+      compiledURL = url
     } else {
-      do {
-        compiledURL = try MLModel.compileModel(at: url)
-        Self.cachedCompiledURL = compiledURL
-      } catch {
-        throw TinyAudioError.mlxModuleLoadFailed(name: "SileroVAD", underlying: AnyError(error))
+      Self.compileLock.lock()
+      defer { Self.compileLock.unlock() }
+      if let cached = Self.cachedCompiledURL, FileManager.default.fileExists(atPath: cached.path) {
+        compiledURL = cached
+      } else {
+        do {
+          compiledURL = try MLModel.compileModel(at: url)
+          Self.cachedCompiledURL = compiledURL
+        } catch {
+          throw TinyAudioError.mlxModuleLoadFailed(name: "SileroVAD", underlying: AnyError(error))
+        }
       }
     }
 
