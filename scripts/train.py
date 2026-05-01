@@ -15,6 +15,7 @@ import wandb
 from datasets import (
     Audio,
     Dataset,
+    Value,
     concatenate_datasets,
     load_dataset,
 )
@@ -45,6 +46,10 @@ class DatasetLoader:
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
         self.num_proc = self.config.get("num_proc", 16)
+        # `duration` is only consumed by Trainer's group_by_length sampler; skip
+        # any duration prep when group_by_length is off. Avoids a slow column
+        # cast (and potentially a full-decode map) on every train run.
+        self.needs_duration = bool(config.training.get("group_by_length", False))
         self.multitask_enabled = multitask_enabled
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str):
@@ -81,13 +86,12 @@ class DatasetLoader:
             task = dataset_cfg.get("task", "transcribe")  # Default to transcribe
             # Add task column to identify ASR vs SIFT samples
             ds = ds.add_column("task", [task] * len(ds))
-            keep_cols = {"audio", "text", "duration", "sift_response", "task"}
-            extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
+            keep_cols = {"audio", "text", "sift_response", "task"}
         else:
-            # Remove extra columns, keep only audio, text, and duration (for group_by_length)
-            extra_cols = [
-                c for c in (ds.column_names or []) if c not in {"audio", "text", "duration"}
-            ]
+            keep_cols = {"audio", "text"}
+        if self.needs_duration:
+            keep_cols = keep_cols | {"duration"}
+        extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
@@ -119,15 +123,20 @@ class DatasetLoader:
     def _ensure_duration(self, ds: Dataset) -> Dataset:
         # `group_by_length` requires a `duration` column. Compute from audio
         # length when no source field provides one. Run AFTER resampling so we
-        # don't decode samples that get trimmed.
-        if "duration" in ds.column_names:
-            return ds
-        sr = self.sample_rate
+        # don't decode samples that get trimmed. Cast to float32 only when the
+        # source ships a different dtype (sources mix float32/float64/null and
+        # concatenate_datasets rejects the mismatch); skipping a no-op cast
+        # avoids a multi-minute column rewrite on large streams.
+        if "duration" not in ds.column_names:
+            sr = self.sample_rate
 
-        def _add_duration(batch):
-            return {"duration": [a["array"].shape[0] / sr for a in batch["audio"]]}
+            def _add_duration(batch):
+                return {"duration": [a["array"].shape[0] / sr for a in batch["audio"]]}
 
-        return ds.map(_add_duration, batched=True, num_proc=self.num_proc)
+            ds = ds.map(_add_duration, batched=True, num_proc=self.num_proc)
+        if ds.features["duration"].dtype != "float32":
+            ds = ds.cast_column("duration", Value("float32"))
+        return ds
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -141,11 +150,15 @@ class DatasetLoader:
                 ds = self._prepare_split(d_cfg, train_split)
                 if target_samples:
                     ds = self._resample_to_target(ds, target_samples)
-                train_datasets.append(self._ensure_duration(ds))
+                if self.needs_duration:
+                    ds = self._ensure_duration(ds)
+                train_datasets.append(ds)
 
             for eval_split in eval_splits:
                 ds = self._prepare_split(d_cfg, eval_split)
-                val_datasets.append(self._ensure_duration(ds))
+                if self.needs_duration:
+                    ds = self._ensure_duration(ds)
+                val_datasets.append(ds)
 
         # Concatenate and shuffle
         train_ds = (

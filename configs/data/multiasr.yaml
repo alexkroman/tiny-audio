@@ -10,14 +10,13 @@
 # ┌──────────────────┬───────────┬─────────┐
 # │ Dataset          │ Samples   │ Percent │
 # ├──────────────────┼───────────┼─────────┤
-# │ loquacious med   │ 1,090,000 │   46.9% │
-# │ ami-ihm          │   305,000 │   13.1% │
-# │ ami-sdm          │   175,000 │    7.5% │
-# │ spgispeech L     │   260,000 │   11.2% │
-# │ switchboard      │   260,000 │   11.2% │
-# │ gigaspeech xl    │   232,000 │   10.0% │
+# │ loquacious med   │ 1,090,000 │   52.2% │
+# │ ami-ihm          │   305,000 │   14.6% │
+# │ ami-sdm          │   175,000 │    8.4% │
+# │ spgispeech L     │   260,000 │   12.4% │
+# │ switchboard      │   260,000 │   12.4% │
 # └──────────────────┴───────────┴─────────┘
-# Total: ~2,322,000 samples
+# Total: ~2,090,000 samples
 #
 # Loquacious is uncapped (full medium ~1.09M); other streams scaled to hit
 # the target proportions. AMI IHM/SDM and Switchboard upsample (~2-3x repeats)
@@ -74,20 +73,6 @@ datasets:
     train_splits: [train]
     eval_splits: [validation]
     target_samples: 260000
-
-  # GigaSpeech XL (empty-audio-removed) - YouTube/podcast/audiobook mix.
-  # Direct training data for the GigaSpeech eval (not in Loquacious).
-  # fixie-ai/gigaspeech only ships {dev, xl, xl-empty-audio-removed} — no
-  # smaller subsets — so we stream from the full XL pool and cap with
-  # target_samples for the desired ~10% mix share.
-  - path: fixie-ai/gigaspeech
-    name: xl-empty-audio-removed
-    audio_column: audio
-    text_column: text
-    task: transcribe
-    train_splits: [train]
-    eval_splits: [validation]
-    target_samples: 232000
 
 # Audio processing
 sample_rate: 16000

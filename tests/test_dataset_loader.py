@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 from scripts.train import DatasetLoader
 
 
-def _make_cfg(datasets, sample_rate=16000, num_proc=1):
+def _make_cfg(datasets, sample_rate=16000, num_proc=1, group_by_length=True):
     return OmegaConf.create(
         {
             "data": {
@@ -19,7 +19,7 @@ def _make_cfg(datasets, sample_rate=16000, num_proc=1):
                 "dataset_cache_dir": None,
                 "num_proc": num_proc,
             },
-            "training": {"seed": 42},
+            "training": {"seed": 42, "group_by_length": group_by_length},
         }
     )
 
@@ -85,3 +85,13 @@ class TestEnsureDuration:
         ds = loader._ensure_duration(ds)
 
         assert ds[0]["duration"] == pytest.approx(999.0)
+
+
+class TestGroupByLengthDisabled:
+    def test_duration_dropped_when_group_by_length_off(self):
+        fake = _fake_dataset(audio_seconds=1.0, text="hi", duration=1.0)
+        cfg = {"path": "fake/dataset", "audio_column": "audio", "text_column": "text"}
+        loader = DatasetLoader(_make_cfg([cfg], group_by_length=False))
+        ds = _prepare(loader, cfg, fake)
+
+        assert "duration" not in ds.column_names
