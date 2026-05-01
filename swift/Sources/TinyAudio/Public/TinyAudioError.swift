@@ -12,6 +12,7 @@ public enum TinyAudioError: Error, Sendable {
     case audioFormatUnsupported(reason: String)
     case audioEmpty
     case promptAudioTokenMismatch(prompt: Int, projector: Int)
+    case vadModelMissing
 }
 
 /// Sendable wrapper for any `Error`, allowing `TinyAudioError` to be `Sendable`
@@ -42,6 +43,7 @@ extension TinyAudioError: Equatable {
         case (.audioEmpty, .audioEmpty): return true
         case let (.promptAudioTokenMismatch(lp, lpr), .promptAudioTokenMismatch(rp, rpr)):
             return lp == rp && lpr == rpr
+        case (.vadModelMissing, .vadModelMissing): return true
         default: return false
         }
     }
@@ -57,6 +59,7 @@ extension TinyAudioError: CustomStringConvertible {
         case let .audioFormatUnsupported(reason): return "audio format unsupported: \(reason)"
         case .audioEmpty: return "audio is empty"
         case let .promptAudioTokenMismatch(prompt, projector): return "prompt has \(prompt) <audio> placeholders but projector emitted \(projector) frames"
+        case .vadModelMissing: return "Silero VAD mlpackage is missing from the bundle"
         }
     }
 }
