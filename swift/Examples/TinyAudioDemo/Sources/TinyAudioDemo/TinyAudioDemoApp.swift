@@ -8,7 +8,7 @@ struct TinyAudioDemoApp: App {
   }
 
   var body: some Scene {
-    WindowGroup("TinyAudio Demo") {
+    WindowGroup("Tiny Audio") {
       ContentView()
     }
   }

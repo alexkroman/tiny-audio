@@ -17,7 +17,7 @@ targets:
     info:
       path: Info.plist
       properties:
-        CFBundleName: TinyAudio Demo
+        CFBundleName: Tiny Audio
         CFBundleShortVersionString: "0.1"
         CFBundleVersion: "1"
         UILaunchScreen: {}

@@ -10,7 +10,7 @@
           transcripts: vm.finalizedTranscripts,
           emptyPrompt: "Tap Record to start listening."
         )
-        .navigationTitle("TinyAudio")
+        .navigationTitle("Tiny Audio")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
           ToolbarItem(placement: .topBarTrailing) {
@@ -51,47 +51,22 @@
             .padding(.horizontal, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        controlRow
+        RecordButton(
+          isListening: vm.isListening,
+          isEnabled: vm.loadState == .ready,
+          action: {
+            Task {
+              if vm.isListening {
+                await vm.stopMic()
+              } else {
+                await vm.startMic()
+              }
+            }
+          }
+        )
       }
       .padding(.vertical, 12)
       .background(.bar)
-    }
-
-    @ViewBuilder
-    private var controlRow: some View {
-      HStack(spacing: 12) {
-        Spacer()
-        if vm.isListening {
-          ListeningIndicator()
-        }
-        switch vm.loadState {
-        case .loading:
-          HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text("Loading model…")
-              .font(.subheadline)
-              .foregroundStyle(.secondary)
-          }
-        case .ready:
-          RecordButton(
-            isListening: vm.isListening,
-            isEnabled: true,
-            action: {
-              Task {
-                if vm.isListening {
-                  await vm.stopMic()
-                } else {
-                  await vm.startMic()
-                }
-              }
-            }
-          )
-        case .error:
-          RecordButton(isListening: false, isEnabled: false, action: {})
-        }
-        Spacer()
-      }
-      .padding(.horizontal, 16)
     }
   }
 #endif

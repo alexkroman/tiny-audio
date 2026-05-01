@@ -20,12 +20,10 @@
 		6A072EDF09802159CFF096E2 /* TranscriptBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E94F9648F007E18506B4C63 /* TranscriptBubble.swift */; };
 		6ED6A56EE507C5566E0567BF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FDA75A6B919557551529869C /* Assets.xcassets */; };
 		782FB7B7C54C3DC4AAB68C81 /* iOSContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1618D1C39F83FA2CE4A7DBA /* iOSContentView.swift */; };
-		8E5255369C469C63725DAEB8 /* ListeningIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB0B23AEE326CDD96FCECA47 /* ListeningIndicator.swift */; };
 		A1476B57DA7A4FAD326B77E5 /* TinyAudio in Frameworks */ = {isa = PBXBuildFile; productRef = F60BA45127593874814237D7 /* TinyAudio */; };
 		A20A6790E9711D62A1344444 /* MacContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A8A5D5C81CA6CC56150FC84 /* MacContentView.swift */; };
 		A4C722A657A8B1DEE275DA00 /* TranscriptList.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC7B2107A87A901ABC42B95C /* TranscriptList.swift */; };
 		AC443ED75A16E12EF99EB3E4 /* MacContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A8A5D5C81CA6CC56150FC84 /* MacContentView.swift */; };
-		AFB1D2F638DEA22D515BB4E6 /* ListeningIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB0B23AEE326CDD96FCECA47 /* ListeningIndicator.swift */; };
 		B8CD054B924E89BDE8209491 /* TranscriptBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E94F9648F007E18506B4C63 /* TranscriptBubble.swift */; };
 		C43A377978175DA0CA165693 /* TinyAudioDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7736B12DD1701506D7A1D042 /* TinyAudioDemoApp.swift */; };
 		E13C27E11C3B59A1E016A757 /* TranscriberViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18A058EBDA9AB9A7E56FD0AA /* TranscriberViewModel.swift */; };
@@ -48,7 +46,6 @@
 		B94676E424D7CDFF2C9F294D /* RecordButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordButton.swift; sourceTree = "<group>"; };
 		D8E61FE375FE5809797C5B8B /* EmptyState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyState.swift; sourceTree = "<group>"; };
 		D91ABB055ED7C7A019BBB126 /* TinyAudioDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TinyAudioDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		DB0B23AEE326CDD96FCECA47 /* ListeningIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListeningIndicator.swift; sourceTree = "<group>"; };
 		F3C50293AFEFEE71F7666B28 /* TinyAudioDemo.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TinyAudioDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FDA75A6B919557551529869C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -88,7 +85,6 @@
 			children = (
 				D8E61FE375FE5809797C5B8B /* EmptyState.swift */,
 				A1618D1C39F83FA2CE4A7DBA /* iOSContentView.swift */,
-				DB0B23AEE326CDD96FCECA47 /* ListeningIndicator.swift */,
 				9A8A5D5C81CA6CC56150FC84 /* MacContentView.swift */,
 				30F70DF05A95F4CAACF552E3 /* PermissionBanner.swift */,
 				B94676E424D7CDFF2C9F294D /* RecordButton.swift */,
@@ -238,7 +234,6 @@
 			files = (
 				4FF22C86A32DA5DBE109C812 /* ContentView.swift in Sources */,
 				F4F33B042202404B722B6A0D /* EmptyState.swift in Sources */,
-				AFB1D2F638DEA22D515BB4E6 /* ListeningIndicator.swift in Sources */,
 				AC443ED75A16E12EF99EB3E4 /* MacContentView.swift in Sources */,
 				492CD85FEFD1FF8F5FE8BFF8 /* PermissionBanner.swift in Sources */,
 				115067BF5D9A677E1EE88E30 /* RecordButton.swift in Sources */,
@@ -256,7 +251,6 @@
 			files = (
 				E81E763C0C926A5E848049DA /* ContentView.swift in Sources */,
 				5B06DD38DB32C6D241571164 /* EmptyState.swift in Sources */,
-				8E5255369C469C63725DAEB8 /* ListeningIndicator.swift in Sources */,
 				A20A6790E9711D62A1344444 /* MacContentView.swift in Sources */,
 				692D8E9BDACD32D273791831 /* PermissionBanner.swift in Sources */,
 				FF2B98CB18D4B5840F5658F1 /* RecordButton.swift in Sources */,
