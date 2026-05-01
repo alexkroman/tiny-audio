@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
 
 /// Convert an `AVAudioPCMBuffer` to 16 kHz mono Float32 `[Float]`.
@@ -35,14 +35,21 @@ struct AudioResampler {
             throw TinyAudioError.audioFormatUnsupported(reason: "could not allocate output buffer")
         }
 
-        var consumed = false
+        // The AVAudioConverter input block is `@Sendable` under Swift 6, even though
+        // it's called synchronously on the calling thread. Wrap the one-shot delivery
+        // flag in a class so the closure captures a reference rather than a captured
+        // mutable var.
+        final class InputState: @unchecked Sendable {
+            var delivered = false
+        }
+        let state = InputState()
         var convError: NSError?
         let status = converter.convert(to: outBuffer, error: &convError) { _, outStatus in
-            if consumed {
+            if state.delivered {
                 outStatus.pointee = .endOfStream
                 return nil
             }
-            consumed = true
+            state.delivered = true
             outStatus.pointee = .haveData
             return buffer
         }
