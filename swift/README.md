@@ -30,18 +30,29 @@ In your `Package.swift`:
 > Note: this package lives under `swift/` in the `tiny-audio` repo. SwiftPM
 > resolves the manifest at that path automatically.
 
+> **Disk size**: the SDK is ~675 MB because model weights (~663 MB of safetensors) are
+> bundled via Git LFS. Make sure `git-lfs` is installed before cloning so the blobs
+> are resolved (`brew install git-lfs && git lfs install`).
+
 ## Quickstart — file transcription
 
 ```swift
 import TinyAudio
 
-let transcriber = try await Transcriber.load { progress in
-    print("Downloading model: \(Int(progress.fractionCompleted * 100))%")
-}
+// No download required — model weights are bundled with the SDK.
+let transcriber = try await Transcriber.load()
 
 let url = URL(fileURLWithPath: "/path/to/audio.wav")
 let text = try await transcriber.transcribe(.file(url))
 print(text)
+```
+
+To use a different model revision from the HuggingFace Hub:
+
+```swift
+let transcriber = try await Transcriber.load(from: .hub(repoID: "mazesmazes/tiny-audio-mlx", revision: nil)) { progress in
+    print("Downloading model: \(Int(progress.fractionCompleted * 100))%")
+}
 ```
 
 ## Streaming text deltas
@@ -122,10 +133,10 @@ let text = try await transcriber.transcribe(.samples(samples, sampleRate: 16_000
 
 ## Model details
 
-- ~460 MB total (4-bit quantized GLM-ASR encoder + Qwen3-0.6B decoder, fp16 projector).
-- Downloaded on first `Transcriber.load()` call from the Hugging Face Hub repo
-  `mazesmazes/tiny-audio-mlx` into the standard HF cache.
-- Subsequent loads are offline (manifest SHA256-verified once, then trusted).
+- ~675 MB total on disk (4-bit quantized GLM-ASR encoder + Qwen3-0.6B decoder, fp16 projector),
+  bundled as Git LFS resources inside the Swift package.
+- `Transcriber.load(from: .defaultHub)` reads directly from `Bundle.module` — no network
+  request on first launch. Use `.hub(repoID:revision:)` to pull a different revision.
 - Greedy decoding only (no sampling, no beam search). Optimised for ASR transcription.
 
 ## Architecture

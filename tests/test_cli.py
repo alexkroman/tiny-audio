@@ -102,9 +102,8 @@ class TestNestedCommands:
         """Test that nested commands are accessible and show expected options."""
         result = runner.invoke(app, cmd_path + ["--help"])
         assert result.exit_code == 0, f"'{' '.join(cmd_path)} --help' failed: {result.output}"
-        assert expected_keyword.lower() in _clean(result.output).lower(), (
-            f"Expected '{expected_keyword}' in {cmd_path} help"
-        )
+        err = f"Expected '{expected_keyword}' in {cmd_path} help"
+        assert expected_keyword.lower() in _clean(result.output).lower(), err
 
 
 class TestDevCommands:

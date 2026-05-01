@@ -4,17 +4,18 @@ import Foundation
 ///
 /// The three cases cover the common deployment scenarios:
 ///
-/// - ``defaultHub`` — production default; downloads `mazesmazes/tiny-audio-mlx`
-///   from HuggingFace Hub and caches it in the application-support directory.
+/// - ``defaultHub`` — production default; reads the bundled model weights
+///   directly from `Bundle.module` — no download required.
 /// - ``hub(repoID:revision:)`` — use a custom or forked Hub repository, or
 ///   pin to a specific git revision for reproducibility.
 /// - ``localDirectory(_:)`` — use a pre-staged bundle; suitable for offline
 ///   use, unit tests, or embedding weights inside the app bundle.
 public enum WeightSource: Sendable {
-    /// The official `mazesmazes/tiny-audio-mlx` bundle on HuggingFace Hub.
+    /// The bundled model weights — no download required.
     ///
-    /// Weights are downloaded on first use and cached.  Subsequent launches
-    /// skip the download when the SHA-256 manifest check passes.
+    /// Loads from the SDK's resource bundle (`Bundle.module/Resources/Model/`).
+    /// Use ``hub(repoID:revision:)`` if you want a different model revision or
+    /// a custom Hub repo.
     case defaultHub
 
     /// An explicit HuggingFace Hub repository, with an optional git revision.

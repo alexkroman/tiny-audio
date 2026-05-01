@@ -200,20 +200,18 @@ class BaseAlignmentEvaluator:
                     delta_start = (ps - rs) * 1000  # ms
                     delta_end = (pe - re) * 1000  # ms
                     # Color code: green if <50ms, yellow if <100ms, red otherwise
-                    start_color = (
-                        "green"
-                        if abs(delta_start) < 50
-                        else "yellow"
-                        if abs(delta_start) < 100
-                        else "red"
-                    )
-                    end_color = (
-                        "green"
-                        if abs(delta_end) < 50
-                        else "yellow"
-                        if abs(delta_end) < 100
-                        else "red"
-                    )
+                    if abs(delta_start) < 50:
+                        start_color = "green"
+                    elif abs(delta_start) < 100:
+                        start_color = "yellow"
+                    else:
+                        start_color = "red"
+                    if abs(delta_end) < 50:
+                        end_color = "green"
+                    elif abs(delta_end) < 100:
+                        end_color = "yellow"
+                    else:
+                        end_color = "red"
                     console.print(
                         f"  {word:<20} {ps:>10.3f} {rs:>10.3f} [{start_color}]{delta_start:>+10.1f}[/{start_color}] "
                         f"{pe:>10.3f} {re:>10.3f} [{end_color}]{delta_end:>+10.1f}[/{end_color}]"

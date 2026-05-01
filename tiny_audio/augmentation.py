@@ -186,6 +186,7 @@ class RIRAugmentation:
             room.add_source(pos_src)
             room.add_microphone(pos_rcv)
             room.compute_rir()
+            assert room.rir is not None, "compute_rir() did not populate room.rir"
             rir_np = np.asarray(room.rir[0][0], dtype=np.float32)
             rir_t = torch.from_numpy(rir_np)
             peak_idx = int(rir_t.abs().argmax().item())

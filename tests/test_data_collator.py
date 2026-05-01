@@ -103,9 +103,8 @@ class TestLabelMasking:
         unmasked_text = tokenizer.decode(unmasked_tokens, skip_special_tokens=True)
 
         # The transcription text should be in the unmasked portion
-        assert "hello" in unmasked_text.lower(), (
-            f"Transcription not found in unmasked text: {unmasked_text}"
-        )
+        err = f"Transcription not found in unmasked text: {unmasked_text}"
+        assert "hello" in unmasked_text.lower(), err
 
     def test_stop_token_is_unmasked(self, collator, tokenizer):
         """Verify that <|im_end|> stop token is included in labels."""
@@ -126,9 +125,8 @@ class TestLabelMasking:
             if inp == im_end_id and label == im_end_id
         ]
 
-        assert len(unmasked_im_end) > 0, (
-            "No <|im_end|> token found in labels - model won't learn to stop"
-        )
+        err = "No <|im_end|> token found in labels - model won't learn to stop"
+        assert len(unmasked_im_end) > 0, err
 
     def test_system_and_user_prompts_are_masked(self, collator, tokenizer):
         """Verify that system prompt and user content are masked (-100)."""
@@ -184,9 +182,8 @@ class TestLabelMasking:
         # For every unmasked position, label should equal input_id
         for i, (label, input_id) in enumerate(zip(labels, input_ids)):
             if label != -100:
-                assert label == input_id, (
-                    f"Label mismatch at position {i}: label={label}, input_id={input_id}"
-                )
+                err = f"Label mismatch at position {i}: label={label}, input_id={input_id}"
+                assert label == input_id, err
 
 
 class TestAudioTokens:
@@ -242,9 +239,8 @@ class TestAudioTokens:
         # All positions with <audio> token should have label=-100
         audio_positions = (input_ids == audio_token_id).nonzero(as_tuple=True)[0]
         for pos in audio_positions:
-            assert labels[pos].item() == -100, (
-                f"Audio token at position {pos} should be masked but has label {labels[pos]}"
-            )
+            err = f"Audio token at position {pos} should be masked but has label {labels[pos]}"
+            assert labels[pos].item() == -100, err
 
 
 class TestBatchProcessing:
@@ -324,9 +320,8 @@ class TestMultiTaskDataCollator:
         from scripts.train import DESCRIBE_PROMPTS
 
         assert "<audio>" in decoded
-        assert any(prompt in decoded for prompt in DESCRIBE_PROMPTS), (
-            f"No describe prompt found in: {decoded}"
-        )
+        err = f"No describe prompt found in: {decoded}"
+        assert any(prompt in decoded for prompt in DESCRIBE_PROMPTS), err
         # Should contain the response from dataset
         assert "The speaker sounds happy and excited" in decoded
 
@@ -347,9 +342,8 @@ class TestMultiTaskDataCollator:
         from scripts.train import TRANSCRIBE_PROMPTS
 
         assert "<audio>" in decoded
-        assert any(prompt in decoded for prompt in TRANSCRIBE_PROMPTS), (
-            f"No transcribe prompt found in: {decoded}"
-        )
+        err = f"No transcribe prompt found in: {decoded}"
+        assert any(prompt in decoded for prompt in TRANSCRIBE_PROMPTS), err
         # Should use text column (lowercased)
         assert "hello world transcript" in decoded
         # Should NOT use sift_response
@@ -374,9 +368,8 @@ class TestMultiTaskDataCollator:
         from scripts.train import TRANSCRIBE_PROMPTS
 
         assert "<audio>" in decoded
-        assert any(prompt in decoded for prompt in TRANSCRIBE_PROMPTS), (
-            f"No transcribe prompt found in: {decoded}"
-        )
+        err = f"No transcribe prompt found in: {decoded}"
+        assert any(prompt in decoded for prompt in TRANSCRIBE_PROMPTS), err
         assert "default transcription" in decoded
 
     def test_response_is_unmasked(self, multitask_collator, tokenizer):
@@ -408,9 +401,8 @@ class TestMultiTaskDataCollator:
         unmasked_text = tokenizer.decode(unmasked_tokens, skip_special_tokens=True)
 
         # The response should be in the unmasked portion
-        assert "happy" in unmasked_text.lower(), (
-            f"Response not found in unmasked text: {unmasked_text}"
-        )
+        err = f"Response not found in unmasked text: {unmasked_text}"
+        assert "happy" in unmasked_text.lower(), err
 
 
 class TestAudioTokenCountsExposed:
@@ -422,9 +414,8 @@ class TestAudioTokenCountsExposed:
             create_sample("world how are you", duration_sec=2.0),
         ]
         batch = collator(samples)
-        assert "audio_token_counts" in batch, (
-            "Collator must include audio_token_counts in the returned batch"
-        )
+        err = "Collator must include audio_token_counts in the returned batch"
+        assert "audio_token_counts" in batch, err
         assert batch["audio_token_counts"].dtype == torch.long
         assert batch["audio_token_counts"].shape == (2,)
         assert (batch["audio_token_counts"] > 0).all()

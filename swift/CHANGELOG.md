@@ -2,6 +2,25 @@
 
 All notable changes to the TinyAudio Swift SDK are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- Model weights are now bundled with the SDK as Git LFS resources.
+  `Transcriber.load(from: .defaultHub)` no longer downloads — it reads directly
+  from `Bundle.module`. Users who want a different model revision can still
+  use `.hub(repoID:revision:)` for the on-demand download path.
+- Total SDK disk footprint is now ~675 MB (dominated by bundled model weights).
+
+### Added
+
+- `MLXBootstrap.ensureMetallibAvailable()` — a startup helper that locates
+  `mlx.metallib` in nearby SwiftPM build artifacts and copies it next to the
+  running executable. Eliminates the need for manual metallib copies when using
+  `swift run` for the demo or eval CLI.
+- `TinyAudioDemoApp` and `tiny-audio-swift-eval` now call
+  `MLXBootstrap.ensureMetallibAvailable()` at startup automatically.
+
 ## [1.0.0] — 2026-04-30
 
 ### Added

@@ -25,6 +25,9 @@ private struct ErrorMsg: Encodable { let error: String; let path: String? }
 @main
 struct TinyAudioEvalCLI {
     static func main() async {
+        // Ensure mlx.metallib is next to the executable before any MLX use.
+        MLXBootstrap.ensureMetallibAvailable()
+
         // Parse args: --repo <repo-id> | --local <dir>. Default: .defaultHub.
         let args = Array(CommandLine.arguments.dropFirst())
         let source: WeightSource = parseSource(args)

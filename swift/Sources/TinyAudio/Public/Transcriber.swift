@@ -30,12 +30,12 @@ public actor Transcriber {
 
     // MARK: - Public factory
 
-    /// Download (if needed), verify, and load the model, returning a warmed-up `Transcriber`.
+    /// Verify and load the model, returning a warmed-up `Transcriber`.
     ///
-    /// On the first call the ~460 MB MLX bundle is downloaded from HuggingFace
-    /// Hub (or from a custom ``WeightSource``) and cached in the system's
-    /// application-support directory.  Subsequent calls skip the download when
-    /// the cached bundle passes its SHA-256 manifest check.
+    /// When called with the default ``WeightSource/defaultHub`` source, weights
+    /// are read directly from the SDK's resource bundle (``Bundle/module``) — no
+    /// network request is made.  Use ``WeightSource/hub(repoID:revision:)`` to
+    /// pull a different model revision from HuggingFace Hub on demand.
     ///
     /// After loading, the actor runs a short synthetic warmup at 1 s, 5 s, and
     /// 15 s of audio to JIT-compile Metal kernels for the shapes most common in
@@ -71,14 +71,39 @@ public actor Transcriber {
         progress: ((Progress) -> Void)? = nil
     ) async throws -> Transcriber {
 
-        // 1. Materialise weights to a local directory.
-        let bundle = try await HubLoader.materialize(source, progress: progress)
+        // 1. Resolve weight directory.
+        let bundle: URL
+        switch source {
+        case .defaultHub:
+            // Bundled model — no download needed.
+            guard let modelDir = Bundle.module.url(forResource: "Model", withExtension: nil) else {
+                throw TinyAudioError.mlxModuleLoadFailed(
+                    name: "bundled model",
+                    underlying: AnyError(ConfigError.invalidJSON(
+                        "Resources/Model is missing from the SDK bundle"
+                    ))
+                )
+            }
+            bundle = modelDir
+        case let .hub(repoID, revision):
+            bundle = try await HubLoader.materialize(.hub(repoID: repoID, revision: revision), progress: progress)
+        case let .localDirectory(url):
+            bundle = url
+        }
         let cache = WeightCache(directory: bundle)
 
-        // 2. Verify manifest unless already marked complete.
+        // 2. Verify manifest unless already marked complete OR the directory is
+        //    read-only (bundled resources inside the SwiftPM bundle are not writable).
         if !cache.isComplete {
-            try ManifestVerifier.verify(directory: bundle)
-            try cache.markComplete()
+            do {
+                try ManifestVerifier.verify(directory: bundle)
+                // Try to mark complete; ignore failure for read-only bundled dirs.
+                try? cache.markComplete()
+            } catch {
+                // For bundled resources, manifest verification is a sanity check;
+                // if it fails the package is corrupt — surface as load failure.
+                throw error
+            }
         }
 
         // 3. Read bundle config.json.
