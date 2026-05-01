@@ -108,14 +108,6 @@ public actor MicrophoneTranscriber {
   /// Leftover samples that didn't fill a complete VAD frame yet.
   private var pendingFrameTail: [Float] = []
 
-  /// Counter used by the tap callback for throttled NSLog output.
-  /// `nonisolated(unsafe)` is fine because tap fires on a single private
-  /// AVAudioEngine thread.
-  nonisolated(unsafe) private static var tapCounter: UInt64 = 0
-  /// Counter used by `feed()` for throttled NSLog output. Single actor
-  /// invocation, so `nonisolated(unsafe)` is safe.
-  nonisolated(unsafe) private static var feedCounter: UInt64 = 0
-
   // MARK: - Init
 
   /// Create a `MicrophoneTranscriber`.
@@ -173,15 +165,10 @@ public actor MicrophoneTranscriber {
   ///   `AVAudioEngine` cannot start (e.g. no input device, audio session
   ///   conflict on iOS).
   public func start() async throws {
-    NSLog("[TinyAudio] MicrophoneTranscriber.start() invoked")
-    guard !engine.isRunning else {
-      NSLog("[TinyAudio] start: engine already running, returning")
-      return
-    }
+    guard !engine.isRunning else { return }
 
     // 1. Request microphone permission (iOS 17+ / macOS 14+).
     let granted = await Self.requestPermission()
-    NSLog("[TinyAudio] start: mic permission granted=\(granted)")
     guard granted else { throw TinyAudioError.micPermissionDenied }
 
     // 2. Configure AVAudioSession for recording on iOS.
@@ -233,20 +220,12 @@ public actor MicrophoneTranscriber {
     //    we hop to actor isolation via a Task for any state mutation.
     //    [weak self] avoids a retain cycle: if the actor is deinitialized
     //    while a tap callback is in-flight the guard safely exits.
-    NSLog("[TinyAudio] installing tap: inFormat=\(inFormat) outFormat=\(outFormat)")
     inputNode.installTap(onBus: 0, bufferSize: 4096, format: inFormat) { [weak self] buffer, _ in
       guard let self else { return }
-      MicrophoneTranscriber.tapCounter &+= 1
-      if MicrophoneTranscriber.tapCounter % 10 == 1 {
-        NSLog(
-          "[TinyAudio] tap fired #\(MicrophoneTranscriber.tapCounter) frameLength=\(buffer.frameLength)"
-        )
-      }
       let samples: [Float]
       do {
         samples = try Self.convertBuffer(buffer, with: converter, outFormat: outFormat)
       } catch {
-        NSLog("[TinyAudio] convertBuffer failed: \(error)")
         Task { await self.emitError(error) }
         return
       }
@@ -292,18 +271,9 @@ public actor MicrophoneTranscriber {
   /// Append new samples, slice into `SileroVAD.frameSize`-sample frames,
   /// run each frame through the VAD streamer.
   private func feed(samples: [Float]) {
-    Self.feedCounter &+= 1
-    if Self.feedCounter % 10 == 1 {
-      NSLog(
-        "[TinyAudio] feed #\(Self.feedCounter) samplesIn=\(samples.count) tail=\(pendingFrameTail.count)"
-      )
-    }
     pendingFrameTail.append(contentsOf: samples)
     let frameSize = SileroVAD.frameSize
     let completeFrames = pendingFrameTail.count / frameSize
-    if Self.feedCounter % 10 == 1 {
-      NSLog("[TinyAudio] feed: completeFrames=\(completeFrames) frameSize=\(frameSize)")
-    }
     for i in 0..<completeFrames {
       let start = i * frameSize
       let frame = Array(pendingFrameTail[start..<start + frameSize])
@@ -311,7 +281,6 @@ public actor MicrophoneTranscriber {
       do {
         vadEvents = try streamer.process(frame)
       } catch {
-        NSLog("[TinyAudio] streamer.process threw: \(error)")
         emitError(error)
         continue
       }
