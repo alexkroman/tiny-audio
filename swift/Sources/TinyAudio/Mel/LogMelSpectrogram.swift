@@ -39,11 +39,4 @@ struct LogMelSpectrogram {
     let floats = mel.asArray(Float.self)
     return (floats, shape: mel.shape)
   }
-
-  /// Compatibility shim -- older code called `LogMelSpectrogram.loadDefault()`.
-  /// Now that the filterbank is built inside `computeMelSpectrogram`, no
-  /// resource is loaded. Returns a fresh instance.
-  static func loadDefault() -> LogMelSpectrogram {
-    LogMelSpectrogram()
-  }
 }

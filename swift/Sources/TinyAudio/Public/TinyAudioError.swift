@@ -81,17 +81,19 @@ public struct AnyError: Error, Sendable, CustomStringConvertible {
 }
 
 extension TinyAudioError: Equatable {
+  /// Cases that carry an `AnyError` payload compare equal when the cases match,
+  /// since the wrapped error has no meaningful equality.  Cases with primitive
+  /// payloads compare structurally.
   public static func == (lhs: TinyAudioError, rhs: TinyAudioError) -> Bool {
     switch (lhs, rhs) {
-    case (.mlxModuleLoadFailed, .mlxModuleLoadFailed): return false
-    case (.audioFormatUnsupported(let lr), .audioFormatUnsupported(let rr)):
-      return lr == rr
+    case (.mlxModuleLoadFailed(let l, _), .mlxModuleLoadFailed(let r, _)): return l == r
+    case (.audioFormatUnsupported(let lr), .audioFormatUnsupported(let rr)): return lr == rr
     case (.audioEmpty, .audioEmpty): return true
     case (.promptAudioTokenMismatch(let lp, let lpr), .promptAudioTokenMismatch(let rp, let rpr)):
       return lp == rp && lpr == rpr
     case (.vadModelMissing, .vadModelMissing): return true
     case (.micPermissionDenied, .micPermissionDenied): return true
-    case (.audioSessionConfigurationFailed, .audioSessionConfigurationFailed): return false
+    case (.audioSessionConfigurationFailed, .audioSessionConfigurationFailed): return true
     default: return false
     }
   }

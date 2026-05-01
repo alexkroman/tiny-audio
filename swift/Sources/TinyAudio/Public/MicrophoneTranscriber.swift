@@ -40,9 +40,9 @@ public actor MicrophoneTranscriber {
   /// `final` events normally.
   ///
   /// `Event` is `Sendable` so it can be forwarded across actor boundaries
-  /// without copying.  However, the associated `Error` in ``error(_:)`` is
-  /// not itself constrained to `Sendable`; handle it promptly rather than
-  /// storing it across async suspension points.
+  /// without copying.  Errors are wrapped in ``AnyError`` (a type-erased
+  /// `Sendable` carrier); inspect `AnyError.underlying` for the original
+  /// `Error` value.
   public enum Event: Sendable {
     /// The complete, settled transcript for one utterance.
     ///
@@ -54,7 +54,7 @@ public actor MicrophoneTranscriber {
     /// The session continues after this event; subsequent utterances
     /// produce new events normally.  Check ``TinyAudioError`` for
     /// recoverable cases (e.g. ``TinyAudioError/audioEmpty``).
-    case error(Error)
+    case error(AnyError)
   }
 
   // MARK: - Public properties
@@ -307,13 +307,13 @@ public actor MicrophoneTranscriber {
         )
         cont.yield(.final(utteranceID: id, text: text))
       } catch {
-        cont.yield(.error(error))
+        cont.yield(.error(AnyError(error)))
       }
     }
   }
 
   private func emitError(_ error: Error) {
-    continuation.yield(.error(error))
+    continuation.yield(.error(AnyError(error)))
   }
 
   // MARK: - Permission
