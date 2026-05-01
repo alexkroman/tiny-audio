@@ -34,6 +34,9 @@ let package = Package(
             exclude: [
                 "Vendored/Qwen3/LICENSE",
                 "Vendored/Qwen3/UPSTREAM.md",
+            ],
+            resources: [
+                .copy("Resources/silero_vad.mlpackage"),
             ]
         ),
         .executableTarget(
