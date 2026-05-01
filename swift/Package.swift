@@ -10,6 +10,7 @@ let package = Package(
     ],
     products: [
         .library(name: "TinyAudio", targets: ["TinyAudio"]),
+        .executable(name: "tiny-audio-swift-eval", targets: ["tiny-audio-swift-eval"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.21.0"),
@@ -34,6 +35,11 @@ let package = Package(
                 "Vendored/Qwen3/LICENSE",
                 "Vendored/Qwen3/UPSTREAM.md",
             ]
+        ),
+        .executableTarget(
+            name: "tiny-audio-swift-eval",
+            dependencies: ["TinyAudio"],
+            path: "Sources/tiny-audio-swift-eval"
         ),
         .testTarget(
             name: "TinyAudioTests",

@@ -2,8 +2,10 @@
 
 import contextlib
 import io
+import json
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -581,3 +583,179 @@ class MLXEvaluator(Evaluator):
         text = self.model.transcribe(audio)
         elapsed = time.time() - start
         return text, elapsed
+
+
+class SwiftSDKEvaluator(Evaluator):
+    """Evaluator for the TinyAudio Swift SDK on Apple Silicon.
+
+    Triggered by `ta eval -m swift://<repo-id>`. Subprocesses to a persistent
+    Swift binary (`tiny-audio-swift-eval`) that loads the SDK's Transcriber
+    once and processes audio files from stdin.
+
+    The binary must be built first via `swift build --package-path swift -c release
+    --product tiny-audio-swift-eval`. We resolve its path from
+    `swift/.build/release/tiny-audio-swift-eval` relative to the repo root.
+    """
+
+    def __init__(self, repo_id: str, **kwargs):
+        if kwargs.get("num_workers", 1) > 1:
+            console.print(
+                "[yellow]Warning: SwiftSDKEvaluator forces num_workers=1 "
+                "(single Swift subprocess)[/yellow]"
+            )
+            kwargs["num_workers"] = 1
+        super().__init__(**kwargs)
+
+        repo_root = Path(__file__).resolve().parents[3]
+        swift_build = repo_root / "swift" / ".build"
+        # Try release build first, fall back to debug.
+        bin_release = swift_build / "release" / "tiny-audio-swift-eval"
+        bin_debug = swift_build / "debug" / "tiny-audio-swift-eval"
+        if bin_release.exists():
+            binary = bin_release
+        elif bin_debug.exists():
+            binary = bin_debug
+        else:
+            raise RuntimeError(
+                "tiny-audio-swift-eval binary not found. Build first:\n"
+                "  swift build --package-path swift -c release --product tiny-audio-swift-eval"
+            )
+
+        # MLX requires mlx.metallib to be colocated with the binary.
+        # SwiftPM only bundles it inside XCTest bundles, not standalone executables.
+        # If it's missing, find it from the debug XCTest bundle and copy it.
+        binary_dir = binary.parent
+        if not (binary_dir / "mlx.metallib").exists():
+            xctest_bundle = (
+                swift_build
+                / "arm64-apple-macosx"
+                / "debug"
+                / "TinyAudioPackageTests.xctest"
+                / "Contents"
+                / "MacOS"
+                / "mlx.metallib"
+            )
+            if xctest_bundle.exists():
+                shutil.copy2(str(xctest_bundle), str(binary_dir / "mlx.metallib"))
+                console.print(
+                    "[dim]Copied mlx.metallib to binary directory for MLX Metal support[/dim]"
+                )
+            else:
+                # Build the debug tests to get the metallib, then copy.
+                console.print(
+                    "[yellow]mlx.metallib not found; building Swift tests to generate it...[/yellow]"
+                )
+                result = subprocess.run(
+                    ["swift", "build", "--package-path", str(repo_root / "swift"), "--build-tests"],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    console.print(
+                        f"[red]Warning: swift build --build-tests failed: {result.stderr[:200]}[/red]"
+                    )
+                elif xctest_bundle.exists():
+                    shutil.copy2(str(xctest_bundle), str(binary_dir / "mlx.metallib"))
+
+        cmd = [str(binary), "--repo", repo_id]
+        console.print(f"[bold cyan]Spawning Swift SDK eval subprocess:[/bold cyan] {' '.join(cmd)}")
+
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,  # captured for diagnostics on crash
+            text=True,
+            bufsize=1,  # line-buffered
+        )
+
+        # Wait for the binary to emit `{"ready": true}` once load + warmup is done.
+        ready_line = self.proc.stdout.readline()
+        if not ready_line:
+            err = self.proc.stderr.read()
+            raise RuntimeError(f"Swift binary failed to start. stderr:\n{err}")
+        try:
+            ready_msg = json.loads(ready_line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Swift binary emitted non-JSON startup line: {ready_line!r}"
+            ) from exc
+        if "error" in ready_msg:
+            raise RuntimeError(f"Swift binary load failed: {ready_msg['error']}")
+        if not ready_msg.get("ready"):
+            raise RuntimeError(f"Swift binary unexpected startup line: {ready_msg}")
+        console.print("[bold green]Swift SDK ready[/bold green]")
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        # The eval framework passes either a path string or a dict-like with an
+        # 'array' field. The Swift binary takes file paths only — write to a
+        # temp wav if we got an in-memory array.
+        path, is_temp = self._resolve_audio_path(audio)
+        try:
+            self.proc.stdin.write(path + "\n")
+            self.proc.stdin.flush()
+            line = self.proc.stdout.readline()
+            if not line:
+                err = self.proc.stderr.read()
+                raise RuntimeError(f"Swift binary closed unexpectedly. stderr:\n{err}")
+            msg = json.loads(line)
+            if "error" in msg:
+                raise RuntimeError(f"Swift transcribe failed: {msg['error']}")
+            return msg["text"], msg["elapsed_ms"] / 1000.0
+        finally:
+            if is_temp:
+                Path(path).unlink(missing_ok=True)
+
+    def _resolve_audio_path(self, audio) -> tuple[str, bool]:
+        """Return (filesystem_path, is_temp) for the Swift binary to read.
+
+        The eval framework's `audio` argument can be:
+        - a string path (HF datasets sometimes give the source path)
+        - a dict with 'path' (HF datasets style)
+        - a dict with 'array' + 'sampling_rate' (decoded numpy)
+        - a torchcodec AudioDecoder
+        - an AudioSamples-like object with `.data` and `.sample_rate`
+        For arrays/decoders without a path, materialise to a temp wav.
+        """
+        import numpy as np
+
+        if isinstance(audio, str):
+            return audio, False
+        if isinstance(audio, dict):
+            # HF datasets Audio feature: dict with 'path' (absolute) + optionally 'array'/'bytes'.
+            path = audio.get("path")
+            if path and Path(path).is_absolute() and Path(path).exists():
+                return path, False
+            # 'bytes' field: raw file bytes (wav, mp3, etc.) — write to temp file.
+            if audio.get("bytes"):
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp.write(audio["bytes"])
+                    tmp_name = tmp.name
+                return tmp_name, True
+            # 'array' + 'sampling_rate': decoded numpy array — encode to wav.
+            arr = np.asarray(audio["array"], dtype=np.float32)
+            sr = int(audio.get("sampling_rate", 16000))
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_name = tmp.name
+            sf.write(tmp_name, arr, sr, subtype="PCM_16")
+            return tmp_name, True
+        # AudioDecoder / AudioSamples fallback (mirrors MLXASRModel._prepare_audio).
+        if hasattr(audio, "get_all_samples"):
+            samples = audio.get_all_samples()
+            data = samples.data.detach().cpu().numpy()
+            sr = int(samples.sample_rate)
+            if data.ndim > 1:
+                data = data.mean(axis=0)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_name = tmp.name
+            sf.write(tmp_name, data, sr, subtype="PCM_16")
+            return tmp_name, True
+        raise ValueError(f"unsupported audio input type for Swift eval: {type(audio)}")
+
+    def __del__(self):
+        if hasattr(self, "proc") and self.proc.poll() is None:
+            try:
+                self.proc.stdin.close()
+                self.proc.wait(timeout=5)
+            except Exception:
+                self.proc.kill()
