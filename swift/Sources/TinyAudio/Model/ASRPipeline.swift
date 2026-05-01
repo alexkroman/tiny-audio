@@ -37,6 +37,9 @@ final class ASRPipeline: @unchecked Sendable {
     let eosTokenIds: Set<Int32>
     /// Number of transformer layers — used to allocate per-layer KV-caches.
     let numDecoderLayers: Int
+    /// Pre-built logit bias: −∞ at the audio-token position, 0 elsewhere.
+    /// Built once at init so the decode loop never allocates a fresh [Float]/MLXArray.
+    let audioLogitBias: MLXArray
 
     init(
         encoder: GLMASREncoder,
@@ -46,7 +49,8 @@ final class ASRPipeline: @unchecked Sendable {
         mel: LogMelSpectrogram,
         audioTokenId: Int32,
         eosTokenIds: Set<Int32>,
-        numDecoderLayers: Int
+        numDecoderLayers: Int,
+        vocabSize: Int
     ) {
         self.encoder = encoder
         self.projector = projector
@@ -56,6 +60,9 @@ final class ASRPipeline: @unchecked Sendable {
         self.audioTokenId = audioTokenId
         self.eosTokenIds = eosTokenIds
         self.numDecoderLayers = numDecoderLayers
+        var maskData = [Float](repeating: 0, count: vocabSize)
+        maskData[Int(audioTokenId)] = -.infinity
+        self.audioLogitBias = MLXArray(maskData)
     }
 
     // MARK: - Public API
@@ -195,10 +202,8 @@ final class ASRPipeline: @unchecked Sendable {
     ///
     /// `logits` shape: `[1, 1, V]` (single decode step) or `[1, T, V]`
     /// (last-token slice of the prefill). Broadcast-adds cleanly in both cases.
+    /// Uses the pre-built `audioLogitBias` — no per-step allocation.
     private func maskAudioLogit(_ logits: MLXArray) -> MLXArray {
-        let v = logits.shape.last!
-        var mask = [Float](repeating: 0, count: v)
-        mask[Int(audioTokenId)] = -.infinity
-        return logits + MLXArray(mask)
+        return logits + audioLogitBias
     }
 }

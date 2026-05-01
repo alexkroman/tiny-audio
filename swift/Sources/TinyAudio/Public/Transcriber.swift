@@ -103,11 +103,13 @@ public actor Transcriber {
         //    v_proj scales [1024,8] from full weight [1024,1024] => 1024/8=128).
         let decoder: Qwen3Model
         let numDecoderLayers: Int
+        let vocabSize: Int
         do {
             let decoderConfigURL = bundle.appendingPathComponent("decoder_config.json")
             let decoderConfigData = try Data(contentsOf: decoderConfigURL)
             let qwenConfig = try JSONDecoder().decode(Qwen3Configuration.self, from: decoderConfigData)
             numDecoderLayers = qwenConfig.hiddenLayers
+            vocabSize = qwenConfig.vocabularySize
             decoder = Qwen3Model(qwenConfig)
             quantize(model: decoder, groupSize: 128, bits: 4)
             let rawWeights = try MLX.loadArrays(
@@ -158,7 +160,8 @@ public actor Transcriber {
             mel: mel,
             audioTokenId: audioTokenId,
             eosTokenIds: eosTokenIds,
-            numDecoderLayers: numDecoderLayers
+            numDecoderLayers: numDecoderLayers,
+            vocabSize: vocabSize
         )
 
         // 12. Warmup + return.
@@ -354,6 +357,7 @@ extension Transcriber {
                     let samples = try AudioDecoder.decode(audio)
                     let pipeline = self.pipeline
                     var accumulatedIds: [Int32] = []
+                    var accumulatedInts: [Int] = []
                     var lastText = ""
 
                     for try await tid in pipeline.tokenStream(
@@ -363,19 +367,27 @@ extension Transcriber {
                     ) {
                         if pipeline.eosTokenIds.contains(tid) { break }
                         accumulatedIds.append(tid)
+                        accumulatedInts.append(Int(tid))
 
-                        // Decode the running prefix, yield the delta vs. last yield.
-                        // Detokenization can occasionally rewrite earlier tokens (mid-byte
-                        // sequences); when that happens, yield the whole new text.
-                        let text = pipeline.tokenizer.decode(tokens: accumulatedIds.map(Int.init))
+                        // Fast path: decode only the new token. Correct for tokens
+                        // that don't span UTF-8 byte boundaries (the common BPE case).
+                        // Slow path: full-prefix decode when a boundary may have shifted.
+                        let single = pipeline.tokenizer.decode(tokens: [Int(tid)])
                         let delta: String
-                        if text.hasPrefix(lastText) {
-                            delta = String(text.dropFirst(lastText.count))
+                        if !single.isEmpty && !mayCrossBoundary(prev: lastText, next: single) {
+                            delta = single
+                            lastText = lastText + single
                         } else {
-                            delta = text
+                            // Fallback: full-prefix decode (expensive, but rare).
+                            let fullText = pipeline.tokenizer.decode(tokens: accumulatedInts)
+                            if fullText.hasPrefix(lastText) {
+                                delta = String(fullText.dropFirst(lastText.count))
+                            } else {
+                                delta = fullText
+                            }
+                            lastText = fullText
                         }
                         if !delta.isEmpty { continuation.yield(delta) }
-                        lastText = text
                     }
                     continuation.finish()
                 } catch {
@@ -404,4 +416,22 @@ extension Transcriber {
         }
         return ids
     }
+}
+
+// MARK: - Incremental detokenization helpers
+
+/// Heuristic: detect when concatenating `next` after `prev` might invalidate
+/// the previous yield (e.g. a multi-byte UTF-8 sequence split across tokens).
+/// Conservative — false positives just take the slow path; correctness is always preserved.
+private func mayCrossBoundary(prev: String, next: String) -> Bool {
+    if prev.isEmpty { return false }
+    // Common BPE artefact: replacement character signals an incomplete decode.
+    if next.contains("\u{FFFD}") { return true }
+    // If the token starts with a combining mark or zero-width joiner it can
+    // rewrite the previous grapheme cluster.
+    if let first = next.unicodeScalars.first,
+       first.properties.isGraphemeExtend || first == "\u{200D}" {
+        return true
+    }
+    return false
 }

@@ -733,7 +733,10 @@ class SwiftSDKEvaluator(Evaluator):
                     tmp_name = tmp.name
                 return tmp_name, True
             # 'array' + 'sampling_rate': decoded numpy array — encode to wav.
-            arr = np.asarray(audio["array"], dtype=np.float32)
+            array_val = audio.get("array")
+            if array_val is None:
+                raise ValueError("audio dict has no usable 'path', 'bytes', or 'array' field")
+            arr = np.asarray(array_val, dtype=np.float32)
             sr = int(audio.get("sampling_rate", 16000))
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 tmp_name = tmp.name
