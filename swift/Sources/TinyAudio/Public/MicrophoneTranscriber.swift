@@ -179,11 +179,7 @@ public actor MicrophoneTranscriber {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker])
         try session.setActive(true, options: [])
-        NSLog(
-          "[TinyAudio] audio session configured: cat=\(session.category.rawValue) sr=\(session.sampleRate) inputs=\(session.availableInputs?.count ?? -1)"
-        )
       } catch {
-        NSLog("[TinyAudio] audio session config failed: \(error)")
         throw TinyAudioError.audioSessionConfigurationFailed(underlying: AnyError(error))
       }
     #endif
