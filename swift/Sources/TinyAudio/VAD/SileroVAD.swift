@@ -32,6 +32,9 @@ final class SileroVAD {
   private let model: MLModel
   private var hState: MLMultiArray
   private var cState: MLMultiArray
+  /// Reused [1, frameSize] Float32 buffer fed to the model on every frame.
+  /// Avoids per-call MLMultiArray allocation in the hot path.
+  private let audioBuffer: MLMultiArray
 
   init() throws {
     guard let url = VADResources.sileroVADURL else {
@@ -69,6 +72,8 @@ final class SileroVAD {
 
     self.hState = try Self.zeroState()
     self.cState = try Self.zeroState()
+    self.audioBuffer = try MLMultiArray(
+      shape: [1, NSNumber(value: Self.frameSize)], dataType: .float32)
   }
 
   /// Reset LSTM state. Call at utterance boundaries.
@@ -79,22 +84,20 @@ final class SileroVAD {
 
   /// Run VAD on a frame of `frameSize` samples at 16 kHz. Returns speech probability.
   /// Updates internal LSTM state for the next call.
-  func process(_ frame: [Float]) throws -> Float {
+  func process(_ frame: ArraySlice<Float>) throws -> Float {
     precondition(
       frame.count == Self.frameSize,
       "SileroVAD expects exactly \(Self.frameSize) samples per call, got \(frame.count)")
 
-    // Fill via the raw Float32 data pointer, no per-element NSNumber boxing.
-    let audioArray = try MLMultiArray(
-      shape: [1, NSNumber(value: Self.frameSize)], dataType: .float32)
+    // Fill the persistent audio buffer in-place — no per-frame allocation.
     frame.withUnsafeBufferPointer { src in
-      let dst = audioArray.dataPointer.assumingMemoryBound(to: Float32.self)
+      let dst = audioBuffer.dataPointer.assumingMemoryBound(to: Float32.self)
       dst.update(from: src.baseAddress!, count: Self.frameSize)
     }
 
     // Input keys: "audio", "h", "c"; outputs: "prob", "h_out", "c_out".
     // Verified via coremltools inspection of silero_vad.mlpackage.
-    let input = SileroVADInput(audio: audioArray, h: hState, c: cState)
+    let input = SileroVADInput(audio: audioBuffer, h: hState, c: cState)
     let output: MLFeatureProvider
     do {
       output = try model.prediction(from: input)

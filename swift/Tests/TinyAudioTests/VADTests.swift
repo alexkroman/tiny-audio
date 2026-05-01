@@ -9,7 +9,7 @@ struct VADTests {
   @Test func sileroDetectsSilenceVsSpeechLikeSignal() throws {
     let vad = try SileroVAD()
     let silence = [Float](repeating: 0, count: SileroVAD.frameSize)
-    let probSilence = try vad.process(silence)
+    let probSilence = try vad.process(silence[...])
     #expect(probSilence < 0.1, "silence prob too high: \(probSilence)")
 
     // Reset state, then feed a modulated speech-like signal.
@@ -19,7 +19,7 @@ struct VADTests {
     // frame can be cold.
     var probs: [Float] = []
     for _ in 0..<10 {
-      probs.append(try vad.process(speech))
+      probs.append(try vad.process(speech[...]))
     }
     let maxProb = probs.max() ?? 0
     #expect(
@@ -36,18 +36,19 @@ struct VADTests {
 
     let streamer = VADStreamer(vad: vad, config: config)
 
+    let silenceFrame = [Float](repeating: 0, count: SileroVAD.frameSize)
+    let speechFrame = makeSpeechLikeFrame()
+
     var allEvents: [VADStreamer.Event] = []
     // 5 silence frames -> 15 speech frames -> 10 silence frames.
     for _ in 0..<5 {
-      allEvents.append(
-        contentsOf: try streamer.process([Float](repeating: 0, count: SileroVAD.frameSize)))
+      allEvents.append(contentsOf: try streamer.process(silenceFrame[...]))
     }
     for _ in 0..<15 {
-      allEvents.append(contentsOf: try streamer.process(makeSpeechLikeFrame()))
+      allEvents.append(contentsOf: try streamer.process(speechFrame[...]))
     }
     for _ in 0..<10 {
-      allEvents.append(
-        contentsOf: try streamer.process([Float](repeating: 0, count: SileroVAD.frameSize)))
+      allEvents.append(contentsOf: try streamer.process(silenceFrame[...]))
     }
 
     let hasOnset = allEvents.contains {

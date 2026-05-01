@@ -26,6 +26,11 @@ final class VADStreamer {
   /// Frame duration in ms (36 ms for 576 samples at 16 kHz).
   private static let frameMs = (SileroVAD.frameSize * 1000) / 16_000
 
+  /// Capacity hint for `currentUtterance` at onset — sized for ~10 s of
+  /// 16 kHz mono speech so typical utterances avoid mid-stream resizing.
+  /// Beyond this the array grows naturally; this is not a hard cap.
+  private static let utteranceCapacityHint = 16_000 * 10
+
   init(vad: SileroVAD, config: VADConfig) {
     self.vad = vad
     self.config = config
@@ -34,39 +39,24 @@ final class VADStreamer {
   }
 
   /// Feed one VAD frame (`SileroVAD.frameSize` samples at 16 kHz). Returns 0 or 1 events.
-  func process(_ frame: [Float]) throws -> [Event] {
+  func process(_ frame: ArraySlice<Float>) throws -> [Event] {
     let prob = try vad.process(frame)
     let isSpeech = prob >= config.speechThreshold
 
     var events: [Event] = []
     switch state {
     case .idle:
-      // Track pre-speech audio in a ring buffer using two contiguous slice
-      // writes instead of 576 per-sample modulo operations.
-      if !preSpeechRing.isEmpty {
-        let n = preSpeechRing.count
-        let head = preSpeechRingHead
-        let firstChunk = min(frame.count, n - head)
-        if firstChunk > 0 {
-          preSpeechRing.replaceSubrange(head..<head + firstChunk, with: frame[..<firstChunk])
-        }
-        let remaining = frame.count - firstChunk
-        if remaining > 0 {
-          if remaining <= n {
-            preSpeechRing.replaceSubrange(
-              0..<remaining, with: frame[firstChunk..<firstChunk + remaining])
-          } else {
-            // Frame larger than ring — only the last `n` samples survive.
-            preSpeechRing.replaceSubrange(0..<n, with: frame[(frame.count - n)...])
-          }
-        }
-        preSpeechRingHead = (head + frame.count) % n
-      }
+      writePreSpeechRing(frame)
       if isSpeech {
         speechMs += Self.frameMs
         if speechMs >= config.minSpeechDurationMs {
-          // Onset confirmed. Seed utterance with pre-speech padding.
-          currentUtterance = readPreSpeechRing()
+          // Onset confirmed. Seed utterance with pre-speech padding plus
+          // this frame, then reserve room for typical-utterance growth.
+          let preSpeech = readPreSpeechRing()
+          currentUtterance.removeAll(keepingCapacity: true)
+          currentUtterance.reserveCapacity(
+            preSpeech.count + frame.count + Self.utteranceCapacityHint)
+          currentUtterance.append(contentsOf: preSpeech)
           currentUtterance.append(contentsOf: frame)
           silenceMs = 0
           state = .speaking
@@ -96,13 +86,42 @@ final class VADStreamer {
     return events
   }
 
-  private func readPreSpeechRing() -> [Float] {
-    guard !preSpeechRing.isEmpty else { return [] }
+  /// Write `frame` into the pre-speech ring using up to two contiguous
+  /// slice copies — never a per-sample modulo loop.
+  private func writePreSpeechRing(_ frame: ArraySlice<Float>) {
     let n = preSpeechRing.count
-    var out: [Float] = []
+    guard n > 0 else { return }
+    let frameStart = frame.startIndex
+    if frame.count >= n {
+      // Frame larger than (or equal to) ring — only the last `n` samples survive.
+      preSpeechRing.replaceSubrange(0..<n, with: frame.suffix(n))
+      preSpeechRingHead = 0
+      return
+    }
+    let head = preSpeechRingHead
+    let firstChunk = min(frame.count, n - head)
+    preSpeechRing.replaceSubrange(
+      head..<head + firstChunk,
+      with: frame[frameStart..<frameStart + firstChunk])
+    let remaining = frame.count - firstChunk
+    if remaining > 0 {
+      preSpeechRing.replaceSubrange(
+        0..<remaining,
+        with: frame[(frameStart + firstChunk)..<(frameStart + firstChunk + remaining)])
+    }
+    preSpeechRingHead = (head + frame.count) % n
+  }
+
+  /// Read the pre-speech ring as a linear array using two contiguous copies
+  /// (head..end, then 0..head) — no per-sample modulo.
+  private func readPreSpeechRing() -> [Float] {
+    let n = preSpeechRing.count
+    guard n > 0 else { return [] }
+    var out = [Float]()
     out.reserveCapacity(n)
-    for i in 0..<n {
-      out.append(preSpeechRing[(preSpeechRingHead + i) % n])
+    out.append(contentsOf: preSpeechRing[preSpeechRingHead..<n])
+    if preSpeechRingHead > 0 {
+      out.append(contentsOf: preSpeechRing[0..<preSpeechRingHead])
     }
     return out
   }

@@ -97,8 +97,18 @@ public actor MicrophoneTranscriber {
 
   private let continuation: AsyncStream<Event>.Continuation
 
-  /// Leftover samples that didn't fill a complete VAD frame yet.
+  /// Rolling buffer of samples waiting to be sliced into VAD frames.
+  ///
+  /// Implements a head-offset queue: `feed()` appends new samples and
+  /// advances `pendingFrameHead` past the consumed prefix, only physically
+  /// dropping consumed bytes when the head crosses `compactionThreshold`.
+  /// This avoids the O(N) shift of `removeFirst(_:)` on every tap callback.
   private var pendingFrameTail: [Float] = []
+  private var pendingFrameHead: Int = 0
+  /// Compact `pendingFrameTail` once at least this many consumed samples
+  /// have accumulated at the head.  ~1 s at 16 kHz keeps the live buffer
+  /// roughly bounded without per-call shifting.
+  private static let pendingCompactionThreshold = 16_000
 
   // MARK: - Init
 
@@ -115,6 +125,9 @@ public actor MicrophoneTranscriber {
     self.config = config
     self.vad = try SileroVAD()
     self.streamer = VADStreamer(vad: self.vad, config: config)
+    // Reserve room for ~2 typical tap buffers (8192 samples) so the first
+    // few frames don't trigger Array reallocations.
+    self.pendingFrameTail.reserveCapacity(8_192)
 
     var localCont: AsyncStream<Event>.Continuation!
     self.events = AsyncStream(bufferingPolicy: .unbounded) { c in localCont = c }
@@ -258,16 +271,22 @@ public actor MicrophoneTranscriber {
 
   /// Append new samples, slice into `SileroVAD.frameSize`-sample frames,
   /// run each frame through the VAD streamer.
+  ///
+  /// Uses a head-offset queue — frames are exposed as `ArraySlice<Float>`
+  /// views into `pendingFrameTail` (no per-frame copy).  Consumed bytes are
+  /// only physically removed once the head crosses
+  /// `pendingCompactionThreshold`, keeping per-call work bounded.
   private func feed(samples: [Float]) {
     pendingFrameTail.append(contentsOf: samples)
     let frameSize = SileroVAD.frameSize
-    let completeFrames = pendingFrameTail.count / frameSize
-    for i in 0..<completeFrames {
-      let start = i * frameSize
-      let frame = Array(pendingFrameTail[start..<start + frameSize])
+    while pendingFrameTail.count - pendingFrameHead >= frameSize {
+      let start = pendingFrameHead
+      let end = start + frameSize
+      let frameSlice = pendingFrameTail[start..<end]
+      pendingFrameHead = end
       let vadEvents: [VADStreamer.Event]
       do {
-        vadEvents = try streamer.process(frame)
+        vadEvents = try streamer.process(frameSlice)
       } catch {
         emitError(error)
         continue
@@ -276,8 +295,11 @@ public actor MicrophoneTranscriber {
         handleStreamerEvent(ev)
       }
     }
-    if completeFrames > 0 {
-      pendingFrameTail.removeFirst(completeFrames * frameSize)
+    // Compact lazily once the consumed prefix grows large enough to be
+    // worth the shift.  Avoids the O(N²) cost of removing on every call.
+    if pendingFrameHead >= Self.pendingCompactionThreshold {
+      pendingFrameTail.removeFirst(pendingFrameHead)
+      pendingFrameHead = 0
     }
   }
 
