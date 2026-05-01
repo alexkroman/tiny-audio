@@ -24,7 +24,7 @@ private struct SendableBox<T>: @unchecked Sendable {
 ///
 /// mlx-audio-swift's `Qwen3ASRTextModel` (Prince Canuma's port) has been
 /// replaced to guarantee architectural parity with the Python reference.
-final class ASRPipeline {
+final class ASRPipeline: @unchecked Sendable {
     let encoder: GLMASREncoder
     let projector: MLPProjector
     /// Vendored mlx-swift-lm Qwen3 backbone.

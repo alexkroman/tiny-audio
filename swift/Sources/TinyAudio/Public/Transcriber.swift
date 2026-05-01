@@ -304,3 +304,102 @@ private enum ConfigError: Error {
     case missingKey(String)
     case invalidJSON(String)
 }
+
+// MARK: - Transcription public API
+
+extension Transcriber {
+    /// Run greedy decode to completion and return the final transcript.
+    ///
+    /// This is the convenience wrapper around `transcribeStream`. It collects
+    /// all yielded deltas and returns the concatenated result.
+    ///
+    /// - Parameters:
+    ///   - audio: The audio input to transcribe.
+    ///   - options: Transcription options (max tokens, system prompt).
+    /// - Returns: The full transcript string.
+    public func transcribe(
+        _ audio: AudioInput,
+        options: TranscriptionOptions = .default
+    ) async throws -> String {
+        var collected = ""
+        for try await delta in transcribeStream(audio, options: options) {
+            collected += delta
+        }
+        return collected
+    }
+
+    /// Run greedy decode and yield text deltas as tokens are emitted.
+    ///
+    /// Each yielded `String` is the *delta* since the last yield. Concatenating
+    /// all deltas reconstructs the full transcript (this is the contract the
+    /// `transcribe(...)` convenience uses).
+    ///
+    /// The method is `nonisolated` so callers can consume the stream from any
+    /// actor context without an explicit `await`. The actor hop happens inside
+    /// the Task when `self.pipeline` is accessed.
+    ///
+    /// - Parameters:
+    ///   - audio: The audio input to transcribe.
+    ///   - options: Transcription options (max tokens, system prompt).
+    /// - Returns: An `AsyncThrowingStream` of text deltas.
+    public nonisolated func transcribeStream(
+        _ audio: AudioInput,
+        options: TranscriptionOptions = .default
+    ) -> AsyncThrowingStream<String, Error> {
+        return AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    let samples = try AudioDecoder.decode(audio)
+                    let pipeline = self.pipeline
+                    var accumulatedIds: [Int32] = []
+                    var lastText = ""
+
+                    for try await tid in pipeline.tokenStream(
+                        samples: samples,
+                        maxNewTokens: options.maxNewTokens,
+                        systemPrompt: options.systemPrompt
+                    ) {
+                        if pipeline.eosTokenIds.contains(tid) { break }
+                        accumulatedIds.append(tid)
+
+                        // Decode the running prefix, yield the delta vs. last yield.
+                        // Detokenization can occasionally rewrite earlier tokens (mid-byte
+                        // sequences); when that happens, yield the whole new text.
+                        let text = pipeline.tokenizer.decode(tokens: accumulatedIds.map(Int.init))
+                        let delta: String
+                        if text.hasPrefix(lastText) {
+                            delta = String(text.dropFirst(lastText.count))
+                        } else {
+                            delta = text
+                        }
+                        if !delta.isEmpty { continuation.yield(delta) }
+                        lastText = text
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Test-only accessor: yields raw token IDs instead of text deltas.
+    /// Surfaced via `@_spi(Testing)` so application code can't see it.
+    @_spi(Testing)
+    public func tokenIDsForTesting(
+        _ audio: AudioInput,
+        maxNewTokens: Int,
+        systemPrompt: String? = nil
+    ) async throws -> [Int32] {
+        let samples = try AudioDecoder.decode(audio)
+        var ids: [Int32] = []
+        for try await tid in pipeline.tokenStream(
+            samples: samples,
+            maxNewTokens: maxNewTokens,
+            systemPrompt: systemPrompt
+        ) {
+            ids.append(tid)
+        }
+        return ids
+    }
+}
