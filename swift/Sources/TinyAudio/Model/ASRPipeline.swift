@@ -3,6 +3,55 @@ import MLX
 import MLXNN
 import Tokenizers
 
+// MARK: - Profiling helper
+
+/// Per-call phase-level timing helper.
+///
+/// All measurement is gated on `TINY_AUDIO_PROFILE=1`. When the env var is
+/// unset every method is a no-op, so production callers pay zero overhead.
+///
+/// **Important**: the forced `MLX.eval` calls inserted at phase boundaries add
+/// latency that the fused production graph does not pay — MLX is lazy and would
+/// otherwise defer evaluation to the first `.item()` sync inside the decode loop.
+/// The profile therefore attributes cost to its *actual* phase rather than the
+/// first sync point, which is the right breakdown for diagnosis. Do not treat
+/// the per-phase numbers as production steady-state costs; treat them as "where
+/// does the work happen if you had to pay it all up front?"
+private struct PipelineProfile {
+    private var phases: [(name: String, ms: Int)] = []
+    private var lastTime: Date = Date()
+    let isEnabled: Bool
+
+    init() {
+        self.isEnabled = ProcessInfo.processInfo.environment["TINY_AUDIO_PROFILE"] == "1"
+    }
+
+    mutating func reset() {
+        guard isEnabled else { return }
+        phases = []
+        lastTime = Date()
+    }
+
+    mutating func mark(_ name: String) {
+        guard isEnabled else { return }
+        let now = Date()
+        let ms = Int(now.timeIntervalSince(lastTime) * 1000)
+        phases.append((name, ms))
+        lastTime = now
+    }
+
+    func dump() {
+        guard isEnabled else { return }
+        let total = phases.reduce(0) { $0 + $1.ms }
+        for p in phases {
+            let pct = total > 0 ? Int(Double(p.ms) / Double(total) * 100) : 0
+            print(String(format: "  %-28s %5d ms  (%2d%%)", (p.name as NSString).utf8String!, p.ms, pct))
+        }
+        print("  -----------------------------------")
+        print(String(format: "  %-28s %5d ms", "TOTAL pipeline", total))
+    }
+}
+
 // MARK: - Concurrency helpers
 
 /// Box for passing a non-Sendable value across a Task boundary when external
@@ -98,10 +147,29 @@ final class ASRPipeline: @unchecked Sendable {
                     Memory.clearCache()
                 }
                 do {
+                    var profile = PipelineProfile()
+                    profile.reset()
+
                     // 1. Mel spectrogram → encoder → projector.
+                    //
+                    // NOTE (profiling): MLX is lazy — calling encoder(mel) returns an
+                    // unevaluated graph immediately. Without the forced MLX.eval below
+                    // the entire encoder + projector cost would appear in "prefill" (the
+                    // first real sync point). The gated MLX.eval calls break the graph at
+                    // each phase boundary so the profile shows where work actually lives.
+                    // Production calls skip the forced evals entirely (no overhead).
                     let melArr = pipeline.mel.compute(samples)   // [1, 128, T_mel]
+                    if profile.isEnabled { MLX.eval(melArr) }
+                    profile.mark("mel")
+
                     let encOut = pipeline.encoder(melArr)        // [1, T_enc, encoderDim]
+                    if profile.isEnabled { MLX.eval(encOut) }
+                    profile.mark("encoder")
+
                     let projOut = pipeline.projector(encOut)     // [1, T_proj, llmDim]
+                    if profile.isEnabled { MLX.eval(projOut) }
+                    profile.mark("projector")
+
                     let numAudio = projOut.dim(1)
 
                     // 2. Build chat-template prompt with N <audio> placeholders.
@@ -139,6 +207,7 @@ final class ASRPipeline: @unchecked Sendable {
                         audioEmbeds: audioFrames,
                         audioPositions: audioPositions
                     )  // [1, T, D]
+                    profile.mark("prompt + splice")
 
                     // 6. Prefill: one forward pass over the full prompt via inputEmbeddings.
                     //    Decoder returns logits [1, T, vocabSize] directly — lm_head is
@@ -157,12 +226,18 @@ final class ASRPipeline: @unchecked Sendable {
                         pipeline.maskAudioLogit(prefillLogits[0..., (-1)..., 0...]),
                         axis: -1
                     ).expandedDimensions(axis: 0)  // [1, 1]
+
+                    // Force eval before marking prefill boundary so prefill cost is
+                    // attributed here rather than to the first decode-step sync.
+                    if profile.isEnabled { MLX.eval(y) }
                     MLX.asyncEval(y)
+                    profile.mark("prefill")
 
                     // 8. Pipelined greedy decode loop.
                     //    Dispatch step N+1 before syncing step N so Metal compute
                     //    overlaps with the host .item() sync — same pattern as
                     //    mlx_lm.generate and the Python reference (_iter_token_ids).
+                    var emittedCount = 0
                     for n in 0 ..< maxNewTokens {
                         var nextY: MLXArray? = nil
                         if n < maxNewTokens - 1 {
@@ -176,13 +251,18 @@ final class ASRPipeline: @unchecked Sendable {
 
                         // Sync step N (overlaps with step N+1 compute above).
                         let tid = y.item(Int32.self)
+                        emittedCount += 1
                         continuation.yield(tid)
                         if pipeline.eosTokenIds.contains(tid) {
+                            profile.mark("decode (\(emittedCount) tokens)")
+                            profile.dump()
                             continuation.finish()
                             return
                         }
                         if let next = nextY { y = next }
                     }
+                    profile.mark("decode (\(emittedCount) tokens)")
+                    profile.dump()
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
