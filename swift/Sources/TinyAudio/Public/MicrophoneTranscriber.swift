@@ -171,7 +171,20 @@ public actor MicrophoneTranscriber {
     let granted = await Self.requestPermission()
     guard granted else { throw TinyAudioError.micPermissionDenied }
 
-    // 2. Determine device format and build a 16 kHz mono output format.
+    // 2. Configure AVAudioSession for recording on iOS.
+    //    Without this the inputNode delivers silence (or a session-conflict
+    //    error). macOS has no AVAudioSession; the engine just works.
+    #if os(iOS) || os(visionOS)
+      do {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker])
+        try session.setActive(true, options: [])
+      } catch {
+        throw TinyAudioError.audioSessionConfigurationFailed(underlying: AnyError(error))
+      }
+    #endif
+
+    // 3. Determine device format and build a 16 kHz mono output format.
     let inputNode = engine.inputNode
     let inFormat = inputNode.outputFormat(forBus: 0)
     guard
@@ -199,7 +212,7 @@ public actor MicrophoneTranscriber {
       )
     }
 
-    // 3. Install tap. The tap fires on a private AVAudioEngine thread;
+    // 4. Install tap. The tap fires on a private AVAudioEngine thread;
     //    we hop to actor isolation via a Task for any state mutation.
     //    [weak self] avoids a retain cycle: if the actor is deinitialized
     //    while a tap callback is in-flight the guard safely exits.
@@ -215,7 +228,7 @@ public actor MicrophoneTranscriber {
       Task { await self.feed(samples: samples) }
     }
 
-    // 4. Start the engine.
+    // 5. Start the engine.
     do {
       try engine.start()
     } catch {
@@ -241,6 +254,11 @@ public actor MicrophoneTranscriber {
       engine.inputNode.removeTap(onBus: 0)
       engine.stop()
     }
+    #if os(iOS) || os(visionOS)
+      // Deactivate the audio session so other apps can resume their audio.
+      // Failure here is non-fatal — the user is already done recording.
+      try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    #endif
     continuation.finish()
   }
 
