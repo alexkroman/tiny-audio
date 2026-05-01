@@ -7,8 +7,6 @@ struct AudioDecoder {
     switch input {
     case .file(let url):
       return try decodeFile(url)
-    case .pcm(let buffer):
-      return try AudioResampler.toMono16k(buffer)
     case .samples(let samples, let sampleRate):
       return try decodeSamples(samples, sampleRate: sampleRate)
     }

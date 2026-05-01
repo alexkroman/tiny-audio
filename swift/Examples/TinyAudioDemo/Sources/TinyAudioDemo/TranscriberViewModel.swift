@@ -23,7 +23,7 @@ final class TranscriberViewModel: ObservableObject {
     guard transcriber == nil else { return }
     loadState = .loading
     do {
-      transcriber = try await Transcriber.load(from: .defaultHub, progress: nil)
+      transcriber = try await Transcriber.load()
       loadState = .ready
     } catch {
       loadState = .error(String(describing: error))

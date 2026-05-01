@@ -589,13 +589,14 @@ class MLXEvaluator(Evaluator):
 class SwiftSDKEvaluator(Evaluator):
     """Evaluator for the TinyAudio Swift SDK on Apple Silicon.
 
-    Triggered by `ta eval -m swift://<repo-id>`. Subprocesses to a persistent
-    Swift binary (`tiny-audio-swift-eval`) that loads the SDK's Transcriber
-    once and processes audio files from stdin.
+    Triggered by `ta eval -m swift://<repo-id>`. Builds the SDK in release
+    mode, then subprocesses to a persistent Swift binary
+    (`tiny-audio-swift-eval`) that loads the SDK's bundled Transcriber once
+    and processes audio files from stdin.
 
-    The binary must be built first via `swift build --package-path swift -c release
-    --product tiny-audio-swift-eval`. We resolve its path from
-    `swift/.build/release/tiny-audio-swift-eval` relative to the repo root.
+    The Swift SDK ships with bundled model weights, so the `<repo-id>`
+    suffix is informational only — the binary always uses its embedded
+    weights.
     """
 
     def __init__(self, repo_id: str, **kwargs):
@@ -606,21 +607,39 @@ class SwiftSDKEvaluator(Evaluator):
             )
             kwargs["num_workers"] = 1
         super().__init__(**kwargs)
+        # repo_id is informational only — the Swift binary uses bundled weights.
+        console.print(f"[dim]Swift SDK ignores repo_id={repo_id!r} (bundled weights)[/dim]")
 
         repo_root = Path(__file__).resolve().parents[3]
-        swift_build = repo_root / "swift" / ".build"
-        # Try release build first, fall back to debug.
-        bin_release = swift_build / "release" / "tiny-audio-swift-eval"
-        bin_debug = swift_build / "debug" / "tiny-audio-swift-eval"
-        if bin_release.exists():
-            binary = bin_release
-        elif bin_debug.exists():
-            binary = bin_debug
-        else:
+        swift_dir = repo_root / "swift"
+        swift_build = swift_dir / ".build"
+
+        # Always rebuild release before running. Cheap when up-to-date.
+        console.print("[bold cyan]Building tiny-audio-swift-eval (release)...[/bold cyan]")
+        build_result = subprocess.run(
+            [
+                "swift",
+                "build",
+                "--package-path",
+                str(swift_dir),
+                "-c",
+                "release",
+                "--product",
+                "tiny-audio-swift-eval",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if build_result.returncode != 0:
             raise RuntimeError(
-                "tiny-audio-swift-eval binary not found. Build first:\n"
-                "  swift build --package-path swift -c release --product tiny-audio-swift-eval"
+                "swift build failed:\n"
+                f"stdout:\n{build_result.stdout}\n"
+                f"stderr:\n{build_result.stderr}"
             )
+
+        binary = swift_build / "release" / "tiny-audio-swift-eval"
+        if not binary.exists():
+            raise RuntimeError(f"tiny-audio-swift-eval binary missing after build: {binary}")
 
         # MLX requires mlx.metallib to be colocated with the binary.
         # SwiftPM only bundles it inside XCTest bundles, not standalone executables.
@@ -648,7 +667,7 @@ class SwiftSDKEvaluator(Evaluator):
                     "[yellow]mlx.metallib not found; building Swift tests to generate it...[/yellow]"
                 )
                 result = subprocess.run(
-                    ["swift", "build", "--package-path", str(repo_root / "swift"), "--build-tests"],
+                    ["swift", "build", "--package-path", str(swift_dir), "--build-tests"],
                     capture_output=True,
                     text=True,
                 )
@@ -659,7 +678,7 @@ class SwiftSDKEvaluator(Evaluator):
                 elif xctest_bundle.exists():
                     shutil.copy2(str(xctest_bundle), str(binary_dir / "mlx.metallib"))
 
-        cmd = [str(binary), "--repo", repo_id]
+        cmd = [str(binary)]
         console.print(f"[bold cyan]Spawning Swift SDK eval subprocess:[/bold cyan] {' '.join(cmd)}")
 
         self.proc = subprocess.Popen(

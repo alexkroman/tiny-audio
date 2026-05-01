@@ -6,27 +6,21 @@ import Testing
 
 @Suite("AudioInput")
 struct AudioInputTests {
-  /// All three `AudioInput` cases pointing at the same content should produce
-  /// the same Float32 array (within numerical resampling tolerance).
-  @Test func allInputsConvergeToSameSamples() throws {
+  /// `.file` and `.samples` pointing at the same audio should produce the
+  /// same Float32 array (within numerical resampling tolerance).
+  @Test func fileAndSamplesAgree() throws {
     let url = Bundle.module.url(
       forResource: "librispeech_sample", withExtension: "wav", subdirectory: "Fixtures")!
     let fromFile = try AudioDecoder.decode(.file(url))
 
     let buffer = try Self.readPCMBuffer(url: url)
-    let fromBuffer = try AudioDecoder.decode(.pcm(buffer: buffer))
-
     let nativeSamples = Self.bufferToFloats(buffer)
     let fromSamples = try AudioDecoder.decode(
       .samples(nativeSamples, sampleRate: buffer.format.sampleRate))
 
-    #expect(fromFile.count == fromBuffer.count, "file and buffer paths produce different lengths")
-    #expect(
-      fromBuffer.count == fromSamples.count, "buffer and samples paths produce different lengths")
-
-    // Numerical equality within resampling tolerance.
-    let mae = Self.meanAbsoluteError(fromFile, fromBuffer)
-    #expect(mae < 1e-5, "file vs buffer drift is too large: \(mae)")
+    #expect(fromFile.count == fromSamples.count, "file and samples paths produce different lengths")
+    let mae = Self.meanAbsoluteError(fromFile, fromSamples)
+    #expect(mae < 1e-5, "file vs samples drift is too large: \(mae)")
   }
 
   @Test func emptySamplesThrows() {

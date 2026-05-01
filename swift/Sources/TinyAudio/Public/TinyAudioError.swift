@@ -2,47 +2,12 @@ import Foundation
 
 /// Errors thrown by TinyAudio operations.
 ///
-/// Cases are grouped by lifecycle phase:
-///
-/// - **Load-time** errors (`weightDownloadFailed`, `manifestMismatch`,
-///   `formatVersionUnsupported`, `mlxModuleLoadFailed`) are thrown only from
-///   ``Transcriber/load(from:progress:)``.
-/// - **Runtime** errors (`audioFormatUnsupported`, `audioEmpty`,
-///   `promptAudioTokenMismatch`, `vadModelMissing`) are thrown during
-///   transcription.
-/// - **Microphone** errors (`micPermissionDenied`,
-///   `audioSessionConfigurationFailed`) are thrown from
-///   ``MicrophoneTranscriber/start()``.
-///
 /// `TinyAudioError` is `Sendable` so it can be carried across actor
 /// boundaries (e.g. forwarded through `AsyncStream<Event>.Continuation`).
 /// Associated `Error` values are wrapped in ``AnyError`` to preserve
 /// `Sendable` conformance without requiring every underlying error to be
 /// `Sendable`.
 public enum TinyAudioError: Error, Sendable {
-
-  // MARK: Load-time
-
-  /// The HuggingFace Hub download failed.
-  ///
-  /// Inspect `underlying` for the network or file-system error.
-  case weightDownloadFailed(underlying: AnyError)
-
-  /// A file in the downloaded bundle has a SHA-256 hash that does not match
-  /// the manifest.
-  ///
-  /// - Parameters:
-  ///   - file: The relative path of the mismatched file inside the bundle.
-  ///   - expected: The SHA-256 hex string from `manifest.json`.
-  ///   - actual: The SHA-256 hex string computed from the file on disk.
-  case manifestMismatch(file: String, expected: String, actual: String)
-
-  /// The bundle's format version is outside the range this SDK version supports.
-  ///
-  /// - Parameters:
-  ///   - found: The version integer read from `manifest.json`.
-  ///   - supported: The closed range of versions this SDK can load.
-  case formatVersionUnsupported(found: Int, supported: ClosedRange<Int>)
 
   /// An MLX model component (encoder, projector, or decoder) could not be
   /// constructed or had its weights applied.
@@ -53,17 +18,12 @@ public enum TinyAudioError: Error, Sendable {
   ///   - underlying: The root cause from MLX or the Swift runtime.
   case mlxModuleLoadFailed(name: String, underlying: AnyError)
 
-  // MARK: Runtime
-
   /// The audio container or codec is not supported by `AVAudioFile`.
   ///
   /// - Parameter reason: A human-readable description of the failure.
   case audioFormatUnsupported(reason: String)
 
   /// The decoded audio contained no samples.
-  ///
-  /// Thrown when the input file is empty, the PCM buffer has zero frames,
-  /// or the `samples` array is empty.
   case audioEmpty
 
   /// The number of `<audio>` placeholder tokens in the prompt does not match
@@ -71,29 +31,15 @@ public enum TinyAudioError: Error, Sendable {
   ///
   /// This is an internal consistency check; it should not be reachable in
   /// production builds.
-  ///
-  /// - Parameters:
-  ///   - prompt: Number of `<audio>` tokens found in the prompt.
-  ///   - projector: Number of frames the projector produced.
   case promptAudioTokenMismatch(prompt: Int, projector: Int)
 
   /// The Silero VAD `.mlpackage` is missing from the SDK bundle.
-  ///
-  /// This should only occur in incorrectly assembled app bundles.
   case vadModelMissing
 
-  // MARK: Microphone
-
   /// The user denied microphone access, or permission has never been granted.
-  ///
-  /// Direct the user to **Settings → Privacy → Microphone** to re-enable
-  /// access.
   case micPermissionDenied
 
   /// `AVAudioEngine` or `AVAudioSession` configuration failed.
-  ///
-  /// - Parameter underlying: The AVFoundation or system error that caused
-  ///   the failure.
   case audioSessionConfigurationFailed(underlying: AnyError)
 }
 
@@ -137,11 +83,6 @@ public struct AnyError: Error, Sendable, CustomStringConvertible {
 extension TinyAudioError: Equatable {
   public static func == (lhs: TinyAudioError, rhs: TinyAudioError) -> Bool {
     switch (lhs, rhs) {
-    case (.weightDownloadFailed, .weightDownloadFailed): return false
-    case (.manifestMismatch(let lf, let le, let la), .manifestMismatch(let rf, let re, let ra)):
-      return lf == rf && le == re && la == ra
-    case (.formatVersionUnsupported(let lf, let ls), .formatVersionUnsupported(let rf, let rs)):
-      return lf == rf && ls == rs
     case (.mlxModuleLoadFailed, .mlxModuleLoadFailed): return false
     case (.audioFormatUnsupported(let lr), .audioFormatUnsupported(let rr)):
       return lr == rr
@@ -159,11 +100,6 @@ extension TinyAudioError: Equatable {
 extension TinyAudioError: CustomStringConvertible {
   public var description: String {
     switch self {
-    case .weightDownloadFailed(let err): return "weight download failed: \(err)"
-    case .manifestMismatch(let file, let expected, let actual):
-      return "manifest sha256 mismatch for \(file): expected \(expected), got \(actual)"
-    case .formatVersionUnsupported(let found, let supported):
-      return "MLX format version \(found) not supported; SDK supports \(supported)"
     case .mlxModuleLoadFailed(let name, let err): return "failed to load \(name): \(err)"
     case .audioFormatUnsupported(let reason): return "audio format unsupported: \(reason)"
     case .audioEmpty: return "audio is empty"

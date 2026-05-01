@@ -22,9 +22,9 @@ struct ProfilingTests {
 
     // Phase 1: cold load (one-time cost; not the hot path).
     let loadStart = Date()
-    let transcriber = try await Transcriber.load(from: .defaultHub, progress: nil)
+    let transcriber = try await Transcriber.load()
     let loadMs = Int(Date().timeIntervalSince(loadStart) * 1000)
-    print("[load]    \(loadMs) ms (cold start: download check + verify + module load + warmup)")
+    print("[load]    \(loadMs) ms (cold start: module load + warmup)")
 
     // Use the librispeech sample fixture (~6 s of audio).
     let url = try #require(
@@ -38,7 +38,7 @@ struct ProfilingTests {
     // iterations measure the steady-state hot path.
     for trial in 0..<5 {
       let runStart = Date()
-      let text = try await transcriber.transcribe(.file(url), options: .default)
+      let text = try await transcriber.transcribe(.file(url))
       let runMs = Int(Date().timeIntervalSince(runStart) * 1000)
       let tag = trial == 0 ? "[trial 0 (warmup)]" : "[trial \(trial)]"
       print("\(tag) \(runMs) ms — \(text.prefix(80))…")

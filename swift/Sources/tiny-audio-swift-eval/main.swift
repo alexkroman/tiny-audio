@@ -39,13 +39,9 @@ struct TinyAudioEvalCLI {
     // Ensure mlx.metallib is next to the executable before any MLX use.
     MLXBootstrap.ensureMetallibAvailable()
 
-    // Parse args: --repo <repo-id> | --local <dir>. Default: .defaultHub.
-    let args = Array(CommandLine.arguments.dropFirst())
-    let source: WeightSource = parseSource(args)
-
     let transcriber: Transcriber
     do {
-      transcriber = try await Transcriber.load(from: source, progress: nil)
+      transcriber = try await Transcriber.load()
     } catch {
       emit(ErrorMsg(error: "load failed: \(error)", path: nil))
       exit(1)
@@ -75,29 +71,6 @@ struct TinyAudioEvalCLI {
         emit(ErrorMsg(error: "\(error)", path: path))
       }
     }
-  }
-
-  private static func parseSource(_ args: [String]) -> WeightSource {
-    var i = 0
-    while i < args.count {
-      switch args[i] {
-      case "--repo":
-        if i + 1 < args.count {
-          let repo = args[i + 1]
-          return .hub(repoID: repo, revision: nil)
-        }
-        return .defaultHub
-      case "--local":
-        if i + 1 < args.count {
-          return .localDirectory(URL(fileURLWithPath: args[i + 1]))
-        }
-        return .defaultHub
-      default:
-        i += 1
-        continue
-      }
-    }
-    return .defaultHub
   }
 
   private static func emit<T: Encodable>(_ msg: T) {

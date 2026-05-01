@@ -303,8 +303,7 @@ public actor MicrophoneTranscriber {
     Task {
       do {
         let text = try await transcriber.transcribe(
-          .samples(audio, sampleRate: 16_000),
-          options: .default
+          .samples(audio, sampleRate: 16_000)
         )
         cont.yield(.final(utteranceID: id, text: text))
       } catch {

@@ -21,7 +21,7 @@ struct MicrophoneTranscriberTests {
       return
     }
 
-    let transcriber = try await Transcriber.load(from: .defaultHub, progress: nil)
+    let transcriber = try await Transcriber.load()
     let mic = try MicrophoneTranscriber(transcriber: transcriber)
     // Confirm the events stream is constructed and consumable. No start() call.
     let stream = mic.events
@@ -38,7 +38,7 @@ struct MicrophoneTranscriberTests {
       return
     }
 
-    let transcriber = try await Transcriber.load(from: .defaultHub, progress: nil)
+    let transcriber = try await Transcriber.load()
     let mic = try MicrophoneTranscriber(transcriber: transcriber)
 
     print("\n=== Speak now (10 s window) ===\n")
