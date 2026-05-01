@@ -471,7 +471,6 @@ extension Transcriber {
         do {
           let samples = try AudioDecoder.decode(audio)
           let pipeline = self.pipeline
-          var accumulatedIds: [Int32] = []
           var accumulatedInts: [Int] = []
           var lastText = ""
 
@@ -481,27 +480,20 @@ extension Transcriber {
             systemPrompt: options.systemPrompt
           ) {
             if pipeline.eosTokenIds.contains(tid) { break }
-            accumulatedIds.append(tid)
             accumulatedInts.append(Int(tid))
 
-            // Fast path: decode only the new token. Correct for tokens
-            // that don't span UTF-8 byte boundaries (the common BPE case).
-            // Slow path: full-prefix decode when a boundary may have shifted.
-            let single = pipeline.tokenizer.decode(tokens: [Int(tid)])
+            // Re-decode the full accumulated prefix every step. Required for
+            // BPE / SentencePiece tokens whose detokenization depends on the
+            // surrounding context — single-token decodes drop word-boundary
+            // markers (e.g. `▁`) and yield wrong concatenated output.
+            let fullText = pipeline.tokenizer.decode(tokens: accumulatedInts)
             let delta: String
-            if !single.isEmpty && !mayCrossBoundary(prev: lastText, next: single) {
-              delta = single
-              lastText = lastText + single
+            if fullText.hasPrefix(lastText) {
+              delta = String(fullText.dropFirst(lastText.count))
             } else {
-              // Fallback: full-prefix decode (expensive, but rare).
-              let fullText = pipeline.tokenizer.decode(tokens: accumulatedInts)
-              if fullText.hasPrefix(lastText) {
-                delta = String(fullText.dropFirst(lastText.count))
-              } else {
-                delta = fullText
-              }
-              lastText = fullText
+              delta = fullText
             }
+            lastText = fullText
             if !delta.isEmpty { continuation.yield(delta) }
           }
           continuation.finish()
@@ -542,23 +534,4 @@ extension Transcriber {
     }
     return ids
   }
-}
-
-// MARK: - Incremental detokenization helpers
-
-/// Heuristic: detect when concatenating `next` after `prev` might invalidate
-/// the previous yield (e.g. a multi-byte UTF-8 sequence split across tokens).
-/// Conservative — false positives just take the slow path; correctness is always preserved.
-private func mayCrossBoundary(prev: String, next: String) -> Bool {
-  if prev.isEmpty { return false }
-  // Common BPE artefact: replacement character signals an incomplete decode.
-  if next.contains("\u{FFFD}") { return true }
-  // If the token starts with a combining mark or zero-width joiner it can
-  // rewrite the previous grapheme cluster.
-  if let first = next.unicodeScalars.first,
-    first.properties.isGraphemeExtend || first == "\u{200D}"
-  {
-    return true
-  }
-  return false
 }

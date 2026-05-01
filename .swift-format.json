@@ -1,8 +1,8 @@
 {
   "version": 1,
   "lineLength": 120,
-  "indentation": { "spaces": 4 },
-  "tabWidth": 4,
+  "indentation": { "spaces": 2 },
+  "tabWidth": 2,
   "respectsExistingLineBreaks": true,
   "lineBreakBeforeControlFlowKeywords": false,
   "lineBreakBeforeEachArgument": false,

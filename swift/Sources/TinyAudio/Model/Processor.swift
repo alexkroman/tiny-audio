@@ -6,6 +6,12 @@ import Tokenizers
 /// `tiny_audio/mlx/processor.py`.
 enum Processor {
   static let audioToken = "<audio>"
+  /// Suffix appended after the `<audio>` placeholders in the user turn.
+  /// Must match `tiny_audio/mlx/processor.py:TRANSCRIBE_PROMPT` and the
+  /// training-time prompt in `scripts/train.py:TRANSCRIBE_PROMPTS` — the
+  /// model only learns to transcribe when this exact suffix follows the
+  /// audio tokens.
+  static let transcribePrompt = "Transcribe the speech to text"
 
   /// Apply the encoder's conv layers in order. Each layer:
   ///   `out = (in + 2p - (k-1) - 1) / s + 1`
@@ -46,11 +52,12 @@ enum Processor {
     systemPrompt: String? = nil
   ) throws -> MLXArray {
     let placeholder = String(repeating: audioToken, count: numAudioTokens)
+    let userContent = placeholder + " " + transcribePrompt
     var messages: [Message] = []
     if let systemPrompt, !systemPrompt.isEmpty {
       messages.append(["role": "system", "content": systemPrompt])
     }
-    messages.append(["role": "user", "content": placeholder])
+    messages.append(["role": "user", "content": userContent])
 
     // Use additionalContext to pass enable_thinking=false to the Jinja engine.
     // swift-transformers' applyChatTemplate supports additionalContext in
@@ -74,11 +81,12 @@ enum Processor {
     systemPrompt: String? = nil
   ) -> MLXArray {
     let placeholder = String(repeating: audioToken, count: numAudioTokens)
+    let userContent = placeholder + " " + transcribePrompt
     var prompt = ""
     if let systemPrompt, !systemPrompt.isEmpty {
       prompt += "<|im_start|>system\n\(systemPrompt)<|im_end|>\n"
     }
-    prompt += "<|im_start|>user\n\(placeholder)<|im_end|>\n"
+    prompt += "<|im_start|>user\n\(userContent)<|im_end|>\n"
     prompt += "<|im_start|>assistant\n"
     let ids = tokenizer.encode(text: prompt)
     let int32 = ids.map { Int32($0) }
