@@ -379,7 +379,11 @@ public actor MicrophoneTranscriber {
 
   /// Convert one tap-delivered `AVAudioPCMBuffer` to 16 kHz mono `[Float]`.
   ///
-  /// Uses the same single-shot delivery pattern as `AudioResampler.toMono16k`.
+  /// The converter is reused across tap callbacks. After delivering this
+  /// call's input we signal `.noDataNow` (NOT `.endOfStream`) so the
+  /// converter stays alive for the next call. Sending `.endOfStream` would
+  /// finalize the converter and every subsequent `convert()` would return
+  /// zero samples — see commit history for the bug this guards against.
   private static func convertBuffer(
     _ inputBuffer: AVAudioPCMBuffer,
     with converter: AVAudioConverter,
@@ -393,14 +397,14 @@ public actor MicrophoneTranscriber {
       throw TinyAudioError.audioFormatUnsupported(reason: "output buffer allocation failed")
     }
 
-    // Wrap the one-shot delivery flag in a class so the @Sendable closure
-    // captures a reference (same pattern as AudioResampler.swift).
+    // Single-shot delivery: hand over this tap's buffer once, then signal
+    // .noDataNow so the converter pauses without finalizing.
     final class InputState: @unchecked Sendable { var delivered = false }
     let state = InputState()
     var convError: NSError?
     let status = converter.convert(to: outBuffer, error: &convError) { _, outStatus in
       if state.delivered {
-        outStatus.pointee = .endOfStream
+        outStatus.pointee = .noDataNow
         return nil
       }
       state.delivered = true
