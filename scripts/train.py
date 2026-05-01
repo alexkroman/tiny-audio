@@ -425,6 +425,7 @@ def main(cfg: DictConfig) -> None:
                 sample_rate=cfg.data.sample_rate,
                 prob=rir_cfg.get("prob", 0.5),
                 pool_size=rir_cfg.get("pool_size", 2048),
+                corpus_path=rir_cfg.get("corpus_path"),
                 room_x_range=tuple(rir_cfg.get("room_x_range", [3.0, 10.0])),
                 room_y_range=tuple(rir_cfg.get("room_y_range", [3.0, 10.0])),
                 room_z_range=tuple(rir_cfg.get("room_z_range", [2.4, 4.0])),
@@ -441,6 +442,7 @@ def main(cfg: DictConfig) -> None:
                 prob=noise_cfg.get("prob", 0.5),
                 min_snr_db=noise_cfg.get("min_snr_db", 0.0),
                 max_snr_db=noise_cfg.get("max_snr_db", 25.0),
+                corpus_path=noise_cfg.get("corpus_path"),
             )
         )
 

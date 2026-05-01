@@ -78,19 +78,20 @@ num_freq_masks: 2
 freq_mask_length: 27
 
 # RIR (Room Impulse Response) augmentation — simulates far-field / reverberant
-# audio by convolving with a randomly generated RIR. RIRs are produced on-the-
-# fly by gpuRIR's image method (no corpus download); a pool is materialized at
-# init with random room geometry / T60 / source-mic positions and sampled per
-# step. Requires CUDA + gpuRIR (pip install from
-# https://github.com/DavidDiazGuerra/gpuRIR). Off by default.
+# audio by convolving with a random RIR sampled from a pool. Two backends:
+#   * corpus_path set — load real RIRs from a directory of WAV files
+#     (recommended; SOTA recipe used by NeMo / Canary / Parakeet). Run
+#     `ta dev download-rirs` to fetch OpenSLR-28 to ~/.cache/openslr-28.
+#   * corpus_path null — generate synthetic RIRs at init via pyroomacoustics'
+#     image-source method using the room / T60 ranges below. CPU-only,
+#     no corpus needed; less realistic.
 #
-# Defaults follow recent (Interspeech 2024 / ICASSP 2025) ASR-robustness
-# recipes: T60 [0.1, 1.0]s spans phone-call rooms through medium auditoriums;
-# room ranges 3-10m × 3-10m × 2.4-4.0m cover offices through AMI-style
-# meeting rooms and small lecture halls; prob 0.5 ensures roughly half of
+# Range defaults mirror Interspeech 2024 / ICASSP 2025 ASR-robustness recipes
+# and only matter for the synthetic backend. prob 0.5 ensures roughly half of
 # every batch sees reverb without overwhelming clean-speech training signal.
 rir_augmentation:
-  enabled: false
+  enabled: true
+  corpus_path: ~/.cache/openslr-28/real_rirs_isotropic_noises
   pool_size: 2048
   room_x_range: [3.0, 10.0]
   room_y_range: [3.0, 10.0]
@@ -99,15 +100,21 @@ rir_augmentation:
   prob: 0.5
   seed: null
 
-# Noise augmentation — adds synthetic colored noise (white / pink / blue /
-# violet) at random SNR via torch-audiomentations. CPU-friendly; chains after
-# RIR in the dataloader transform pipeline. Off by default.
+# Noise augmentation — mixes background noise into the signal via
+# torch-audiomentations. Two backends:
+#   * corpus_path set — AddBackgroundNoise samples a random clip from a
+#     directory of audio files (recommended; SOTA recipe). Run
+#     `ta dev download-musan` to fetch MUSAN to ~/.cache/musan.
+#   * corpus_path null — AddColoredNoise synthesizes white / pink / blue /
+#     violet noise. Cheap, no corpus, but lacks real-world structure.
+# CPU-friendly; chains after RIR in the dataloader transform pipeline.
 #
 # SNR range [0, 25] dB intentionally includes low-SNR conditions (the
 # Earnings22 / People's Speech eval gap is dominated by noisy real-world
 # audio); the lower bound is what most modern recipes use to push robustness.
 noise_augmentation:
-  enabled: false
+  enabled: true
+  corpus_path: ~/.cache/musan/musan
   prob: 0.5
   min_snr_db: 0.0
   max_snr_db: 25.0

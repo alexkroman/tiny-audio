@@ -138,6 +138,168 @@ def docstrings():
     raise typer.Exit(run("interrogate", LIB_PATH, "-v", "--fail-under", "50"))
 
 
+OPENSLR28_URL = "https://www.openslr.org/resources/28/rirs_noises.zip"
+OPENSLR28_DEFAULT_DIR = Path.home() / ".cache" / "openslr-28"
+
+MUSAN_URL = "https://www.openslr.org/resources/17/musan.tar.gz"
+MUSAN_DEFAULT_DIR = Path.home() / ".cache" / "musan"
+
+
+def _extract_archive(archive_path: Path, target_dir: Path) -> None:
+    import tarfile
+    import zipfile
+
+    name = archive_path.name
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(archive_path) as zf:
+            zf.extractall(target_dir)
+    elif name.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(archive_path, "r:gz") as tf:
+            tf.extractall(target_dir)
+    else:
+        raise ValueError(f"Unsupported archive format: {name}")
+
+
+def _http_download(url: str, dst: Path) -> None:
+    """Download ``url`` to ``dst``. Prefers aria2c (16-way parallel chunks) if
+    available — openslr.org throttles per-connection, so single-stream urllib
+    is much slower. Falls back to urllib when aria2c isn't installed.
+    """
+    import shutil
+    import subprocess
+    import urllib.request
+
+    if shutil.which("aria2c"):
+        result = subprocess.run(
+            [
+                "aria2c",
+                "-x",
+                "16",
+                "-s",
+                "16",
+                "-k",
+                "1M",
+                "--allow-overwrite=true",
+                "--auto-file-renaming=false",
+                "--summary-interval=10",
+                "-d",
+                str(dst.parent),
+                "-o",
+                dst.name,
+                url,
+            ],
+            check=False,
+        )
+        if result.returncode == 0 and dst.exists():
+            return
+        console.print("[yellow]aria2c failed; falling back to urllib.[/yellow]")
+    with urllib.request.urlopen(url) as resp, dst.open("wb") as out:
+        shutil.copyfileobj(resp, out)
+
+
+def _download_corpus(
+    url: str,
+    target_dir: Path,
+    archive_name: str,
+    sentinel_subdir: str,
+    asset_label: str,
+    config_field: str,
+    force: bool,
+    post_extract=None,
+) -> None:
+    target_dir = target_dir.expanduser()
+    sentinel = target_dir / sentinel_subdir
+    if sentinel.exists() and not force:
+        wav_count = sum(1 for _ in sentinel.rglob("*.wav"))
+        console.print(f"[green]Already present:[/green] {sentinel} ({wav_count} .wav files)")
+        return
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = target_dir / archive_name
+
+    console.print(f"[bold]Downloading[/bold] {url} -> {archive_path}")
+    _http_download(url, archive_path)
+
+    console.print(f"[bold]Extracting[/bold] {archive_path} -> {target_dir}")
+    _extract_archive(archive_path, target_dir)
+    if post_extract is not None:
+        post_extract(target_dir)
+    archive_path.unlink(missing_ok=True)
+
+    wav_count = sum(1 for _ in sentinel.rglob("*.wav"))
+    console.print(
+        f"[green]Done.[/green] {wav_count} {asset_label} at {sentinel}. "
+        f"Set {config_field} to this path."
+    )
+
+
+def _flatten_openslr28(target_dir: Path) -> None:
+    import shutil
+
+    extracted_root = target_dir / "RIRS_NOISES"
+    if not extracted_root.exists():
+        return
+    for sub in ("real_rirs_isotropic_noises", "pointsource_noises", "simulated_rirs"):
+        src = extracted_root / sub
+        dst = target_dir / sub
+        if src.exists() and not dst.exists():
+            shutil.move(str(src), str(dst))
+    shutil.rmtree(extracted_root, ignore_errors=True)
+
+
+@app.command("download-rirs")
+def download_rirs(
+    target_dir: Path = typer.Option(
+        OPENSLR28_DEFAULT_DIR,
+        "--target-dir",
+        "-t",
+        help="Directory to extract OpenSLR-28 into (default: ~/.cache/openslr-28).",
+    ),
+    force: bool = typer.Option(False, "--force", help="Re-download even if already present."),
+):
+    """Download OpenSLR-28 (real RIRs + point-source noise, ~1 GB).
+
+    Used by RIRAugmentation when ``corpus_path`` points at the extracted
+    real_rirs_isotropic_noises subset.
+    """
+    _download_corpus(
+        url=OPENSLR28_URL,
+        target_dir=target_dir,
+        archive_name="rirs_noises.zip",
+        sentinel_subdir="real_rirs_isotropic_noises",
+        asset_label="real RIRs",
+        config_field="rir_augmentation.corpus_path",
+        force=force,
+        post_extract=_flatten_openslr28,
+    )
+
+
+@app.command("download-musan")
+def download_musan(
+    target_dir: Path = typer.Option(
+        MUSAN_DEFAULT_DIR,
+        "--target-dir",
+        "-t",
+        help="Directory to extract MUSAN into (default: ~/.cache/musan).",
+    ),
+    force: bool = typer.Option(False, "--force", help="Re-download even if already present."),
+):
+    """Download MUSAN (real music + speech + noise, ~11 GB).
+
+    Used by NoiseAugmentation when ``corpus_path`` points at the extracted
+    musan/ directory (with ``music/``, ``speech/``, ``noise/`` subdirs).
+    """
+    _download_corpus(
+        url=MUSAN_URL,
+        target_dir=target_dir,
+        archive_name="musan.tar.gz",
+        sentinel_subdir="musan",
+        asset_label="audio files",
+        config_field="noise_augmentation.corpus_path",
+        force=force,
+    )
+
+
 def _register_handler():
     from scripts.deploy.handler_local import test as handler_test
 
