@@ -310,7 +310,7 @@ class NoiseAugmentation:
         # Retry a few files: MUSAN occasionally has unreadable / zero-length
         # entries; fail soft to clean signal if every attempt fails.
         for _ in range(3):
-            path = random.choice(self.noise_paths)  # type: ignore[arg-type]
+            path = random.choice(self.noise_paths)
             try:
                 noise = self._read_noise_segment(path, n)
             except (RuntimeError, OSError, sf.LibsndfileError):
