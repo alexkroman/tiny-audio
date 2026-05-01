@@ -11,7 +11,6 @@ final class TranscriberViewModel: ObservableObject {
 
   @Published var loadState: LoadState = .loading
   @Published var isListening: Bool = false
-  @Published var liveTranscript: String = ""
   @Published var finalizedTranscripts: [String] = []
   @Published var lastError: String?
 
@@ -42,11 +41,8 @@ final class TranscriberViewModel: ObservableObject {
         guard let self else { return }
         for await event in m.events {
           switch event {
-          case .partial(utteranceID: _, let delta):
-            self.liveTranscript += delta
           case .final(utteranceID: _, let text):
             self.finalizedTranscripts.append(text)
-            self.liveTranscript = ""
           case .error(let err):
             self.lastError = String(describing: err)
           }

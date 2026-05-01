@@ -15,7 +15,6 @@ struct MicrophoneTranscriberTests {
   @Test func initSucceedsWithoutMicPermissionPrompt() async throws {
     guard ProcessInfo.processInfo.environment["TINY_AUDIO_E2E"] == "1" else {
       // API-shape sanity check: confirm public Event cases are reachable.
-      _ = MicrophoneTranscriber.Event.partial(utteranceID: UUID(), delta: "x")
       _ = MicrophoneTranscriber.Event.final(utteranceID: UUID(), text: "x")
       print(
         "Skipping full init: set TINY_AUDIO_E2E=1 to exercise MicrophoneTranscriber construction.")
@@ -49,8 +48,6 @@ struct MicrophoneTranscriberTests {
     let consumer = Task {
       for await ev in mic.events {
         switch ev {
-        case .partial(_, let delta):
-          print(delta, terminator: "")
         case .final(_, let text):
           print("\n[FINAL] \(text)")
         case .error(let e):

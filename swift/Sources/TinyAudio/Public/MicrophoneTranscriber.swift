@@ -9,9 +9,8 @@ import Foundation
 /// the default input device is resampled to 16 kHz mono Float32, sliced into
 /// VAD frames, and fed through the internal VAD endpointer.  When the VAD declares an
 /// utterance has ended, the accumulated audio is dispatched to
-/// ``Transcriber/transcribeStream(_:options:)`` and each text delta is
-/// surfaced through ``events`` as an ``Event/partial(utteranceID:delta:)``
-/// message, followed by an ``Event/final(utteranceID:text:)`` message.
+/// ``Transcriber/transcribe(_:options:)`` and the resulting text is surfaced
+/// through ``events`` as a single ``Event/final(utteranceID:text:)`` message.
 ///
 /// Per-utterance transcription failures emit ``Event/error(_:)`` rather than
 /// terminating the stream, so a single bad utterance never ends the session.
@@ -24,9 +23,8 @@ import Foundation
 /// try await mic.start()
 /// for await event in mic.events {
 ///     switch event {
-///     case .partial(let id, let delta): print(delta, terminator: "")
-///     case .final(let id, let text):   print("\n[\(id)] \(text)")
-///     case .error(let err):            print("Error: \(err)")
+///     case .final(let id, let text): print("\n[\(id)] \(text)")
+///     case .error(let err):          print("Error: \(err)")
 ///     }
 /// }
 /// await mic.stop()
@@ -36,26 +34,20 @@ public actor MicrophoneTranscriber {
 
   /// Events emitted on ``MicrophoneTranscriber/events``.
   ///
-  /// Each detected utterance has a stable `utteranceID` (`UUID`) that lets
-  /// callers correlate partial deltas with their final transcript.  The
-  /// sequence for a single utterance is one or more ``partial(utteranceID:delta:)``
-  /// events followed by exactly one ``final(utteranceID:text:)``.
+  /// Each detected utterance produces exactly one ``final(utteranceID:text:)``
+  /// event with a stable `utteranceID` (`UUID`). On failure the session
+  /// emits ``error(_:)`` and continues — subsequent utterances still produce
+  /// `final` events normally.
   ///
   /// `Event` is `Sendable` so it can be forwarded across actor boundaries
   /// without copying.  However, the associated `Error` in ``error(_:)`` is
   /// not itself constrained to `Sendable`; handle it promptly rather than
   /// storing it across async suspension points.
   public enum Event: Sendable {
-    /// An incremental text fragment for the utterance with `utteranceID`.
+    /// The complete, settled transcript for one utterance.
     ///
-    /// Concatenating all deltas for the same `utteranceID` in order
-    /// produces the same string as the subsequent ``final(utteranceID:text:)``
-    /// event.
-    case partial(utteranceID: UUID, delta: String)
-    /// The complete, settled transcript for the utterance with `utteranceID`.
-    ///
-    /// Always emitted exactly once per utterance, after all
-    /// ``partial(utteranceID:delta:)`` events for that utterance.
+    /// Emitted once the VAD declares the utterance ended and the
+    /// `Transcriber` has finished decoding.
     case final(utteranceID: UUID, text: String)
     /// A transcription failure for one utterance.
     ///
@@ -146,7 +138,7 @@ public actor MicrophoneTranscriber {
   ///
   /// Audio is captured from the default system input device.  The engine
   /// resamples to 16 kHz mono Float32, feeds frames through the Silero VAD,
-  /// and dispatches completed utterances to ``Transcriber/transcribeStream(_:options:)``.
+  /// and dispatches completed utterances to ``Transcriber/transcribe(_:options:)``.
   /// Results appear on ``events``.
   ///
   /// ## Example
@@ -155,7 +147,7 @@ public actor MicrophoneTranscriber {
   /// let mic = try MicrophoneTranscriber(transcriber: transcriber)
   /// try await mic.start()
   /// for await event in mic.events {
-  ///     if case let .partial(_, delta) = event { print(delta, terminator: "") }
+  ///     if case let .final(_, text) = event { print(text) }
   /// }
   /// ```
   ///
@@ -292,7 +284,7 @@ public actor MicrophoneTranscriber {
   private func handleStreamerEvent(_ event: VADStreamer.Event) {
     switch event {
     case .onset:
-      // No public event for onset; we only surface .partial / .final / .error.
+      // No public event for onset; we only surface .final / .error.
       break
     case .offset(let audio):
       dispatchUtterance(audio: audio)
@@ -310,16 +302,11 @@ public actor MicrophoneTranscriber {
     let transcriber = self.transcriber
     Task {
       do {
-        var collected = ""
-        let stream = transcriber.transcribeStream(
+        let text = try await transcriber.transcribe(
           .samples(audio, sampleRate: 16_000),
           options: .default
         )
-        for try await delta in stream {
-          collected += delta
-          cont.yield(.partial(utteranceID: id, delta: delta))
-        }
-        cont.yield(.final(utteranceID: id, text: collected))
+        cont.yield(.final(utteranceID: id, text: text))
       } catch {
         cont.yield(.error(error))
       }

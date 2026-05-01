@@ -77,14 +77,6 @@ struct ContentView: View {
             .background(Color.gray.opacity(0.1))
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
-        if !vm.liveTranscript.isEmpty {
-          Text(vm.liveTranscript)
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.blue.opacity(0.1))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .foregroundStyle(.secondary)
-        }
       }
     }
   }
