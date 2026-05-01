@@ -126,6 +126,19 @@ These additions are purely additive: no existing call sites yet use the
 quantized cache. They are wired in by follow-up commits (KV-cache
 quantization and prefix-cache reuse).
 
+#### Cosmetic deviations from upstream (swift-format-driven)
+
+- `let B = keys.dim(0)` in `QuantizedKVCache.updateQuantized` was renamed to
+  `let batchSize = keys.dim(0)` to satisfy `swift-format`'s
+  `AlwaysUseLowerCamelCase` rule. (Upstream tuple destructurings like
+  `let (B, ...) = (...)` are not flagged, only standalone `let B = ...`.)
+- `for i in 0 ..< cache.count` in `maybeQuantizeKVCache` was tightened to
+  `for i in 0..<cache.count` to match the spacing convention used elsewhere
+  in `MLXLMCommonTypes.swift`.
+
+When rebasing this file against upstream, re-apply the rename + spacing
+deltas (or just run `swift-format -i`).
+
 ## How to rebase
 
 When rebasing to a newer mlx-swift-lm commit:

@@ -619,7 +619,7 @@ func quantizedScaledDotProductAttention(
     break
   }
 
-  let attentionWeights = softmax(scores, axis: -1, precise: true)
+  let attentionWeights = softmax(scores, axis: -1)
 
   // Compute output using quantized matmul
   var output = quantizedMM(
