@@ -197,6 +197,12 @@ events.out.tfevents.*
 !swift/Tests/TinyAudioTests/Fixtures/*.bin
 !swift/Tests/TinyAudioTests/Fixtures/*.wav
 
+# Silero VAD Core ML model: compiled once via scripts/convert_silero_vad.py
+# and shipped as a SwiftPM resource. The *.bin rule above would filter the
+# weights file inside the .mlpackage bundle, so we un-ignore it here.
+!swift/Sources/TinyAudio/Resources/silero_vad.mlpackage/
+!swift/Sources/TinyAudio/Resources/silero_vad.mlpackage/**
+
 # Course exercise outputs
 audio_processing.png
 embedding_distributions.png
