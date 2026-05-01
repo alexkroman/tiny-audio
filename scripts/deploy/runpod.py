@@ -166,7 +166,17 @@ def setup_remote_environment(conn: Connection) -> None:
     print("\nSetting up remote environment...")
     conn.run("apt-get update -qq || true", hide=True)
     conn.run(
-        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 portaudio19-dev",
+        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 portaudio19-dev aria2",
+        hide=True,
+    )
+    # Pin augmentation corpora onto the persistent /workspace volume so they
+    # survive container restarts. ~/.cache/<name> becomes a symlink, which
+    # keeps `corpus_path: ~/.cache/...` in production.yaml portable across
+    # local dev and RunPod without per-environment config branches.
+    conn.run(
+        "mkdir -p /workspace/.cache/openslr-28 /workspace/.cache/musan /root/.cache && "
+        "ln -sfn /workspace/.cache/openslr-28 /root/.cache/openslr-28 && "
+        "ln -sfn /workspace/.cache/musan /root/.cache/musan",
         hide=True,
     )
     print("Remote environment setup complete!")
@@ -245,6 +255,26 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
     print("Dependencies installed successfully!")
 
 
+def _download_corpus(conn: Connection, label: str, ta_subcommand: str) -> None:
+    """Run ``ta dev <ta_subcommand>`` on the remote to fetch a corpus (idempotent)."""
+    print(f"\nDownloading {label}...")
+    conn.run(
+        f'bash -lc "cd /workspace && export PATH=/root/.local/bin:$PATH && ta dev {ta_subcommand}"',
+        hide=False,
+    )
+    print(f"{label} ready.")
+
+
+def download_rirs(conn: Connection) -> None:
+    """Download OpenSLR-28 to ~/.cache/openslr-28 on the remote."""
+    _download_corpus(conn, "RIR corpus (OpenSLR-28)", "download-rirs")
+
+
+def download_musan(conn: Connection) -> None:
+    """Download MUSAN to ~/.cache/musan on the remote."""
+    _download_corpus(conn, "noise corpus (MUSAN)", "download-musan")
+
+
 @app.command()
 def deploy(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
@@ -254,6 +284,10 @@ def deploy(
     skip_deps: bool = typer.Option(
         False, "--skip-deps", help="Skip Python dependency installation"
     ),
+    skip_rirs: bool = typer.Option(
+        False, "--skip-rirs", help="Skip OpenSLR-28 RIR corpus download"
+    ),
+    skip_musan: bool = typer.Option(False, "--skip-musan", help="Skip MUSAN noise corpus download"),
 ):
     """Deploy ASR project to a RunPod instance."""
     conn = get_connection(host, port)
@@ -271,6 +305,12 @@ def deploy(
 
     if not skip_deps:
         install_dependencies(conn)
+
+    if not skip_rirs:
+        download_rirs(conn)
+
+    if not skip_musan:
+        download_musan(conn)
 
     print("\nDeployment finished!")
     print(f"To connect: ssh -i ~/.ssh/id_ed25519 -p {port} root@{host}")
