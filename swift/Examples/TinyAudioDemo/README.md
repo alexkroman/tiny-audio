@@ -10,8 +10,13 @@ swift run --package-path swift/Examples/TinyAudioDemo TinyAudioDemo
 
 ## iOS Simulator
 
-Open `swift/Examples/TinyAudioDemo/TinyAudioDemo.xcodeproj` in Xcode, pick an
-iPhone simulator, and Run (⌘R).
+Open `swift/` in Xcode (it picks up `swift/TinyAudio.xcworkspace`), pick the
+`TinyAudioDemo_iOS` scheme and an iPhone simulator, and Run (⌘R). The workspace
+also exposes `TinyAudioDemo_macOS` and the SDK schemes
+(`TinyAudio`, `tiny-audio-swift-eval`, `tiny-audio-vad-bench`).
+
+You can also open `swift/Examples/TinyAudioDemo/TinyAudioDemo.xcodeproj`
+directly if you only want the demo.
 
 If the project file is missing or stale, regenerate with:
 
