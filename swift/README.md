@@ -207,6 +207,26 @@ behind an environment variable (downloads ~460 MB on first run):
 TINY_AUDIO_E2E=1 swift test --filter E2ETokenID
 ```
 
+## Code style
+
+Swift code is formatted with `swift-format` (Apple's official formatter, ships
+with Swift 5.8+). The repo's pre-commit hook runs `swift-format lint` on every
+commit.
+
+Format locally:
+
+```bash
+swift-format format --in-place --recursive swift/Sources swift/Tests swift/Examples
+```
+
+Or just lint:
+
+```bash
+swift-format lint --strict --recursive swift/Sources swift/Tests
+```
+
+Config lives at `.swift-format.json` at the repo root.
+
 ## License
 
 [Match the project's license — likely MIT / Apache 2.0.]

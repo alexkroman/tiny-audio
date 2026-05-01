@@ -1,16 +1,25 @@
 # TinyAudioDemo
 
-Minimal SwiftUI demo of the TinyAudio Swift SDK with live-microphone transcription.
+Minimal SwiftUI demo of the TinyAudio Swift SDK, runnable on macOS and iOS.
 
-## Run
+## macOS
 
 ```bash
-cd swift/Examples/TinyAudioDemo
-swift run TinyAudioDemo
+swift run --package-path swift/Examples/TinyAudioDemo TinyAudioDemo
 ```
 
-The first launch downloads the model (~460 MB) into the standard HuggingFace
-cache. Subsequent launches are offline.
+## iOS Simulator
+
+Open `swift/Examples/TinyAudioDemo/TinyAudioDemo.xcodeproj` in Xcode, pick an
+iPhone simulator, and Run (⌘R).
+
+If the project file is missing or stale, regenerate with:
+
+```bash
+brew install xcodegen
+cd swift/Examples/TinyAudioDemo
+xcodegen
+```
 
 ## What it shows
 
@@ -20,6 +29,13 @@ cache. Subsequent launches are offline.
 
 ## Microphone permission
 
-For an Xcode-built app, declare `NSMicrophoneUsageDescription` in `Info.plist`.
-The `swift run` path on macOS doesn't enforce sandbox; the system permission
-prompt fires on first `mic.start()`.
+The app declares `NSMicrophoneUsageDescription` in `Info.plist`. The system
+permission prompt fires on first `mic.start()`. On the iOS Simulator, grant
+access in Settings if prompted.
+
+## Caveat
+
+The TinyAudio SDK bundles ~675 MB of model weights as Git LFS resources. This
+makes the demo's binary size much larger than a typical app. For App Store
+distribution, switch the demo's `Transcriber.load(from:)` argument from
+`.defaultHub` (bundled) to `.hub(repoID:revision:)` (download on first launch).

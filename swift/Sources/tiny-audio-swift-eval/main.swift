@@ -19,81 +19,94 @@ import TinyAudio
 // MARK: - Codable message types
 
 private struct ReadyMsg: Encodable { let ready: Bool }
-private struct ResultMsg: Encodable { let text: String; let elapsed_ms: Int }
-private struct ErrorMsg: Encodable { let error: String; let path: String? }
+private struct ResultMsg: Encodable {
+  let text: String
+  let elapsedMs: Int
+
+  enum CodingKeys: String, CodingKey {
+    case text
+    case elapsedMs = "elapsed_ms"
+  }
+}
+private struct ErrorMsg: Encodable {
+  let error: String
+  let path: String?
+}
 
 @main
 struct TinyAudioEvalCLI {
-    static func main() async {
-        // Ensure mlx.metallib is next to the executable before any MLX use.
-        MLXBootstrap.ensureMetallibAvailable()
+  static func main() async {
+    // Ensure mlx.metallib is next to the executable before any MLX use.
+    MLXBootstrap.ensureMetallibAvailable()
 
-        // Parse args: --repo <repo-id> | --local <dir>. Default: .defaultHub.
-        let args = Array(CommandLine.arguments.dropFirst())
-        let source: WeightSource = parseSource(args)
+    // Parse args: --repo <repo-id> | --local <dir>. Default: .defaultHub.
+    let args = Array(CommandLine.arguments.dropFirst())
+    let source: WeightSource = parseSource(args)
 
-        let transcriber: Transcriber
-        do {
-            transcriber = try await Transcriber.load(from: source, progress: nil)
-        } catch {
-            emit(ErrorMsg(error: "load failed: \(error)", path: nil))
-            exit(1)
-        }
-
-        emit(ReadyMsg(ready: true))
-
-        // Read paths from stdin until EOF.
-        while let line = readLine() {
-            let path = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !path.isEmpty else { continue }
-            guard !path.contains("\n") else {
-                emit(ErrorMsg(error: "path contains newline", path: nil))
-                continue
-            }
-            let url = URL(fileURLWithPath: path)
-            let started = ContinuousClock.now
-            do {
-                let text = try await transcriber.transcribe(.file(url))
-                let elapsed = started.duration(to: ContinuousClock.now)
-                let ns = elapsed.components.seconds * 1_000_000_000 + elapsed.components.attoseconds / 1_000_000_000
-                let elapsedMs = Int(ns / 1_000_000)
-                emit(ResultMsg(text: text, elapsed_ms: elapsedMs))
-            } catch {
-                emit(ErrorMsg(error: "\(error)", path: path))
-            }
-        }
+    let transcriber: Transcriber
+    do {
+      transcriber = try await Transcriber.load(from: source, progress: nil)
+    } catch {
+      emit(ErrorMsg(error: "load failed: \(error)", path: nil))
+      exit(1)
     }
 
-    private static func parseSource(_ args: [String]) -> WeightSource {
-        var i = 0
-        while i < args.count {
-            switch args[i] {
-            case "--repo":
-                if i + 1 < args.count {
-                    let repo = args[i + 1]
-                    return .hub(repoID: repo, revision: nil)
-                }
-                return .defaultHub
-            case "--local":
-                if i + 1 < args.count {
-                    return .localDirectory(URL(fileURLWithPath: args[i + 1]))
-                }
-                return .defaultHub
-            default:
-                i += 1
-                continue
-            }
+    emit(ReadyMsg(ready: true))
+
+    // Read paths from stdin until EOF.
+    while let line = readLine() {
+      let path = line.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !path.isEmpty else { continue }
+      guard !path.contains("\n") else {
+        emit(ErrorMsg(error: "path contains newline", path: nil))
+        continue
+      }
+      let url = URL(fileURLWithPath: path)
+      let started = ContinuousClock.now
+      do {
+        let text = try await transcriber.transcribe(.file(url))
+        let elapsed = started.duration(to: ContinuousClock.now)
+        let ns =
+          elapsed.components.seconds * 1_000_000_000 + elapsed.components.attoseconds
+          / 1_000_000_000
+        let elapsedMs = Int(ns / 1_000_000)
+        emit(ResultMsg(text: text, elapsedMs: elapsedMs))
+      } catch {
+        emit(ErrorMsg(error: "\(error)", path: path))
+      }
+    }
+  }
+
+  private static func parseSource(_ args: [String]) -> WeightSource {
+    var i = 0
+    while i < args.count {
+      switch args[i] {
+      case "--repo":
+        if i + 1 < args.count {
+          let repo = args[i + 1]
+          return .hub(repoID: repo, revision: nil)
         }
         return .defaultHub
-    }
-
-    private static func emit<T: Encodable>(_ msg: T) {
-        do {
-            var data = try JSONEncoder().encode(msg)
-            data.append(0x0a)  // '\n'
-            FileHandle.standardOutput.write(data)
-        } catch {
-            FileHandle.standardError.write(Data("emit failed: \(error)\n".utf8))
+      case "--local":
+        if i + 1 < args.count {
+          return .localDirectory(URL(fileURLWithPath: args[i + 1]))
         }
+        return .defaultHub
+      default:
+        i += 1
+        continue
+      }
     }
+    return .defaultHub
+  }
+
+  private static func emit<T: Encodable>(_ msg: T) {
+    do {
+      var data = try JSONEncoder().encode(msg)
+      data.append(0x0a)  // '\n'
+      FileHandle.standardOutput.write(data)
+    } catch {
+      FileHandle.standardError.write(Data("emit failed: \(error)\n".utf8))
+    }
+  }
 }

@@ -1,0 +1,43 @@
+name: TinyAudioDemo
+options:
+  bundleIdPrefix: com.tinyaudio
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+packages:
+  TinyAudio:
+    path: ../..
+targets:
+  TinyAudioDemo:
+    type: application
+    platform: [iOS, macOS]
+    sources:
+      - Sources/TinyAudioDemo
+    info:
+      path: Info.plist
+      properties:
+        CFBundleName: TinyAudio Demo
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        NSMicrophoneUsageDescription: TinyAudio Demo uses the microphone to transcribe your speech locally on this device. No audio leaves the device.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        LSRequiresIPhoneOS: true
+        UIRequiredDeviceCapabilities: [armv7]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "6.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        PRODUCT_BUNDLE_IDENTIFIER: com.tinyaudio.demo
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+    dependencies:
+      - package: TinyAudio
+        product: TinyAudio
