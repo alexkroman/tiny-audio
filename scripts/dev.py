@@ -153,10 +153,10 @@ def _extract_archive(archive_path: Path, target_dir: Path) -> None:
     name = archive_path.name
     if name.endswith(".zip"):
         with zipfile.ZipFile(archive_path) as zf:
-            zf.extractall(target_dir)
+            zf.extractall(target_dir)  # nosec B202 - hardcoded openslr.org archives
     elif name.endswith((".tar.gz", ".tgz")):
         with tarfile.open(archive_path, "r:gz") as tf:
-            tf.extractall(target_dir)
+            tf.extractall(target_dir)  # nosec B202 - hardcoded openslr.org archives
     else:
         raise ValueError(f"Unsupported archive format: {name}")
 
@@ -194,7 +194,7 @@ def _http_download(url: str, dst: Path) -> None:
         if result.returncode == 0 and dst.exists():
             return
         console.print("[yellow]aria2c failed; falling back to urllib.[/yellow]")
-    with urllib.request.urlopen(url) as resp, dst.open("wb") as out:
+    with urllib.request.urlopen(url) as resp, dst.open("wb") as out:  # nosec B310 - hardcoded https URL
         shutil.copyfileobj(resp, out)
 
 
