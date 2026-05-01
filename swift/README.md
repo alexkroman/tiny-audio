@@ -170,6 +170,10 @@ A minimal SwiftUI demo lives at `swift/Examples/TinyAudioDemo/`. Run it with:
 swift run --package-path swift/Examples/TinyAudioDemo TinyAudioDemo
 ```
 
+Or open `swift/` in Xcode — `swift/TinyAudio.xcworkspace` exposes the SDK
+schemes alongside `TinyAudioDemo_iOS` and `TinyAudioDemo_macOS` so the demo
+builds and runs from the same workspace.
+
 It demonstrates `Transcriber.load()` with progress callback and `MicrophoneTranscriber` live-mic streaming through `@Published` SwiftUI state.
 
 ## Documentation
