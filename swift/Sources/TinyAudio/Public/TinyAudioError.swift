@@ -13,6 +13,12 @@ public enum TinyAudioError: Error, Sendable {
     case audioEmpty
     case promptAudioTokenMismatch(prompt: Int, projector: Int)
     case vadModelMissing
+
+    // Microphone
+    /// The user denied microphone access (or the permission was never granted).
+    case micPermissionDenied
+    /// `AVAudioEngine` or `AVAudioSession` configuration failed.
+    case audioSessionConfigurationFailed(underlying: AnyError)
 }
 
 /// Sendable wrapper for any `Error`, allowing `TinyAudioError` to be `Sendable`
@@ -44,6 +50,8 @@ extension TinyAudioError: Equatable {
         case let (.promptAudioTokenMismatch(lp, lpr), .promptAudioTokenMismatch(rp, rpr)):
             return lp == rp && lpr == rpr
         case (.vadModelMissing, .vadModelMissing): return true
+        case (.micPermissionDenied, .micPermissionDenied): return true
+        case (.audioSessionConfigurationFailed, .audioSessionConfigurationFailed): return false
         default: return false
         }
     }
@@ -60,6 +68,8 @@ extension TinyAudioError: CustomStringConvertible {
         case .audioEmpty: return "audio is empty"
         case let .promptAudioTokenMismatch(prompt, projector): return "prompt has \(prompt) <audio> placeholders but projector emitted \(projector) frames"
         case .vadModelMissing: return "Silero VAD mlpackage is missing from the bundle"
+        case .micPermissionDenied: return "microphone permission denied"
+        case let .audioSessionConfigurationFailed(err): return "audio session configuration failed: \(err)"
         }
     }
 }
