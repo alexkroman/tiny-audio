@@ -3,6 +3,7 @@ import TinyAudio
 
 struct ContentView: View {
   @StateObject private var vm = TranscriberViewModel()
+  @Environment(\.scenePhase) private var scenePhase
 
   var body: some View {
     NavigationStack {
@@ -12,7 +13,15 @@ struct ContentView: View {
         #if os(macOS)
           .frame(minWidth: 480, minHeight: 320)
         #endif
-        .task { await vm.loadModel() }
+        .task(id: scenePhase) {
+          // iOS revokes GPU access in the background; defer model load
+          // and pause the mic when not active.
+          if scenePhase == .active {
+            await vm.loadModel()
+          } else {
+            await vm.stopMic()
+          }
+        }
     }
   }
 
