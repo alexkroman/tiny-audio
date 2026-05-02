@@ -171,174 +171,170 @@ final class ASRPipeline: @unchecked Sendable {
           // Metal pool regardless of how the generator exits.
           Memory.clearCache()
         }
-        do {
-          var profile = PipelineProfile()
-          profile.reset()
+        var profile = PipelineProfile()
+        profile.reset()
 
-          // 1. Mel spectrogram → encoder → projector.
-          //
-          // NOTE (profiling): MLX is lazy — calling encoder(mel) returns an
-          // unevaluated graph immediately. Without the forced MLX.eval below
-          // the entire encoder + projector cost would appear in "prefill" (the
-          // first real sync point). The gated MLX.eval calls break the graph at
-          // each phase boundary so the profile shows where work actually lives.
-          // Production calls skip the forced evals entirely (no overhead).
-          let melArr = pipeline.mel.compute(samples)  // [1, 128, T_mel]
-          if profile.isEnabled { MLX.eval(melArr) }
-          profile.mark("mel")
+        // 1. Mel spectrogram → encoder → projector.
+        //
+        // NOTE (profiling): MLX is lazy — calling encoder(mel) returns an
+        // unevaluated graph immediately. Without the forced MLX.eval below
+        // the entire encoder + projector cost would appear in "prefill" (the
+        // first real sync point). The gated MLX.eval calls break the graph at
+        // each phase boundary so the profile shows where work actually lives.
+        // Production calls skip the forced evals entirely (no overhead).
+        let melArr = pipeline.mel.compute(samples)  // [1, 128, T_mel]
+        if profile.isEnabled { MLX.eval(melArr) }
+        profile.mark("mel")
 
-          let encOut = pipeline.encoder(melArr)  // [1, T_enc, encoderDim]
-          if profile.isEnabled { MLX.eval(encOut) }
-          profile.mark("encoder")
+        let encOut = pipeline.encoder(melArr)  // [1, T_enc, encoderDim]
+        if profile.isEnabled { MLX.eval(encOut) }
+        profile.mark("encoder")
 
-          let projOut = pipeline.projector(encOut)  // [1, T_proj, llmDim]
-          if profile.isEnabled { MLX.eval(projOut) }
-          profile.mark("projector")
+        let projOut = pipeline.projector(encOut)  // [1, T_proj, llmDim]
+        if profile.isEnabled { MLX.eval(projOut) }
+        profile.mark("projector")
 
-          // 2. Build the audio + suffix portion. The prefix tokens are
-          //    already prefilled into `pipeline.prefixCache` (when
-          //    available — see fallback below).
-          let parts = pipeline.promptParts
-          let numAudio = projOut.dim(1)
+        // 2. Build the audio + suffix portion. The prefix tokens are
+        //    already prefilled into `pipeline.prefixCache` (when
+        //    available — see fallback below).
+        let parts = pipeline.promptParts
+        let numAudio = projOut.dim(1)
 
-          // Build audio+suffix token IDs (audio placeholders that we
-          // overwrite via embedding splice immediately afterward).
-          let audioRun = [Int32](repeating: pipeline.audioTokenId, count: numAudio)
-          let postfixIds = audioRun + parts.suffixIds
-          let postfixIdsArr = MLXArray(postfixIds).expandedDimensions(axis: 0)
+        // Build audio+suffix token IDs (audio placeholders that we
+        // overwrite via embedding splice immediately afterward).
+        let audioRun = [Int32](repeating: pipeline.audioTokenId, count: numAudio)
+        let postfixIds = audioRun + parts.suffixIds
+        let postfixIdsArr = MLXArray(postfixIds).expandedDimensions(axis: 0)
 
-          // Replace audio token IDs with 0 before the embed lookup; the
-          // splice below overwrites those rows so the 0 placeholder never
-          // contributes to the output.
-          let audioMask = postfixIdsArr .== MLXArray(pipeline.audioTokenId)
-          let safeIds = MLX.where(
-            audioMask, MLXArray.zeros(like: postfixIdsArr), postfixIdsArr)
-          let postfixEmbeds = pipeline.decoder.model.embedTokens(safeIds)
+        // Replace audio token IDs with 0 before the embed lookup; the
+        // splice below overwrites those rows so the 0 placeholder never
+        // contributes to the output.
+        let audioMask = postfixIdsArr .== MLXArray(pipeline.audioTokenId)
+        let safeIds = MLX.where(
+          audioMask, MLXArray.zeros(like: postfixIdsArr), postfixIdsArr)
+        let postfixEmbeds = pipeline.decoder.model.embedTokens(safeIds)
 
-          // Audio positions inside the postfix segment are 0..<numAudio
-          // (the audio run is the leading slice of postfix).
-          let audioPositions = (0..<Int32(numAudio)).map { $0 }
-          let audioFrames = projOut[0, 0..<numAudio, 0...]
-          let postfix = AudioEmbeddingSplice.splice(
-            textEmbeds: postfixEmbeds,
-            audioEmbeds: audioFrames,
-            audioPositions: audioPositions
-          )
-          profile.mark("prompt + splice")
+        // Audio positions inside the postfix segment are 0..<numAudio
+        // (the audio run is the leading slice of postfix).
+        let audioPositions = (0..<Int32(numAudio)).map { $0 }
+        let audioFrames = projOut[0, 0..<numAudio, 0...]
+        let postfix = AudioEmbeddingSplice.splice(
+          textEmbeds: postfixEmbeds,
+          audioEmbeds: audioFrames,
+          audioPositions: audioPositions
+        )
+        profile.mark("prompt + splice")
 
-          // 3. Either copy the prebuilt prefix cache and forward only the
-          //    postfix, or fall back to a fresh full prefill when:
-          //    - the caller passed a different systemPrompt than the
-          //      pipeline was built with, or
-          //    - the prefix was too short to cache (returns nil), or
-          //    - tests have set bypassPrefixCacheForTesting.
-          var cache: [KVCache]
-          let prefillLogits: MLXArray
-          let promptLen: Int
-          let useCachedPrefix =
-            (systemPrompt == nil)
-            && !pipeline.bypassPrefixCacheForTesting
-          if useCachedPrefix, let prefix = pipeline.prefixCache {
-            cache = prefix.map { $0.copy() }
-            prefillLogits = pipeline.decoder(
-              nil, cache: cache, inputEmbeddings: postfix)
-            promptLen = parts.prefixIds.count + postfix.dim(1)
-          } else {
-            // Legacy path: prefill prefix + audio + suffix in one shot.
-            // Re-tokenize the prefix here because the caller may have
-            // supplied a different systemPrompt than `pipeline.promptParts`
-            // was built with.
-            let actualParts = Processor.buildPromptParts(
-              tokenizer: pipeline.tokenizer, systemPrompt: systemPrompt)
-            let prefixEmbeds = pipeline.decoder.model.embedTokens(
-              MLXArray(actualParts.prefixIds).expandedDimensions(axis: 0))
-            let fullPrefill = MLX.concatenated([prefixEmbeds, postfix], axis: 1)
-            cache = pipeline.makeCache()
-            prefillLogits = pipeline.decoder(
-              nil, cache: cache, inputEmbeddings: fullPrefill)
-            promptLen = fullPrefill.dim(1)
-          }
-
-          // 7. First greedy step: argmax over the last token position.
-          //    Slice keeps the sequence dim ([1, 1, V]) so the shape
-          //    mirrors single-token decode steps below.
-          var y = MLX.argMax(
-            pipeline.maskAudioLogit(prefillLogits[0..., (-1)..., 0...]),
-            axis: -1
-          ).expandedDimensions(axis: 0)  // [1, 1]
-
-          // Force eval before marking prefill boundary so prefill cost is
-          // attributed here rather than to the first decode-step sync.
-          if profile.isEnabled { MLX.eval(y) }
-          MLX.asyncEval(y)
-          profile.mark("prefill")
-
-          // Pre-grow the cache to its final size so the compiled step's
-          // input identity stays stable for the whole loop.
-          Self.growCacheToFit(
-            cache: cache,
-            targetTokens: promptLen + maxNewTokens + 8,  // +8 slack
-            decoder: pipeline.decoder
-          )
-
-          // Build the compiled per-token decode closure once. Captures
-          // `cache` and `pipeline.decoder` by reference; the
-          // `inputs:`/`outputs:` declarations tell MLX to track cache
-          // mutation across calls.
-          //
-          // Honor TINY_AUDIO_NO_COMPILE=1 as a kill-switch.
-          let useCompile =
-            ProcessInfo.processInfo.environment[
-              "TINY_AUDIO_NO_COMPILE"] != "1"
-          let updatableCache: [any Updatable] = cache
-          let compiledStep: (MLXArray) -> MLXArray
-          if useCompile {
-            let fn = MLX.compile(
-              inputs: updatableCache,
-              outputs: updatableCache
-            ) { (ys: [MLXArray]) -> [MLXArray] in
-              [pipeline.decoder(ys[0], cache: cache)]
-            }
-            compiledStep = { y in fn([y])[0] }
-          } else {
-            compiledStep = { y in pipeline.decoder(y, cache: cache) }
-          }
-
-          // 8. Pipelined greedy decode loop (unchanged structure, only
-          //    the inner forward call swapped to `compiledStep`).
-          //    Dispatch step N+1 before syncing step N so Metal compute
-          //    overlaps with the host .item() sync — same pattern as
-          //    mlx_lm.generate and the Python reference (_iter_token_ids).
-          var emittedCount = 0
-          for n in 0..<maxNewTokens {
-            var nextY: MLXArray? = nil
-            if n < maxNewTokens - 1 {
-              let nextLogits = compiledStep(y)
-              nextY = MLX.argMax(
-                pipeline.maskAudioLogit(nextLogits[0..., (-1)..., 0...]),
-                axis: -1
-              ).expandedDimensions(axis: 0)
-              MLX.asyncEval(nextY!)
-            }
-
-            // Sync step N (overlaps with step N+1 compute above).
-            let tid = y.item(Int32.self)
-            emittedCount += 1
-            continuation.yield(tid)
-            if pipeline.eosTokenIds.contains(tid) {
-              profile.mark("decode (\(emittedCount) tokens)")
-              profile.dump()
-              continuation.finish()
-              return
-            }
-            if let next = nextY { y = next }
-          }
-          profile.mark("decode (\(emittedCount) tokens)")
-          profile.dump()
-          continuation.finish()
-        } catch {
-          continuation.finish(throwing: error)
+        // 3. Either copy the prebuilt prefix cache and forward only the
+        //    postfix, or fall back to a fresh full prefill when:
+        //    - the caller passed a different systemPrompt than the
+        //      pipeline was built with, or
+        //    - the prefix was too short to cache (returns nil), or
+        //    - tests have set bypassPrefixCacheForTesting.
+        var cache: [KVCache]
+        let prefillLogits: MLXArray
+        let promptLen: Int
+        let useCachedPrefix =
+          (systemPrompt == nil)
+          && !pipeline.bypassPrefixCacheForTesting
+        if useCachedPrefix, let prefix = pipeline.prefixCache {
+          cache = prefix.map { $0.copy() }
+          prefillLogits = pipeline.decoder(
+            nil, cache: cache, inputEmbeddings: postfix)
+          promptLen = parts.prefixIds.count + postfix.dim(1)
+        } else {
+          // Legacy path: prefill prefix + audio + suffix in one shot.
+          // Re-tokenize the prefix here because the caller may have
+          // supplied a different systemPrompt than `pipeline.promptParts`
+          // was built with.
+          let actualParts = Processor.buildPromptParts(
+            tokenizer: pipeline.tokenizer, systemPrompt: systemPrompt)
+          let prefixEmbeds = pipeline.decoder.model.embedTokens(
+            MLXArray(actualParts.prefixIds).expandedDimensions(axis: 0))
+          let fullPrefill = MLX.concatenated([prefixEmbeds, postfix], axis: 1)
+          cache = pipeline.makeCache()
+          prefillLogits = pipeline.decoder(
+            nil, cache: cache, inputEmbeddings: fullPrefill)
+          promptLen = fullPrefill.dim(1)
         }
+
+        // 7. First greedy step: argmax over the last token position.
+        //    Slice keeps the sequence dim ([1, 1, V]) so the shape
+        //    mirrors single-token decode steps below.
+        var y = MLX.argMax(
+          pipeline.maskAudioLogit(prefillLogits[0..., (-1)..., 0...]),
+          axis: -1
+        ).expandedDimensions(axis: 0)  // [1, 1]
+
+        // Force eval before marking prefill boundary so prefill cost is
+        // attributed here rather than to the first decode-step sync.
+        if profile.isEnabled { MLX.eval(y) }
+        MLX.asyncEval(y)
+        profile.mark("prefill")
+
+        // Pre-grow the cache to its final size so the compiled step's
+        // input identity stays stable for the whole loop.
+        Self.growCacheToFit(
+          cache: cache,
+          targetTokens: promptLen + maxNewTokens + 8,  // +8 slack
+          decoder: pipeline.decoder
+        )
+
+        // Build the compiled per-token decode closure once. Captures
+        // `cache` and `pipeline.decoder` by reference; the
+        // `inputs:`/`outputs:` declarations tell MLX to track cache
+        // mutation across calls.
+        //
+        // Honor TINY_AUDIO_NO_COMPILE=1 as a kill-switch.
+        let useCompile =
+          ProcessInfo.processInfo.environment[
+            "TINY_AUDIO_NO_COMPILE"] != "1"
+        let updatableCache: [any Updatable] = cache
+        let compiledStep: (MLXArray) -> MLXArray
+        if useCompile {
+          let fn = MLX.compile(
+            inputs: updatableCache,
+            outputs: updatableCache
+          ) { (ys: [MLXArray]) -> [MLXArray] in
+            [pipeline.decoder(ys[0], cache: cache)]
+          }
+          compiledStep = { y in fn([y])[0] }
+        } else {
+          compiledStep = { y in pipeline.decoder(y, cache: cache) }
+        }
+
+        // 8. Pipelined greedy decode loop (unchanged structure, only
+        //    the inner forward call swapped to `compiledStep`).
+        //    Dispatch step N+1 before syncing step N so Metal compute
+        //    overlaps with the host .item() sync — same pattern as
+        //    mlx_lm.generate and the Python reference (_iter_token_ids).
+        var emittedCount = 0
+        for n in 0..<maxNewTokens {
+          var nextY: MLXArray? = nil
+          if n < maxNewTokens - 1 {
+            let nextLogits = compiledStep(y)
+            nextY = MLX.argMax(
+              pipeline.maskAudioLogit(nextLogits[0..., (-1)..., 0...]),
+              axis: -1
+            ).expandedDimensions(axis: 0)
+            MLX.asyncEval(nextY!)
+          }
+
+          // Sync step N (overlaps with step N+1 compute above).
+          let tid = y.item(Int32.self)
+          emittedCount += 1
+          continuation.yield(tid)
+          if pipeline.eosTokenIds.contains(tid) {
+            profile.mark("decode (\(emittedCount) tokens)")
+            profile.dump()
+            continuation.finish()
+            return
+          }
+          if let next = nextY { y = next }
+        }
+        profile.mark("decode (\(emittedCount) tokens)")
+        profile.dump()
+        continuation.finish()
       }
     }
   }
