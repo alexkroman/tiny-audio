@@ -234,8 +234,12 @@ final class ASRPipeline: @unchecked Sendable {
         var cache: [KVCache]
         let prefillLogits: MLXArray
         let promptLen: Int
+        // Empty string is equivalent to nil for `Processor.buildPromptParts`
+        // (the system block is skipped in both cases), so the cached prefix
+        // — which was built with `cachedSystemPrompt: nil` — is also valid
+        // for callers passing "".
         let useCachedPrefix =
-          (systemPrompt == nil)
+          (systemPrompt ?? "").isEmpty
           && !pipeline.bypassPrefixCacheForTesting
         if useCachedPrefix, let prefix = pipeline.prefixCache {
           cache = prefix.map { $0.copy() }
@@ -359,7 +363,12 @@ final class ASRPipeline: @unchecked Sendable {
     numDecoderLayers: Int,
     prefixIds: [Int32]
   ) -> [KVCache]? {
-    guard prefixIds.count > 10 else { return nil }
+    // Skip caching only for the trivial-empty case. Even a 3-token prefix
+    // (the default `<|im_start|>user\n` block) saves a small but non-zero
+    // amount of QKV/RoPE work per call across 28 layers; the per-call cost
+    // is just N copies of small KVCacheSimple state arrays. The original
+    // 10-token threshold was set conservatively without measurement.
+    guard !prefixIds.isEmpty else { return nil }
 
     let cache: [KVCache] = (0..<numDecoderLayers).map { _ in KVCacheSimple() }
     let inputs = MLXArray(prefixIds).expandedDimensions(axis: 0)
