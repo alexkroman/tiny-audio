@@ -24,7 +24,7 @@
             .frame(maxWidth: .infinity, alignment: .leading)
         }
       }
-      .frame(minWidth: 440, minHeight: 400)
+      .frame(minWidth: 360, minHeight: 400)
       .toolbar {
         ToolbarItemGroup(placement: .primaryAction) {
           RecordButton(
@@ -41,7 +41,8 @@
             }
           )
           Button("Clear") { vm.clearTranscripts() }
-            .foregroundStyle(.white)
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
             .disabled(vm.finalizedTranscripts.isEmpty)
         }
       }

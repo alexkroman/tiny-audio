@@ -35,5 +35,8 @@ struct TinyAudioDemoApp: App {
     WindowGroup("Tiny Audio") {
       ContentView()
     }
+    #if os(macOS)
+      .defaultSize(width: 380, height: 520)
+    #endif
   }
 }
