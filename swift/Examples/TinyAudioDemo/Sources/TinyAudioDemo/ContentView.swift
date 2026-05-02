@@ -6,13 +6,15 @@ struct ContentView: View {
 
   var body: some View {
     platformView
-      .task(id: scenePhase) {
-        // iOS revokes GPU access in the background; defer model load and pause
-        // the mic when not active.
-        if scenePhase == .active {
-          await vm.loadModel()
-        } else {
-          await vm.stopMic()
+      .task {
+        // Run once on appear; intentionally NOT keyed on scenePhase so a
+        // transient focus change during model load doesn't cancel the
+        // long-running load.
+        await vm.loadModel()
+      }
+      .onChange(of: scenePhase) { _, newPhase in
+        if newPhase != .active {
+          Task { await vm.stopMic() }
         }
       }
   }
