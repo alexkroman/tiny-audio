@@ -54,6 +54,16 @@ enum Processor {
   /// Tokenize the constant chat-template prefix and suffix once. Audio
   /// embeddings sit between them; the full sequence is
   /// `prefix ++ <audio>×N ++ suffix`.
+  ///
+  /// **Drift risk:** the bytes here (`<|im_start|>user\n`, `<|im_end|>\n`,
+  /// `<think>\n\n</think>\n\n`) are pinned to the bundled Qwen3 chat
+  /// template rendered with `enable_thinking=False, add_generation_prompt=True,
+  /// no tools`. This deliberately bypasses `tokenizer.applyChatTemplate(...)`
+  /// because Task 5's prefix KV cache reuse needs prefix and suffix to be
+  /// tokenized independently — `applyChatTemplate` only returns a fused id
+  /// list. If the bundled tokenizer's chat template ever changes, update
+  /// these strings (the `promptIdsMatchPythonReference` test will catch the
+  /// drift the next time it runs against a refreshed reference fixture).
   static func buildPromptParts(
     tokenizer: any Tokenizer,
     systemPrompt: String? = nil
@@ -72,10 +82,9 @@ enum Processor {
     return PromptParts(prefixIds: prefixIds, suffixIds: suffixIds)
   }
 
-  /// Render the full input_ids tensor with N `<audio>` placeholders, by
-  /// concatenating prefix + audio + suffix. Mirrors the legacy
-  /// `buildPromptInputIds` byte-for-byte; kept for callers that don't
-  /// want the split form.
+  /// Render the full `input_ids` tensor with N `<audio>` placeholders by
+  /// concatenating `buildPromptParts(...).prefixIds`, an audio-id run, and
+  /// `.suffixIds`. Returns the result as `MLXArray[1, T]` of Int32.
   static func buildPromptInputIds(
     tokenizer: any Tokenizer,
     numAudioTokens: Int,
