@@ -92,6 +92,18 @@ final class ASRPipeline: @unchecked Sendable {
   /// Pre-built logit bias: −∞ at the audio-token position, 0 elsewhere.
   /// Built once at init so the decode loop never allocates a fresh [Float]/MLXArray.
   let audioLogitBias: MLXArray
+  /// Pre-computed token IDs for the constant chat-template prefix and suffix.
+  /// Built once at init from the system prompt the pipeline was constructed
+  /// with; reused on every call.
+  let promptParts: Processor.PromptParts
+  /// Per-layer KV-cache snapshot of the prefix prefill. `nil` when the
+  /// prefix is too short to bother caching (default-system-prompt case);
+  /// in that case `tokenStream` falls back to the legacy full-prefill path.
+  let prefixCache: [KVCache]?
+  /// Test-only: when true, `tokenStream` always takes the legacy full
+  /// prefill path even if `prefixCache` is non-nil. Used by
+  /// `PrefixCacheTests` to compare both code paths against the same audio.
+  @_spi(Testing) public var bypassPrefixCacheForTesting: Bool = false
 
   init(
     encoder: GLMASREncoder,
@@ -102,7 +114,8 @@ final class ASRPipeline: @unchecked Sendable {
     audioTokenId: Int32,
     eosTokenIds: Set<Int32>,
     numDecoderLayers: Int,
-    vocabSize: Int
+    vocabSize: Int,
+    cachedSystemPrompt: String? = nil
   ) {
     self.encoder = encoder
     self.projector = projector
@@ -112,9 +125,18 @@ final class ASRPipeline: @unchecked Sendable {
     self.audioTokenId = audioTokenId
     self.eosTokenIds = eosTokenIds
     self.numDecoderLayers = numDecoderLayers
+
     var maskData = [Float](repeating: 0, count: vocabSize)
     maskData[Int(audioTokenId)] = -.infinity
     self.audioLogitBias = MLXArray(maskData)
+
+    self.promptParts = Processor.buildPromptParts(
+      tokenizer: tokenizer, systemPrompt: cachedSystemPrompt)
+    self.prefixCache = Self.buildPrefixCache(
+      decoder: decoder,
+      numDecoderLayers: numDecoderLayers,
+      prefixIds: promptParts.prefixIds
+    )
   }
 
   // MARK: - Public API
@@ -173,54 +195,69 @@ final class ASRPipeline: @unchecked Sendable {
           if profile.isEnabled { MLX.eval(projOut) }
           profile.mark("projector")
 
+          // 2. Build the audio + suffix portion. The prefix tokens are
+          //    already prefilled into `pipeline.prefixCache` (when
+          //    available — see fallback below).
+          let parts = pipeline.promptParts
           let numAudio = projOut.dim(1)
 
-          // 2. Build chat-template prompt with N <audio> placeholders.
-          let inputIds = try Processor.buildPromptInputIds(
-            tokenizer: pipeline.tokenizer,
-            numAudioTokens: numAudio,
-            systemPrompt: systemPrompt
-          )  // [1, T_prompt]
+          // Build audio+suffix token IDs (audio placeholders that we
+          // overwrite via embedding splice immediately afterward).
+          let audioRun = [Int32](repeating: pipeline.audioTokenId, count: numAudio)
+          let postfixIds = audioRun + parts.suffixIds
+          let postfixIdsArr = MLXArray(postfixIds).expandedDimensions(axis: 0)
 
-          // 3. Validate <audio> placeholder count matches projector output.
-          let idsFlat = inputIds.asArray(Int32.self)
-          var audioPositions: [Int32] = []
-          for (i, id) in idsFlat.enumerated() where id == pipeline.audioTokenId {
-            audioPositions.append(Int32(i))
-          }
-          guard audioPositions.count == numAudio else {
-            throw TinyAudioError.promptAudioTokenMismatch(
-              prompt: audioPositions.count,
-              projector: numAudio
-            )
-          }
+          // Replace audio token IDs with 0 before the embed lookup; the
+          // splice below overwrites those rows so the 0 placeholder never
+          // contributes to the output.
+          let audioMask = postfixIdsArr .== MLXArray(pipeline.audioTokenId)
+          let safeIds = MLX.where(
+            audioMask, MLXArray.zeros(like: postfixIdsArr), postfixIdsArr)
+          let postfixEmbeds = pipeline.decoder.model.embedTokens(safeIds)
 
-          // 4. Replace <audio> token ids with 0 before the embed lookup.
-          //    Audio positions are overwritten by the splice immediately
-          //    after, so the 0 placeholder never contributes to the output.
-          let audioMask = inputIds .== MLXArray(pipeline.audioTokenId)
-          let safeIds = MLX.where(audioMask, MLXArray.zeros(like: inputIds), inputIds)
-
-          // 5. Embed text tokens via the decoder's inner embed_tokens table,
-          //    then splice projected audio at <audio> positions.
-          let textEmbeds = pipeline.decoder.model.embedTokens(safeIds)  // [1, T, D]
-          let audioFrames = projOut[0, 0..<numAudio, 0...]  // [N, D]
-          let prefill = AudioEmbeddingSplice.splice(
-            textEmbeds: textEmbeds,
+          // Audio positions inside the postfix segment are 0..<numAudio
+          // (the audio run is the leading slice of postfix).
+          let audioPositions = (0..<Int32(numAudio)).map { $0 }
+          let audioFrames = projOut[0, 0..<numAudio, 0...]
+          let postfix = AudioEmbeddingSplice.splice(
+            textEmbeds: postfixEmbeds,
             audioEmbeds: audioFrames,
             audioPositions: audioPositions
-          )  // [1, T, D]
+          )
           profile.mark("prompt + splice")
 
-          // 6. Prefill: one forward pass over the full prompt via inputEmbeddings.
-          //    Decoder returns logits [1, T, vocabSize] directly — lm_head is
-          //    applied inside Qwen3Model.callAsFunction.
-          let cache = pipeline.makeCache()
-          let prefillLogits = pipeline.decoder(
-            nil,
-            cache: cache,
-            inputEmbeddings: prefill
-          )  // [1, T, vocabSize]
+          // 3. Either copy the prebuilt prefix cache and forward only the
+          //    postfix, or fall back to a fresh full prefill when:
+          //    - the caller passed a different systemPrompt than the
+          //      pipeline was built with, or
+          //    - the prefix was too short to cache (returns nil), or
+          //    - tests have set bypassPrefixCacheForTesting.
+          var cache: [KVCache]
+          let prefillLogits: MLXArray
+          let promptLen: Int
+          let useCachedPrefix =
+            (systemPrompt == nil)
+            && !pipeline.bypassPrefixCacheForTesting
+          if useCachedPrefix, let prefix = pipeline.prefixCache {
+            cache = prefix.map { $0.copy() }
+            prefillLogits = pipeline.decoder(
+              nil, cache: cache, inputEmbeddings: postfix)
+            promptLen = parts.prefixIds.count + postfix.dim(1)
+          } else {
+            // Legacy path: prefill prefix + audio + suffix in one shot.
+            // Re-tokenize the prefix here because the caller may have
+            // supplied a different systemPrompt than `pipeline.promptParts`
+            // was built with.
+            let actualParts = Processor.buildPromptParts(
+              tokenizer: pipeline.tokenizer, systemPrompt: systemPrompt)
+            let prefixEmbeds = pipeline.decoder.model.embedTokens(
+              MLXArray(actualParts.prefixIds).expandedDimensions(axis: 0))
+            let fullPrefill = MLX.concatenated([prefixEmbeds, postfix], axis: 1)
+            cache = pipeline.makeCache()
+            prefillLogits = pipeline.decoder(
+              nil, cache: cache, inputEmbeddings: fullPrefill)
+            promptLen = fullPrefill.dim(1)
+          }
 
           // 7. First greedy step: argmax over the last token position.
           //    Slice keeps the sequence dim ([1, 1, V]) so the shape
@@ -238,7 +275,6 @@ final class ASRPipeline: @unchecked Sendable {
 
           // Pre-grow the cache to its final size so the compiled step's
           // input identity stays stable for the whole loop.
-          let promptLen = prefill.dim(1)
           Self.growCacheToFit(
             cache: cache,
             targetTokens: promptLen + maxNewTokens + 8,  // +8 slack
@@ -312,6 +348,31 @@ final class ASRPipeline: @unchecked Sendable {
   /// Build one `KVCacheSimple` per decoder transformer layer.
   private func makeCache() -> [KVCache] {
     (0..<numDecoderLayers).map { _ in KVCacheSimple() }
+  }
+
+  /// Run a one-shot prefill over `prefixIds` to populate a `KVCacheSimple`
+  /// per layer; returns the populated caches. We do **not** apply any
+  /// post-prefill quantize/transform here — the per-call cache list is
+  /// what `tokenStream` operates on; this snapshot is only `copy()`'d.
+  ///
+  /// Returns `nil` when the prefix is too short to be worth caching —
+  /// the savings don't justify the load-time cost. ~10 tokens is roughly
+  /// the break-even.
+  private static func buildPrefixCache(
+    decoder: Qwen3Model,
+    numDecoderLayers: Int,
+    prefixIds: [Int32]
+  ) -> [KVCache]? {
+    guard prefixIds.count > 10 else { return nil }
+
+    let cache: [KVCache] = (0..<numDecoderLayers).map { _ in KVCacheSimple() }
+    let inputs = MLXArray(prefixIds).expandedDimensions(axis: 0)
+    _ = decoder(inputs, cache: cache)
+    // Force materialisation so the snapshot is ready in memory.
+    for c in cache {
+      MLX.eval(c.innerState())
+    }
+    return cache
   }
 
   /// Force `KVCacheSimple` to allocate its key/value buffers up-front to a

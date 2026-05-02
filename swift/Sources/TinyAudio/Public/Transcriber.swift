@@ -151,7 +151,8 @@ public actor Transcriber {
       audioTokenId: audioTokenId,
       eosTokenIds: eosTokenIds,
       numDecoderLayers: numDecoderLayers,
-      vocabSize: vocabSize
+      vocabSize: vocabSize,
+      cachedSystemPrompt: nil  // matches transcribe()'s default
     )
 
     // 12. Warmup + return.
@@ -350,5 +351,12 @@ extension Transcriber {
     // tokens are context-sensitive — `decode([t1]) + decode([t2])` is not
     // equal to `decode([t1, t2])`, so we cannot accumulate per-token decodes.
     return pipeline.tokenizer.decode(tokens: accumulatedInts)
+  }
+}
+
+extension Transcriber {
+  @_spi(Testing)
+  public func setBypassPrefixCache(_ bypass: Bool) {
+    pipeline.bypassPrefixCacheForTesting = bypass
   }
 }
