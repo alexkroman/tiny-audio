@@ -13,6 +13,16 @@ enum Processor {
   /// audio tokens.
   static let transcribePrompt = "Transcribe the speech to text"
 
+  struct PromptParts {
+    /// Token IDs that come before the first `<audio>` placeholder. Constant
+    /// for a given system prompt — safe to pre-prefill once.
+    let prefixIds: [Int32]
+    /// Token IDs that come after the last `<audio>` placeholder, terminating
+    /// in the assistant `<think>...</think>` block. Length is constant for
+    /// a fixed transcribe prompt.
+    let suffixIds: [Int32]
+  }
+
   /// Apply the encoder's conv layers in order. Each layer:
   ///   `out = (in + 2p - (k-1) - 1) / s + 1`
   /// Default GLM-ASR conv layers: `[(p=1, k=3, s=1), (p=1, k=3, s=2)]`.
@@ -41,55 +51,40 @@ enum Processor {
     return projector.outputLength(encLen)
   }
 
-  /// Render the Qwen3 chat-template prompt with N `<audio>` placeholders.
-  /// Returns input_ids as `MLXArray[1, T]` of Int32.
-  ///
-  /// Qwen3's chat template requires `enable_thinking=False` to suppress
-  /// `<think>...</think>` reasoning blocks. ASR responses must use this.
+  /// Tokenize the constant chat-template prefix and suffix once. Audio
+  /// embeddings sit between them; the full sequence is
+  /// `prefix ++ <audio>×N ++ suffix`.
+  static func buildPromptParts(
+    tokenizer: any Tokenizer,
+    systemPrompt: String? = nil
+  ) -> PromptParts {
+    var prefixText = ""
+    if let systemPrompt, !systemPrompt.isEmpty {
+      prefixText += "<|im_start|>system\n\(systemPrompt)<|im_end|>\n"
+    }
+    prefixText += "<|im_start|>user\n"
+
+    let suffixText =
+      " \(transcribePrompt)<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+    let prefixIds = tokenizer.encode(text: prefixText).map { Int32($0) }
+    let suffixIds = tokenizer.encode(text: suffixText).map { Int32($0) }
+    return PromptParts(prefixIds: prefixIds, suffixIds: suffixIds)
+  }
+
+  /// Render the full input_ids tensor with N `<audio>` placeholders, by
+  /// concatenating prefix + audio + suffix. Mirrors the legacy
+  /// `buildPromptInputIds` byte-for-byte; kept for callers that don't
+  /// want the split form.
   static func buildPromptInputIds(
     tokenizer: any Tokenizer,
     numAudioTokens: Int,
     systemPrompt: String? = nil
   ) throws -> MLXArray {
-    let placeholder = String(repeating: audioToken, count: numAudioTokens)
-    let userContent = placeholder + " " + transcribePrompt
-    var messages: [Message] = []
-    if let systemPrompt, !systemPrompt.isEmpty {
-      messages.append(["role": "system", "content": systemPrompt])
-    }
-    messages.append(["role": "user", "content": userContent])
-
-    // Use additionalContext to pass enable_thinking=false to the Jinja engine.
-    // swift-transformers' applyChatTemplate supports additionalContext in
-    // PreTrainedTokenizer; the protocol extension falls back gracefully.
-    let ids = try tokenizer.applyChatTemplate(
-      messages: messages,
-      tools: nil,
-      additionalContext: ["enable_thinking": false]
-    )
-
-    let int32 = ids.map { Int32($0) }
-    return MLXArray(int32).expandedDimensions(axis: 0)
-  }
-
-  /// Hardcoded Qwen3 chat template that mirrors the Jinja template's
-  /// `enable_thinking=False` output. Used as a fallback when the tokenizer
-  /// does not have a chat template configured.
-  static func fallbackQwen3PromptIds(
-    tokenizer: any Tokenizer,
-    numAudioTokens: Int,
-    systemPrompt: String? = nil
-  ) -> MLXArray {
-    let placeholder = String(repeating: audioToken, count: numAudioTokens)
-    let userContent = placeholder + " " + transcribePrompt
-    var prompt = ""
-    if let systemPrompt, !systemPrompt.isEmpty {
-      prompt += "<|im_start|>system\n\(systemPrompt)<|im_end|>\n"
-    }
-    prompt += "<|im_start|>user\n\(userContent)<|im_end|>\n"
-    prompt += "<|im_start|>assistant\n"
-    let ids = tokenizer.encode(text: prompt)
-    let int32 = ids.map { Int32($0) }
-    return MLXArray(int32).expandedDimensions(axis: 0)
+    let parts = buildPromptParts(tokenizer: tokenizer, systemPrompt: systemPrompt)
+    let audioId = tokenizer.convertTokenToId(audioToken)!
+    let audioRun = [Int32](repeating: Int32(audioId), count: numAudioTokens)
+    let all = parts.prefixIds + audioRun + parts.suffixIds
+    return MLXArray(all).expandedDimensions(axis: 0)
   }
 }

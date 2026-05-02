@@ -3,6 +3,7 @@ import Foundation
 import Hub
 import MLX
 import Testing
+@_spi(Testing) import TinyAudio
 import Tokenizers
 
 @testable import TinyAudio
@@ -88,5 +89,23 @@ struct ProcessorTests {
 
     let tokenizerData = Config(tokenizerDict as [NSString: Any])
     return try PreTrainedTokenizer(tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
+  }
+
+  @Test func promptPartsConcatToFullPrompt() async throws {
+    guard let bundle = Bundle.module.url(forResource: "Model", withExtension: nil) else {
+      print("Skipping: bundled Model not present in test bundle")
+      return
+    }
+    let tokenizer = try await Transcriber.loadTokenizerForTesting(directory: bundle)
+
+    let parts = Processor.buildPromptParts(tokenizer: tokenizer, systemPrompt: nil)
+    let n = 7
+    let combined = try Processor.buildPromptInputIds(
+      tokenizer: tokenizer, numAudioTokens: n, systemPrompt: nil)
+    let combinedIds = combined.asArray(Int32.self)
+
+    let audioId = Int32(tokenizer.convertTokenToId(Processor.audioToken)!)
+    let expected = parts.prefixIds + [Int32](repeating: audioId, count: n) + parts.suffixIds
+    #expect(combinedIds == expected)
   }
 }

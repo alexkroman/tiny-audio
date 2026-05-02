@@ -119,7 +119,7 @@ public actor Transcriber {
     //    at runtime by the Python pipeline (ASRModel._init_tokenizer). We mirror
     //    that here by patching `added_tokens` before constructing the tokenizer,
     //    matching ProcessorTests.swift's approach.
-    let tokenizer = try await loadTokenizerWithAudioToken(directory: bundle)
+    let tokenizer = try await loadTokenizerForTesting(directory: bundle)
 
     // 9. Resolve audio token ID.
     guard let audioTokenIdInt = tokenizer.convertTokenToId(Processor.audioToken) else {
@@ -203,7 +203,8 @@ public actor Transcriber {
   ///
   /// The audio token ID is fixed at 151669 for Qwen3-0.6B (the next available ID
   /// after the base vocabulary). The actual ID is cross-checked after construction.
-  private static func loadTokenizerWithAudioToken(directory: URL) async throws -> any Tokenizer {
+  @_spi(Testing)
+  public static func loadTokenizerForTesting(directory: URL) async throws -> any Tokenizer {
     // Load tokenizer_config.json.
     let configURL = directory.appendingPathComponent("tokenizer_config.json")
     let configData = try Data(contentsOf: configURL)
