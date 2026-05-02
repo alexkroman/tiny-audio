@@ -9,6 +9,9 @@ mac_minimal_output
 overfit_output
 overfit_aggressive_output
 
+# Xcode-local SwiftPM state for the demo project (project-local, regenerated on open)
+swift/Examples/TinyAudioDemo/.swiftpm/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

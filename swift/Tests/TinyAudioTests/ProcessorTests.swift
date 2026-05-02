@@ -51,6 +51,44 @@ struct ProcessorTests {
     #expect(idsFlat == refInputIds, "Swift prompt token IDs differ from Python reference")
   }
 
+  /// Verify the algebraic identity that Task 5's prefix KV cache reuse will
+  /// rely on: `buildPromptParts(...).prefixIds + [audioId]×N + .suffixIds`
+  /// must equal `buildPromptInputIds(numAudioTokens: N, ...)` for any N.
+  ///
+  /// Gated on `TINY_AUDIO_E2E=1` because it needs the full bundled tokenizer;
+  /// the existing `promptIdsMatchPythonReference` test covers the byte-parity
+  /// invariant against the Python reference, so this one only adds value
+  /// when actually run.
+  @Test func promptPartsConcatToFullPrompt() async throws {
+    guard ProcessInfo.processInfo.environment["TINY_AUDIO_E2E"] == "1" else {
+      print("Skipping: set TINY_AUDIO_E2E=1 to exercise prefix/suffix concat parity.")
+      return
+    }
+    guard let bundle = BundleResolver.locate() else {
+      print("Skipping ProcessorTests: tiny-audio-mlx bundle not cached.")
+      return
+    }
+
+    // Use a fixed test-side audio token ID; we control the patched
+    // tokenizer.json so the value just has to match what we then look up.
+    let audioTokenId = 151669
+    let tokenizer = try makeTokenizerWithAudioToken(
+      bundle: bundle,
+      audioToken: Processor.audioToken,
+      audioTokenId: audioTokenId
+    )
+
+    let parts = Processor.buildPromptParts(tokenizer: tokenizer, systemPrompt: nil)
+    let n = 7
+    let combined = try Processor.buildPromptInputIds(
+      tokenizer: tokenizer, numAudioTokens: n, systemPrompt: nil)
+    let combinedIds = combined.asArray(Int32.self)
+
+    let audioId = Int32(tokenizer.convertTokenToId(Processor.audioToken)!)
+    let expected = parts.prefixIds + [Int32](repeating: audioId, count: n) + parts.suffixIds
+    #expect(combinedIds == expected)
+  }
+
   /// Build a `PreTrainedTokenizer` from the bundle's tokenizer files, patching
   /// `added_tokens` in `tokenizer.json` to include `<audio>` so it is treated as
   /// a single token (matching Python's `tokenizer.add_tokens(['<audio>'])`).

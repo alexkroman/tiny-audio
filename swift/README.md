@@ -74,12 +74,10 @@ let mic = try MicrophoneTranscriber(transcriber: transcriber)
 try await mic.start()
 for await event in mic.events {
     switch event {
-    case let .partial(_, delta):
-        print(delta, terminator: "")
     case let .final(id, text):
-        print("\n[utterance \(id): \(text)]")
+        print("[utterance \(id): \(text)]")
     case let .error(error):
-        print("\n[error: \(error)]")
+        print("[error: \(error)]")
     }
 }
 ```
@@ -164,11 +162,10 @@ the only model-specific component.
 
 ## Example app
 
-A minimal SwiftUI demo lives at `swift/Examples/TinyAudioDemo/`. Run it with:
-
-```bash
-swift run --package-path swift/Examples/TinyAudioDemo TinyAudioDemo
-```
+A minimal SwiftUI demo lives at `swift/Examples/TinyAudioDemo/`. Open
+`swift/TinyAudio.xcworkspace` in Xcode — it exposes the SDK schemes alongside
+`TinyAudioDemo_iOS` and `TinyAudioDemo_macOS` so the demo builds and runs from
+the same workspace.
 
 Or open `swift/` in Xcode — `swift/TinyAudio.xcworkspace` exposes the SDK
 schemes alongside `TinyAudioDemo_iOS` and `TinyAudioDemo_macOS` so the demo

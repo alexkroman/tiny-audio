@@ -26,13 +26,6 @@ public enum TinyAudioError: Error, Sendable {
   /// The decoded audio contained no samples.
   case audioEmpty
 
-  /// The number of `<audio>` placeholder tokens in the prompt does not match
-  /// the number of frames the projector emitted.
-  ///
-  /// This is an internal consistency check; it should not be reachable in
-  /// production builds.
-  case promptAudioTokenMismatch(prompt: Int, projector: Int)
-
   /// The Silero VAD `.mlpackage` is missing from the SDK bundle.
   case vadModelMissing
 
@@ -89,8 +82,6 @@ extension TinyAudioError: Equatable {
     case (.mlxModuleLoadFailed(let l, _), .mlxModuleLoadFailed(let r, _)): return l == r
     case (.audioFormatUnsupported(let lr), .audioFormatUnsupported(let rr)): return lr == rr
     case (.audioEmpty, .audioEmpty): return true
-    case (.promptAudioTokenMismatch(let lp, let lpr), .promptAudioTokenMismatch(let rp, let rpr)):
-      return lp == rp && lpr == rpr
     case (.vadModelMissing, .vadModelMissing): return true
     case (.micPermissionDenied, .micPermissionDenied): return true
     case (.audioSessionConfigurationFailed, .audioSessionConfigurationFailed): return true
@@ -105,8 +96,6 @@ extension TinyAudioError: CustomStringConvertible {
     case .mlxModuleLoadFailed(let name, let err): return "failed to load \(name): \(err)"
     case .audioFormatUnsupported(let reason): return "audio format unsupported: \(reason)"
     case .audioEmpty: return "audio is empty"
-    case .promptAudioTokenMismatch(let prompt, let projector):
-      return "prompt has \(prompt) <audio> placeholders but projector emitted \(projector) frames"
     case .vadModelMissing: return "Silero VAD mlpackage is missing from the bundle"
     case .micPermissionDenied: return "microphone permission denied"
     case .audioSessionConfigurationFailed(let err):

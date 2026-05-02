@@ -13,10 +13,11 @@ targets:
     platform: [iOS, macOS]
     sources:
       - Sources/TinyAudioDemo
+      - Assets.xcassets
     info:
       path: Info.plist
       properties:
-        CFBundleName: TinyAudio Demo
+        CFBundleName: Tiny Audio
         CFBundleShortVersionString: "0.1"
         CFBundleVersion: "1"
         UILaunchScreen: {}
@@ -24,7 +25,6 @@ targets:
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         LSRequiresIPhoneOS: true
-        UIRequiredDeviceCapabilities: [armv7]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
@@ -43,6 +43,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.tinyaudio.demo
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
     dependencies:
       - package: TinyAudio
         product: TinyAudio
+    scheme: {}
