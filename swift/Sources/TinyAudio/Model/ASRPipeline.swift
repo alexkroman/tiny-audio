@@ -335,8 +335,14 @@ final class ASRPipeline: @unchecked Sendable {
       guard let simple = c as? KVCacheSimple else { continue }
       if let keys = simple.keys, keys.dim(2) >= targetTokens { continue }
       let needed = max(1, targetTokens - simple.offset)
-      let dummyK = MLXArray.zeros([1, kvHeads, needed, headDim], dtype: .float16)
-      let dummyV = MLXArray.zeros([1, kvHeads, needed, headDim], dtype: .float16)
+      // Match the existing buffer's dtype if one exists; the prefill above
+      // has already written real K/V at the model's native dtype, so any
+      // mismatch here would force a concat across dtypes inside `update()`.
+      // Decode-loop-only invariant: caller emits one token per `update()`;
+      // `previous + 1 > currentKeys.dim(2)` won't trip after this grow.
+      let dtype = simple.keys?.dtype ?? .float16
+      let dummyK = MLXArray.zeros([1, kvHeads, needed, headDim], dtype: dtype)
+      let dummyV = MLXArray.zeros([1, kvHeads, needed, headDim], dtype: dtype)
       _ = simple.update(keys: dummyK, values: dummyV)
       simple.offset -= needed
     }
