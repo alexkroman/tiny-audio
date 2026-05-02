@@ -27,14 +27,6 @@
       .frame(minWidth: 440, minHeight: 400)
       .toolbar {
         ToolbarItemGroup(placement: .primaryAction) {
-          if vm.loadState == .loading {
-            HStack(spacing: 6) {
-              ProgressView().controlSize(.small)
-              Text("Loading model…")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            }
-          }
           RecordButton(
             isListening: vm.isListening,
             isEnabled: vm.loadState == .ready,

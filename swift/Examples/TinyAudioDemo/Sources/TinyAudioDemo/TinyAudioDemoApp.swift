@@ -2,10 +2,31 @@ import SwiftUI
 import TinyAudio
 #if os(macOS)
   import AppKit
+
+  final class TinyAudioAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+      // Without this, the window can launch behind the launching app
+      // (Xcode, Terminal). Calling from applicationDidFinishLaunching is
+      // earlier than .onAppear and reliably wins the focus race.
+      NSApp.setActivationPolicy(.regular)
+      NSApp.activate(ignoringOtherApps: true)
+      NSApp.windows.first?.makeKeyAndOrderFront(nil)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(
+      _ sender: NSApplication
+    ) -> Bool {
+      true
+    }
+  }
 #endif
 
 @main
 struct TinyAudioDemoApp: App {
+  #if os(macOS)
+    @NSApplicationDelegateAdaptor(TinyAudioAppDelegate.self) private var appDelegate
+  #endif
+
   init() {
     MLXBootstrap.ensureMetallibAvailable()
   }
@@ -13,13 +34,6 @@ struct TinyAudioDemoApp: App {
   var body: some Scene {
     WindowGroup("Tiny Audio") {
       ContentView()
-        .onAppear {
-          #if os(macOS)
-            // Bring the demo to the foreground on launch — without this,
-            // the window can open behind the launching app (Xcode, terminal).
-            NSApp.activate(ignoringOtherApps: true)
-          #endif
-        }
     }
   }
 }

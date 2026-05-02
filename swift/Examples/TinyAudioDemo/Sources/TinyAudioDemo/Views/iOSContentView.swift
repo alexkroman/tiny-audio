@@ -52,14 +52,6 @@
             .padding(.horizontal, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        if vm.loadState == .loading {
-          HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text("Loading model…")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
-        }
         RecordButton(
           isListening: vm.isListening,
           isEnabled: vm.loadState == .ready,
