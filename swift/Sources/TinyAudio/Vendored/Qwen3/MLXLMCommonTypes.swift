@@ -7,7 +7,11 @@
 // Sources:
 //   Libraries/MLXLMCommon/JSONDecodingTypes.swift  -> StringOrNumber
 //   Libraries/MLXLMCommon/KVCache.swift            -> KVCache, BaseKVCache, KVCacheSimple,
-//                                                     createCausalMask, createAttentionMask
+//                                                     createCausalMask, createAttentionMask,
+//                                                     QuantizedKVCacheProtocol, QuantizedKVCache,
+//                                                     KVCacheSimple.toQuantized,
+//                                                     quantizedScaledDotProductAttention,
+//                                                     maybeQuantizeKVCache
 //   Libraries/MLXLMCommon/AttentionUtils.swift     -> attentionWithCacheUpdate
 //   Libraries/MLXLMCommon/RoPEUtils.swift          -> RoPELayer typealias
 //   Libraries/MLXLMCommon/RoPEApplication.swift    -> BatchPositionedKVCache, applyRotaryPosition
@@ -73,7 +77,12 @@ enum StringOrNumber: Codable, Equatable, Sendable {
 // MARK: - KVCache protocol (from KVCache.swift)
 
 /// Interface for Key/Value cache for LLMs.
-protocol KVCache: Evaluatable {
+///
+/// Refines `Updatable` so that values typed as `any KVCache` can be passed
+/// directly to `MLX.compile(inputs:outputs:)`. Both `Updatable` and
+/// `Evaluatable` declare the identical method `func innerState() -> [MLXArray]`,
+/// so adding the conformance is free at the implementation level.
+protocol KVCache: Evaluatable, Updatable {
   var offset: Int { get }
   var maxSize: Int? { get }
   func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray)
@@ -106,7 +115,7 @@ protocol QuantizedKVCacheProtocol: KVCache {
 // Note: `open` is removed here (would require `public` protocol, which we don't want);
 // `class` with `func` (= `internal`) is sufficient for our module-internal use.
 
-class BaseKVCache: KVCache {
+class BaseKVCache: KVCache, Updatable {
   var offset: Int = 0
   var maxSize: Int? { nil }
 
@@ -248,6 +257,10 @@ final class KVCacheSimple: BaseKVCache {
     let returnedValues = self.values![.ellipsis, ..<self.offset, 0...]
 
     return (returnedKeys, returnedValues)
+  }
+
+  override func innerState() -> [MLXArray] {
+    [keys, values].compactMap { $0 }
   }
 
   override var state: [MLXArray] {

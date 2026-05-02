@@ -236,7 +236,40 @@ final class ASRPipeline: @unchecked Sendable {
           MLX.asyncEval(y)
           profile.mark("prefill")
 
-          // 8. Pipelined greedy decode loop.
+          // Pre-grow the cache to its final size so the compiled step's
+          // input identity stays stable for the whole loop.
+          let promptLen = prefill.dim(1)
+          Self.growCacheToFit(
+            cache: cache,
+            targetTokens: promptLen + maxNewTokens + 8,  // +8 slack
+            decoder: pipeline.decoder
+          )
+
+          // Build the compiled per-token decode closure once. Captures
+          // `cache` and `pipeline.decoder` by reference; the
+          // `inputs:`/`outputs:` declarations tell MLX to track cache
+          // mutation across calls.
+          //
+          // Honor TINY_AUDIO_NO_COMPILE=1 as a kill-switch.
+          let useCompile =
+            ProcessInfo.processInfo.environment[
+              "TINY_AUDIO_NO_COMPILE"] != "1"
+          let updatableCache: [any Updatable] = cache
+          let compiledStep: (MLXArray) -> MLXArray
+          if useCompile {
+            let fn = MLX.compile(
+              inputs: updatableCache,
+              outputs: updatableCache
+            ) { (ys: [MLXArray]) -> [MLXArray] in
+              [pipeline.decoder(ys[0], cache: cache)]
+            }
+            compiledStep = { y in fn([y])[0] }
+          } else {
+            compiledStep = { y in pipeline.decoder(y, cache: cache) }
+          }
+
+          // 8. Pipelined greedy decode loop (unchanged structure, only
+          //    the inner forward call swapped to `compiledStep`).
           //    Dispatch step N+1 before syncing step N so Metal compute
           //    overlaps with the host .item() sync — same pattern as
           //    mlx_lm.generate and the Python reference (_iter_token_ids).
@@ -244,7 +277,7 @@ final class ASRPipeline: @unchecked Sendable {
           for n in 0..<maxNewTokens {
             var nextY: MLXArray? = nil
             if n < maxNewTokens - 1 {
-              let nextLogits = pipeline.decoder(y, cache: cache)
+              let nextLogits = compiledStep(y)
               nextY = MLX.argMax(
                 pipeline.maskAudioLogit(nextLogits[0..., (-1)..., 0...]),
                 axis: -1
@@ -277,8 +310,36 @@ final class ASRPipeline: @unchecked Sendable {
   // MARK: - Private helpers
 
   /// Build one `KVCacheSimple` per decoder transformer layer.
-  private func makeCache() -> [KVCacheSimple] {
+  private func makeCache() -> [KVCache] {
     (0..<numDecoderLayers).map { _ in KVCacheSimple() }
+  }
+
+  /// Force `KVCacheSimple` to allocate its key/value buffers up-front to a
+  /// size sufficient for the whole decode loop, so the buffer pointer stays
+  /// stable. Required when the loop body is wrapped in `MLX.compile` — a
+  /// mid-loop buffer realloc invalidates the compiled graph's input identity
+  /// and produces wrong outputs.
+  ///
+  /// `KVCacheSimple` allocates in `step`-sized chunks. We trigger a one-shot
+  /// `update()` with a synthetic zero tensor of the right shape, then walk
+  /// `offset` back so the cache appears at its original logical position.
+  private static func growCacheToFit(
+    cache: [KVCache],
+    targetTokens: Int,
+    decoder: Qwen3Model
+  ) {
+    let cfg = decoder.configuration
+    let kvHeads = cfg.kvHeads
+    let headDim = cfg.headDim
+    for c in cache {
+      guard let simple = c as? KVCacheSimple else { continue }
+      if let keys = simple.keys, keys.dim(2) >= targetTokens { continue }
+      let needed = max(1, targetTokens - simple.offset)
+      let dummyK = MLXArray.zeros([1, kvHeads, needed, headDim], dtype: .float16)
+      let dummyV = MLXArray.zeros([1, kvHeads, needed, headDim], dtype: .float16)
+      _ = simple.update(keys: dummyK, values: dummyV)
+      simple.offset -= needed
+    }
   }
 
   /// Add a −∞ bias at the audio-token position so it can never be sampled.

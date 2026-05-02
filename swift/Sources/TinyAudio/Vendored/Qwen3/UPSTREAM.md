@@ -143,6 +143,24 @@ quantization and prefix-cache reuse).
 When rebasing this file against upstream, re-apply the rename + spacing
 deltas (or just run `swift-format -i`).
 
+### 6. `Updatable` conformance for KV-cache classes
+
+`BaseKVCache` was extended to conform to `Updatable` (its existing
+`innerState()` already satisfies the protocol; both `Updatable` and
+`Evaluatable` declare the identical method). `KVCacheSimple` got an
+`innerState()` override exposing its `[keys, values]` storage so MLX's
+compile state-tracker can see them.
+
+The `KVCache` protocol itself was also refined to inherit from
+`Updatable` so values typed as `any KVCache` satisfy the existential
+`any Updatable` and can be passed directly to
+`MLX.compile(inputs:outputs:)` without per-element coercion.
+
+This is the prerequisite for `ASRPipeline.tokenStream` wrapping the
+per-token decoder forward in `MLX.compile(inputs:outputs:)`, mirroring
+Python `mlx-lm`'s `@partial(mx.compile, inputs=model.state,
+outputs=model.state)` pattern.
+
 ## How to rebase
 
 When rebasing to a newer mlx-swift-lm commit:
