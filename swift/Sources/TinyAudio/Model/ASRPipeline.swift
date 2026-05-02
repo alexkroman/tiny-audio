@@ -92,6 +92,14 @@ final class ASRPipeline: @unchecked Sendable {
   /// Pre-built logit bias: −∞ at the audio-token position, 0 elsewhere.
   /// Built once at init so the decode loop never allocates a fresh [Float]/MLXArray.
   let audioLogitBias: MLXArray
+  /// Number of bits to quantize the KV cache after prefill (8 = recommended,
+  /// 4 = aggressive). `nil` keeps the cache unquantized.
+  let kvCacheBits: Int?
+  /// Group size for KV cache quantization. Ignored when `kvCacheBits == nil`.
+  let kvCacheGroupSize: Int
+  /// Token offset at which to begin quantizing the cache. The first
+  /// `quantizedKVStart` tokens stay unquantized for accuracy on the prompt.
+  let quantizedKVStart: Int
 
   init(
     encoder: GLMASREncoder,
@@ -102,7 +110,10 @@ final class ASRPipeline: @unchecked Sendable {
     audioTokenId: Int32,
     eosTokenIds: Set<Int32>,
     numDecoderLayers: Int,
-    vocabSize: Int
+    vocabSize: Int,
+    kvCacheBits: Int? = nil,
+    kvCacheGroupSize: Int = 64,
+    quantizedKVStart: Int = 0
   ) {
     self.encoder = encoder
     self.projector = projector
@@ -115,6 +126,9 @@ final class ASRPipeline: @unchecked Sendable {
     var maskData = [Float](repeating: 0, count: vocabSize)
     maskData[Int(audioTokenId)] = -.infinity
     self.audioLogitBias = MLXArray(maskData)
+    self.kvCacheBits = kvCacheBits
+    self.kvCacheGroupSize = kvCacheGroupSize
+    self.quantizedKVStart = quantizedKVStart
   }
 
   // MARK: - Public API
@@ -215,12 +229,18 @@ final class ASRPipeline: @unchecked Sendable {
           // 6. Prefill: one forward pass over the full prompt via inputEmbeddings.
           //    Decoder returns logits [1, T, vocabSize] directly — lm_head is
           //    applied inside Qwen3Model.callAsFunction.
-          let cache = pipeline.makeCache()
+          var cache: [KVCache] = pipeline.makeCache()
           let prefillLogits = pipeline.decoder(
             nil,
             cache: cache,
             inputEmbeddings: prefill
           )  // [1, T, vocabSize]
+          maybeQuantizeKVCache(
+            cache: &cache,
+            kvBits: pipeline.kvCacheBits,
+            kvGroupSize: pipeline.kvCacheGroupSize,
+            quantizedKVStart: pipeline.quantizedKVStart
+          )
 
           // 7. First greedy step: argmax over the last token position.
           //    Slice keeps the sequence dim ([1, 1, V]) so the shape
@@ -277,7 +297,7 @@ final class ASRPipeline: @unchecked Sendable {
   // MARK: - Private helpers
 
   /// Build one `KVCacheSimple` per decoder transformer layer.
-  private func makeCache() -> [KVCacheSimple] {
+  private func makeCache() -> [KVCache] {
     (0..<numDecoderLayers).map { _ in KVCacheSimple() }
   }
 

@@ -141,6 +141,12 @@ public actor Transcriber {
       eosTokenIds.insert(Int32(eosId))
     }
 
+    // Optional KV-cache quantization. Off by default; opt in via
+    // TINY_AUDIO_KV_BITS=8 or TINY_AUDIO_KV_BITS=4. Group size
+    // defaults to 64 (the upstream default).
+    let kvCacheBits: Int? = ProcessInfo.processInfo.environment["TINY_AUDIO_KV_BITS"]
+      .flatMap(Int.init)
+
     // 11. Construct ASRPipeline.
     let asr = ASRPipeline(
       encoder: encoder,
@@ -151,7 +157,8 @@ public actor Transcriber {
       audioTokenId: audioTokenId,
       eosTokenIds: eosTokenIds,
       numDecoderLayers: numDecoderLayers,
-      vocabSize: vocabSize
+      vocabSize: vocabSize,
+      kvCacheBits: kvCacheBits
     )
 
     // 12. Warmup + return.
