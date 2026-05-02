@@ -52,10 +52,10 @@ def _save_module_safetensors(module, out_path: Path) -> None:
     mx.save_safetensors(str(out_path), flat)
 
 
-def build_bundle(work: Path, args) -> None:
+def build_bundle(work: Path, source_repo: str, decoder_repo: str) -> None:
     """Build the MLX bundle into *work*, writing all files except manifest.json last."""
-    print(f"Loading source MLX model from {args.source_repo}...")
-    model = MLXASRModel.from_pretrained(args.source_repo)
+    print(f"Loading source MLX model from {source_repo}...")
+    model = MLXASRModel.from_pretrained(source_repo)
 
     print("Saving encoder.safetensors (4-bit quantized)...")
     _save_module_safetensors(model.encoder, work / "encoder.safetensors")
@@ -63,8 +63,8 @@ def build_bundle(work: Path, args) -> None:
     print("Saving projector.safetensors (fp16)...")
     _save_module_safetensors(model.projector, work / "projector.safetensors")
 
-    print(f"Mirroring decoder weights from {args.decoder_repo}...")
-    decoder_src = Path(snapshot_download(args.decoder_repo))
+    print(f"Mirroring decoder weights from {decoder_repo}...")
+    decoder_src = Path(snapshot_download(decoder_repo))
     for name in ("model.safetensors", "tokenizer.json", "tokenizer_config.json", "config.json"):
         src = decoder_src / name
         if src.exists():
@@ -79,7 +79,7 @@ def build_bundle(work: Path, args) -> None:
         upstream_files = sorted(p.name for p in decoder_src.iterdir() if p.is_file())
         raise FileNotFoundError(
             f"Decoder mirror is missing required files: {missing}. "
-            f"Upstream {args.decoder_repo} contains: {upstream_files}. "
+            f"Upstream {decoder_repo} contains: {upstream_files}. "
             f"Sharded weights (model-XXXXX-of-NNNNN.safetensors) are not yet supported by this script."
         )
 
@@ -132,14 +132,14 @@ def main() -> None:
     if args.dry_run:
         work = Path(tempfile.mkdtemp(prefix="tiny-audio-mlx-"))
         print(f"Building bundle in {work}")
-        build_bundle(work, args)
+        build_bundle(work, args.source_repo, args.decoder_repo)
         print(f"Dry run — bundle prepared at {work}. Skipping push.")
         return
 
     with tempfile.TemporaryDirectory(prefix="tiny-audio-mlx-") as work_str:
         work = Path(work_str)
         print(f"Building bundle in {work}")
-        build_bundle(work, args)
+        build_bundle(work, args.source_repo, args.decoder_repo)
         api = HfApi()
         api.create_repo(args.target_repo, exist_ok=True)
         print(f"Uploading to {args.target_repo}...")

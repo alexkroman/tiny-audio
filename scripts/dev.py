@@ -301,6 +301,75 @@ def download_musan(
     )
 
 
+SWIFT_RESOURCES_MODEL_DIR = Path("swift/Sources/TinyAudio/Resources/Model")
+
+
+@app.command("build-swift-weights")
+def build_swift_weights(
+    source_repo: str = typer.Option(
+        "mazesmazes/tiny-audio-embedded",
+        "--source-repo",
+        help="Tiny-audio embedded checkpoint to load encoder + projector from.",
+    ),
+    decoder_repo: str = typer.Option(
+        "Qwen/Qwen3-0.6B-MLX-4bit",
+        "--decoder-repo",
+        help="Upstream MLX decoder repo to mirror (weights, tokenizer, config).",
+    ),
+    dest: Path = typer.Option(
+        SWIFT_RESOURCES_MODEL_DIR,
+        "--dest",
+        help="Where to install the bundle. Default: the Swift package's Resources/Model.",
+    ),
+    push: bool = typer.Option(
+        False, "--push", help="Also push the bundle to a HuggingFace Hub repo."
+    ),
+    target_repo: str = typer.Option(
+        "mazesmazes/tiny-audio-mlx",
+        "--target-repo",
+        help="Hub repo to push to when --push is set.",
+    ),
+):
+    """Build the MLX bundle (encoder + projector + mirrored decoder + manifest)
+    and install it into the Swift package so `Transcriber.load()` finds it.
+
+    One command for the full Swift-weights build: re-quantizes the encoder,
+    re-saves the projector, mirrors the decoder/tokenizer/config from the
+    upstream Qwen MLX repo, writes config.json + manifest.json, and copies
+    everything into ``swift/Sources/TinyAudio/Resources/Model``. Pass --push
+    to also publish to the Hub.
+    """
+    import shutil
+    import tempfile
+
+    from scripts.publish_mlx_bundle import build_bundle
+
+    dest = dest.expanduser().resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="tiny-audio-mlx-") as work_str:
+        work = Path(work_str)
+        console.print(f"[bold]Building bundle[/bold] in {work}")
+        build_bundle(work, source_repo, decoder_repo)
+
+        console.print(f"[bold]Installing[/bold] bundle into {dest}")
+        for src in sorted(work.iterdir()):
+            if src.is_file():
+                shutil.copy(src, dest / src.name)
+
+        if push:
+            from huggingface_hub import HfApi
+
+            api = HfApi()
+            api.create_repo(target_repo, exist_ok=True)
+            console.print(f"[bold]Uploading[/bold] to {target_repo}")
+            api.upload_folder(folder_path=str(work), repo_id=target_repo)
+            console.print(f"[green]Pushed[/green] to https://huggingface.co/{target_repo}")
+
+    installed = sorted(p.name for p in dest.iterdir() if p.is_file())
+    console.print(f"[green]Done.[/green] {len(installed)} files at {dest}: {installed}")
+
+
 def _register_handler():
     from scripts.deploy.handler_local import test as handler_test
 
