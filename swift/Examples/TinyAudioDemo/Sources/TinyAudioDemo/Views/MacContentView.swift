@@ -42,7 +42,6 @@
           )
           Button("Clear") { vm.clearTranscripts() }
             .buttonStyle(.borderedProminent)
-            .tint(.red)
             .disabled(vm.finalizedTranscripts.isEmpty)
         }
       }
