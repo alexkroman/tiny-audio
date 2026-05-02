@@ -15,6 +15,7 @@
         .toolbar {
           ToolbarItem(placement: .topBarTrailing) {
             Button("Clear") { vm.clearTranscripts() }
+              .foregroundStyle(.white)
               .disabled(vm.finalizedTranscripts.isEmpty)
           }
         }
