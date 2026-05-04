@@ -311,11 +311,6 @@ def build_swift_weights(
         "--source-repo",
         help="Tiny-audio embedded checkpoint to load encoder + projector from.",
     ),
-    decoder_repo: str = typer.Option(
-        "Qwen/Qwen3-0.6B-MLX-4bit",
-        "--decoder-repo",
-        help="Upstream MLX decoder repo to mirror (weights, tokenizer, config).",
-    ),
     dest: Path = typer.Option(
         SWIFT_RESOURCES_MODEL_DIR,
         "--dest",
@@ -329,19 +324,31 @@ def build_swift_weights(
         "--target-repo",
         help="Hub repo to push to when --push is set.",
     ),
+    unquantized: bool = typer.Option(
+        False,
+        "--unquantized",
+        help=(
+            "Ship fp16 encoder + decoder weights with no quantization. "
+            "For Swift↔PyTorch equivalence testing — Swift's loader skips "
+            "quantize() when the bundle config has no quantization block."
+        ),
+    ),
 ):
-    """Build the MLX bundle (encoder + projector + mirrored decoder + manifest)
-    and install it into the Swift package so `Transcriber.load()` finds it.
+    """Build the MLX bundle (encoder + projector + decoder + manifest) and install
+    it into the Swift package so `Transcriber.load()` finds it.
 
     One command for the full Swift-weights build: re-quantizes the encoder,
-    re-saves the projector, mirrors the decoder/tokenizer/config from the
-    upstream Qwen MLX repo, writes config.json + manifest.json, and copies
-    everything into ``swift/Sources/TinyAudio/Resources/Model``. Pass --push
-    to also publish to the Hub.
+    re-saves the projector, extracts and mlx_lm-quantizes the decoder LM
+    from the source checkpoint at 8-bit / group_size=64 (same recipe for
+    both frozen-LM and full-decoder-fine-tune checkpoints), writes
+    config.json + manifest.json, and copies everything into
+    ``swift/Sources/TinyAudio/Resources/Model``. Pass --push to also publish
+    to the Hub.
     """
     import shutil
     import tempfile
 
+    from scripts.mlx.convert_decoder import convert_decoder
     from scripts.publish_mlx_bundle import build_bundle
 
     dest = dest.expanduser().resolve()
@@ -349,8 +356,25 @@ def build_swift_weights(
 
     with tempfile.TemporaryDirectory(prefix="tiny-audio-mlx-") as work_str:
         work = Path(work_str)
+
+        decoder_dir = work / "decoder-mlx"
+        if unquantized:
+            console.print(
+                f"[bold yellow]Converting decoder[/bold yellow] from {source_repo} "
+                f"(fp16, no quantization — equivalence-test mode)"
+            )
+        else:
+            console.print(f"[bold]Converting decoder[/bold] from {source_repo} (8-bit / group=64)")
+        convert_decoder(
+            checkpoint=source_repo,
+            out_dir=decoder_dir,
+            q_bits=8,
+            q_group_size=64,
+            quantize=not unquantized,
+        )
+
         console.print(f"[bold]Building bundle[/bold] in {work}")
-        build_bundle(work, source_repo, decoder_repo)
+        build_bundle(work, source_repo, str(decoder_dir), quantize=not unquantized)
 
         console.print(f"[bold]Installing[/bold] bundle into {dest}")
         for src in sorted(work.iterdir()):

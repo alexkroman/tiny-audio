@@ -26,6 +26,7 @@ from huggingface_hub import HfApi, snapshot_download
 from mlx.utils import tree_flatten
 
 from tiny_audio.mlx import MLXASRModel
+from tiny_audio.mlx.model import ENCODER_QUANT_BITS, ENCODER_QUANT_GROUP_SIZE
 
 # Bump this when bundle layout changes incompatibly.
 MLX_FORMAT_VERSION = 1
@@ -52,10 +53,20 @@ def _save_module_safetensors(module, out_path: Path) -> None:
     mx.save_safetensors(str(out_path), flat)
 
 
-def build_bundle(work: Path, source_repo: str, decoder_repo: str) -> None:
-    """Build the MLX bundle into *work*, writing all files except manifest.json last."""
+def build_bundle(
+    work: Path,
+    source_repo: str,
+    decoder_repo: str,
+    *,
+    quantize: bool = True,
+) -> None:
+    """Build the MLX bundle into *work*, writing all files except manifest.json last.
+
+    `quantize=False` ships fp16 encoder + decoder weights for Swift↔PyTorch
+    equivalence testing.
+    """
     print(f"Loading source MLX model from {source_repo}...")
-    model = MLXASRModel.from_pretrained(source_repo)
+    model = MLXASRModel.from_pretrained(source_repo, quantize_encoder=quantize)
 
     print("Saving encoder.safetensors (4-bit quantized)...")
     _save_module_safetensors(model.encoder, work / "encoder.safetensors")
@@ -63,8 +74,13 @@ def build_bundle(work: Path, source_repo: str, decoder_repo: str) -> None:
     print("Saving projector.safetensors (fp16)...")
     _save_module_safetensors(model.projector, work / "projector.safetensors")
 
-    print(f"Mirroring decoder weights from {decoder_repo}...")
-    decoder_src = Path(snapshot_download(decoder_repo))
+    decoder_path = Path(decoder_repo)
+    if decoder_path.is_dir():
+        print(f"Mirroring decoder weights from local path {decoder_path}...")
+        decoder_src = decoder_path
+    else:
+        print(f"Mirroring decoder weights from {decoder_repo}...")
+        decoder_src = Path(snapshot_download(decoder_repo))
     for name in ("model.safetensors", "tokenizer.json", "tokenizer_config.json", "config.json"):
         src = decoder_src / name
         if src.exists():
@@ -92,6 +108,11 @@ def build_bundle(work: Path, source_repo: str, decoder_repo: str) -> None:
         "intermediate_size": int(model.encoder.cfg.intermediate_size),
         "rope_theta": float(model.encoder.cfg.rope_theta),
     }
+    if quantize:
+        encoder_cfg["quantization"] = {
+            "group_size": ENCODER_QUANT_GROUP_SIZE,
+            "bits": ENCODER_QUANT_BITS,
+        }
     bundle_config = {
         "mlx_format_version": MLX_FORMAT_VERSION,
         "encoder": encoder_cfg,

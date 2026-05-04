@@ -16,6 +16,38 @@ public actor Transcriber {
     self.pipeline = pipeline
   }
 
+  // MARK: - Compute precision
+
+  /// Numeric type used for model weights and intermediate activations.
+  /// Set to `.bfloat16` to match PyTorch's default Qwen3 / GLM-ASR runtime
+  /// precision; set to `.float16` for the previous behavior. The compute
+  /// dtype is applied by casting loaded weights and the mel input through
+  /// `castWeightsForCompute` / `castMelForCompute`.
+  internal static let computeDtype: DType = .bfloat16
+
+  /// Cast every floating-point weight in a loaded safetensors dict to
+  /// `computeDtype`. Non-float arrays (token id tables etc.) pass through
+  /// untouched.
+  internal static func castWeightsForCompute(
+    _ weights: [String: MLXArray]
+  ) -> [String: MLXArray] {
+    weights.mapValues { arr in
+      switch arr.dtype {
+      case .float16, .float32, .bfloat16:
+        return arr.asType(computeDtype)
+      default:
+        return arr
+      }
+    }
+  }
+
+  /// Cast a mel-spectrogram tensor to `computeDtype`. The weights are cast
+  /// at load time; the mel needs to be cast at every call so its dtype
+  /// matches the encoder's first conv weight.
+  internal static func castMelForCompute(_ mel: MLXArray) -> MLXArray {
+    mel.asType(computeDtype)
+  }
+
   // MARK: - Public factory
 
   /// Load the bundled model and return a warmed-up `Transcriber`.
@@ -49,7 +81,11 @@ public actor Transcriber {
     // 4. Build mel spectrogram (no resource path needed; uses computeMelSpectrogram).
     let mel = LogMelSpectrogram()
 
-    // 5. Build encoder, quantize to 4-bit, load weights.
+    // 5. Build encoder, quantize per the bundle's config, load weights.
+    //    `encoder.quantization.{group_size, bits}` is written by the Python
+    //    build pipeline so it always matches what `mlx.nn.quantize` did at
+    //    bundle-build time. Falls back to (64, 4) for bundles built before
+    //    the field was added.
     let encoder: GLMASREncoder
     do {
       guard let encConfigDict = config["encoder"] as? [String: Any] else {
@@ -57,9 +93,15 @@ public actor Transcriber {
       }
       let encConfig = try GLMASREncoderConfig(dict: encConfigDict)
       encoder = GLMASREncoder(encConfig)
-      quantize(model: encoder, groupSize: 64, bits: 4)
-      let weights = try MLX.loadArrays(
-        url: bundle.appendingPathComponent("encoder.safetensors")
+      // No quantization block ⇒ bundle ships fp16 weights (equivalence-test
+      // mode); skip the quantize() call so plain Linear modules accept them.
+      if let encQuant = encConfigDict["quantization"] as? [String: Int],
+        let groupSize = encQuant["group_size"], let bits = encQuant["bits"]
+      {
+        quantize(model: encoder, groupSize: groupSize, bits: bits)
+      }
+      let weights = Self.castWeightsForCompute(
+        try MLX.loadArrays(url: bundle.appendingPathComponent("encoder.safetensors"))
       )
       try encoder.update(parameters: ModuleParameters.unflattened(weights), verify: .all)
     } catch let e as TinyAudioError {
@@ -75,8 +117,8 @@ public actor Transcriber {
         throw ConfigError.missingKey("projector")
       }
       projector = try MLPProjector(dict: projConfigDict)
-      let weights = try MLX.loadArrays(
-        url: bundle.appendingPathComponent("projector.safetensors")
+      let weights = Self.castWeightsForCompute(
+        try MLX.loadArrays(url: bundle.appendingPathComponent("projector.safetensors"))
       )
       try projector.update(parameters: ModuleParameters.unflattened(weights), verify: .all)
     } catch let e as TinyAudioError {
@@ -85,12 +127,12 @@ public actor Transcriber {
       throw TinyAudioError.mlxModuleLoadFailed(name: "projector", underlying: AnyError(error))
     }
 
-    // 7. Build vendored Qwen3 decoder, quantize to 4-bit, load weights.
-    //    The bundle's decoder.safetensors is already 4-bit; quantize() here
-    //    transforms the Linear modules in-place to QuantizedLinear so their
-    //    parameter shapes match the stored weight layout.
-    //    The Qwen3-0.6B bundle uses group_size=128 (verified from scales shape:
-    //    v_proj scales [1024,8] from full weight [1024,1024] => 1024/8=128).
+    // 7. Build vendored Qwen3 decoder, quantize per the bundle's config, load weights.
+    //    `quantize()` transforms Linear modules in-place to QuantizedLinear so their
+    //    parameter shapes match the stored weight layout. groupSize/bits MUST come
+    //    from decoder_config.json — the build pipeline picks 4/128 for the stock
+    //    Qwen MLX decoder and 8/64 for full-decoder fine-tunes (4-bit affine quant
+    //    degrades EOS prediction on fine-tuned weights).
     let decoder: Qwen3Model
     let numDecoderLayers: Int
     let vocabSize: Int
@@ -98,12 +140,17 @@ public actor Transcriber {
       let decoderConfigURL = bundle.appendingPathComponent("decoder_config.json")
       let decoderConfigData = try Data(contentsOf: decoderConfigURL)
       let qwenConfig = try JSONDecoder().decode(Qwen3Configuration.self, from: decoderConfigData)
+      // Optional decode — fp16 (unquantized) bundles omit the block entirely.
+      let quantSpec = try? JSONDecoder().decode(
+        DecoderQuantizationSpec.self, from: decoderConfigData)
       numDecoderLayers = qwenConfig.hiddenLayers
       vocabSize = qwenConfig.vocabularySize
       decoder = Qwen3Model(qwenConfig)
-      quantize(model: decoder, groupSize: 128, bits: 4)
-      let rawWeights = try MLX.loadArrays(
-        url: bundle.appendingPathComponent("decoder.safetensors")
+      if let q = quantSpec?.quantization {
+        quantize(model: decoder, groupSize: q.groupSize, bits: q.bits)
+      }
+      let rawWeights = Self.castWeightsForCompute(
+        try MLX.loadArrays(url: bundle.appendingPathComponent("decoder.safetensors"))
       )
       // sanitize strips lm_head.weight when tieWordEmbeddings=true.
       let weights = decoder.sanitize(weights: rawWeights)
@@ -313,6 +360,22 @@ extension MLPProjector {
   }
 }
 
+// MARK: - Decoder quantization spec
+
+/// Reads the `quantization` block from `decoder_config.json` so we can call
+/// `quantize()` with the same group_size/bits the bundle was built with.
+private struct DecoderQuantizationSpec: Codable {
+  struct Block: Codable {
+    let groupSize: Int
+    let bits: Int
+    enum CodingKeys: String, CodingKey {
+      case groupSize = "group_size"
+      case bits
+    }
+  }
+  let quantization: Block
+}
+
 // MARK: - Internal config-parsing errors
 
 private enum ConfigError: Error {
@@ -324,9 +387,9 @@ private enum ConfigError: Error {
 
 extension Transcriber {
   /// Maximum number of new tokens the decoder may generate per call.
-  /// Mirrors the Python `transcribe()` default and is sufficient for
-  /// utterances up to roughly 30–40 words.
-  private static let maxNewTokens = 96
+  /// Matches the published checkpoint's `generation_config.max_new_tokens`
+  /// (`tiny-audio-embedded/config.json` — 128).
+  private static let maxNewTokens = 128
 
   /// Transcribe audio to text, waiting for the full transcript before returning.
   ///

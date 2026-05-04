@@ -39,6 +39,7 @@ def convert_decoder(
     q_bits: int = 4,
     q_group_size: int = 64,
     q_mode: str = "affine",
+    quantize: bool = True,
 ) -> None:
     from mlx_lm import convert as mlx_lm_convert
 
@@ -48,10 +49,11 @@ def convert_decoder(
     model = ASRModel.from_pretrained(checkpoint)
 
     if getattr(model.config, "freeze_language_model", True):
-        raise SystemExit(
-            f"{checkpoint} was trained with frozen language model — there is "
-            f"no fine-tuned decoder to convert. Re-train with "
-            f"freeze_language_model: false."
+        print(
+            f"Note: {checkpoint} was trained with freeze_language_model=true — "
+            f"the LM weights match the upstream base model. Converting anyway to "
+            f"keep the bundle's decoder quantization consistent across "
+            f"frozen-LM and fine-tuned-LM checkpoints."
         )
 
     out_dir = Path(out_dir)
@@ -68,16 +70,24 @@ def convert_decoder(
         model.tokenizer.save_pretrained(str(hf_dir))
         _patch_config_for_mlx_lm(hf_dir)
 
-        print(
-            f"Converting + quantizing ({q_mode}, {q_bits}-bit, group={q_group_size}) -> {out_dir}..."
-        )
-        mlx_lm_convert(
-            hf_path=str(hf_dir),
-            mlx_path=str(out_dir),
-            quantize=True,
-            q_bits=q_bits,
-            q_group_size=q_group_size,
-            q_mode=q_mode,
-        )
+        if quantize:
+            print(
+                f"Converting + quantizing ({q_mode}, {q_bits}-bit, group={q_group_size}) -> {out_dir}..."
+            )
+            mlx_lm_convert(
+                hf_path=str(hf_dir),
+                mlx_path=str(out_dir),
+                quantize=True,
+                q_bits=q_bits,
+                q_group_size=q_group_size,
+                q_mode=q_mode,
+            )
+        else:
+            print(f"Converting (fp16, no quantization) -> {out_dir}...")
+            mlx_lm_convert(
+                hf_path=str(hf_dir),
+                mlx_path=str(out_dir),
+                quantize=False,
+            )
 
     print(f"Done. MLX-LM decoder written to {out_dir}")

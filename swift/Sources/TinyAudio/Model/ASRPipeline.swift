@@ -182,7 +182,8 @@ final class ASRPipeline: @unchecked Sendable {
         // first real sync point). The gated MLX.eval calls break the graph at
         // each phase boundary so the profile shows where work actually lives.
         // Production calls skip the forced evals entirely (no overhead).
-        let melArr = pipeline.mel.compute(samples)  // [1, 128, T_mel]
+        let melArr = Transcriber.castMelForCompute(
+          pipeline.mel.compute(samples))  // [1, 128, T_mel]
         if profile.isEnabled { MLX.eval(melArr) }
         profile.mark("mel")
 

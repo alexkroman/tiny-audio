@@ -12,6 +12,7 @@ app = typer.Typer(help="MLX bundle build utilities", no_args_is_help=True)
 _DEFAULT_DECODER_CACHE = get_project_root() / ".cache" / "decoder-mlx"
 _DEFAULT_BUNDLE_DIR = get_project_root() / "swift/Sources/TinyAudio/Resources/Model"
 _STOCK_DECODER_REPO = "Qwen/Qwen3-0.6B-MLX-4bit"
+_DEFAULT_CHECKPOINT = "mazesmazes/tiny-audio-embedded"
 
 
 @app.command("convert-decoder")
@@ -23,7 +24,7 @@ def convert_decoder_cmd(
             "-c",
             help="HF repo id or local path of a tiny-audio checkpoint with full LM weights.",
         ),
-    ],
+    ] = _DEFAULT_CHECKPOINT,
     out_dir: Annotated[
         Path,
         typer.Option(
