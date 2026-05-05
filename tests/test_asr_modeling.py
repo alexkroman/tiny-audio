@@ -326,3 +326,81 @@ class TestForwardSpecAugment:
                 attention_mask=torch.ones_like(input_ids),
             )
             spy.assert_called_once()
+
+
+class TestSavePretrained:
+    """save_pretrained writes config, weights, tokenizer, and source files."""
+
+    def test_save_creates_expected_files(self, base_asr_model, tmp_path):
+        save_dir = tmp_path / "model"
+        base_asr_model.save_pretrained(save_dir)
+
+        assert (save_dir / "config.json").exists()
+        assert (save_dir / "model.safetensors").exists()
+        assert (save_dir / "tokenizer_config.json").exists()
+        # asr_*.py files copied for auto-loading
+        assert (save_dir / "asr_modeling.py").exists()
+        assert (save_dir / "asr_config.py").exists()
+        assert (save_dir / "asr_processing.py").exists()
+        assert (save_dir / "asr_pipeline.py").exists()
+        assert (save_dir / "projectors.py").exists()
+        assert (save_dir / "alignment.py").exists()
+        assert (save_dir / "diarization.py").exists()
+
+    def test_save_then_load_round_trip(self, base_asr_model, tmp_path):
+        from tiny_audio.asr_modeling import ASRModel
+
+        save_dir = tmp_path / "model"
+        base_asr_model.save_pretrained(save_dir)
+
+        loaded = ASRModel.from_pretrained(str(save_dir))
+
+        # Check projector weights match
+        original_proj = dict(base_asr_model.projector.state_dict())
+        loaded_proj = dict(loaded.projector.state_dict())
+        assert original_proj.keys() == loaded_proj.keys()
+        for k, v in original_proj.items():
+            assert torch.allclose(v, loaded_proj[k])
+
+    def test_save_lora_writes_adapter_config(self, lora_asr_model, tmp_path):
+        save_dir = tmp_path / "lora_model"
+        lora_asr_model.save_pretrained(save_dir)
+
+        # PEFT writes these
+        assert (save_dir / "adapter_config.json").exists()
+        assert (save_dir / "adapter_model.safetensors").exists()
+
+    def test_save_lora_clears_base_model_path_when_no_repo_id(self, lora_asr_model, tmp_path):
+        import json
+
+        save_dir = tmp_path / "lora_model"
+        lora_asr_model.save_pretrained(save_dir)
+
+        with (save_dir / "adapter_config.json").open() as f:
+            adapter_cfg = json.load(f)
+
+        # Should be empty string (not None / "None") when no repo_id is given
+        assert adapter_cfg["base_model_name_or_path"] == ""
+
+    def test_save_lora_uses_repo_id_when_provided(self, lora_asr_model, tmp_path):
+        import json
+
+        save_dir = tmp_path / "lora_model_with_repo"
+        lora_asr_model.save_pretrained(save_dir, repo_id="alex/test-model")
+
+        with (save_dir / "adapter_config.json").open() as f:
+            adapter_cfg = json.load(f)
+
+        assert adapter_cfg["base_model_name_or_path"] == "alex/test-model"
+
+
+class TestProcessor:
+    """get_processor wires together feature extractor, tokenizer, projector."""
+
+    def test_get_processor_returns_asrprocessor(self, base_asr_model):
+        from tiny_audio.asr_processing import ASRProcessor
+
+        proc = base_asr_model.get_processor()
+        assert isinstance(proc, ASRProcessor)
+        assert proc.feature_extractor is base_asr_model.feature_extractor
+        assert proc.tokenizer is base_asr_model.tokenizer
