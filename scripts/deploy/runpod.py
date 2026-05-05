@@ -122,38 +122,21 @@ def attach_tmux_session(host: str, port: int, session_name: str) -> None:
     print(f"\nDetached from session '{session_name}'.")
 
 
-RSYNC_EXCLUDES = [
-    "__pycache__",
-    "*.pyc",
-    ".git",
-    ".worktrees",
-    ".venv",
-    "venv",
-    "env",
-    ".env",
-    "./data/",
-    "datasets_cache/",
-    "outputs/",
-    "logs/",
-    "runs/",
-    "wandb/",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    "*.egg-info",
-    "dist/",
-    "build/",
-    ".DS_Store",
-    ".idea/",
-    ".vscode/",
-    "node_modules/",
-    ".cache/",
-    "datasets/",
-    "checkpoints/",
-    "*.ckpt",
-    "*.pth",
-    "*.pt",
-]
+def _gitignore_aware_file_list(project_root: Path) -> str:
+    """Return newline-separated repo-relative paths git would track or add.
+
+    Uses ``git ls-files --cached --others --exclude-standard`` so the rsync
+    file set has exact gitignore semantics (including ``!`` un-ignore lines,
+    which rsync's own ``:- .gitignore`` filter mishandles).
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout
 
 
 def setup_remote_environment(conn: Connection) -> None:
@@ -166,7 +149,7 @@ def setup_remote_environment(conn: Connection) -> None:
     print("\nSetting up remote environment...")
     conn.run("apt-get update -qq || true", hide=True)
     conn.run(
-        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 portaudio19-dev aria2",
+        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 portaudio19-dev aria2 unzip",
         hide=True,
     )
     # Pin augmentation corpora onto the persistent /workspace volume so they
@@ -183,17 +166,26 @@ def setup_remote_environment(conn: Connection) -> None:
 
 
 def sync_project(conn: Connection, project_root: Path) -> None:
-    """Sync project files to the RunPod instance using rsync."""
+    """Sync project files to the RunPod instance using rsync.
+
+    File set comes from git so gitignore is honored exactly. ``--delete`` is
+    omitted (it doesn't compose cleanly with ``--files-from`` and would
+    require a parallel exclude set anyway); stale files on the remote are
+    harmless for training. Wipe ``/workspace`` manually if needed.
+    """
     print(f"\nSyncing project from {project_root}...")
 
-    excludes = " ".join(f"--exclude={e}" for e in RSYNC_EXCLUDES)
+    file_list = _gitignore_aware_file_list(project_root)
+    if not file_list.strip():
+        raise RuntimeError(f"git ls-files returned no files under {project_root}")
+
     rsync_cmd = (
-        f"rsync -avz --delete --no-owner --no-group {excludes} "
+        f"rsync -avz --no-owner --no-group --files-from=- "
         f'-e "ssh -i ~/.ssh/id_ed25519 -p {conn.port} -o StrictHostKeyChecking=no" '
         f"{project_root}/ root@{conn.host}:/workspace/"
     )
 
-    subprocess.run(rsync_cmd, shell=True, check=True)
+    subprocess.run(rsync_cmd, shell=True, check=True, input=file_list, text=True)
     print("Project synced successfully!")
 
 

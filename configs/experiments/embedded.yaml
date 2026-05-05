@@ -17,7 +17,7 @@ model:
   text_model_id: Qwen/Qwen3-0.6B
 
 training:
-  hub_model_id: "mazesmazes/tiny-audio-embedded"
+  hub_model_id: "mazesmazes/tiny-audio-embedded-2"
   group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
   # Full decoder fine-tuning (projector + Qwen3-0.6B). Saved checkpoints contain the full LM.
   freeze_language_model: false
@@ -39,7 +39,7 @@ training:
   per_device_train_batch_size: 32
   per_device_eval_batch_size: 32
   gradient_accumulation_steps: 2
-  num_train_epochs: 2
+  num_train_epochs: 3
   save_steps: 1000
   eval_steps: 1000
 

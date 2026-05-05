@@ -98,12 +98,19 @@ rir_augmentation:
   corpus_path:
     - ~/.cache/openslr-28/real_rirs_isotropic_noises
     - ~/.cache/openslr-28/simulated_rirs
-  pool_size: 2048
-  room_x_range: [3.0, 10.0]
-  room_y_range: [3.0, 10.0]
-  room_z_range: [2.4, 4.0]
-  t60_range: [0.1, 1.0]
-  prob: 0.5
+  # Bumped from 2048 → 8192: sub-sampling 2K from ~60K simulated impulses was
+  # leaving real-RIR diversity on the table, especially relevant for ami-sdm.
+  pool_size: 8192
+  # Widened from [3, 10] / [2.4, 4] / t60 [0.1, 1.0] to capture larger meeting
+  # rooms with longer reverberation. Real AMI rooms are bigger and more
+  # reverberant than the prior synthetic distribution covered.
+  room_x_range: [3.0, 15.0]
+  room_y_range: [3.0, 15.0]
+  room_z_range: [2.4, 5.0]
+  t60_range: [0.2, 1.5]
+  # 0.5 → 0.7: embedded ASR sees reverberant audio more than half the time in
+  # deployment; current 50/50 clean split underweights real conditions.
+  prob: 0.7
   seed: null
 
 # Noise augmentation — mixes background noise into the signal via
@@ -115,9 +122,9 @@ rir_augmentation:
 #     violet noise. Cheap, no corpus, but lacks real-world structure.
 # CPU-friendly; chains after RIR in the dataloader transform pipeline.
 #
-# SNR range [0, 25] dB intentionally includes low-SNR conditions (the
-# Earnings22 / People's Speech eval gap is dominated by noisy real-world
-# audio); the lower bound is what most modern recipes use to push robustness.
+# SNR range [-5, 25] dB pushes robustness into the low-SNR regime that drives
+# the People's Speech / CommonVoice / Earnings22 gap. Lower bound matches
+# modern NeMo / Canary / Parakeet recipes.
 noise_augmentation:
   enabled: true
   # MUSAN (music + speech + noise, ~109h) plus OpenSLR-28's pointsource_noises
@@ -125,9 +132,17 @@ noise_augmentation:
   corpus_path:
     - ~/.cache/musan/musan
     - ~/.cache/openslr-28/pointsource_noises
-  prob: 0.5
-  min_snr_db: 0.0
+  prob: 0.7
+  min_snr_db: -5.0
   max_snr_db: 25.0
+  # Bias 35% of corpus draws toward MUSAN/speech (multi-talker babble).
+  # Babble is the most ASR-relevant noise texture but otherwise only ~14% of
+  # MUSAN+pointsource_noises files. Closes the People's / CV / Earnings22 gap.
+  babble_weight: 0.35
+  # Convolve noise with a random RIR before mixing so the noise inherits the
+  # same room response as the (already-reverbed) clean signal. Aligns with
+  # NeMo / Canary recipe; modest realism win for ami-sdm + LS-other.
+  reverb_noise: true
 
 # Misc
 disable_tqdm: false

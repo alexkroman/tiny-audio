@@ -11,8 +11,10 @@ mostly on close-talk audio. Two backends:
     image-source method (CPU, pure-Python — no CUDA toolchain). Faster to
     set up, slightly less realistic.
 
-NoiseAugmentation adds synthetic colored noise via torch-audiomentations
-and works on CPU.
+NoiseAugmentation mixes background noise from a corpus (MUSAN / OpenSLR /
+WHAM!) at random SNR. Optionally biases draws toward MUSAN/speech (babble),
+the most ASR-relevant noise type, and convolves the noise with an RIR before
+mixing so it shares the room response with the clean signal (NeMo recipe).
 
 Apply both via dataset.with_transform on the train split. They're decoupled
 so either can be enabled independently. RIR runs first (waveform shaping),
@@ -242,6 +244,16 @@ class NoiseAugmentation:
         white / pink / blue / violet noise at random SNR. Cheap, no corpus,
         but lacks real-world temporal / spectral structure.
 
+    ``babble_weight`` biases corpus draws toward MUSAN/speech (multi-talker
+    babble) — the most ASR-relevant noise texture and the closest analogue to
+    People's Speech / CommonVoice / Earnings22 backgrounds. Paths under any
+    ``speech/`` subdirectory in the corpus are treated as the babble pool.
+
+    ``rir_augmentation``, when provided, convolves each noise clip with a
+    random RIR before mixing so the noise inherits the same room response as
+    the (already-reverbed) clean signal — anechoic noise against reverberant
+    speech is unphysical.
+
     Accepts/returns numpy arrays so it can be chained with
     :class:`RIRAugmentation` in the dataloader transform pipeline.
     """
@@ -253,12 +265,20 @@ class NoiseAugmentation:
         min_snr_db: float = 0.0,
         max_snr_db: float = 25.0,
         corpus_path: str | Sequence[str] | None = None,
+        babble_weight: float = 0.0,
+        rir_augmentation: RIRAugmentation | None = None,
     ):
         self.sample_rate = sample_rate
         self.prob = prob
         self.min_snr_db = min_snr_db
         self.max_snr_db = max_snr_db
+        self.babble_weight = float(babble_weight)
+        if not 0.0 <= self.babble_weight <= 1.0:
+            raise ValueError(f"babble_weight must be in [0, 1], got {babble_weight}")
+        self.rir_augmentation = rir_augmentation
         self.noise_paths: list[Path] | None = None
+        self.babble_paths: list[Path] = []
+        self.non_babble_paths: list[Path] = []
         self.augment = None
 
         if corpus_path is not None:
@@ -271,6 +291,15 @@ class NoiseAugmentation:
             self.noise_paths = sorted(collected)
             if not self.noise_paths:
                 raise ValueError(f"No .wav files found under {[str(r) for r in roots]}")
+            for p in self.noise_paths:
+                if any(part == "speech" for part in p.parts):
+                    self.babble_paths.append(p)
+                else:
+                    self.non_babble_paths.append(p)
+            # If the corpus has no babble pool, silently disable weighting —
+            # better than raising on an otherwise-valid noise corpus.
+            if not self.babble_paths:
+                self.babble_weight = 0.0
         else:
             try:
                 from torch_audiomentations import AddColoredNoise
@@ -323,18 +352,36 @@ class NoiseAugmentation:
             arr = np.tile(arr, repeats)
         return arr[:n_target]
 
+    def _pick_noise_path(self) -> Path:
+        # Bias toward MUSAN/speech (babble) when available; this is the most
+        # ASR-relevant noise type and otherwise gets undersampled (~14% of
+        # MUSAN files are under speech/).
+        if self.babble_weight > 0.0 and self.babble_paths and random.random() < self.babble_weight:
+            return random.choice(self.babble_paths)
+        if self.babble_weight > 0.0 and self.non_babble_paths:
+            return random.choice(self.non_babble_paths)
+        return random.choice(self.noise_paths)
+
     def _mix_corpus_noise(self, audio: np.ndarray) -> np.ndarray:
         n = audio.shape[-1]
         # Retry a few files: MUSAN occasionally has unreadable / zero-length
         # entries; fail soft to clean signal if every attempt fails.
         for _ in range(3):
-            path = random.choice(self.noise_paths)
+            path = self._pick_noise_path()
             try:
                 noise = self._read_noise_segment(path, n)
             except (RuntimeError, OSError, sf.LibsndfileError):
                 continue
             if noise is None:
                 continue
+            # Convolve noise with a sampled RIR so it shares the room response
+            # with the (already-reverbed) clean signal — anechoic noise against
+            # reverberant speech is unphysical (NeMo / Canary recipe).
+            if self.rir_augmentation is not None and self.rir_augmentation.rirs:
+                noise_t = torch.from_numpy(np.ascontiguousarray(noise))
+                rir = random.choice(self.rir_augmentation.rirs)
+                reverbed = taf.fftconvolve(noise_t, rir, mode="full")[:n]
+                noise = reverbed.numpy().astype(np.float32)
             signal_rms = float(np.sqrt(np.mean(audio**2)))
             noise_rms = float(np.sqrt(np.mean(noise**2)))
             if signal_rms < 1e-8 or noise_rms < 1e-8:

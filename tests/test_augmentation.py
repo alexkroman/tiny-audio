@@ -6,6 +6,8 @@ tests. Noise tests exercise torch-audiomentations on CPU directly. Corpus
 loading is exercised against synthetic WAVs written to ``tmp_path``.
 """
 
+import random
+
 import numpy as np
 import pytest
 import soundfile as sf
@@ -210,3 +212,102 @@ class TestNoiseCorpusMode:
         self._write_synthetic_corpus(a, n=2)
         with pytest.raises(FileNotFoundError):
             NoiseAugmentation(prob=1.0, corpus_path=[str(a), str(tmp_path / "does-not-exist")])
+
+
+class TestNoiseBabbleWeighting:
+    """Tests for the ``babble_weight`` corpus draw bias."""
+
+    def _write_musan_like(self, root, sample_rate: int = 16000):
+        """Mimic MUSAN's directory layout with a tiny speech/ + noise/ split."""
+        rng = np.random.default_rng(0)
+        for sub in ("speech", "noise", "music"):
+            d = root / sub
+            d.mkdir(parents=True, exist_ok=True)
+            for i in range(2):
+                arr = rng.standard_normal(sample_rate * 2).astype(np.float32) * 0.1
+                sf.write(str(d / f"{sub}_{i}.wav"), arr, sample_rate)
+
+    def test_invalid_babble_weight_raises(self, tmp_path):
+        self._write_musan_like(tmp_path)
+        with pytest.raises(ValueError, match="babble_weight"):
+            NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=1.5)
+
+    def test_paths_split_by_speech_subdir(self, tmp_path):
+        self._write_musan_like(tmp_path)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=0.5)
+        # 2 babble (speech/) + 4 non-babble (noise/ + music/)
+        assert len(aug.babble_paths) == 2
+        assert len(aug.non_babble_paths) == 4
+        assert all("speech" in p.parts for p in aug.babble_paths)
+        assert all("speech" not in p.parts for p in aug.non_babble_paths)
+
+    def test_weight_one_always_picks_babble(self, tmp_path):
+        self._write_musan_like(tmp_path)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=1.0)
+        for _ in range(50):
+            picked = aug._pick_noise_path()
+            assert "speech" in picked.parts
+
+    def test_weight_zero_falls_back_to_full_pool(self, tmp_path):
+        self._write_musan_like(tmp_path)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=0.0)
+        # With weight=0, _pick_noise_path takes the full-pool branch
+        seen_subdirs = set()
+        random.seed(0)
+        for _ in range(200):
+            picked = aug._pick_noise_path()
+            for sub in ("speech", "noise", "music"):
+                if sub in picked.parts:
+                    seen_subdirs.add(sub)
+        # All three subdirs should appear when sampling uniformly from the full pool
+        assert seen_subdirs == {"speech", "noise", "music"}
+
+    def test_silently_disabled_when_no_babble_in_corpus(self, tmp_path):
+        # Corpus with no speech/ subdirectory — babble_weight should self-zero
+        # rather than raise, so a noise-only corpus stays usable.
+        rng = np.random.default_rng(0)
+        (tmp_path / "noise").mkdir()
+        for i in range(2):
+            arr = rng.standard_normal(16000 * 2).astype(np.float32) * 0.1
+            sf.write(str(tmp_path / "noise" / f"n_{i}.wav"), arr, 16000)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=0.5)
+        assert aug.babble_weight == 0.0
+        assert aug.babble_paths == []
+
+
+class TestNoiseReverb:
+    """Tests for ``rir_augmentation`` noise convolution."""
+
+    def _write_noise_corpus(self, root, n: int = 3, sample_rate: int = 16000):
+        rng = np.random.default_rng(0)
+        for i in range(n):
+            arr = rng.standard_normal(sample_rate * 2).astype(np.float32) * 0.1
+            sf.write(str(root / f"noise_{i}.wav"), arr, sample_rate)
+
+    def test_reverbed_noise_differs_from_unreverbed(self, tmp_path, fake_rirs):
+        # With the same seed, the only difference between two NoiseAugmentation
+        # runs should be whether noise is convolved with an RIR — output must
+        # therefore differ when reverb_noise is on.
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        self._write_noise_corpus(tmp_path)
+        rir_aug = RIRAugmentation(rirs=fake_rirs, prob=0.0)  # prob=0: don't apply to speech
+        plain = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path))
+        reverbed = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), rir_augmentation=rir_aug)
+
+        audio = np.random.RandomState(0).randn(16000).astype(np.float32) * 0.1
+        random.seed(42)
+        plain_out = plain(audio.copy())
+        random.seed(42)
+        reverbed_out = reverbed(audio.copy())
+        assert plain_out.shape == reverbed_out.shape
+        assert not np.allclose(plain_out, reverbed_out, atol=1e-5)
+
+    def test_reverb_preserves_shape_and_dtype(self, tmp_path, fake_rirs):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        self._write_noise_corpus(tmp_path)
+        rir_aug = RIRAugmentation(rirs=fake_rirs, prob=0.0)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), rir_augmentation=rir_aug)
+        audio = np.random.randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        assert out.shape == audio.shape
+        assert out.dtype == audio.dtype

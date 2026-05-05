@@ -480,24 +480,27 @@ def main(cfg: DictConfig) -> None:
     train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
 
     augmentations: list = []
+    rir_aug: RIRAugmentation | None = None
     rir_cfg = cfg.training.get("rir_augmentation") or {}
     if rir_cfg.get("enabled"):
-        augmentations.append(
-            RIRAugmentation(
-                sample_rate=cfg.data.sample_rate,
-                prob=rir_cfg.get("prob", 0.5),
-                pool_size=rir_cfg.get("pool_size", 2048),
-                corpus_path=rir_cfg.get("corpus_path"),
-                room_x_range=tuple(rir_cfg.get("room_x_range", [3.0, 10.0])),
-                room_y_range=tuple(rir_cfg.get("room_y_range", [3.0, 10.0])),
-                room_z_range=tuple(rir_cfg.get("room_z_range", [2.4, 4.0])),
-                t60_range=tuple(rir_cfg.get("t60_range", [0.1, 1.0])),
-                seed=rir_cfg.get("seed"),
-            )
+        rir_aug = RIRAugmentation(
+            sample_rate=cfg.data.sample_rate,
+            prob=rir_cfg.get("prob", 0.5),
+            pool_size=rir_cfg.get("pool_size", 2048),
+            corpus_path=rir_cfg.get("corpus_path"),
+            room_x_range=tuple(rir_cfg.get("room_x_range", [3.0, 10.0])),
+            room_y_range=tuple(rir_cfg.get("room_y_range", [3.0, 10.0])),
+            room_z_range=tuple(rir_cfg.get("room_z_range", [2.4, 4.0])),
+            t60_range=tuple(rir_cfg.get("t60_range", [0.1, 1.0])),
+            seed=rir_cfg.get("seed"),
         )
+        augmentations.append(rir_aug)
 
     noise_cfg = cfg.training.get("noise_augmentation") or {}
     if noise_cfg.get("enabled"):
+        # Share the RIR pool with NoiseAugmentation when reverb_noise is set
+        # so noise gets the same room response as the clean signal.
+        noise_rir = rir_aug if (rir_aug is not None and noise_cfg.get("reverb_noise")) else None
         augmentations.append(
             NoiseAugmentation(
                 sample_rate=cfg.data.sample_rate,
@@ -505,6 +508,8 @@ def main(cfg: DictConfig) -> None:
                 min_snr_db=noise_cfg.get("min_snr_db", 0.0),
                 max_snr_db=noise_cfg.get("max_snr_db", 25.0),
                 corpus_path=noise_cfg.get("corpus_path"),
+                babble_weight=noise_cfg.get("babble_weight", 0.0),
+                rir_augmentation=noise_rir,
             )
         )
 

@@ -147,16 +147,23 @@ MUSAN_DEFAULT_DIR = Path.home() / ".cache" / "musan"
 
 
 def _extract_archive(archive_path: Path, target_dir: Path) -> None:
-    import tarfile
-    import zipfile
+    # Shell out to `unzip` / `tar`: 2-5x faster than Python's pure-Python
+    # zipfile / tarfile on archives with many small files (OpenSLR-28's ~60K
+    # simulated RIRs), and per-file stdout output makes long extractions
+    # visibly progressing instead of looking hung.
+    import subprocess
 
     name = archive_path.name
     if name.endswith(".zip"):
-        with zipfile.ZipFile(archive_path) as zf:
-            zf.extractall(target_dir)  # nosec B202 - hardcoded openslr.org archives
+        subprocess.run(
+            ["unzip", "-o", str(archive_path), "-d", str(target_dir)],
+            check=True,
+        )
     elif name.endswith((".tar.gz", ".tgz")):
-        with tarfile.open(archive_path, "r:gz") as tf:
-            tf.extractall(target_dir)  # nosec B202 - hardcoded openslr.org archives
+        subprocess.run(
+            ["tar", "-xzvf", str(archive_path), "-C", str(target_dir)],
+            check=True,
+        )
     else:
         raise ValueError(f"Unsupported archive format: {name}")
 
@@ -215,7 +222,15 @@ def _download_corpus(
         console.print(f"[green]Already present:[/green] {sentinel} ({wav_count} .wav files)")
         return
 
-    target_dir.mkdir(parents=True, exist_ok=True)
+    # RunPod pins ~/.cache/<corpus> to /workspace/.cache/<corpus> via symlink.
+    # If /workspace got wiped between runs the symlink dangles, and
+    # `Path.mkdir(exist_ok=True)` raises FileExistsError on it (pathlib only
+    # swallows EEXIST when is_dir() is true, which broken symlinks fail).
+    # Resolve through and create the real target.
+    if target_dir.is_symlink() and not target_dir.exists():
+        target_dir.resolve().mkdir(parents=True, exist_ok=True)
+    else:
+        target_dir.mkdir(parents=True, exist_ok=True)
     archive_path = target_dir / archive_name
 
     console.print(f"[bold]Downloading[/bold] {url} -> {archive_path}")

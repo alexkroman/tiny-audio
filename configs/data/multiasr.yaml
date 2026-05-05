@@ -1,30 +1,34 @@
 # Multi-ASR dataset configuration
-# Train semantic projector on ASR data from multiple sources.
 #
-# Rebalanced from a Loquacious-dominant (80%) mix to a more domain-diverse
-# distribution. Loquacious medium already provides equal exposure (20% each)
-# to LibriHeavy, VoxPopuli, YODAS, People's Speech, and CommonVoice — so the
-# value of expanding non-Loquacious data is targeting domains Loquacious does
-# not cover (meetings, far-field, financial, conversational telephony).
+# Rebalanced mix targeting the WER gaps to universal-3-pro: People's Speech,
+# CommonVoice, and Gigaspeech (where Loquacious's 500hr-each balance was
+# bottlenecking those evals), plus AMI-IHM/SDM tuning for the meeting/far-field
+# gap. AMI-IHM no longer 3x-repeated (was overfitting); SDM upweighted as the
+# only real far-field signal available on HF for English.
 #
-# ┌──────────────────┬───────────┬─────────┐
-# │ Dataset          │ Samples   │ Percent │
-# ├──────────────────┼───────────┼─────────┤
-# │ loquacious med   │ 1,090,000 │   52.2% │
-# │ ami-ihm          │   305,000 │   14.6% │
-# │ ami-sdm          │   175,000 │    8.4% │
-# │ spgispeech L     │   260,000 │   12.4% │
-# │ switchboard      │   260,000 │   12.4% │
-# └──────────────────┴───────────┴─────────┘
-# Total: ~2,090,000 samples
+# ┌────────────────────────┬───────────┬─────────┐
+# │ Dataset                │ Samples   │ Percent │
+# ├────────────────────────┼───────────┼─────────┤
+# │ Loquacious medium      │   780,000 │   37.1% │
+# │ People's Speech (fixie)│   210,000 │   10.0% │
+# │ CommonVoice 17 en      │   210,000 │   10.0% │
+# │ Gigaspeech M (fixie)   │   168,000 │    8.0% │
+# │ SPGISpeech M           │   210,000 │   10.0% │
+# │ Switchboard            │   252,000 │   12.0% │
+# │ AMI IHM (1x, no repeat)│  ~67,000  │    3.2% │
+# │ AMI SDM                │   168,000 │    8.0% │
+# └────────────────────────┴───────────┴─────────┘
+# Total: ~2,065,000 samples
 #
-# Loquacious is uncapped (full medium ~1.09M); other streams scaled to hit
-# the target proportions. AMI IHM/SDM and Switchboard upsample (~2-3x repeats)
-# since their full sizes are smaller than the proportional target.
+# fixie-ai mirrors are used for People's Speech, CommonVoice, and Gigaspeech
+# because their pre-processed/sharded layouts are friendlier than the upstream
+# repos. Smallest config that comfortably exceeds the budget is chosen so we
+# don't download tiers we can't use (e.g. Gigaspeech M ≈ 1000hr, not L/XL).
 
 datasets:
   # Loquacious medium - balanced 5-source mix (LibriHeavy / VoxPopuli /
-  # YODAS / People's Speech / CommonVoice, 500hr each)
+  # YODAS / People's Speech / CommonVoice, 500hr each). Capped at 780K to
+  # leave room for the direct-loaded People's / CV / Gigaspeech streams.
   - path: speechbrain/LoquaciousSet
     name: medium
     audio_column: wav
@@ -32,30 +36,45 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [dev]
+    target_samples: 780000
 
-  # AMI corpus IHM - meeting transcriptions, close-talk mic
-  - path: edinburghcstr/ami
-    name: ihm
+  # People's Speech (fixie-ai mirror, clean-transcribed subset).
+  # Direct exposure beyond the 500hr already inside Loquacious — targets the
+  # ~10pt gap to universal-3-pro on the People's Speech eval.
+  - path: fixie-ai/peoples_speech
+    name: clean
     audio_column: audio
     text_column: text
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 305000
+    target_samples: 210000
 
-  # AMI corpus SDM - meeting transcriptions, single distant mic (far-field).
-  # Targets AMI eval gap that IHM-only training does not close.
-  - path: edinburghcstr/ami
-    name: sdm
+  # CommonVoice 17 English (fixie-ai mirror).
+  # Direct exposure beyond Loquacious's 500hr — targets the ~7pt CV gap.
+  - path: fixie-ai/common_voice_17_0
+    name: en
+    audio_column: audio
+    text_column: sentence
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 210000
+
+  # Gigaspeech M (fixie-ai mirror, ~1000hr). Smallest tier above S (~250hr)
+  # that comfortably exceeds the 168K sample budget. Targets the Gigaspeech
+  # eval gap — there was no in-domain training data in the prior mix.
+  - path: fixie-ai/gigaspeech
+    name: m
     audio_column: audio
     text_column: text
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 175000
+    target_samples: 168000
 
-  # SPGISpeech L - financial earnings calls, ~5000hr (was S, ~200hr).
-  # Larger tier targets the Earnings22 eval gap.
+  # SPGISpeech M - financial earnings calls. Holds at ~10% — Earnings22 gap
+  # is moderate (+2.3pt) and SPGI is the relevant in-domain stream.
   - path: kensho/spgispeech
     name: M
     audio_column: audio
@@ -63,16 +82,43 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 260000
+    target_samples: 210000
 
-  # Switchboard - conversational telephone speech
+  # Switchboard - conversational telephone speech. Held at ~12% because this
+  # is the one eval where tiny-audio already beats universal-3-pro by ~4pt;
+  # the recipe is working, don't break it.
   - path: hhoangphuoc/switchboard
     audio_column: audio
     text_column: transcript
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 260000
+    target_samples: 252000
+
+  # AMI corpus IHM - close-talk meeting mic. NO repeat (target_samples
+  # omitted = natural size, ~67K). Prior 305K target was 3x replay on the
+  # same speakers and almost certainly drove the 29% IHM eval (overfit, not
+  # data-limited).
+  - path: edinburghcstr/ami
+    name: ihm
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+
+  # AMI corpus SDM - single distant mic (far-field). Upweighted from 175K to
+  # 168K samples (similar count, but as a fraction of the smaller total it's
+  # ~8% vs the prior 8.4%). With CHiME-6 / AliMeeting unavailable on HF,
+  # SDM + RIR/noise/speaker-mix augmentation is the recipe for ami-sdm.
+  - path: edinburghcstr/ami
+    name: sdm
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 168000
 
 # Audio processing
 sample_rate: 16000
