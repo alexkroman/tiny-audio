@@ -98,19 +98,18 @@ class ASRConfig(transformers.PretrainedConfig):
             use_lora: Enable LoRA adapters for Stage 2 fine-tuning
             use_specaugment: Enable SpecAugment data augmentation
         """
-        # Set default generation parameters (greedy decoding only)
+        # Set default generation parameters (greedy decoding only).
+        # Applied via setattr below — keeping these out of kwargs so they
+        # don't get re-overwritten by super().__init__(**kwargs) at the end.
         generation_defaults = {
             "num_beams": 1,
             "max_new_tokens": 128,
             "min_new_tokens": 0,
             "repetition_penalty": 1.0,
             "length_penalty": 1.0,
-            "no_repeat_ngram_size": 0,  # Prevent repeating 3-grams like "so so so"
+            "no_repeat_ngram_size": 0,
             "use_cache": True,
         }
-
-        # Apply defaults (config.json values take precedence)
-        kwargs = {**generation_defaults, **kwargs}
 
         self.audio_model_id = audio_model_id
         self.text_model_id = text_model_id

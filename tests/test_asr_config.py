@@ -2,7 +2,6 @@
 
 import json
 
-import pytest
 import transformers
 
 
@@ -107,15 +106,6 @@ class TestASRConfigSerialization:
 class TestASRConfigOverrides:
     """Explicit overrides win over defaults."""
 
-    @pytest.mark.xfail(
-        reason=(
-            "Bug in tiny_audio/asr_config.py: super().__init__(**kwargs) at the end "
-            "of ASRConfig.__init__ overwrites explicit generation-param values "
-            "(max_new_tokens, num_beams, etc.) with the defaults that were merged "
-            "into kwargs at line 113. Fix should be in source, not test."
-        ),
-        strict=True,
-    )
     def test_explicit_max_new_tokens_overrides_default(self):
         from tiny_audio.asr_config import ASRConfig
 
