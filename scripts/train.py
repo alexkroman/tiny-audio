@@ -36,7 +36,13 @@ from tiny_audio.asr_config import (
     compute_encoder_output_length,
 )
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation, SpeedPerturbation
+from tiny_audio.augmentation import (
+    CodecAugmentation,
+    NoiseAugmentation,
+    PhoneBandwidthAugmentation,
+    RIRAugmentation,
+    SpeedPerturbation,
+)
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
@@ -515,6 +521,31 @@ def main(cfg: DictConfig) -> None:
                 corpus_path=noise_cfg.get("corpus_path"),
                 babble_weight=noise_cfg.get("babble_weight", 0.0),
                 rir_augmentation=noise_rir,
+            )
+        )
+
+    # Phone bandwidth + codec are channel-side augmentations: they simulate
+    # how audio gets degraded after capture (downsampled to 8 kHz on phone
+    # calls, encoded through MP3 / Opus / AAC for streaming). Run AFTER
+    # room/noise so the channel applies to the already-mixed signal.
+    bandwidth_cfg = cfg.training.get("phone_bandwidth_augmentation") or {}
+    if bandwidth_cfg.get("enabled"):
+        augmentations.append(
+            PhoneBandwidthAugmentation(
+                sample_rate=cfg.data.sample_rate,
+                narrowband_rate=bandwidth_cfg.get("narrowband_rate", 8000),
+                prob=bandwidth_cfg.get("prob", 0.2),
+            )
+        )
+
+    codec_cfg = cfg.training.get("codec_augmentation") or {}
+    if codec_cfg.get("enabled"):
+        augmentations.append(
+            CodecAugmentation(
+                sample_rate=cfg.data.sample_rate,
+                prob=codec_cfg.get("prob", 0.3),
+                codecs=codec_cfg.get("codecs"),
+                timeout_s=codec_cfg.get("timeout_s", 5.0),
             )
         )
 

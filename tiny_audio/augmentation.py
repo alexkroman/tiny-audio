@@ -26,6 +26,8 @@ All required packages are listed in pyproject.toml; no extra install steps.
 from __future__ import annotations
 
 import random
+import shutil
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -99,6 +101,190 @@ class SpeedPerturbation:
         new_freq = max(1, int(round(self.sample_rate / rate)))
         out = taf.resample(audio_t, orig_freq=self.sample_rate, new_freq=new_freq)
         return out.numpy().astype(in_dtype)
+
+
+class PhoneBandwidthAugmentation:
+    """Simulate narrowband telephony by resampling 16 kHz → 8 kHz → 16 kHz.
+
+    The trip through 8 kHz strips everything above 4 kHz (Nyquist) — exactly
+    the bandwidth limit of G.711 / GSM phone calls. Closes the WER gap on
+    Switchboard, real-call tests, and any narrowband-encoded audio. Standard
+    addition in modern ASR augmentation recipes (NeMo Canary, AssemblyAI
+    Universal, Whisper-v3 fine-tunes). Should run AFTER room / noise so the
+    bandwidth limit applies to the already-mixed signal.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        narrowband_rate: int = 8000,
+        prob: float = 0.2,
+    ):
+        if not 0.0 <= prob <= 1.0:
+            raise ValueError(f"prob must be in [0, 1], got {prob}")
+        if narrowband_rate >= sample_rate:
+            raise ValueError(
+                f"narrowband_rate ({narrowband_rate}) must be < sample_rate ({sample_rate})"
+            )
+        self.sample_rate = sample_rate
+        self.narrowband_rate = narrowband_rate
+        self.prob = prob
+
+    def __call__(self, audio: np.ndarray) -> np.ndarray:
+        if random.random() > self.prob:
+            return audio
+        in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
+        audio_t = torch.from_numpy(_to_mono_float32(audio))
+        if audio_t.numel() == 0:
+            return audio
+        narrow = taf.resample(audio_t, self.sample_rate, self.narrowband_rate)
+        wide = taf.resample(narrow, self.narrowband_rate, self.sample_rate)
+        # Resample is rate-conversion-exact but two passes can drift the sample
+        # count by ±1; trim/pad to the original length so downstream tensor
+        # shapes line up exactly with the un-augmented path.
+        n = audio_t.shape[-1]
+        if wide.shape[-1] >= n:
+            wide = wide[..., :n]
+        else:
+            wide = torch.nn.functional.pad(wide, (0, n - wide.shape[-1]))
+        return wide.numpy().astype(in_dtype)
+
+
+class CodecAugmentation:
+    """Encode/decode the signal through a random lossy codec at random bitrate.
+
+    Simulates the streaming/phone pipeline that produces audio on People's
+    Speech, real phone calls, and any user-uploaded MP3/Opus content. Each
+    codec at low bitrate introduces characteristic artifacts (MP3 pre-echo,
+    Opus framing transients, AAC spectral holes) the encoder learns to
+    transcribe through. Used by NeMo Canary, AssemblyAI Universal-2, and
+    Whisper-v3 fine-tune recipes. Should run LAST in the augmentation chain
+    so the codec applies to the already-mixed/reverberated/bandlimited
+    signal.
+
+    Implementation pipes raw float32 audio through `ffmpeg` (codec encode)
+    then back through `ffmpeg` (codec decode). One subprocess pair per call;
+    cheap enough at dataloader_num_workers ≥ 8.
+    """
+
+    # name → (ffmpeg container, ffmpeg encoder, candidate bitrates in kbps).
+    # Bitrate ranges span "obviously degraded" → "transparent": MP3 64-128
+    # covers standard streaming; Opus dips lower (its sweet spot is 16-64
+    # kbps for speech); AAC sits between.
+    _CODECS: dict[str, tuple[str, str, tuple[int, ...]]] = {
+        "mp3": ("mp3", "libmp3lame", (32, 64, 96, 128)),
+        "opus": ("ogg", "libopus", (6, 12, 24, 48)),
+        "aac": ("adts", "aac", (32, 64, 96)),
+    }
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        prob: float = 0.3,
+        codecs: Sequence[str] | None = None,
+        timeout_s: float = 5.0,
+    ):
+        if not 0.0 <= prob <= 1.0:
+            raise ValueError(f"prob must be in [0, 1], got {prob}")
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            raise RuntimeError(
+                "ffmpeg not found in PATH; required for CodecAugmentation. "
+                "Install with `apt-get install -y ffmpeg`."
+            )
+        self.sample_rate = sample_rate
+        self.prob = prob
+        self.timeout_s = timeout_s
+        self._ffmpeg = ffmpeg
+        if codecs is None:
+            self._enabled = list(self._CODECS.values())
+        else:
+            self._enabled = [self._CODECS[c] for c in codecs if c in self._CODECS]
+            if not self._enabled:
+                raise ValueError(f"No supported codecs in {codecs}; pick from mp3/opus/aac")
+
+    def __call__(self, audio: np.ndarray) -> np.ndarray:
+        if random.random() > self.prob:
+            return audio
+        in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
+        audio_arr = _to_mono_float32(audio)
+        n = audio_arr.size
+        if n == 0:
+            return audio
+        container, encoder, bitrates = random.choice(self._enabled)
+        bitrate_kbps = random.choice(bitrates)
+        try:
+            out = self._roundtrip(audio_arr, container, encoder, bitrate_kbps)
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
+            # Codec round-trip can fail on very short / silent / degenerate
+            # clips. Fail soft to the un-augmented signal — better than
+            # dropping the sample.
+            return audio
+        out = out[:n] if out.size >= n else np.pad(out, (0, n - out.size))
+        return out.astype(in_dtype)
+
+    def _roundtrip(
+        self,
+        audio: np.ndarray,
+        container: str,
+        encoder: str,
+        bitrate_kbps: int,
+    ) -> np.ndarray:
+        # Encode: raw f32le PCM → codec bytes
+        encoded = subprocess.run(
+            [
+                self._ffmpeg,
+                "-y",
+                "-loglevel",
+                "error",
+                "-hide_banner",
+                "-f",
+                "f32le",
+                "-ar",
+                str(self.sample_rate),
+                "-ac",
+                "1",
+                "-i",
+                "pipe:0",
+                "-c:a",
+                encoder,
+                "-b:a",
+                f"{bitrate_kbps}k",
+                "-f",
+                container,
+                "pipe:1",
+            ],
+            input=audio.tobytes(),
+            capture_output=True,
+            check=True,
+            timeout=self.timeout_s,
+        ).stdout
+        # Decode: codec bytes → raw f32le PCM
+        decoded = subprocess.run(
+            [
+                self._ffmpeg,
+                "-y",
+                "-loglevel",
+                "error",
+                "-hide_banner",
+                "-f",
+                container,
+                "-i",
+                "pipe:0",
+                "-f",
+                "f32le",
+                "-ar",
+                str(self.sample_rate),
+                "-ac",
+                "1",
+                "pipe:1",
+            ],
+            input=encoded,
+            capture_output=True,
+            check=True,
+            timeout=self.timeout_s,
+        ).stdout
+        return np.frombuffer(decoded, dtype=np.float32)
 
 
 class RIRAugmentation:

@@ -154,6 +154,34 @@ noise_augmentation:
   # NeMo / Canary recipe; modest realism win for ami-sdm + LS-other.
   reverb_noise: true
 
+# Phone-bandwidth simulation — resample to 8 kHz then back to 16 kHz so the
+# signal sees the same hard 4 kHz cutoff as G.711 / GSM telephony. Closes
+# the WER gap on Switchboard, real call data, and any narrowband-encoded
+# audio. Standard addition in 2026 SOTA recipes (NeMo Canary, AssemblyAI
+# Universal-2). Lower prob than RIR/noise — only ~20% of users transmit
+# through narrowband channels in deployment.
+phone_bandwidth_augmentation:
+  enabled: true
+  narrowband_rate: 8000
+  prob: 0.2
+
+# Codec round-trip — encode through MP3 / Opus / AAC at random bitrate and
+# decode back. Simulates the streaming/phone pipeline that produces audio on
+# People's Speech, real phone calls, and any user-uploaded compressed media.
+# Each codec at low bitrate introduces characteristic artifacts (MP3
+# pre-echo, Opus framing transients, AAC spectral holes) the encoder learns
+# to transcribe through. Used by NeMo Canary, AssemblyAI Universal-2,
+# Whisper-v3 fine-tunes. Requires `ffmpeg` in PATH; runpod.py's apt-get
+# install list already includes it.
+codec_augmentation:
+  enabled: true
+  prob: 0.3
+  # Subset to enable; null = all (mp3, opus, aac).
+  codecs: null
+  # Per-call ffmpeg subprocess timeout — short clips with degenerate content
+  # can hang. Fail soft to un-augmented signal on timeout / encoder error.
+  timeout_s: 5.0
+
 # Misc
 disable_tqdm: false
 log_level: info
