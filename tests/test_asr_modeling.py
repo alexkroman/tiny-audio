@@ -115,3 +115,60 @@ class TestStateDict:
         sd = model.state_dict()
         assert any(k.startswith("language_model.") for k in sd)
         assert any(k.startswith("projector.") for k in sd)
+
+
+class TestLoadAudioEncoder:
+    """_load_audio_encoder dispatches based on audio_model_id substring."""
+
+    def test_whisper_branch_loads_encoder_only(self, base_asr_model):
+        # base_asr_model uses whisper-tiny → audio_tower should be Whisper's encoder
+        # (not the full WhisperModel)
+        from transformers.models.whisper.modeling_whisper import WhisperEncoder
+
+        assert isinstance(base_asr_model.audio_tower, WhisperEncoder)
+
+    def test_audio_encoder_is_frozen(self, base_asr_model):
+        for p in base_asr_model.audio_tower.parameters():
+            assert p.requires_grad is False
+
+    def test_audio_encoder_in_eval_mode(self, base_asr_model):
+        assert base_asr_model.audio_tower.training is False
+
+    def test_glm_branch_uses_audio_tower(self, monkeypatch):
+        """Verify GLM dispatch path without downloading the real GLM model."""
+        from unittest.mock import MagicMock
+
+        from tiny_audio.asr_modeling import ASRModel
+
+        # Mock AutoModelForSeq2SeqLM.from_pretrained to return a mock with audio_tower
+        mock_full = MagicMock()
+        mock_full.audio_tower = MagicMock(spec=torch.nn.Module)
+        mock_full.audio_tower.requires_grad_ = MagicMock()
+        mock_full.audio_tower.eval = MagicMock()
+
+        with monkeypatch.context() as m:
+            mock_loader = MagicMock(return_value=mock_full)
+            m.setattr("transformers.AutoModelForSeq2SeqLM.from_pretrained", mock_loader)
+
+            cfg = MagicMock()
+            cfg.audio_model_id = "zai-org/GLM-ASR-something"
+            cfg.attn_implementation = "eager"
+
+            encoder = ASRModel._load_audio_encoder(cfg, torch.float32)
+
+            # Should have called the GLM loader, not WhisperModel
+            mock_loader.assert_called_once()
+            assert encoder is mock_full.audio_tower
+            mock_full.audio_tower.requires_grad_.assert_called_with(False)
+            mock_full.audio_tower.eval.assert_called_once()
+
+
+class TestLoadLanguageModel:
+    """_load_language_model freezes LM by default."""
+
+    def test_lm_frozen_by_default(self, base_asr_model):
+        for p in base_asr_model.language_model.parameters():
+            assert p.requires_grad is False
+
+    def test_use_cache_synced(self, base_asr_model):
+        assert base_asr_model.language_model.config.use_cache is True
