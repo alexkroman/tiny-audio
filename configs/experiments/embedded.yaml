@@ -30,7 +30,7 @@ training:
   # Wider warmup gives the randomly-initialized projector time to settle before
   # the LM's much smaller LR starts to bite — important now that the LM is
   # trainable and the projector dominates early gradients.
-  warmup_steps: 4000
+  warmup_steps: 2000
   lr_scheduler_type: cosine
   seed: 42
   auto_find_batch_size: false
@@ -44,8 +44,8 @@ training:
   # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck at
   # this batch size. AMD EPYC 9355 has 32 cores / 64 threads — leave a handful
   # free for the main process, GPU sync, and tokenizer threads.
-  dataloader_num_workers: 12
-  dataloader_prefetch_factor: 8
+  dataloader_num_workers: 8
+  dataloader_prefetch_factor: 2
 
   # SDPA (PyTorch-native, cuDNN flash backend on Blackwell) — avoids the slow
   # flash-attn source build on RunPod and is fast enough at our seq lengths.

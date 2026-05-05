@@ -48,7 +48,7 @@ hub_private_repo: false
 fp16: false
 bf16: true
 tf32: true
-torch_compile: false
+torch_compile: true
 # group_by_length varies the batch shape per bucket, which would otherwise
 # blow past dynamo's default cache_size_limit=8 and force eager fallback.
 torch_compile_config:
@@ -58,11 +58,11 @@ attn_implementation: flash_attention_2
 
 # Data loading
 dataloader_num_workers: 24
-dataloader_prefetch_factor: 8
+dataloader_prefetch_factor: 2
 dataloader_pin_memory: true
 dataloader_persistent_workers: true
 dataloader_drop_last: true
-group_by_length: false
+group_by_length: true
 length_column_name: duration
 
 # Speed perturbation — Kaldi-style 3-rate resampling (0.9 / 1.0 / 1.1×).
@@ -72,7 +72,7 @@ length_column_name: duration
 # free. Runs FIRST in the augmentation chain so reverb / noise apply to
 # the perturbed signal.
 speed_perturbation:
-  enabled: true
+  enabled: false
   rates: [0.9, 1.0, 1.1]
   prob: 1.0
 
@@ -161,7 +161,7 @@ noise_augmentation:
 # Universal-2). Lower prob than RIR/noise — only ~20% of users transmit
 # through narrowband channels in deployment.
 phone_bandwidth_augmentation:
-  enabled: true
+  enabled: false
   narrowband_rate: 8000
   prob: 0.2
 
