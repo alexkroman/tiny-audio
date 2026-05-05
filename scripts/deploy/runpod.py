@@ -678,7 +678,9 @@ def eval(
         None, "--max-samples", "-n", help="Max samples per dataset"
     ),
     assemblyai_model: str = typer.Option(
-        "slam_1", "--assemblyai-model", help="AssemblyAI model (best, universal, slam_1, nano)"
+        "universal-3-pro",
+        "--assemblyai-model",
+        help="AssemblyAI model (best, universal, universal-3-pro)",
     ),
     num_workers: int = typer.Option(
         1, "--num-workers", "-w", help="Number of parallel workers for API evaluations"
@@ -698,7 +700,7 @@ def eval(
 
     Examples:
         runpod eval host port -m mazesmazes/tiny-audio -d loquacious
-        runpod eval host port -m assemblyai --assemblyai-model slam_1 -d loquacious -w 4
+        runpod eval host port -m assemblyai --assemblyai-model universal-3-pro -d loquacious -w 4
     """
     conn = get_connection(host, port)
 

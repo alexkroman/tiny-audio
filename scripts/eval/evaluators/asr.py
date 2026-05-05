@@ -257,7 +257,9 @@ class EndpointEvaluator(Evaluator):
 class AssemblyAIEvaluator(Evaluator):
     """Evaluator for AssemblyAI API."""
 
-    def __init__(self, api_key: str, model: str = "slam_1", base_url: str | None = None, **kwargs):
+    def __init__(
+        self, api_key: str, model: str = "universal-3-pro", base_url: str | None = None, **kwargs
+    ):
         super().__init__(**kwargs)
         self.transcriber = setup_assemblyai(api_key, model, base_url=base_url)
 

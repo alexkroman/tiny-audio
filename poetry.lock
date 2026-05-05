@@ -273,14 +273,14 @@ trio = ["trio (>=0.32.0)"]
 
 [[package]]
 name = "assemblyai"
-version = "0.62.0"
+version = "0.63.0"
 description = "AssemblyAI Python SDK"
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "assemblyai-0.62.0-py3-none-any.whl", hash = "sha256:e2fdaf0cc189733eb308b659576c9f2443831018f83a3751be04e1c751f0c274"},
-    {file = "assemblyai-0.62.0.tar.gz", hash = "sha256:c96eb468c68fc3789a547ddd8690fca846f5466cf0cf0d67d520d4c8bf973ba3"},
+    {file = "assemblyai-0.63.0-py3-none-any.whl", hash = "sha256:64aaf32027bd539529f8e9e7d78979ca5da0a1ec3567c149aa34f62d457f430c"},
+    {file = "assemblyai-0.63.0.tar.gz", hash = "sha256:e57af55661ce129a0c2d5382a2592d699624cdb5645092d66e0dfe8a78b589f8"},
 ]
 
 [package.dependencies]

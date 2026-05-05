@@ -55,8 +55,7 @@ class AssemblyAIModel(str, Enum):
 
     best = "best"
     universal = "universal"
-    slam_1 = "slam_1"
-    nano = "nano"
+    universal_3_pro = "universal-3-pro"
 
 
 # Valid dataset choices
@@ -463,7 +462,7 @@ def main(
     ] = False,
     assemblyai_model: Annotated[
         AssemblyAIModel, typer.Option("--assemblyai-model", help="AssemblyAI model")
-    ] = AssemblyAIModel.slam_1,
+    ] = AssemblyAIModel.universal_3_pro,
     streaming: Annotated[
         bool, typer.Option("--streaming", "-s", help="Use streaming evaluation (for local or AAI)")
     ] = False,
