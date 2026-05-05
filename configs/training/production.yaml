@@ -48,7 +48,7 @@ hub_private_repo: false
 fp16: false
 bf16: true
 tf32: true
-torch_compile: true
+torch_compile: false
 # group_by_length varies the batch shape per bucket, which would otherwise
 # blow past dynamo's default cache_size_limit=8 and force eager fallback.
 torch_compile_config:
@@ -58,11 +58,11 @@ attn_implementation: flash_attention_2
 
 # Data loading
 dataloader_num_workers: 24
-dataloader_prefetch_factor: 2
+dataloader_prefetch_factor: 8
 dataloader_pin_memory: true
 dataloader_persistent_workers: true
 dataloader_drop_last: true
-group_by_length: true
+group_by_length: false
 length_column_name: duration
 
 # Speed perturbation — Kaldi-style 3-rate resampling (0.9 / 1.0 / 1.1×).
@@ -152,7 +152,7 @@ noise_augmentation:
   # Convolve noise with a random RIR before mixing so the noise inherits the
   # same room response as the (already-reverbed) clean signal. Aligns with
   # NeMo / Canary recipe; modest realism win for ami-sdm + LS-other.
-  reverb_noise: true
+  reverb_noise: false
 
 # Phone-bandwidth simulation — resample to 8 kHz then back to 16 kHz so the
 # signal sees the same hard 4 kHz cutoff as G.711 / GSM telephony. Closes
@@ -174,7 +174,7 @@ phone_bandwidth_augmentation:
 # Whisper-v3 fine-tunes. Requires `ffmpeg` in PATH; runpod.py's apt-get
 # install list already includes it.
 codec_augmentation:
-  enabled: true
+  enabled: false
   prob: 0.3
   # Subset to enable; null = all (mp3, opus, aac).
   codecs: null
