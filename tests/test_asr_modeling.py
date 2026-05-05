@@ -12,7 +12,7 @@ class TestProjectorDispatch:
 
         assert isinstance(base_asr_model.projector, MLPAudioProjector)
 
-    def test_unknown_projector_type_raises(self, base_asr_config):
+    def test_unknown_projector_type_raises(self):
         from tiny_audio.asr_config import ASRConfig
         from tiny_audio.asr_modeling import ASRModel
 
