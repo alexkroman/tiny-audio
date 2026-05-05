@@ -172,3 +172,39 @@ class TestLoadLanguageModel:
 
     def test_use_cache_synced(self, base_asr_model):
         assert base_asr_model.language_model.config.use_cache is True
+
+
+class TestLoRASetup:
+    """_setup_lora wraps language_model with PEFT when use_lora=True."""
+
+    def test_lora_model_has_peft_config(self, lora_asr_model):
+        assert hasattr(lora_asr_model.language_model, "peft_config")
+
+    def test_lora_target_modules_applied(self, lora_asr_model):
+        # PEFT replaces target Linear layers with LoraLayer wrappers
+        from peft.tuners.lora import LoraLayer
+
+        has_lora = any(isinstance(m, LoraLayer) for m in lora_asr_model.language_model.modules())
+        assert has_lora
+
+    def test_non_lora_model_has_no_peft(self, base_asr_model):
+        assert not hasattr(base_asr_model.language_model, "peft_config")
+
+
+class TestFreezeProjector:
+    """freeze_projector=True freezes projector params."""
+
+    def test_freeze_projector_disables_grad(self):
+        from tiny_audio.asr_config import ASRConfig
+        from tiny_audio.asr_modeling import ASRModel
+
+        cfg = ASRConfig(
+            audio_model_id="openai/whisper-tiny",
+            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
+            attn_implementation="eager",
+            model_dtype="float32",
+            freeze_projector=True,
+        )
+        model = ASRModel(cfg)
+        for p in model.projector.parameters():
+            assert p.requires_grad is False

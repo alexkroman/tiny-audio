@@ -178,8 +178,8 @@ def lora_asr_config():
         projector_type="mlp",
         model_dtype="float32",
         attn_implementation="eager",
-        lora_enabled=True,
-        lora_r=8,
+        use_lora=True,
+        lora_rank=8,
         lora_alpha=16,
         lora_dropout=0.1,
     )
