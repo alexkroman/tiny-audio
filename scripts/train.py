@@ -28,7 +28,7 @@ from transformers import (
     TrainerCallback,
     TrainingArguments,
 )
-from trl.experimental.utils import DataCollatorForChatML
+from trl.experimental.utils import DataCollatorForChatML  # pyright: ignore[reportMissingImports]
 
 from tiny_audio.asr_config import (
     DEFAULT_ENCODER_CONV_LAYERS,
@@ -399,7 +399,13 @@ class ASRTrainer(Trainer):
         to decide whether to shift labels. Since ASRModel isn't in that mapping,
         it incorrectly uses shift_labels=False, causing misaligned predictions.
         This override forces shift_labels=True for correct causal LM behavior.
+
+        `num_items_in_batch` is part of HF Trainer's compute_loss signature
+        (newer transformers versions pass it for gradient-accumulation token
+        counting). We don't need it here, but the kwarg name has to match
+        Trainer's call, so we keep it on the signature and ignore it.
         """
+        del num_items_in_batch  # Trainer-signature compatibility; unused here.
         labels = (
             inputs.pop("labels") if self.label_smoother is not None and "labels" in inputs else None
         )
