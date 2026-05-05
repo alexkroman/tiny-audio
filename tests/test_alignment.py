@@ -108,10 +108,11 @@ def reset_aligner_singleton():
     ) = original
 
 
+@pytest.mark.usefixtures("reset_aligner_singleton")
 class TestAlign:
     """align() — full path with mocked torchaudio bundle."""
 
-    def test_align_returns_word_list(self, reset_aligner_singleton):
+    def test_align_returns_word_list(self):
         """align() with mocked emissions produces dicts with word/start/end keys."""
         from tiny_audio.alignment import ForcedAligner
 
@@ -152,7 +153,7 @@ class TestAlign:
             assert w["start"] >= 0.0
             assert w["end"] >= w["start"]
 
-    def test_align_empty_text_returns_empty(self, reset_aligner_singleton):
+    def test_align_empty_text_returns_empty(self):
         """Empty token list short-circuits to []."""
         from tiny_audio.alignment import ForcedAligner
 
