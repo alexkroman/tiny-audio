@@ -208,3 +208,121 @@ class TestFreezeProjector:
         model = ASRModel(cfg)
         for p in model.projector.parameters():
             assert p.requires_grad is False
+
+
+class TestForward:
+    """forward() handles text-only and audio+text inputs."""
+
+    def test_forward_text_only(self, base_asr_model):
+        """Forward without audio inputs (pure text path)."""
+        input_ids = torch.tensor([[1, 2, 3, 4, 5]])
+        attention_mask = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            out = base_asr_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+        assert out.logits.shape[0] == 1
+        assert out.logits.shape[1] == 5
+
+    def test_forward_with_labels_returns_loss(self, base_asr_model):
+        """Loss is computed when labels are passed."""
+        input_ids = torch.tensor([[1, 2, 3, 4, 5]])
+        labels = input_ids.clone()
+        attention_mask = torch.ones_like(input_ids)
+
+        out = base_asr_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
+        assert out.loss is not None
+
+
+class TestGenerate:
+    """generate() validates inputs and returns generated tokens."""
+
+    def test_generate_requires_input_features(self, base_asr_model):
+        with pytest.raises(ValueError, match="input_features"):
+            base_asr_model.generate(input_ids=torch.tensor([[1, 2, 3]]))
+
+    def test_generate_requires_audio_attention_mask(self, base_asr_model):
+        with pytest.raises(ValueError, match="audio_attention_mask"):
+            base_asr_model.generate(
+                input_features=torch.randn(1, 80, 3000),
+                input_ids=torch.tensor([[1, 2, 3]]),
+            )
+
+    def test_generate_returns_tokens(self, base_asr_model):
+        """Generate end-to-end with synthetic mel features (whisper-tiny)."""
+        # Whisper-tiny expects 80 mel bins, 3000 frames (30s of audio at 16kHz)
+        input_features = torch.zeros(1, 80, 3000)
+        audio_attention_mask = torch.ones(1, 3000, dtype=torch.long)
+
+        out = base_asr_model.generate(
+            input_features=input_features,
+            audio_attention_mask=audio_attention_mask,
+            max_new_tokens=4,
+        )
+        # Returns only generated tokens (input is stripped)
+        assert out.dim() == 2
+        assert out.shape[0] == 1
+        assert out.shape[1] <= 4
+
+
+class TestGenerateStreaming:
+    """generate_streaming yields partial transcript pieces."""
+
+    def test_streaming_yields_strings(self, base_asr_model):
+        input_features = torch.zeros(1, 80, 3000)
+        audio_attention_mask = torch.ones(1, 3000, dtype=torch.long)
+
+        outputs = list(
+            base_asr_model.generate_streaming(
+                input_features=input_features,
+                audio_attention_mask=audio_attention_mask,
+                max_new_tokens=4,
+            )
+        )
+        # Each yielded piece is a string (possibly empty)
+        for piece in outputs:
+            assert isinstance(piece, str)
+
+
+class TestForwardSpecAugment:
+    """forward applies SpecAugment when training and use_specaugment=True."""
+
+    def test_specaugment_applied_during_training(self):
+        from unittest.mock import patch
+
+        from tiny_audio.asr_config import ASRConfig
+        from tiny_audio.asr_modeling import ASRModel
+
+        cfg = ASRConfig(
+            audio_model_id="openai/whisper-tiny",
+            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
+            attn_implementation="eager",
+            model_dtype="float32",
+            use_specaugment=True,
+            num_time_masks=1,
+            time_mask_length=5,
+        )
+        model = ASRModel(cfg)
+        assert model.spec_augment is not None
+
+        model.train()
+
+        input_ids = torch.tensor([[model.audio_token_id, 1, 2]])
+        input_features = torch.zeros(1, 80, 3000)
+        audio_attention_mask = torch.ones(1, 3000, dtype=torch.long)
+
+        # Patch the forward method of spec_augment (nn.Module) to spy on calls
+        with patch.object(model.spec_augment, "forward", wraps=model.spec_augment.forward) as spy:
+            model(
+                input_ids=input_ids,
+                input_features=input_features,
+                audio_attention_mask=audio_attention_mask,
+                attention_mask=torch.ones_like(input_ids),
+            )
+            spy.assert_called_once()
