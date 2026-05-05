@@ -63,17 +63,19 @@ class DatasetLoader:
         self.needs_duration = bool(config.training.get("group_by_length", False))
         self.multitask_enabled = multitask_enabled
 
-    def _prepare_split(self, dataset_cfg: DictConfig, split: str):
+    def _prepare_split(self, dataset_cfg: DictConfig, split: str, num_proc: int | None = None):
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
             raise ValueError("Dataset path is required")
+
+        np_local = num_proc if num_proc is not None else self.num_proc
 
         ds = load_dataset(
             dataset_path,
             name=dataset_cfg.get("name"),
             split=split,
             cache_dir=self.cache_dir,
-            num_proc=self.num_proc,
+            num_proc=np_local,
             trust_remote_code=True,
         )
 
@@ -114,7 +116,7 @@ class DatasetLoader:
             def filter_tedlium(text):
                 return text.strip() != "ignore_time_segment_in_scoring"
 
-            ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
+            ds = ds.filter(filter_tedlium, num_proc=np_local, input_columns="text")
 
         return ds
 
@@ -131,45 +133,70 @@ class DatasetLoader:
         indices = list(range(current)) * repeats
         return ds.select(indices[:target])
 
-    def _ensure_duration(self, ds: Dataset) -> Dataset:
+    def _ensure_duration(self, ds: Dataset, num_proc: int | None = None) -> Dataset:
         # `group_by_length` requires a `duration` column. Compute from audio
         # length when no source field provides one. Run AFTER resampling so we
         # don't decode samples that get trimmed. Cast to float32 only when the
         # source ships a different dtype (sources mix float32/float64/null and
         # concatenate_datasets rejects the mismatch); skipping a no-op cast
         # avoids a multi-minute column rewrite on large streams.
+        np_local = num_proc if num_proc is not None else self.num_proc
         if "duration" not in ds.column_names:
             sr = self.sample_rate
 
             def _add_duration(batch):
                 return {"duration": [a["array"].shape[0] / sr for a in batch["audio"]]}
 
-            ds = ds.map(_add_duration, batched=True, num_proc=self.num_proc)
+            ds = ds.map(_add_duration, batched=True, num_proc=np_local)
         if ds.features["duration"].dtype != "float32":
             ds = ds.cast_column("duration", Value("float32"))
         return ds
 
     def load(self) -> tuple[Dataset, Dataset]:
-        train_datasets, val_datasets = [], []
-
-        for d_cfg in tqdm(self.config.datasets, desc="Loading datasets"):
+        # Build the full list of (cfg, split, kind, target) jobs so we can
+        # fetch them concurrently. Empirically (HF Pro, 10 Gbps RunPod pod,
+        # hf_transfer enabled), HF caps total bandwidth per-IP at ~180 Mbps
+        # regardless of stream count, so parallel fetch does NOT multiply
+        # bandwidth. What it does buy is overlap between download (network-
+        # bound) and parse / audio-decode / cast (CPU-bound) phases — while
+        # one dataset is parsing, another can keep the pipe at the per-IP
+        # cap. Net cold-load wall time is ~1.5-2x faster than sequential
+        # (which leaves the pipe idle during every parse phase).
+        jobs: list[tuple[DictConfig, str, str, int | None]] = []
+        for d_cfg in self.config.datasets:
             train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
             eval_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
             target_samples = d_cfg.get("target_samples")
+            for s in train_splits:
+                jobs.append((d_cfg, s, "train", target_samples))
+            for s in eval_splits:
+                jobs.append((d_cfg, s, "eval", None))
 
-            for train_split in train_splits:
-                ds = self._prepare_split(d_cfg, train_split)
-                if target_samples:
-                    ds = self._resample_to_target(ds, target_samples)
-                if self.needs_duration:
-                    ds = self._ensure_duration(ds)
-                train_datasets.append(ds)
+        # Cap concurrency so each thread's load_dataset(num_proc=...) doesn't
+        # collectively oversubscribe the CPU. Per-thread num_proc scaled down
+        # from self.num_proc so total prep workers ≤ host cores.
+        from concurrent.futures import ThreadPoolExecutor
 
-            for eval_split in eval_splits:
-                ds = self._prepare_split(d_cfg, eval_split)
-                if self.needs_duration:
-                    ds = self._ensure_duration(ds)
-                val_datasets.append(ds)
+        max_workers = min(len(jobs), 8)
+        per_job_num_proc = max(2, self.num_proc // max(1, max_workers))
+
+        def _fetch(job):
+            d_cfg, split, kind, target = job
+            ds = self._prepare_split(d_cfg, split, num_proc=per_job_num_proc)
+            if kind == "train" and target:
+                ds = self._resample_to_target(ds, target)
+            if self.needs_duration:
+                ds = self._ensure_duration(ds, num_proc=per_job_num_proc)
+            return kind, ds
+
+        train_datasets, val_datasets = [], []
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for kind, ds in tqdm(
+                pool.map(_fetch, jobs),
+                total=len(jobs),
+                desc="Loading datasets",
+            ):
+                (train_datasets if kind == "train" else val_datasets).append(ds)
 
         # Concatenate and shuffle
         train_ds = (
