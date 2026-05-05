@@ -117,3 +117,152 @@ class TestTinyAudioSTTServiceDocstring:
         from tiny_audio.integrations.pipecat_stt import TinyAudioSTTService
 
         assert "Example:" in TinyAudioSTTService.__doc__
+
+
+class TestEnsureModel:
+    """_ensure_model lazy-loads the ASRModel and selects a device."""
+
+    def test_ensure_model_calls_from_pretrained_once(self):
+        from unittest.mock import MagicMock, patch
+
+        import torch
+
+        from tiny_audio.integrations.pipecat_stt import TinyAudioSTTService
+
+        service = TinyAudioSTTService(model_id="test/model", device="cpu")
+
+        fake_model = MagicMock()
+        fake_param = MagicMock()
+        fake_param.dtype = torch.float32
+        fake_model.parameters.return_value = iter([fake_param])
+
+        with patch("tiny_audio.ASRModel.from_pretrained", return_value=fake_model) as mock_fp:
+            service._ensure_model()
+            service._ensure_model()  # second call should be a no-op
+
+        assert mock_fp.call_count == 1
+        assert service._model is fake_model
+        assert service._model_dtype == torch.float32
+
+    def test_ensure_model_auto_detects_device(self):
+        from unittest.mock import MagicMock, patch
+
+        import torch
+
+        from tiny_audio.integrations.pipecat_stt import TinyAudioSTTService
+
+        service = TinyAudioSTTService(model_id="test/model")  # device=None
+
+        fake_model = MagicMock()
+        fake_param = MagicMock()
+        fake_param.dtype = torch.float32
+        fake_model.parameters.return_value = iter([fake_param])
+
+        with patch("tiny_audio.ASRModel.from_pretrained", return_value=fake_model), patch(
+            "torch.backends.mps.is_available", return_value=False
+        ), patch("torch.cuda.is_available", return_value=False):
+            service._ensure_model()
+
+        assert service._device == torch.device("cpu")
+
+
+class TestRunStt:
+    """run_stt yields TranscriptionFrame for empty audio and InterimFrames during streaming."""
+
+    @pytest.mark.asyncio
+    async def test_run_stt_empty_audio_yields_empty_frame(self):
+        from unittest.mock import MagicMock
+
+        import torch
+        from pipecat.frames.frames import TranscriptionFrame
+
+        from tiny_audio.integrations.pipecat_stt import TinyAudioSTTService
+
+        service = TinyAudioSTTService(model_id="test/model", device="cpu")
+        # Pre-set _model so _ensure_model is a no-op
+        service._model = MagicMock()
+        service._model_dtype = torch.float32
+        service._user_id = "test_user"
+
+        frames = []
+        async for frame in service.run_stt(b""):
+            frames.append(frame)
+
+        assert len(frames) == 1
+        assert isinstance(frames[0], TranscriptionFrame)
+        assert frames[0].text == ""
+
+    @pytest.mark.asyncio
+    async def test_run_stt_streaming_yields_interim_frames(self):
+        from unittest.mock import MagicMock
+
+        import numpy as np
+        import torch
+        from pipecat.frames.frames import (
+            InterimTranscriptionFrame,
+            TranscriptionFrame,
+        )
+
+        from tiny_audio.integrations.pipecat_stt import TinyAudioSTTService
+
+        service = TinyAudioSTTService(model_id="test/model", device="cpu", streaming=True)
+
+        # Mock the model and its components
+        fake_model = MagicMock()
+        fake_inputs = MagicMock()
+        fake_inputs.input_features = torch.zeros(1, 80, 100)
+        fake_inputs.attention_mask = torch.ones(1, 100, dtype=torch.long)
+        fake_model.feature_extractor.return_value = fake_inputs
+        fake_model.generate_streaming.return_value = iter(["hello", " world"])
+
+        service._model = fake_model
+        service._model_dtype = torch.float32
+        service._user_id = "test_user"
+
+        # 16-bit PCM, 1 second of silence
+        audio_bytes = np.zeros(16000, dtype=np.int16).tobytes()
+
+        frames = []
+        async for frame in service.run_stt(audio_bytes):
+            frames.append(frame)
+
+        # Should produce 2 InterimTranscriptionFrames + 1 final TranscriptionFrame
+        interim = [f for f in frames if isinstance(f, InterimTranscriptionFrame)]
+        final = [f for f in frames if isinstance(f, TranscriptionFrame)]
+        assert len(interim) == 2
+        assert len(final) == 1
+        assert final[0].text == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_run_stt_non_streaming_yields_single_frame(self):
+        from unittest.mock import MagicMock
+
+        import numpy as np
+        import torch
+        from pipecat.frames.frames import TranscriptionFrame
+
+        from tiny_audio.integrations.pipecat_stt import TinyAudioSTTService
+
+        service = TinyAudioSTTService(model_id="test/model", device="cpu", streaming=False)
+
+        fake_model = MagicMock()
+        fake_inputs = MagicMock()
+        fake_inputs.input_features = torch.zeros(1, 80, 100)
+        fake_inputs.attention_mask = torch.ones(1, 100, dtype=torch.long)
+        fake_model.feature_extractor.return_value = fake_inputs
+        fake_model.generate.return_value = torch.tensor([[1, 2, 3]])
+        fake_model.tokenizer.decode.return_value = "  hello world  "
+
+        service._model = fake_model
+        service._model_dtype = torch.float32
+        service._user_id = "test_user"
+
+        audio_bytes = np.zeros(16000, dtype=np.int16).tobytes()
+
+        frames = []
+        async for frame in service.run_stt(audio_bytes):
+            frames.append(frame)
+
+        assert len(frames) == 1
+        assert isinstance(frames[0], TranscriptionFrame)
+        assert frames[0].text == "hello world"  # stripped

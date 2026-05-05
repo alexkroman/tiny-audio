@@ -11,3 +11,4 @@ from . import (
     asr_processing,  # noqa: F401
     diarization,  # noqa: F401
 )
+from .asr_modeling import ASRModel  # noqa: F401
