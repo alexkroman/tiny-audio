@@ -10,7 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from scripts.utils import find_model_dirs, parse_results_file
+from scripts.utils import _extract_model_from_dir, find_model_dirs, parse_results_file
 
 app = typer.Typer(help="Analysis tools for ASR evaluation results")
 console = Console()
@@ -36,13 +36,7 @@ def extract_dataset_name(dir_name: str) -> str:
     return dataset
 
 
-def extract_model_name(dir_name: str) -> str:
-    """Extract model name from output directory name.
-
-    Format: {timestamp}_{model}_{dataset}[_suffix]
-    """
-    parts = dir_name.split("_")
-    return parts[2] if len(parts) >= 3 else "unknown"
+extract_model_name = _extract_model_from_dir
 
 
 def normalize_text(text: str) -> str:

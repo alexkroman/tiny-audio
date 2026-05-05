@@ -6,6 +6,19 @@ import transformers
 DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
 
 
+def compute_encoder_output_length(mel_length, conv_layers=None):
+    """Apply encoder conv layer formulas to compute output length.
+
+    Works with both Python ints and torch tensors of mel lengths; the formula
+    `(L + 2*p - (k-1) - 1) // s + 1` per layer is identical for both.
+    """
+    layers = conv_layers if conv_layers is not None else DEFAULT_ENCODER_CONV_LAYERS
+    length = mel_length
+    for padding, kernel_size, stride in layers:
+        length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
+    return length
+
+
 class ASRConfig(transformers.PretrainedConfig):
     """Configuration class for the ASR model.
 
@@ -38,9 +51,6 @@ class ASRConfig(transformers.PretrainedConfig):
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
         projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
-        projector_num_layers: int = 2,  # Number of layers in MLP projector
-        projector_init_std: float = 0.02,  # Weight initialization std
-        projector_dropout: float = 0.0,  # Dropout rate for projector layers
         # MoE-specific configuration
         num_experts: int = 4,  # Number of experts in MoE projectors
         num_experts_per_tok: int = 2,  # Top-k experts per token
@@ -51,8 +61,6 @@ class ASRConfig(transformers.PretrainedConfig):
         qformer_num_layers: int = 2,  # Number of QFormer transformer layers
         qformer_num_heads: int = 16,  # Number of attention heads in QFormer
         qformer_intermediate_size: Optional[int] = None,  # FFN size (defaults to 4x hidden)
-        label_smoothing: float = 0.0,  # Label smoothing for cross-entropy loss
-        inference_warmup_tokens: int = 10,
         # SpecAugment settings
         use_specaugment: bool = False,
         num_time_masks: int = 2,
@@ -113,13 +121,10 @@ class ASRConfig(transformers.PretrainedConfig):
         self.llm_dim = llm_dim
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
         self.audio_sample_rate = audio_sample_rate
-        self.projector_init_std = projector_init_std
         self.projector_pool_stride = projector_pool_stride
         self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
-        self.projector_num_layers = projector_num_layers
-        self.projector_dropout = projector_dropout
         # MoE-specific configuration
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
@@ -130,8 +135,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.qformer_num_layers = qformer_num_layers
         self.qformer_num_heads = qformer_num_heads
         self.qformer_intermediate_size = qformer_intermediate_size
-        self.label_smoothing = label_smoothing
-        self.inference_warmup_tokens = inference_warmup_tokens
         # SpecAugment configuration
         self.use_specaugment = use_specaugment
         self.num_time_masks = num_time_masks

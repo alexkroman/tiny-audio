@@ -161,11 +161,10 @@ def setup_remote_environment(conn: Connection) -> None:
     Python, common libs) we leave alone.
     """
     print("\nSetting up remote environment...")
-    conn.run("apt-get update -qq || true", hide=True)
+    conn.run("apt-get update -qq || true")
     # Required packages — training and corpus extraction need these.
     conn.run(
         "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 unzip",
-        hide=True,
     )
     # Optional perf adds — fall back gracefully on pods where these aren't
     # available (e.g. minimal images, universe repo disabled, partial apt
@@ -174,8 +173,7 @@ def setup_remote_environment(conn: Connection) -> None:
     # p7zip-full → parallel zip extract for OpenSLR-28 (unzip fallback);
     # portaudio19-dev → only needed for pyaudio runtime, never training.
     conn.run(
-        "apt-get install -y -qq aria2 pigz p7zip-full portaudio19-dev || true",
-        hide=True,
+        "apt-get install -y aria2 pigz p7zip-full portaudio19-dev || true",
     )
     # Pin augmentation corpora onto the persistent /workspace volume so they
     # survive container restarts. ~/.cache/<name> becomes a symlink, which
@@ -185,7 +183,6 @@ def setup_remote_environment(conn: Connection) -> None:
         "mkdir -p /workspace/.cache/openslr-28 /workspace/.cache/musan /root/.cache && "
         "ln -sfn /workspace/.cache/openslr-28 /root/.cache/openslr-28 && "
         "ln -sfn /workspace/.cache/musan /root/.cache/musan",
-        hide=True,
     )
     print("Remote environment setup complete!")
 

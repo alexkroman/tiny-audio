@@ -17,10 +17,10 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 try:
-    from .asr_config import ASRConfig
+    from .asr_config import ASRConfig, compute_encoder_output_length
     from .projectors import PROJECTOR_CLASSES
 except ImportError:
-    from asr_config import ASRConfig  # type: ignore[no-redef]
+    from asr_config import ASRConfig, compute_encoder_output_length  # type: ignore[no-redef]
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
@@ -56,7 +56,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     _supports_flash_attn_2 = True
     supports_gradient_checkpointing = True
     _is_loading_from_pretrained: bool = False
-    _pretrained_model_path: Optional[str] = None
 
     TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 
@@ -72,7 +71,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Set flag to avoid device_map="auto" in sub-model loaders
         cls._is_loading_from_pretrained = True
-        cls._pretrained_model_path = pretrained_model_name_or_path
 
         try:
             model = cls(config, **kwargs)
@@ -134,7 +132,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             return model
         finally:
             cls._is_loading_from_pretrained = False
-            cls._pretrained_model_path = None
 
     def __init__(self, config: ASRConfig, **kwargs) -> None:
         super().__init__(config)
@@ -352,10 +349,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 cfg.eos_token_id = self.tokenizer.eos_token_id
                 cfg.bos_token_id = self.tokenizer.bos_token_id
 
-    def _init_weights(self, _module):
-        """Weight initialization (projector weights are initialized in MoEAudioProjector)."""
-        pass
-
     def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func=None):
         """Enable/disable gradient checkpointing for the language model."""
         # The LLM still stores activations during forward for backprop to projector
@@ -408,22 +401,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         audio_attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute per-sample encoder output lengths using conv layer formulas.
-
-        Args:
-            audio_attention_mask: Mask indicating real vs padded mel frames (batch, mel_len)
-
-        Returns:
-            Tensor of encoder output lengths per sample (batch,)
-        """
-        # Get mel frame lengths from attention mask
-        lengths = audio_attention_mask.sum(dim=-1)
-
-        # Apply conv layer formulas: output = (input + 2*pad - (kernel-1) - 1) // stride + 1
-        for padding, kernel_size, stride in self.config.encoder_conv_layers:
-            lengths = (lengths + 2 * padding - (kernel_size - 1) - 1) // stride + 1
-
-        return lengths
+        """Compute per-sample encoder output lengths using conv layer formulas."""
+        return compute_encoder_output_length(
+            audio_attention_mask.sum(dim=-1),
+            self.config.encoder_conv_layers,
+        )
 
     def _encode_audio(
         self,

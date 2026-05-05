@@ -72,6 +72,15 @@ def get_model_name(model_path: str) -> str:
     return model_path.rstrip("/").split("/")[-1]
 
 
+def _require_api_key(env_var: str) -> str:
+    """Read an API key from the environment or exit with an error."""
+    api_key = os.environ.get(env_var, "")
+    if not api_key:
+        console.print(f"[red]Error: {env_var} environment variable not set[/red]")
+        raise typer.Exit(1)
+    return api_key
+
+
 def save_results(
     model_name: str,
     dataset_name: str,
@@ -533,12 +542,7 @@ def main(
         if dataset_name in DIARIZATION_DATASETS:
             dataset = load_eval_dataset(dataset_name, actual_split, config, decode_audio=False)
             if model == "assemblyai":
-                api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
-                if not api_key:
-                    console.print(
-                        "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
-                    )
-                    raise typer.Exit(1)
+                api_key = _require_api_key("ASSEMBLYAI_API_KEY")
                 model_id = assemblyai_model.value.replace("_", "-")
                 evaluator = AssemblyAIDiarizationEvaluator(
                     api_key=api_key,
@@ -550,10 +554,7 @@ def main(
                     num_workers=num_workers,
                 )
             elif model == "deepgram":
-                api_key = os.environ.get("DEEPGRAM_API_KEY", "")
-                if not api_key:
-                    console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
-                    raise typer.Exit(1)
+                api_key = _require_api_key("DEEPGRAM_API_KEY")
                 model_id = "nova-3"
                 evaluator = DeepgramDiarizationEvaluator(
                     api_key=api_key,
@@ -564,12 +565,7 @@ def main(
                     num_workers=num_workers,
                 )
             elif model == "elevenlabs":
-                api_key = os.environ.get("ELEVENLABS_API_KEY", "")
-                if not api_key:
-                    console.print(
-                        "[red]Error: ELEVENLABS_API_KEY environment variable not set[/red]"
-                    )
-                    raise typer.Exit(1)
+                api_key = _require_api_key("ELEVENLABS_API_KEY")
                 model_id = "scribe-v2"
                 evaluator = ElevenLabsDiarizationEvaluator(
                     api_key=api_key,
@@ -604,12 +600,7 @@ def main(
             dataset = load_eval_dataset(dataset_name, actual_split, config)
 
             if model == "assemblyai":
-                api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
-                if not api_key:
-                    console.print(
-                        "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
-                    )
-                    raise typer.Exit(1)
+                api_key = _require_api_key("ASSEMBLYAI_API_KEY")
                 model_id = assemblyai_model.value.replace("_", "-")
                 evaluator = AssemblyAIAlignmentEvaluator(
                     api_key=api_key,
@@ -620,10 +611,7 @@ def main(
                     verbose=verbose,
                 )
             elif model == "deepgram":
-                api_key = os.environ.get("DEEPGRAM_API_KEY", "")
-                if not api_key:
-                    console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
-                    raise typer.Exit(1)
+                api_key = _require_api_key("DEEPGRAM_API_KEY")
                 model_id = "nova-3"
                 evaluator = DeepgramAlignmentEvaluator(
                     api_key=api_key,
@@ -633,12 +621,7 @@ def main(
                     verbose=verbose,
                 )
             elif model == "elevenlabs":
-                api_key = os.environ.get("ELEVENLABS_API_KEY", "")
-                if not api_key:
-                    console.print(
-                        "[red]Error: ELEVENLABS_API_KEY environment variable not set[/red]"
-                    )
-                    raise typer.Exit(1)
+                api_key = _require_api_key("ELEVENLABS_API_KEY")
                 model_id = "scribe-v2"
                 evaluator = ElevenLabsAlignmentEvaluator(
                     api_key=api_key,
@@ -671,12 +654,7 @@ def main(
             dataset = hf_load_dataset(cfg.path, split=actual_split, streaming=True)
 
             if model == "assemblyai":
-                api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
-                if not api_key:
-                    console.print(
-                        "[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]"
-                    )
-                    raise typer.Exit(1)
+                api_key = _require_api_key("ASSEMBLYAI_API_KEY")
                 model_id = assemblyai_model.value.replace("_", "-")
                 evaluator = AssemblyAIMMAUEvaluator(
                     api_key=api_key,
@@ -751,10 +729,7 @@ def main(
         dataset = load_eval_dataset(dataset_name, actual_split, config)
 
         if model == "assemblyai":
-            api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
-            if not api_key:
-                console.print("[red]Error: ASSEMBLYAI_API_KEY environment variable not set[/red]")
-                raise typer.Exit(1)
+            api_key = _require_api_key("ASSEMBLYAI_API_KEY")
 
             if streaming:
                 model_id = "universal-streaming"
@@ -775,10 +750,7 @@ def main(
                     num_workers=num_workers,
                 )
         elif model == "deepgram":
-            api_key = os.environ.get("DEEPGRAM_API_KEY", "")
-            if not api_key:
-                console.print("[red]Error: DEEPGRAM_API_KEY environment variable not set[/red]")
-                raise typer.Exit(1)
+            api_key = _require_api_key("DEEPGRAM_API_KEY")
             model_id = "nova-3"
             evaluator = DeepgramEvaluator(
                 api_key=api_key,
@@ -787,10 +759,7 @@ def main(
                 num_workers=num_workers,
             )
         elif model == "elevenlabs":
-            api_key = os.environ.get("ELEVENLABS_API_KEY", "")
-            if not api_key:
-                console.print("[red]Error: ELEVENLABS_API_KEY environment variable not set[/red]")
-                raise typer.Exit(1)
+            api_key = _require_api_key("ELEVENLABS_API_KEY")
             model_id = "scribe-v2"
             evaluator = ElevenLabsEvaluator(
                 api_key=api_key,

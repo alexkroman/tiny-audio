@@ -29,7 +29,11 @@ from transformers import (
 )
 from trl.experimental.utils import DataCollatorForChatML
 
-from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_config import (
+    DEFAULT_ENCODER_CONV_LAYERS,
+    ASRConfig,
+    compute_encoder_output_length,
+)
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation, SpeedPerturbation
 
@@ -176,8 +180,6 @@ class DatasetLoader:
 class DataCollator:
     """Collates audio and text data for training."""
 
-    DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
-
     def __init__(
         self,
         tokenizer: Any,
@@ -192,7 +194,7 @@ class DataCollator:
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
         self.projector = projector
-        self.encoder_conv_layers = encoder_conv_layers or self.DEFAULT_ENCODER_CONV_LAYERS
+        self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
         # Whisper's encoder requires a fixed 3000 mel frames; other encoders
         # (GLM-ASR) accept variable-length input, so only pad to longest.
         self._audio_padding = (
@@ -203,10 +205,7 @@ class DataCollator:
         self.text_collator = DataCollatorForChatML(tokenizer=tokenizer, max_length=2048)
 
     def _compute_encoder_output_length(self, mel_length: int) -> int:
-        length = mel_length
-        for padding, kernel_size, stride in self.encoder_conv_layers:
-            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
-        return length
+        return compute_encoder_output_length(mel_length, self.encoder_conv_layers)
 
     def _extract_audio_arrays(self, features):
         audio_arrays = []
@@ -274,22 +273,9 @@ class DataCollator:
 class MultiTaskDataCollator(DataCollator):
     """Collates audio and text data for multi-task ASR + SIFT training."""
 
-    def __init__(
-        self,
-        tokenizer: Any,
-        feature_extractor: Any,
-        sample_rate: int,
-        projector: Any = None,
-        encoder_conv_layers: list = None,
-    ):
-        super().__init__(
-            tokenizer=tokenizer,
-            feature_extractor=feature_extractor,
-            sample_rate=sample_rate,
-            system_prompt="",
-            projector=projector,
-            encoder_conv_layers=encoder_conv_layers,
-        )
+    def __init__(self, *args, **kwargs):
+        kwargs["system_prompt"] = ""
+        super().__init__(*args, **kwargs)
 
     def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
         if feature.get("task") == "sift":
@@ -417,8 +403,6 @@ def get_valid_training_args(config: dict) -> dict:
 
 
 TRAINING_MODEL_PARAMS = [
-    "label_smoothing",
-    "projector_dropout",
     "use_specaugment",
     "num_time_masks",
     "time_mask_length",

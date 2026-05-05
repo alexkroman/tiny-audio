@@ -60,11 +60,20 @@ def format_code():
     run("ruff", "format", *CODE_PATHS)
     run("ruff", "check", "--fix", *CODE_PATHS)
 
-    md_excludes = (".venv", "docs/course", ".worktrees")
+    # Use git ls-files so we only format tracked markdown — naturally skips
+    # worktrees, build/cache/checkpoint dirs, and vendored docs that gitignore
+    # already excludes. (Pre-rglob version mis-handled `.claude/worktrees`,
+    # `swift/.build`, etc.)
+    tracked = subprocess.run(
+        ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
+    )
+    md_excludes = ("docs/course/",)
     md_files = [
-        str(f)
-        for f in Path().rglob("*.md")
-        if not any(part in str(f) for part in md_excludes) and f.name != "MODEL_CARD.md"
+        line
+        for line in tracked.stdout.splitlines()
+        if line
+        and not any(line.startswith(p) for p in md_excludes)
+        and Path(line).name != "MODEL_CARD.md"
     ]
     if md_files:
         run("mdformat", *md_files)
@@ -171,11 +180,14 @@ def _extract_archive(archive_path: Path, target_dir: Path) -> None:
             )
     elif name.endswith((".tar.gz", ".tgz")):
         # pigz parallelizes gzip across cores; cuts MUSAN extract from ~15 min to ~3 min on RunPod.
+        # --no-same-owner: MUSAN's tar entries carry uid 60706:gid 21 (the maintainer's uid);
+        # restoring ownership fails in containers without that uid mapping. We don't need it.
         decomp = "pigz" if shutil.which("pigz") else "gzip"
         subprocess.run(
             [
                 "tar",
                 f"--use-compress-program={decomp}",
+                "--no-same-owner",
                 "-xvf",
                 str(archive_path),
                 "-C",
@@ -220,7 +232,8 @@ def _http_download(url: str, dst: Path) -> None:
         if result.returncode == 0 and dst.exists():
             return
         console.print("[yellow]aria2c failed; falling back to urllib.[/yellow]")
-    with urllib.request.urlopen(url) as resp, dst.open("wb") as out:  # nosec B310 - hardcoded https URL
+    # urllib URL is a hardcoded https constant — bandit B310 false positive.
+    with urllib.request.urlopen(url) as resp, dst.open("wb") as out:  # nosec B310
         shutil.copyfileobj(resp, out)
 
 
