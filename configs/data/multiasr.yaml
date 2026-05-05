@@ -65,16 +65,29 @@ datasets:
   # Gigaspeech XL (fixie-ai mirror, empty-audio rows pre-filtered). fixie's
   # mirror only ships ['dev', 'xl', 'xl-empty-audio-removed'] (no smaller
   # M/S/XS tiers); xl-empty-audio-removed is the cleaner of the two training
-  # configs. target_samples caps usage at 232K — the rest of XL (~8.27M)
-  # just sits in the cache. Targets the Gigaspeech eval gap.
+  # configs but ships only a 'train' split (no 'validation'). Eval lives in
+  # the sibling 'dev' config below. target_samples caps usage at 800K — the
+  # rest of XL (~8.27M) just sits in the cache. Targets the Gigaspeech eval
+  # gap.
   - path: fixie-ai/gigaspeech
     name: xl-empty-audio-removed
     audio_column: audio
     text_column: text
     task: transcribe
     train_splits: [train]
-    eval_splits: [validation]
+    eval_splits: []
     target_samples: 800000
+
+  # Gigaspeech dev split — fixie's mirror keeps the dev set in a separate
+  # config (only ships a 'train' split, which we use as eval here). Pairs
+  # with the train-only entry above.
+  - path: fixie-ai/gigaspeech
+    name: dev
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: []
+    eval_splits: [train]
 
   # SPGISpeech M - financial earnings calls (~385K train). Targets Earnings22.
   # Natural size (target_samples omitted) to maximize finance/earnings
