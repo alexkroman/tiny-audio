@@ -13,7 +13,8 @@ class TestRunpodCLI:
 
     def test_gitignore_aware_file_list_excludes_gitignored_paths(self):
         """File list piped into rsync should honor .gitignore (no __pycache__,
-        no .git/, no datasets_cache)."""
+        no .git/, no datasets_cache) and drop the suffix blocklist (no
+        .safetensors — Swift bundled weights aren't needed on RunPod)."""
         from scripts.deploy.runpod import _gitignore_aware_file_list
         from scripts.utils import get_project_root
 
@@ -23,6 +24,7 @@ class TestRunpodCLI:
         assert not any("__pycache__" in f for f in files)
         assert not any(f.startswith(".git/") for f in files)
         assert not any(f.startswith("datasets_cache/") for f in files)
+        assert not any(f.endswith(".safetensors") for f in files)
         # Sanity: at least the project's pyproject.toml is in there
         assert "pyproject.toml" in files
 
