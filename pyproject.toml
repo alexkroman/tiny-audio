@@ -49,8 +49,10 @@ priority = "supplemental"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
-# torch - Poetry will pull from pytorch-cu128 source on Linux when available
-torch = "~2.11.0"
+# torch - Poetry will pull from pytorch-cu128 source on Linux when available.
+# Pinned to 2.8.x to match the runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+# image so deploys don't need to swap out the base image's torch.
+torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
 transformers = ">=5.0.0"
@@ -70,8 +72,8 @@ deepgram-sdk = "*"
 typer = ">=0.19.2"
 trl = ">=0.26.0"
 peft = ">=0.13.0"  # LoRA adapters for Stage 2 fine-tuning
-torchaudio = ">=2.0.0"
-torchvision = ">=0.26.0,<0.27.0"
+torchaudio = "~2.8.0"  # torchaudio's major.minor must match torch's
+torchvision = ">=0.23.0,<0.24.0"  # Pairs with torch 2.8.x
 pyannote-core = ">=6.0.0"  # For DER metric calculation
 pyannote-metrics = ">=4.0.0"  # For DER metric calculation
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
