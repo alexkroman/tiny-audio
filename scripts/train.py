@@ -10,6 +10,7 @@ from typing import Any
 os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
 
 import hydra
+import numpy as np
 import torch
 import wandb
 from datasets import (
@@ -215,6 +216,17 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
+                # Drop samples that would poison the gradient: empty audio,
+                # NaN/Inf samples (encoding glitches in community datasets),
+                # or empty text labels (would yield 0/0 loss under label
+                # smoothing). One bad sample is enough to NaN the optimizer
+                # state and every subsequent step.
+                if audio.size == 0:
+                    continue
+                if not np.isfinite(audio).all():
+                    continue
+                if not (f.get("text") or "").strip():
+                    continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
             except Exception:

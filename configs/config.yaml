@@ -40,5 +40,6 @@ early_stopping:
 
 verbose: false
 
-# Data loading
-num_proc: 8
+# Data loading. EPYC 9355 has 32 cores; this is one-shot dataset prep, so
+# we can afford to use most of them.
+num_proc: 24

@@ -41,8 +41,10 @@ training:
   save_steps: 1000
   eval_steps: 1000
 
-  # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck at this batch size.
-  dataloader_num_workers: 16
+  # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck at
+  # this batch size. AMD EPYC 9355 has 32 cores / 64 threads — leave a handful
+  # free for the main process, GPU sync, and tokenizer threads.
+  dataloader_num_workers: 24
   dataloader_prefetch_factor: 4
 
   # SDPA (PyTorch-native, cuDNN flash backend on Blackwell) — avoids the slow
