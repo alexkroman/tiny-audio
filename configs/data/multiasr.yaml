@@ -11,16 +11,16 @@
 # ┌────────────────────────┬───────────┬─────────┐
 # │ Dataset                │ Samples   │ Percent │
 # ├────────────────────────┼───────────┼─────────┤
-# │ Loquacious medium (all)│ 1,074,114 │   36.3% │
-# │ People's Speech (fixie)│   290,000 │    9.8% │
-# │ CommonVoice 17 en      │   450,000 │   15.2% │
-# │ Gigaspeech XL (fixie)  │   450,000 │   15.2% │
-# │ SPGISpeech M           │   290,000 │    9.8% │
-# │ Switchboard (natural)  │   185,402 │    6.3% │
-# │ AMI IHM (natural)      │   108,502 │    3.7% │
-# │ AMI SDM (natural)      │   107,319 │    3.6% │
+# │ Loquacious medium (all)│ 1,074,114 │   31.6% │
+# │ People's Speech (fixie)│   290,000 │    8.5% │
+# │ CommonVoice 17 en      │   450,000 │   13.2% │
+# │ Gigaspeech XL (fixie)  │   800,000 │   23.5% │
+# │ SPGISpeech M (natural) │   385,000 │   11.3% │
+# │ Switchboard (natural)  │   185,402 │    5.5% │
+# │ AMI IHM (natural)      │   108,502 │    3.2% │
+# │ AMI SDM (natural)      │   107,319 │    3.2% │
 # └────────────────────────┴───────────┴─────────┘
-# Total: ~2,955,337 samples
+# Total: ~3,400,337 samples
 #
 # fixie-ai mirrors are used for People's Speech, CommonVoice, and Gigaspeech
 # because their pre-processed/sharded layouts are friendlier than the upstream
@@ -74,9 +74,11 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 450000
+    target_samples: 800000
 
   # SPGISpeech M - financial earnings calls (~385K train). Targets Earnings22.
+  # Natural size (target_samples omitted) to maximize finance/earnings
+  # register coverage.
   - path: kensho/spgispeech
     name: M
     audio_column: audio
@@ -84,7 +86,6 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 290000
 
   # Switchboard - conversational telephone speech. Natural size (~185,402);
   # target_samples omitted. Prior 252K target was 1.36x repeat — dropped to
