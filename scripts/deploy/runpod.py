@@ -149,7 +149,7 @@ def setup_remote_environment(conn: Connection) -> None:
     print("\nSetting up remote environment...")
     conn.run("apt-get update -qq || true", hide=True)
     conn.run(
-        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 portaudio19-dev aria2 unzip",
+        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 portaudio19-dev aria2 unzip pigz",
         hide=True,
     )
     # Pin augmentation corpora onto the persistent /workspace volume so they
