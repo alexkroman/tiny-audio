@@ -204,9 +204,6 @@ class DataCollator:
         )
         self.text_collator = DataCollatorForChatML(tokenizer=tokenizer, max_length=2048)
 
-    def _compute_encoder_output_length(self, mel_length: int) -> int:
-        return compute_encoder_output_length(mel_length, self.encoder_conv_layers)
-
     def _extract_audio_arrays(self, features):
         audio_arrays = []
         valid_features = []
@@ -254,10 +251,9 @@ class DataCollator:
         )
 
         mel_lengths = audio_out.attention_mask.sum(dim=-1)
-        audio_token_counts = [
-            self.projector.get_output_length(self._compute_encoder_output_length(int(m.item())))
-            for m in mel_lengths
-        ]
+        encoder_lengths = compute_encoder_output_length(mel_lengths, self.encoder_conv_layers)
+        token_counts_tensor = self.projector.get_output_length(encoder_lengths).to(torch.long)
+        audio_token_counts = token_counts_tensor.tolist()
 
         text_features = [
             self._build_sample(f, n) for f, n in zip(valid_features, audio_token_counts)
@@ -266,7 +262,7 @@ class DataCollator:
         batch = self.text_collator(text_features)
         batch["input_features"] = audio_out.input_features
         batch["audio_attention_mask"] = audio_out.attention_mask
-        batch["audio_token_counts"] = torch.tensor(audio_token_counts, dtype=torch.long)
+        batch["audio_token_counts"] = token_counts_tensor
         return batch
 
 

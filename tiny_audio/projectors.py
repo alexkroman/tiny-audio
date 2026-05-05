@@ -413,10 +413,13 @@ class QFormerAudioProjector(nn.Module):
         # Final projection to LLM dimension (Granite uses bias=True)
         self.linear = nn.Linear(qformer_hidden, llm_dim)
 
-    def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length."""
-        # QFormer uses window-based processing with num_queries per window
-        nblocks = math.ceil(input_length / self.window_size)
+    def get_output_length(self, input_length):
+        """Calculate output sequence length given input length.
+
+        Accepts either Python ints or torch tensors; uses ceiling division so
+        the formula is identical for both — math.ceil would block tensors.
+        """
+        nblocks = (input_length + self.window_size - 1) // self.window_size
         return nblocks * self.num_queries
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

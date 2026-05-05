@@ -349,6 +349,21 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 cfg.eos_token_id = self.tokenizer.eos_token_id
                 cfg.bos_token_id = self.tokenizer.bos_token_id
 
+    def train(self, mode: bool = True):
+        """Set train/eval mode, but keep frozen submodules out of train mode.
+
+        HF Trainer calls `model.train()` at the top of every training step, which
+        recursively switches every submodule into train mode — re-enabling dropout
+        on modules with `requires_grad_(False)`. The frozen encoder (and the LM
+        when `freeze_language_model=True`) should always run deterministically;
+        train-mode dropout only adds noise that can't improve a frozen network.
+        """
+        super().train(mode)
+        self.audio_tower.train(False)
+        if getattr(self.config, "freeze_language_model", True):
+            self.language_model.train(False)
+        return self
+
     def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func=None):
         """Enable/disable gradient checkpointing for the language model."""
         # The LLM still stores activations during forward for backprop to projector
@@ -538,13 +553,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         device = input_features.device
         batch_size = input_features.shape[0]
 
-        # Encode audio -> flattened embeddings
+        # Encode audio -> flattened embeddings (no per-sample host sync)
         encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
-        token_counts = torch.tensor(
-            [self.projector.get_output_length(int(length.item())) for length in encoder_lengths],
-            device=input_features.device,
-            dtype=torch.long,
-        )
+        token_counts = self.projector.get_output_length(encoder_lengths).to(torch.long)
         audio_embeds = self._encode_audio(input_features, token_counts)
 
         # If input_ids not provided, build prompt with correct number of audio tokens
@@ -628,13 +639,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         device = input_features.device
         batch_size = input_features.shape[0]
 
-        # Encode audio -> flattened embeddings
+        # Encode audio -> flattened embeddings (no per-sample host sync)
         encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
-        token_counts = torch.tensor(
-            [self.projector.get_output_length(int(length.item())) for length in encoder_lengths],
-            device=input_features.device,
-            dtype=torch.long,
-        )
+        token_counts = self.projector.get_output_length(encoder_lengths).to(torch.long)
         audio_embeds = self._encode_audio(input_features, token_counts)
 
         # Build prompt with correct number of audio tokens
