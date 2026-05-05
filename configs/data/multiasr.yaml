@@ -1,34 +1,36 @@
 # Multi-ASR dataset configuration
 #
-# Rebalanced mix targeting the WER gaps to universal-3-pro: People's Speech,
-# CommonVoice, and Gigaspeech (where Loquacious's 500hr-each balance was
-# bottlenecking those evals), plus AMI-IHM/SDM tuning for the meeting/far-field
-# gap. AMI-IHM no longer 3x-repeated (was overfitting); SDM upweighted as the
-# only real far-field signal available on HF for English.
+# Robustness-oriented mix: prioritizes register/acoustic diversity over
+# closing single-eval WER gaps. CV is capped at 450K (down from 750K) since
+# read-speech has diminishing returns past ~15%; Gigaspeech is pushed to
+# 450K to boost YouTube/podcast/long-form register coverage. Switchboard
+# and AMI run at natural cap to preserve conversational + far-field signal.
+# No dataset is repeated — every target_samples is at or below the natural
+# train-split size, so each example is seen at most once per epoch.
 #
 # ┌────────────────────────┬───────────┬─────────┐
 # │ Dataset                │ Samples   │ Percent │
 # ├────────────────────────┼───────────┼─────────┤
-# │ Loquacious medium      │   780,000 │   37.1% │
-# │ People's Speech (fixie)│   210,000 │   10.0% │
-# │ CommonVoice 17 en      │   210,000 │   10.0% │
-# │ Gigaspeech M (fixie)   │   168,000 │    8.0% │
-# │ SPGISpeech M           │   210,000 │   10.0% │
-# │ Switchboard            │   252,000 │   12.0% │
-# │ AMI IHM (1x, no repeat)│  ~67,000  │    3.2% │
-# │ AMI SDM                │   168,000 │    8.0% │
+# │ Loquacious medium (all)│ 1,074,114 │   36.3% │
+# │ People's Speech (fixie)│   290,000 │    9.8% │
+# │ CommonVoice 17 en      │   450,000 │   15.2% │
+# │ Gigaspeech XL (fixie)  │   450,000 │   15.2% │
+# │ SPGISpeech M           │   290,000 │    9.8% │
+# │ Switchboard (natural)  │   185,402 │    6.3% │
+# │ AMI IHM (natural)      │   108,502 │    3.7% │
+# │ AMI SDM (natural)      │   107,319 │    3.6% │
 # └────────────────────────┴───────────┴─────────┘
-# Total: ~2,065,000 samples
+# Total: ~2,955,337 samples
 #
 # fixie-ai mirrors are used for People's Speech, CommonVoice, and Gigaspeech
 # because their pre-processed/sharded layouts are friendlier than the upstream
-# repos. Smallest config that comfortably exceeds the budget is chosen so we
-# don't download tiers we can't use (e.g. Gigaspeech M ≈ 1000hr, not L/XL).
+# repos. For Gigaspeech, fixie's mirror only ships the XL tier (no smaller
+# M/S/XS), so target_samples caps usage and the rest sits in the cache.
 
 datasets:
   # Loquacious medium - balanced 5-source mix (LibriHeavy / VoxPopuli /
-  # YODAS / People's Speech / CommonVoice, 500hr each). Capped at 780K to
-  # leave room for the direct-loaded People's / CV / Gigaspeech streams.
+  # YODAS / People's Speech / CommonVoice, 500hr each). Full natural size
+  # (~1,074,114) — target_samples omitted to consume the entire train split.
   - path: speechbrain/LoquaciousSet
     name: medium
     audio_column: wav
@@ -36,9 +38,8 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [dev]
-    target_samples: 780000
 
-  # People's Speech (fixie-ai mirror, clean-transcribed subset).
+  # People's Speech (fixie-ai mirror, clean-transcribed subset, ~1.5M train).
   # Direct exposure beyond the 500hr already inside Loquacious — targets the
   # ~10pt gap to universal-3-pro on the People's Speech eval.
   - path: fixie-ai/peoples_speech
@@ -48,9 +49,9 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 210000
+    target_samples: 290000
 
-  # CommonVoice 17 English (fixie-ai mirror).
+  # CommonVoice 17 English (fixie-ai mirror, ~1.1M train).
   # Direct exposure beyond Loquacious's 500hr — targets the ~7pt CV gap.
   - path: fixie-ai/common_voice_17_0
     name: en
@@ -59,22 +60,23 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 210000
+    target_samples: 450000
 
-  # Gigaspeech M (fixie-ai mirror, ~1000hr). Smallest tier above S (~250hr)
-  # that comfortably exceeds the 168K sample budget. Targets the Gigaspeech
-  # eval gap — there was no in-domain training data in the prior mix.
+  # Gigaspeech XL (fixie-ai mirror, empty-audio rows pre-filtered). fixie's
+  # mirror only ships ['dev', 'xl', 'xl-empty-audio-removed'] (no smaller
+  # M/S/XS tiers); xl-empty-audio-removed is the cleaner of the two training
+  # configs. target_samples caps usage at 232K — the rest of XL (~8.27M)
+  # just sits in the cache. Targets the Gigaspeech eval gap.
   - path: fixie-ai/gigaspeech
-    name: m
+    name: xl-empty-audio-removed
     audio_column: audio
     text_column: text
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 168000
+    target_samples: 450000
 
-  # SPGISpeech M - financial earnings calls. Holds at ~10% — Earnings22 gap
-  # is moderate (+2.3pt) and SPGI is the relevant in-domain stream.
+  # SPGISpeech M - financial earnings calls (~385K train). Targets Earnings22.
   - path: kensho/spgispeech
     name: M
     audio_column: audio
@@ -82,22 +84,21 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 210000
+    target_samples: 290000
 
-  # Switchboard - conversational telephone speech. Held at ~12% because this
-  # is the one eval where tiny-audio already beats universal-3-pro by ~4pt;
-  # the recipe is working, don't break it.
+  # Switchboard - conversational telephone speech. Natural size (~185,402);
+  # target_samples omitted. Prior 252K target was 1.36x repeat — dropped to
+  # avoid replay since this eval already beats universal-3-pro by ~4pt.
   - path: hhoangphuoc/switchboard
     audio_column: audio
     text_column: transcript
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 252000
 
-  # AMI corpus IHM - close-talk meeting mic. NO repeat (target_samples
-  # omitted = natural size, ~67K). Prior 305K target was 3x replay on the
-  # same speakers and almost certainly drove the 29% IHM eval (overfit, not
+  # AMI corpus IHM - close-talk meeting mic. Natural size (~108,502),
+  # target_samples omitted. Prior 305K target was ~3x replay on the same
+  # speakers and almost certainly drove the 29% IHM eval (overfit, not
   # data-limited).
   - path: edinburghcstr/ami
     name: ihm
@@ -107,10 +108,10 @@ datasets:
     train_splits: [train]
     eval_splits: [validation]
 
-  # AMI corpus SDM - single distant mic (far-field). Upweighted from 175K to
-  # 168K samples (similar count, but as a fraction of the smaller total it's
-  # ~8% vs the prior 8.4%). With CHiME-6 / AliMeeting unavailable on HF,
-  # SDM + RIR/noise/speaker-mix augmentation is the recipe for ami-sdm.
+  # AMI corpus SDM - single distant mic (far-field). Natural size
+  # (~107,319), target_samples omitted. Prior 168K target was 1.57x replay.
+  # With CHiME-6 / AliMeeting unavailable on HF, SDM + RIR/noise/speaker-mix
+  # augmentation is the recipe for ami-sdm.
   - path: edinburghcstr/ami
     name: sdm
     audio_column: audio
@@ -118,7 +119,6 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 168000
 
 # Audio processing
 sample_rate: 16000

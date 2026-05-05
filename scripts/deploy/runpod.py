@@ -122,12 +122,21 @@ def attach_tmux_session(host: str, port: int, session_name: str) -> None:
     print(f"\nDetached from session '{session_name}'.")
 
 
+# Suffixes filtered out of the rsync file set on top of gitignore. The
+# Swift bundled model weights are git-tracked (un-ignored in .gitignore via
+# `!swift/Sources/TinyAudio/Resources/Model/**`) but RunPod is for Python
+# training and doesn't need them — uploading hundreds of MB on every sync
+# wastes bandwidth.
+RSYNC_SUFFIX_BLOCKLIST = (".safetensors",)
+
+
 def _gitignore_aware_file_list(project_root: Path) -> str:
     """Return newline-separated repo-relative paths git would track or add.
 
     Uses ``git ls-files --cached --others --exclude-standard`` so the rsync
     file set has exact gitignore semantics (including ``!`` un-ignore lines,
-    which rsync's own ``:- .gitignore`` filter mishandles).
+    which rsync's own ``:- .gitignore`` filter mishandles). Suffixes in
+    ``RSYNC_SUFFIX_BLOCKLIST`` are then dropped on top.
     """
     result = subprocess.run(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
@@ -136,7 +145,12 @@ def _gitignore_aware_file_list(project_root: Path) -> str:
         text=True,
         check=True,
     )
-    return result.stdout
+    lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line and not line.endswith(RSYNC_SUFFIX_BLOCKLIST)
+    ]
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def setup_remote_environment(conn: Connection) -> None:
@@ -148,8 +162,19 @@ def setup_remote_environment(conn: Connection) -> None:
     """
     print("\nSetting up remote environment...")
     conn.run("apt-get update -qq || true", hide=True)
+    # Required packages — training and corpus extraction need these.
     conn.run(
-        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 portaudio19-dev aria2 unzip pigz",
+        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 unzip",
+        hide=True,
+    )
+    # Optional perf adds — fall back gracefully on pods where these aren't
+    # available (e.g. minimal images, universe repo disabled, partial apt
+    # cache). aria2 → faster RIRs/MUSAN download (urllib fallback exists);
+    # pigz → parallel gzip for MUSAN tar (single-threaded fallback);
+    # p7zip-full → parallel zip extract for OpenSLR-28 (unzip fallback);
+    # portaudio19-dev → only needed for pyaudio runtime, never training.
+    conn.run(
+        "apt-get install -y -qq aria2 pigz p7zip-full portaudio19-dev || true",
         hide=True,
     )
     # Pin augmentation corpora onto the persistent /workspace volume so they

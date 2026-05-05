@@ -56,6 +56,51 @@ def _resolve_corpus_roots(corpus_path: str | Sequence[str], hint: str = "") -> l
     return roots
 
 
+class SpeedPerturbation:
+    """Kaldi-style speed perturbation via sample-rate-based resampling.
+
+    Picks a random rate from ``rates`` and resamples audio so that, when
+    consumed at the original ``sample_rate``, it appears sped up
+    (rate > 1.0) or slowed down (rate < 1.0) by that factor. Pitch shifts
+    together with rate — the canonical Kaldi recipe (NeMo / ESPnet / K2 /
+    Icefall). rate == 1.0 is a no-op pass-through.
+
+    Should run FIRST in the augmentation chain so reverb / noise apply to
+    the speed-perturbed signal, not the original.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        rates: Sequence[float] = (0.9, 1.0, 1.1),
+        prob: float = 1.0,
+    ):
+        if not rates:
+            raise ValueError("rates must be non-empty")
+        if not 0.0 <= prob <= 1.0:
+            raise ValueError(f"prob must be in [0, 1], got {prob}")
+        self.sample_rate = sample_rate
+        self.rates = list(rates)
+        self.prob = prob
+
+    def __call__(self, audio: np.ndarray) -> np.ndarray:
+        if random.random() > self.prob:
+            return audio
+        rate = random.choice(self.rates)
+        if rate == 1.0:
+            return audio
+        in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
+        audio_t = torch.from_numpy(_to_mono_float32(audio))
+        if audio_t.numel() == 0:
+            return audio
+        # Resample to (sample_rate / rate) and then treat the output as if
+        # it's still at sample_rate — fewer/more samples in the same nominal
+        # rate ⇒ playback speed scales by rate. Standard Kaldi/NeMo recipe.
+        new_freq = max(1, int(round(self.sample_rate / rate)))
+        out = taf.resample(audio_t, orig_freq=self.sample_rate, new_freq=new_freq)
+        return out.numpy().astype(in_dtype)
+
+
 class RIRAugmentation:
     """Convolve audio with a random RIR from a pool.
 
@@ -109,6 +154,10 @@ class RIRAugmentation:
             raise ValueError("Empty RIR pool")
         self.sample_rate = sample_rate
         self.prob = prob
+        # The RIR sampled on the most recent __call__, or None if that call
+        # skipped (random > prob). NoiseAugmentation reads this to convolve
+        # noise with the same room response — same-room recipe.
+        self.last_rir: torch.Tensor | None = None
 
     @staticmethod
     def _load_corpus_pool(
@@ -216,16 +265,29 @@ class RIRAugmentation:
 
     def __call__(self, audio: np.ndarray) -> np.ndarray:
         if random.random() > self.prob:
+            self.last_rir = None
             return audio
 
         in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
         audio_t = torch.from_numpy(_to_mono_float32(audio))
         n = audio_t.shape[-1]
         if n == 0:
+            self.last_rir = None
             return audio
 
+        in_rms = float(torch.sqrt(torch.mean(audio_t**2)))
+
         rir = random.choice(self.rirs)
+        self.last_rir = rir
         out = taf.fftconvolve(audio_t, rir, mode="full")[:n]
+
+        # L2-normalized RIRs still attenuate RMS in time, so reverbed clips
+        # end up quieter than the input. Restore level so downstream SNR /
+        # gain decisions see a consistent distribution (NeMo / Canary recipe).
+        out_rms = float(torch.sqrt(torch.mean(out**2)))
+        if in_rms > 1e-8 and out_rms > 1e-8:
+            out = out * (in_rms / out_rms)
+
         peak = float(out.abs().max())
         if peak > 1.0:
             out = out / peak
@@ -374,13 +436,18 @@ class NoiseAugmentation:
                 continue
             if noise is None:
                 continue
-            # Convolve noise with a sampled RIR so it shares the room response
-            # with the (already-reverbed) clean signal — anechoic noise against
-            # reverberant speech is unphysical (NeMo / Canary recipe).
-            if self.rir_augmentation is not None and self.rir_augmentation.rirs:
+            # Reuse the RIR the signal got this sample so noise inherits the
+            # same room response (canonical NeMo / Canary recipe). If signal
+            # was anechoic this call (RIR aug skipped or disabled), keep noise
+            # anechoic too — mismatched signal/noise rooms are unphysical.
+            shared_rir = (
+                getattr(self.rir_augmentation, "last_rir", None)
+                if self.rir_augmentation is not None
+                else None
+            )
+            if shared_rir is not None:
                 noise_t = torch.from_numpy(np.ascontiguousarray(noise))
-                rir = random.choice(self.rir_augmentation.rirs)
-                reverbed = taf.fftconvolve(noise_t, rir, mode="full")[:n]
+                reverbed = taf.fftconvolve(noise_t, shared_rir, mode="full")[:n]
                 noise = reverbed.numpy().astype(np.float32)
             signal_rms = float(np.sqrt(np.mean(audio**2)))
             noise_rms = float(np.sqrt(np.mean(noise**2)))
@@ -389,7 +456,14 @@ class NoiseAugmentation:
             snr_db = random.uniform(self.min_snr_db, self.max_snr_db)
             target_noise_rms = signal_rms / (10 ** (snr_db / 20))
             noise = noise * (target_noise_rms / noise_rms)
-            return audio + noise.astype(audio.dtype)
+            mixed = audio + noise.astype(audio.dtype)
+            # Float32 won't physically clip, but downstream mel extraction
+            # expects in-range samples — renormalize if mixing pushed the
+            # peak above 1.0.
+            peak = float(np.abs(mixed).max())
+            if peak > 1.0:
+                mixed = mixed / peak
+            return mixed
         return audio
 
     def __call__(self, audio: np.ndarray) -> np.ndarray:

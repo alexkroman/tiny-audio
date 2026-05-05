@@ -69,10 +69,24 @@ length_column_name: duration
 projector_dropout: 0.0
 label_smoothing: 0.0
 
-# SpecAugment (LibriDouble settings: 2 masks each, time 100, freq 27).
+# Speed perturbation — Kaldi-style 3-rate resampling (0.9 / 1.0 / 1.1×).
+# Played at the original sample rate, the perturbed signal sounds sped up
+# or slowed down with a coupled pitch shift. Universal recipe in NeMo /
+# ESPnet / K2 / Icefall — adds rate-of-speech variation effectively for
+# free. Runs FIRST in the augmentation chain so reverb / noise apply to
+# the perturbed signal.
+speed_perturbation:
+  enabled: true
+  rates: [0.9, 1.0, 1.1]
+  prob: 1.0
+
+# SpecAugment — 2024-era recipe (NeMo Canary / Parakeet / Distil-Whisper):
+# 10 time masks of width 100 + 2 freq masks of width 27. The convergence
+# in modern recipes is "many small time masks > few large ones"; freq
+# settings are unchanged from the 2019 LibriDouble preset (still SOTA).
 # Applied on the mel spectrogram during training.
 use_specaugment: true
-num_time_masks: 2
+num_time_masks: 10
 time_mask_length: 100
 num_freq_masks: 2
 freq_mask_length: 27

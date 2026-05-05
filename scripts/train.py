@@ -31,7 +31,7 @@ from trl.experimental.utils import DataCollatorForChatML
 
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation
+from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation, SpeedPerturbation
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
@@ -480,6 +480,19 @@ def main(cfg: DictConfig) -> None:
     train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
 
     augmentations: list = []
+
+    # Speed perturbation runs FIRST so reverb / noise apply to the perturbed
+    # signal — Kaldi convention also followed by NeMo / ESPnet / K2 / Icefall.
+    speed_cfg = cfg.training.get("speed_perturbation") or {}
+    if speed_cfg.get("enabled"):
+        augmentations.append(
+            SpeedPerturbation(
+                sample_rate=cfg.data.sample_rate,
+                rates=tuple(speed_cfg.get("rates", [0.9, 1.0, 1.1])),
+                prob=speed_cfg.get("prob", 1.0),
+            )
+        )
+
     rir_aug: RIRAugmentation | None = None
     rir_cfg = cfg.training.get("rir_augmentation") or {}
     if rir_cfg.get("enabled"):
