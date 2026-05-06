@@ -25,7 +25,11 @@ training:
   # Projector LR mirrors transcription.yaml; the LM gets a much lower LR
   # (typical full-decoder fine-tuning range) to avoid catastrophic forgetting.
   learning_rate: 1e-3
-  decoder_learning_rate: 1e-4
+  # Halved from 1e-4 after the prior run showed ~18.8% mean attention drift
+  # (25% max on K-proj mid-layers) — at the edge of catastrophic-forgetting
+  # territory for a 0.6B decoder. 5e-5 preserves adapter capacity while
+  # protecting general-LM behavior.
+  decoder_learning_rate: 5e-5
   decoder_weight_decay: 0.001
   # Wider warmup gives the randomly-initialized projector time to settle before
   # the LM's much smaller LR starts to bite — important now that the LM is
@@ -37,7 +41,7 @@ training:
   per_device_train_batch_size: 32
   per_device_eval_batch_size: 32
   gradient_accumulation_steps: 2
-  num_train_epochs: 2
+  num_train_epochs: 1
   save_steps: 1000
   eval_steps: 1000
 
@@ -51,5 +55,21 @@ training:
   # flash-attn source build on RunPod and is fast enough at our seq lengths.
   attn_implementation: sdpa
 
-  label_smoothing_factor: 0.1
+  # Disabled (was 0.1): smoothing diluted EOS confidence and produced trailing
+  # discourse-marker insertions ("...nice day and", "...with the camp and")
+  # on Peoples / Earnings22 evals. Modern ASR recipes (NeMo Canary, Parakeet,
+  # Whisper-Large-v3) all use 0.0 — ASR targets are low-entropy enough that
+  # smoothing hurts EOS discrimination more than it helps generalization.
+  label_smoothing_factor: 0.0
   weight_decay: 0.0
+
+  # CE-loss up-weight on the assistant-turn EOS token (`<|im_end|>` for Qwen).
+  # Pairs with label_smoothing=0 to push confident stops, addressing the
+  # observed pattern of one-token continuations past the actual end of speech.
+  eos_loss_weight: 2.0
+
+  # Probability of replacing a training sample's audio with silence + empty
+  # target. Teaches the model "no speech → emit nothing" — currently it
+  # backchannels ("yeah", "huh", "i") on AMI silence segments because empty-
+  # text samples were silently filtered out of training.
+  silence_injection_prob: 0.01

@@ -412,34 +412,41 @@ class NoiseAugmentation:
             return random.choice(self.non_babble_paths)
         return random.choice(self.noise_paths)
 
-    def _mix_corpus_noise(self, audio: np.ndarray) -> np.ndarray:
-        n = audio.shape[-1]
-        # Retry a few files: MUSAN occasionally has unreadable / zero-length
-        # entries; fail soft to clean signal if every attempt fails.
+    def _try_read_random_noise(self, num_samples: int) -> np.ndarray | None:
+        """Pick + read a random noise segment, retrying past unreadable files.
+
+        MUSAN occasionally has zero-length or otherwise broken entries; up to
+        three picks before giving up. Returns None when the corpus is
+        exhausted of usable picks for this attempt.
+        """
         for _ in range(3):
             path = self._pick_noise_path()
             try:
-                noise = self._read_noise_segment(path, n)
+                noise = self._read_noise_segment(path, num_samples)
             except (RuntimeError, OSError, sf.LibsndfileError):
                 continue
-            if noise is None:
-                continue
-            signal_rms = float(np.sqrt(np.mean(audio**2)))
-            noise_rms = float(np.sqrt(np.mean(noise**2)))
-            if signal_rms < 1e-8 or noise_rms < 1e-8:
-                return audio
-            snr_db = random.uniform(self.min_snr_db, self.max_snr_db)
-            target_noise_rms = signal_rms / (10 ** (snr_db / 20))
-            noise = noise * (target_noise_rms / noise_rms)
-            mixed = audio + noise.astype(audio.dtype)
-            # Float32 won't physically clip, but downstream mel extraction
-            # expects in-range samples — renormalize if mixing pushed the
-            # peak above 1.0.
-            peak = float(np.abs(mixed).max())
-            if peak > 1.0:
-                mixed = mixed / peak
-            return mixed
-        return audio
+            if noise is not None:
+                return noise
+        return None
+
+    def _mix_corpus_noise(self, audio: np.ndarray) -> np.ndarray:
+        noise = self._try_read_random_noise(audio.shape[-1])
+        if noise is None:
+            return audio
+        signal_rms = float(np.sqrt(np.mean(audio**2)))
+        noise_rms = float(np.sqrt(np.mean(noise**2)))
+        if signal_rms < 1e-8 or noise_rms < 1e-8:
+            return audio
+        snr_db = random.uniform(self.min_snr_db, self.max_snr_db)
+        target_noise_rms = signal_rms / (10 ** (snr_db / 20))
+        noise = noise * (target_noise_rms / noise_rms)
+        mixed = audio + noise.astype(audio.dtype)
+        # Float32 won't physically clip, but downstream mel extraction expects
+        # in-range samples — renormalize if mixing pushed the peak above 1.0.
+        peak = float(np.abs(mixed).max())
+        if peak > 1.0:
+            mixed = mixed / peak
+        return mixed
 
     def __call__(self, audio: np.ndarray) -> np.ndarray:
         in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
@@ -453,3 +460,18 @@ class NoiseAugmentation:
         audio_t = torch.from_numpy(_to_mono_float32(audio)).unsqueeze(0).unsqueeze(0)
         out = self.augment(audio_t).samples
         return out.squeeze(0).squeeze(0).numpy().astype(in_dtype)
+
+    def sample_noise_only(self, num_samples: int) -> np.ndarray | None:
+        """Return a noise-only clip of ``num_samples`` length, or None on failure.
+
+        Used for silence-injection training: pairs a non-speech audio sample
+        with an empty transcription so the model learns "no speech → emit
+        nothing" instead of backchanneling on silent / non-speech segments.
+        Returns None when no corpus is configured — the synthetic
+        ``AddColoredNoise`` backend has no concept of "noise-only" since it's
+        already additive.
+        """
+        if self.noise_paths is None or num_samples <= 0:
+            return None
+        noise = self._try_read_random_noise(num_samples)
+        return None if noise is None else noise.astype(np.float32)

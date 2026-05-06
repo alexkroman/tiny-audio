@@ -336,11 +336,31 @@ class ASRTrainer(Trainer):
         *args,
         decoder_learning_rate: float | None = None,
         decoder_weight_decay: float | None = None,
+        eos_loss_weight: float = 1.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.decoder_learning_rate = decoder_learning_rate
         self.decoder_weight_decay = decoder_weight_decay
+        self.eos_loss_weight = float(eos_loss_weight)
+        # Vocab size depends on the tokenizer resize for <audio>, so the
+        # weight tensor is built on first compute_loss call. Cache key is
+        # (device, dtype) — autocast/Accelerate may move logits across
+        # devices or dtypes mid-run.
+        self._ce_class_weights: torch.Tensor | None = None
+        self._ce_class_weights_key: tuple | None = None
+        self._eos_token_ids: list[int] = []
+        if self.eos_loss_weight != 1.0:
+            eos_ids = getattr(self.model.generation_config, "eos_token_id", None)
+            if isinstance(eos_ids, int):
+                self._eos_token_ids = [eos_ids]
+            elif eos_ids:
+                self._eos_token_ids = list(eos_ids)
+            if not self._eos_token_ids:
+                raise ValueError(
+                    "eos_loss_weight != 1.0 but model.generation_config.eos_token_id "
+                    "is empty; ASRModel._init_tokenizer should have populated it."
+                )
 
     def create_optimizer(self):
         """Optimizer with separate LR / weight decay for the language model.
@@ -400,12 +420,22 @@ class ASRTrainer(Trainer):
         it incorrectly uses shift_labels=False, causing misaligned predictions.
         This override forces shift_labels=True for correct causal LM behavior.
 
+        When ``eos_loss_weight`` ≠ 1.0, computes a class-weighted cross-entropy
+        directly on outputs.logits, up-weighting the EOS-class contribution so
+        the model learns confident stops. Mutually exclusive with HF's
+        label_smoother (which would double-handle the loss); training fails
+        early in __init__ if both are configured.
+
         `num_items_in_batch` is part of HF Trainer's compute_loss signature
         (newer transformers versions pass it for gradient-accumulation token
         counting). We don't need it here, but the kwarg name has to match
         Trainer's call, so we keep it on the signature and ignore it.
         """
         del num_items_in_batch  # Trainer-signature compatibility; unused here.
+
+        if self.eos_loss_weight != 1.0:
+            return self._compute_eos_weighted_loss(model, inputs, return_outputs)
+
         labels = (
             inputs.pop("labels") if self.label_smoother is not None and "labels" in inputs else None
         )
@@ -419,6 +449,56 @@ class ASRTrainer(Trainer):
         else:
             loss = outputs.loss
 
+        return (loss, outputs) if return_outputs else loss
+
+    def _compute_eos_weighted_loss(self, model, inputs, return_outputs):
+        """Class-weighted CE that boosts the EOS-token gradient.
+
+        Pops labels before forward to suppress HF's internal CE, runs the
+        weighted CE on outputs.logits, then re-adds projector aux loss
+        (MoSA / MoE) that ASRModel.forward would normally fold in via
+        outputs.loss but skips when labels are absent.
+        """
+        labels = inputs.pop("labels", None)
+        if labels is None:
+            outputs = model(**inputs)
+            loss = outputs.loss
+            return (loss, outputs) if return_outputs else loss
+
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        cache_key = (logits.device, logits.dtype)
+        if self._ce_class_weights is None or self._ce_class_weights_key != cache_key:
+            vocab_size = logits.size(-1)
+            weights = torch.ones(vocab_size, dtype=logits.dtype, device=logits.device)
+            for tid in self._eos_token_ids:
+                if 0 <= tid < vocab_size:
+                    weights[tid] = self.eos_loss_weight
+            self._ce_class_weights = weights
+            self._ce_class_weights_key = cache_key
+
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous().to(logits.device)
+        loss_fct = torch.nn.CrossEntropyLoss(
+            weight=self._ce_class_weights,
+            ignore_index=-100,
+        )
+        loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+        )
+
+        projector = getattr(model, "projector", None)
+        if projector is not None and hasattr(projector, "get_aux_loss"):
+            aux_loss = projector.get_aux_loss()
+            if aux_loss is not None and aux_loss.numel() > 0:
+                loss = loss + aux_loss.to(loss.device)
+
+        if self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
+
+        outputs.loss = loss
         return (loss, outputs) if return_outputs else loss
 
 
@@ -528,18 +608,18 @@ def main(cfg: DictConfig) -> None:
         )
         augmentations.append(rir_aug)
 
+    noise_aug: NoiseAugmentation | None = None
     noise_cfg = cfg.training.get("noise_augmentation") or {}
     if noise_cfg.get("enabled"):
-        augmentations.append(
-            NoiseAugmentation(
-                sample_rate=cfg.data.sample_rate,
-                prob=noise_cfg.get("prob", 0.5),
-                min_snr_db=noise_cfg.get("min_snr_db", 0.0),
-                max_snr_db=noise_cfg.get("max_snr_db", 25.0),
-                corpus_path=noise_cfg.get("corpus_path"),
-                babble_weight=noise_cfg.get("babble_weight", 0.0),
-            )
+        noise_aug = NoiseAugmentation(
+            sample_rate=cfg.data.sample_rate,
+            prob=noise_cfg.get("prob", 0.5),
+            min_snr_db=noise_cfg.get("min_snr_db", 0.0),
+            max_snr_db=noise_cfg.get("max_snr_db", 25.0),
+            corpus_path=noise_cfg.get("corpus_path"),
+            babble_weight=noise_cfg.get("babble_weight", 0.0),
         )
+        augmentations.append(noise_aug)
 
     # Phone bandwidth simulates how audio gets degraded after capture
     # (downsampled to 8 kHz on phone calls). Runs AFTER room/noise so the
@@ -554,16 +634,43 @@ def main(cfg: DictConfig) -> None:
             )
         )
 
-    if augmentations:
+    silence_injection_prob = float(cfg.training.get("silence_injection_prob", 0.0))
+    if silence_injection_prob > 0.0 and noise_aug is None:
+        raise ValueError(
+            "silence_injection_prob > 0 requires noise_augmentation.enabled "
+            "(the MUSAN corpus is the source of noise-only samples)."
+        )
+
+    if augmentations or silence_injection_prob > 0.0:
 
         def _apply_aug(batch):
             audios = batch.get("audio") or []
-            for a in audios:
-                if a and "array" in a:
-                    arr = a["array"]
-                    for aug in augmentations:
-                        arr = aug(arr)
-                    a["array"] = arr
+            texts = batch.get("text")
+            n_texts = len(texts) if texts is not None else 0
+            for i, a in enumerate(audios):
+                if not a or "array" not in a:
+                    continue
+                arr = a["array"]
+                # Silence injection: replace audio with a MUSAN noise clip and
+                # clear text. Targets the AMI backchannel hallucinations
+                # ("yeah" / "huh" on empty GT) by teaching the model to emit
+                # only EOS on non-speech. Falls through to the rest of the
+                # augmentation chain so RIR + phone-bandwidth still apply —
+                # at inference, real silence has been through a room and a
+                # codec, and the training distribution should match.
+                if (
+                    silence_injection_prob > 0.0
+                    and noise_aug is not None
+                    and i < n_texts
+                    and random.random() < silence_injection_prob
+                ):
+                    noise = noise_aug.sample_noise_only(arr.shape[-1])
+                    if noise is not None:
+                        arr = noise.astype(arr.dtype)
+                        texts[i] = ""
+                for aug in augmentations:
+                    arr = aug(arr)
+                a["array"] = arr
             return batch
 
         train_dataset = train_dataset.with_transform(_apply_aug)

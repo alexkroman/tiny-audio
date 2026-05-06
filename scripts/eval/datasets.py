@@ -67,6 +67,14 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         text_field="text",
         default_split="dev",
     ),
+    "spgispeech": DatasetConfig(
+        name="spgispeech",
+        path="kensho/spgispeech",
+        config="test",
+        audio_field="audio",
+        text_field="transcript",
+        default_split="test",
+    ),
     "tedlium": DatasetConfig(
         name="tedlium",
         path="sanchit-gandhi/tedlium-data",
@@ -87,6 +95,13 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         config="clean",
         audio_field="audio",
         text_field="text",
+    ),
+    "voxpopuli": DatasetConfig(
+        name="voxpopuli",
+        path="facebook/voxpopuli",
+        config="en",
+        audio_field="audio",
+        text_field="normalized_text",
     ),
     "switchboard": DatasetConfig(
         name="switchboard",

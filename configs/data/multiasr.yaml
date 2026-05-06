@@ -1,26 +1,34 @@
 # Multi-ASR dataset configuration
 #
-# Robustness-oriented mix: prioritizes register/acoustic diversity over
-# closing single-eval WER gaps. CV is capped at 450K (down from 750K) since
-# read-speech has diminishing returns past ~15%; Gigaspeech is pushed to
-# 450K to boost YouTube/podcast/long-form register coverage. Switchboard
-# and AMI run at natural cap to preserve conversational + far-field signal.
-# No dataset is repeated — every target_samples is at or below the natural
-# train-split size, so each example is seen at most once per epoch.
+# Gap-targeted mix: rebalanced from the prior robustness-first split to put
+# more share on the datasets matching the largest closable eval gaps vs
+# universal-3-pro (CV +4.4, Peoples +2.6) and to add direct register
+# coverage for Earnings22 via sanchit-gandhi's robust split. Loquacious
+# runs at natural cap to keep its unique LibriHeavy + YODAS exposure
+# (those two sources aren't elsewhere in the mix); the CV / Peoples
+# overlap with Loquacious's internal slices is distributional, not
+# example-level. Gigaspeech bumped 800K → 1.2M because we're still well
+# below XL's 8.27M saturation point and the long-form/podcast register
+# also helps Earnings22 / Tedlium. Switchboard and AMI run at natural
+# cap (already at parity or winning). No dataset is repeated — every
+# target_samples is at or below the natural train-split size, so each
+# example is seen at most once per epoch.
 #
-# ┌────────────────────────┬───────────┬─────────┐
-# │ Dataset                │ Samples   │ Percent │
-# ├────────────────────────┼───────────┼─────────┤
-# │ Loquacious medium (all)│ 1,074,114 │   31.6% │
-# │ People's Speech (fixie)│   290,000 │    8.5% │
-# │ CommonVoice 17 en      │   450,000 │   13.2% │
-# │ Gigaspeech XL (fixie)  │   800,000 │   23.5% │
-# │ SPGISpeech M (natural) │   385,000 │   11.3% │
-# │ Switchboard (natural)  │   185,402 │    5.5% │
-# │ AMI IHM (natural)      │   108,502 │    3.2% │
-# │ AMI SDM (natural)      │   107,319 │    3.2% │
-# └────────────────────────┴───────────┴─────────┘
-# Total: ~3,400,337 samples
+# ┌──────────────────────────┬───────────┬─────────┐
+# │ Dataset                  │ Samples   │ Percent │
+# ├──────────────────────────┼───────────┼─────────┤
+# │ Loquacious medium (all)  │ 1,074,114 │   24.4% │
+# │ Gigaspeech XL (fixie)    │ 1,200,000 │   27.3% │
+# │ CommonVoice 17 en        │   750,000 │   17.0% │
+# │ People's Speech (fixie)  │   550,000 │   12.5% │
+# │ SPGISpeech M (natural)   │   385,000 │    8.7% │
+# │ Switchboard (natural)    │   185,402 │    4.2% │
+# │ AMI IHM (natural)        │   108,502 │    2.5% │
+# │ AMI SDM (natural)        │   107,319 │    2.4% │
+# │ VoxPopuli en             │    75,000 │    1.7% │
+# │ Earnings22 robust (all)  │   ~25,000 │    0.6% │
+# └──────────────────────────┴           ┴         ┘
+# Total: ~4,460,337 samples
 #
 # fixie-ai mirrors are used for People's Speech, CommonVoice, and Gigaspeech
 # because their pre-processed/sharded layouts are friendlier than the upstream
@@ -30,7 +38,11 @@
 datasets:
   # Loquacious medium - balanced 5-source mix (LibriHeavy / VoxPopuli /
   # YODAS / People's Speech / CommonVoice, 500hr each). Full natural size
-  # (~1,074,114) — target_samples omitted to consume the entire train split.
+  # (~1,074,114) — target_samples omitted to consume the entire train
+  # split. The CV / Peoples / VoxPopuli overlap with the direct slices
+  # below is distributional, not example-level, and capping here would
+  # also drop LibriHeavy and YODAS exposure (the two sources not present
+  # elsewhere in the mix).
   - path: speechbrain/LoquaciousSet
     name: medium
     audio_column: wav
@@ -40,8 +52,9 @@ datasets:
     eval_splits: [dev]
 
   # People's Speech (fixie-ai mirror, clean-transcribed subset, ~1.5M train).
-  # Direct exposure beyond the 500hr already inside Loquacious — targets the
-  # ~10pt gap to universal-3-pro on the People's Speech eval.
+  # 290K → 550K to attack the +2.59 Peoples gap directly. Long-form
+  # register diversity that Loquacious's 500hr proxy doesn't fully cover;
+  # natural cap leaves plenty of headroom (~1.5M total).
   - path: fixie-ai/peoples_speech
     name: clean
     audio_column: audio
@@ -49,10 +62,12 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 290000
+    target_samples: 550000
 
   # CommonVoice 17 English (fixie-ai mirror, ~1.1M train).
-  # Direct exposure beyond Loquacious's 500hr — targets the ~7pt CV gap.
+  # 450K → 750K. Largest closable eval gap (+4.42) and the only lever is
+  # direct exposure — CV's gap is L1-accent + device diversity that no
+  # proxy dataset captures. Still under natural cap (~1.1M), so no replay.
   - path: fixie-ai/common_voice_17_0
     name: en
     audio_column: audio
@@ -60,15 +75,16 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 450000
+    target_samples: 750000
 
   # Gigaspeech XL (fixie-ai mirror, empty-audio rows pre-filtered). fixie's
   # mirror only ships ['dev', 'xl', 'xl-empty-audio-removed'] (no smaller
   # M/S/XS tiers); xl-empty-audio-removed is the cleaner of the two training
   # configs but ships only a 'train' split (no 'validation'). Eval lives in
-  # the sibling 'dev' config below. target_samples caps usage at 800K — the
-  # rest of XL (~8.27M) just sits in the cache. Targets the Gigaspeech eval
-  # gap.
+  # the sibling 'dev' config below. 800K → 1.2M: still ~14% of XL's 8.27M,
+  # well below transcript-noise saturation, and the long-form / podcast /
+  # audiobook register also helps Earnings22 and Tedlium beyond the
+  # Gigaspeech eval itself.
   - path: fixie-ai/gigaspeech
     name: xl-empty-audio-removed
     audio_column: audio
@@ -76,7 +92,7 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: []
-    target_samples: 800000
+    target_samples: 1200000
 
   # Gigaspeech dev split — fixie's mirror keeps the dev set in a separate
   # 'dev' config that ships its data under a 'dev' split (not 'train' like
@@ -133,6 +149,36 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
+
+  # Earnings22 robust split (sanchit-gandhi, ESB partition). Same dataset
+  # the eval points at — train/test are partitioned by speaker and call
+  # so this is safe to train on. ~33hr / ~25K segments. Direct register
+  # match (real earnings calls, not SPGI's read transcripts); only
+  # corpus in the mix that hits Earnings22's exact distribution.
+  # eval_splits: [validation] for train-time loss; the standalone eval
+  # uses the test split via `ta eval`.
+  - path: sanchit-gandhi/earnings22_robust_split
+    name: default
+    audio_column: audio
+    text_column: sentence
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+
+  # VoxPopuli en (transcribed, ~543hr). Hedge slice for CV's L2-accent
+  # diversity (MEPs from across Europe speak non-native English at
+  # scale). Kept small at 75K because Loquacious already includes 500hr
+  # of VoxPopuli — additional direct exposure here is targeted top-up,
+  # not register expansion. normalized_text used in preference to
+  # raw_text (punctuation/casing already cleaned).
+  - path: facebook/voxpopuli
+    name: en
+    audio_column: audio
+    text_column: normalized_text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
+    target_samples: 75000
 
 # Audio processing
 sample_rate: 16000
