@@ -56,51 +56,54 @@ def _resolve_corpus_roots(corpus_path: str | Sequence[str], hint: str = "") -> l
     return roots
 
 
-class PhoneBandwidthAugmentation:
-    """Simulate narrowband telephony by resampling 16 kHz → 8 kHz → 16 kHz.
+class SpeedPerturbationAugmentation:
+    """Resample audio at a discrete speed factor (default {0.9, 1.0, 1.1}).
 
-    The trip through 8 kHz strips everything above 4 kHz (Nyquist) — exactly
-    the bandwidth limit of G.711 / GSM phone calls. Closes the WER gap on
-    Switchboard, real-call tests, and any narrowband-encoded audio. Standard
-    addition in modern ASR augmentation recipes (NeMo Canary, AssemblyAI
-    Universal, Whisper-v3 fine-tunes). Should run AFTER room / noise so the
-    bandwidth limit applies to the already-mixed signal.
+    Standard ASR augmentation across NeMo, Wav2Vec2, and Whisper fine-tune
+    recipes — cheap effective-data multiplier that exposes the projector to
+    the encoder's response on the same content at different prosody rates.
+
+    Implementation: relabel the audio's nominal sample rate as
+    ``sample_rate * factor`` and resample back to ``sample_rate``. Output
+    length scales by ``1/factor`` (factor>1 = faster + shorter; factor<1 =
+    slower + longer). Length-changing on purpose; downstream feature
+    extractor pads to longest in the batch.
+
+    Should run FIRST in the augmentation chain — speed perturbation models
+    speaker variation in the source signal, then RIR and noise model the
+    channel applied to that varied source.
     """
 
     def __init__(
         self,
         sample_rate: int = 16000,
-        narrowband_rate: int = 8000,
-        prob: float = 0.2,
+        factors: Sequence[float] = (0.9, 1.0, 1.1),
+        prob: float = 0.5,
     ):
         if not 0.0 <= prob <= 1.0:
             raise ValueError(f"prob must be in [0, 1], got {prob}")
-        if narrowband_rate >= sample_rate:
-            raise ValueError(
-                f"narrowband_rate ({narrowband_rate}) must be < sample_rate ({sample_rate})"
-            )
+        if not factors:
+            raise ValueError("factors must be non-empty")
+        for f in factors:
+            if f <= 0:
+                raise ValueError(f"all factors must be > 0, got {f}")
         self.sample_rate = sample_rate
-        self.narrowband_rate = narrowband_rate
+        self.factors = list(factors)
         self.prob = prob
 
     def __call__(self, audio: np.ndarray) -> np.ndarray:
         if random.random() > self.prob:
             return audio
+        factor = random.choice(self.factors)
+        if factor == 1.0:
+            return audio
         in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
         audio_t = torch.from_numpy(_to_mono_float32(audio))
         if audio_t.numel() == 0:
             return audio
-        narrow = taf.resample(audio_t, self.sample_rate, self.narrowband_rate)
-        wide = taf.resample(narrow, self.narrowband_rate, self.sample_rate)
-        # Resample is rate-conversion-exact but two passes can drift the sample
-        # count by ±1; trim/pad to the original length so downstream tensor
-        # shapes line up exactly with the un-augmented path.
-        n = audio_t.shape[-1]
-        if wide.shape[-1] >= n:
-            wide = wide[..., :n]
-        else:
-            wide = torch.nn.functional.pad(wide, (0, n - wide.shape[-1]))
-        return wide.numpy().astype(in_dtype)
+        relabeled_rate = int(round(self.sample_rate * factor))
+        out = taf.resample(audio_t, relabeled_rate, self.sample_rate)
+        return out.numpy().astype(in_dtype)
 
 
 class RIRAugmentation:

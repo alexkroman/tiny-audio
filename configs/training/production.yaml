@@ -69,18 +69,35 @@ dataloader_drop_last: true
 group_by_length: true
 length_column_name: duration
 
-# SpecAugment — pulled back from the 2024 NeMo Canary / Parakeet preset
-# (10×100 time masks). That recipe assumes a fully-trained encoder
-# absorbing the masked signal; with a frozen encoder + projector-only
-# gradient path, ~10s of cumulative time-mask per clip just produces
-# harder examples without the capacity to learn from them. 6×80 keeps
-# the "many small masks > few large" principle at a more proportionate
-# total mask budget. Freq settings unchanged.
+# SpecAugment — 2×100 time masks. Closer to NeMo Canary's 10×100 mask
+# *length* but with far fewer masks; total budget is 200 frames (down from
+# the 4×70=280 we were running, well under encoder-recipe 1000). Larger
+# individual masks force the projector to span gaps in the encoder's
+# response rather than treating each masked window as an isolated gap.
+# Freq settings unchanged.
 use_specaugment: true
-num_time_masks: 6
-time_mask_length: 80
+num_time_masks: 2
+time_mask_length: 100
 num_freq_masks: 2
 freq_mask_length: 27
+
+# Speed perturbation — resample source audio at a discrete factor to expose
+# the projector to the encoder's response across speaker rates. Standard
+# ASR augmentation in NeMo / Wav2Vec2 / Whisper-fine-tune recipes; cheap
+# effective-data multiplier (≈3× when factor=1.0 is in the set). Runs
+# FIRST in the chain so RIR / noise model the channel applied to the
+# rate-varied source.
+speed_perturbation:
+  enabled: true
+  # {0.9, 1.0, 1.1} is the canonical NeMo / Kaldi speed-perturb set. Wider
+  # ranges (e.g. {0.85, 1.0, 1.15}) push prosody beyond what Whisper's
+  # frozen encoder cleanly handles; stick with the standard.
+  factors: [0.9, 1.0, 1.1]
+  # 0.5: standard prob; lower than encoder-pretrain recipes (which run 1.0
+  # with a 3× sample budget) because we don't have the encoder capacity to
+  # absorb every batch being perturbed, but high enough to materially shift
+  # the prosody distribution the projector trains against.
+  prob: 0.5
 
 # RIR (Room Impulse Response) augmentation — simulates far-field / reverberant
 # audio by convolving with a random RIR sampled from a pool. Two backends:
@@ -113,11 +130,12 @@ rir_augmentation:
   room_y_range: [3.0, 15.0]
   room_z_range: [2.4, 5.0]
   t60_range: [0.2, 1.5]
-  # 0.7 → 0.5: 70% reverb-on-every-batch was paying for ami-sdm/Switchboard
-  # parity at the cost of LS Clean (1.59 → 2.37), Tedlium (2.33 → 3.19), and
-  # CV (8.32 → 12.74) gaps on essentially clean read speech. ami-sdm is
-  # already at parity, so additional reverb has diminishing returns.
-  prob: 0.5
+  # 0.6: aggressive reverb exposure. ami-sdm and Switchboard are the key
+  # eval gaps where reverberant / far-field training pays off; 0.6 keeps
+  # majority-of-batches reverb to invest projector capacity in those
+  # slices. Trades some LS Clean / Tedlium clean-speech headroom for that
+  # gain — eval will tell us whether the trade is favorable.
+  prob: 0.6
   seed: null
 
 # Noise augmentation — mixes background noise into the signal via
@@ -139,31 +157,24 @@ noise_augmentation:
   corpus_path:
     - ~/.cache/musan/musan
     - ~/.cache/openslr-28/pointsource_noises
-  prob: 0.7
-  # min_snr -5 → 0 dB. -5 dB is the modern NeMo floor but produces samples
-  # where intelligibility is genuinely degraded; with a small projector that
-  # capacity is better spent on the mid-SNR distribution that actually shows
-  # up in the eval gaps (CV, LS Clean were paying for low-SNR robustness
-  # the deployment doesn't need).
-  min_snr_db: 0.0
+  # 0.7 → 0.5: speech-LLM regime; noise no longer dominates batches but stays
+  # at meaningful exposure (Qwen2-Audio / Granite-Speech run ~0.2-0.5).
+  # 0.5 hedges between full speech-LLM defaults (~0.3) and preserving the
+  # robustness gains the prior 0.7 was paying for.
+  prob: 0.5
+  # 0 → -5 dB: drop floor to NeMo Canary's standard. Sub-zero SNR samples
+  # are degraded enough that the encoder's response gets noisy, but they
+  # also force the projector to learn a wider robustness envelope. Pairs
+  # with the higher noise prob to push the model into the regime AMI-SDM
+  # and Switchboard live in (real-world deployment routinely sees < 0 dB
+  # SNR on far-field captures).
+  min_snr_db: -5.0
   max_snr_db: 25.0
-  # 0.35 → 0.55. Highest-leverage knob given the AMI IHM gap (22.14 vs
-  # 16.46): close-talk meeting mic isn't a reverb problem (ami-sdm is at
-  # parity), it's cross-talker bleed from co-located speakers — i.e. babble.
-  # Peoples / CV / Earnings22 also benefit more from babble than from
-  # heavier music/white noise.
-  babble_weight: 0.55
-
-# Phone-bandwidth simulation — resample to 8 kHz then back to 16 kHz so the
-# signal sees the same hard 4 kHz cutoff as G.711 / GSM telephony. Closes
-# the WER gap on Switchboard, real call data, and any narrowband-encoded
-# audio. Standard addition in 2026 SOTA recipes (NeMo Canary, AssemblyAI
-# Universal-2). Lower prob than RIR/noise — only ~20% of users transmit
-# through narrowband channels in deployment.
-phone_bandwidth_augmentation:
-  enabled: false
-  narrowband_rate: 8000
-  prob: 0.2
+  # 0.55 → 0.4: babble was weighted up specifically to close ami-ihm via
+  # cross-talker simulation. Speech-LLM literature shows no babble-specific
+  # wins, so step down toward the unweighted default — but not all the way,
+  # to preserve some of the ami-ihm-targeted gain.
+  babble_weight: 0.4
 
 # Misc
 disable_tqdm: false
