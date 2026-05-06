@@ -140,3 +140,22 @@ class TestTextNormalizer:
         assert "," not in result
         assert "!" not in result
         assert "?" not in result
+
+    def test_possessive_s_is_mangled_by_whisper(self, normalizer):
+        """Whisper's normalizer expands ALL ``'s`` to ``is``, including
+        possessives. This is a known limitation; the test pins the behavior so
+        nobody re-introduces a custom ``'s -> is`` rule (which would be a no-op
+        on top of Whisper) thinking they're fixing it. The damage is symmetric
+        between reference and prediction, so WER stays comparable."""
+        assert normalizer.normalize("john's car") == "john is car"
+        assert normalizer.normalize("the company's revenue") == "the company is revenue"
+
+    def test_gigaspeech_punctuation_markers_stripped(self, normalizer):
+        """Gigaspeech transcripts ship with literal ``<COMMA>`` / ``<PERIOD>`` /
+        ``<QUESTIONMARK>`` / ``<EXCLAMATIONPOINT>`` / ``<UNK>`` markers in
+        place of real punctuation. Whisper's normalizer drops <...> tags."""
+        raw = "hello <COMMA> world <PERIOD> how are you <QUESTIONMARK>"
+        result = normalizer.normalize(raw)
+        assert "<" not in result and ">" not in result
+        assert "comma" not in result and "period" not in result
+        assert "questionmark" not in result

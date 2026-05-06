@@ -11,13 +11,22 @@ import pytest
 class TestRunpodCLI:
     """Tests for runpod CLI configuration and utilities."""
 
-    def test_rsync_excludes_contains_expected_patterns(self):
-        """Test that RSYNC_EXCLUDES contains necessary patterns."""
-        from scripts.deploy.runpod import RSYNC_EXCLUDES
+    def test_gitignore_aware_file_list_excludes_gitignored_paths(self):
+        """File list piped into rsync should honor .gitignore (no __pycache__,
+        no .git/, no datasets_cache) and drop the suffix blocklist (no
+        .safetensors — Swift bundled weights aren't needed on RunPod)."""
+        from scripts.deploy.runpod import _gitignore_aware_file_list
+        from scripts.utils import get_project_root
 
-        assert isinstance(RSYNC_EXCLUDES, list)
-        assert "__pycache__" in RSYNC_EXCLUDES
-        assert ".git" in RSYNC_EXCLUDES
+        files = _gitignore_aware_file_list(get_project_root()).splitlines()
+
+        assert files, "expected at least one file from git ls-files"
+        assert not any("__pycache__" in f for f in files)
+        assert not any(f.startswith(".git/") for f in files)
+        assert not any(f.startswith("datasets_cache/") for f in files)
+        assert not any(f.endswith(".safetensors") for f in files)
+        # Sanity: at least the project's pyproject.toml is in there
+        assert "pyproject.toml" in files
 
     def test_ssh_key_path_is_valid(self):
         """Test that SSH_KEY_PATH points to expected location."""

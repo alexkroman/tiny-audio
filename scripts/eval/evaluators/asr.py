@@ -226,38 +226,29 @@ class EndpointEvaluator(Evaluator):
         from huggingface_hub import InferenceClient
 
         self.client = InferenceClient(base_url=endpoint_url)
-        self.temp_dir = tempfile.mkdtemp()
 
     def transcribe(self, audio) -> tuple[str, float]:
         wav_bytes = prepare_wav_bytes(audio)
-        temp_path = Path(self.temp_dir) / f"temp_{time.time_ns()}.wav"
-        temp_path.write_bytes(wav_bytes)
 
-        try:
-            start = time.time()
-            result = self.client.automatic_speech_recognition(str(temp_path))
-            elapsed = time.time() - start
+        start = time.time()
+        result = self.client.automatic_speech_recognition(wav_bytes)
+        elapsed = time.time() - start
 
-            if isinstance(result, dict):
-                text = result.get("text", result.get("transcription", ""))
-            elif hasattr(result, "text"):
-                text = result.text
-            else:
-                text = str(result)
-            return text, elapsed
-        finally:
-            temp_path.unlink(missing_ok=True)
-
-    def __del__(self):
-        import shutil
-
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        if isinstance(result, dict):
+            text = result.get("text", result.get("transcription", ""))
+        elif hasattr(result, "text"):
+            text = result.text
+        else:
+            text = str(result)
+        return text, elapsed
 
 
 class AssemblyAIEvaluator(Evaluator):
     """Evaluator for AssemblyAI API."""
 
-    def __init__(self, api_key: str, model: str = "slam_1", base_url: str | None = None, **kwargs):
+    def __init__(
+        self, api_key: str, model: str = "universal-3-pro", base_url: str | None = None, **kwargs
+    ):
         super().__init__(**kwargs)
         self.transcriber = setup_assemblyai(api_key, model, base_url=base_url)
 

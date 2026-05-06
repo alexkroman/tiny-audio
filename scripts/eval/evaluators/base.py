@@ -12,7 +12,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
 
 # AssemblyAI model options
-ASSEMBLYAI_MODELS = {"best", "universal", "slam_1", "nano"}
+ASSEMBLYAI_MODELS = {"best", "universal", "universal-3-pro"}
 
 
 def setup_assemblyai(
@@ -27,7 +27,8 @@ def setup_assemblyai(
     if model not in ASSEMBLYAI_MODELS:
         raise ValueError(f"Invalid model '{model}'. Choose from: {ASSEMBLYAI_MODELS}")
     config = aai.TranscriptionConfig(
-        speech_model=getattr(aai.types.SpeechModel, model), speaker_labels=speaker_labels
+        speech_models=[model],
+        speaker_labels=speaker_labels,
     )
     return aai.Transcriber(config=config)
 

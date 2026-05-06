@@ -4,21 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from tiny_audio.asr_config import compute_encoder_output_length
+
 AUDIO_TOKEN = "<audio>"
 TRANSCRIBE_PROMPT = "Transcribe the speech to text"
-
-
-def compute_encoder_output_length(
-    mel_length: int, encoder_conv_layers: list[tuple[int, int, int]]
-) -> int:
-    """Apply encoder conv layers in order. Each layer: out = (in + 2p - (k-1) - 1) // s + 1.
-
-    Default GLM-ASR conv layers: [(1, 3, 1), (1, 3, 2)] - kernel=3, padding=1, stride 1 then 2.
-    """
-    length = mel_length
-    for padding, kernel_size, stride in encoder_conv_layers:
-        length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
-    return length
 
 
 def compute_num_audio_tokens(

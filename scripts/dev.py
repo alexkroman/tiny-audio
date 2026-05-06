@@ -60,11 +60,20 @@ def format_code():
     run("ruff", "format", *CODE_PATHS)
     run("ruff", "check", "--fix", *CODE_PATHS)
 
-    md_excludes = (".venv", "docs/course", ".worktrees")
+    # Use git ls-files so we only format tracked markdown — naturally skips
+    # worktrees, build/cache/checkpoint dirs, and vendored docs that gitignore
+    # already excludes. (Pre-rglob version mis-handled `.claude/worktrees`,
+    # `swift/.build`, etc.)
+    tracked = subprocess.run(
+        ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
+    )
+    md_excludes = ("docs/course/",)
     md_files = [
-        str(f)
-        for f in Path().rglob("*.md")
-        if not any(part in str(f) for part in md_excludes) and f.name != "MODEL_CARD.md"
+        line
+        for line in tracked.stdout.splitlines()
+        if line
+        and not any(line.startswith(p) for p in md_excludes)
+        and Path(line).name != "MODEL_CARD.md"
     ]
     if md_files:
         run("mdformat", *md_files)
@@ -147,16 +156,45 @@ MUSAN_DEFAULT_DIR = Path.home() / ".cache" / "musan"
 
 
 def _extract_archive(archive_path: Path, target_dir: Path) -> None:
-    import tarfile
-    import zipfile
+    # Shell out to `unzip` / `tar`: 2-5x faster than Python's pure-Python
+    # zipfile / tarfile on archives with many small files (OpenSLR-28's ~60K
+    # simulated RIRs), and per-file stdout output makes long extractions
+    # visibly progressing instead of looking hung.
+    import shutil
+    import subprocess
 
     name = archive_path.name
     if name.endswith(".zip"):
-        with zipfile.ZipFile(archive_path) as zf:
-            zf.extractall(target_dir)  # nosec B202 - hardcoded openslr.org archives
+        # 7z extracts ZIP entries in parallel across cores, which is the win
+        # for OpenSLR-28's ~60K-file simulated_rirs payload. Falls back to
+        # single-threaded unzip when p7zip isn't installed.
+        if shutil.which("7z"):
+            subprocess.run(
+                ["7z", "x", "-y", f"-o{target_dir}", str(archive_path)],
+                check=True,
+            )
+        else:
+            subprocess.run(
+                ["unzip", "-o", str(archive_path), "-d", str(target_dir)],
+                check=True,
+            )
     elif name.endswith((".tar.gz", ".tgz")):
-        with tarfile.open(archive_path, "r:gz") as tf:
-            tf.extractall(target_dir)  # nosec B202 - hardcoded openslr.org archives
+        # pigz parallelizes gzip across cores; cuts MUSAN extract from ~15 min to ~3 min on RunPod.
+        # --no-same-owner: MUSAN's tar entries carry uid 60706:gid 21 (the maintainer's uid);
+        # restoring ownership fails in containers without that uid mapping. We don't need it.
+        decomp = "pigz" if shutil.which("pigz") else "gzip"
+        subprocess.run(
+            [
+                "tar",
+                f"--use-compress-program={decomp}",
+                "--no-same-owner",
+                "-xvf",
+                str(archive_path),
+                "-C",
+                str(target_dir),
+            ],
+            check=True,
+        )
     else:
         raise ValueError(f"Unsupported archive format: {name}")
 
@@ -194,7 +232,8 @@ def _http_download(url: str, dst: Path) -> None:
         if result.returncode == 0 and dst.exists():
             return
         console.print("[yellow]aria2c failed; falling back to urllib.[/yellow]")
-    with urllib.request.urlopen(url) as resp, dst.open("wb") as out:  # nosec B310 - hardcoded https URL
+    # urllib URL is a hardcoded https constant — bandit B310 false positive.
+    with urllib.request.urlopen(url) as resp, dst.open("wb") as out:  # nosec B310
         shutil.copyfileobj(resp, out)
 
 
@@ -215,7 +254,15 @@ def _download_corpus(
         console.print(f"[green]Already present:[/green] {sentinel} ({wav_count} .wav files)")
         return
 
-    target_dir.mkdir(parents=True, exist_ok=True)
+    # RunPod pins ~/.cache/<corpus> to /workspace/.cache/<corpus> via symlink.
+    # If /workspace got wiped between runs the symlink dangles, and
+    # `Path.mkdir(exist_ok=True)` raises FileExistsError on it (pathlib only
+    # swallows EEXIST when is_dir() is true, which broken symlinks fail).
+    # Resolve through and create the real target.
+    if target_dir.is_symlink() and not target_dir.exists():
+        target_dir.resolve().mkdir(parents=True, exist_ok=True)
+    else:
+        target_dir.mkdir(parents=True, exist_ok=True)
     archive_path = target_dir / archive_name
 
     console.print(f"[bold]Downloading[/bold] {url} -> {archive_path}")
@@ -311,11 +358,6 @@ def build_swift_weights(
         "--source-repo",
         help="Tiny-audio embedded checkpoint to load encoder + projector from.",
     ),
-    decoder_repo: str = typer.Option(
-        "Qwen/Qwen3-0.6B-MLX-4bit",
-        "--decoder-repo",
-        help="Upstream MLX decoder repo to mirror (weights, tokenizer, config).",
-    ),
     dest: Path = typer.Option(
         SWIFT_RESOURCES_MODEL_DIR,
         "--dest",
@@ -329,19 +371,31 @@ def build_swift_weights(
         "--target-repo",
         help="Hub repo to push to when --push is set.",
     ),
+    unquantized: bool = typer.Option(
+        False,
+        "--unquantized",
+        help=(
+            "Ship fp16 encoder + decoder weights with no quantization. "
+            "For Swift↔PyTorch equivalence testing — Swift's loader skips "
+            "quantize() when the bundle config has no quantization block."
+        ),
+    ),
 ):
-    """Build the MLX bundle (encoder + projector + mirrored decoder + manifest)
-    and install it into the Swift package so `Transcriber.load()` finds it.
+    """Build the MLX bundle (encoder + projector + decoder + manifest) and install
+    it into the Swift package so `Transcriber.load()` finds it.
 
     One command for the full Swift-weights build: re-quantizes the encoder,
-    re-saves the projector, mirrors the decoder/tokenizer/config from the
-    upstream Qwen MLX repo, writes config.json + manifest.json, and copies
-    everything into ``swift/Sources/TinyAudio/Resources/Model``. Pass --push
-    to also publish to the Hub.
+    re-saves the projector, extracts and mlx_lm-quantizes the decoder LM
+    from the source checkpoint at 8-bit / group_size=64 (same recipe for
+    both frozen-LM and full-decoder-fine-tune checkpoints), writes
+    config.json + manifest.json, and copies everything into
+    ``swift/Sources/TinyAudio/Resources/Model``. Pass --push to also publish
+    to the Hub.
     """
     import shutil
     import tempfile
 
+    from scripts.mlx.convert_decoder import convert_decoder
     from scripts.publish_mlx_bundle import build_bundle
 
     dest = dest.expanduser().resolve()
@@ -349,8 +403,25 @@ def build_swift_weights(
 
     with tempfile.TemporaryDirectory(prefix="tiny-audio-mlx-") as work_str:
         work = Path(work_str)
+
+        decoder_dir = work / "decoder-mlx"
+        if unquantized:
+            console.print(
+                f"[bold yellow]Converting decoder[/bold yellow] from {source_repo} "
+                f"(fp16, no quantization — equivalence-test mode)"
+            )
+        else:
+            console.print(f"[bold]Converting decoder[/bold] from {source_repo} (8-bit / group=64)")
+        convert_decoder(
+            checkpoint=source_repo,
+            out_dir=decoder_dir,
+            q_bits=8,
+            q_group_size=64,
+            quantize=not unquantized,
+        )
+
         console.print(f"[bold]Building bundle[/bold] in {work}")
-        build_bundle(work, source_repo, decoder_repo)
+        build_bundle(work, source_repo, str(decoder_dir), quantize=not unquantized)
 
         console.print(f"[bold]Installing[/bold] bundle into {dest}")
         for src in sorted(work.iterdir()):

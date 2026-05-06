@@ -267,9 +267,8 @@ class TestAssemblyAIModels:
         """Test that expected models are available."""
         assert "best" in ASSEMBLYAI_MODELS
         assert "universal" in ASSEMBLYAI_MODELS
-        assert "slam_1" in ASSEMBLYAI_MODELS
-        assert "nano" in ASSEMBLYAI_MODELS
+        assert "universal-3-pro" in ASSEMBLYAI_MODELS
 
     def test_model_count(self):
         """Test number of available models."""
-        assert len(ASSEMBLYAI_MODELS) == 4
+        assert len(ASSEMBLYAI_MODELS) == 3

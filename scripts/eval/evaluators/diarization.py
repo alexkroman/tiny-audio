@@ -231,7 +231,7 @@ class DiarizationEvaluator:
 class AssemblyAIDiarizationEvaluator(DiarizationEvaluator):
     """Evaluator for AssemblyAI speaker diarization."""
 
-    def __init__(self, api_key: str, model: str = "slam_1", **kwargs):
+    def __init__(self, api_key: str, model: str = "universal-3-pro", **kwargs):
         kwargs.pop("hf_token", None)
         super().__init__(**kwargs)
         self.transcriber = setup_assemblyai(api_key, model, speaker_labels=True)

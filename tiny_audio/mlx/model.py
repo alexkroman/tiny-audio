@@ -48,6 +48,12 @@ AudioInput = Union[str, np.ndarray, "list[float]"]
 # the trained Qwen/Qwen3-0.6B base used for fine-tuning.
 _DECODER_MLX_REPO = "Qwen/Qwen3-0.6B-MLX-4bit"
 
+# Encoder quantization (affine). Single source of truth: build_bundle reads
+# these to populate `config.json -> encoder.quantization`, and Swift's
+# Transcriber reads that same block to call `quantize()` with matching params.
+ENCODER_QUANT_BITS = 8
+ENCODER_QUANT_GROUP_SIZE = 64
+
 _EOS_TOKEN_STRINGS = ("<|im_end|>", "<|endoftext|>")
 
 
@@ -128,6 +134,7 @@ class MLXASRModel:
         repo_id_or_path: str,
         *,
         force_reconvert: bool = False,
+        quantize_encoder: bool = True,
     ) -> MLXASRModel:
         """Load a tiny-audio embedded checkpoint into an MLX inference pipeline.
 
@@ -214,11 +221,13 @@ class MLXASRModel:
 
         gc.collect()
 
-        # Quantize encoder to 4-bit in-place. mlx.nn.quantize transforms
-        # nn.Linear -> QuantizedLinear and quantizes existing weights.
-        import mlx.nn as mlx_nn
+        # Quantize encoder in-place unless caller requested fp16 weights
+        # (used for Swift↔PyTorch equivalence testing). mlx.nn.quantize
+        # transforms nn.Linear -> QuantizedLinear and quantizes existing weights.
+        if quantize_encoder:
+            import mlx.nn as mlx_nn
 
-        mlx_nn.quantize(encoder, group_size=64, bits=4)
+            mlx_nn.quantize(encoder, group_size=ENCODER_QUANT_GROUP_SIZE, bits=ENCODER_QUANT_BITS)
 
         # 7. Build projector and load trained weights.
         projector = MLXMLPProjector(

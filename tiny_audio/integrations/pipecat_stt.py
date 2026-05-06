@@ -56,7 +56,7 @@ class TinyAudioSTTService(SegmentedSTTService):
         """Lazy-load the model on first use."""
         if self._model is None:
             try:
-                from tiny_audio import ASRModel  # pyright: ignore[reportMissingImports]
+                from tiny_audio.asr_modeling import ASRModel
             except ImportError:
                 # Fallback for local development
                 import sys
@@ -65,7 +65,7 @@ class TinyAudioSTTService(SegmentedSTTService):
                 src_path = Path(__file__).parent.parent
                 if str(src_path) not in sys.path:
                     sys.path.insert(0, str(src_path))
-                from asr_modeling import ASRModel
+                from asr_modeling import ASRModel  # type: ignore[no-redef]
 
             # Determine device: MPS > CUDA > CPU
             if self._device is None:

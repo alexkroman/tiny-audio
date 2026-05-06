@@ -330,7 +330,7 @@ class AssemblyAIAlignmentEvaluator(BaseAlignmentEvaluator):
     def __init__(
         self,
         api_key: str,
-        model: str = "slam_1",
+        model: str = "universal-3-pro",
         audio_field: str = "audio",
         text_field: str = "transcript",
         words_field: str = "words",

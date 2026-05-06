@@ -1,7 +1,6 @@
 """Audio utilities and text normalization for ASR evaluation."""
 
 import io
-import re
 
 import numpy as np
 import soundfile as sf
@@ -65,11 +64,18 @@ class TextNormalizer:
     - Number normalization ("three" <-> "3")
     - British to American spelling ("colour" -> "color")
     - Disfluency removal ("uh", "um", "hmm")
-    - Tag removal ("<inaudible>", etc.)
+    - Tag removal ("<inaudible>", "<COMMA>", etc.)
+    - Contraction expansion: "don't" -> "do not", "we'd" -> "we would",
+      and ALL "'s" -> " is" (which incorrectly mangles possessives:
+      "john's car" -> "john is car"). This is a known Whisper limitation;
+      since both reference and prediction get the same treatment, WER stays
+      symmetric. Don't try to "fix" by re-expanding "'s" — that's a no-op
+      because Whisper has already done it.
 
-    Additional normalizations:
+    Additional project-level fixes (Whisper leaves these alone):
     - "okay" -> "ok"
     - "all right" -> "alright"
+    - "kinda" -> "kind of"
     """
 
     def __init__(self):
@@ -87,4 +93,4 @@ class TextNormalizer:
         text = self._normalizer(text)
         for src, dst in self._SPELLING_FIXES.items():
             text = text.replace(src, dst)
-        return re.sub(r"'s\b", " is", text)
+        return text

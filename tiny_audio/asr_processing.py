@@ -5,9 +5,13 @@ import transformers
 from transformers import ProcessorMixin
 
 try:
-    from .asr_config import DEFAULT_ENCODER_CONV_LAYERS, ASRConfig
+    from .asr_config import DEFAULT_ENCODER_CONV_LAYERS, ASRConfig, compute_encoder_output_length
 except ImportError:
-    from asr_config import DEFAULT_ENCODER_CONV_LAYERS, ASRConfig  # type: ignore[no-redef]
+    from asr_config import (  # type: ignore[no-redef]
+        DEFAULT_ENCODER_CONV_LAYERS,
+        ASRConfig,
+        compute_encoder_output_length,
+    )
 
 
 class ASRProcessor(ProcessorMixin):
@@ -42,10 +46,7 @@ class ASRProcessor(ProcessorMixin):
 
     def _compute_encoder_output_length(self, mel_length: int) -> int:
         """Compute encoder output length using conv layer formulas."""
-        length = mel_length
-        for padding, kernel_size, stride in self.encoder_conv_layers:
-            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
-        return length
+        return compute_encoder_output_length(mel_length, self.encoder_conv_layers)
 
     def __call__(
         self,

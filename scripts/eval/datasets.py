@@ -52,6 +52,13 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         audio_field="audio",
         text_field="text",
     ),
+    "ami-sdm": DatasetConfig(
+        name="ami-sdm",
+        path="edinburghcstr/ami",
+        config="sdm",
+        audio_field="audio",
+        text_field="text",
+    ),
     "gigaspeech": DatasetConfig(
         name="gigaspeech",
         path="fixie-ai/gigaspeech",
@@ -59,6 +66,14 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         audio_field="audio",
         text_field="text",
         default_split="dev",
+    ),
+    "spgispeech": DatasetConfig(
+        name="spgispeech",
+        path="kensho/spgispeech",
+        config="test",
+        audio_field="audio",
+        text_field="transcript",
+        default_split="test",
     ),
     "tedlium": DatasetConfig(
         name="tedlium",
@@ -80,6 +95,20 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         config="clean",
         audio_field="audio",
         text_field="text",
+    ),
+    "voxpopuli": DatasetConfig(
+        name="voxpopuli",
+        path="facebook/voxpopuli",
+        config="en",
+        audio_field="audio",
+        text_field="normalized_text",
+    ),
+    "switchboard": DatasetConfig(
+        name="switchboard",
+        path="hhoangphuoc/switchboard",
+        audio_field="audio",
+        text_field="transcript",
+        default_split="validation",
     ),
     "librispeech": DatasetConfig(
         name="librispeech",

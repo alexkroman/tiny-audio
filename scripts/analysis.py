@@ -10,7 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from scripts.utils import find_model_dirs, parse_results_file
+from scripts.utils import _extract_model_from_dir, find_model_dirs, parse_results_file
 
 app = typer.Typer(help="Analysis tools for ASR evaluation results")
 console = Console()
@@ -36,13 +36,7 @@ def extract_dataset_name(dir_name: str) -> str:
     return dataset
 
 
-def extract_model_name(dir_name: str) -> str:
-    """Extract model name from output directory name.
-
-    Format: {timestamp}_{model}_{dataset}[_suffix]
-    """
-    parts = dir_name.split("_")
-    return parts[2] if len(parts) >= 3 else "unknown"
+extract_model_name = _extract_model_from_dir
 
 
 def normalize_text(text: str) -> str:
@@ -103,7 +97,9 @@ def high_wer(
     ),
     exclude: list[str] = typer.Option([], help="Patterns to exclude"),
     latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
-    output_file: Path = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
+    output_file: Path | None = typer.Option(
+        None, "--output", "-o", help="Output file (default: stdout)"
+    ),
 ):
     """Output ground truth and predictions for samples with WER above threshold."""
     model_dirs = find_model_dirs(output_dir, model, exclude, latest=latest)
@@ -174,7 +170,9 @@ def entity_errors(
     entity_type: str = typer.Option(
         "", "--type", "-t", help="Filter by entity type (e.g., PERSON, ORG)"
     ),
-    output_file: Path = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
+    output_file: Path | None = typer.Option(
+        None, "--output", "-o", help="Output file (default: stdout)"
+    ),
 ):
     """Output samples where entities were missed in the prediction."""
     # Load keywords file
@@ -329,6 +327,7 @@ DATASET_ORDER = [
     "ami",
     "gigaspeech",
     "commonvoice",
+    "voxpopuli",
     "loquacious",
     "librispeech-other",
     "tedlium",
@@ -351,6 +350,7 @@ DATASET_SHORT_NAMES = {
     "ami": "AMI",
     "gigaspeech": "Gigaspeech",
     "commonvoice": "CV",
+    "voxpopuli": "VoxPopuli",
     "loquacious": "Loquacious",
     "librispeech-other": "LS Other",
     "tedlium": "Tedlium",

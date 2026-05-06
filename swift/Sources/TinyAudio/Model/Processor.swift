@@ -23,34 +23,6 @@ enum Processor {
     let suffixIds: [Int32]
   }
 
-  /// Apply the encoder's conv layers in order. Each layer:
-  ///   `out = (in + 2p - (k-1) - 1) / s + 1`
-  /// Default GLM-ASR conv layers: `[(p=1, k=3, s=1), (p=1, k=3, s=2)]`.
-  static func encoderOutputLength(
-    melLength: Int,
-    convLayers: [(padding: Int, kernel: Int, stride: Int)]
-  ) -> Int {
-    var len = melLength
-    for layer in convLayers {
-      len = (len + 2 * layer.padding - (layer.kernel - 1) - 1) / layer.stride + 1
-    }
-    return len
-  }
-
-  /// Total number of `<audio>` placeholder tokens for a given audio length.
-  /// Pipeline: audio_len → mel_frames (audio_len / hop_length) → encoder_frames
-  /// (conv formula) → projector_output_length.
-  static func numAudioTokens(
-    audioLength: Int,
-    convLayers: [(padding: Int, kernel: Int, stride: Int)],
-    projector: MLPProjector,
-    hopLength: Int = 160
-  ) -> Int {
-    let melLen = audioLength / hopLength
-    let encLen = encoderOutputLength(melLength: melLen, convLayers: convLayers)
-    return projector.outputLength(encLen)
-  }
-
   /// Tokenize the constant chat-template prefix and suffix once. Audio
   /// embeddings sit between them; the full sequence is
   /// `prefix ++ <audio>×N ++ suffix`.

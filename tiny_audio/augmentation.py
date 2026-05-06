@@ -11,8 +11,10 @@ mostly on close-talk audio. Two backends:
     image-source method (CPU, pure-Python — no CUDA toolchain). Faster to
     set up, slightly less realistic.
 
-NoiseAugmentation adds synthetic colored noise via torch-audiomentations
-and works on CPU.
+NoiseAugmentation mixes background noise from a corpus (MUSAN / OpenSLR /
+WHAM!) at random SNR. Optionally biases draws toward MUSAN/speech (babble),
+the most ASR-relevant noise type, and convolves the noise with an RIR before
+mixing so it shares the room response with the clean signal (NeMo recipe).
 
 Apply both via dataset.with_transform on the train split. They're decoupled
 so either can be enabled independently. RIR runs first (waveform shaping),
@@ -52,6 +54,53 @@ def _resolve_corpus_roots(corpus_path: str | Sequence[str], hint: str = "") -> l
             raise FileNotFoundError(msg)
         roots.append(root)
     return roots
+
+
+class PhoneBandwidthAugmentation:
+    """Simulate narrowband telephony by resampling 16 kHz → 8 kHz → 16 kHz.
+
+    The trip through 8 kHz strips everything above 4 kHz (Nyquist) — exactly
+    the bandwidth limit of G.711 / GSM phone calls. Closes the WER gap on
+    Switchboard, real-call tests, and any narrowband-encoded audio. Standard
+    addition in modern ASR augmentation recipes (NeMo Canary, AssemblyAI
+    Universal, Whisper-v3 fine-tunes). Should run AFTER room / noise so the
+    bandwidth limit applies to the already-mixed signal.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        narrowband_rate: int = 8000,
+        prob: float = 0.2,
+    ):
+        if not 0.0 <= prob <= 1.0:
+            raise ValueError(f"prob must be in [0, 1], got {prob}")
+        if narrowband_rate >= sample_rate:
+            raise ValueError(
+                f"narrowband_rate ({narrowband_rate}) must be < sample_rate ({sample_rate})"
+            )
+        self.sample_rate = sample_rate
+        self.narrowband_rate = narrowband_rate
+        self.prob = prob
+
+    def __call__(self, audio: np.ndarray) -> np.ndarray:
+        if random.random() > self.prob:
+            return audio
+        in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
+        audio_t = torch.from_numpy(_to_mono_float32(audio))
+        if audio_t.numel() == 0:
+            return audio
+        narrow = taf.resample(audio_t, self.sample_rate, self.narrowband_rate)
+        wide = taf.resample(narrow, self.narrowband_rate, self.sample_rate)
+        # Resample is rate-conversion-exact but two passes can drift the sample
+        # count by ±1; trim/pad to the original length so downstream tensor
+        # shapes line up exactly with the un-augmented path.
+        n = audio_t.shape[-1]
+        if wide.shape[-1] >= n:
+            wide = wide[..., :n]
+        else:
+            wide = torch.nn.functional.pad(wide, (0, n - wide.shape[-1]))
+        return wide.numpy().astype(in_dtype)
 
 
 class RIRAugmentation:
@@ -222,8 +271,18 @@ class RIRAugmentation:
         if n == 0:
             return audio
 
+        in_rms = float(torch.sqrt(torch.mean(audio_t**2)))
+
         rir = random.choice(self.rirs)
         out = taf.fftconvolve(audio_t, rir, mode="full")[:n]
+
+        # L2-normalized RIRs still attenuate RMS in time, so reverbed clips
+        # end up quieter than the input. Restore level so downstream SNR /
+        # gain decisions see a consistent distribution (NeMo / Canary recipe).
+        out_rms = float(torch.sqrt(torch.mean(out**2)))
+        if in_rms > 1e-8 and out_rms > 1e-8:
+            out = out * (in_rms / out_rms)
+
         peak = float(out.abs().max())
         if peak > 1.0:
             out = out / peak
@@ -242,6 +301,11 @@ class NoiseAugmentation:
         white / pink / blue / violet noise at random SNR. Cheap, no corpus,
         but lacks real-world temporal / spectral structure.
 
+    ``babble_weight`` biases corpus draws toward MUSAN/speech (multi-talker
+    babble) — the most ASR-relevant noise texture and the closest analogue to
+    People's Speech / CommonVoice / Earnings22 backgrounds. Paths under any
+    ``speech/`` subdirectory in the corpus are treated as the babble pool.
+
     Accepts/returns numpy arrays so it can be chained with
     :class:`RIRAugmentation` in the dataloader transform pipeline.
     """
@@ -253,12 +317,18 @@ class NoiseAugmentation:
         min_snr_db: float = 0.0,
         max_snr_db: float = 25.0,
         corpus_path: str | Sequence[str] | None = None,
+        babble_weight: float = 0.0,
     ):
         self.sample_rate = sample_rate
         self.prob = prob
         self.min_snr_db = min_snr_db
         self.max_snr_db = max_snr_db
+        self.babble_weight = float(babble_weight)
+        if not 0.0 <= self.babble_weight <= 1.0:
+            raise ValueError(f"babble_weight must be in [0, 1], got {babble_weight}")
         self.noise_paths: list[Path] | None = None
+        self.babble_paths: list[Path] = []
+        self.non_babble_paths: list[Path] = []
         self.augment = None
 
         if corpus_path is not None:
@@ -271,6 +341,15 @@ class NoiseAugmentation:
             self.noise_paths = sorted(collected)
             if not self.noise_paths:
                 raise ValueError(f"No .wav files found under {[str(r) for r in roots]}")
+            for p in self.noise_paths:
+                if any(part == "speech" for part in p.parts):
+                    self.babble_paths.append(p)
+                else:
+                    self.non_babble_paths.append(p)
+            # If the corpus has no babble pool, silently disable weighting —
+            # better than raising on an otherwise-valid noise corpus.
+            if not self.babble_paths:
+                self.babble_weight = 0.0
         else:
             try:
                 from torch_audiomentations import AddColoredNoise
@@ -323,27 +402,51 @@ class NoiseAugmentation:
             arr = np.tile(arr, repeats)
         return arr[:n_target]
 
-    def _mix_corpus_noise(self, audio: np.ndarray) -> np.ndarray:
-        n = audio.shape[-1]
-        # Retry a few files: MUSAN occasionally has unreadable / zero-length
-        # entries; fail soft to clean signal if every attempt fails.
+    def _pick_noise_path(self) -> Path:
+        # Bias toward MUSAN/speech (babble) when available; this is the most
+        # ASR-relevant noise type and otherwise gets undersampled (~14% of
+        # MUSAN files are under speech/).
+        if self.babble_weight > 0.0 and self.babble_paths and random.random() < self.babble_weight:
+            return random.choice(self.babble_paths)
+        if self.babble_weight > 0.0 and self.non_babble_paths:
+            return random.choice(self.non_babble_paths)
+        return random.choice(self.noise_paths)
+
+    def _try_read_random_noise(self, num_samples: int) -> np.ndarray | None:
+        """Pick + read a random noise segment, retrying past unreadable files.
+
+        MUSAN occasionally has zero-length or otherwise broken entries; up to
+        three picks before giving up. Returns None when the corpus is
+        exhausted of usable picks for this attempt.
+        """
         for _ in range(3):
-            path = random.choice(self.noise_paths)
+            path = self._pick_noise_path()
             try:
-                noise = self._read_noise_segment(path, n)
+                noise = self._read_noise_segment(path, num_samples)
             except (RuntimeError, OSError, sf.LibsndfileError):
                 continue
-            if noise is None:
-                continue
-            signal_rms = float(np.sqrt(np.mean(audio**2)))
-            noise_rms = float(np.sqrt(np.mean(noise**2)))
-            if signal_rms < 1e-8 or noise_rms < 1e-8:
-                return audio
-            snr_db = random.uniform(self.min_snr_db, self.max_snr_db)
-            target_noise_rms = signal_rms / (10 ** (snr_db / 20))
-            noise = noise * (target_noise_rms / noise_rms)
-            return audio + noise.astype(audio.dtype)
-        return audio
+            if noise is not None:
+                return noise
+        return None
+
+    def _mix_corpus_noise(self, audio: np.ndarray) -> np.ndarray:
+        noise = self._try_read_random_noise(audio.shape[-1])
+        if noise is None:
+            return audio
+        signal_rms = float(np.sqrt(np.mean(audio**2)))
+        noise_rms = float(np.sqrt(np.mean(noise**2)))
+        if signal_rms < 1e-8 or noise_rms < 1e-8:
+            return audio
+        snr_db = random.uniform(self.min_snr_db, self.max_snr_db)
+        target_noise_rms = signal_rms / (10 ** (snr_db / 20))
+        noise = noise * (target_noise_rms / noise_rms)
+        mixed = audio + noise.astype(audio.dtype)
+        # Float32 won't physically clip, but downstream mel extraction expects
+        # in-range samples — renormalize if mixing pushed the peak above 1.0.
+        peak = float(np.abs(mixed).max())
+        if peak > 1.0:
+            mixed = mixed / peak
+        return mixed
 
     def __call__(self, audio: np.ndarray) -> np.ndarray:
         in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
@@ -357,3 +460,18 @@ class NoiseAugmentation:
         audio_t = torch.from_numpy(_to_mono_float32(audio)).unsqueeze(0).unsqueeze(0)
         out = self.augment(audio_t).samples
         return out.squeeze(0).squeeze(0).numpy().astype(in_dtype)
+
+    def sample_noise_only(self, num_samples: int) -> np.ndarray | None:
+        """Return a noise-only clip of ``num_samples`` length, or None on failure.
+
+        Used for silence-injection training: pairs a non-speech audio sample
+        with an empty transcription so the model learns "no speech → emit
+        nothing" instead of backchanneling on silent / non-speech segments.
+        Returns None when no corpus is configured — the synthetic
+        ``AddColoredNoise`` backend has no concept of "noise-only" since it's
+        already additive.
+        """
+        if self.noise_paths is None or num_samples <= 0:
+            return None
+        noise = self._try_read_random_noise(num_samples)
+        return None if noise is None else noise.astype(np.float32)

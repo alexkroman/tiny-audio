@@ -4,12 +4,14 @@
 import contextlib
 import os
 import random
+import re
 from dataclasses import fields
 from typing import Any
 
 os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
 
 import hydra
+import numpy as np
 import torch
 import wandb
 from datasets import (
@@ -27,14 +29,59 @@ from transformers import (
     TrainerCallback,
     TrainingArguments,
 )
-from trl.experimental.utils import DataCollatorForChatML
+from trl.experimental.utils import DataCollatorForChatML  # pyright: ignore[reportMissingImports]
 
-from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_config import (
+    DEFAULT_ENCODER_CONV_LAYERS,
+    ASRConfig,
+    compute_encoder_output_length,
+)
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation
+from tiny_audio.augmentation import (
+    NoiseAugmentation,
+    PhoneBandwidthAugmentation,
+    RIRAugmentation,
+)
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
+
+# Markers that pollute training labels but are absent from corresponding
+# eval splits. Gigaspeech ships <comma>/<period>/etc. in ~55% of train rows
+# and zero in dev. TEDLIUM ships <unk> in ~92% of train rows and zero in
+# validation/test. Stripping is safe across all corpora — these are ASR
+# annotation conventions, never literal user-intended words.
+_CORPUS_MARKER_RE = re.compile(
+    r"\s*<(comma|period|exclamationpoint|questionmark|sil|music|noise|other|unk)>",
+    re.IGNORECASE,
+)
+# TEDLIUM occasionally inlines editorial commentary in square brackets
+# ([ medicine ], [ multi-word stage direction ]) — ~0.25% of train rows;
+# zero in dev/test. Strip the entire bracketed block, including any
+# preceding whitespace, to avoid leaving a double-space behind.
+_TEDLIUM_BRACKET_RE = re.compile(r"\s*\[[^\]]*\]")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_label(raw_text: str) -> str:
+    """Canonicalize a training transcript label.
+
+    Mirrors the percent rule from scripts/analysis.py:normalize_text so train
+    and eval agree on canonical surface form for percent values, and strips
+    annotation markers that pollute train rows while being absent from the
+    matching eval splits.
+
+    Order matters: lowercase first (so the IGNORECASE on markers is belt-and-
+    suspenders), strip angle-bracket markers (consuming any preceding
+    whitespace so we don't leave double-spaces), strip TEDLIUM editorial
+    brackets (same whitespace handling), then canonicalize percent, then
+    collapse whitespace, then strip ends.
+    """
+    text = (raw_text or "").strip().lower()
+    text = _CORPUS_MARKER_RE.sub("", text)
+    text = _TEDLIUM_BRACKET_RE.sub("", text)
+    text = text.replace("%", " percent").replace("per cent", "percent")
+    return _WHITESPACE_RE.sub(" ", text).strip()
 
 
 class DatasetLoader:
@@ -176,8 +223,6 @@ class DatasetLoader:
 class DataCollator:
     """Collates audio and text data for training."""
 
-    DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
-
     def __init__(
         self,
         tokenizer: Any,
@@ -192,7 +237,7 @@ class DataCollator:
         self.sample_rate = sample_rate
         self.system_prompt = system_prompt
         self.projector = projector
-        self.encoder_conv_layers = encoder_conv_layers or self.DEFAULT_ENCODER_CONV_LAYERS
+        self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
         # Whisper's encoder requires a fixed 3000 mel frames; other encoders
         # (GLM-ASR) accept variable-length input, so only pad to longest.
         self._audio_padding = (
@@ -201,12 +246,6 @@ class DataCollator:
             else "longest"
         )
         self.text_collator = DataCollatorForChatML(tokenizer=tokenizer, max_length=2048)
-
-    def _compute_encoder_output_length(self, mel_length: int) -> int:
-        length = mel_length
-        for padding, kernel_size, stride in self.encoder_conv_layers:
-            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
-        return length
 
     def _extract_audio_arrays(self, features):
         audio_arrays = []
@@ -219,6 +258,17 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
+                # Drop samples that would poison the gradient: empty audio,
+                # NaN/Inf samples (encoding glitches in community datasets),
+                # or empty text labels (would yield 0/0 loss under label
+                # smoothing). One bad sample is enough to NaN the optimizer
+                # state and every subsequent step.
+                if audio.size == 0:
+                    continue
+                if not np.isfinite(audio).all():
+                    continue
+                if not (f.get("text") or "").strip():
+                    continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
             except Exception:
@@ -231,7 +281,7 @@ class DataCollator:
 
     def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
         """Build a single chat sample. Subclasses can override for task-specific prompts."""
-        text = (feature.get("text") or "").strip().lower()
+        text = _normalize_label(feature.get("text") or "")
         return self._make_messages(num_audio_tokens, random.choice(TRANSCRIBE_PROMPTS), text)
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
@@ -255,10 +305,9 @@ class DataCollator:
         )
 
         mel_lengths = audio_out.attention_mask.sum(dim=-1)
-        audio_token_counts = [
-            self.projector.get_output_length(self._compute_encoder_output_length(int(m.item())))
-            for m in mel_lengths
-        ]
+        encoder_lengths = compute_encoder_output_length(mel_lengths, self.encoder_conv_layers)
+        token_counts_tensor = self.projector.get_output_length(encoder_lengths).to(torch.long)
+        audio_token_counts = token_counts_tensor.tolist()
 
         text_features = [
             self._build_sample(f, n) for f, n in zip(valid_features, audio_token_counts)
@@ -267,29 +316,16 @@ class DataCollator:
         batch = self.text_collator(text_features)
         batch["input_features"] = audio_out.input_features
         batch["audio_attention_mask"] = audio_out.attention_mask
-        batch["audio_token_counts"] = torch.tensor(audio_token_counts, dtype=torch.long)
+        batch["audio_token_counts"] = token_counts_tensor
         return batch
 
 
 class MultiTaskDataCollator(DataCollator):
     """Collates audio and text data for multi-task ASR + SIFT training."""
 
-    def __init__(
-        self,
-        tokenizer: Any,
-        feature_extractor: Any,
-        sample_rate: int,
-        projector: Any = None,
-        encoder_conv_layers: list = None,
-    ):
-        super().__init__(
-            tokenizer=tokenizer,
-            feature_extractor=feature_extractor,
-            sample_rate=sample_rate,
-            system_prompt="",
-            projector=projector,
-            encoder_conv_layers=encoder_conv_layers,
-        )
+    def __init__(self, *args, **kwargs):
+        kwargs["system_prompt"] = ""
+        super().__init__(*args, **kwargs)
 
     def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
         if feature.get("task") == "sift":
@@ -309,11 +345,31 @@ class ASRTrainer(Trainer):
         *args,
         decoder_learning_rate: float | None = None,
         decoder_weight_decay: float | None = None,
+        eos_loss_weight: float = 1.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.decoder_learning_rate = decoder_learning_rate
         self.decoder_weight_decay = decoder_weight_decay
+        self.eos_loss_weight = float(eos_loss_weight)
+        # Vocab size depends on the tokenizer resize for <audio>, so the
+        # weight tensor is built on first compute_loss call. Cache key is
+        # (device, dtype) — autocast/Accelerate may move logits across
+        # devices or dtypes mid-run.
+        self._ce_class_weights: torch.Tensor | None = None
+        self._ce_class_weights_key: tuple | None = None
+        self._eos_token_ids: list[int] = []
+        if self.eos_loss_weight != 1.0:
+            eos_ids = getattr(self.model.generation_config, "eos_token_id", None)
+            if isinstance(eos_ids, int):
+                self._eos_token_ids = [eos_ids]
+            elif eos_ids:
+                self._eos_token_ids = list(eos_ids)
+            if not self._eos_token_ids:
+                raise ValueError(
+                    "eos_loss_weight != 1.0 but model.generation_config.eos_token_id "
+                    "is empty; ASRModel._init_tokenizer should have populated it."
+                )
 
     def create_optimizer(self):
         """Optimizer with separate LR / weight decay for the language model.
@@ -372,7 +428,23 @@ class ASRTrainer(Trainer):
         to decide whether to shift labels. Since ASRModel isn't in that mapping,
         it incorrectly uses shift_labels=False, causing misaligned predictions.
         This override forces shift_labels=True for correct causal LM behavior.
+
+        When ``eos_loss_weight`` ≠ 1.0, computes a class-weighted cross-entropy
+        directly on outputs.logits, up-weighting the EOS-class contribution so
+        the model learns confident stops. Mutually exclusive with HF's
+        label_smoother (which would double-handle the loss); training fails
+        early in __init__ if both are configured.
+
+        `num_items_in_batch` is part of HF Trainer's compute_loss signature
+        (newer transformers versions pass it for gradient-accumulation token
+        counting). We don't need it here, but the kwarg name has to match
+        Trainer's call, so we keep it on the signature and ignore it.
         """
+        del num_items_in_batch  # Trainer-signature compatibility; unused here.
+
+        if self.eos_loss_weight != 1.0:
+            return self._compute_eos_weighted_loss(model, inputs, return_outputs)
+
         labels = (
             inputs.pop("labels") if self.label_smoother is not None and "labels" in inputs else None
         )
@@ -386,6 +458,56 @@ class ASRTrainer(Trainer):
         else:
             loss = outputs.loss
 
+        return (loss, outputs) if return_outputs else loss
+
+    def _compute_eos_weighted_loss(self, model, inputs, return_outputs):
+        """Class-weighted CE that boosts the EOS-token gradient.
+
+        Pops labels before forward to suppress HF's internal CE, runs the
+        weighted CE on outputs.logits, then re-adds projector aux loss
+        (MoSA / MoE) that ASRModel.forward would normally fold in via
+        outputs.loss but skips when labels are absent.
+        """
+        labels = inputs.pop("labels", None)
+        if labels is None:
+            outputs = model(**inputs)
+            loss = outputs.loss
+            return (loss, outputs) if return_outputs else loss
+
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        cache_key = (logits.device, logits.dtype)
+        if self._ce_class_weights is None or self._ce_class_weights_key != cache_key:
+            vocab_size = logits.size(-1)
+            weights = torch.ones(vocab_size, dtype=logits.dtype, device=logits.device)
+            for tid in self._eos_token_ids:
+                if 0 <= tid < vocab_size:
+                    weights[tid] = self.eos_loss_weight
+            self._ce_class_weights = weights
+            self._ce_class_weights_key = cache_key
+
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous().to(logits.device)
+        loss_fct = torch.nn.CrossEntropyLoss(
+            weight=self._ce_class_weights,
+            ignore_index=-100,
+        )
+        loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+        )
+
+        projector = getattr(model, "projector", None)
+        if projector is not None and hasattr(projector, "get_aux_loss"):
+            aux_loss = projector.get_aux_loss()
+            if aux_loss is not None and aux_loss.numel() > 0:
+                loss = loss + aux_loss.to(loss.device)
+
+        if self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
+
+        outputs.loss = loss
         return (loss, outputs) if return_outputs else loss
 
 
@@ -417,8 +539,6 @@ def get_valid_training_args(config: dict) -> dict:
 
 
 TRAINING_MODEL_PARAMS = [
-    "label_smoothing",
-    "projector_dropout",
     "use_specaugment",
     "num_time_masks",
     "time_mask_length",
@@ -480,44 +600,86 @@ def main(cfg: DictConfig) -> None:
     train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
 
     augmentations: list = []
+
+    rir_aug: RIRAugmentation | None = None
     rir_cfg = cfg.training.get("rir_augmentation") or {}
     if rir_cfg.get("enabled"):
-        augmentations.append(
-            RIRAugmentation(
-                sample_rate=cfg.data.sample_rate,
-                prob=rir_cfg.get("prob", 0.5),
-                pool_size=rir_cfg.get("pool_size", 2048),
-                corpus_path=rir_cfg.get("corpus_path"),
-                room_x_range=tuple(rir_cfg.get("room_x_range", [3.0, 10.0])),
-                room_y_range=tuple(rir_cfg.get("room_y_range", [3.0, 10.0])),
-                room_z_range=tuple(rir_cfg.get("room_z_range", [2.4, 4.0])),
-                t60_range=tuple(rir_cfg.get("t60_range", [0.1, 1.0])),
-                seed=rir_cfg.get("seed"),
-            )
+        rir_aug = RIRAugmentation(
+            sample_rate=cfg.data.sample_rate,
+            prob=rir_cfg.get("prob", 0.5),
+            pool_size=rir_cfg.get("pool_size", 2048),
+            corpus_path=rir_cfg.get("corpus_path"),
+            room_x_range=tuple(rir_cfg.get("room_x_range", [3.0, 10.0])),
+            room_y_range=tuple(rir_cfg.get("room_y_range", [3.0, 10.0])),
+            room_z_range=tuple(rir_cfg.get("room_z_range", [2.4, 4.0])),
+            t60_range=tuple(rir_cfg.get("t60_range", [0.1, 1.0])),
+            seed=rir_cfg.get("seed"),
         )
+        augmentations.append(rir_aug)
 
+    noise_aug: NoiseAugmentation | None = None
     noise_cfg = cfg.training.get("noise_augmentation") or {}
     if noise_cfg.get("enabled"):
+        noise_aug = NoiseAugmentation(
+            sample_rate=cfg.data.sample_rate,
+            prob=noise_cfg.get("prob", 0.5),
+            min_snr_db=noise_cfg.get("min_snr_db", 0.0),
+            max_snr_db=noise_cfg.get("max_snr_db", 25.0),
+            corpus_path=noise_cfg.get("corpus_path"),
+            babble_weight=noise_cfg.get("babble_weight", 0.0),
+        )
+        augmentations.append(noise_aug)
+
+    # Phone bandwidth simulates how audio gets degraded after capture
+    # (downsampled to 8 kHz on phone calls). Runs AFTER room/noise so the
+    # channel applies to the already-mixed signal.
+    bandwidth_cfg = cfg.training.get("phone_bandwidth_augmentation") or {}
+    if bandwidth_cfg.get("enabled"):
         augmentations.append(
-            NoiseAugmentation(
+            PhoneBandwidthAugmentation(
                 sample_rate=cfg.data.sample_rate,
-                prob=noise_cfg.get("prob", 0.5),
-                min_snr_db=noise_cfg.get("min_snr_db", 0.0),
-                max_snr_db=noise_cfg.get("max_snr_db", 25.0),
-                corpus_path=noise_cfg.get("corpus_path"),
+                narrowband_rate=bandwidth_cfg.get("narrowband_rate", 8000),
+                prob=bandwidth_cfg.get("prob", 0.2),
             )
         )
 
-    if augmentations:
+    silence_injection_prob = float(cfg.training.get("silence_injection_prob", 0.0))
+    if silence_injection_prob > 0.0 and noise_aug is None:
+        raise ValueError(
+            "silence_injection_prob > 0 requires noise_augmentation.enabled "
+            "(the MUSAN corpus is the source of noise-only samples)."
+        )
+
+    if augmentations or silence_injection_prob > 0.0:
 
         def _apply_aug(batch):
             audios = batch.get("audio") or []
-            for a in audios:
-                if a and "array" in a:
-                    arr = a["array"]
-                    for aug in augmentations:
-                        arr = aug(arr)
-                    a["array"] = arr
+            texts = batch.get("text")
+            n_texts = len(texts) if texts is not None else 0
+            for i, a in enumerate(audios):
+                if not a or "array" not in a:
+                    continue
+                arr = a["array"]
+                # Silence injection: replace audio with a MUSAN noise clip and
+                # clear text. Targets the AMI backchannel hallucinations
+                # ("yeah" / "huh" on empty GT) by teaching the model to emit
+                # only EOS on non-speech. Falls through to the rest of the
+                # augmentation chain so RIR + phone-bandwidth still apply —
+                # at inference, real silence has been through a room and a
+                # codec, and the training distribution should match.
+                if (
+                    silence_injection_prob > 0.0
+                    and noise_aug is not None
+                    and i < n_texts
+                    and random.random() < silence_injection_prob
+                ):
+                    noise = noise_aug.sample_noise_only(arr.shape[-1])
+                    if noise is not None:
+                        arr = noise.astype(arr.dtype)
+                        texts[i] = ""
+                for aug in augmentations:
+                    arr = aug(arr)
+                a["array"] = arr
             return batch
 
         train_dataset = train_dataset.with_transform(_apply_aug)

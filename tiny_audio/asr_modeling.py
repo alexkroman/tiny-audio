@@ -17,10 +17,10 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 try:
-    from .asr_config import ASRConfig
+    from .asr_config import ASRConfig, compute_encoder_output_length
     from .projectors import PROJECTOR_CLASSES
 except ImportError:
-    from asr_config import ASRConfig  # type: ignore[no-redef]
+    from asr_config import ASRConfig, compute_encoder_output_length  # type: ignore[no-redef]
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
@@ -56,7 +56,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     _supports_flash_attn_2 = True
     supports_gradient_checkpointing = True
     _is_loading_from_pretrained: bool = False
-    _pretrained_model_path: Optional[str] = None
 
     TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 
@@ -72,7 +71,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Set flag to avoid device_map="auto" in sub-model loaders
         cls._is_loading_from_pretrained = True
-        cls._pretrained_model_path = pretrained_model_name_or_path
 
         try:
             model = cls(config, **kwargs)
@@ -134,7 +132,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             return model
         finally:
             cls._is_loading_from_pretrained = False
-            cls._pretrained_model_path = None
 
     def __init__(self, config: ASRConfig, **kwargs) -> None:
         super().__init__(config)
@@ -352,9 +349,20 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 cfg.eos_token_id = self.tokenizer.eos_token_id
                 cfg.bos_token_id = self.tokenizer.bos_token_id
 
-    def _init_weights(self, _module):
-        """Weight initialization (projector weights are initialized in MoEAudioProjector)."""
-        pass
+    def train(self, mode: bool = True):
+        """Set train/eval mode, but keep frozen submodules out of train mode.
+
+        HF Trainer calls `model.train()` at the top of every training step, which
+        recursively switches every submodule into train mode — re-enabling dropout
+        on modules with `requires_grad_(False)`. The frozen encoder (and the LM
+        when `freeze_language_model=True`) should always run deterministically;
+        train-mode dropout only adds noise that can't improve a frozen network.
+        """
+        super().train(mode)
+        self.audio_tower.train(False)
+        if getattr(self.config, "freeze_language_model", True):
+            self.language_model.train(False)
+        return self
 
     def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func=None):
         """Enable/disable gradient checkpointing for the language model."""
@@ -408,22 +416,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         audio_attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute per-sample encoder output lengths using conv layer formulas.
-
-        Args:
-            audio_attention_mask: Mask indicating real vs padded mel frames (batch, mel_len)
-
-        Returns:
-            Tensor of encoder output lengths per sample (batch,)
-        """
-        # Get mel frame lengths from attention mask
-        lengths = audio_attention_mask.sum(dim=-1)
-
-        # Apply conv layer formulas: output = (input + 2*pad - (kernel-1) - 1) // stride + 1
-        for padding, kernel_size, stride in self.config.encoder_conv_layers:
-            lengths = (lengths + 2 * padding - (kernel_size - 1) - 1) // stride + 1
-
-        return lengths
+        """Compute per-sample encoder output lengths using conv layer formulas."""
+        return compute_encoder_output_length(
+            audio_attention_mask.sum(dim=-1),
+            self.config.encoder_conv_layers,
+        )
 
     def _encode_audio(
         self,
@@ -556,13 +553,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         device = input_features.device
         batch_size = input_features.shape[0]
 
-        # Encode audio -> flattened embeddings
+        # Encode audio -> flattened embeddings (no per-sample host sync)
         encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
-        token_counts = torch.tensor(
-            [self.projector.get_output_length(int(length.item())) for length in encoder_lengths],
-            device=input_features.device,
-            dtype=torch.long,
-        )
+        token_counts = self.projector.get_output_length(encoder_lengths).to(torch.long)
         audio_embeds = self._encode_audio(input_features, token_counts)
 
         # If input_ids not provided, build prompt with correct number of audio tokens
@@ -646,13 +639,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         device = input_features.device
         batch_size = input_features.shape[0]
 
-        # Encode audio -> flattened embeddings
+        # Encode audio -> flattened embeddings (no per-sample host sync)
         encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
-        token_counts = torch.tensor(
-            [self.projector.get_output_length(int(length.item())) for length in encoder_lengths],
-            device=input_features.device,
-            dtype=torch.long,
-        )
+        token_counts = self.projector.get_output_length(encoder_lengths).to(torch.long)
         audio_embeds = self._encode_audio(input_features, token_counts)
 
         # Build prompt with correct number of audio tokens

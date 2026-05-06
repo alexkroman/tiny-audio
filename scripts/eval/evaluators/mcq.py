@@ -285,7 +285,7 @@ class AssemblyAIMMAUEvaluator(MMAUEvaluator):
     def __init__(
         self,
         api_key: str,
-        model: str = "slam_1",
+        model: str = "universal-3-pro",
         audio_field: str = "context",
         question_field: str = "instruction",
         answer_field: str = "answer",

@@ -112,11 +112,11 @@ that an earlier patch had dropped. `attentionWithCacheUpdate` routes
 
 Vendored from upstream `Libraries/MLXLMCommon/KVCache.swift`:
 
-- `QuantizedKVCacheProtocol`           (lines 94-118)
-- `QuantizedKVCache` class             (lines 728-988)
-- `KVCacheSimple.toQuantized(...)`     (lines 407-427)
+- `QuantizedKVCacheProtocol` (lines 94-118)
+- `QuantizedKVCache` class (lines 728-988)
+- `KVCacheSimple.toQuantized(...)` (lines 407-427)
 - `quantizedScaledDotProductAttention` (lines 1532-1620)
-- `maybeQuantizeKVCache`               (lines 1636-1659)
+- `maybeQuantizeKVCache` (lines 1636-1659)
 
 As with the rest of `MLXLMCommonTypes.swift`, visibility was lowered from
 `public` to internal (module-scoped). Helper methods on `QuantizedKVCache`

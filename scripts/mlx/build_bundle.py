@@ -293,9 +293,16 @@ def build_bundle(
         tokenizer.add_special_tokens({"additional_special_tokens": [AUDIO_TOKEN]})
     audio_token_id = int(tokenizer.convert_tokens_to_ids(AUDIO_TOKEN))
 
+    encoder_config = _encoder_config_dict(audio_cfg)
+    # Swift's Transcriber reads `encoder.quantization.{group_size, bits}` to
+    # call `quantize(model: encoder, ...)` at load time so the runtime encoder
+    # accepts the quantized .weight/.scales/.biases triples in
+    # encoder.safetensors. Without this block Swift builds a plain Embedding
+    # and rejects the quantized embed_positions on shape mismatch.
+    encoder_config["quantization"] = {"group_size": q_group_size, "bits": q_bits}
     bundle_config = {
         "mlx_format_version": MLX_FORMAT_VERSION,
-        "encoder": _encoder_config_dict(audio_cfg),
+        "encoder": encoder_config,
         "projector": {
             "encoder_dim": encoder_dim,
             "llm_dim": llm_dim,

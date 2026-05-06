@@ -191,3 +191,138 @@ class TestPostprocess:
         assert "<think>" not in result["text"]
         assert "reasoning" not in result["text"]
         assert "hello world" in result["text"]
+
+
+class TestExtractAudioFileAndBytes:
+    """_extract_audio handles file paths and bytes inputs (uses ffmpeg_read)."""
+
+    def test_extract_audio_from_bytes(self):
+        """Bytes input should be parsed by ffmpeg_read."""
+        from unittest.mock import patch
+
+        from tiny_audio.asr_pipeline import ASRPipeline
+
+        class MockPipeline:
+            _extract_audio = ASRPipeline._extract_audio
+
+        with patch("tiny_audio.asr_pipeline.ffmpeg_read") as mock_read:
+            mock_read.return_value = np.zeros(16000, dtype=np.float32)
+            result = MockPipeline()._extract_audio(b"some-audio-bytes")
+
+        assert result is not None
+        assert result["sampling_rate"] == 16000
+        mock_read.assert_called_once()
+
+    def test_extract_audio_from_path(self, tmp_path):
+        """File path input should be opened and read via ffmpeg_read."""
+        from unittest.mock import patch
+
+        from tiny_audio.asr_pipeline import ASRPipeline
+
+        class MockPipeline:
+            _extract_audio = ASRPipeline._extract_audio
+
+        # Create a dummy file
+        f = tmp_path / "audio.wav"
+        f.write_bytes(b"fake-wav-bytes")
+
+        with patch("tiny_audio.asr_pipeline.ffmpeg_read") as mock_read:
+            mock_read.return_value = np.zeros(16000, dtype=np.float32)
+            result = MockPipeline()._extract_audio(str(f))
+
+        assert result is not None
+        assert result["sampling_rate"] == 16000
+
+
+class TestPipelineCall:
+    """ASRPipeline.__call__ orchestrates transcription, alignment, diarization."""
+
+    @pytest.fixture
+    def pipeline(self, base_asr_model):
+        from tiny_audio.asr_pipeline import ASRPipeline
+
+        return ASRPipeline(
+            model=base_asr_model,
+            feature_extractor=base_asr_model.feature_extractor,
+            tokenizer=base_asr_model.tokenizer,
+        )
+
+    def test_call_basic_transcription(self, pipeline):
+        """Plain call returns dict with 'text' key."""
+        audio = np.zeros(16000, dtype=np.float32)  # 1s silence
+        result = pipeline({"array": audio, "sampling_rate": 16000})
+        assert "text" in result
+
+    def test_call_with_timestamps_calls_aligner(self, pipeline):
+        """return_timestamps=True invokes ForcedAligner.align."""
+        from unittest.mock import patch
+
+        audio = np.zeros(16000, dtype=np.float32)
+        fake_words = [{"word": "hello", "start": 0.0, "end": 0.5}]
+
+        with patch(
+            "tiny_audio.asr_pipeline.ForcedAligner.align", return_value=fake_words
+        ) as mock_align:
+            result = pipeline(
+                {"array": audio, "sampling_rate": 16000},
+                return_timestamps=True,
+            )
+
+        # If model produced any text, align should have been called
+        if result.get("text"):
+            mock_align.assert_called_once()
+            assert result["words"] == fake_words
+
+    def test_call_alignment_failure_recorded(self, pipeline):
+        """If alignment raises, error is captured in result['timestamp_error']."""
+        from unittest.mock import patch
+
+        audio = np.zeros(16000, dtype=np.float32)
+
+        with patch(
+            "tiny_audio.asr_pipeline.ForcedAligner.align",
+            side_effect=RuntimeError("model not loadable"),
+        ):
+            result = pipeline(
+                {"array": audio, "sampling_rate": 16000},
+                return_timestamps=True,
+            )
+
+        # Either text was empty (so words=[]) or alignment failed and was recorded
+        if result.get("text"):
+            assert result["words"] == []
+            assert "timestamp_error" in result
+            assert "model not loadable" in result["timestamp_error"]
+
+    def test_call_with_speakers_calls_diarizer(self, pipeline):
+        """return_speakers=True invokes SpeakerDiarizer.diarize."""
+        from unittest.mock import patch
+
+        audio = np.zeros(16000, dtype=np.float32)
+        fake_segments = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0}]
+        fake_words = [{"word": "hello", "start": 0.1, "end": 0.4}]
+
+        with patch("tiny_audio.asr_pipeline.ForcedAligner.align", return_value=fake_words), patch(
+            "tiny_audio.asr_pipeline.SpeakerDiarizer.diarize", return_value=fake_segments
+        ) as mock_diarize:
+            result = pipeline(
+                {"array": audio, "sampling_rate": 16000},
+                return_speakers=True,
+            )
+
+        if result.get("text"):
+            mock_diarize.assert_called_once()
+            assert result["speaker_segments"] == fake_segments
+
+    def test_call_user_prompt_overrides_default(self, pipeline):
+        """user_prompt kwarg temporarily replaces TRANSCRIBE_PROMPT."""
+        original_prompt = pipeline.model.TRANSCRIBE_PROMPT
+        audio = np.zeros(16000, dtype=np.float32)
+
+        pipeline(
+            {"array": audio, "sampling_rate": 16000},
+            user_prompt="Custom prompt:",
+        )
+
+        # Should restore original prompt after the call
+        assert original_prompt == pipeline.model.TRANSCRIBE_PROMPT

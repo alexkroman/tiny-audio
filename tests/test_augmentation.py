@@ -6,6 +6,8 @@ tests. Noise tests exercise torch-audiomentations on CPU directly. Corpus
 loading is exercised against synthetic WAVs written to ``tmp_path``.
 """
 
+import random
+
 import numpy as np
 import pytest
 import soundfile as sf
@@ -210,3 +212,103 @@ class TestNoiseCorpusMode:
         self._write_synthetic_corpus(a, n=2)
         with pytest.raises(FileNotFoundError):
             NoiseAugmentation(prob=1.0, corpus_path=[str(a), str(tmp_path / "does-not-exist")])
+
+
+class TestNoiseBabbleWeighting:
+    """Tests for the ``babble_weight`` corpus draw bias."""
+
+    def _write_musan_like(self, root, sample_rate: int = 16000):
+        """Mimic MUSAN's directory layout with a tiny speech/ + noise/ split."""
+        rng = np.random.default_rng(0)
+        for sub in ("speech", "noise", "music"):
+            d = root / sub
+            d.mkdir(parents=True, exist_ok=True)
+            for i in range(2):
+                arr = rng.standard_normal(sample_rate * 2).astype(np.float32) * 0.1
+                sf.write(str(d / f"{sub}_{i}.wav"), arr, sample_rate)
+
+    def test_invalid_babble_weight_raises(self, tmp_path):
+        self._write_musan_like(tmp_path)
+        with pytest.raises(ValueError, match="babble_weight"):
+            NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=1.5)
+
+    def test_paths_split_by_speech_subdir(self, tmp_path):
+        self._write_musan_like(tmp_path)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=0.5)
+        # 2 babble (speech/) + 4 non-babble (noise/ + music/)
+        assert len(aug.babble_paths) == 2
+        assert len(aug.non_babble_paths) == 4
+        assert all("speech" in p.parts for p in aug.babble_paths)
+        assert all("speech" not in p.parts for p in aug.non_babble_paths)
+
+    def test_weight_one_always_picks_babble(self, tmp_path):
+        self._write_musan_like(tmp_path)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=1.0)
+        for _ in range(50):
+            picked = aug._pick_noise_path()
+            assert "speech" in picked.parts
+
+    def test_weight_zero_falls_back_to_full_pool(self, tmp_path):
+        self._write_musan_like(tmp_path)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=0.0)
+        # With weight=0, _pick_noise_path takes the full-pool branch
+        seen_subdirs = set()
+        random.seed(0)
+        for _ in range(200):
+            picked = aug._pick_noise_path()
+            for sub in ("speech", "noise", "music"):
+                if sub in picked.parts:
+                    seen_subdirs.add(sub)
+        # All three subdirs should appear when sampling uniformly from the full pool
+        assert seen_subdirs == {"speech", "noise", "music"}
+
+    def test_silently_disabled_when_no_babble_in_corpus(self, tmp_path):
+        # Corpus with no speech/ subdirectory — babble_weight should self-zero
+        # rather than raise, so a noise-only corpus stays usable.
+        rng = np.random.default_rng(0)
+        (tmp_path / "noise").mkdir()
+        for i in range(2):
+            arr = rng.standard_normal(16000 * 2).astype(np.float32) * 0.1
+            sf.write(str(tmp_path / "noise" / f"n_{i}.wav"), arr, 16000)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=0.5)
+        assert aug.babble_weight == 0.0
+        assert aug.babble_paths == []
+
+
+class TestRIRBehavior:
+    """Tests for RIR convolution behavior."""
+
+    def test_rms_restored_after_convolution(self, fake_rirs):
+        # RMS of reverbed output should match input RMS (within tolerance);
+        # without restoration the L2-normalized RIR would attenuate level.
+        aug = RIRAugmentation(rirs=fake_rirs, prob=1.0)
+        audio = np.random.RandomState(0).randn(16000).astype(np.float32) * 0.1
+        in_rms = float(np.sqrt(np.mean(audio**2)))
+        out = aug(audio)
+        out_rms = float(np.sqrt(np.mean(out**2)))
+        # 5% tolerance — peak-clip protection can scale slightly when the
+        # restored signal exceeds [-1, 1].
+        assert abs(out_rms - in_rms) / in_rms < 0.05
+
+
+class TestNoiseMixingPeakProtection:
+    def _write_noise_corpus(self, root, n: int = 3, sample_rate: int = 16000):
+        rng = np.random.default_rng(0)
+        for i in range(n):
+            arr = rng.standard_normal(sample_rate * 2).astype(np.float32) * 0.5
+            sf.write(str(root / f"noise_{i}.wav"), arr, sample_rate)
+
+    def test_mixed_output_within_unit_range(self, tmp_path):
+        # Loud signal + loud noise at low SNR would exceed [-1, 1] without
+        # post-mix peak protection. Verify the mixer keeps output in range.
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        self._write_noise_corpus(tmp_path)
+        # Force low-SNR (very loud noise) to make clipping likely.
+        aug = NoiseAugmentation(
+            prob=1.0, corpus_path=str(tmp_path), min_snr_db=-20.0, max_snr_db=-20.0
+        )
+        # Near-full-scale signal.
+        audio = np.random.RandomState(0).randn(16000).astype(np.float32) * 0.7
+        out = aug(audio)
+        peak = float(np.abs(out).max())
+        assert peak <= 1.0 + 1e-6

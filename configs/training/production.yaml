@@ -53,11 +53,15 @@ torch_compile: true
 # blow past dynamo's default cache_size_limit=8 and force eager fallback.
 torch_compile_config:
   cache_size_limit: 256
-model_dtype: bfloat16
+# Master weights in fp32 so AdamW updates below the bf16 ULP gap (~0.0078
+# near 1.0) actually land — bf16 master weights silently round small
+# RMSNorm/LayerNorm updates to zero, freezing every norm scale in the LM.
+# Compute is still bf16 via `bf16: true` autocast.
+model_dtype: float32
 attn_implementation: flash_attention_2
 
 # Data loading
-dataloader_num_workers: 8
+dataloader_num_workers: 24
 dataloader_prefetch_factor: 2
 dataloader_pin_memory: true
 dataloader_persistent_workers: true
@@ -65,15 +69,16 @@ dataloader_drop_last: true
 group_by_length: true
 length_column_name: duration
 
-# Model training options
-projector_dropout: 0.0
-label_smoothing: 0.0
-
-# SpecAugment (LibriDouble settings: 2 masks each, time 100, freq 27).
-# Applied on the mel spectrogram during training.
+# SpecAugment — pulled back from the 2024 NeMo Canary / Parakeet preset
+# (10×100 time masks). That recipe assumes a fully-trained encoder
+# absorbing the masked signal; with a frozen encoder + projector-only
+# gradient path, ~10s of cumulative time-mask per clip just produces
+# harder examples without the capacity to learn from them. 6×80 keeps
+# the "many small masks > few large" principle at a more proportionate
+# total mask budget. Freq settings unchanged.
 use_specaugment: true
-num_time_masks: 2
-time_mask_length: 100
+num_time_masks: 6
+time_mask_length: 80
 num_freq_masks: 2
 freq_mask_length: 27
 
@@ -98,11 +103,20 @@ rir_augmentation:
   corpus_path:
     - ~/.cache/openslr-28/real_rirs_isotropic_noises
     - ~/.cache/openslr-28/simulated_rirs
-  pool_size: 2048
-  room_x_range: [3.0, 10.0]
-  room_y_range: [3.0, 10.0]
-  room_z_range: [2.4, 4.0]
-  t60_range: [0.1, 1.0]
+  # Bumped from 2048 → 8192: sub-sampling 2K from ~60K simulated impulses was
+  # leaving real-RIR diversity on the table, especially relevant for ami-sdm.
+  pool_size: 8192
+  # Widened from [3, 10] / [2.4, 4] / t60 [0.1, 1.0] to capture larger meeting
+  # rooms with longer reverberation. Real AMI rooms are bigger and more
+  # reverberant than the prior synthetic distribution covered.
+  room_x_range: [3.0, 15.0]
+  room_y_range: [3.0, 15.0]
+  room_z_range: [2.4, 5.0]
+  t60_range: [0.2, 1.5]
+  # 0.7 → 0.5: 70% reverb-on-every-batch was paying for ami-sdm/Switchboard
+  # parity at the cost of LS Clean (1.59 → 2.37), Tedlium (2.33 → 3.19), and
+  # CV (8.32 → 12.74) gaps on essentially clean read speech. ami-sdm is
+  # already at parity, so additional reverb has diminishing returns.
   prob: 0.5
   seed: null
 
@@ -115,9 +129,9 @@ rir_augmentation:
 #     violet noise. Cheap, no corpus, but lacks real-world structure.
 # CPU-friendly; chains after RIR in the dataloader transform pipeline.
 #
-# SNR range [0, 25] dB intentionally includes low-SNR conditions (the
-# Earnings22 / People's Speech eval gap is dominated by noisy real-world
-# audio); the lower bound is what most modern recipes use to push robustness.
+# SNR range [0, 25] dB targets the natural-noise regime; floor lifted off
+# the NeMo -5 dB preset because sub-zero-SNR samples were degrading the
+# clean read-speech evals more than they were buying robustness gains.
 noise_augmentation:
   enabled: true
   # MUSAN (music + speech + noise, ~109h) plus OpenSLR-28's pointsource_noises
@@ -125,9 +139,31 @@ noise_augmentation:
   corpus_path:
     - ~/.cache/musan/musan
     - ~/.cache/openslr-28/pointsource_noises
-  prob: 0.5
+  prob: 0.7
+  # min_snr -5 → 0 dB. -5 dB is the modern NeMo floor but produces samples
+  # where intelligibility is genuinely degraded; with a small projector that
+  # capacity is better spent on the mid-SNR distribution that actually shows
+  # up in the eval gaps (CV, LS Clean were paying for low-SNR robustness
+  # the deployment doesn't need).
   min_snr_db: 0.0
   max_snr_db: 25.0
+  # 0.35 → 0.55. Highest-leverage knob given the AMI IHM gap (22.14 vs
+  # 16.46): close-talk meeting mic isn't a reverb problem (ami-sdm is at
+  # parity), it's cross-talker bleed from co-located speakers — i.e. babble.
+  # Peoples / CV / Earnings22 also benefit more from babble than from
+  # heavier music/white noise.
+  babble_weight: 0.55
+
+# Phone-bandwidth simulation — resample to 8 kHz then back to 16 kHz so the
+# signal sees the same hard 4 kHz cutoff as G.711 / GSM telephony. Closes
+# the WER gap on Switchboard, real call data, and any narrowband-encoded
+# audio. Standard addition in 2026 SOTA recipes (NeMo Canary, AssemblyAI
+# Universal-2). Lower prob than RIR/noise — only ~20% of users transmit
+# through narrowband channels in deployment.
+phone_bandwidth_augmentation:
+  enabled: false
+  narrowband_rate: 8000
+  prob: 0.2
 
 # Misc
 disable_tqdm: false

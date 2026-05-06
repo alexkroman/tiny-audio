@@ -77,6 +77,12 @@ jobs:
           restore-keys: |
             hf-cache-${{ runner.os }}-
 
+      # torchcodec (a dev dep) needs FFmpeg shared libs (libavutil.so.X) at
+      # runtime, and Ubuntu runners don't ship them by default. The pipeline
+      # tests indirectly load torchcodec via the transformers ASR pipeline.
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Install dependencies
         run: poetry install --with dev --no-interaction
 

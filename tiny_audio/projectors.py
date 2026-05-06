@@ -102,6 +102,12 @@ class MOSAProjector(nn.Module):
     Uses Conv1d for downsampling (2 layers, stride 2 each = 4x total).
     """
 
+    ADAPTER_HIDDEN_DIM = 4096
+    ROUTER_HIDDEN_DIM = 512
+    CONV_KERNEL = 3
+    CONV_STRIDE = 2
+    CONV_PADDING = 1
+
     def __init__(self, config):
         """Initialize MOSA projector.
 
@@ -112,31 +118,28 @@ class MOSAProjector(nn.Module):
         self.encoder_dim = getattr(config, "encoder_dim", None) or 1280
         self.llm_dim = getattr(config, "llm_dim", None) or 2048
         self.num_experts = getattr(config, "num_experts", None) or 4  # MOSA-Base uses 4
-        adapter_hidden = getattr(config, "adapter_hidden_dim", None) or 4096
-        router_hidden = getattr(config, "router_hidden_dim", None) or 512
 
-        # --- 1. Conv1d Downsampler (4x reduction) ---
-        # 2 layers of stride-2 convolution
+        conv_kwargs = {
+            "kernel_size": self.CONV_KERNEL,
+            "stride": self.CONV_STRIDE,
+            "padding": self.CONV_PADDING,
+        }
         self.downsampler = nn.Sequential(
-            nn.Conv1d(self.encoder_dim, self.encoder_dim, kernel_size=3, stride=2, padding=1),
+            nn.Conv1d(self.encoder_dim, self.encoder_dim, **conv_kwargs),
             nn.GELU(),
-            nn.Conv1d(self.encoder_dim, self.llm_dim, kernel_size=3, stride=2, padding=1),
+            nn.Conv1d(self.encoder_dim, self.llm_dim, **conv_kwargs),
             nn.GELU(),
         )
 
-        # --- 2. Simple Router (MOSA-Base: 2 layers with ReLU) ---
-        # Takes downsampled features (llm_dim) -> 512 -> num_experts
         self.router = nn.Sequential(
-            nn.Linear(self.llm_dim, router_hidden),
+            nn.Linear(self.llm_dim, self.ROUTER_HIDDEN_DIM),
             nn.ReLU(),
-            nn.Linear(router_hidden, self.num_experts),
+            nn.Linear(self.ROUTER_HIDDEN_DIM, self.num_experts),
         )
 
-        # --- 3. Experts (Simple 2-layer GELU adapters) ---
-        # Each expert: llm_dim -> hidden -> llm_dim (much smaller than frame-stacking)
         self.experts = nn.ModuleList(
             [
-                SimpleAdapter(self.llm_dim, adapter_hidden, self.llm_dim)
+                SimpleAdapter(self.llm_dim, self.ADAPTER_HIDDEN_DIM, self.llm_dim)
                 for _ in range(self.num_experts)
             ]
         )
@@ -150,26 +153,22 @@ class MOSAProjector(nn.Module):
         Returns:
             Projected features of shape [batch, out_len, llm_dim]
         """
-        # --- 1. Conv1d Downsampling ---
-        # Permute for Conv1d: [B, S, D] -> [B, D, S]
-        x = x.transpose(1, 2)
-        x = self.downsampler(x)
-        # Permute back: [B, D, S] -> [B, S, D]
-        x = x.transpose(1, 2)
+        x = self.downsampler(x.transpose(1, 2)).transpose(1, 2)
 
-        # --- 2. Routing ---
         routing_weights = F.softmax(self.router(x), dim=-1)  # (B, out_len, num_experts)
 
-        # --- 3. Expert Mixture (Dense Execution) ---
-        expert_outputs = torch.stack([expert(x) for expert in self.experts])  # (E, B, out_len, D)
-        return torch.einsum("ebsd, bse -> bsd", expert_outputs, routing_weights)
+        # Accumulate weighted expert outputs without materializing all experts at once.
+        output = self.experts[0](x) * routing_weights[..., 0:1]
+        for i, expert in enumerate(self.experts[1:], start=1):
+            output = output + expert(x) * routing_weights[..., i : i + 1]
+        return output
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length after Conv1d downsampling (4x reduction)."""
-        # Conv1d with stride 2, kernel 3, padding 1: out = (in + 2*1 - 3) // 2 + 1 = (in - 1) // 2 + 1
-        # Applied twice for 4x total reduction
-        after_conv1 = (input_length + 2 * 1 - 3) // 2 + 1
-        return (after_conv1 + 2 * 1 - 3) // 2 + 1
+        length = input_length
+        for _ in range(2):
+            length = (length + 2 * self.CONV_PADDING - self.CONV_KERNEL) // self.CONV_STRIDE + 1
+        return length
 
 
 # =============================================================================
@@ -414,10 +413,13 @@ class QFormerAudioProjector(nn.Module):
         # Final projection to LLM dimension (Granite uses bias=True)
         self.linear = nn.Linear(qformer_hidden, llm_dim)
 
-    def get_output_length(self, input_length: int) -> int:
-        """Calculate output sequence length given input length."""
-        # QFormer uses window-based processing with num_queries per window
-        nblocks = math.ceil(input_length / self.window_size)
+    def get_output_length(self, input_length):
+        """Calculate output sequence length given input length.
+
+        Accepts either Python ints or torch tensors; uses ceiling division so
+        the formula is identical for both — math.ceil would block tensors.
+        """
+        nblocks = (input_length + self.window_size - 1) // self.window_size
         return nblocks * self.num_queries
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

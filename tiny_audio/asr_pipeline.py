@@ -23,9 +23,9 @@ __all__ = ["ForcedAligner", "SpeakerDiarizer", "ASRPipeline"]
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
 _DEFAULT_MIN_REPEATS = 3
-_TRAILING_CHAR_RE = re.compile(r"(.)\1{" + str(_DEFAULT_MIN_REPEATS - 1) + r",}$")
+_TRAILING_CHAR_RE = re.compile(rf"(.)\1{{{_DEFAULT_MIN_REPEATS - 1},}}$")
 _TRAILING_WORD_RE = re.compile(
-    r"\b(\w+)(?:\s+\1){" + str(_DEFAULT_MIN_REPEATS - 1) + r",}\s*$", re.IGNORECASE
+    rf"\b(\w+)(?:\s+\1){{{_DEFAULT_MIN_REPEATS - 1},}}\s*$", re.IGNORECASE
 )
 
 
@@ -291,10 +291,8 @@ def _truncate_repetitions(text: str, min_repeats: int = 3) -> str:
         char_pattern = _TRAILING_CHAR_RE
         word_pattern = _TRAILING_WORD_RE
     else:
-        char_pattern = re.compile(r"(.)\1{" + str(min_repeats - 1) + r",}$")
-        word_pattern = re.compile(
-            r"\b(\w+)(?:\s+\1){" + str(min_repeats - 1) + r",}\s*$", re.IGNORECASE
-        )
+        char_pattern = re.compile(rf"(.)\1{{{min_repeats - 1},}}$")
+        word_pattern = re.compile(rf"\b(\w+)(?:\s+\1){{{min_repeats - 1},}}\s*$", re.IGNORECASE)
 
     text = char_pattern.sub(r"\1", text)
     while word_pattern.search(text):
@@ -303,28 +301,24 @@ def _truncate_repetitions(text: str, min_repeats: int = 3) -> str:
     # 3. Truncate repeated phrases (2-20 words) at end
     # e.g., "i am sorry i am sorry i am sorry" -> "i am sorry"
     words = text.split()
-    if len(words) >= min_repeats * 2:
-        # Try phrase lengths from 2 to 20 words
-        for phrase_len in range(2, min(21, len(words) // min_repeats + 1)):
-            # Check if the last phrase_len words repeat
-            phrase = " ".join(words[-phrase_len:])
-            # Build pattern to match repeated phrases at end
-            phrase_escaped = re.escape(phrase)
-            phrase_pattern = re.compile(
-                r"(^|.*?\s)("
-                + phrase_escaped
-                + r")(?:\s+"
-                + phrase_escaped
-                + r"){"
-                + str(min_repeats - 1)
-                + r",}\s*$",
-                re.IGNORECASE,
-            )
-            match = phrase_pattern.match(text)
-            if match:
-                # Keep prefix + one instance of the phrase
-                text = (match.group(1) + match.group(2)).strip()
-                words = text.split()
-                break
+    if len(words) < min_repeats * 2:
+        return text
+
+    # Cheap pre-check: trailing window must contain duplicates for any phrase repeat
+    # to be possible. set(window) == window means all unique → no repetition.
+    window = words[-min_repeats * 2 :]
+    if len(set(window)) == len(window):
+        return text
+
+    for phrase_len in range(2, min(21, len(words) // min_repeats + 1)):
+        phrase_escaped = re.escape(" ".join(words[-phrase_len:]))
+        phrase_pattern = re.compile(
+            rf"(^|.*?\s)({phrase_escaped})(?:\s+{phrase_escaped}){{{min_repeats - 1},}}\s*$",
+            re.IGNORECASE,
+        )
+        match = phrase_pattern.match(text)
+        if match:
+            text = (match.group(1) + match.group(2)).strip()
+            break
 
     return text
