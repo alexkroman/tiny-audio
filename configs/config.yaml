@@ -11,6 +11,12 @@ model:
   system_prompt: ""
   projector_type: mlp  # Options: mlp, mosa, moe, qformer
 
+  # Master weights in fp32 so AdamW updates below the bf16 ULP gap (~0.0078
+  # near 1.0) actually land — bf16 master weights silently round small
+  # RMSNorm/LayerNorm updates to zero, freezing every norm scale in the LM.
+  # Compute is still bf16 via training.bf16=true autocast.
+  model_dtype: float32
+
   # Projector settings
   projector_pool_stride: 4
   projector_hidden_dim: null

@@ -15,6 +15,7 @@ def _copy_pt_to_mlx(pt: MLPAudioProjector, mlx_proj: MLXMLPProjector) -> None:
     mlx_proj.linear_1.weight = mx.array(pt.linear_1.weight.detach().numpy())
     mlx_proj.norm.weight = mx.array(pt.norm.weight.detach().numpy())
     mlx_proj.linear_2.weight = mx.array(pt.linear_2.weight.detach().numpy())
+    mlx_proj.norm_2.weight = mx.array(pt.norm_2.weight.detach().numpy())
 
 
 def test_mlx_projector_matches_pt():

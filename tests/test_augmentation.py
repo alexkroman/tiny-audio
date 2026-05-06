@@ -6,14 +6,16 @@ tests. Noise tests exercise torch-audiomentations on CPU directly. Corpus
 loading is exercised against synthetic WAVs written to ``tmp_path``.
 """
 
-import random
-
 import numpy as np
 import pytest
 import soundfile as sf
 import torch
 
-from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation
+from tiny_audio.augmentation import (
+    GainPerturbationAugmentation,
+    NoiseAugmentation,
+    RIRAugmentation,
+)
 
 
 def _synthetic_rir(length: int = 1600) -> torch.Tensor:
@@ -27,6 +29,46 @@ def _synthetic_rir(length: int = 1600) -> torch.Tensor:
 @pytest.fixture
 def fake_rirs():
     return [_synthetic_rir() for _ in range(4)]
+
+
+class TestGainPerturbationAugmentation:
+    def test_invalid_range_raises(self):
+        with pytest.raises(ValueError, match="min_gain_db"):
+            GainPerturbationAugmentation(min_gain_db=6.0, max_gain_db=-6.0)
+
+    def test_invalid_prob_raises(self):
+        with pytest.raises(ValueError, match="prob"):
+            GainPerturbationAugmentation(prob=1.5)
+
+    def test_passthrough_at_prob_zero(self):
+        aug = GainPerturbationAugmentation(prob=0.0)
+        audio = np.random.RandomState(0).randn(16000).astype(np.float32) * 0.1
+        assert np.array_equal(aug(audio), audio)
+
+    def test_zero_db_range_is_identity(self):
+        aug = GainPerturbationAugmentation(min_gain_db=0.0, max_gain_db=0.0, prob=1.0)
+        audio = np.random.RandomState(0).randn(16000).astype(np.float32) * 0.1
+        np.testing.assert_allclose(aug(audio), audio, rtol=1e-6)
+
+    def test_dtype_and_shape_preserved(self):
+        aug = GainPerturbationAugmentation(prob=1.0)
+        audio = np.random.RandomState(0).randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        assert out.shape == audio.shape
+        assert out.dtype == audio.dtype
+
+    def test_peak_clamped_below_one(self):
+        aug = GainPerturbationAugmentation(min_gain_db=20.0, max_gain_db=20.0, prob=1.0)
+        audio = np.full(16000, 0.5, dtype=np.float32)
+        out = aug(audio)
+        assert float(np.abs(out).max()) <= 1.0 + 1e-6
+
+    def test_empty_audio_passthrough(self):
+        aug = GainPerturbationAugmentation(prob=1.0)
+        empty = np.zeros(0, dtype=np.float32)
+        out = aug(empty)
+        assert out.shape == empty.shape
+        assert out.dtype == empty.dtype
 
 
 class TestRIRAugmentation:
@@ -214,11 +256,18 @@ class TestNoiseCorpusMode:
             NoiseAugmentation(prob=1.0, corpus_path=[str(a), str(tmp_path / "does-not-exist")])
 
 
-class TestNoiseBabbleWeighting:
-    """Tests for the ``babble_weight`` corpus draw bias."""
+class TestSilenceInjection:
+    """Tests for silence-injection corpus filtering.
+
+    Silence injection pairs audio with an empty transcript. If the audio
+    were drawn from MUSAN/speech, this would teach the model 'real human
+    speech → emit nothing' — the opposite of what an ASR system should do.
+    ``sample_noise_only`` must skip any path under a ``speech`` subdirectory.
+    Noise *mixing* (cocktail-party robustness) should still use the full pool.
+    """
 
     def _write_musan_like(self, root, sample_rate: int = 16000):
-        """Mimic MUSAN's directory layout with a tiny speech/ + noise/ split."""
+        """Mimic MUSAN's directory layout with speech/ + noise/ + music/ subdirs."""
         rng = np.random.default_rng(0)
         for sub in ("speech", "noise", "music"):
             d = root / sub
@@ -227,52 +276,54 @@ class TestNoiseBabbleWeighting:
                 arr = rng.standard_normal(sample_rate * 2).astype(np.float32) * 0.1
                 sf.write(str(d / f"{sub}_{i}.wav"), arr, sample_rate)
 
-    def test_invalid_babble_weight_raises(self, tmp_path):
+    def test_sample_noise_only_skips_speech_subdir(self, tmp_path):
         self._write_musan_like(tmp_path)
-        with pytest.raises(ValueError, match="babble_weight"):
-            NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=1.5)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path))
+        sampled_paths: list = []
+        original = aug._read_noise_segment
 
-    def test_paths_split_by_speech_subdir(self, tmp_path):
-        self._write_musan_like(tmp_path)
-        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=0.5)
-        # 2 babble (speech/) + 4 non-babble (noise/ + music/)
-        assert len(aug.babble_paths) == 2
-        assert len(aug.non_babble_paths) == 4
-        assert all("speech" in p.parts for p in aug.babble_paths)
-        assert all("speech" not in p.parts for p in aug.non_babble_paths)
+        def probe(path, n_target):
+            sampled_paths.append(path)
+            return original(path, n_target)
 
-    def test_weight_one_always_picks_babble(self, tmp_path):
-        self._write_musan_like(tmp_path)
-        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=1.0)
-        for _ in range(50):
-            picked = aug._pick_noise_path()
-            assert "speech" in picked.parts
+        aug._read_noise_segment = probe  # type: ignore[method-assign]
+        for _ in range(100):
+            aug.sample_noise_only(8000)
+        assert sampled_paths, "no paths were sampled"
+        assert all("speech" not in p.parts for p in sampled_paths)
 
-    def test_weight_zero_falls_back_to_full_pool(self, tmp_path):
-        self._write_musan_like(tmp_path)
-        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=0.0)
-        # With weight=0, _pick_noise_path takes the full-pool branch
-        seen_subdirs = set()
-        random.seed(0)
-        for _ in range(200):
-            picked = aug._pick_noise_path()
-            for sub in ("speech", "noise", "music"):
-                if sub in picked.parts:
-                    seen_subdirs.add(sub)
-        # All three subdirs should appear when sampling uniformly from the full pool
-        assert seen_subdirs == {"speech", "noise", "music"}
-
-    def test_silently_disabled_when_no_babble_in_corpus(self, tmp_path):
-        # Corpus with no speech/ subdirectory — babble_weight should self-zero
-        # rather than raise, so a noise-only corpus stays usable.
+    def test_sample_noise_only_returns_none_when_only_speech(self, tmp_path):
+        # If the configured corpus contains only speech/, silence injection
+        # has no safe pool — return None so the caller can skip injection
+        # rather than emit a speech-paired-with-empty sample.
         rng = np.random.default_rng(0)
-        (tmp_path / "noise").mkdir()
+        (tmp_path / "speech").mkdir()
         for i in range(2):
             arr = rng.standard_normal(16000 * 2).astype(np.float32) * 0.1
-            sf.write(str(tmp_path / "noise" / f"n_{i}.wav"), arr, 16000)
-        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path), babble_weight=0.5)
-        assert aug.babble_weight == 0.0
-        assert aug.babble_paths == []
+            sf.write(str(tmp_path / "speech" / f"s_{i}.wav"), arr, 16000)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path))
+        assert aug.sample_noise_only(16000) is None
+
+    def test_mix_corpus_noise_still_uses_full_pool(self, tmp_path):
+        # Noise *mixing* (cocktail-party robustness) should still draw from
+        # the full pool, including speech/ — only silence-injection skips it.
+        self._write_musan_like(tmp_path)
+        aug = NoiseAugmentation(prob=1.0, corpus_path=str(tmp_path))
+        sampled_paths: list = []
+        original = aug._read_noise_segment
+
+        def probe(path, n_target):
+            sampled_paths.append(path)
+            return original(path, n_target)
+
+        aug._read_noise_segment = probe  # type: ignore[method-assign]
+        rng = np.random.default_rng(0)
+        for _ in range(100):
+            audio = rng.standard_normal(8000).astype(np.float32) * 0.1
+            aug._mix_corpus_noise(audio)
+        assert any("speech" in p.parts for p in sampled_paths), (
+            "mixing should still draw from speech/ for cocktail-party robustness"
+        )
 
 
 class TestRIRBehavior:

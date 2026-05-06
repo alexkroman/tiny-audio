@@ -31,6 +31,12 @@ training:
   # protecting general-LM behavior.
   decoder_learning_rate: 5e-5
   decoder_weight_decay: 0.001
+  # Projector is a small (~12M-param) randomly-initialized bridge that has to
+  # learn an exact mapping from the frozen encoder's space into the LM's
+  # embedding space; weight decay just pulls those bespoke directions back
+  # toward zero. The LM keeps its standard `weight_decay` (the trainer-args
+  # default applied to params not under `language_model.`).
+  projector_weight_decay: 0.0
   # Wider warmup gives the randomly-initialized projector time to settle before
   # the LM's much smaller LR starts to bite — important now that the LM is
   # trainable and the projector dominates early gradients.
@@ -64,22 +70,19 @@ training:
   # when Inductor's dynamic-shape backward is more robust on huge-vocab heads.
   torch_compile: true
 
-  # Re-enabled at 0.1: speech-LLM-regime regularization. The prior disable
-  # (0.1 → 0.0) was diagnosing trailing discourse-marker insertions on
-  # Peoples / Earnings22; the EOS-weighted CE (eos_loss_weight) added in
-  # commit 09e9303 addresses that EOS-confidence problem more directly,
-  # which lets us turn smoothing back on for its actual job — preventing
-  # the LM from overfitting to high-frequency tokens in a 4.7M-sample mix.
+  # Standard 0.1 — speech-LLM-regime regularization. Prevents the LM from
+  # overfitting to high-frequency tokens in a 4.7M-sample mix.
   label_smoothing_factor: 0.1
   weight_decay: 0.01
 
-  # CE-loss up-weight on the assistant-turn EOS token (`<|im_end|>` for Qwen).
-  # Pairs with label_smoothing=0 to push confident stops, addressing the
-  # observed pattern of one-token continuations past the actual end of speech.
-  eos_loss_weight: 2.0
-
   # Probability of replacing a training sample's audio with silence + empty
-  # target. Teaches the model "no speech → emit nothing" — currently it
-  # backchannels ("yeah", "huh", "i") on AMI silence segments because empty-
-  # text samples were silently filtered out of training.
-  silence_injection_prob: 0.01
+  # target. Teaches the model "no speech → emit nothing" — without it the
+  # model backchannels ("yeah", "huh", "i") on AMI silence segments because
+  # empty-text samples were silently filtered out of training.
+  #
+  # 0.01 → 0.05: speech-LLM-recipe modal (Granite-Speech / Whisper-fine-tune
+  # ranges sit at 0.03–0.10). 1-in-100 was barely above zero — the gradient
+  # signal for "no speech → nothing" was too dilute for the model to
+  # internalize as a sharp stopping rule. 0.05 gives a real share of batches
+  # the silence-→-empty signal without crowding out actual ASR training.
+  silence_injection_prob: 0.05
