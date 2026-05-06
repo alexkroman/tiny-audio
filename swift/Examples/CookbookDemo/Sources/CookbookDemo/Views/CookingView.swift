@@ -7,11 +7,8 @@ struct CookingView: View {
     ZStack(alignment: .topTrailing) {
       mainColumn
       if vm.ingredientsVisible {
-        HStack {
-          Spacer()
-          IngredientsPanel(ingredients: vm.recipe.ingredients)
-        }
-        .transition(.move(edge: .trailing))
+        IngredientsPanel(ingredients: vm.recipe.ingredients)
+          .transition(.move(edge: .trailing))
       }
       if vm.groceryOverlayVisible {
         GroceryListOverlay(items: vm.groceryList)
@@ -52,7 +49,7 @@ struct CookingView: View {
       Text(vm.recipe.title).font(.title2.weight(.semibold))
       Spacer()
       ListeningIndicator(state: vm.listeningState)
-      if vm.groceryList.count > 0 {
+      if !vm.groceryList.isEmpty {
         GroceryBadge(count: vm.groceryList.count)
       }
       if let t = vm.timer {

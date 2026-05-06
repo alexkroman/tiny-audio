@@ -26,7 +26,7 @@ actor CommandPipeline {
       intent = await classifier.classify(trimmed)
     }
 
-    await viewModel.applyOnMainActor(intent)
+    await viewModel.apply(intent)
     await viewModel.setListeningState(.idle)
   }
 
@@ -43,10 +43,4 @@ actor CommandPipeline {
       }
     }
   }
-}
-
-extension RecipeViewModel {
-  func setLastHeard(_ text: String) { lastHeardText = text }
-  func setListeningState(_ s: ListeningState) { listeningState = s }
-  func applyOnMainActor(_ intent: Intent) { apply(intent) }
 }

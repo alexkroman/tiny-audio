@@ -3,10 +3,9 @@ import TinyAudio
 
 struct ContentView: View {
   @State private var vm: RecipeViewModel? = nil
-  @State private var loadProgress: Double = 0.0
-  @Environment(\.scenePhase) private var scenePhase
 
-  // Hold strong refs across view rebuilds.
+  // Hold strong refs across view rebuilds so the model, mic engine, and
+  // tick/consume tasks aren't deallocated mid-flight.
   @State private var transcriber: Transcriber? = nil
   @State private var mic: MicrophoneTranscriber? = nil
   @State private var pipeline: CommandPipeline? = nil
@@ -18,7 +17,7 @@ struct ContentView: View {
       if let vm {
         switch vm.phase {
         case .loading:
-          LoadingView(progress: loadProgress)
+          LoadingView(progress: .nan)
         case .cooking:
           CookingView(vm: vm)
         case .micDenied:
@@ -36,19 +35,16 @@ struct ContentView: View {
           )
         }
       } else {
-        LoadingView(progress: loadProgress)
+        LoadingView(progress: .nan)
       }
     }
     .task { await bootstrap() }
-    .onChange(of: scenePhase) { _, phase in
-      if phase != .active { Task { await stopMic() } }
-    }
   }
 
   private func bootstrap() async {
     do {
       let recipe = try Recipe.bundled()
-      let vm = await MainActor.run { RecipeViewModel(recipe: recipe) }
+      let vm = RecipeViewModel(recipe: recipe)
       self.vm = vm
 
       let t = try await Transcriber.load()
@@ -62,28 +58,19 @@ struct ContentView: View {
       self.mic = m
       try await m.start()
 
-      let timerCtl = await MainActor.run { TimerController(viewModel: vm) }
-      await MainActor.run { timerCtl.start() }
+      let timerCtl = TimerController(viewModel: vm)
+      timerCtl.start()
       self.timerController = timerCtl
 
       consumeTask = Task { [pipeline, m] in
         await pipeline.consume(events: m.events)
       }
 
-      await MainActor.run { vm.phase = .cooking }
+      vm.phase = .cooking
     } catch TinyAudioError.micPermissionDenied {
-      await MainActor.run { vm?.phase = .micDenied }
+      vm?.phase = .micDenied
     } catch {
-      let msg = String(describing: error)
-      await MainActor.run { vm?.phase = .modelFailed(msg) }
+      vm?.phase = .modelFailed(String(describing: error))
     }
-  }
-
-  private func stopMic() async {
-    consumeTask?.cancel()
-    consumeTask = nil
-    await mic?.stop()
-    mic = nil
-    await MainActor.run { timerController?.stop() }
   }
 }

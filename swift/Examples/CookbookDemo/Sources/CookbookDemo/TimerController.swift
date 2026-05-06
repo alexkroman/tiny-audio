@@ -16,8 +16,12 @@ final class TimerController {
         guard let vm = self?.viewModel else { return }
         guard var t = vm.timer else { continue }
         let remaining = max(0, Int(t.endsAt.timeIntervalSinceNow.rounded()))
-        t.secondsRemaining = remaining
-        vm.timer = t
+        // Skip the write when whole-seconds didn't change so SwiftUI doesn't
+        // invalidate every tick. The chip already reads the same value.
+        if remaining != t.secondsRemaining {
+          t.secondsRemaining = remaining
+          vm.timer = t
+        }
       }
     }
   }

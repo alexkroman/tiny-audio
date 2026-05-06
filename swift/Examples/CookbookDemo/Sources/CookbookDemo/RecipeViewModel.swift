@@ -33,6 +33,9 @@ final class RecipeViewModel {
 
   init(recipe: Recipe) { self.recipe = recipe }
 
+  func setLastHeard(_ text: String) { lastHeardText = text }
+  func setListeningState(_ state: ListeningState) { listeningState = state }
+
   func apply(_ intent: Intent) {
     switch intent {
     case .nextStep:

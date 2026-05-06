@@ -60,9 +60,6 @@ public actor ChatSession {
       throw TinyAudioError.invalidArgument(reason: "maxNewTokens must be > 0")
     }
 
-    // Render the chat template. The template prepended to `tokenizer.json`
-    // produces a complete prefill prompt including the assistant generation
-    // marker, so the model is primed to emit reply tokens directly.
     let messages: [[String: String]] = [["role": "user", "content": trimmed]]
     let inputIds: [Int]
     do {
@@ -71,12 +68,9 @@ public actor ChatSession {
       throw TinyAudioError.mlxModuleLoadFailed(name: "tokenizer", underlying: AnyError(error))
     }
 
-    // Capture into locals so the detached task body doesn't capture `self`
-    // (the actor) — the detached body runs concurrently with the actor.
-    // The decoder is not `Sendable`, so we ferry it across the boundary
-    // inside an `@unchecked Sendable` box (safe because the actor's
-    // properties are immutable after init). The other captures (`[Int32]`,
-    // `Int`, `Set<Int32>`) are already `Sendable`.
+    // The decoder is not Sendable; ferry it across the detached boundary in
+    // an unchecked-Sendable box. Safe because the actor's properties are
+    // immutable after init.
     let decoderBox = SendableBox(value: self.decoder)
     let numLayers = self.numDecoderLayers
     let eosTokenIds = self.eosTokenIds
@@ -90,18 +84,12 @@ public actor ChatSession {
 
         let decoder = decoderBox.value
         let cache: [KVCache] = (0..<numLayers).map { _ in KVCacheSimple() }
-        let inputs = MLXArray(inputIds32)
-          .expandedDimensions(axis: 0)  // [1, T]
-
-        // Prefill.
+        let inputs = MLXArray(inputIds32).expandedDimensions(axis: 0)
         let prefillLogits = decoder(inputs, cache: cache)
-
-        // First greedy step: argmax on the last token's logits. Slice keeps
-        // the sequence dim so subsequent decode steps see the same shape.
         var y = MLX.argMax(
           prefillLogits[0..., (-1)..., 0...],
           axis: -1
-        ).expandedDimensions(axis: 0)  // [1, 1]
+        ).expandedDimensions(axis: 0)
         MLX.asyncEval(y)
 
         // Pipelined greedy decode: dispatch step N+1 before syncing step N.
@@ -116,8 +104,6 @@ public actor ChatSession {
             ).expandedDimensions(axis: 0)
             MLX.asyncEval(nextY!)
           }
-
-          // Sync step N (overlaps with step N+1 compute above).
           let tid = y.item(Int32.self)
           if eosTokenIds.contains(tid) {
             continuation.resume(returning: emitted)
@@ -130,16 +116,8 @@ public actor ChatSession {
       }
     }
 
-    // Detokenize on the actor; the underlying tokenizer state is the actor's
-    // and shouldn't cross task boundaries unnecessarily.
     return tokenizer.decode(tokens: generatedIds)
   }
-}
-
-/// Box for passing a non-`Sendable` value across a `Task.detached` boundary
-/// when external safety is guaranteed (immutable after construction).
-private struct SendableBox<T>: @unchecked Sendable {
-  let value: T
 }
 
 #if DEBUG
@@ -150,7 +128,6 @@ private struct SendableBox<T>: @unchecked Sendable {
     ///
     /// Internal; not part of the public SDK surface.
     internal static func makeForTests(modelDirectory: URL) async throws -> ChatSession {
-      // Mirror Transcriber.load step 7 (decoder).
       let decoder: Qwen3Model
       let numDecoderLayers: Int
       do {
@@ -173,8 +150,8 @@ private struct SendableBox<T>: @unchecked Sendable {
         throw TinyAudioError.mlxModuleLoadFailed(name: "decoder", underlying: AnyError(error))
       }
 
-      // Mirror Transcriber.load step 8 (tokenizer) — minus the <audio> patching
-      // since text-only chat never emits the audio placeholder.
+      // Text-only chat skips the <audio>-token patching that Transcriber.load
+      // applies; this loader never emits the audio placeholder.
       let tokenizer: any Tokenizer
       do {
         let configURL = modelDirectory.appendingPathComponent("tokenizer_config.json")
@@ -213,9 +190,8 @@ private struct SendableBox<T>: @unchecked Sendable {
         throw TinyAudioError.mlxModuleLoadFailed(name: "tokenizer", underlying: AnyError(error))
       }
 
-      // Resolve EOS token IDs the same way Transcriber.load does.
       var eosTokenIds: Set<Int32> = []
-      for eosStr in ["<|im_end|>", "<|endoftext|>"] {
+      for eosStr in Transcriber.qwen3EosTokenStrings {
         if let id = tokenizer.convertTokenToId(eosStr) {
           eosTokenIds.insert(Int32(id))
         }
@@ -233,9 +209,9 @@ private struct SendableBox<T>: @unchecked Sendable {
     }
   }
 
-  /// Local copy of `DecoderQuantizationSpec` from `Transcriber.swift`. The
-  /// original is `fileprivate` to that file; replicating it here avoids
-  /// touching `Transcriber.swift` for this task.
+  /// Local copy of `DecoderQuantizationSpec` from `Transcriber.swift`; the
+  /// original is `fileprivate` so we duplicate the shape here rather than
+  /// widen access for a DEBUG-only loader.
   private struct ChatSessionDecoderQuantizationSpec: Codable {
     struct Block: Codable {
       let groupSize: Int

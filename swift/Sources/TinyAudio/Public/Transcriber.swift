@@ -25,6 +25,11 @@ public actor Transcriber {
   /// `castWeightsForCompute` / `castMelForCompute`.
   internal static let computeDtype: DType = .bfloat16
 
+  /// Special tokens that should terminate Qwen3 generation in addition to
+  /// `tokenizer.eosTokenId`. Both `Transcriber.load()` and
+  /// `ChatSession.makeForTests` resolve these against the loaded tokenizer.
+  internal static let qwen3EosTokenStrings: [String] = ["<|im_end|>", "<|endoftext|>"]
+
   /// Cast every floating-point weight in a loaded safetensors dict to
   /// `computeDtype`. Non-float arrays (token id tables etc.) pass through
   /// untouched.
@@ -179,7 +184,7 @@ public actor Transcriber {
 
     // 10. Resolve EOS token IDs.
     var eosTokenIds: Set<Int32> = []
-    for eosStr in ["<|im_end|>", "<|endoftext|>"] {
+    for eosStr in Transcriber.qwen3EosTokenStrings {
       if let id = tokenizer.convertTokenToId(eosStr) {
         eosTokenIds.insert(Int32(id))
       }
