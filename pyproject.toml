@@ -110,12 +110,13 @@ bandit = ">=1.7.0"
 vulture = ">=2.10"
 interrogate = ">=1.5.0"
 pytest-mock = "^3.15.1"
+pytest-asyncio = ">=1.0.0"
 elevenlabs = "^2.31.0"
 # Apple SFSpeechRecognizer eval backend (scripts/eval/evaluators/asr.py).
 # Already a runtime dep on macOS, but pinning it in dev too so the dev env
 # doesn't fail-import when running tests/CLI flows that touch the backend.
 pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
-torchcodec = ">=0.5.0"
+torchcodec = ">=0.5.0,<0.8"  # 0.7.x is the last line built against torch 2.8 ABI; 0.8+ requires torch 2.9+
 
 [tool.poetry.group.pipecat]
 optional = true
