@@ -39,8 +39,8 @@ from tiny_audio.asr_config import (
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.augmentation import (
     NoiseAugmentation,
-    PhoneBandwidthAugmentation,
     RIRAugmentation,
+    SpeedPerturbationAugmentation,
 )
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
@@ -601,6 +601,19 @@ def main(cfg: DictConfig) -> None:
 
     augmentations: list = []
 
+    # Speed perturbation runs FIRST in the chain — it models source-signal
+    # variation (speaker rate), then RIR / noise model the channel applied
+    # to that varied source. Standard NeMo / Wav2Vec2 order.
+    speed_cfg = cfg.training.get("speed_perturbation") or {}
+    if speed_cfg.get("enabled"):
+        augmentations.append(
+            SpeedPerturbationAugmentation(
+                sample_rate=cfg.data.sample_rate,
+                factors=tuple(speed_cfg.get("factors", [0.9, 1.0, 1.1])),
+                prob=speed_cfg.get("prob", 0.5),
+            )
+        )
+
     rir_aug: RIRAugmentation | None = None
     rir_cfg = cfg.training.get("rir_augmentation") or {}
     if rir_cfg.get("enabled"):
@@ -630,19 +643,6 @@ def main(cfg: DictConfig) -> None:
         )
         augmentations.append(noise_aug)
 
-    # Phone bandwidth simulates how audio gets degraded after capture
-    # (downsampled to 8 kHz on phone calls). Runs AFTER room/noise so the
-    # channel applies to the already-mixed signal.
-    bandwidth_cfg = cfg.training.get("phone_bandwidth_augmentation") or {}
-    if bandwidth_cfg.get("enabled"):
-        augmentations.append(
-            PhoneBandwidthAugmentation(
-                sample_rate=cfg.data.sample_rate,
-                narrowband_rate=bandwidth_cfg.get("narrowband_rate", 8000),
-                prob=bandwidth_cfg.get("prob", 0.2),
-            )
-        )
-
     silence_injection_prob = float(cfg.training.get("silence_injection_prob", 0.0))
     if silence_injection_prob > 0.0 and noise_aug is None:
         raise ValueError(
@@ -664,9 +664,9 @@ def main(cfg: DictConfig) -> None:
                 # clear text. Targets the AMI backchannel hallucinations
                 # ("yeah" / "huh" on empty GT) by teaching the model to emit
                 # only EOS on non-speech. Falls through to the rest of the
-                # augmentation chain so RIR + phone-bandwidth still apply —
-                # at inference, real silence has been through a room and a
-                # codec, and the training distribution should match.
+                # augmentation chain so RIR still applies — at inference,
+                # real silence has been through a room, and the training
+                # distribution should match.
                 if (
                     silence_injection_prob > 0.0
                     and noise_aug is not None

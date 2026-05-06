@@ -55,13 +55,23 @@ training:
   # flash-attn source build on RunPod and is fast enough at our seq lengths.
   attn_implementation: sdpa
 
-  # Disabled (was 0.1): smoothing diluted EOS confidence and produced trailing
-  # discourse-marker insertions ("...nice day and", "...with the camp and")
-  # on Peoples / Earnings22 evals. Modern ASR recipes (NeMo Canary, Parakeet,
-  # Whisper-Large-v3) all use 0.0 — ASR targets are low-entropy enough that
-  # smoothing hurts EOS discrimination more than it helps generalization.
-  label_smoothing_factor: 0.0
-  weight_decay: 0.0
+  # Inductor backward graph asserts wrong stride on the (B, S, vocab=151670)
+  # LM-head logits when seq_len changes between batches (group_by_length is
+  # off here for multi-dataset). Forward graph handles dynamic shape but the
+  # compiled backward doesn't get re-specialized, blowing up with
+  # `assert_size_stride … expected size N==N, stride X==Y`. Disabling
+  # torch_compile costs ~10-25% throughput but unblocks this recipe; revisit
+  # when Inductor's dynamic-shape backward is more robust on huge-vocab heads.
+  torch_compile: true
+
+  # Re-enabled at 0.1: speech-LLM-regime regularization. The prior disable
+  # (0.1 → 0.0) was diagnosing trailing discourse-marker insertions on
+  # Peoples / Earnings22; the EOS-weighted CE (eos_loss_weight) added in
+  # commit 09e9303 addresses that EOS-confidence problem more directly,
+  # which lets us turn smoothing back on for its actual job — preventing
+  # the LM from overfitting to high-frequency tokens in a 4.7M-sample mix.
+  label_smoothing_factor: 0.1
+  weight_decay: 0.01
 
   # CE-loss up-weight on the assistant-turn EOS token (`<|im_end|>` for Qwen).
   # Pairs with label_smoothing=0 to push confident stops, addressing the
