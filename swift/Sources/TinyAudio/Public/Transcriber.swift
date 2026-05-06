@@ -418,6 +418,21 @@ extension Transcriber {
 }
 
 extension Transcriber {
+  /// Return a ``ChatSession`` that reuses the same Qwen3 decoder + tokenizer
+  /// already loaded for ASR. No extra weights are loaded; chat and transcribe
+  /// can be called interleaved on the same `Transcriber`, but not concurrently
+  /// (each takes the actor's executor).
+  public func makeChatSession() -> ChatSession {
+    ChatSession(
+      decoder: pipeline.decoder,
+      tokenizer: pipeline.tokenizer,
+      numDecoderLayers: pipeline.numDecoderLayers,
+      eosTokenIds: pipeline.eosTokenIds
+    )
+  }
+}
+
+extension Transcriber {
   @_spi(Testing)
   public func setBypassPrefixCache(_ bypass: Bool) {
     pipeline.bypassPrefixCacheForTesting = bypass
