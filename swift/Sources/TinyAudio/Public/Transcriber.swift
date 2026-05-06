@@ -419,9 +419,13 @@ extension Transcriber {
 
 extension Transcriber {
   /// Return a ``ChatSession`` that reuses the same Qwen3 decoder + tokenizer
-  /// already loaded for ASR. No extra weights are loaded; chat and transcribe
-  /// can be called interleaved on the same `Transcriber`, but not concurrently
-  /// (each takes the actor's executor).
+  /// already loaded for ASR. No extra weights are loaded.
+  ///
+  /// The returned session shares the underlying `Qwen3Model` instance with the
+  /// transcriber. Calls to `chat(...)` and `transcribe(...)` are safe when
+  /// interleaved sequentially, but must not run concurrently — both paths
+  /// allocate their own KV cache but operate on the same model parameters and
+  /// would corrupt each other's decode state if dispatched in parallel.
   public func makeChatSession() -> ChatSession {
     ChatSession(
       decoder: pipeline.decoder,
