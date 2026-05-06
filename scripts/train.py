@@ -4,6 +4,7 @@
 import contextlib
 import os
 import random
+import re
 from dataclasses import fields
 from typing import Any
 
@@ -44,6 +45,34 @@ from tiny_audio.augmentation import (
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
+
+# Markers Gigaspeech ships in the train split (~55% of rows) but not in dev.
+# Including <sil>/<music>/<noise>/<other> defensively per the documented set.
+# Compiled once at import; the regex is hot-path on every training batch.
+_GIGASPEECH_MARKER_RE = re.compile(
+    r"\s*<(comma|period|exclamationpoint|questionmark|sil|music|noise|other)>",
+    re.IGNORECASE,
+)
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_label(raw_text: str) -> str:
+    """Canonicalize a training transcript label.
+
+    Mirrors the percent rule from scripts/analysis.py:normalize_text so train
+    and eval agree on canonical surface form for percent values, and strips
+    Gigaspeech transcription/event markers that pollute ~55% of train rows
+    while being absent from the dev split.
+
+    Order matters: lowercase first (so the IGNORECASE on markers is belt-and-
+    suspenders), strip markers (consuming any preceding whitespace so we
+    don't leave double-spaces), then canonicalize percent, then collapse
+    whitespace, then strip ends.
+    """
+    text = (raw_text or "").strip().lower()
+    text = _GIGASPEECH_MARKER_RE.sub("", text)
+    text = text.replace("%", " percent").replace("per cent", "percent")
+    return _WHITESPACE_RE.sub(" ", text).strip()
 
 
 class DatasetLoader:
@@ -243,7 +272,7 @@ class DataCollator:
 
     def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
         """Build a single chat sample. Subclasses can override for task-specific prompts."""
-        text = (feature.get("text") or "").strip().lower()
+        text = _normalize_label(feature.get("text") or "")
         return self._make_messages(num_audio_tokens, random.choice(TRANSCRIBE_PROMPTS), text)
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
