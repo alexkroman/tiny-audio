@@ -12,9 +12,7 @@ mostly on close-talk audio. Two backends:
     set up, slightly less realistic.
 
 NoiseAugmentation mixes background noise from a corpus (MUSAN / OpenSLR /
-WHAM!) at random SNR. Optionally biases draws toward MUSAN/speech (babble),
-the most ASR-relevant noise type, and convolves the noise with an RIR before
-mixing so it shares the room response with the clean signal (NeMo recipe).
+WHAM!) at random SNR.
 
 Apply both via dataset.with_transform on the train split. They're decoupled
 so either can be enabled independently. RIR runs first (waveform shaping),
@@ -54,6 +52,41 @@ def _resolve_corpus_roots(corpus_path: str | Sequence[str], hint: str = "") -> l
             raise FileNotFoundError(msg)
         roots.append(root)
     return roots
+
+
+class GainPerturbationAugmentation:
+    """Scale the waveform by a random gain in dB.
+
+    Cheap signal-level augmentation. Applied *first* in the chain so noise SNR
+    randomization is computed against the post-gain level — matching what
+    deployment audio looks like (variable mic gain + variable noise floor).
+    """
+
+    def __init__(
+        self,
+        min_gain_db: float = -6.0,
+        max_gain_db: float = 6.0,
+        prob: float = 0.5,
+    ):
+        if not 0.0 <= prob <= 1.0:
+            raise ValueError(f"prob must be in [0, 1], got {prob}")
+        if min_gain_db > max_gain_db:
+            raise ValueError(f"min_gain_db ({min_gain_db}) > max_gain_db ({max_gain_db})")
+        self.min_gain_db = float(min_gain_db)
+        self.max_gain_db = float(max_gain_db)
+        self.prob = prob
+
+    def __call__(self, audio: np.ndarray) -> np.ndarray:
+        if random.random() > self.prob:
+            return audio
+        in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
+        gain_db = random.uniform(self.min_gain_db, self.max_gain_db)
+        gain = float(10 ** (gain_db / 20))
+        out = np.asarray(audio, dtype=np.float32) * gain
+        peak = float(np.abs(out).max()) if out.size else 0.0
+        if peak > 1.0:
+            out = out / peak
+        return out.astype(in_dtype)
 
 
 class SpeedPerturbationAugmentation:
@@ -304,11 +337,6 @@ class NoiseAugmentation:
         white / pink / blue / violet noise at random SNR. Cheap, no corpus,
         but lacks real-world temporal / spectral structure.
 
-    ``babble_weight`` biases corpus draws toward MUSAN/speech (multi-talker
-    babble) — the most ASR-relevant noise texture and the closest analogue to
-    People's Speech / CommonVoice / Earnings22 backgrounds. Paths under any
-    ``speech/`` subdirectory in the corpus are treated as the babble pool.
-
     Accepts/returns numpy arrays so it can be chained with
     :class:`RIRAugmentation` in the dataloader transform pipeline.
     """
@@ -320,15 +348,11 @@ class NoiseAugmentation:
         min_snr_db: float = 0.0,
         max_snr_db: float = 25.0,
         corpus_path: str | Sequence[str] | None = None,
-        babble_weight: float = 0.0,
     ):
         self.sample_rate = sample_rate
         self.prob = prob
         self.min_snr_db = min_snr_db
         self.max_snr_db = max_snr_db
-        self.babble_weight = float(babble_weight)
-        if not 0.0 <= self.babble_weight <= 1.0:
-            raise ValueError(f"babble_weight must be in [0, 1], got {babble_weight}")
         self.noise_paths: list[Path] | None = None
         self.babble_paths: list[Path] = []
         self.non_babble_paths: list[Path] = []
@@ -349,10 +373,6 @@ class NoiseAugmentation:
                     self.babble_paths.append(p)
                 else:
                     self.non_babble_paths.append(p)
-            # If the corpus has no babble pool, silently disable weighting —
-            # better than raising on an otherwise-valid noise corpus.
-            if not self.babble_paths:
-                self.babble_weight = 0.0
         else:
             try:
                 from torch_audiomentations import AddColoredNoise
@@ -405,25 +425,22 @@ class NoiseAugmentation:
             arr = np.tile(arr, repeats)
         return arr[:n_target]
 
-    def _pick_noise_path(self) -> Path:
-        # Bias toward MUSAN/speech (babble) when available; this is the most
-        # ASR-relevant noise type and otherwise gets undersampled (~14% of
-        # MUSAN files are under speech/).
-        if self.babble_weight > 0.0 and self.babble_paths and random.random() < self.babble_weight:
-            return random.choice(self.babble_paths)
-        if self.babble_weight > 0.0 and self.non_babble_paths:
-            return random.choice(self.non_babble_paths)
-        return random.choice(self.noise_paths)
-
-    def _try_read_random_noise(self, num_samples: int) -> np.ndarray | None:
+    def _try_read_random_noise(
+        self, num_samples: int, paths: list[Path] | None = None
+    ) -> np.ndarray | None:
         """Pick + read a random noise segment, retrying past unreadable files.
 
         MUSAN occasionally has zero-length or otherwise broken entries; up to
-        three picks before giving up. Returns None when the corpus is
-        exhausted of usable picks for this attempt.
+        three picks before giving up. ``paths`` defaults to the full noise
+        pool; callers pass a filtered subset (e.g. silence injection passes
+        a no-speech subset). Returns None when the candidate pool is empty
+        or no usable file is found in three attempts.
         """
+        candidates = paths if paths is not None else self.noise_paths
+        if not candidates:
+            return None
         for _ in range(3):
-            path = self._pick_noise_path()
+            path = random.choice(candidates)
             try:
                 noise = self._read_noise_segment(path, num_samples)
             except (RuntimeError, OSError, sf.LibsndfileError):
@@ -470,11 +487,21 @@ class NoiseAugmentation:
         Used for silence-injection training: pairs a non-speech audio sample
         with an empty transcription so the model learns "no speech → emit
         nothing" instead of backchanneling on silent / non-speech segments.
-        Returns None when no corpus is configured — the synthetic
-        ``AddColoredNoise`` backend has no concept of "noise-only" since it's
-        already additive.
+
+        Filters out paths under any ``speech`` subdirectory (e.g.
+        MUSAN/speech) — pairing real human speech with an empty transcript
+        would teach the model to skip transcribing legitimate speech, the
+        opposite of what we want. The full pool (including speech) is still
+        used by ``_mix_corpus_noise`` for cocktail-party robustness; only
+        this empty-target path filters it.
+
+        Returns None when no corpus is configured (synthetic noise has no
+        "noise-only" mode) or when the corpus contains only speech.
         """
         if self.noise_paths is None or num_samples <= 0:
             return None
-        noise = self._try_read_random_noise(num_samples)
+        non_speech = [p for p in self.noise_paths if "speech" not in p.parts]
+        if not non_speech:
+            return None
+        noise = self._try_read_random_noise(num_samples, paths=non_speech)
         return None if noise is None else noise.astype(np.float32)

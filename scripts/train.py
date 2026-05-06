@@ -38,6 +38,7 @@ from tiny_audio.asr_config import (
 )
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.augmentation import (
+    GainPerturbationAugmentation,
     NoiseAugmentation,
     RIRAugmentation,
     SpeedPerturbationAugmentation,
@@ -345,44 +346,28 @@ class ASRTrainer(Trainer):
         *args,
         decoder_learning_rate: float | None = None,
         decoder_weight_decay: float | None = None,
-        eos_loss_weight: float = 1.0,
+        projector_weight_decay: float | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.decoder_learning_rate = decoder_learning_rate
         self.decoder_weight_decay = decoder_weight_decay
-        self.eos_loss_weight = float(eos_loss_weight)
-        # Vocab size depends on the tokenizer resize for <audio>, so the
-        # weight tensor is built on first compute_loss call. Cache key is
-        # (device, dtype) — autocast/Accelerate may move logits across
-        # devices or dtypes mid-run.
-        self._ce_class_weights: torch.Tensor | None = None
-        self._ce_class_weights_key: tuple | None = None
-        self._eos_token_ids: list[int] = []
-        if self.eos_loss_weight != 1.0:
-            eos_ids = getattr(self.model.generation_config, "eos_token_id", None)
-            if isinstance(eos_ids, int):
-                self._eos_token_ids = [eos_ids]
-            elif eos_ids:
-                self._eos_token_ids = list(eos_ids)
-            if not self._eos_token_ids:
-                raise ValueError(
-                    "eos_loss_weight != 1.0 but model.generation_config.eos_token_id "
-                    "is empty; ASRModel._init_tokenizer should have populated it."
-                )
+        self.projector_weight_decay = projector_weight_decay
 
     def create_optimizer(self):
-        """Optimizer with separate LR / weight decay for the language model.
+        """Optimizer with separate LR / weight decay for projector and language model.
 
         Mirrors HF Trainer.create_optimizer's decay/no-decay split, but adds a
         second axis: parameters under `language_model.` get `decoder_learning_rate`
-        and `decoder_weight_decay` (when set), while the projector keeps
-        `args.learning_rate` and `args.weight_decay`.
+        and `decoder_weight_decay`; projector params get `projector_weight_decay`
+        (when set). Each falls back to `args.learning_rate` / `args.weight_decay`.
         """
-        decoder_overrides = (
-            self.decoder_learning_rate is not None or self.decoder_weight_decay is not None
+        overrides = (
+            self.decoder_learning_rate is not None
+            or self.decoder_weight_decay is not None
+            or self.projector_weight_decay is not None
         )
-        if self.optimizer is not None or not decoder_overrides:
+        if self.optimizer is not None or not overrides:
             return super().create_optimizer()
 
         from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
@@ -409,8 +394,11 @@ class ASRTrainer(Trainer):
         base_lr = self.args.learning_rate
         dec_lr = self.decoder_learning_rate if self.decoder_learning_rate is not None else base_lr
         dec_wd = self.decoder_weight_decay if self.decoder_weight_decay is not None else base_wd
+        proj_wd = (
+            self.projector_weight_decay if self.projector_weight_decay is not None else base_wd
+        )
         optimizer_grouped_parameters = [
-            {"params": groups[(False, True)], "weight_decay": base_wd, "lr": base_lr},
+            {"params": groups[(False, True)], "weight_decay": proj_wd, "lr": base_lr},
             {"params": groups[(False, False)], "weight_decay": 0.0, "lr": base_lr},
             {"params": groups[(True, True)], "weight_decay": dec_wd, "lr": dec_lr},
             {"params": groups[(True, False)], "weight_decay": 0.0, "lr": dec_lr},
@@ -422,51 +410,26 @@ class ASRTrainer(Trainer):
         return self.optimizer
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        """Compute loss with proper label shifting for causal LM.
+        """Compute label-smoothed CE with token-correct accumulation.
 
-        HuggingFace Trainer's label_smoother checks MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
-        to decide whether to shift labels. Since ASRModel isn't in that mapping,
-        it incorrectly uses shift_labels=False, causing misaligned predictions.
-        This override forces shift_labels=True for correct causal LM behavior.
+        HuggingFace Trainer's built-in ``label_smoother`` checks
+        MODEL_FOR_CAUSAL_LM_MAPPING_NAMES to decide whether to shift labels;
+        since ASRModel isn't in that mapping, it incorrectly uses
+        shift_labels=False, producing misaligned predictions. This override
+        shifts labels manually and applies smoothing via
+        ``CrossEntropyLoss(label_smoothing=)`` directly.
 
-        When ``eos_loss_weight`` ≠ 1.0, computes a class-weighted cross-entropy
-        directly on outputs.logits, up-weighting the EOS-class contribution so
-        the model learns confident stops. Mutually exclusive with HF's
-        label_smoother (which would double-handle the loss); training fails
-        early in __init__ if both are configured.
+        ``num_items_in_batch`` is the total non-ignored target-token count
+        across the gradient-accumulation window (threaded through by HF
+        Trainer in newer transformers versions). When provided, CE uses
+        ``reduction='sum'`` and divides by it for token-correct accumulated
+        gradients — samples don't get up-weighted just for being short.
+        When absent, falls back to per-micro-batch mean + accum-step
+        division (the legacy formulation).
 
-        `num_items_in_batch` is part of HF Trainer's compute_loss signature
-        (newer transformers versions pass it for gradient-accumulation token
-        counting). We don't need it here, but the kwarg name has to match
-        Trainer's call, so we keep it on the signature and ignore it.
-        """
-        del num_items_in_batch  # Trainer-signature compatibility; unused here.
-
-        if self.eos_loss_weight != 1.0:
-            return self._compute_eos_weighted_loss(model, inputs, return_outputs)
-
-        labels = (
-            inputs.pop("labels") if self.label_smoother is not None and "labels" in inputs else None
-        )
-
-        outputs = model(**inputs)
-
-        if labels is not None:
-            loss = self.label_smoother(outputs, labels, shift_labels=True)
-            if self.args.gradient_accumulation_steps > 1:
-                loss = loss / self.args.gradient_accumulation_steps
-        else:
-            loss = outputs.loss
-
-        return (loss, outputs) if return_outputs else loss
-
-    def _compute_eos_weighted_loss(self, model, inputs, return_outputs):
-        """Class-weighted CE that boosts the EOS-token gradient.
-
-        Pops labels before forward to suppress HF's internal CE, runs the
-        weighted CE on outputs.logits, then re-adds projector aux loss
-        (MoSA / MoE) that ASRModel.forward would normally fold in via
-        outputs.loss but skips when labels are absent.
+        Projector aux loss (MoSA / MoE only; None for MLP) is a per-batch
+        regularizer, not a per-token quantity — kept on the accum-step
+        normalization path regardless of which CE reduction ran.
         """
         labels = inputs.pop("labels", None)
         if labels is None:
@@ -477,35 +440,34 @@ class ASRTrainer(Trainer):
         outputs = model(**inputs)
         logits = outputs.logits
 
-        cache_key = (logits.device, logits.dtype)
-        if self._ce_class_weights is None or self._ce_class_weights_key != cache_key:
-            vocab_size = logits.size(-1)
-            weights = torch.ones(vocab_size, dtype=logits.dtype, device=logits.device)
-            for tid in self._eos_token_ids:
-                if 0 <= tid < vocab_size:
-                    weights[tid] = self.eos_loss_weight
-            self._ce_class_weights = weights
-            self._ce_class_weights_key = cache_key
-
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous().to(logits.device)
+        flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+        flat_labels = shift_labels.view(-1)
+
+        token_correct = num_items_in_batch is not None
+        reduction = "sum" if token_correct else "mean"
+
         loss_fct = torch.nn.CrossEntropyLoss(
-            weight=self._ce_class_weights,
             ignore_index=-100,
+            label_smoothing=float(self.args.label_smoothing_factor),
+            reduction=reduction,
         )
-        loss = loss_fct(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-        )
+        loss = loss_fct(flat_logits, flat_labels)
+
+        if token_correct:
+            loss = loss / num_items_in_batch
+        elif self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
 
         projector = getattr(model, "projector", None)
         if projector is not None and hasattr(projector, "get_aux_loss"):
             aux_loss = projector.get_aux_loss()
             if aux_loss is not None and aux_loss.numel() > 0:
-                loss = loss + aux_loss.to(loss.device)
-
-        if self.args.gradient_accumulation_steps > 1:
-            loss = loss / self.args.gradient_accumulation_steps
+                aux = aux_loss.to(loss.device)
+                if self.args.gradient_accumulation_steps > 1:
+                    aux = aux / self.args.gradient_accumulation_steps
+                loss = loss + aux
 
         outputs.loss = loss
         return (loss, outputs) if return_outputs else loss
@@ -601,6 +563,19 @@ def main(cfg: DictConfig) -> None:
 
     augmentations: list = []
 
+    # Gain perturbation runs FIRST so downstream noise SNR is computed against
+    # the post-gain level — matches deployment audio (variable mic gain +
+    # variable noise floor).
+    gain_cfg = cfg.training.get("gain_perturbation") or {}
+    if gain_cfg.get("enabled"):
+        augmentations.append(
+            GainPerturbationAugmentation(
+                min_gain_db=gain_cfg.get("min_gain_db", -6.0),
+                max_gain_db=gain_cfg.get("max_gain_db", 6.0),
+                prob=gain_cfg.get("prob", 0.5),
+            )
+        )
+
     # Speed perturbation runs FIRST in the chain — it models source-signal
     # variation (speaker rate), then RIR / noise model the channel applied
     # to that varied source. Standard NeMo / Wav2Vec2 order.
@@ -639,7 +614,6 @@ def main(cfg: DictConfig) -> None:
             min_snr_db=noise_cfg.get("min_snr_db", 0.0),
             max_snr_db=noise_cfg.get("max_snr_db", 25.0),
             corpus_path=noise_cfg.get("corpus_path"),
-            babble_weight=noise_cfg.get("babble_weight", 0.0),
         )
         augmentations.append(noise_aug)
 
@@ -717,6 +691,7 @@ def main(cfg: DictConfig) -> None:
     assert isinstance(training_config, dict)
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     decoder_weight_decay = training_config.pop("decoder_weight_decay", None)
+    projector_weight_decay = training_config.pop("projector_weight_decay", None)
     if compile_config := training_config.pop("torch_compile_config", None):
         torch._dynamo.config.cache_size_limit = compile_config.get("cache_size_limit", 64)
         torch._dynamo.config.capture_scalar_outputs = compile_config.get(
@@ -734,6 +709,7 @@ def main(cfg: DictConfig) -> None:
         callbacks=callbacks,
         decoder_learning_rate=decoder_learning_rate,
         decoder_weight_decay=decoder_weight_decay,
+        projector_weight_decay=projector_weight_decay,
     )
 
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))

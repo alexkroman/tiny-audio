@@ -337,7 +337,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             self.tokenizer.add_special_tokens(
                 {"additional_special_tokens": existing_special + ["<audio>"]}
             )
-            self.language_model.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
+            # mean_resizing=True initializes the new <audio> row at the mean of
+            # existing rows so its scale matches the pretrained distribution. The
+            # input-side <audio> embedding is overwritten via masked_scatter and
+            # never seen by the LM, but with tied embeddings (Qwen3-0.6B) this
+            # same row is the lm_head column for predicting <audio>; a Gaussian
+            # draw at config.initializer_range was visible in early-step logits.
+            self.language_model.resize_token_embeddings(len(self.tokenizer), mean_resizing=True)
 
         self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<audio>")
         self.tokenizer.padding_side = "right"

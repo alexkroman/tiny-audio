@@ -7,6 +7,12 @@ learning_rate: 1e-4
 max_grad_norm: 1.0
 warmup_steps: 2000
 lr_scheduler_type: cosine
+# β2=0.95 (vs HF default 0.999) — GPT-style recipe. The default's effective
+# variance window is ~1000 steps; with a randomly-initialized projector the
+# gradient distribution shifts hard in the first few thousand steps (i.e.
+# inside warmup), and a 1000-step variance estimate lags that shift. β2=0.95
+# tracks a ~20-step window so AdamW adapts quickly during warmup.
+adam_beta2: 0.95
 
 # Training
 max_steps: -1
@@ -53,11 +59,6 @@ torch_compile: true
 # blow past dynamo's default cache_size_limit=8 and force eager fallback.
 torch_compile_config:
   cache_size_limit: 256
-# Master weights in fp32 so AdamW updates below the bf16 ULP gap (~0.0078
-# near 1.0) actually land — bf16 master weights silently round small
-# RMSNorm/LayerNorm updates to zero, freezing every norm scale in the LM.
-# Compute is still bf16 via `bf16: true` autocast.
-model_dtype: float32
 attn_implementation: flash_attention_2
 
 # Data loading
@@ -81,12 +82,23 @@ time_mask_length: 100
 num_freq_masks: 2
 freq_mask_length: 27
 
+# Gain perturbation — scale the waveform by a random gain in dB. Runs FIRST
+# so noise SNR randomization is computed against the post-gain level, which
+# matches deployment audio (variable mic gain + variable noise floor).
+gain_perturbation:
+  enabled: true
+  min_gain_db: -6.0   # NeMo runs ±10, Kaldi ~±18, audiomentations default ±12
+  max_gain_db: 6.0    # ±6 is the conservative speech-LLM-friendly range; pairs
+                      # well with noise SNR randomization since absolute level
+                      # variance compounds with relative SNR variance
+  prob: 0.5           # half-batch — matches noise / speed perturb cadence
+
 # Speed perturbation — resample source audio at a discrete factor to expose
 # the projector to the encoder's response across speaker rates. Standard
 # ASR augmentation in NeMo / Wav2Vec2 / Whisper-fine-tune recipes; cheap
-# effective-data multiplier (≈3× when factor=1.0 is in the set). Runs
-# FIRST in the chain so RIR / noise model the channel applied to the
-# rate-varied source.
+# effective-data multiplier (≈3× when factor=1.0 is in the set). Runs after
+# gain perturbation so the noise SNR is computed against gain-and-rate-varied
+# source audio.
 speed_perturbation:
   enabled: true
   # {0.9, 1.0, 1.1} is the canonical NeMo / Kaldi speed-perturb set. Wider
@@ -147,9 +159,9 @@ rir_augmentation:
 #     violet noise. Cheap, no corpus, but lacks real-world structure.
 # CPU-friendly; chains after RIR in the dataloader transform pipeline.
 #
-# SNR range [0, 25] dB targets the natural-noise regime; floor lifted off
-# the NeMo -5 dB preset because sub-zero-SNR samples were degrading the
-# clean read-speech evals more than they were buying robustness gains.
+# SNR range [0, 25] dB targets the natural-noise regime; floor held at 0 dB
+# since sub-zero-SNR samples were degrading the clean read-speech evals more
+# than they were buying robustness gains.
 noise_augmentation:
   enabled: true
   # MUSAN (music + speech + noise, ~109h) plus OpenSLR-28's pointsource_noises
@@ -162,19 +174,8 @@ noise_augmentation:
   # 0.5 hedges between full speech-LLM defaults (~0.3) and preserving the
   # robustness gains the prior 0.7 was paying for.
   prob: 0.5
-  # 0 → -5 dB: drop floor to NeMo Canary's standard. Sub-zero SNR samples
-  # are degraded enough that the encoder's response gets noisy, but they
-  # also force the projector to learn a wider robustness envelope. Pairs
-  # with the higher noise prob to push the model into the regime AMI-SDM
-  # and Switchboard live in (real-world deployment routinely sees < 0 dB
-  # SNR on far-field captures).
-  min_snr_db: -5.0
+  min_snr_db: 0.0
   max_snr_db: 25.0
-  # 0.55 → 0.4: babble was weighted up specifically to close ami-ihm via
-  # cross-talker simulation. Speech-LLM literature shows no babble-specific
-  # wins, so step down toward the unweighted default — but not all the way,
-  # to preserve some of the ami-ihm-targeted gain.
-  babble_weight: 0.4
 
 # Misc
 disable_tqdm: false

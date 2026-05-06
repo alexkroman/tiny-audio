@@ -43,6 +43,11 @@ class MLPAudioProjector(nn.Module):
         self.norm = LlamaRMSNorm(hidden_dim, eps=1e-6)
         self.act = nn.GELU()
         self.linear_2 = nn.Linear(hidden_dim, llm_dim, bias=False)
+        # Output norm aligns the projector's RMS with the LM's embed_tokens
+        # distribution. Without it, linear_2's Kaiming-uniform init produces
+        # outputs ~30× quieter than embed rows, which saturates softmax at
+        # audio positions and starves them of gradient.
+        self.norm_2 = LlamaRMSNorm(llm_dim, eps=1e-6)
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length (matches GLM-ASR)."""
@@ -62,7 +67,8 @@ class MLPAudioProjector(nn.Module):
         x = self.linear_1(x)
         x = self.norm(x)
         x = self.act(x)
-        return self.linear_2(x)
+        x = self.linear_2(x)
+        return self.norm_2(x)
 
 
 # =============================================================================

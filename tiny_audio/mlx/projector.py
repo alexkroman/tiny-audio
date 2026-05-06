@@ -5,7 +5,7 @@ import mlx.nn as nn
 
 
 class MLXMLPProjector(nn.Module):
-    """Frame-stack (k=pool_stride) -> Linear -> RMSNorm -> GELU -> Linear."""
+    """Frame-stack (k=pool_stride) -> Linear -> RMSNorm -> GELU -> Linear -> RMSNorm."""
 
     def __init__(
         self,
@@ -21,6 +21,7 @@ class MLXMLPProjector(nn.Module):
         self.norm = nn.RMSNorm(hidden_dim, eps=1e-6)
         self.act = nn.GELU()
         self.linear_2 = nn.Linear(hidden_dim, llm_dim, bias=False)
+        self.norm_2 = nn.RMSNorm(llm_dim, eps=1e-6)
 
     def get_output_length(self, input_length: int) -> int:
         return (input_length - self.k) // self.k + 1
@@ -33,4 +34,5 @@ class MLXMLPProjector(nn.Module):
         x = self.linear_1(x)
         x = self.norm(x)
         x = self.act(x)
-        return self.linear_2(x)
+        x = self.linear_2(x)
+        return self.norm_2(x)

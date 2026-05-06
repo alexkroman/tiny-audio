@@ -28,8 +28,9 @@
 # │ AMI SDM (natural)        │   107,319 │    2.3% │
 # │ VoxPopuli en             │    75,000 │    1.6% │
 # │ Earnings22 robust (all)  │   ~25,000 │    0.5% │
+# │ EdAcc (validation)       │     9,850 │    0.2% │
 # └──────────────────────────┴           ┴         ┘
-# Total: ~4,728,600 samples
+# Total: ~4,738,450 samples
 #
 # fixie-ai mirrors are used for People's Speech, CommonVoice, and Gigaspeech
 # because their pre-processed/sharded layouts are friendlier than the upstream
@@ -180,6 +181,23 @@ datasets:
     train_splits: [train]
     eval_splits: [validation]
     target_samples: 75000
+
+  # EdAcc (Edinburgh International Accents of English Corpus). Dyadic
+  # informal interviews, 40+ L1/L2 accents (Indian, Nigerian, Jamaican,
+  # Vietnamese, etc.). Only orthogonal accent signal in the mix:
+  # VoxPopuli covers European MEPs, CV is read-style. EdAcc is benchmark-
+  # only on HF (no train split shipped), so we train on its 9.85K
+  # validation split and eval on the 9.29K test split — the canonical
+  # open-asr-leaderboard partition. Studio-quality audio, so isolates
+  # accent from channel noise. Tiny (~0.2% of mix), targeted exposure
+  # rather than volume — same role as Earnings22.
+  - path: edinburghcstr/edacc
+    name: default
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: [validation]
+    eval_splits: [test]
 
   # TEDLIUM (sanchit-gandhi/tedlium-data) — TED-talk register: scripted,
   # long-form, single-speaker. Natural ~268K (5.7% of post-addition mix).
