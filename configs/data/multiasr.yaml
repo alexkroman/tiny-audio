@@ -142,7 +142,7 @@ datasets:
 
   # AMI corpus SDM - single distant mic (far-field). Natural size
   # (~107,319), target_samples omitted. Prior 168K target was 1.57x replay.
-  # With CHiME-6 / AliMeeting unavailable on HF, SDM + RIR/noise/speaker-mix
+  # With CHiME-6 / AliMeeting unavailable on HF, SDM + noise/speaker-mix
   # augmentation is the recipe for ami-sdm.
   - path: edinburghcstr/ami
     name: sdm

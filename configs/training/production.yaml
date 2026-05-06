@@ -4,15 +4,9 @@ output_dir: ./outputs/production_model
 # Optimizer
 optim: adamw_torch_fused
 learning_rate: 1e-4
-max_grad_norm: 1.0
+max_grad_norm: 3.0
 warmup_steps: 2000
 lr_scheduler_type: cosine
-# β2=0.95 (vs HF default 0.999) — GPT-style recipe. The default's effective
-# variance window is ~1000 steps; with a randomly-initialized projector the
-# gradient distribution shifts hard in the first few thousand steps (i.e.
-# inside warmup), and a 1000-step variance estimate lags that shift. β2=0.95
-# tracks a ~20-step window so AdamW adapts quickly during warmup.
-adam_beta2: 0.95
 
 # Training
 max_steps: -1
@@ -70,112 +64,41 @@ dataloader_drop_last: true
 group_by_length: true
 length_column_name: duration
 
-# SpecAugment — 2×100 time masks. Closer to NeMo Canary's 10×100 mask
-# *length* but with far fewer masks; total budget is 200 frames (down from
-# the 4×70=280 we were running, well under encoder-recipe 1000). Larger
-# individual masks force the projector to span gaps in the encoder's
-# response rather than treating each masked window as an isolated gap.
-# Freq settings unchanged.
-use_specaugment: true
-num_time_masks: 2
-time_mask_length: 100
-num_freq_masks: 2
-freq_mask_length: 27
-
-# Gain perturbation — scale the waveform by a random gain in dB. Runs FIRST
-# so noise SNR randomization is computed against the post-gain level, which
-# matches deployment audio (variable mic gain + variable noise floor).
-gain_perturbation:
-  enabled: true
-  min_gain_db: -6.0   # NeMo runs ±10, Kaldi ~±18, audiomentations default ±12
-  max_gain_db: 6.0    # ±6 is the conservative speech-LLM-friendly range; pairs
-                      # well with noise SNR randomization since absolute level
-                      # variance compounds with relative SNR variance
-  prob: 0.5           # half-batch — matches noise / speed perturb cadence
-
-# Speed perturbation — resample source audio at a discrete factor to expose
-# the projector to the encoder's response across speaker rates. Standard
-# ASR augmentation in NeMo / Wav2Vec2 / Whisper-fine-tune recipes; cheap
-# effective-data multiplier (≈3× when factor=1.0 is in the set). Runs after
-# gain perturbation so the noise SNR is computed against gain-and-rate-varied
-# source audio.
-speed_perturbation:
-  enabled: true
-  # {0.9, 1.0, 1.1} is the canonical NeMo / Kaldi speed-perturb set. Wider
-  # ranges (e.g. {0.85, 1.0, 1.15}) push prosody beyond what Whisper's
-  # frozen encoder cleanly handles; stick with the standard.
-  factors: [0.9, 1.0, 1.1]
-  # 0.5: standard prob; lower than encoder-pretrain recipes (which run 1.0
-  # with a 3× sample budget) because we don't have the encoder capacity to
-  # absorb every batch being perturbed, but high enough to materially shift
-  # the prosody distribution the projector trains against.
-  prob: 0.5
-
-# RIR (Room Impulse Response) augmentation — simulates far-field / reverberant
-# audio by convolving with a random RIR sampled from a pool. Two backends:
-#   * corpus_path set — load real RIRs from a directory of WAV files
-#     (recommended; SOTA recipe used by NeMo / Canary / Parakeet). Run
-#     `ta dev download-rirs` to fetch OpenSLR-28 to ~/.cache/openslr-28.
-#   * corpus_path null — generate synthetic RIRs at init via pyroomacoustics'
-#     image-source method using the room / T60 ranges below. CPU-only,
-#     no corpus needed; less realistic.
-#
-# Range defaults mirror Interspeech 2024 / ICASSP 2025 ASR-robustness recipes
-# and only matter for the synthetic backend. prob 0.5 ensures roughly half of
-# every batch sees reverb without overwhelming clean-speech training signal.
-rir_augmentation:
-  enabled: true
-  # Combine OpenSLR-28's real RIRs with its much larger simulated_rirs set
-  # (~60K simulated impulses) so pool_size sub-samples from the full corpus
-  # each run. pointsource_noises is intentionally excluded — those are noise
-  # clips, not impulse responses.
-  corpus_path:
-    - ~/.cache/openslr-28/real_rirs_isotropic_noises
-    - ~/.cache/openslr-28/simulated_rirs
-  # Bumped from 2048 → 8192: sub-sampling 2K from ~60K simulated impulses was
-  # leaving real-RIR diversity on the table, especially relevant for ami-sdm.
-  pool_size: 8192
-  # Widened from [3, 10] / [2.4, 4] / t60 [0.1, 1.0] to capture larger meeting
-  # rooms with longer reverberation. Real AMI rooms are bigger and more
-  # reverberant than the prior synthetic distribution covered.
-  room_x_range: [3.0, 15.0]
-  room_y_range: [3.0, 15.0]
-  room_z_range: [2.4, 5.0]
-  t60_range: [0.2, 1.5]
-  # 0.6: aggressive reverb exposure. ami-sdm and Switchboard are the key
-  # eval gaps where reverberant / far-field training pays off; 0.6 keeps
-  # majority-of-batches reverb to invest projector capacity in those
-  # slices. Trades some LS Clean / Tedlium clean-speech headroom for that
-  # gain — eval will tell us whether the trade is favorable.
-  prob: 0.6
-  seed: null
-
-# Noise augmentation — mixes background noise into the signal via
-# torch-audiomentations. Two backends:
-#   * corpus_path set — AddBackgroundNoise samples a random clip from a
-#     directory of audio files (recommended; SOTA recipe). Run
-#     `ta dev download-musan` to fetch MUSAN to ~/.cache/musan.
-#   * corpus_path null — AddColoredNoise synthesizes white / pink / blue /
-#     violet noise. Cheap, no corpus, but lacks real-world structure.
-# CPU-friendly; chains after RIR in the dataloader transform pipeline.
-#
-# SNR range [0, 25] dB targets the natural-noise regime; floor held at 0 dB
-# since sub-zero-SNR samples were degrading the clean read-speech evals more
-# than they were buying robustness gains.
+# Noise augmentation — Persian-ELN recipe (arXiv:2512.17247): every utterance
+# corrupted with one MUSAN ambient segment at SNR ∈ [-15, +15] dB, plus a thin
+# layer of low-amplitude Gaussian noise on top. Music/speech/babble subsets
+# are excluded; only the ~930-clip ambient noise subset is used.
 noise_augmentation:
   enabled: true
-  # MUSAN (music + speech + noise, ~109h) plus OpenSLR-28's pointsource_noises
-  # (~843 clips) — the canonical Kaldi/NeMo noise pool.
+  # MUSAN ambient subset only (`musan/noise` — ~930 wav, ~6 hours: rain,
+  # thunder, wind, crowd chatter, cafeteria, footsteps, paper, mechanical,
+  # phone tones). Excludes `musan/music` and `musan/speech` (babble).
   corpus_path:
-    - ~/.cache/musan/musan
-    - ~/.cache/openslr-28/pointsource_noises
-  # 0.7 → 0.5: speech-LLM regime; noise no longer dominates batches but stays
-  # at meaningful exposure (Qwen2-Audio / Granite-Speech run ~0.2-0.5).
-  # 0.5 hedges between full speech-LLM defaults (~0.3) and preserving the
-  # robustness gains the prior 0.7 was paying for.
-  prob: 0.5
-  min_snr_db: 0.0
-  max_snr_db: 25.0
+    - ~/.cache/musan/musan/noise
+  # Apply to every utterance (paper applies noise corruption to all training
+  # samples, not a fraction).
+  prob: 1.0
+  min_snr_db: -15.0
+  max_snr_db: 15.0
+  # NeMo NoisePerturbationWithNormalization: normalize both clean and noise
+  # to this dB-FS target before SNR scaling. Decouples SNR from per-clip
+  # absolute level (close-talk vs. distant-mic AMI). -25 dBFS is NeMo's
+  # default and matches the Microsoft DNS-Challenge convention.
+  target_db: -25.0
+  # Floor for the RMS divide in dB-FS normalization (effectively silent
+  # clips snap to this RMS instead of dividing by ~0). NeMo default.
+  rms_epsilon: 0.01
+  # Insert this much silence between repeats when a noise clip is shorter
+  # than the utterance — avoids the periodic seam artifact that butt-joined
+  # tiling creates on short MUSAN clips.
+  tile_silence_sec: 0.25
+  # Additive Gaussian "background sensor" noise layered on top of the MUSAN
+  # mix. SNR sampled uniformly per clip and σ derived from clip RMS
+  # (SpeechBrain / NeMo additive-noise convention). Paper doesn't specify
+  # SNR — 20-40 dB is the canonical "background dither" range, with MUSAN
+  # remaining the dominant noise component. Set both to null to disable.
+  gaussian_min_snr_db: 20.0
+  gaussian_max_snr_db: 40.0
 
 # Misc
 disable_tqdm: false

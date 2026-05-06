@@ -296,7 +296,6 @@ def analyze_weights(
         "projector_pool_stride",
         "audio_model_id",
         "text_model_id",
-        "use_specaugment",
         "use_lora",
     ]
     for key in important_keys:

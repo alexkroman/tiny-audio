@@ -168,20 +168,18 @@ def setup_remote_environment(conn: Connection) -> None:
     )
     # Optional perf adds — fall back gracefully on pods where these aren't
     # available (e.g. minimal images, universe repo disabled, partial apt
-    # cache). aria2 → faster RIRs/MUSAN download (urllib fallback exists);
+    # cache). aria2 → faster MUSAN download (urllib fallback exists);
     # pigz → parallel gzip for MUSAN tar (single-threaded fallback);
-    # p7zip-full → parallel zip extract for OpenSLR-28 (unzip fallback);
     # portaudio19-dev → only needed for pyaudio runtime, never training.
     conn.run(
-        "apt-get install -y aria2 pigz p7zip-full portaudio19-dev || true",
+        "apt-get install -y aria2 pigz portaudio19-dev || true",
     )
     # Pin augmentation corpora onto the persistent /workspace volume so they
-    # survive container restarts. ~/.cache/<name> becomes a symlink, which
-    # keeps `corpus_path: ~/.cache/...` in production.yaml portable across
-    # local dev and RunPod without per-environment config branches.
+    # survive container restarts. ~/.cache/musan becomes a symlink, which
+    # keeps `corpus_path: ~/.cache/musan/...` in production.yaml portable
+    # across local dev and RunPod without per-environment config branches.
     conn.run(
-        "mkdir -p /workspace/.cache/openslr-28 /workspace/.cache/musan /root/.cache && "
-        "ln -sfn /workspace/.cache/openslr-28 /root/.cache/openslr-28 && "
+        "mkdir -p /workspace/.cache/musan /root/.cache && "
         "ln -sfn /workspace/.cache/musan /root/.cache/musan",
     )
     print("Remote environment setup complete!")
@@ -279,11 +277,6 @@ def _download_corpus(conn: Connection, label: str, ta_subcommand: str) -> None:
     print(f"{label} ready.")
 
 
-def download_rirs(conn: Connection) -> None:
-    """Download OpenSLR-28 to ~/.cache/openslr-28 on the remote."""
-    _download_corpus(conn, "RIR corpus (OpenSLR-28)", "download-rirs")
-
-
 def download_musan(conn: Connection) -> None:
     """Download MUSAN to ~/.cache/musan on the remote."""
     _download_corpus(conn, "noise corpus (MUSAN)", "download-musan")
@@ -297,9 +290,6 @@ def deploy(
     skip_sync: bool = typer.Option(False, "--skip-sync", help="Skip project file sync"),
     skip_deps: bool = typer.Option(
         False, "--skip-deps", help="Skip Python dependency installation"
-    ),
-    skip_rirs: bool = typer.Option(
-        False, "--skip-rirs", help="Skip OpenSLR-28 RIR corpus download"
     ),
     skip_musan: bool = typer.Option(False, "--skip-musan", help="Skip MUSAN noise corpus download"),
 ):
@@ -319,9 +309,6 @@ def deploy(
 
     if not skip_deps:
         install_dependencies(conn)
-
-    if not skip_rirs:
-        download_rirs(conn)
 
     if not skip_musan:
         download_musan(conn)

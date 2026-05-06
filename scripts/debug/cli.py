@@ -5,6 +5,7 @@ import typer
 
 from scripts.debug.analyze_lora import main as analyze_lora_command
 from scripts.debug.analyze_weights import main as analyze_weights_command
+from scripts.debug.check_gradient_flow import main as check_gradient_flow_command
 from scripts.debug.check_moe import main as check_moe_command
 from scripts.debug.check_mosa import main as check_mosa_command
 from scripts.debug.compare_to_base import main as compare_to_base_command
@@ -24,6 +25,10 @@ app.command(name="analyze-weights", help="Analyze model weights for training hea
 app.command(name="compare-to-base", help="Compare fine-tuned weights against base model")(
     compare_to_base_command
 )
+app.command(
+    name="check-gradient-flow",
+    help="Probe gradient flow on a checkpoint (per-component grad norms)",
+)(check_gradient_flow_command)
 
 if __name__ == "__main__":
     app()

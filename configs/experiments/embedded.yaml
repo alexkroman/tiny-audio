@@ -31,12 +31,6 @@ training:
   # protecting general-LM behavior.
   decoder_learning_rate: 5e-5
   decoder_weight_decay: 0.001
-  # Projector is a small (~12M-param) randomly-initialized bridge that has to
-  # learn an exact mapping from the frozen encoder's space into the LM's
-  # embedding space; weight decay just pulls those bespoke directions back
-  # toward zero. The LM keeps its standard `weight_decay` (the trainer-args
-  # default applied to params not under `language_model.`).
-  projector_weight_decay: 0.0
   # Wider warmup gives the randomly-initialized projector time to settle before
   # the LM's much smaller LR starts to bite — important now that the LM is
   # trainable and the projector dominates early gradients.
@@ -70,9 +64,6 @@ training:
   # when Inductor's dynamic-shape backward is more robust on huge-vocab heads.
   torch_compile: true
 
-  # Standard 0.1 — speech-LLM-regime regularization. Prevents the LM from
-  # overfitting to high-frequency tokens in a 4.7M-sample mix.
-  label_smoothing_factor: 0.1
   weight_decay: 0.01
 
   # Probability of replacing a training sample's audio with silence + empty
