@@ -73,13 +73,14 @@ public actor ChatSession {
 
     // Capture into locals so the detached task body doesn't capture `self`
     // (the actor) — the detached body runs concurrently with the actor.
-    // The decoder + tokenizer are not `Sendable`, so we ferry them across
-    // the boundary inside an `@unchecked Sendable` box (safe because the
-    // actor's properties are immutable after init).
+    // The decoder is not `Sendable`, so we ferry it across the boundary
+    // inside an `@unchecked Sendable` box (safe because the actor's
+    // properties are immutable after init). The other captures (`[Int32]`,
+    // `Int`, `Set<Int32>`) are already `Sendable`.
     let decoderBox = SendableBox(value: self.decoder)
-    let numDecoderLayers = self.numDecoderLayers
+    let numLayers = self.numDecoderLayers
     let eosTokenIds = self.eosTokenIds
-    let inputIdsBox = SendableBox(value: inputIds)
+    let inputIds32 = inputIds.map { Int32($0) }
 
     let generatedIds: [Int] = try await withCheckedThrowingContinuation { continuation in
       Task.detached {
@@ -88,8 +89,8 @@ public actor ChatSession {
         defer { Memory.clearCache() }
 
         let decoder = decoderBox.value
-        let cache: [KVCache] = (0..<numDecoderLayers).map { _ in KVCacheSimple() }
-        let inputs = MLXArray(inputIdsBox.value.map { Int32($0) })
+        let cache: [KVCache] = (0..<numLayers).map { _ in KVCacheSimple() }
+        let inputs = MLXArray(inputIds32)
           .expandedDimensions(axis: 0)  // [1, T]
 
         // Prefill.
@@ -180,7 +181,12 @@ private struct SendableBox<T>: @unchecked Sendable {
         let configData = try Data(contentsOf: configURL)
         guard let configDict = try JSONSerialization.jsonObject(with: configData) as? [String: Any]
         else {
-          throw ChatSessionConfigError.invalidJSON("tokenizer_config.json is not a dict")
+          throw TinyAudioError.mlxModuleLoadFailed(
+            name: "tokenizer",
+            underlying: AnyError(
+              NSError(
+                domain: "TinyAudio.ChatSession", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "tokenizer_config.json is not a dict"])))
         }
         let tokenizerConfig = Config(configDict as [NSString: Any])
 
@@ -190,11 +196,19 @@ private struct SendableBox<T>: @unchecked Sendable {
           let tokenizerDict = try JSONSerialization.jsonObject(with: tokenizerRaw)
             as? [String: Any]
         else {
-          throw ChatSessionConfigError.invalidJSON("tokenizer.json is not a dict")
+          throw TinyAudioError.mlxModuleLoadFailed(
+            name: "tokenizer",
+            underlying: AnyError(
+              NSError(
+                domain: "TinyAudio.ChatSession", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "tokenizer.json is not a dict"])))
         }
         let tokenizerData = Config(tokenizerDict as [NSString: Any])
         tokenizer = try PreTrainedTokenizer(
           tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
+      } catch let err as TinyAudioError {
+        // Already wrapped at the throw site — propagate unchanged.
+        throw err
       } catch {
         throw TinyAudioError.mlxModuleLoadFailed(name: "tokenizer", underlying: AnyError(error))
       }
@@ -232,9 +246,5 @@ private struct SendableBox<T>: @unchecked Sendable {
       }
     }
     let quantization: Block
-  }
-
-  private enum ChatSessionConfigError: Error {
-    case invalidJSON(String)
   }
 #endif
