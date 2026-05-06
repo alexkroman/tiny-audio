@@ -97,7 +97,9 @@ def high_wer(
     ),
     exclude: list[str] = typer.Option([], help="Patterns to exclude"),
     latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
-    output_file: Path = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
+    output_file: Path | None = typer.Option(
+        None, "--output", "-o", help="Output file (default: stdout)"
+    ),
 ):
     """Output ground truth and predictions for samples with WER above threshold."""
     model_dirs = find_model_dirs(output_dir, model, exclude, latest=latest)
@@ -168,7 +170,9 @@ def entity_errors(
     entity_type: str = typer.Option(
         "", "--type", "-t", help="Filter by entity type (e.g., PERSON, ORG)"
     ),
-    output_file: Path = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
+    output_file: Path | None = typer.Option(
+        None, "--output", "-o", help="Output file (default: stdout)"
+    ),
 ):
     """Output samples where entities were missed in the prediction."""
     # Load keywords file
