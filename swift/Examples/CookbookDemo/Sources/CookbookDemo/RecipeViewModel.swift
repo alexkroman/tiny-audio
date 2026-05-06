@@ -13,7 +13,10 @@ struct TimerState: Equatable, Sendable {
 @MainActor
 @Observable
 final class RecipeViewModel {
-  enum Phase: Equatable { case loading, cooking, micDenied, modelFailed(String) }
+  enum Phase: Equatable {
+    case loading, cooking, micDenied
+    case modelFailed(String)
+  }
   enum ListeningState { case idle, hearing, thinking }
 
   let recipe: Recipe

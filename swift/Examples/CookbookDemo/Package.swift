@@ -6,7 +6,7 @@ let package = Package(
   platforms: [
     // macOS only on purpose (matches TinyAudioDemo). Cooking demo is voice-first
     // and big-screen by design.
-    .macOS(.v14),
+    .macOS(.v14)
   ],
   dependencies: [
     .package(path: "../..")

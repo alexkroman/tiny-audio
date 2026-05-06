@@ -7,8 +7,11 @@ struct CookingView: View {
     ZStack(alignment: .topTrailing) {
       mainColumn
       if vm.ingredientsVisible {
-        HStack { Spacer(); IngredientsPanel(ingredients: vm.recipe.ingredients) }
-          .transition(.move(edge: .trailing))
+        HStack {
+          Spacer()
+          IngredientsPanel(ingredients: vm.recipe.ingredients)
+        }
+        .transition(.move(edge: .trailing))
       }
       if vm.groceryOverlayVisible {
         GroceryListOverlay(items: vm.groceryList)

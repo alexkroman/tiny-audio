@@ -33,8 +33,9 @@ extension Intent {
       return .setTimer(seconds: s)
     case "cancel_timer": return .cancelTimer
     case "add_to_grocery_list":
-      guard let item = (dict["item"] as? String)?
-        .trimmingCharacters(in: .whitespacesAndNewlines),
+      guard
+        let item = (dict["item"] as? String)?
+          .trimmingCharacters(in: .whitespacesAndNewlines),
         !item.isEmpty
       else { return .none }
       return .addToGroceryList(item: item)
