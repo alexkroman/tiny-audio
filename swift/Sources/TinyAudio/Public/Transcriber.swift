@@ -25,6 +25,11 @@ public actor Transcriber {
   /// `castWeightsForCompute` / `castMelForCompute`.
   internal static let computeDtype: DType = .bfloat16
 
+  /// Special tokens that should terminate Qwen3 generation in addition to
+  /// `tokenizer.eosTokenId`. Both `Transcriber.load()` and
+  /// `ChatSession.makeForTests` resolve these against the loaded tokenizer.
+  internal static let qwen3EosTokenStrings: [String] = ["<|im_end|>", "<|endoftext|>"]
+
   /// Cast every floating-point weight in a loaded safetensors dict to
   /// `computeDtype`. Non-float arrays (token id tables etc.) pass through
   /// untouched.
@@ -179,7 +184,7 @@ public actor Transcriber {
 
     // 10. Resolve EOS token IDs.
     var eosTokenIds: Set<Int32> = []
-    for eosStr in ["<|im_end|>", "<|endoftext|>"] {
+    for eosStr in Transcriber.qwen3EosTokenStrings {
       if let id = tokenizer.convertTokenToId(eosStr) {
         eosTokenIds.insert(Int32(id))
       }
@@ -414,6 +419,25 @@ extension Transcriber {
     // tokens are context-sensitive — `decode([t1]) + decode([t2])` is not
     // equal to `decode([t1, t2])`, so we cannot accumulate per-token decodes.
     return pipeline.tokenizer.decode(tokens: accumulatedInts)
+  }
+}
+
+extension Transcriber {
+  /// Return a ``ChatSession`` that reuses the same Qwen3 decoder + tokenizer
+  /// already loaded for ASR. No extra weights are loaded.
+  ///
+  /// The returned session shares the underlying `Qwen3Model` instance with the
+  /// transcriber. Calls to `chat(...)` and `transcribe(...)` are safe when
+  /// interleaved sequentially, but must not run concurrently — both paths
+  /// allocate their own KV cache but operate on the same model parameters and
+  /// would corrupt each other's decode state if dispatched in parallel.
+  public func makeChatSession() -> ChatSession {
+    ChatSession(
+      decoder: pipeline.decoder,
+      tokenizer: pipeline.tokenizer,
+      numDecoderLayers: pipeline.numDecoderLayers,
+      eosTokenIds: pipeline.eosTokenIds
+    )
   }
 }
 

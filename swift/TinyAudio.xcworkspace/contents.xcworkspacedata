@@ -7,4 +7,7 @@
    <FileRef
       location = "group:Examples/TinyAudioDemo/TinyAudioDemo.xcodeproj">
    </FileRef>
+   <FileRef
+      location = "group:Examples/CookbookDemo/Package.swift">
+   </FileRef>
 </Workspace>

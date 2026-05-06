@@ -59,7 +59,7 @@ private struct PipelineProfile {
 
 /// Box for passing a non-Sendable value across a Task boundary when external
 /// safety is guaranteed (the enclosed value is immutable after construction).
-private struct SendableBox<T>: @unchecked Sendable {
+internal struct SendableBox<T>: @unchecked Sendable {
   let value: T
 }
 

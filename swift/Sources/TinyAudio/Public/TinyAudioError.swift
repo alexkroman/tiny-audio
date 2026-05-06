@@ -34,6 +34,15 @@ public enum TinyAudioError: Error, Sendable {
 
   /// `AVAudioEngine` or `AVAudioSession` configuration failed.
   case audioSessionConfigurationFailed(underlying: AnyError)
+
+  /// The caller passed an empty or whitespace-only prompt to a text-generation
+  /// API. The empty prompt would render to a degenerate chat template and the
+  /// model's behavior would be unpredictable.
+  case promptEmpty
+
+  /// The caller passed an invalid argument value (e.g. `maxNewTokens <= 0`)
+  /// that the SDK rejects before doing any model work.
+  case invalidArgument(reason: String)
 }
 
 /// A `Sendable` type-erased wrapper for any `Error`.
@@ -85,6 +94,8 @@ extension TinyAudioError: Equatable {
     case (.vadModelMissing, .vadModelMissing): return true
     case (.micPermissionDenied, .micPermissionDenied): return true
     case (.audioSessionConfigurationFailed, .audioSessionConfigurationFailed): return true
+    case (.promptEmpty, .promptEmpty): return true
+    case (.invalidArgument(let lr), .invalidArgument(let rr)): return lr == rr
     default: return false
     }
   }
@@ -100,6 +111,10 @@ extension TinyAudioError: CustomStringConvertible {
     case .micPermissionDenied: return "microphone permission denied"
     case .audioSessionConfigurationFailed(let err):
       return "audio session configuration failed: \(err)"
+    case .promptEmpty:
+      return "Prompt was empty or whitespace-only."
+    case .invalidArgument(let reason):
+      return "Invalid argument: \(reason)"
     }
   }
 }
