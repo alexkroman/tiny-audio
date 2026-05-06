@@ -37,5 +37,4 @@ training:
   save_steps: 1000
   eval_steps: 1000
 
-  label_smoothing_factor: 0.1
   weight_decay: 0.01

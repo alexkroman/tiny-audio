@@ -31,20 +31,38 @@ from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
 
-def build_model(dtype: torch.dtype, device: str) -> ASRModel:
-    """Mirror configs/experiments/embedded.yaml model section."""
-    cfg = ASRConfig(
-        audio_model_id="zai-org/GLM-ASR-Nano-2512",
-        text_model_id="Qwen/Qwen3-0.6B",
-        projector_type="mlp",
-        projector_pool_stride=4,
-        projector_hidden_dim=2048,
-        freeze_language_model=False,
-        # Use eager so we don't depend on flash-attn being importable on the
-        # local box; gradient flow is independent of attention impl.
-        attn_implementation="eager",
-    )
-    model = ASRModel(cfg)
+def build_model(dtype: torch.dtype, device: str, model_id: str | None = None) -> ASRModel:
+    """Build the model used by configs/experiments/embedded.yaml.
+
+    If `model_id` is provided, load the trained checkpoint from the Hub or a
+    local path; otherwise build a fresh model with base-LM weights and a
+    randomly-initialized projector. Gradient flow (which params get grads)
+    is independent of weights, but absolute gradient magnitudes — and the
+    projector/decoder ratio — depend on the trained state, so checkpoint
+    loading matters for the "is the projector dominating?" diagnostic.
+    """
+    if model_id is None:
+        cfg = ASRConfig(
+            audio_model_id="zai-org/GLM-ASR-Nano-2512",
+            text_model_id="Qwen/Qwen3-0.6B",
+            projector_type="mlp",
+            projector_pool_stride=4,
+            projector_hidden_dim=2048,
+            freeze_language_model=False,
+            # Use eager so we don't depend on flash-attn being importable on the
+            # local box; gradient flow is independent of attention impl.
+            attn_implementation="eager",
+        )
+        model = ASRModel(cfg)
+    else:
+        model = ASRModel.from_pretrained(
+            model_id,
+            attn_implementation="eager",
+        )
+        # from_pretrained may have left freeze_language_model=True from the
+        # saved config; force it off so the LM gets gradient as in training.
+        for p in model.language_model.parameters():
+            p.requires_grad_(True)
     model.to(device=device, dtype=dtype)
     return model
 
@@ -272,18 +290,42 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         print("         - all grads finite")
 
 
-def main() -> None:
+def main(
+    model_id: str | None = None,
+    dtype: str = "float32",
+    device: str = "cpu",
+) -> None:
+    """Run gradient-flow probe.
+
+    Args:
+        model_id: Hub repo id or local path to a trained checkpoint. If
+            omitted, build a fresh model from base-LM weights + randomly-
+            initialized projector (verifies plumbing, not training state).
+        dtype: float32 / bfloat16 / float16.
+        device: cpu / cuda / mps.
+    """
+    torch_dtype = {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+    }[dtype]
+    torch.manual_seed(0)
+    model = build_model(torch_dtype, device, model_id=model_id)
+    report(model, torch_dtype, device)
+
+
+def _argparse_main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model-id",
+        default=None,
+        help="Hub repo id or local path; omit to build a fresh model.",
+    )
     parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"])
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
-    dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[
-        args.dtype
-    ]
-    torch.manual_seed(0)
-    model = build_model(dtype, args.device)
-    report(model, dtype, args.device)
+    main(model_id=args.model_id, dtype=args.dtype, device=args.device)
 
 
 if __name__ == "__main__":
-    main()
+    _argparse_main()

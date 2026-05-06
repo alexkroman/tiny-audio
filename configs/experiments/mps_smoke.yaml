@@ -47,8 +47,6 @@ training:
   dataloader_prefetch_factor: null
   dataloader_pin_memory: false
 
-  rir_augmentation:
-    enabled: false
   noise_augmentation:
     enabled: false
 

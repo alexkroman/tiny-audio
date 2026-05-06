@@ -37,12 +37,7 @@ from tiny_audio.asr_config import (
     compute_encoder_output_length,
 )
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.augmentation import (
-    GainPerturbationAugmentation,
-    NoiseAugmentation,
-    RIRAugmentation,
-    SpeedPerturbationAugmentation,
-)
+from tiny_audio.augmentation import NoiseAugmentation
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
@@ -409,69 +404,6 @@ class ASRTrainer(Trainer):
         self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
 
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        """Compute label-smoothed CE with token-correct accumulation.
-
-        HuggingFace Trainer's built-in ``label_smoother`` checks
-        MODEL_FOR_CAUSAL_LM_MAPPING_NAMES to decide whether to shift labels;
-        since ASRModel isn't in that mapping, it incorrectly uses
-        shift_labels=False, producing misaligned predictions. This override
-        shifts labels manually and applies smoothing via
-        ``CrossEntropyLoss(label_smoothing=)`` directly.
-
-        ``num_items_in_batch`` is the total non-ignored target-token count
-        across the gradient-accumulation window (threaded through by HF
-        Trainer in newer transformers versions). When provided, CE uses
-        ``reduction='sum'`` and divides by it for token-correct accumulated
-        gradients — samples don't get up-weighted just for being short.
-        When absent, falls back to per-micro-batch mean + accum-step
-        division (the legacy formulation).
-
-        Projector aux loss (MoSA / MoE only; None for MLP) is a per-batch
-        regularizer, not a per-token quantity — kept on the accum-step
-        normalization path regardless of which CE reduction ran.
-        """
-        labels = inputs.pop("labels", None)
-        if labels is None:
-            outputs = model(**inputs)
-            loss = outputs.loss
-            return (loss, outputs) if return_outputs else loss
-
-        outputs = model(**inputs)
-        logits = outputs.logits
-
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous().to(logits.device)
-        flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-        flat_labels = shift_labels.view(-1)
-
-        token_correct = num_items_in_batch is not None
-        reduction = "sum" if token_correct else "mean"
-
-        loss_fct = torch.nn.CrossEntropyLoss(
-            ignore_index=-100,
-            label_smoothing=float(self.args.label_smoothing_factor),
-            reduction=reduction,
-        )
-        loss = loss_fct(flat_logits, flat_labels)
-
-        if token_correct:
-            loss = loss / num_items_in_batch
-        elif self.args.gradient_accumulation_steps > 1:
-            loss = loss / self.args.gradient_accumulation_steps
-
-        projector = getattr(model, "projector", None)
-        if projector is not None and hasattr(projector, "get_aux_loss"):
-            aux_loss = projector.get_aux_loss()
-            if aux_loss is not None and aux_loss.numel() > 0:
-                aux = aux_loss.to(loss.device)
-                if self.args.gradient_accumulation_steps > 1:
-                    aux = aux / self.args.gradient_accumulation_steps
-                loss = loss + aux
-
-        outputs.loss = loss
-        return (loss, outputs) if return_outputs else loss
-
 
 class PushToHubCallback(TrainerCallback):
     """Pushes model to Hub on every save."""
@@ -501,11 +433,6 @@ def get_valid_training_args(config: dict) -> dict:
 
 
 TRAINING_MODEL_PARAMS = [
-    "use_specaugment",
-    "num_time_masks",
-    "time_mask_length",
-    "num_freq_masks",
-    "freq_mask_length",
     "attn_implementation",
     "use_lora",
     "lora_rank",
@@ -563,48 +490,6 @@ def main(cfg: DictConfig) -> None:
 
     augmentations: list = []
 
-    # Gain perturbation runs FIRST so downstream noise SNR is computed against
-    # the post-gain level — matches deployment audio (variable mic gain +
-    # variable noise floor).
-    gain_cfg = cfg.training.get("gain_perturbation") or {}
-    if gain_cfg.get("enabled"):
-        augmentations.append(
-            GainPerturbationAugmentation(
-                min_gain_db=gain_cfg.get("min_gain_db", -6.0),
-                max_gain_db=gain_cfg.get("max_gain_db", 6.0),
-                prob=gain_cfg.get("prob", 0.5),
-            )
-        )
-
-    # Speed perturbation runs FIRST in the chain — it models source-signal
-    # variation (speaker rate), then RIR / noise model the channel applied
-    # to that varied source. Standard NeMo / Wav2Vec2 order.
-    speed_cfg = cfg.training.get("speed_perturbation") or {}
-    if speed_cfg.get("enabled"):
-        augmentations.append(
-            SpeedPerturbationAugmentation(
-                sample_rate=cfg.data.sample_rate,
-                factors=tuple(speed_cfg.get("factors", [0.9, 1.0, 1.1])),
-                prob=speed_cfg.get("prob", 0.5),
-            )
-        )
-
-    rir_aug: RIRAugmentation | None = None
-    rir_cfg = cfg.training.get("rir_augmentation") or {}
-    if rir_cfg.get("enabled"):
-        rir_aug = RIRAugmentation(
-            sample_rate=cfg.data.sample_rate,
-            prob=rir_cfg.get("prob", 0.5),
-            pool_size=rir_cfg.get("pool_size", 2048),
-            corpus_path=rir_cfg.get("corpus_path"),
-            room_x_range=tuple(rir_cfg.get("room_x_range", [3.0, 10.0])),
-            room_y_range=tuple(rir_cfg.get("room_y_range", [3.0, 10.0])),
-            room_z_range=tuple(rir_cfg.get("room_z_range", [2.4, 4.0])),
-            t60_range=tuple(rir_cfg.get("t60_range", [0.1, 1.0])),
-            seed=rir_cfg.get("seed"),
-        )
-        augmentations.append(rir_aug)
-
     noise_aug: NoiseAugmentation | None = None
     noise_cfg = cfg.training.get("noise_augmentation") or {}
     if noise_cfg.get("enabled"):
@@ -614,6 +499,11 @@ def main(cfg: DictConfig) -> None:
             min_snr_db=noise_cfg.get("min_snr_db", 0.0),
             max_snr_db=noise_cfg.get("max_snr_db", 25.0),
             corpus_path=noise_cfg.get("corpus_path"),
+            gaussian_min_snr_db=noise_cfg.get("gaussian_min_snr_db"),
+            gaussian_max_snr_db=noise_cfg.get("gaussian_max_snr_db"),
+            target_db=noise_cfg.get("target_db", -25.0),
+            rms_epsilon=noise_cfg.get("rms_epsilon", 1e-2),
+            tile_silence_sec=noise_cfg.get("tile_silence_sec", 0.25),
         )
         augmentations.append(noise_aug)
 
@@ -638,9 +528,7 @@ def main(cfg: DictConfig) -> None:
                 # clear text. Targets the AMI backchannel hallucinations
                 # ("yeah" / "huh" on empty GT) by teaching the model to emit
                 # only EOS on non-speech. Falls through to the rest of the
-                # augmentation chain so RIR still applies — at inference,
-                # real silence has been through a room, and the training
-                # distribution should match.
+                # augmentation chain so noise mixing still applies.
                 if (
                     silence_injection_prob > 0.0
                     and noise_aug is not None

@@ -290,44 +290,6 @@ class TestGenerateStreaming:
             assert isinstance(piece, str)
 
 
-class TestForwardSpecAugment:
-    """forward applies SpecAugment when training and use_specaugment=True."""
-
-    def test_specaugment_applied_during_training(self):
-        from unittest.mock import patch
-
-        from tiny_audio.asr_config import ASRConfig
-        from tiny_audio.asr_modeling import ASRModel
-
-        cfg = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            attn_implementation="eager",
-            model_dtype="float32",
-            use_specaugment=True,
-            num_time_masks=1,
-            time_mask_length=5,
-        )
-        model = ASRModel(cfg)
-        assert model.spec_augment is not None
-
-        model.train()
-
-        input_ids = torch.tensor([[model.audio_token_id, 1, 2]])
-        input_features = torch.zeros(1, 80, 3000)
-        audio_attention_mask = torch.ones(1, 3000, dtype=torch.long)
-
-        # Patch the forward method of spec_augment (nn.Module) to spy on calls
-        with patch.object(model.spec_augment, "forward", wraps=model.spec_augment.forward) as spy:
-            model(
-                input_ids=input_ids,
-                input_features=input_features,
-                audio_attention_mask=audio_attention_mask,
-                attention_mask=torch.ones_like(input_ids),
-            )
-            spy.assert_called_once()
-
-
 class TestSavePretrained:
     """save_pretrained writes config, weights, tokenizer, and source files."""
 

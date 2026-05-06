@@ -27,7 +27,7 @@ class ASRConfig(transformers.PretrainedConfig):
     - Text decoder (Qwen)
     - Projector (MLP, MOSA, MoE, QFormer)
     - Generation parameters
-    - Training options (SpecAugment, LoRA)
+    - Training options (LoRA)
     """
 
     model_type = "asr_model"
@@ -61,12 +61,6 @@ class ASRConfig(transformers.PretrainedConfig):
         qformer_num_layers: int = 2,  # Number of QFormer transformer layers
         qformer_num_heads: int = 16,  # Number of attention heads in QFormer
         qformer_intermediate_size: Optional[int] = None,  # FFN size (defaults to 4x hidden)
-        # SpecAugment settings
-        use_specaugment: bool = False,
-        num_time_masks: int = 2,
-        time_mask_length: int = 10,
-        num_freq_masks: int = 0,
-        freq_mask_length: int = 10,
         # LoRA configuration (for Stage 2 fine-tuning)
         use_lora: bool = False,
         lora_rank: int = 8,  # SALMONN default
@@ -96,7 +90,6 @@ class ASRConfig(transformers.PretrainedConfig):
             model_dtype: Model dtype ("bfloat16", "float16", "float32")
             projector_type: Projector architecture ("mlp", "mosa", "moe", "qformer")
             use_lora: Enable LoRA adapters for Stage 2 fine-tuning
-            use_specaugment: Enable SpecAugment data augmentation
         """
         # Set default generation parameters (greedy decoding only).
         # Applied via setattr below — keeping these out of kwargs so they
@@ -134,12 +127,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.qformer_num_layers = qformer_num_layers
         self.qformer_num_heads = qformer_num_heads
         self.qformer_intermediate_size = qformer_intermediate_size
-        # SpecAugment configuration
-        self.use_specaugment = use_specaugment
-        self.num_time_masks = num_time_masks
-        self.time_mask_length = time_mask_length
-        self.num_freq_masks = num_freq_masks
-        self.freq_mask_length = freq_mask_length
         # LoRA configuration
         self.use_lora = use_lora
         self.lora_rank = lora_rank

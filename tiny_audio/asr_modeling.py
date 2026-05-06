@@ -24,9 +24,6 @@ except ImportError:
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
-from torchaudio.transforms import SpecAugment
-
-
 def _gather_audio_embeds(audio_embeds: torch.Tensor, token_counts: torch.Tensor) -> torch.Tensor:
     """Flatten per-sample audio embeddings into a packed tensor.
 
@@ -186,17 +183,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Freeze projector if specified (for Stage 2 LoRA-only training)
         if getattr(config, "freeze_projector", False):
             self.projector.requires_grad_(False)
-
-        # SpecAugment for data augmentation during training
-        if getattr(config, "use_specaugment", False):
-            self.spec_augment = SpecAugment(
-                n_time_masks=config.num_time_masks,
-                time_mask_param=config.time_mask_length,
-                n_freq_masks=config.num_freq_masks,
-                freq_mask_param=config.freq_mask_length,
-            )
-        else:
-            self.spec_augment = None
 
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
@@ -471,9 +457,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
         if input_features is not None and input_ids is not None:
-            if self.training and self.spec_augment is not None:
-                input_features = self.spec_augment(input_features)
-
             is_audio_token = input_ids == self.audio_token_id
             if audio_token_counts is None:
                 audio_token_counts = is_audio_token.sum(dim=-1)
