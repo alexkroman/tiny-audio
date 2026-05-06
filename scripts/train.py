@@ -46,13 +46,20 @@ from tiny_audio.augmentation import (
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
 
-# Markers Gigaspeech ships in the train split (~55% of rows) but not in dev.
-# Including <sil>/<music>/<noise>/<other> defensively per the documented set.
-# Compiled once at import; the regex is hot-path on every training batch.
-_GIGASPEECH_MARKER_RE = re.compile(
-    r"\s*<(comma|period|exclamationpoint|questionmark|sil|music|noise|other)>",
+# Markers that pollute training labels but are absent from corresponding
+# eval splits. Gigaspeech ships <comma>/<period>/etc. in ~55% of train rows
+# and zero in dev. TEDLIUM ships <unk> in ~92% of train rows and zero in
+# validation/test. Stripping is safe across all corpora — these are ASR
+# annotation conventions, never literal user-intended words.
+_CORPUS_MARKER_RE = re.compile(
+    r"\s*<(comma|period|exclamationpoint|questionmark|sil|music|noise|other|unk)>",
     re.IGNORECASE,
 )
+# TEDLIUM occasionally inlines editorial commentary in square brackets
+# ([ medicine ], [ multi-word stage direction ]) — ~0.25% of train rows;
+# zero in dev/test. Strip the entire bracketed block, including any
+# preceding whitespace, to avoid leaving a double-space behind.
+_TEDLIUM_BRACKET_RE = re.compile(r"\s*\[[^\]]*\]")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -61,16 +68,18 @@ def _normalize_label(raw_text: str) -> str:
 
     Mirrors the percent rule from scripts/analysis.py:normalize_text so train
     and eval agree on canonical surface form for percent values, and strips
-    Gigaspeech transcription/event markers that pollute ~55% of train rows
-    while being absent from the dev split.
+    annotation markers that pollute train rows while being absent from the
+    matching eval splits.
 
     Order matters: lowercase first (so the IGNORECASE on markers is belt-and-
-    suspenders), strip markers (consuming any preceding whitespace so we
-    don't leave double-spaces), then canonicalize percent, then collapse
-    whitespace, then strip ends.
+    suspenders), strip angle-bracket markers (consuming any preceding
+    whitespace so we don't leave double-spaces), strip TEDLIUM editorial
+    brackets (same whitespace handling), then canonicalize percent, then
+    collapse whitespace, then strip ends.
     """
     text = (raw_text or "").strip().lower()
-    text = _GIGASPEECH_MARKER_RE.sub("", text)
+    text = _CORPUS_MARKER_RE.sub("", text)
+    text = _TEDLIUM_BRACKET_RE.sub("", text)
     text = text.replace("%", " percent").replace("per cent", "percent")
     return _WHITESPACE_RE.sub(" ", text).strip()
 

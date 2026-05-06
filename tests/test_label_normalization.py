@@ -98,3 +98,31 @@ class TestHygiene:
         # Realistic clean labels (already lowercased, no markers, no %) should
         # round-trip identically. Guards against accidental over-normalization.
         assert _normalize_label(raw) == raw
+
+
+class TestTedliumNormalization:
+    def test_unk_marker_stripped_at_start(self):
+        assert (
+            _normalize_label("<unk> i thought i would read poems") == "i thought i would read poems"
+        )
+
+    def test_unk_marker_stripped_mid_sentence(self):
+        assert _normalize_label("hello <unk> world") == "hello world"
+
+    def test_unk_marker_stripped_at_end(self):
+        assert (
+            _normalize_label("washing my mouth out with soap <unk>")
+            == "washing my mouth out with soap"
+        )
+
+    def test_bracket_block_stripped(self):
+        assert _normalize_label("she said [ medicine ] and laughed") == "she said and laughed"
+
+    def test_long_bracket_block_stripped(self):
+        assert (
+            _normalize_label("then [ her face and hands stood out ] she paused")
+            == "then she paused"
+        )
+
+    def test_unk_and_bracket_combined(self):
+        assert _normalize_label("<unk> hello [ aside ] world") == "hello world"

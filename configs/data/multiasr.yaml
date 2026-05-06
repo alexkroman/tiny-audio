@@ -17,18 +17,19 @@
 # ┌──────────────────────────┬───────────┬─────────┐
 # │ Dataset                  │ Samples   │ Percent │
 # ├──────────────────────────┼───────────┼─────────┤
-# │ Loquacious medium (all)  │ 1,074,114 │   24.4% │
-# │ Gigaspeech XL (fixie)    │ 1,200,000 │   27.3% │
-# │ CommonVoice 17 en        │   750,000 │   17.0% │
-# │ People's Speech (fixie)  │   550,000 │   12.5% │
-# │ SPGISpeech M (natural)   │   385,000 │    8.7% │
-# │ Switchboard (natural)    │   185,402 │    4.2% │
-# │ AMI IHM (natural)        │   108,502 │    2.5% │
-# │ AMI SDM (natural)        │   107,319 │    2.4% │
-# │ VoxPopuli en             │    75,000 │    1.7% │
-# │ Earnings22 robust (all)  │   ~25,000 │    0.6% │
+# │ Loquacious medium (all)  │ 1,074,114 │   22.7% │
+# │ Gigaspeech XL (fixie)    │ 1,200,000 │   25.4% │
+# │ CommonVoice 17 en        │   750,000 │   15.9% │
+# │ People's Speech (fixie)  │   550,000 │   11.6% │
+# │ SPGISpeech M (natural)   │   385,000 │    8.1% │
+# │ TEDLIUM (natural)        │   268,263 │    5.7% │
+# │ Switchboard (natural)    │   185,402 │    3.9% │
+# │ AMI IHM (natural)        │   108,502 │    2.3% │
+# │ AMI SDM (natural)        │   107,319 │    2.3% │
+# │ VoxPopuli en             │    75,000 │    1.6% │
+# │ Earnings22 robust (all)  │   ~25,000 │    0.5% │
 # └──────────────────────────┴           ┴         ┘
-# Total: ~4,460,337 samples
+# Total: ~4,728,600 samples
 #
 # fixie-ai mirrors are used for People's Speech, CommonVoice, and Gigaspeech
 # because their pre-processed/sharded layouts are friendlier than the upstream
@@ -179,6 +180,20 @@ datasets:
     train_splits: [train]
     eval_splits: [validation]
     target_samples: 75000
+
+  # TEDLIUM (sanchit-gandhi/tedlium-data) — TED-talk register: scripted,
+  # long-form, single-speaker. Natural ~268K (5.7% of post-addition mix).
+  # No replay (target_samples omitted). Same dataset as the eval entry so
+  # train/test distribution is matched. Train labels carry <unk> in ~92%
+  # of rows (annotator convention for unrecognized words); eval splits
+  # have zero. Normalized away in DataCollator._build_sample.
+  - path: sanchit-gandhi/tedlium-data
+    name: default
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits: [train]
+    eval_splits: [validation]
 
 # Audio processing
 sample_rate: 16000
