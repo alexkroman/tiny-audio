@@ -96,7 +96,7 @@ def build_bundle_cmd(
         str,
         typer.Option("--encoder", help="HF repo id of the upstream PT encoder."),
     ] = "zai-org/GLM-ASR-Nano-2512",
-    q_bits: Annotated[int, typer.Option("--q-bits", help="Bits per encoder weight.")] = 4,
+    q_bits: Annotated[int, typer.Option("--q-bits", help="Bits per encoder weight.")] = 8,
     q_group_size: Annotated[
         int, typer.Option("--q-group-size", help="Encoder quantization group size.")
     ] = 64,

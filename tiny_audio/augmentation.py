@@ -26,8 +26,6 @@ All required packages are listed in pyproject.toml; no extra install steps.
 from __future__ import annotations
 
 import random
-import shutil
-import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -56,51 +54,6 @@ def _resolve_corpus_roots(corpus_path: str | Sequence[str], hint: str = "") -> l
             raise FileNotFoundError(msg)
         roots.append(root)
     return roots
-
-
-class SpeedPerturbation:
-    """Kaldi-style speed perturbation via sample-rate-based resampling.
-
-    Picks a random rate from ``rates`` and resamples audio so that, when
-    consumed at the original ``sample_rate``, it appears sped up
-    (rate > 1.0) or slowed down (rate < 1.0) by that factor. Pitch shifts
-    together with rate — the canonical Kaldi recipe (NeMo / ESPnet / K2 /
-    Icefall). rate == 1.0 is a no-op pass-through.
-
-    Should run FIRST in the augmentation chain so reverb / noise apply to
-    the speed-perturbed signal, not the original.
-    """
-
-    def __init__(
-        self,
-        sample_rate: int = 16000,
-        rates: Sequence[float] = (0.9, 1.0, 1.1),
-        prob: float = 1.0,
-    ):
-        if not rates:
-            raise ValueError("rates must be non-empty")
-        if not 0.0 <= prob <= 1.0:
-            raise ValueError(f"prob must be in [0, 1], got {prob}")
-        self.sample_rate = sample_rate
-        self.rates = list(rates)
-        self.prob = prob
-
-    def __call__(self, audio: np.ndarray) -> np.ndarray:
-        if random.random() > self.prob:
-            return audio
-        rate = random.choice(self.rates)
-        if rate == 1.0:
-            return audio
-        in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
-        audio_t = torch.from_numpy(_to_mono_float32(audio))
-        if audio_t.numel() == 0:
-            return audio
-        # Resample to (sample_rate / rate) and then treat the output as if
-        # it's still at sample_rate — fewer/more samples in the same nominal
-        # rate ⇒ playback speed scales by rate. Standard Kaldi/NeMo recipe.
-        new_freq = max(1, int(round(self.sample_rate / rate)))
-        out = taf.resample(audio_t, orig_freq=self.sample_rate, new_freq=new_freq)
-        return out.numpy().astype(in_dtype)
 
 
 class PhoneBandwidthAugmentation:
@@ -148,143 +101,6 @@ class PhoneBandwidthAugmentation:
         else:
             wide = torch.nn.functional.pad(wide, (0, n - wide.shape[-1]))
         return wide.numpy().astype(in_dtype)
-
-
-class CodecAugmentation:
-    """Encode/decode the signal through a random lossy codec at random bitrate.
-
-    Simulates the streaming/phone pipeline that produces audio on People's
-    Speech, real phone calls, and any user-uploaded MP3/Opus content. Each
-    codec at low bitrate introduces characteristic artifacts (MP3 pre-echo,
-    Opus framing transients, AAC spectral holes) the encoder learns to
-    transcribe through. Used by NeMo Canary, AssemblyAI Universal-2, and
-    Whisper-v3 fine-tune recipes. Should run LAST in the augmentation chain
-    so the codec applies to the already-mixed/reverberated/bandlimited
-    signal.
-
-    Implementation pipes raw float32 audio through `ffmpeg` (codec encode)
-    then back through `ffmpeg` (codec decode). One subprocess pair per call;
-    cheap enough at dataloader_num_workers ≥ 8.
-    """
-
-    # name → (ffmpeg container, ffmpeg encoder, candidate bitrates in kbps).
-    # Bitrate ranges span "obviously degraded" → "transparent": MP3 64-128
-    # covers standard streaming; Opus dips lower (its sweet spot is 16-64
-    # kbps for speech); AAC sits between.
-    _CODECS: dict[str, tuple[str, str, tuple[int, ...]]] = {
-        "mp3": ("mp3", "libmp3lame", (32, 64, 96, 128)),
-        "opus": ("ogg", "libopus", (6, 12, 24, 48)),
-        "aac": ("adts", "aac", (32, 64, 96)),
-    }
-
-    def __init__(
-        self,
-        sample_rate: int = 16000,
-        prob: float = 0.3,
-        codecs: Sequence[str] | None = None,
-        timeout_s: float = 5.0,
-    ):
-        if not 0.0 <= prob <= 1.0:
-            raise ValueError(f"prob must be in [0, 1], got {prob}")
-        ffmpeg = shutil.which("ffmpeg")
-        if ffmpeg is None:
-            raise RuntimeError(
-                "ffmpeg not found in PATH; required for CodecAugmentation. "
-                "Install with `apt-get install -y ffmpeg`."
-            )
-        self.sample_rate = sample_rate
-        self.prob = prob
-        self.timeout_s = timeout_s
-        self._ffmpeg = ffmpeg
-        if codecs is None:
-            self._enabled = list(self._CODECS.values())
-        else:
-            self._enabled = [self._CODECS[c] for c in codecs if c in self._CODECS]
-            if not self._enabled:
-                raise ValueError(f"No supported codecs in {codecs}; pick from mp3/opus/aac")
-
-    def __call__(self, audio: np.ndarray) -> np.ndarray:
-        if random.random() > self.prob:
-            return audio
-        in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
-        audio_arr = _to_mono_float32(audio)
-        n = audio_arr.size
-        if n == 0:
-            return audio
-        container, encoder, bitrates = random.choice(self._enabled)
-        bitrate_kbps = random.choice(bitrates)
-        try:
-            out = self._roundtrip(audio_arr, container, encoder, bitrate_kbps)
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
-            # Codec round-trip can fail on very short / silent / degenerate
-            # clips. Fail soft to the un-augmented signal — better than
-            # dropping the sample.
-            return audio
-        out = out[:n] if out.size >= n else np.pad(out, (0, n - out.size))
-        return out.astype(in_dtype)
-
-    def _roundtrip(
-        self,
-        audio: np.ndarray,
-        container: str,
-        encoder: str,
-        bitrate_kbps: int,
-    ) -> np.ndarray:
-        # Encode: raw f32le PCM → codec bytes
-        encoded = subprocess.run(
-            [
-                self._ffmpeg,
-                "-y",
-                "-loglevel",
-                "error",
-                "-hide_banner",
-                "-f",
-                "f32le",
-                "-ar",
-                str(self.sample_rate),
-                "-ac",
-                "1",
-                "-i",
-                "pipe:0",
-                "-c:a",
-                encoder,
-                "-b:a",
-                f"{bitrate_kbps}k",
-                "-f",
-                container,
-                "pipe:1",
-            ],
-            input=audio.tobytes(),
-            capture_output=True,
-            check=True,
-            timeout=self.timeout_s,
-        ).stdout
-        # Decode: codec bytes → raw f32le PCM
-        decoded = subprocess.run(
-            [
-                self._ffmpeg,
-                "-y",
-                "-loglevel",
-                "error",
-                "-hide_banner",
-                "-f",
-                container,
-                "-i",
-                "pipe:0",
-                "-f",
-                "f32le",
-                "-ar",
-                str(self.sample_rate),
-                "-ac",
-                "1",
-                "pipe:1",
-            ],
-            input=encoded,
-            capture_output=True,
-            check=True,
-            timeout=self.timeout_s,
-        ).stdout
-        return np.frombuffer(decoded, dtype=np.float32)
 
 
 class RIRAugmentation:
@@ -340,10 +156,6 @@ class RIRAugmentation:
             raise ValueError("Empty RIR pool")
         self.sample_rate = sample_rate
         self.prob = prob
-        # The RIR sampled on the most recent __call__, or None if that call
-        # skipped (random > prob). NoiseAugmentation reads this to convolve
-        # noise with the same room response — same-room recipe.
-        self.last_rir: torch.Tensor | None = None
 
     @staticmethod
     def _load_corpus_pool(
@@ -451,20 +263,17 @@ class RIRAugmentation:
 
     def __call__(self, audio: np.ndarray) -> np.ndarray:
         if random.random() > self.prob:
-            self.last_rir = None
             return audio
 
         in_dtype = audio.dtype if hasattr(audio, "dtype") else np.float32
         audio_t = torch.from_numpy(_to_mono_float32(audio))
         n = audio_t.shape[-1]
         if n == 0:
-            self.last_rir = None
             return audio
 
         in_rms = float(torch.sqrt(torch.mean(audio_t**2)))
 
         rir = random.choice(self.rirs)
-        self.last_rir = rir
         out = taf.fftconvolve(audio_t, rir, mode="full")[:n]
 
         # L2-normalized RIRs still attenuate RMS in time, so reverbed clips
@@ -497,11 +306,6 @@ class NoiseAugmentation:
     People's Speech / CommonVoice / Earnings22 backgrounds. Paths under any
     ``speech/`` subdirectory in the corpus are treated as the babble pool.
 
-    ``rir_augmentation``, when provided, convolves each noise clip with a
-    random RIR before mixing so the noise inherits the same room response as
-    the (already-reverbed) clean signal — anechoic noise against reverberant
-    speech is unphysical.
-
     Accepts/returns numpy arrays so it can be chained with
     :class:`RIRAugmentation` in the dataloader transform pipeline.
     """
@@ -514,7 +318,6 @@ class NoiseAugmentation:
         max_snr_db: float = 25.0,
         corpus_path: str | Sequence[str] | None = None,
         babble_weight: float = 0.0,
-        rir_augmentation: RIRAugmentation | None = None,
     ):
         self.sample_rate = sample_rate
         self.prob = prob
@@ -523,7 +326,6 @@ class NoiseAugmentation:
         self.babble_weight = float(babble_weight)
         if not 0.0 <= self.babble_weight <= 1.0:
             raise ValueError(f"babble_weight must be in [0, 1], got {babble_weight}")
-        self.rir_augmentation = rir_augmentation
         self.noise_paths: list[Path] | None = None
         self.babble_paths: list[Path] = []
         self.non_babble_paths: list[Path] = []
@@ -622,19 +424,6 @@ class NoiseAugmentation:
                 continue
             if noise is None:
                 continue
-            # Reuse the RIR the signal got this sample so noise inherits the
-            # same room response (canonical NeMo / Canary recipe). If signal
-            # was anechoic this call (RIR aug skipped or disabled), keep noise
-            # anechoic too — mismatched signal/noise rooms are unphysical.
-            shared_rir = (
-                getattr(self.rir_augmentation, "last_rir", None)
-                if self.rir_augmentation is not None
-                else None
-            )
-            if shared_rir is not None:
-                noise_t = torch.from_numpy(np.ascontiguousarray(noise))
-                reverbed = taf.fftconvolve(noise_t, shared_rir, mode="full")[:n]
-                noise = reverbed.numpy().astype(np.float32)
             signal_rms = float(np.sqrt(np.mean(audio**2)))
             noise_rms = float(np.sqrt(np.mean(noise**2)))
             if signal_rms < 1e-8 or noise_rms < 1e-8:

@@ -37,11 +37,9 @@ from tiny_audio.asr_config import (
 )
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.augmentation import (
-    CodecAugmentation,
     NoiseAugmentation,
     PhoneBandwidthAugmentation,
     RIRAugmentation,
-    SpeedPerturbation,
 )
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
@@ -485,18 +483,6 @@ def main(cfg: DictConfig) -> None:
 
     augmentations: list = []
 
-    # Speed perturbation runs FIRST so reverb / noise apply to the perturbed
-    # signal — Kaldi convention also followed by NeMo / ESPnet / K2 / Icefall.
-    speed_cfg = cfg.training.get("speed_perturbation") or {}
-    if speed_cfg.get("enabled"):
-        augmentations.append(
-            SpeedPerturbation(
-                sample_rate=cfg.data.sample_rate,
-                rates=tuple(speed_cfg.get("rates", [0.9, 1.0, 1.1])),
-                prob=speed_cfg.get("prob", 1.0),
-            )
-        )
-
     rir_aug: RIRAugmentation | None = None
     rir_cfg = cfg.training.get("rir_augmentation") or {}
     if rir_cfg.get("enabled"):
@@ -515,9 +501,6 @@ def main(cfg: DictConfig) -> None:
 
     noise_cfg = cfg.training.get("noise_augmentation") or {}
     if noise_cfg.get("enabled"):
-        # Share the RIR pool with NoiseAugmentation when reverb_noise is set
-        # so noise gets the same room response as the clean signal.
-        noise_rir = rir_aug if (rir_aug is not None and noise_cfg.get("reverb_noise")) else None
         augmentations.append(
             NoiseAugmentation(
                 sample_rate=cfg.data.sample_rate,
@@ -526,14 +509,12 @@ def main(cfg: DictConfig) -> None:
                 max_snr_db=noise_cfg.get("max_snr_db", 25.0),
                 corpus_path=noise_cfg.get("corpus_path"),
                 babble_weight=noise_cfg.get("babble_weight", 0.0),
-                rir_augmentation=noise_rir,
             )
         )
 
-    # Phone bandwidth + codec are channel-side augmentations: they simulate
-    # how audio gets degraded after capture (downsampled to 8 kHz on phone
-    # calls, encoded through MP3 / Opus / AAC for streaming). Run AFTER
-    # room/noise so the channel applies to the already-mixed signal.
+    # Phone bandwidth simulates how audio gets degraded after capture
+    # (downsampled to 8 kHz on phone calls). Runs AFTER room/noise so the
+    # channel applies to the already-mixed signal.
     bandwidth_cfg = cfg.training.get("phone_bandwidth_augmentation") or {}
     if bandwidth_cfg.get("enabled"):
         augmentations.append(
@@ -541,17 +522,6 @@ def main(cfg: DictConfig) -> None:
                 sample_rate=cfg.data.sample_rate,
                 narrowband_rate=bandwidth_cfg.get("narrowband_rate", 8000),
                 prob=bandwidth_cfg.get("prob", 0.2),
-            )
-        )
-
-    codec_cfg = cfg.training.get("codec_augmentation") or {}
-    if codec_cfg.get("enabled"):
-        augmentations.append(
-            CodecAugmentation(
-                sample_rate=cfg.data.sample_rate,
-                prob=codec_cfg.get("prob", 0.3),
-                codecs=codec_cfg.get("codecs"),
-                timeout_s=codec_cfg.get("timeout_s", 5.0),
             )
         )
 

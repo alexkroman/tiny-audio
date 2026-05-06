@@ -65,17 +65,6 @@ dataloader_drop_last: true
 group_by_length: true
 length_column_name: duration
 
-# Speed perturbation — Kaldi-style 3-rate resampling (0.9 / 1.0 / 1.1×).
-# Played at the original sample rate, the perturbed signal sounds sped up
-# or slowed down with a coupled pitch shift. Universal recipe in NeMo /
-# ESPnet / K2 / Icefall — adds rate-of-speech variation effectively for
-# free. Runs FIRST in the augmentation chain so reverb / noise apply to
-# the perturbed signal.
-speed_perturbation:
-  enabled: false
-  rates: [0.9, 1.0, 1.1]
-  prob: 1.0
-
 # SpecAugment — 2024-era recipe (NeMo Canary / Parakeet / Distil-Whisper):
 # 10 time masks of width 100 + 2 freq masks of width 27. The convergence
 # in modern recipes is "many small time masks > few large ones"; freq
@@ -149,10 +138,6 @@ noise_augmentation:
   # Babble is the most ASR-relevant noise texture but otherwise only ~14% of
   # MUSAN+pointsource_noises files. Closes the People's / CV / Earnings22 gap.
   babble_weight: 0.35
-  # Convolve noise with a random RIR before mixing so the noise inherits the
-  # same room response as the (already-reverbed) clean signal. Aligns with
-  # NeMo / Canary recipe; modest realism win for ami-sdm + LS-other.
-  reverb_noise: false
 
 # Phone-bandwidth simulation — resample to 8 kHz then back to 16 kHz so the
 # signal sees the same hard 4 kHz cutoff as G.711 / GSM telephony. Closes
@@ -164,23 +149,6 @@ phone_bandwidth_augmentation:
   enabled: false
   narrowband_rate: 8000
   prob: 0.2
-
-# Codec round-trip — encode through MP3 / Opus / AAC at random bitrate and
-# decode back. Simulates the streaming/phone pipeline that produces audio on
-# People's Speech, real phone calls, and any user-uploaded compressed media.
-# Each codec at low bitrate introduces characteristic artifacts (MP3
-# pre-echo, Opus framing transients, AAC spectral holes) the encoder learns
-# to transcribe through. Used by NeMo Canary, AssemblyAI Universal-2,
-# Whisper-v3 fine-tunes. Requires `ffmpeg` in PATH; runpod.py's apt-get
-# install list already includes it.
-codec_augmentation:
-  enabled: false
-  prob: 0.3
-  # Subset to enable; null = all (mp3, opus, aac).
-  codecs: null
-  # Per-call ffmpeg subprocess timeout — short clips with degenerate content
-  # can hang. Fail soft to un-augmented signal on timeout / encoder error.
-  timeout_s: 5.0
 
 # Misc
 disable_tqdm: false
