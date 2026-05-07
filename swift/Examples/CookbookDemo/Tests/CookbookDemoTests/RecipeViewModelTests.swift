@@ -117,4 +117,59 @@ struct RecipeViewModelTests {
     vm.apply(.none)
     #expect(vm.snapshot() == before)
   }
+
+  private func makeCatalogVM() -> RecipeViewModel {
+    let cookies = Recipe(
+      title: "Chocolate Chip Cookies",
+      ingredients: ["flour", "sugar"],
+      steps: ["mix", "bake"]
+    )
+    let pancakes = Recipe(
+      title: "Pancakes",
+      ingredients: ["flour", "milk"],
+      steps: ["mix", "cook"]
+    )
+    return RecipeViewModel(recipes: [cookies, pancakes])
+  }
+
+  @Test func catalogInitStartsInSelectingPhaseWithNoRecipe() {
+    let vm = makeCatalogVM()
+    #expect(vm.phase == .selecting)
+    #expect(vm.recipe == nil)
+  }
+
+  @Test func selectRecipeMatchesByToken() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))
+    #expect(vm.phase == .overview)
+    #expect(vm.recipe?.title == "Chocolate Chip Cookies")
+    #expect(vm.currentStepIndex == 0)
+  }
+
+  @Test func selectRecipeMatchesMultiTokenSlot() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "chip cookies"))
+    #expect(vm.recipe?.title == "Chocolate Chip Cookies")
+  }
+
+  @Test func selectRecipeIsCaseInsensitive() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "PANCAKES"))
+    #expect(vm.recipe?.title == "Pancakes")
+  }
+
+  @Test func selectRecipeNoMatchIsNoOp() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "lasagna"))
+    #expect(vm.phase == .selecting)
+    #expect(vm.recipe == nil)
+  }
+
+  @Test func selectRecipeIgnoredOutsideSelectingPhase() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))  // → overview, recipe=cookies
+    vm.apply(.selectRecipe(name: "pancakes"))  // ignored
+    #expect(vm.recipe?.title == "Chocolate Chip Cookies")
+    #expect(vm.phase == .overview)
+  }
 }

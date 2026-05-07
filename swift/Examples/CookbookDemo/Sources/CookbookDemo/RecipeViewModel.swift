@@ -85,8 +85,14 @@ final class RecipeViewModel {
     case .showGroceryList:
       ingredientsVisible = false
       groceryOverlayVisible = true
-    case .selectRecipe:
-      break
+    case .selectRecipe(let name):
+      guard phase == .selecting else { return }
+      guard let matched = matchRecipe(name: name) else { return }
+      dismissOverlays()
+      recipe = matched
+      currentStepIndex = 0
+      recipeComplete = false
+      phase = .overview
     case .none:
       break
     }
@@ -95,6 +101,20 @@ final class RecipeViewModel {
   private func dismissOverlays() {
     ingredientsVisible = false
     groceryOverlayVisible = false
+  }
+
+  private func matchRecipe(name: String) -> Recipe? {
+    let slotTokens = name
+      .lowercased()
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .split(whereSeparator: { $0.isWhitespace })
+      .map(String.init)
+    guard !slotTokens.isEmpty else { return nil }
+    let candidates = recipes.filter { recipe in
+      let titleLower = recipe.title.lowercased()
+      return slotTokens.allSatisfy { titleLower.contains($0) }
+    }
+    return candidates.min(by: { $0.title.count < $1.title.count })
   }
 
   struct Snapshot: Equatable {
