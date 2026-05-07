@@ -14,12 +14,13 @@ struct TimerState: Equatable, Sendable {
 @Observable
 final class RecipeViewModel {
   enum Phase: Equatable {
-    case loading, cooking, micDenied
+    case loading, selecting, overview, cooking, micDenied
     case modelFailed(String)
   }
   enum ListeningState { case idle, hearing, thinking }
 
-  let recipe: Recipe
+  let recipes: [Recipe]
+  var recipe: Recipe?
 
   var phase: Phase = .loading
   var currentStepIndex: Int = 0
@@ -31,7 +32,20 @@ final class RecipeViewModel {
   var lastHeardText: String = ""
   var listeningState: ListeningState = .idle
 
-  init(recipe: Recipe) { self.recipe = recipe }
+  /// Catalog-driven init: starts at the recipe-selection screen with no recipe chosen.
+  init(recipes: [Recipe]) {
+    self.recipes = recipes
+    self.recipe = nil
+    self.phase = .selecting
+  }
+
+  /// Single-recipe convenience for tests and one-shot callers; jumps straight
+  /// to the cooking phase with the recipe already selected.
+  init(recipe: Recipe) {
+    self.recipes = [recipe]
+    self.recipe = recipe
+    self.phase = .cooking
+  }
 
   func setLastHeard(_ text: String) { lastHeardText = text }
   func setListeningState(_ state: ListeningState) { listeningState = state }
@@ -40,6 +54,7 @@ final class RecipeViewModel {
     switch intent {
     case .nextStep:
       dismissOverlays()
+      guard let recipe = recipe else { return }
       if currentStepIndex < recipe.steps.count - 1 {
         currentStepIndex += 1
       } else {
@@ -70,6 +85,8 @@ final class RecipeViewModel {
     case .showGroceryList:
       ingredientsVisible = false
       groceryOverlayVisible = true
+    case .selectRecipe:
+      break
     case .none:
       break
     }
@@ -82,6 +99,7 @@ final class RecipeViewModel {
 
   struct Snapshot: Equatable {
     let phase: Phase
+    let recipeTitle: String?
     let currentStepIndex: Int
     let ingredientsVisible: Bool
     let timer: TimerState?
@@ -93,6 +111,7 @@ final class RecipeViewModel {
   func snapshot() -> Snapshot {
     Snapshot(
       phase: phase,
+      recipeTitle: recipe?.title,
       currentStepIndex: currentStepIndex,
       ingredientsVisible: ingredientsVisible,
       timer: timer,
