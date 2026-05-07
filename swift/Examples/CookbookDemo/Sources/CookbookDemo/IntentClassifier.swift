@@ -42,12 +42,15 @@ final class LLMIntentClassifier: IntentClassifying, @unchecked Sendable {
     - {"intent":"cancel_timer"}
     - {"intent":"add_to_grocery_list","item":"<short string>"}
     - {"intent":"show_grocery_list"}
+    - {"intent":"select_recipe","name":"<recipe name as said>"}
     - {"intent":"none"}
 
     Examples:
     "go ahead" → {"intent":"next_step"}
     "set a timer for five minutes" → {"intent":"set_timer","seconds":300}
     "add olive oil to my list" → {"intent":"add_to_grocery_list","item":"olive oil"}
+    "make some cookies" → {"intent":"select_recipe","name":"cookies"}
+    "let's do pancakes" → {"intent":"select_recipe","name":"pancakes"}
     "the dog is barking" → {"intent":"none"}
 
     JSON:
