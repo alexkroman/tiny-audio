@@ -51,6 +51,8 @@ final class LLMIntentClassifier: IntentClassifying, @unchecked Sendable {
     "add olive oil to my list" → {"intent":"add_to_grocery_list","item":"olive oil"}
     "make some cookies" → {"intent":"select_recipe","name":"cookies"}
     "let's do pancakes" → {"intent":"select_recipe","name":"pancakes"}
+    "pancakes" → {"intent":"select_recipe","name":"pancakes"}
+    "guacamole" → {"intent":"select_recipe","name":"guacamole"}
     "the dog is barking" → {"intent":"none"}
 
     JSON:
