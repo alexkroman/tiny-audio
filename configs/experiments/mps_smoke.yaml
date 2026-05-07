@@ -47,9 +47,6 @@ training:
   dataloader_prefetch_factor: null
   dataloader_pin_memory: false
 
-  noise_augmentation:
-    enabled: false
-
   report_to: "none"
   save_strategy: "no"
   eval_strategy: "no"

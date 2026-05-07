@@ -10,6 +10,7 @@ enum Intent: Equatable, Sendable {
   case cancelTimer
   case addToGroceryList(item: String)
   case showGroceryList
+  case selectRecipe(name: String)
   case none
 }
 
@@ -39,6 +40,13 @@ extension Intent {
         !item.isEmpty
       else { return .none }
       return .addToGroceryList(item: item)
+    case "select_recipe":
+      guard
+        let name = (dict["name"] as? String)?
+          .trimmingCharacters(in: .whitespacesAndNewlines),
+        !name.isEmpty
+      else { return .none }
+      return .selectRecipe(name: name)
     case "show_grocery_list": return .showGroceryList
     case "none": return .none
     default: return .none

@@ -37,7 +37,6 @@ from tiny_audio.asr_config import (
     compute_encoder_output_length,
 )
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.augmentation import NoiseAugmentation
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
@@ -462,8 +461,15 @@ def main(cfg: DictConfig) -> None:
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_config_dict, dict), "model config must be a dict"
     for param in TRAINING_MODEL_PARAMS:
-        if cfg.training.get(param) is not None:
-            model_config_dict[param] = cfg.training[param]
+        val = cfg.training.get(param)
+        if val is None:
+            continue
+        # Strip OmegaConf wrappers so list/dict params (e.g. lora_target_modules)
+        # land in ASRConfig as plain Python types — otherwise config.save_pretrained
+        # hits a TypeError when json.dumps walks a ListConfig at checkpoint time.
+        if OmegaConf.is_config(val):
+            val = OmegaConf.to_container(val, resolve=True)
+        model_config_dict[param] = val
     asr_config = ASRConfig(**model_config_dict)
 
     if cfg.model.get("pretrained_model_path"):
@@ -487,64 +493,6 @@ def main(cfg: DictConfig) -> None:
     multitask_enabled = cfg.get("multitask", {}).get("enabled", False)
 
     train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
-
-    augmentations: list = []
-
-    noise_aug: NoiseAugmentation | None = None
-    noise_cfg = cfg.training.get("noise_augmentation") or {}
-    if noise_cfg.get("enabled"):
-        noise_aug = NoiseAugmentation(
-            sample_rate=cfg.data.sample_rate,
-            prob=noise_cfg.get("prob", 0.5),
-            min_snr_db=noise_cfg.get("min_snr_db", 0.0),
-            max_snr_db=noise_cfg.get("max_snr_db", 25.0),
-            corpus_path=noise_cfg.get("corpus_path"),
-            gaussian_min_snr_db=noise_cfg.get("gaussian_min_snr_db"),
-            gaussian_max_snr_db=noise_cfg.get("gaussian_max_snr_db"),
-            target_db=noise_cfg.get("target_db", -25.0),
-            rms_epsilon=noise_cfg.get("rms_epsilon", 1e-2),
-            tile_silence_sec=noise_cfg.get("tile_silence_sec", 0.25),
-        )
-        augmentations.append(noise_aug)
-
-    silence_injection_prob = float(cfg.training.get("silence_injection_prob", 0.0))
-    if silence_injection_prob > 0.0 and noise_aug is None:
-        raise ValueError(
-            "silence_injection_prob > 0 requires noise_augmentation.enabled "
-            "(the MUSAN corpus is the source of noise-only samples)."
-        )
-
-    if augmentations or silence_injection_prob > 0.0:
-
-        def _apply_aug(batch):
-            audios = batch.get("audio") or []
-            texts = batch.get("text")
-            n_texts = len(texts) if texts is not None else 0
-            for i, a in enumerate(audios):
-                if not a or "array" not in a:
-                    continue
-                arr = a["array"]
-                # Silence injection: replace audio with a MUSAN noise clip and
-                # clear text. Targets the AMI backchannel hallucinations
-                # ("yeah" / "huh" on empty GT) by teaching the model to emit
-                # only EOS on non-speech. Falls through to the rest of the
-                # augmentation chain so noise mixing still applies.
-                if (
-                    silence_injection_prob > 0.0
-                    and noise_aug is not None
-                    and i < n_texts
-                    and random.random() < silence_injection_prob
-                ):
-                    noise = noise_aug.sample_noise_only(arr.shape[-1])
-                    if noise is not None:
-                        arr = noise.astype(arr.dtype)
-                        texts[i] = ""
-                for aug in augmentations:
-                    arr = aug(arr)
-                a["array"] = arr
-            return batch
-
-        train_dataset = train_dataset.with_transform(_apply_aug)
 
     if multitask_enabled:
         data_collator = MultiTaskDataCollator(

@@ -162,25 +162,13 @@ def setup_remote_environment(conn: Connection) -> None:
     """
     print("\nSetting up remote environment...")
     conn.run("apt-get update -qq || true")
-    # Required packages — training and corpus extraction need these.
+    # Required packages — training needs these.
     conn.run(
         "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 unzip",
     )
-    # Optional perf adds — fall back gracefully on pods where these aren't
-    # available (e.g. minimal images, universe repo disabled, partial apt
-    # cache). aria2 → faster MUSAN download (urllib fallback exists);
-    # pigz → parallel gzip for MUSAN tar (single-threaded fallback);
-    # portaudio19-dev → only needed for pyaudio runtime, never training.
+    # Optional perf adds — only portaudio19-dev for pyaudio runtime.
     conn.run(
-        "apt-get install -y aria2 pigz portaudio19-dev || true",
-    )
-    # Pin augmentation corpora onto the persistent /workspace volume so they
-    # survive container restarts. ~/.cache/musan becomes a symlink, which
-    # keeps `corpus_path: ~/.cache/musan/...` in production.yaml portable
-    # across local dev and RunPod without per-environment config branches.
-    conn.run(
-        "mkdir -p /workspace/.cache/musan /root/.cache && "
-        "ln -sfn /workspace/.cache/musan /root/.cache/musan",
+        "apt-get install -y portaudio19-dev || true",
     )
     print("Remote environment setup complete!")
 
@@ -267,21 +255,6 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
     print("Dependencies installed successfully!")
 
 
-def _download_corpus(conn: Connection, label: str, ta_subcommand: str) -> None:
-    """Run ``ta dev <ta_subcommand>`` on the remote to fetch a corpus (idempotent)."""
-    print(f"\nDownloading {label}...")
-    conn.run(
-        f'bash -lc "cd /workspace && export PATH=/root/.local/bin:$PATH && ta dev {ta_subcommand}"',
-        hide=False,
-    )
-    print(f"{label} ready.")
-
-
-def download_musan(conn: Connection) -> None:
-    """Download MUSAN to ~/.cache/musan on the remote."""
-    _download_corpus(conn, "noise corpus (MUSAN)", "download-musan")
-
-
 @app.command()
 def deploy(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
@@ -291,7 +264,6 @@ def deploy(
     skip_deps: bool = typer.Option(
         False, "--skip-deps", help="Skip Python dependency installation"
     ),
-    skip_musan: bool = typer.Option(False, "--skip-musan", help="Skip MUSAN noise corpus download"),
 ):
     """Deploy ASR project to a RunPod instance."""
     conn = get_connection(host, port)
@@ -309,9 +281,6 @@ def deploy(
 
     if not skip_deps:
         install_dependencies(conn)
-
-    if not skip_musan:
-        download_musan(conn)
 
     print("\nDeployment finished!")
     print(f"To connect: ssh -i ~/.ssh/id_ed25519 -p {port} root@{host}")

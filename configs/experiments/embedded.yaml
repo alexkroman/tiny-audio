@@ -65,15 +65,3 @@ training:
   torch_compile: true
 
   weight_decay: 0.01
-
-  # Probability of replacing a training sample's audio with silence + empty
-  # target. Teaches the model "no speech → emit nothing" — without it the
-  # model backchannels ("yeah", "huh", "i") on AMI silence segments because
-  # empty-text samples were silently filtered out of training.
-  #
-  # 0.01 → 0.05: speech-LLM-recipe modal (Granite-Speech / Whisper-fine-tune
-  # ranges sit at 0.03–0.10). 1-in-100 was barely above zero — the gradient
-  # signal for "no speech → nothing" was too dilute for the model to
-  # internalize as a sharp stopping rule. 0.05 gives a real share of batches
-  # the silence-→-empty signal without crowding out actual ASR training.
-  silence_injection_prob: 0.05

@@ -5,10 +5,12 @@ struct CookingView: View {
 
   var body: some View {
     ZStack(alignment: .topTrailing) {
-      mainColumn
-      if vm.ingredientsVisible {
-        IngredientsPanel(ingredients: vm.recipe.ingredients)
-          .transition(.move(edge: .trailing))
+      if let recipe = vm.recipe {
+        mainColumn(recipe: recipe)
+        if vm.ingredientsVisible {
+          IngredientsPanel(ingredients: recipe.ingredients)
+            .transition(.move(edge: .trailing))
+        }
       }
       if vm.groceryOverlayVisible {
         GroceryListOverlay(items: vm.groceryList)
@@ -30,42 +32,25 @@ struct CookingView: View {
     .animation(.easeInOut(duration: 0.18), value: vm.recipeComplete)
   }
 
-  private var mainColumn: some View {
+  private func mainColumn(recipe: Recipe) -> some View {
     VStack(spacing: 0) {
-      topBar
+      ScreenTopBar(
+        title: recipe.title,
+        listeningState: vm.listeningState,
+        groceryCount: vm.groceryList.count
+      ) {
+        if let t = vm.timer {
+          TimerChip(secondsRemaining: t.secondsRemaining)
+        }
+      }
       Divider()
       StepCard(
         stepNumber: vm.currentStepIndex + 1,
-        totalSteps: vm.recipe.steps.count,
-        stepText: vm.recipe.steps[vm.currentStepIndex]
+        totalSteps: recipe.steps.count,
+        stepText: recipe.steps[vm.currentStepIndex]
       )
       Divider()
-      heardCaption
+      HeardCaption(text: vm.lastHeardText)
     }
-  }
-
-  private var topBar: some View {
-    HStack(spacing: 16) {
-      Text(vm.recipe.title).font(.title2.weight(.semibold))
-      Spacer()
-      ListeningIndicator(state: vm.listeningState)
-      if !vm.groceryList.isEmpty {
-        GroceryBadge(count: vm.groceryList.count)
-      }
-      if let t = vm.timer {
-        TimerChip(secondsRemaining: t.secondsRemaining)
-      }
-    }
-    .padding(.horizontal, 24).padding(.vertical, 14)
-  }
-
-  private var heardCaption: some View {
-    HStack {
-      Text(vm.lastHeardText.isEmpty ? " " : "heard: \"\(vm.lastHeardText)\"")
-        .font(.callout)
-        .foregroundStyle(.tertiary)
-      Spacer()
-    }
-    .padding(.horizontal, 24).padding(.vertical, 12)
   }
 }

@@ -30,9 +30,17 @@ In your `Package.swift`:
 > Note: this package lives under `swift/` in the `tiny-audio` repo. SwiftPM
 > resolves the manifest at that path automatically.
 
-> **Disk size**: the SDK is ~675 MB because model weights (~663 MB of safetensors) are
-> bundled via Git LFS. Make sure `git-lfs` is installed before cloning so the blobs
-> are resolved (`brew install git-lfs && git lfs install`).
+> **Model bundle**: the ~663 MB of model weights (encoder + projector + decoder
+>
+> - tokenizer) are **not** tracked in git. Generate them once before building
+>   the Swift package:
+>
+> ```bash
+> poetry install
+> poetry run ta mlx build-bundle --projector mazesmazes/tiny-audio-embedded-2
+> ```
+>
+> See `Sources/TinyAudio/Resources/Model/README.md` for the bundle layout.
 
 ## Quickstart — file transcription
 

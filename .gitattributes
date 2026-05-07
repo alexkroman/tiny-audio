@@ -1,2 +1,0 @@
-swift/Sources/TinyAudio/Resources/Model/*.safetensors filter=lfs diff=lfs merge=lfs -text
-swift/Sources/TinyAudio/Resources/Model/*.json filter=lfs diff=lfs merge=lfs -text

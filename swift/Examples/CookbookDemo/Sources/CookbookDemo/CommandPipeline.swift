@@ -27,6 +27,15 @@ actor CommandPipeline {
     }
 
     await viewModel.apply(intent)
+
+    // Fallback for the recipe-selection screen: bare recipe names ("pancakes")
+    // often classify as .none because the LLM examples are all phrasal. If
+    // we're still in .selecting after applying the classifier's result, try
+    // the utterance as a recipe name. matchRecipe silently no-ops on misses.
+    if intent == .none, await viewModel.phase == .selecting {
+      await viewModel.apply(.selectRecipe(name: trimmed))
+    }
+
     await viewModel.setListeningState(.idle)
   }
 

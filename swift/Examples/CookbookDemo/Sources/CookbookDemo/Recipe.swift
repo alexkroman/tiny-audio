@@ -7,12 +7,12 @@ struct Recipe: Codable, Sendable, Equatable {
 }
 
 extension Recipe {
-  /// Load the single recipe bundled into this app target.
-  static func bundled() throws -> Recipe {
-    guard let url = Bundle.module.url(forResource: "recipe", withExtension: "json") else {
+  /// Load all bundled recipes into the app catalog.
+  static func bundledAll() throws -> [Recipe] {
+    guard let url = Bundle.module.url(forResource: "recipes", withExtension: "json") else {
       throw CocoaError(.fileNoSuchFile)
     }
     let data = try Data(contentsOf: url)
-    return try JSONDecoder().decode(Recipe.self, from: data)
+    return try JSONDecoder().decode([Recipe].self, from: data)
   }
 }

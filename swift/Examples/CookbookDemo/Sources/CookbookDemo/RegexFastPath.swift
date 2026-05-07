@@ -23,7 +23,21 @@ enum RegexFastPath {
     case "cancel timer", "cancel the timer", "stop timer", "stop the timer":
       return .cancelTimer
     default:
-      return nil
+      break
     }
+
+    // "add X to (my|the|our)? (grocery|shopping)? list" / "put X on ... list".
+    // Captures the item between the verb and the trailing list reference, so
+    // the LLM doesn't have to handle this very common phrasing.
+    let groceryPattern =
+      #/^(?:add|put)\s+(.+?)\s+(?:to|on)\s+(?:(?:the|my|our)\s+)?(?:(?:grocery|shopping)\s+)?list$/#
+    if let match = trimmed.wholeMatch(of: groceryPattern) {
+      let item = String(match.output.1).trimmingCharacters(in: .whitespacesAndNewlines)
+      if !item.isEmpty {
+        return .addToGroceryList(item: item)
+      }
+    }
+
+    return nil
   }
 }

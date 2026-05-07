@@ -1,0 +1,80 @@
+[
+  {
+    "title": "Chocolate Chip Cookies",
+    "ingredients": [
+      "2 1/4 cups all-purpose flour",
+      "1 tsp baking soda",
+      "1 tsp salt",
+      "1 cup unsalted butter, softened",
+      "3/4 cup granulated sugar",
+      "3/4 cup packed brown sugar",
+      "2 large eggs",
+      "2 tsp vanilla extract",
+      "2 cups semi-sweet chocolate chips"
+    ],
+    "steps": [
+      "Preheat the oven to 375 degrees Fahrenheit.",
+      "Whisk the flour, baking soda, and salt together in a small bowl.",
+      "Cream the butter and both sugars together until light and fluffy, about three to four minutes.",
+      "Beat in the eggs one at a time, then mix in the vanilla.",
+      "Gradually mix in the dry ingredients on low speed until just combined.",
+      "Stir in the chocolate chips by hand.",
+      "Drop rounded tablespoons of dough onto an ungreased baking sheet.",
+      "Bake for nine to eleven minutes, or until the edges are golden brown."
+    ]
+  },
+  {
+    "title": "Pancakes",
+    "ingredients": [
+      "1 1/2 cups all-purpose flour",
+      "3 1/2 tsp baking powder",
+      "1 tsp salt",
+      "1 tbsp granulated sugar",
+      "1 1/4 cups milk",
+      "1 large egg",
+      "3 tbsp melted butter"
+    ],
+    "steps": [
+      "Whisk the flour, baking powder, salt, and sugar together in a large bowl.",
+      "Make a well in the center and pour in the milk, egg, and melted butter.",
+      "Mix until just combined; a few small lumps are fine.",
+      "Heat a lightly oiled skillet over medium-high heat.",
+      "Pour roughly a quarter cup of batter for each pancake and cook until bubbles form on top.",
+      "Flip and cook the other side for about a minute, until golden."
+    ]
+  },
+  {
+    "title": "Grilled Cheese",
+    "ingredients": [
+      "2 slices sourdough bread",
+      "2 tbsp unsalted butter, softened",
+      "2 slices sharp cheddar cheese",
+      "1 slice gruyere cheese"
+    ],
+    "steps": [
+      "Butter one side of each slice of bread.",
+      "Place one slice butter-side down in a cold skillet and layer the cheeses on top.",
+      "Top with the second slice, butter-side up.",
+      "Cook over medium-low heat until the bottom is deep golden, about four minutes.",
+      "Flip carefully and cook the other side until golden and the cheese is fully melted."
+    ]
+  },
+  {
+    "title": "Guacamole",
+    "ingredients": [
+      "3 ripe avocados",
+      "1/2 small white onion, finely diced",
+      "1 small jalapeño, seeded and minced",
+      "1/4 cup chopped cilantro",
+      "1 lime, juiced",
+      "1/2 tsp kosher salt"
+    ],
+    "steps": [
+      "Halve and pit the avocados, then scoop the flesh into a medium bowl.",
+      "Add the onion, jalapeño, cilantro, lime juice, and salt.",
+      "Mash with a fork to your preferred texture, leaving some chunks for body.",
+      "Taste and adjust salt or lime as needed.",
+      "Serve immediately, or press plastic wrap directly on the surface to keep it green."
+    ]
+  }
+]

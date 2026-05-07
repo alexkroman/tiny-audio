@@ -54,4 +54,15 @@ struct IntentTests {
     let raw = #"Sure! {"intent":"next_step"} — here you go."#
     #expect(Intent.from(json: raw) == .nextStep)
   }
+  @Test func decodesSelectRecipe() {
+    #expect(
+      Intent.from(json: #"{"intent":"select_recipe","name":"cookies"}"#)
+        == .selectRecipe(name: "cookies"))
+  }
+  @Test func selectRecipeWithEmptyNameBecomesNone() {
+    #expect(Intent.from(json: #"{"intent":"select_recipe","name":"  "}"#) == .none)
+  }
+  @Test func selectRecipeWithMissingNameBecomesNone() {
+    #expect(Intent.from(json: #"{"intent":"select_recipe"}"#) == .none)
+  }
 }

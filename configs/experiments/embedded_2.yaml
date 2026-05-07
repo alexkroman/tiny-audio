@@ -1,0 +1,76 @@
+# @package _global_
+# Stage 2: LoRA fine-tune on top of the embedded-2 full-decoder run.
+# Loads mazesmazes/tiny-audio-embedded-2 (projector + fine-tuned Qwen3-0.6B) and
+# continues training the projector while attaching fresh LoRA adapters to the
+# decoder. LoRA hyper-params mirror IBM Granite Speech 3.3-2b
+# (huggingface.co/ibm-granite/granite-speech-3.3-2b/blob/main/adapter_config.json):
+# r=64, alpha=32, dropout=0, target_modules={q_proj,v_proj}, bias=none.
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=embedded_2
+
+defaults:
+  - override /data: multiasr
+
+model:
+  projector_type: mlp
+  projector_pool_stride: 4
+  projector_hidden_dim: 2048
+  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  text_model_id: Qwen/Qwen3-0.6B
+  # Source checkpoint: model.safetensors carries the projector + the
+  # full fine-tuned Qwen3-0.6B from the embedded-2 run. ASRModel.from_pretrained
+  # overlays both, then attaches fresh LoRA adapters because no
+  # adapter_config.json exists in the embedded-2 repo.
+  pretrained_model_path: "mazesmazes/tiny-audio-embedded-2"
+
+training:
+  # Push to a new repo so we don't clobber embedded-2.
+  hub_model_id: "mazesmazes/tiny-audio-embedded-3"
+  group_by_length: false  # multi-dataset configs have inconsistent duration columns
+
+  # LoRA on the decoder (Granite Speech 3.3-2b settings).
+  use_lora: true
+  lora_rank: 64
+  lora_alpha: 32        # α/r = 0.5 effective scaling
+  lora_dropout: 0.0
+  lora_target_modules:
+    - q_proj
+    - v_proj
+  # Train the projector AND the adapters. PEFT freezes the base LM internally,
+  # so only LoRA params on the decoder side receive gradients even though
+  # freeze_language_model is false. We keep it false so the base LM weights
+  # (= embedded-2's fine-tuned LM, unchanged this run) get serialized into
+  # model.safetensors. With freeze_language_model=true, the saved checkpoint
+  # would only contain projector + adapters, and a future load would fall
+  # back to vanilla Qwen3-0.6B — adapters trained against the embedded-2
+  # base would then be applied to the wrong base.
+  freeze_projector: false
+  freeze_language_model: false
+
+  # Single LR for projector + LoRA. Both groups are small (~12M and ~7M
+  # respectively) and Adam normalizes per-param scale, so the projector-vs-
+  # LoRA asymmetric init is handled fine by warmup. 2e-4 is mid-range for
+  # q,v-only LoRA and ~5× below embedded.yaml's fresh-init projector LR
+  # (1e-3) — gentle enough that the pre-trained projector doesn't drift.
+  # If LoRA ‖B·A‖ stays near zero past warmup, bump to 3e-4.
+  learning_rate: 2e-4
+  warmup_steps: 1000
+  lr_scheduler_type: cosine
+  seed: 43
+
+  auto_find_batch_size: false
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 2
+  num_train_epochs: 1
+  save_steps: 1000
+  eval_steps: 1000
+
+  dataloader_num_workers: 8
+  dataloader_prefetch_factor: 2
+
+  attn_implementation: sdpa
+  torch_compile: true
+
+  weight_decay: 0.0

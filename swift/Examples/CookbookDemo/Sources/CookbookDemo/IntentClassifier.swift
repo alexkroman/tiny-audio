@@ -19,38 +19,83 @@ final class LLMIntentClassifier: IntentClassifying, @unchecked Sendable {
     let prompt = Self.buildPrompt(utterance: trimmed)
     do {
       let reply = try await session.chat(prompt: prompt, maxNewTokens: 64)
-      return Intent.from(json: reply)
+      let intent = Intent.from(json: reply)
+      print("[LLM] utterance=\"\(trimmed)\" reply=\(reply.debugDescription) intent=\(intent)")
+      return intent
     } catch {
+      print("[LLM] utterance=\"\(trimmed)\" threw=\(error)")
       return .none
     }
   }
 
   static func buildPrompt(utterance: String) -> String {
     """
-    You are a cooking-assistant command router. The user is cooking and just said:
-    "\(utterance)"
+    You convert a cook's spoken sentence into one JSON command.
+    Output ONLY the JSON object. No other text.
 
-    Classify into one intent. Respond with only a JSON object, no prose, no \
-    explanation.
-    Valid intents and slots:
-    - {"intent":"next_step"}
-    - {"intent":"previous_step"}
-    - {"intent":"repeat_step"}
-    - {"intent":"restart"}
-    - {"intent":"read_ingredients"}
-    - {"intent":"set_timer","seconds":<integer seconds>}
-    - {"intent":"cancel_timer"}
-    - {"intent":"add_to_grocery_list","item":"<short string>"}
-    - {"intent":"show_grocery_list"}
-    - {"intent":"none"}
+    Schema (pick exactly one):
+    {"intent":"next_step"}
+    {"intent":"previous_step"}
+    {"intent":"repeat_step"}
+    {"intent":"restart"}
+    {"intent":"read_ingredients"}
+    {"intent":"set_timer","seconds":<int>}
+    {"intent":"cancel_timer"}
+    {"intent":"add_to_grocery_list","item":"<string>"}
+    {"intent":"show_grocery_list"}
+    {"intent":"select_recipe","name":"<string>"}
+    {"intent":"none"}
 
     Examples:
-    "go ahead" → {"intent":"next_step"}
-    "set a timer for five minutes" → {"intent":"set_timer","seconds":300}
-    "add olive oil to my list" → {"intent":"add_to_grocery_list","item":"olive oil"}
-    "the dog is barking" → {"intent":"none"}
+    Input: go ahead
+    Output: {"intent":"next_step"}
+    Input: next
+    Output: {"intent":"next_step"}
+    Input: go back
+    Output: {"intent":"previous_step"}
+    Input: say that again
+    Output: {"intent":"repeat_step"}
+    Input: start over
+    Output: {"intent":"restart"}
+    Input: what do I need
+    Output: {"intent":"read_ingredients"}
+    Input: what are the ingredients
+    Output: {"intent":"read_ingredients"}
+    Input: set a timer for five minutes
+    Output: {"intent":"set_timer","seconds":300}
+    Input: timer for 30 seconds
+    Output: {"intent":"set_timer","seconds":30}
+    Input: two and a half minutes
+    Output: {"intent":"set_timer","seconds":150}
+    Input: one hour timer
+    Output: {"intent":"set_timer","seconds":3600}
+    Input: stop the timer
+    Output: {"intent":"cancel_timer"}
+    Input: cancel timer
+    Output: {"intent":"cancel_timer"}
+    Input: add olive oil to my list
+    Output: {"intent":"add_to_grocery_list","item":"olive oil"}
+    Input: put eggs on the grocery list
+    Output: {"intent":"add_to_grocery_list","item":"eggs"}
+    Input: show my grocery list
+    Output: {"intent":"show_grocery_list"}
+    Input: what's on my list
+    Output: {"intent":"show_grocery_list"}
+    Input: make some cookies
+    Output: {"intent":"select_recipe","name":"cookies"}
+    Input: let's do pancakes
+    Output: {"intent":"select_recipe","name":"pancakes"}
+    Input: pancakes
+    Output: {"intent":"select_recipe","name":"pancakes"}
+    Input: guacamole
+    Output: {"intent":"select_recipe","name":"guacamole"}
+    Input: the dog is barking
+    Output: {"intent":"none"}
+    Input: hmm
+    Output: {"intent":"none"}
 
-    JSON:
+    Input: \(utterance)
+    Output:
     """
   }
 }

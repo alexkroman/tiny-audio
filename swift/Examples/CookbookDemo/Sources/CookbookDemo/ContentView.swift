@@ -18,6 +18,10 @@ struct ContentView: View {
         switch vm.phase {
         case .loading:
           LoadingView(progress: .nan)
+        case .selecting:
+          RecipeSelectionView(vm: vm)
+        case .overview:
+          RecipeOverviewView(vm: vm)
         case .cooking:
           CookingView(vm: vm)
         case .micDenied:
@@ -43,8 +47,8 @@ struct ContentView: View {
 
   private func bootstrap() async {
     do {
-      let recipe = try Recipe.bundled()
-      let vm = RecipeViewModel(recipe: recipe)
+      let recipes = try Recipe.bundledAll()
+      let vm = RecipeViewModel(recipes: recipes)
       self.vm = vm
 
       let t = try await Transcriber.load()
@@ -54,7 +58,13 @@ struct ContentView: View {
       let pipeline = CommandPipeline(viewModel: vm, classifier: classifier)
       self.pipeline = pipeline
 
-      let m = try MicrophoneTranscriber(transcriber: t)
+      let vadConfig = VADConfig(
+        speechThreshold: 0.35,
+        minSilenceDurationMs: 350,
+        minSpeechDurationMs: 100,
+        preSpeechPaddingMs: 250
+      )
+      let m = try MicrophoneTranscriber(transcriber: t, vad: vadConfig)
       self.mic = m
       try await m.start()
 
@@ -66,7 +76,7 @@ struct ContentView: View {
         await pipeline.consume(events: m.events)
       }
 
-      vm.phase = .cooking
+      vm.phase = .selecting
     } catch TinyAudioError.micPermissionDenied {
       vm?.phase = .micDenied
     } catch {

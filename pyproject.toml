@@ -84,7 +84,6 @@ spacy = "^3.8.11"
 ten-vad = ">=1.0.6"
 speechbrain = {git = "https://github.com/speechbrain/speechbrain.git"}
 pytz = "*"
-torch-audiomentations = ">=0.12.0,<0.13.0"
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]

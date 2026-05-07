@@ -5,12 +5,22 @@ import Testing
 
 @Suite("Recipe")
 struct RecipeTests {
-  @Test func decodesFromBundledJSON() throws {
-    let recipe = try Recipe.bundled()
-    #expect(recipe.title == "Chocolate Chip Cookies")
-    #expect(recipe.steps.count == 8)
-    #expect(recipe.ingredients.count == 9)
-    #expect(recipe.steps.first?.contains("Preheat") == true)
+  @Test func bundledAllReturnsFourRecipes() throws {
+    let recipes = try Recipe.bundledAll()
+    #expect(recipes.count == 4)
+    let titles = recipes.map(\.title)
+    #expect(titles.contains("Chocolate Chip Cookies"))
+    #expect(titles.contains("Pancakes"))
+    #expect(titles.contains("Grilled Cheese"))
+    #expect(titles.contains("Guacamole"))
+  }
+
+  @Test func bundledAllRecipesHaveContent() throws {
+    let recipes = try Recipe.bundledAll()
+    for recipe in recipes {
+      #expect(!recipe.ingredients.isEmpty, "\(recipe.title) ingredients")
+      #expect(!recipe.steps.isEmpty, "\(recipe.title) steps")
+    }
   }
 
   @Test func decodesFromRawJSON() throws {

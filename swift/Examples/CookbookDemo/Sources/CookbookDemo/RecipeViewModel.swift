@@ -14,12 +14,13 @@ struct TimerState: Equatable, Sendable {
 @Observable
 final class RecipeViewModel {
   enum Phase: Equatable {
-    case loading, cooking, micDenied
+    case loading, selecting, overview, cooking, micDenied
     case modelFailed(String)
   }
-  enum ListeningState { case idle, hearing, thinking }
+  enum ListeningState: Equatable { case idle, hearing, thinking }
 
-  let recipe: Recipe
+  let recipes: [Recipe]
+  var recipe: Recipe?
 
   var phase: Phase = .loading
   var currentStepIndex: Int = 0
@@ -31,15 +32,40 @@ final class RecipeViewModel {
   var lastHeardText: String = ""
   var listeningState: ListeningState = .idle
 
-  init(recipe: Recipe) { self.recipe = recipe }
+  init(recipes: [Recipe]) {
+    self.recipes = recipes
+    self.recipe = nil
+    self.phase = .selecting
+  }
 
-  func setLastHeard(_ text: String) { lastHeardText = text }
-  func setListeningState(_ state: ListeningState) { listeningState = state }
+  /// Single-recipe convenience for tests and one-shot callers; jumps straight
+  /// to the cooking phase with the recipe already selected.
+  init(recipe: Recipe) {
+    self.recipes = [recipe]
+    self.recipe = recipe
+    self.phase = .cooking
+  }
+
+  func setLastHeard(_ text: String) {
+    guard lastHeardText != text else { return }
+    lastHeardText = text
+  }
+  func setListeningState(_ state: ListeningState) {
+    guard listeningState != state else { return }
+    listeningState = state
+  }
 
   func apply(_ intent: Intent) {
     switch intent {
     case .nextStep:
       dismissOverlays()
+      if phase == .overview {
+        phase = .cooking
+        currentStepIndex = 0
+        recipeComplete = false
+        return
+      }
+      guard let recipe = recipe else { return }
       if currentStepIndex < recipe.steps.count - 1 {
         currentStepIndex += 1
       } else {
@@ -47,6 +73,13 @@ final class RecipeViewModel {
       }
     case .previousStep:
       dismissOverlays()
+      if phase == .overview {
+        recipe = nil
+        phase = .selecting
+        currentStepIndex = 0
+        recipeComplete = false
+        return
+      }
       if currentStepIndex > 0 { currentStepIndex -= 1 }
     case .repeatStep:
       dismissOverlays()
@@ -70,6 +103,14 @@ final class RecipeViewModel {
     case .showGroceryList:
       ingredientsVisible = false
       groceryOverlayVisible = true
+    case .selectRecipe(let name):
+      guard phase == .selecting else { return }
+      guard let matched = matchRecipe(name: name) else { return }
+      dismissOverlays()
+      recipe = matched
+      currentStepIndex = 0
+      recipeComplete = false
+      phase = .overview
     case .none:
       break
     }
@@ -78,6 +119,20 @@ final class RecipeViewModel {
   private func dismissOverlays() {
     ingredientsVisible = false
     groceryOverlayVisible = false
+  }
+
+  private func matchRecipe(name: String) -> Recipe? {
+    let slotTokens = name
+      .lowercased()
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .split(whereSeparator: { $0.isWhitespace })
+      .map(String.init)
+    guard !slotTokens.isEmpty else { return nil }
+    let candidates = recipes.filter { recipe in
+      let titleLower = recipe.title.lowercased()
+      return slotTokens.allSatisfy { titleLower.contains($0) }
+    }
+    return candidates.min(by: { $0.title.count < $1.title.count })
   }
 
   struct Snapshot: Equatable {

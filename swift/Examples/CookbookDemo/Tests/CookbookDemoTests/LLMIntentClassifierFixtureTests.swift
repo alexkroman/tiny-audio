@@ -7,7 +7,7 @@ import TinyAudio
 @Suite("LLMIntentClassifier fixture")
 struct LLMIntentClassifierFixtureTests {
 
-  // 20 in-set + 5 noise = 25.
+  // 23 in-set + 5 noise = 28.
   private static let fixture: [(utterance: String, expected: Intent)] = [
     ("go to the next step", .nextStep),
     ("move on", .nextStep),
@@ -29,6 +29,9 @@ struct LLMIntentClassifierFixtureTests {
     ("show my grocery list", .showGroceryList),
     ("show me what I need to buy", .showGroceryList),
     ("read me the shopping list", .showGroceryList),
+    ("make some cookies", .selectRecipe(name: "cookies")),
+    ("let's do pancakes today", .selectRecipe(name: "pancakes")),
+    ("how about guacamole", .selectRecipe(name: "guacamole")),
     // Noise samples — all should classify as .none.
     ("the dog is barking again", .none),
     ("did you see the game last night", .none),
@@ -69,6 +72,9 @@ struct LLMIntentClassifierFixtureTests {
       let diff = Double(abs(g - e)) / Double(e)
       return diff <= 0.2
     case (.addToGroceryList(let g), .addToGroceryList(let e)):
+      return g.lowercased().trimmingCharacters(in: .whitespaces)
+        == e.lowercased().trimmingCharacters(in: .whitespaces)
+    case (.selectRecipe(let g), .selectRecipe(let e)):
       return g.lowercased().trimmingCharacters(in: .whitespaces)
         == e.lowercased().trimmingCharacters(in: .whitespaces)
     default:

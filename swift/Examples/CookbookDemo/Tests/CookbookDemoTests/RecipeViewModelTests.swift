@@ -117,4 +117,91 @@ struct RecipeViewModelTests {
     vm.apply(.none)
     #expect(vm.snapshot() == before)
   }
+
+  private func makeCatalogVM() -> RecipeViewModel {
+    let cookies = Recipe(
+      title: "Chocolate Chip Cookies",
+      ingredients: ["flour", "sugar"],
+      steps: ["mix", "bake"]
+    )
+    let pancakes = Recipe(
+      title: "Pancakes",
+      ingredients: ["flour", "milk"],
+      steps: ["mix", "cook"]
+    )
+    return RecipeViewModel(recipes: [cookies, pancakes])
+  }
+
+  @Test func catalogInitStartsInSelectingPhaseWithNoRecipe() {
+    let vm = makeCatalogVM()
+    #expect(vm.phase == .selecting)
+    #expect(vm.recipe == nil)
+  }
+
+  @Test func selectRecipeMatchesByToken() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))
+    #expect(vm.phase == .overview)
+    #expect(vm.recipe?.title == "Chocolate Chip Cookies")
+    #expect(vm.currentStepIndex == 0)
+  }
+
+  @Test func selectRecipeMatchesMultiTokenSlot() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "chip cookies"))
+    #expect(vm.recipe?.title == "Chocolate Chip Cookies")
+  }
+
+  @Test func selectRecipeIsCaseInsensitive() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "PANCAKES"))
+    #expect(vm.recipe?.title == "Pancakes")
+  }
+
+  @Test func selectRecipeNoMatchIsNoOp() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "lasagna"))
+    #expect(vm.phase == .selecting)
+    #expect(vm.recipe == nil)
+  }
+
+  @Test func selectRecipeIgnoredOutsideSelectingPhase() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))  // → overview, recipe=cookies
+    vm.apply(.selectRecipe(name: "pancakes"))  // ignored
+    #expect(vm.recipe?.title == "Chocolate Chip Cookies")
+    #expect(vm.phase == .overview)
+  }
+
+  @Test func nextStepFromOverviewEntersCooking() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))
+    #expect(vm.phase == .overview)
+    vm.apply(.nextStep)
+    #expect(vm.phase == .cooking)
+    #expect(vm.currentStepIndex == 0)
+  }
+
+  @Test func previousStepFromOverviewReturnsToSelection() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))
+    vm.apply(.previousStep)
+    #expect(vm.phase == .selecting)
+    #expect(vm.recipe == nil)
+  }
+
+  @Test func addToGroceryListWorksFromOverview() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))
+    vm.apply(.addToGroceryList(item: "flour"))
+    #expect(vm.groceryList == ["flour"])
+    #expect(vm.phase == .overview)
+  }
+
+  @Test func showGroceryListWorksFromOverview() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))
+    vm.apply(.showGroceryList)
+    #expect(vm.groceryOverlayVisible == true)
+  }
 }
