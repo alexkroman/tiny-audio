@@ -19,9 +19,9 @@ struct ContentView: View {
         case .loading:
           LoadingView(progress: .nan)
         case .selecting:
-          LoadingView(progress: .nan)
+          RecipeSelectionView(vm: vm)
         case .overview:
-          LoadingView(progress: .nan)
+          RecipeOverviewView(vm: vm)
         case .cooking:
           CookingView(vm: vm)
         case .micDenied:
