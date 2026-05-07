@@ -19,8 +19,11 @@ final class LLMIntentClassifier: IntentClassifying, @unchecked Sendable {
     let prompt = Self.buildPrompt(utterance: trimmed)
     do {
       let reply = try await session.chat(prompt: prompt, maxNewTokens: 64)
-      return Intent.from(json: reply)
+      let intent = Intent.from(json: reply)
+      print("[LLM] utterance=\"\(trimmed)\" reply=\(reply.debugDescription) intent=\(intent)")
+      return intent
     } catch {
+      print("[LLM] utterance=\"\(trimmed)\" threw=\(error)")
       return .none
     }
   }
