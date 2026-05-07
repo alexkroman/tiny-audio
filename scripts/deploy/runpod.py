@@ -122,11 +122,9 @@ def attach_tmux_session(host: str, port: int, session_name: str) -> None:
     print(f"\nDetached from session '{session_name}'.")
 
 
-# Suffixes filtered out of the rsync file set on top of gitignore. The
-# Swift bundled model weights are git-tracked (un-ignored in .gitignore via
-# `!swift/Sources/TinyAudio/Resources/Model/**`) but RunPod is for Python
-# training and doesn't need them — uploading hundreds of MB on every sync
-# wastes bandwidth.
+# Suffixes filtered out of the rsync file set on top of gitignore. Belt-and-
+# suspenders against accidentally syncing checkpoint weights into a RunPod
+# workspace.
 RSYNC_SUFFIX_BLOCKLIST = (".safetensors",)
 
 
@@ -145,10 +143,20 @@ def _gitignore_aware_file_list(project_root: Path) -> str:
         text=True,
         check=True,
     )
+    # Drop tracked-but-deleted paths — they're in --cached but missing on disk,
+    # so rsync --files-from would skip them and exit 23.
+    deleted = subprocess.run(
+        ["git", "ls-files", "--deleted"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    deleted_set = set(deleted.stdout.splitlines())
     lines = [
         line
         for line in result.stdout.splitlines()
-        if line and not line.endswith(RSYNC_SUFFIX_BLOCKLIST)
+        if line and line not in deleted_set and not line.endswith(RSYNC_SUFFIX_BLOCKLIST)
     ]
     return "\n".join(lines) + ("\n" if lines else "")
 

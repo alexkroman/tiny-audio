@@ -19,7 +19,6 @@ from .asr import (
     EndpointEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
-    MLXEvaluator,
     SwiftSDKEvaluator,
 )
 from .base import (
@@ -64,7 +63,6 @@ __all__ = [
     "DeepgramEvaluator",
     "ElevenLabsEvaluator",
     "AppleSpeechEvaluator",
-    "MLXEvaluator",
     "SwiftSDKEvaluator",
     # Diarization evaluators
     "DiarizationEvaluator",

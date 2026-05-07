@@ -40,7 +40,6 @@ from scripts.eval.evaluators import (
     LocalEvaluator,
     LocalStreamingEvaluator,
     MCQResult,
-    MLXEvaluator,
     MMAUEvaluator,
     SwiftSDKEvaluator,
     TimestampAlignmentEvaluator,
@@ -774,16 +773,10 @@ def main(
                 audio_field=cfg.audio_field,
                 text_field=cfg.text_field,
             )
-        elif model.startswith("mlx://"):
-            repo_id = model[len("mlx://") :]
-            model_id = get_model_name(repo_id)
-            evaluator = MLXEvaluator(
-                model_path=repo_id,
-                audio_field=cfg.audio_field,
-                text_field=cfg.text_field,
-            )
-        elif model.startswith("swift://"):
-            repo_id = model[len("swift://") :]
+        elif model == "swift" or model.startswith("swift://"):
+            repo_id = (
+                model[len("swift://") :] if model.startswith("swift://") else ""
+            ) or "mazesmazes/tiny-audio-mlx"
             model_id = get_model_name(repo_id)
             evaluator = SwiftSDKEvaluator(
                 repo_id=repo_id,

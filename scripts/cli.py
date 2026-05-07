@@ -20,7 +20,6 @@ def register_subcommands():
     from scripts.dev import app as dev_app
     from scripts.eval.cli import app as eval_app
     from scripts.hub.push import main as push_command
-    from scripts.mlx.cli import app as mlx_app
 
     app.add_typer(eval_app, name="eval", help="Evaluate ASR models on datasets")
     app.add_typer(analysis_app, name="analysis", help="WER analysis and comparison tools")
@@ -30,7 +29,6 @@ def register_subcommands():
     app.add_typer(debug_app, name="debug", help="Debug and analysis tools")
     app.add_typer(demo_app, name="demo", help="Launch Gradio demo")
     app.add_typer(dev_app, name="dev", help="Development commands")
-    app.add_typer(mlx_app, name="mlx", help="MLX bundle build utilities")
 
 
 register_subcommands()
