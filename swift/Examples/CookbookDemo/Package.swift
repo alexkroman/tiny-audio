@@ -19,7 +19,7 @@ let package = Package(
       ],
       path: "Sources/CookbookDemo",
       resources: [
-        .copy("../../Resources/recipe.json")
+        .copy("../../Resources/recipes.json")
       ]
     ),
     .testTarget(
