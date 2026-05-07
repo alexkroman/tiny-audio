@@ -48,13 +48,23 @@ def convert_decoder(
     print(f"Loading tiny-audio checkpoint from {checkpoint}...")
     model = ASRModel.from_pretrained(checkpoint)
 
-    if getattr(model.config, "freeze_language_model", True):
+    if getattr(model.config, "freeze_language_model", True) and not hasattr(
+        model.language_model, "peft_config"
+    ):
         print(
             f"Note: {checkpoint} was trained with freeze_language_model=true — "
             f"the LM weights match the upstream base model. Converting anyway to "
             f"keep the bundle's decoder quantization consistent across "
             f"frozen-LM and fine-tuned-LM checkpoints."
         )
+
+    # Bake any LoRA adapters into the base LM so the exported HF directory is a
+    # plain Qwen3 (or whatever) checkpoint that mlx_lm.convert can read. PeftModel's
+    # own save_pretrained only writes adapter_model.safetensors + adapter_config.json,
+    # which is not a full HF model.
+    if hasattr(model.language_model, "peft_config"):
+        print("Merging LoRA adapters into base LM...")
+        model.language_model = model.language_model.merge_and_unload()
 
     out_dir = Path(out_dir)
     if out_dir.exists():

@@ -396,12 +396,29 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
 
     def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
-        """Save trainable weights: projector, plus the language model when fine-tuned."""
+        """Save trainable weights: projector, plus the language model when fine-tuned.
+
+        With LoRA attached, the language_model entries are flattened to plain
+        (non-PEFT) HF naming so model.safetensors round-trips through
+        ASRModel.from_pretrained — which builds a vanilla base LM, overlays
+        these weights, and only then re-attaches PEFT. lora_*/adapter weights
+        are skipped here; PEFT serializes them separately as
+        adapter_model.safetensors via the save_pretrained path below.
+        """
         sd = {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
         if not getattr(self.config, "freeze_language_model", True):
-            sd.update(
-                {f"language_model.{k}": v for k, v in self.language_model.state_dict().items()}
-            )
+            lm = self.language_model
+            if hasattr(lm, "peft_config"):
+                for k, v in lm.state_dict().items():
+                    if "lora_" in k:
+                        continue
+                    if k.startswith("base_model.model."):
+                        k = k[len("base_model.model.") :]
+                    # LoRA layers wrap the original Linear as `<name>.base_layer.<weight|bias>`.
+                    k = k.replace(".base_layer.", ".")
+                    sd[f"language_model.{k}"] = v
+            else:
+                sd.update({f"language_model.{k}": v for k, v in lm.state_dict().items()})
         return sd
 
     def _compute_encoder_output_lengths(

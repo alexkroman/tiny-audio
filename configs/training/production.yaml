@@ -64,42 +64,6 @@ dataloader_drop_last: true
 group_by_length: true
 length_column_name: duration
 
-# Noise augmentation — Persian-ELN recipe (arXiv:2512.17247): every utterance
-# corrupted with one MUSAN ambient segment at SNR ∈ [-15, +15] dB, plus a thin
-# layer of low-amplitude Gaussian noise on top. Music/speech/babble subsets
-# are excluded; only the ~930-clip ambient noise subset is used.
-noise_augmentation:
-  enabled: true
-  # MUSAN ambient subset only (`musan/noise` — ~930 wav, ~6 hours: rain,
-  # thunder, wind, crowd chatter, cafeteria, footsteps, paper, mechanical,
-  # phone tones). Excludes `musan/music` and `musan/speech` (babble).
-  corpus_path:
-    - ~/.cache/musan/musan/noise
-  # Apply to every utterance (paper applies noise corruption to all training
-  # samples, not a fraction).
-  prob: 1.0
-  min_snr_db: -15.0
-  max_snr_db: 15.0
-  # NeMo NoisePerturbationWithNormalization: normalize both clean and noise
-  # to this dB-FS target before SNR scaling. Decouples SNR from per-clip
-  # absolute level (close-talk vs. distant-mic AMI). -25 dBFS is NeMo's
-  # default and matches the Microsoft DNS-Challenge convention.
-  target_db: -25.0
-  # Floor for the RMS divide in dB-FS normalization (effectively silent
-  # clips snap to this RMS instead of dividing by ~0). NeMo default.
-  rms_epsilon: 0.01
-  # Insert this much silence between repeats when a noise clip is shorter
-  # than the utterance — avoids the periodic seam artifact that butt-joined
-  # tiling creates on short MUSAN clips.
-  tile_silence_sec: 0.25
-  # Additive Gaussian "background sensor" noise layered on top of the MUSAN
-  # mix. SNR sampled uniformly per clip and σ derived from clip RMS
-  # (SpeechBrain / NeMo additive-noise convention). Paper doesn't specify
-  # SNR — 20-40 dB is the canonical "background dither" range, with MUSAN
-  # remaining the dominant noise component. Set both to null to disable.
-  gaussian_min_snr_db: 20.0
-  gaussian_max_snr_db: 40.0
-
 # Misc
 disable_tqdm: false
 log_level: info

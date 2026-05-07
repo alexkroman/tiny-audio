@@ -1,5 +1,6 @@
 """CLI for MLX bundle build utilities."""
 
+import json
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -13,6 +14,42 @@ _DEFAULT_DECODER_CACHE = get_project_root() / ".cache" / "decoder-mlx"
 _DEFAULT_BUNDLE_DIR = get_project_root() / "swift/Sources/TinyAudio/Resources/Model"
 _STOCK_DECODER_REPO = "Qwen/Qwen3-0.6B-MLX-4bit"
 _DEFAULT_CHECKPOINT = "mazesmazes/tiny-audio-embedded"
+
+
+def _projector_needs_converted_decoder(repo_or_path: str) -> bool:
+    """A converted decoder is needed when the projector checkpoint shipped its
+    own fine-tuned LM weights (`freeze_language_model=false`) or LoRA adapters
+    (`use_lora=true`). Pure projector-only training can reuse the stock MLX
+    decoder."""
+    from huggingface_hub import hf_hub_download
+
+    p = Path(repo_or_path)
+    if p.is_dir():
+        cfg_path = p / "config.json"
+    else:
+        cfg_path = Path(hf_hub_download(repo_or_path, "config.json"))
+    cfg = json.loads(cfg_path.read_text())
+    if not cfg.get("freeze_language_model", True):
+        return True
+    return bool(cfg.get("use_lora", False))
+
+
+def _resolve_default_decoder(projector: str) -> str:
+    """Pick the decoder source for a build-bundle invocation that didn't pass
+    --decoder. Caches per-projector under .cache/decoder-mlx/<sanitized-repo>
+    and auto-runs convert-decoder for fine-tuned/LoRA checkpoints so the
+    bundle's decoder matches the projector it was trained against."""
+    if not _projector_needs_converted_decoder(projector):
+        return _STOCK_DECODER_REPO
+
+    sanitized = projector.replace("/", "--")
+    cache_path = _DEFAULT_DECODER_CACHE / sanitized
+    if not cache_path.is_dir():
+        from scripts.mlx.convert_decoder import convert_decoder
+
+        typer.echo(f"No cached decoder for {projector}; running convert-decoder...")
+        convert_decoder(checkpoint=projector, out_dir=cache_path, q_bits=8)
+    return str(cache_path)
 
 
 @app.command("convert-decoder")
@@ -82,9 +119,11 @@ def build_bundle_cmd(
             "--decoder",
             "-d",
             help=(
-                "Local mlx-lm directory or HF repo id. "
-                f"Defaults to the convert-decoder cache ({_DEFAULT_DECODER_CACHE}) if it exists, "
-                f"else the stock {_STOCK_DECODER_REPO}."
+                "Local mlx-lm directory or HF repo id. Defaults to a per-projector "
+                f"cache under {_DEFAULT_DECODER_CACHE}/<repo>, auto-populated by "
+                f"convert-decoder when the projector was trained with a fine-tuned "
+                f"LM or LoRA adapters. Falls back to the stock {_STOCK_DECODER_REPO} "
+                f"for projector-only checkpoints."
             ),
         ),
     ] = None,
@@ -105,9 +144,7 @@ def build_bundle_cmd(
     from scripts.mlx.build_bundle import build_bundle
 
     if decoder is None:
-        decoder = (
-            str(_DEFAULT_DECODER_CACHE) if _DEFAULT_DECODER_CACHE.is_dir() else _STOCK_DECODER_REPO
-        )
+        decoder = _resolve_default_decoder(projector)
         typer.echo(f"Using decoder: {decoder}")
 
     build_bundle(
