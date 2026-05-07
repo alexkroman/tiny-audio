@@ -172,4 +172,36 @@ struct RecipeViewModelTests {
     #expect(vm.recipe?.title == "Chocolate Chip Cookies")
     #expect(vm.phase == .overview)
   }
+
+  @Test func nextStepFromOverviewEntersCooking() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))
+    #expect(vm.phase == .overview)
+    vm.apply(.nextStep)
+    #expect(vm.phase == .cooking)
+    #expect(vm.currentStepIndex == 0)
+  }
+
+  @Test func previousStepFromOverviewReturnsToSelection() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))
+    vm.apply(.previousStep)
+    #expect(vm.phase == .selecting)
+    #expect(vm.recipe == nil)
+  }
+
+  @Test func addToGroceryListWorksFromOverview() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))
+    vm.apply(.addToGroceryList(item: "flour"))
+    #expect(vm.groceryList == ["flour"])
+    #expect(vm.phase == .overview)
+  }
+
+  @Test func showGroceryListWorksFromOverview() {
+    let vm = makeCatalogVM()
+    vm.apply(.selectRecipe(name: "cookies"))
+    vm.apply(.showGroceryList)
+    #expect(vm.groceryOverlayVisible == true)
+  }
 }

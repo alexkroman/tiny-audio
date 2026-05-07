@@ -54,6 +54,12 @@ final class RecipeViewModel {
     switch intent {
     case .nextStep:
       dismissOverlays()
+      if phase == .overview {
+        phase = .cooking
+        currentStepIndex = 0
+        recipeComplete = false
+        return
+      }
       guard let recipe = recipe else { return }
       if currentStepIndex < recipe.steps.count - 1 {
         currentStepIndex += 1
@@ -62,6 +68,13 @@ final class RecipeViewModel {
       }
     case .previousStep:
       dismissOverlays()
+      if phase == .overview {
+        recipe = nil
+        phase = .selecting
+        currentStepIndex = 0
+        recipeComplete = false
+        return
+      }
       if currentStepIndex > 0 { currentStepIndex -= 1 }
     case .repeatStep:
       dismissOverlays()
