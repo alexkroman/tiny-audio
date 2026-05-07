@@ -550,33 +550,6 @@ class AppleSpeechEvaluator(Evaluator):
             self.temp_dir = None
 
 
-class MLXEvaluator(Evaluator):
-    """Evaluator for MLX inference on Apple Silicon.
-
-    Triggered by `ta eval -m mlx://<repo-id>`. Loads the trained checkpoint
-    via `MLXASRModel.from_pretrained()` (4-bit quantized encoder + decoder,
-    fp16 projector).
-    """
-
-    def __init__(self, model_path: str, **kwargs):
-        super().__init__(**kwargs)
-        from tiny_audio.mlx import MLXASRModel
-
-        self.model = MLXASRModel.from_pretrained(model_path)
-        console.print(f"[bold cyan]Loaded MLX model:[/bold cyan] {model_path}")
-        # Warm up MLX kernels so the first real sample doesn't pay JIT-compile
-        # latency (encoder + projector + decoder graphs all materialize here).
-        warm_start = time.time()
-        self.model.warmup()
-        console.print(f"[dim]MLX warmup: {time.time() - warm_start:.2f}s[/dim]")
-
-    def transcribe(self, audio) -> tuple[str, float]:
-        start = time.time()
-        text = self.model.transcribe(audio)
-        elapsed = time.time() - start
-        return text, elapsed
-
-
 class SwiftSDKEvaluator(Evaluator):
     """Evaluator for the TinyAudio Swift SDK on Apple Silicon.
 
@@ -588,9 +561,13 @@ class SwiftSDKEvaluator(Evaluator):
     The Swift SDK ships with bundled model weights, so the `<repo-id>`
     suffix is informational only — the binary always uses its embedded
     weights.
+
+    The Swift package now lives in a sibling repo. Override its location
+    via the ``TINY_AUDIO_SWIFT_DIR`` env var (path to the ``swift/``
+    package root). Default: ``~/Code/tiny-audio-swift/swift``.
     """
 
-    def __init__(self, repo_id: str, **kwargs):
+    def __init__(self, repo_id: str = "mazesmazes/tiny-audio-mlx", **kwargs):
         if kwargs.get("num_workers", 1) > 1:
             console.print(
                 "[yellow]Warning: SwiftSDKEvaluator forces num_workers=1 "
@@ -601,8 +578,18 @@ class SwiftSDKEvaluator(Evaluator):
         # repo_id is informational only — the Swift binary uses bundled weights.
         console.print(f"[dim]Swift SDK ignores repo_id={repo_id!r} (bundled weights)[/dim]")
 
-        repo_root = Path(__file__).resolve().parents[3]
-        swift_dir = repo_root / "swift"
+        swift_dir = Path(
+            os.environ.get(
+                "TINY_AUDIO_SWIFT_DIR",
+                Path.home() / "Code" / "tiny-audio-swift" / "swift",
+            )
+        ).expanduser()
+        if not (swift_dir / "Package.swift").exists():
+            raise RuntimeError(
+                f"Swift package not found at {swift_dir}. Set TINY_AUDIO_SWIFT_DIR "
+                f"to the path containing Package.swift (the tiny-audio-swift "
+                f"checkout's swift/ directory)."
+            )
         swift_build = swift_dir / ".build"
 
         # Always rebuild release before running. Cheap when up-to-date.
@@ -759,7 +746,7 @@ class SwiftSDKEvaluator(Evaluator):
                 tmp_name = tmp.name
             sf.write(tmp_name, arr, sr, subtype="PCM_16")
             return tmp_name, True
-        # AudioDecoder / AudioSamples fallback (mirrors MLXASRModel._prepare_audio).
+        # AudioDecoder / AudioSamples fallback for torchcodec / SDK-style inputs.
         if hasattr(audio, "get_all_samples"):
             samples = audio.get_all_samples()
             data = samples.data.detach().cpu().numpy()

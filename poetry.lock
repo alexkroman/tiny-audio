@@ -2700,180 +2700,6 @@ files = [
 ]
 
 [[package]]
-name = "miniaudio"
-version = "1.70"
-description = "python bindings for the miniaudio library and its decoders (mp3, flac, ogg vorbis, wav)"
-optional = true
-python-versions = ">=3.8"
-groups = ["main"]
-markers = "extra == \"mlx\" and sys_platform == \"darwin\""
-files = [
-    {file = "miniaudio-1.70-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:34d0bcda68293c6efceb8ea4c2c1871979193ecd1fbc9fe408fa1a69e1fe40b4"},
-    {file = "miniaudio-1.70-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:16d86fe5a9fa54b7a15d417c1bf6b1b8ddbfda0bf82acb59fff8bc01336e9bcd"},
-    {file = "miniaudio-1.70-cp310-cp310-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:5c3ef2023a37a1e81e5e9a65abb20934bc910336ebf23d5da3e235b1d8ee488d"},
-    {file = "miniaudio-1.70-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e68f0d0e957f716bb7ba2f20623ef032a2c0be5fb1aee4b4f5ecb6710bd2da5c"},
-    {file = "miniaudio-1.70-cp310-cp310-musllinux_1_2_i686.whl", hash = "sha256:e67fa7f34273e651e2f6aa36f06b31bf136e105d9d05332dd2378f89bb0a3f78"},
-    {file = "miniaudio-1.70-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:07b7a813981aeea441b35324fae20a04872d113ad9731f1fe3fad31f8ef65bab"},
-    {file = "miniaudio-1.70-cp310-cp310-win32.whl", hash = "sha256:a6db4139f66317cbad89361c82eb82be7984bb827d1c1954950160b020c2b196"},
-    {file = "miniaudio-1.70-cp310-cp310-win_amd64.whl", hash = "sha256:a71c170e3f9476f707bbb3fce1e8d8c1726be3024c3621685c0d1f29e5510f6b"},
-    {file = "miniaudio-1.70-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:06401e658d64fff8a4705f2082c093b1f1ce78bf99cbc932e2b8e48ec634cfb9"},
-    {file = "miniaudio-1.70-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:588843c600c798e37fbe25b7b9feaa891e6ca0693be89f8d51734b8be441209a"},
-    {file = "miniaudio-1.70-cp311-cp311-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:8eb21a2bd770e575a0ff14b00b2120bfe9e59495f7a61c98c2e1f3942cccaad9"},
-    {file = "miniaudio-1.70-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:770ece1f3a1d6d0c8e0ce17c444b0e46b919e85389d4ef26ea8e354c0de1b840"},
-    {file = "miniaudio-1.70-cp311-cp311-musllinux_1_2_i686.whl", hash = "sha256:e39e40562515aea0eafbc21ff9ea7852dd42b8af4f7c65cd218569eaef93add3"},
-    {file = "miniaudio-1.70-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:9c385bdcfb203276a662964ddb4b0786790c56a833cdbcab1eece767b99a3476"},
-    {file = "miniaudio-1.70-cp311-cp311-win32.whl", hash = "sha256:faec5f2d549640e1bffd19f68e6e21449bbe24a0e2eea215c8f8ba78a668d3fc"},
-    {file = "miniaudio-1.70-cp311-cp311-win_amd64.whl", hash = "sha256:1a6b58fc456d0384a39233a5889728c4d6b7fa0d105774c620e5666aad2d0bc9"},
-    {file = "miniaudio-1.70-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:bfe53c6d47a13c6ae5612444731f4717a3b293990a6048d9486bf69a83e876ea"},
-    {file = "miniaudio-1.70-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:5c96244596485a42345b8b7094a1917857d0a4f11a25c254ec9cb8562611093d"},
-    {file = "miniaudio-1.70-cp312-cp312-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:4ed1da7e0f903eeea3cecd8c199a39bedf27d782a9de9b81bf1db3d0840c673c"},
-    {file = "miniaudio-1.70-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ec53c807dce88f457375538e7d81b87cc4366502a581f46b3ee4b50e282b7a2c"},
-    {file = "miniaudio-1.70-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:fcda7999e1c170ae59019f7ddf8cfd48aafcdbc8ebd89c25f917b4910e30090e"},
-    {file = "miniaudio-1.70-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:3c7116fd74ed2733a4ef6b4f23224fe968872ea89030917f1bcd5eeb7060d0f1"},
-    {file = "miniaudio-1.70-cp312-cp312-win32.whl", hash = "sha256:8adda5de804ececcd1810c9522767f87d2afb951fdd9bce0916fb586457bfc69"},
-    {file = "miniaudio-1.70-cp312-cp312-win_amd64.whl", hash = "sha256:e6c66850acafd8bacfa8b39fecc939527783ae2919336bb446c4d7d48e86e612"},
-    {file = "miniaudio-1.70-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:178bf8671c317a6dec5c2ade93394be406bd52f43ac784c5d51e3c71a23e2919"},
-    {file = "miniaudio-1.70-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:e76686f21cf5d1459f64d61ac41a360db3f27e3e89b6bb61274a2ba240d36092"},
-    {file = "miniaudio-1.70-cp313-cp313-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:4c7b67b4dfbc2478c254fbfb6eca1d3f5f7c6062dd5f63022dfde15099fea20e"},
-    {file = "miniaudio-1.70-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ad0a7ebe9ad4ae987c582f884f87945a21ac3d93131bba01d39797607a5f01cf"},
-    {file = "miniaudio-1.70-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:50cf3e80675fd34cd00c60efcb503b6254a9d4be8eb4633b401aa1d42f05c165"},
-    {file = "miniaudio-1.70-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:540e1ea433b1f2a2f63bcc4acdc8707ba89299b62db9019913367359a087b597"},
-    {file = "miniaudio-1.70-cp313-cp313-win32.whl", hash = "sha256:387213741b55daca5a2db69a89ae904f7b4bbc0440f81e66352150910ff6e416"},
-    {file = "miniaudio-1.70-cp313-cp313-win_amd64.whl", hash = "sha256:2107858d97fad7da021ffd43e109247ee10d6ca31f196f63b2ba2095df9025eb"},
-    {file = "miniaudio-1.70.tar.gz", hash = "sha256:f788504ee2b8ad3092f34b13d72875dba50597a3d25d8af3ac2f8573d31d8c31"},
-]
-
-[package.dependencies]
-cffi = ">=1.12.0"
-
-[[package]]
-name = "mlx"
-version = "0.31.2"
-description = "A framework for machine learning on Apple silicon."
-optional = true
-python-versions = ">=3.10"
-groups = ["main"]
-markers = "extra == \"mlx\" and sys_platform == \"darwin\""
-files = [
-    {file = "mlx-0.31.2-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:b29cf940f34205f09bb552ac60465ae833c4ae640b52777c6d725ddbad8461ca"},
-    {file = "mlx-0.31.2-cp310-cp310-macosx_15_0_arm64.whl", hash = "sha256:ebdc47b87b4b0216ceab3b5961716804bba3107c16454b65ae51d0e0c059f298"},
-    {file = "mlx-0.31.2-cp310-cp310-macosx_26_0_arm64.whl", hash = "sha256:2a64db61b2840f28bae08354e6f999698e30381af201cc12354290673c96213b"},
-    {file = "mlx-0.31.2-cp310-cp310-manylinux_2_35_aarch64.whl", hash = "sha256:e3e2818157371501de097887f371784227f9dd9c91e177f986db7b25319c55d7"},
-    {file = "mlx-0.31.2-cp310-cp310-manylinux_2_35_x86_64.whl", hash = "sha256:c71dff00cc1b363d542f111d9e8b7b59dadb65b29d027f798b71ea34da75b665"},
-    {file = "mlx-0.31.2-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:4a3f181b367d404e44a6bd68ef5eb573930809ac60cacd51d0c851c629b1b651"},
-    {file = "mlx-0.31.2-cp311-cp311-macosx_15_0_arm64.whl", hash = "sha256:70297cbef7479429f69c966bfed10da20a6f0c2aa997eec2b4f6ba1a07caf2ef"},
-    {file = "mlx-0.31.2-cp311-cp311-macosx_26_0_arm64.whl", hash = "sha256:c0ff158b7ac93a4b5659adbc70053498b30a5964fc45f78596398e056a96c36a"},
-    {file = "mlx-0.31.2-cp311-cp311-manylinux_2_35_aarch64.whl", hash = "sha256:cd5d42b0b2bee7efe1b0680a7e302943dd33b92c879cffa0358ffdb5a4a8d27b"},
-    {file = "mlx-0.31.2-cp311-cp311-manylinux_2_35_x86_64.whl", hash = "sha256:b368f7ede4238cc44076e4843820338c453c21ee50bd3ee26d4b182c179fd8e1"},
-    {file = "mlx-0.31.2-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:e5067aaf2be1f3d7bba5be52348775804f111173c1ed04639618fd713b1a530f"},
-    {file = "mlx-0.31.2-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:edb9797db7d852477ca1c99708058654ee860d4148fe5765f0d55528e2b1aa22"},
-    {file = "mlx-0.31.2-cp312-cp312-macosx_26_0_arm64.whl", hash = "sha256:51ca102db641b01e7cb083ce8ecb580e281530a141a7ca12544bb370641630ae"},
-    {file = "mlx-0.31.2-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:117c7583cae0ca107cd53c591cc34f8e75f97a505aa47088844b7dc0fc69dc67"},
-    {file = "mlx-0.31.2-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:99572133181481640a8bf8d449daf083816d0af3ee050c8adfc5bf45ceca91c6"},
-    {file = "mlx-0.31.2-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:1b3fb0dda955b0d552ce57bdd6f42b3309ab21b067e40587d6848443d307e91f"},
-    {file = "mlx-0.31.2-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:34b0171cd9eb5c43fdd82091f6135d6ccc5a065363a4a3e68fac64fb4e53d37c"},
-    {file = "mlx-0.31.2-cp313-cp313-macosx_26_0_arm64.whl", hash = "sha256:c05981684279a8935d58b0dde3ea5b02d210c3bad3319aa0e9934ec2df165752"},
-    {file = "mlx-0.31.2-cp313-cp313-manylinux_2_35_aarch64.whl", hash = "sha256:cd1f4189e5f1bc68735f44eb63ce98ae09d66ac75d7ab5b15a41afae7e9f0513"},
-    {file = "mlx-0.31.2-cp313-cp313-manylinux_2_35_x86_64.whl", hash = "sha256:53c8d57ffa9ce77f8355663be05014c0dd37280e57f19126fb0a24389a30684b"},
-    {file = "mlx-0.31.2-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:a13c9ce23c3deef6aa5a09315e7953e1a5dc311e851fa16fc74c81fb2509c0b9"},
-    {file = "mlx-0.31.2-cp314-cp314-macosx_15_0_arm64.whl", hash = "sha256:b0764bf11fc3a71dee988e19275eef67775cab63112d8bb7ef173ca8b2a1247c"},
-    {file = "mlx-0.31.2-cp314-cp314-macosx_26_0_arm64.whl", hash = "sha256:59ccbd0f0044d4f97f11ebcbf0c480bc9e962935fd96275f120954afea65be8a"},
-    {file = "mlx-0.31.2-cp314-cp314-manylinux_2_35_aarch64.whl", hash = "sha256:e81798c610f95a09c642c89214ba5c23b72ce18ce4728184aceabe7eddca33d7"},
-    {file = "mlx-0.31.2-cp314-cp314-manylinux_2_35_x86_64.whl", hash = "sha256:69fbc94bf53607a75af9eb3e22c354738a6fe4e25aa4e2b20934b009a4bba1f3"},
-]
-
-[package.dependencies]
-mlx-metal = {version = "0.31.2", markers = "platform_system == \"Darwin\""}
-
-[package.extras]
-cpu = ["mlx-cpu (==0.31.2) ; platform_system == \"Linux\""]
-cuda = ["mlx-cuda-12 (==0.31.2) ; platform_system == \"Linux\""]
-cuda12 = ["mlx-cuda-12 (==0.31.2) ; platform_system == \"Linux\""]
-cuda13 = ["mlx-cuda-13 (==0.31.2) ; platform_system == \"Linux\""]
-dev = ["ml_dtypes", "numpy (>=2)", "pre-commit", "psutil", "torch (>=2.9)", "typing_extensions"]
-
-[[package]]
-name = "mlx-audio"
-version = "0.0.0"
-description = "MLX-Audio is a package for inference of text-to-speech (TTS) and speech-to-speech (STS) models locally on your Mac using MLX"
-optional = true
-python-versions = ">=3.10"
-groups = ["main"]
-markers = "extra == \"mlx\" and sys_platform == \"darwin\""
-files = []
-develop = false
-
-[package.dependencies]
-huggingface_hub = ">=1.0"
-miniaudio = ">=1.61"
-mlx = ">=0.31.1"
-mlx-lm = ">=0.31.1"
-numpy = ">=1.26.4"
-scipy = ">=1.10.0"
-sounddevice = ">=0.5.3"
-tqdm = ">=4.67.1"
-transformers = ">=5.5.0"
-
-[package.extras]
-all = ["fastapi (>=0.95.0)", "mistral-common[audio]", "sentencepiece (>=0.2.0)", "setuptools (<81)", "uvicorn[standard] (>=0.22.0)", "webrtcvad (>=2.0.10)"]
-dev = ["black (>=24.2.0)", "isort (>=5.13.2)", "pre-commit (>=3.7.0)", "pytest (>=7.0.0)", "pytest-asyncio (>=1.0.0)"]
-docs = ["mkdocs-material (>=9.6)", "mkdocstrings[python] (>=0.29)"]
-server = ["fastapi (>=0.95.0)", "python-multipart (>=0.0.22)", "setuptools (<81)", "uvicorn[standard] (>=0.22.0)", "webrtcvad (>=2.0.10)"]
-sts = ["sentencepiece (>=0.2.0)", "setuptools (<81)", "webrtcvad (>=2.0.10)"]
-stt = ["sentencepiece (>=0.2.0)"]
-tts = ["mistral-common[audio]", "sentencepiece (>=0.2.0)"]
-
-[package.source]
-type = "git"
-url = "https://github.com/Blaizzy/mlx-audio.git"
-reference = "HEAD"
-resolved_reference = "c3a61df7e60fe431cf120d71c394ba2fec7b6c47"
-
-[[package]]
-name = "mlx-lm"
-version = "0.31.3"
-description = "LLMs with MLX and the Hugging Face Hub"
-optional = true
-python-versions = ">=3.8"
-groups = ["main"]
-markers = "extra == \"mlx\" and sys_platform == \"darwin\""
-files = [
-    {file = "mlx_lm-0.31.3-py3-none-any.whl", hash = "sha256:758cfddf1180053b7613db76fad3d246a331a2a905808e1164a275621fc983b8"},
-    {file = "mlx_lm-0.31.3.tar.gz", hash = "sha256:61eb0e3ba09444f77f874aff295401d7ccd20b39495cbbce0c782a15474ce733"},
-]
-
-[package.dependencies]
-jinja2 = "*"
-mlx = {version = ">=0.31.2", markers = "platform_system == \"Darwin\""}
-numpy = "*"
-protobuf = "*"
-pyyaml = "*"
-sentencepiece = "*"
-transformers = ">=5.0.0"
-
-[package.extras]
-cpu = ["mlx[cpu] (>=0.31.2)"]
-cuda12 = ["mlx[cuda12] (>=0.31.2)"]
-cuda13 = ["mlx[cuda13] (>=0.31.2)"]
-evaluate = ["lm-eval", "tqdm"]
-test = ["datasets", "lm-eval"]
-train = ["datasets", "tqdm"]
-
-[[package]]
-name = "mlx-metal"
-version = "0.31.2"
-description = "A framework for machine learning on Apple silicon."
-optional = true
-python-versions = ">=3.10"
-groups = ["main"]
-markers = "extra == \"mlx\" and platform_system == \"Darwin\" and sys_platform == \"darwin\""
-files = [
-    {file = "mlx_metal-0.31.2-py3-none-macosx_14_0_arm64.whl", hash = "sha256:b25385bcee18fc194092255b8b53b9a3d8489eb650e59160f1b57aadd07aa2dc"},
-    {file = "mlx_metal-0.31.2-py3-none-macosx_15_0_arm64.whl", hash = "sha256:e9d4e5fce6ca10a87a0e388597f99519ad594d09e674708b5312bd8bd4f5997d"},
-    {file = "mlx_metal-0.31.2-py3-none-macosx_26_0_arm64.whl", hash = "sha256:84ffb60ee503f03eb684f5fb168d5cff31e2a16b7f27c1731eaf7662bd6e9b46"},
-]
-
-[[package]]
 name = "mpmath"
 version = "1.3.0"
 description = "Python library for arbitrary-precision floating-point arithmetic"
@@ -6537,29 +6363,6 @@ files = [
 ]
 
 [[package]]
-name = "sounddevice"
-version = "0.5.5"
-description = "Play and Record Sound with Python"
-optional = true
-python-versions = ">=3.7"
-groups = ["main"]
-markers = "extra == \"mlx\" and sys_platform == \"darwin\""
-files = [
-    {file = "sounddevice-0.5.5-py3-none-any.whl", hash = "sha256:30ff99f6c107f49d25ad16a45cacd8d91c25a1bcdd3e81a206b921a3a6405b1f"},
-    {file = "sounddevice-0.5.5-py3-none-macosx_10_6_x86_64.macosx_10_6_universal2.whl", hash = "sha256:05eb9fd6c54c38d67741441c19164c0dae8ce80453af2d8c4ad2e7823d15b722"},
-    {file = "sounddevice-0.5.5-py3-none-win32.whl", hash = "sha256:1234cc9b4c9df97b6cbe748146ae0ec64dd7d6e44739e8e42eaa5b595313a103"},
-    {file = "sounddevice-0.5.5-py3-none-win_amd64.whl", hash = "sha256:cfc6b2c49fb7f555591c78cb8ecf48d6a637fd5b6e1db5fec6ed9365d64b3519"},
-    {file = "sounddevice-0.5.5-py3-none-win_arm64.whl", hash = "sha256:3861901ddd8230d2e0e8ae62ac320cdd4c688d81df89da036dcb812f757bb3e6"},
-    {file = "sounddevice-0.5.5.tar.gz", hash = "sha256:22487b65198cb5bf2208755105b524f78ad173e5ab6b445bdab1c989f6698df3"},
-]
-
-[package.dependencies]
-cffi = "*"
-
-[package.extras]
-numpy = ["numpy"]
-
-[[package]]
 name = "soundfile"
 version = "0.13.1"
 description = "An audio library based on libsndfile, CFFI and NumPy"
@@ -8186,9 +7989,8 @@ propcache = ">=0.2.1"
 
 [extras]
 local = ["pyaudio"]
-mlx = ["mlx", "mlx-audio", "mlx-lm"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "81fb06a9570d2be23c3489eeab8e9d0380c8915956efc6889b58eb404dea2032"
+content-hash = "e0cb4d20b0327218efe826dd7f0934213d38d8e3301b53671f34a01476ef2db1"

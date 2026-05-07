@@ -87,11 +87,6 @@ pytz = "*"
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]
-mlx = [
-    "mlx>=0.20.0; sys_platform == 'darwin'",
-    "mlx-lm>=0.20.0; sys_platform == 'darwin'",
-    "mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git ; sys_platform == 'darwin'",
-]
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
@@ -159,7 +154,6 @@ exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
 ignore = [
     "tiny_audio/asr_pipeline.py",
     "tiny_audio/integrations/pipecat_stt.py",
-    "tiny_audio/mlx",  # Apple Silicon only — mlx/mlx-lm/mlx-audio not installable on Linux CI
 ]
 typeCheckingMode = "basic"
 reportPrivateImportUsage = false
