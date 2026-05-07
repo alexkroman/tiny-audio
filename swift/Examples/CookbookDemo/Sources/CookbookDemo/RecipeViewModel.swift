@@ -17,7 +17,7 @@ final class RecipeViewModel {
     case loading, selecting, overview, cooking, micDenied
     case modelFailed(String)
   }
-  enum ListeningState { case idle, hearing, thinking }
+  enum ListeningState: Equatable { case idle, hearing, thinking }
 
   let recipes: [Recipe]
   var recipe: Recipe?
@@ -32,7 +32,6 @@ final class RecipeViewModel {
   var lastHeardText: String = ""
   var listeningState: ListeningState = .idle
 
-  /// Catalog-driven init: starts at the recipe-selection screen with no recipe chosen.
   init(recipes: [Recipe]) {
     self.recipes = recipes
     self.recipe = nil
@@ -47,8 +46,14 @@ final class RecipeViewModel {
     self.phase = .cooking
   }
 
-  func setLastHeard(_ text: String) { lastHeardText = text }
-  func setListeningState(_ state: ListeningState) { listeningState = state }
+  func setLastHeard(_ text: String) {
+    guard lastHeardText != text else { return }
+    lastHeardText = text
+  }
+  func setListeningState(_ state: ListeningState) {
+    guard listeningState != state else { return }
+    listeningState = state
+  }
 
   func apply(_ intent: Intent) {
     switch intent {
@@ -132,7 +137,6 @@ final class RecipeViewModel {
 
   struct Snapshot: Equatable {
     let phase: Phase
-    let recipeTitle: String?
     let currentStepIndex: Int
     let ingredientsVisible: Bool
     let timer: TimerState?
@@ -144,7 +148,6 @@ final class RecipeViewModel {
   func snapshot() -> Snapshot {
     Snapshot(
       phase: phase,
-      recipeTitle: recipe?.title,
       currentStepIndex: currentStepIndex,
       ingredientsVisible: ingredientsVisible,
       timer: timer,

@@ -16,7 +16,11 @@ struct RecipeOverviewView: View {
 
   private var mainColumn: some View {
     VStack(spacing: 0) {
-      topBar
+      ScreenTopBar(
+        title: vm.recipe?.title ?? "Recipe",
+        listeningState: vm.listeningState,
+        groceryCount: vm.groceryList.count
+      )
       Divider()
       if let recipe = vm.recipe {
         ScrollView {
@@ -33,44 +37,12 @@ struct RecipeOverviewView: View {
         Spacer()
       }
       Divider()
-      hint
-      heardCaption
-    }
-  }
-
-  private var topBar: some View {
-    HStack(spacing: 16) {
-      Text(vm.recipe?.title ?? "Recipe")
-        .font(.title2.weight(.semibold))
-      Spacer()
-      ListeningIndicator(state: vm.listeningState)
-      if !vm.groceryList.isEmpty {
-        GroceryBadge(count: vm.groceryList.count)
-      }
-    }
-    .padding(.horizontal, 24).padding(.vertical, 14)
-  }
-
-  private var hint: some View {
-    HStack {
-      Text(
-        "Say \"add <item> to grocery list\" to save ingredients, \"next\" to start cooking, "
-        + "or \"back\" to pick a different recipe."
+      HintCaption(
+        text:
+          "Say \"add <item> to grocery list\" to save ingredients, \"next\" to start cooking, "
+          + "or \"back\" to pick a different recipe."
       )
-      .font(.callout)
-      .foregroundStyle(.secondary)
-      Spacer()
+      HeardCaption(text: vm.lastHeardText)
     }
-    .padding(.horizontal, 24).padding(.top, 12)
-  }
-
-  private var heardCaption: some View {
-    HStack {
-      Text(vm.lastHeardText.isEmpty ? " " : "heard: \"\(vm.lastHeardText)\"")
-        .font(.callout)
-        .foregroundStyle(.tertiary)
-      Spacer()
-    }
-    .padding(.horizontal, 24).padding(.vertical, 12)
   }
 }

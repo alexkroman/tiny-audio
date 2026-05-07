@@ -5,7 +5,11 @@ struct RecipeSelectionView: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      topBar
+      ScreenTopBar(
+        title: "Pick a recipe",
+        listeningState: vm.listeningState,
+        groceryCount: vm.groceryList.count
+      )
       Divider()
       ScrollView {
         VStack(spacing: 16) {
@@ -16,21 +20,9 @@ struct RecipeSelectionView: View {
         .padding(24)
       }
       Divider()
-      hint
-      heardCaption
+      HintCaption(text: "Say a recipe name to begin.")
+      HeardCaption(text: vm.lastHeardText)
     }
-  }
-
-  private var topBar: some View {
-    HStack(spacing: 16) {
-      Text("Pick a recipe").font(.title2.weight(.semibold))
-      Spacer()
-      ListeningIndicator(state: vm.listeningState)
-      if !vm.groceryList.isEmpty {
-        GroceryBadge(count: vm.groceryList.count)
-      }
-    }
-    .padding(.horizontal, 24).padding(.vertical, 14)
   }
 
   private func recipeCard(_ recipe: Recipe) -> some View {
@@ -45,25 +37,5 @@ struct RecipeSelectionView: View {
     .background(
       RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.08))
     )
-  }
-
-  private var hint: some View {
-    HStack {
-      Text("Say a recipe name to begin.")
-        .font(.callout)
-        .foregroundStyle(.secondary)
-      Spacer()
-    }
-    .padding(.horizontal, 24).padding(.top, 12)
-  }
-
-  private var heardCaption: some View {
-    HStack {
-      Text(vm.lastHeardText.isEmpty ? " " : "heard: \"\(vm.lastHeardText)\"")
-        .font(.callout)
-        .foregroundStyle(.tertiary)
-      Spacer()
-    }
-    .padding(.horizontal, 24).padding(.vertical, 12)
   }
 }

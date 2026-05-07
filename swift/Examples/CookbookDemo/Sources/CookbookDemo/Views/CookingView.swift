@@ -34,7 +34,15 @@ struct CookingView: View {
 
   private func mainColumn(recipe: Recipe) -> some View {
     VStack(spacing: 0) {
-      topBar(title: recipe.title)
+      ScreenTopBar(
+        title: recipe.title,
+        listeningState: vm.listeningState,
+        groceryCount: vm.groceryList.count
+      ) {
+        if let t = vm.timer {
+          TimerChip(secondsRemaining: t.secondsRemaining)
+        }
+      }
       Divider()
       StepCard(
         stepNumber: vm.currentStepIndex + 1,
@@ -42,32 +50,7 @@ struct CookingView: View {
         stepText: recipe.steps[vm.currentStepIndex]
       )
       Divider()
-      heardCaption
+      HeardCaption(text: vm.lastHeardText)
     }
-  }
-
-  private func topBar(title: String) -> some View {
-    HStack(spacing: 16) {
-      Text(title).font(.title2.weight(.semibold))
-      Spacer()
-      ListeningIndicator(state: vm.listeningState)
-      if !vm.groceryList.isEmpty {
-        GroceryBadge(count: vm.groceryList.count)
-      }
-      if let t = vm.timer {
-        TimerChip(secondsRemaining: t.secondsRemaining)
-      }
-    }
-    .padding(.horizontal, 24).padding(.vertical, 14)
-  }
-
-  private var heardCaption: some View {
-    HStack {
-      Text(vm.lastHeardText.isEmpty ? " " : "heard: \"\(vm.lastHeardText)\"")
-        .font(.callout)
-        .foregroundStyle(.tertiary)
-      Spacer()
-    }
-    .padding(.horizontal, 24).padding(.vertical, 12)
   }
 }
