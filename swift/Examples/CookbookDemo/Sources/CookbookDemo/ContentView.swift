@@ -58,7 +58,13 @@ struct ContentView: View {
       let pipeline = CommandPipeline(viewModel: vm, classifier: classifier)
       self.pipeline = pipeline
 
-      let m = try MicrophoneTranscriber(transcriber: t)
+      let vadConfig = VADConfig(
+        speechThreshold: 0.35,
+        minSilenceDurationMs: 350,
+        minSpeechDurationMs: 100,
+        preSpeechPaddingMs: 250
+      )
+      let m = try MicrophoneTranscriber(transcriber: t, vad: vadConfig)
       self.mic = m
       try await m.start()
 
