@@ -126,3 +126,56 @@ class TestTedliumNormalization:
 
     def test_unk_and_bracket_combined(self):
         assert _normalize_label("<unk> hello [ aside ] world") == "hello world"
+
+
+class TestEdAccNormalization:
+    def test_overlap_marker_stripped(self):
+        # EdAcc convention; absent from the test split it scores against.
+        assert (
+            _normalize_label("YOU'RE A BIG PROMO <OVERLAP> YOU'RE THE BIG PROMOTER")
+            == "you're a big promo you're the big promoter"
+        )
+
+    def test_laugh_marker_stripped(self):
+        assert (
+            _normalize_label("ANALYZING THIS CONVERSATION BUT ANYWAY <LAUGH> YEAH")
+            == "analyzing this conversation but anyway yeah"
+        )
+
+    def test_dtmf_marker_stripped(self):
+        assert (
+            _normalize_label("EVERYBODY IS GOING THERE AND <DTMF> A LITTLE BIT GRIM")
+            == "everybody is going there and a little bit grim"
+        )
+
+    def test_foreign_marker_stripped(self):
+        # 4% of EdAcc validation rows ship <foreign> for code-switched segments.
+        assert _normalize_label("HE SAID <FOREIGN> AND LAUGHED") == "he said and laughed"
+
+    def test_no_speech_marker_stripped(self):
+        # EdAcc placeholder for non-speech regions. Hyphenated form must be
+        # caught by the regex literally.
+        assert _normalize_label("OKAY <NO-SPEECH> RIGHT") == "okay right"
+
+    def test_lipsmack_marker_stripped(self):
+        assert _normalize_label("UM <LIPSMACK> SO") == "um so"
+
+    def test_lowercase_form_also_stripped(self):
+        # _CORPUS_MARKER_RE is IGNORECASE; verify both surface forms.
+        assert _normalize_label("hello <overlap> world") == "hello world"
+        assert _normalize_label("hello <laugh> world") == "hello world"
+        assert _normalize_label("hello <dtmf> world") == "hello world"
+        assert _normalize_label("hello <foreign> world") == "hello world"
+        assert _normalize_label("hello <no-speech> world") == "hello world"
+        assert _normalize_label("hello <lipsmack> world") == "hello world"
+
+
+class TestEarnings22Normalization:
+    def test_clear_throat_marker_stripped(self):
+        assert _normalize_label("um <clear_throat> as i was saying") == "um as i was saying"
+
+    def test_inaudible_marker_stripped(self):
+        assert _normalize_label("the revenue <inaudible> in q4") == "the revenue in q4"
+
+    def test_crosstalk_marker_stripped(self):
+        assert _normalize_label("yeah <crosstalk> i agree") == "yeah i agree"

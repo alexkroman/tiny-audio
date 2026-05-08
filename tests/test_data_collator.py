@@ -421,5 +421,45 @@ class TestAudioTokenCountsExposed:
         assert (batch["audio_token_counts"] > 0).all()
 
 
+class TestExtractAudioArraysFilters:
+    """Collator must drop rows that would poison training:
+    pre-norm-empty text, post-norm-empty text (entire label was an annotation
+    marker), and audio longer than the Whisper window (silently truncated)."""
+
+    def test_drops_post_normalize_empty_text(self, collator):
+        # Switchboard ships ~2% of rows where the whole label is `<noise>` —
+        # passes the .strip() check but normalizes to empty, producing an
+        # empty assistant turn that teaches the model to emit nothing.
+        good = create_sample("hello world", duration_sec=1.0)
+        bad = create_sample("<noise>", duration_sec=1.0)
+        arrays, kept = collator._extract_audio_arrays([good, bad])
+        assert len(arrays) == 1
+        assert kept[0]["text"] == "hello world"
+
+    def test_drops_audio_longer_than_30_seconds(self, collator):
+        # Whisper's feature extractor pads/truncates to a fixed 30s window;
+        # >30s audio is silently truncated while the label keeps its full
+        # transcript — observed in EdAcc (max 46s) and Earnings22 (max 26s).
+        good = create_sample("normal length", duration_sec=5.0)
+        too_long = create_sample("very long", duration_sec=35.0)
+        arrays, kept = collator._extract_audio_arrays([good, too_long])
+        assert len(arrays) == 1
+        assert kept[0]["text"] == "normal length"
+
+    def test_keeps_audio_at_30_second_boundary(self, collator):
+        # Exactly 30s should still pass — the cap is strictly greater-than.
+        ok = create_sample("exactly thirty seconds", duration_sec=30.0)
+        arrays, _ = collator._extract_audio_arrays([ok])
+        assert len(arrays) == 1
+
+    def test_drops_pre_normalize_empty_text(self, collator):
+        # Existing behavior — empty-string labels were already dropped.
+        good = create_sample("hi", duration_sec=1.0)
+        empty = create_sample("", duration_sec=1.0)
+        arrays, kept = collator._extract_audio_arrays([good, empty])
+        assert len(arrays) == 1
+        assert kept[0]["text"] == "hi"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

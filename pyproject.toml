@@ -22,6 +22,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 requires-python = ">=3.10,<3.13"
+# Poetry fills deps in from [tool.poetry.dependencies] below. A static
+# `dependencies = [...]` here would override that list (PEP 621 takes
+# precedence over Poetry's section when both exist); leave it dynamic.
 dynamic = ["dependencies"]
 
 [project.urls]
@@ -84,6 +87,7 @@ spacy = "^3.8.11"
 ten-vad = ">=1.0.6"
 speechbrain = {git = "https://github.com/speechbrain/speechbrain.git"}
 pytz = "*"
+audiomentations = ">=0.40.0"
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]
