@@ -51,6 +51,12 @@ class ASRConfig(transformers.PretrainedConfig):
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
         projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
+        # Per-time-step Bernoulli zero-mask on encoder output before the
+        # projector (training-only). 0.05–0.15 is the SpecAugment-equivalent
+        # range for frozen-encoder setups; drops whole encoder frames so
+        # the projector learns robustness to missing context. No magnitude
+        # rescaling. 0.0 disables.
+        audio_token_dropout: float = 0.0,
         # MoE-specific configuration
         num_experts: int = 4,  # Number of experts in MoE projectors
         num_experts_per_tok: int = 2,  # Top-k experts per token
@@ -117,6 +123,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
+        self.audio_token_dropout = audio_token_dropout
         # MoE-specific configuration
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok

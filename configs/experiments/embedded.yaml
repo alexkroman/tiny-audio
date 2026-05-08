@@ -34,9 +34,9 @@ training:
   save_steps: 1000
   eval_steps: 1000
 
-  # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck at
-  # this batch size. AMD EPYC 9355 has 32 cores / 64 threads — leave a handful
-  # free for the main process, GPU sync, and tokenizer threads.
+  # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck
+  # at this batch size. AMD EPYC 9355 has 32 cores / 64 threads — leave a
+  # handful free for the main process, GPU sync, and tokenizer threads.
   dataloader_num_workers: 8
   dataloader_prefetch_factor: 2
 
@@ -44,11 +44,5 @@ training:
   # flash-attn source build on RunPod and is fast enough at our seq lengths.
   attn_implementation: sdpa
 
-  # Inductor backward graph asserts wrong stride on the (B, S, vocab=151670)
-  # LM-head logits when seq_len changes between batches (group_by_length is
-  # off here for multi-dataset). Forward graph handles dynamic shape but the
-  # compiled backward doesn't get re-specialized, blowing up with
-  # `assert_size_stride … expected size N==N, stride X==Y`. Disabling
-  # torch_compile costs ~10-25% throughput but unblocks this recipe; revisit
-  # when Inductor's dynamic-shape backward is more robust on huge-vocab heads.
-  torch_compile: true
+
+  torch_compile: false

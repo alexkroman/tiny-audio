@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """Training script for ASR models using Hydra configuration."""
 
+# ruff: noqa: E402
+# The trl env-var must be set, and the noisy-logger silencer must run,
+# *before* their respective modules are imported below — so non-import
+# statements precede some imports here. Suppress E402 file-wide rather
+# than per-line.
+
 import contextlib
+import logging
 import os
 import random
 import re
@@ -9,6 +16,9 @@ from dataclasses import fields
 from typing import Any
 
 os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
+
+for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 import hydra
 import numpy as np
@@ -37,6 +47,7 @@ from tiny_audio.asr_config import (
     compute_encoder_output_length,
 )
 from tiny_audio.asr_modeling import ASRModel
+from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
@@ -44,10 +55,17 @@ DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
 # Markers that pollute training labels but are absent from corresponding
 # eval splits. Gigaspeech ships <comma>/<period>/etc. in ~55% of train rows
 # and zero in dev. TEDLIUM ships <unk> in ~92% of train rows and zero in
-# validation/test. Stripping is safe across all corpora — these are ASR
-# annotation conventions, never literal user-intended words.
+# validation/test. EdAcc ships <overlap>/<laugh>/<dtmf>/<foreign>/<no-speech>/
+# <lipsmack> in ~20% of rows; Earnings22 ships <clear_throat>/<inaudible>/
+# <crosstalk> in ~3% of rows. Stripping is safe across all corpora — these
+# are ASR annotation conventions, never literal user-intended words.
 _CORPUS_MARKER_RE = re.compile(
-    r"\s*<(comma|period|exclamationpoint|questionmark|sil|music|noise|other|unk)>",
+    r"\s*<("
+    r"comma|period|exclamationpoint|questionmark|"
+    r"sil|music|noise|other|unk|"
+    r"overlap|laugh|dtmf|foreign|no-speech|lipsmack|"
+    r"clear_throat|inaudible|crosstalk"
+    r")>",
     re.IGNORECASE,
 )
 # TEDLIUM occasionally inlines editorial commentary in square brackets
@@ -80,7 +98,12 @@ def _normalize_label(raw_text: str) -> str:
 
 
 class DatasetLoader:
-    """Loads and prepares datasets for training."""
+    """Loads and prepares datasets for training.
+
+    Downloads each train/eval split fully via HuggingFace's Arrow cache,
+    then concatenates and shuffles. ``group_by_length`` is supported via
+    an optional duration column.
+    """
 
     def __init__(self, config: DictConfig, multitask_enabled: bool = False):
         self.config = config.data
@@ -94,7 +117,7 @@ class DatasetLoader:
         self.needs_duration = bool(config.training.get("group_by_length", False))
         self.multitask_enabled = multitask_enabled
 
-    def _prepare_split(self, dataset_cfg: DictConfig, split: str):
+    def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
             raise ValueError("Dataset path is required")
@@ -123,10 +146,8 @@ class DatasetLoader:
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        # For multitask, keep sift_response and add task column
         if self.multitask_enabled:
-            task = dataset_cfg.get("task", "transcribe")  # Default to transcribe
-            # Add task column to identify ASR vs SIFT samples
+            task = dataset_cfg.get("task", "transcribe")
             ds = ds.add_column("task", [task] * len(ds))
             keep_cols = {"audio", "text", "sift_response", "task"}
         else:
@@ -138,26 +159,28 @@ class DatasetLoader:
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
 
-        # Filter TEDLIUM ignore markers only for TEDLIUM dataset
-        # Duration filtering happens in DataCollator to avoid loading all audio upfront
-        if "tedlium" in dataset_path.lower():
+        # Filter `ignore_time_segment_in_scoring` placeholder labels. TEDLIUM
+        # uses them to mark unscored regions; EdAcc reuses the same convention
+        # in its validation transcripts. Both ship rows where the entire label
+        # IS that string — training on them teaches the model to emit it.
+        # Case-insensitive: TEDLIUM ships lowercase, EdAcc ships uppercase.
+        # Duration filtering happens in DataCollator to avoid loading all audio upfront.
+        if "tedlium" in dataset_path.lower() or "edacc" in dataset_path.lower():
 
-            def filter_tedlium(text):
-                return text.strip() != "ignore_time_segment_in_scoring"
+            def filter_ignore_marker(text):
+                return text.strip().lower() != "ignore_time_segment_in_scoring"
 
-            ds = ds.filter(filter_tedlium, num_proc=self.num_proc, input_columns="text")
+            ds = ds.filter(filter_ignore_marker, num_proc=self.num_proc, input_columns="text")
 
         return ds
 
     def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
-        """Upsample or downsample dataset to target size."""
+        """Cap (downsample) or repeat-pad (upsample) to ``target`` samples."""
         current = len(ds)
         if current == target:
             return ds
         if current > target:
-            # Downsample
             return ds.select(range(target))
-        # Upsample by repeating
         repeats = (target // current) + 1
         indices = list(range(current)) * repeats
         return ds.select(indices[:target])
@@ -185,7 +208,7 @@ class DatasetLoader:
 
         for d_cfg in tqdm(self.config.datasets, desc="Loading datasets"):
             train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
-            eval_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
+            val_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
             target_samples = d_cfg.get("target_samples")
 
             for train_split in train_splits:
@@ -196,13 +219,12 @@ class DatasetLoader:
                     ds = self._ensure_duration(ds)
                 train_datasets.append(ds)
 
-            for eval_split in eval_splits:
-                ds = self._prepare_split(d_cfg, eval_split)
+            for val_split in val_splits:
+                ds = self._prepare_split(d_cfg, val_split)
                 if self.needs_duration:
                     ds = self._ensure_duration(ds)
                 val_datasets.append(ds)
 
-        # Concatenate and shuffle
         train_ds = (
             concatenate_datasets(train_datasets).shuffle(seed=self.seed) if train_datasets else None
         )
@@ -242,6 +264,12 @@ class DataCollator:
         )
         self.text_collator = DataCollatorForChatML(tokenizer=tokenizer, max_length=2048)
 
+    # Whisper's feature extractor pads/truncates to a fixed 30s window. Audio
+    # longer than this is silently truncated while the label is kept whole,
+    # training the model to transcribe content it never sees. Drop those rows.
+    # EdAcc and Earnings22 both ship a small fraction of >30s clips.
+    _MAX_AUDIO_SECONDS = 30.0
+
     def _extract_audio_arrays(self, features):
         audio_arrays = []
         valid_features = []
@@ -255,14 +283,19 @@ class DataCollator:
                     audio = audio.mean(axis=0)
                 # Drop samples that would poison the gradient: empty audio,
                 # NaN/Inf samples (encoding glitches in community datasets),
-                # or empty text labels (would yield 0/0 loss under label
-                # smoothing). One bad sample is enough to NaN the optimizer
-                # state and every subsequent step.
+                # text labels that normalize to empty (entire label was an
+                # annotation marker like <noise>, observed in ~2% of
+                # Switchboard rows), or audio longer than the Whisper window
+                # (label/audio mismatch via silent truncation). One bad
+                # sample is enough to NaN the optimizer state and every
+                # subsequent step.
                 if audio.size == 0:
                     continue
                 if not np.isfinite(audio).all():
                     continue
-                if not (f.get("text") or "").strip():
+                if not _normalize_label(f.get("text") or ""):
+                    continue
+                if audio.size / self.sample_rate > self._MAX_AUDIO_SECONDS:
                     continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
@@ -493,6 +526,65 @@ def main(cfg: DictConfig) -> None:
     multitask_enabled = cfg.get("multitask", {}).get("enabled", False)
 
     train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
+
+    augmentations: list = []
+
+    def _aug_kwargs(cfg_block) -> dict:
+        # Forward every yaml key (minus `enabled`) as a kwarg — defaults
+        # live on the augmentation class signatures, not duplicated here.
+        d = OmegaConf.to_container(cfg_block, resolve=True)
+        d.pop("enabled", None)
+        return d
+
+    rir_aug: RIRAugmentation | None = None
+    rir_cfg = cfg.training.get("rir_augmentation") or {}
+    if rir_cfg.get("enabled"):
+        rir_aug = RIRAugmentation(sample_rate=cfg.data.sample_rate, **_aug_kwargs(rir_cfg))
+        augmentations.append(rir_aug)
+
+    noise_aug: NoiseAugmentation | None = None
+    noise_cfg = cfg.training.get("noise_augmentation") or {}
+    if noise_cfg.get("enabled"):
+        noise_aug = NoiseAugmentation(sample_rate=cfg.data.sample_rate, **_aug_kwargs(noise_cfg))
+        augmentations.append(noise_aug)
+
+    silence_injection_prob = float(cfg.training.get("silence_injection_prob", 0.0))
+    if silence_injection_prob > 0.0 and noise_aug is None:
+        raise ValueError(
+            "silence_injection_prob > 0 requires noise_augmentation.enabled "
+            "(the noise corpus is the source of noise-only samples)."
+        )
+
+    if augmentations or silence_injection_prob > 0.0:
+
+        def _apply_aug(batch):
+            audios = batch.get("audio") or []
+            texts = batch.get("text")
+            n_texts = len(texts) if texts is not None else 0
+            for i, a in enumerate(audios):
+                if not a or "array" not in a:
+                    continue
+                arr = a["array"]
+                # Silence injection targets backchannel hallucinations
+                # ("yeah" / "huh" on empty GT) — a documented Whisper /
+                # SALMONN failure mode — by pairing noise-only audio with
+                # an empty transcript so the model learns "no speech → EOS".
+                if (
+                    silence_injection_prob > 0.0
+                    and noise_aug is not None
+                    and i < n_texts
+                    and random.random() < silence_injection_prob
+                ):
+                    noise = noise_aug.sample_noise_only(arr.shape[-1])
+                    if noise is not None:
+                        arr = noise.astype(arr.dtype)
+                        texts[i] = ""
+                for aug in augmentations:
+                    arr = aug(arr)
+                a["array"] = arr
+            return batch
+
+        train_dataset = train_dataset.with_transform(_apply_aug)
 
     if multitask_enabled:
         data_collator = MultiTaskDataCollator(

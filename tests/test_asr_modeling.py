@@ -240,6 +240,46 @@ class TestForward:
         assert out.loss is not None
 
 
+class TestAudioTokenDropout:
+    """_maybe_drop_audio_tokens zeros whole encoder frames during training."""
+
+    def test_disabled_when_dropout_zero(self, base_asr_model):
+        base_asr_model.config.audio_token_dropout = 0.0
+        base_asr_model.train(True)
+        try:
+            x = torch.randn(2, 10, 16)
+            out = base_asr_model._maybe_drop_audio_tokens(x)
+            torch.testing.assert_close(out, x)
+        finally:
+            base_asr_model.train(False)
+
+    def test_disabled_when_not_training(self, base_asr_model):
+        base_asr_model.config.audio_token_dropout = 0.5
+        base_asr_model.train(False)
+        x = torch.randn(2, 10, 16)
+        out = base_asr_model._maybe_drop_audio_tokens(x)
+        torch.testing.assert_close(out, x)
+
+    def test_zeros_whole_frames_in_train_mode(self, base_asr_model):
+        base_asr_model.config.audio_token_dropout = 0.5
+        base_asr_model.train(True)
+        try:
+            torch.manual_seed(0)
+            x = torch.randn(4, 100, 8)
+            out = base_asr_model._maybe_drop_audio_tokens(x)
+            # When a frame is dropped, ALL feature dims for that time step
+            # are zero (broadcast mask). Surviving frames are unchanged.
+            frame_norms = out.abs().sum(dim=-1)
+            zero_frames = (frame_norms == 0).float().mean().item()
+            # 0.5 drop rate plus noise on a 4x100 grid; well within bounds.
+            assert 0.3 < zero_frames < 0.7
+            # Surviving frames preserve magnitude (no rescaling).
+            survivors = frame_norms > 0
+            torch.testing.assert_close(out[survivors], x[survivors])
+        finally:
+            base_asr_model.train(False)
+
+
 class TestGenerate:
     """generate() validates inputs and returns generated tokens."""
 

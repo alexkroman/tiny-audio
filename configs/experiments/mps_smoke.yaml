@@ -47,6 +47,12 @@ training:
   dataloader_prefetch_factor: null
   dataloader_pin_memory: false
 
+  # Smoke test runs without external corpora — keep MUSAN/RIR off.
+  noise_augmentation:
+    enabled: false
+  rir_augmentation:
+    enabled: false
+
   report_to: "none"
   save_strategy: "no"
   eval_strategy: "no"

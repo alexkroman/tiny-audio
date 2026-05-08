@@ -3,8 +3,8 @@ output_dir: ./outputs/production_model
 
 # Optimizer
 optim: adamw_torch_fused
-learning_rate: 1e-4
-max_grad_norm: 3.0
+learning_rate: 1e-3
+max_grad_norm: 1.0
 warmup_steps: 2000
 lr_scheduler_type: cosine
 
@@ -63,6 +63,89 @@ dataloader_persistent_workers: true
 dataloader_drop_last: true
 group_by_length: true
 length_column_name: duration
+
+# RIR (Room Impulse Response) augmentation — convolves with a random RIR
+# from a pool of real recorded RIRs to simulate far-field / reverberant
+# audio. SOTA recipe used by NeMo / Canary / Parakeet. Run
+# `ta dev download-rirs` to fetch OpenSLR-28 to ~/.cache/openslr-28.
+rir_augmentation:
+  enabled: true
+  # OpenSLR-28's real recorded RIRs. pointsource_noises is intentionally
+  # excluded — those are noise clips, not impulse responses. simulated_rirs
+  # is also excluded — only real RIRs are used.
+  corpus_path:
+    - ~/.cache/openslr-28/real_rirs_isotropic_noises
+  prob: 0.5
+
+# Noise augmentation — MUSAN ambient + always-on Gaussian sensor floor +
+# EQ + clipping + OneOf{LPF, telephony BPF}. Music/speech/babble subsets
+# are excluded; only the ~930-clip ambient noise subset is used.
+noise_augmentation:
+  enabled: true
+  # MUSAN ambient subset only (`musan/noise` — ~930 wav, ~6 hours: rain,
+  # thunder, wind, crowd chatter, cafeteria, footsteps, paper, mechanical,
+  # phone tones). Excludes `musan/music` and `musan/speech` (babble).
+  corpus_path:
+    - ~/.cache/musan/musan/noise
+  # Apply to ~60% of utterances. Lower than the prior 0.8 to preserve a
+  # ~10% fully-clean tail (clean = no MUSAN AND bandlimit didn't fire),
+  # so the model also sees its training distribution undisturbed.
+  prob: 0.6
+  # SNR floor of 5 dB — below this, frozen Whisper produces encoder features
+  # outside its training distribution, so the projector trains on features
+  # that don't correspond to anything realistic at inference. Only drop
+  # below 5 if deployment audio sustains lower SNRs (rare). Upper bound of
+  # 30 dB lets some samples be effectively clean.
+  min_snr_db: 5.0
+  max_snr_db: 30.0
+  # Always-on additive Gaussian sensor floor — present whether or not
+  # MUSAN fired this clip, since real recordings always have per-clip
+  # background dither. SNR sampled uniformly per clip; 20-40 dB is the
+  # canonical "background dither" range. Set both to null to disable.
+  gaussian_min_snr_db: 20.0
+  gaussian_max_snr_db: 40.0
+  # Sparse short-duration transient events (phone dings, key clicks, dog
+  # barks, doors) layered on top of the stationary background mix. MUST be
+  # a sound-event corpus (FSD50K), NOT MUSAN — MUSAN/noise is stationary
+  # so AddShortNoises on it just duplicates AddBackgroundNoise's
+  # distribution. Run `ta dev download-fsd50k` to fetch FSD50K eval split.
+  # Set short_noises_corpus_path: null to disable.
+  short_noises_corpus_path:
+    - ~/.cache/fsd50k/FSD50K.eval_audio
+  short_noises_prob: 0.5
+  # Seven-band parametric EQ — simulates mic / preamp coloration. ±4 dB
+  # (vs library default ±12) is tuned for projector training: Whisper has
+  # already seen wide EQ variation in pretraining and aggressive EQ pushes
+  # features OOD. For training the encoder from scratch, push to ±6-8 dB.
+  eq_prob: 0.5
+  eq_min_db: -4.0
+  eq_max_db: 4.0
+  # Hard clipping at a low percentile (top 10% of samples). Library
+  # default of 40 is more aggressive than Whisper's training distribution.
+  # max_percentile=10 is tuned for projector training; push to 20 if
+  # training the encoder from scratch.
+  clipping_prob: 0.1
+  clipping_max_percentile: 10
+  # Band-limit branch — when fired, picks exactly one of low-pass
+  # (cheap-mic / consumer-device cutoff, 3-7.5 kHz) or telephony band-pass
+  # (G.711 / PSTN passband ≈ 200-4000 Hz). Wrapping in OneOf prevents
+  # incoherent stacks of band-limits on the same clip. 0.3 matches the
+  # prior 0.15 LPF + 0.15 BPF total exposure.
+  bandlimit_prob: 0.3
+  lowpass_min_cutoff: 3000.0
+  lowpass_max_cutoff: 7500.0
+  bandpass_min_center_freq: 2000.0
+  bandpass_max_center_freq: 2200.0
+  bandpass_min_bandwidth_fraction: 1.7
+  bandpass_max_bandwidth_fraction: 1.9
+
+# Probability of replacing a training sample's audio with a noise-only
+# clip + empty target. Teaches the model "no speech → emit nothing" — a
+# documented failure mode for Whisper-based and SALMONN-based speech LLMs
+# (backchanneling "yeah" / "huh" / "i" on AMI silence segments).
+# Speech-LLM-recipe modal range is 0.03-0.10. Requires
+# noise_augmentation.enabled (the corpus is the noise-only source).
+silence_injection_prob: 0.05
 
 # Misc
 disable_tqdm: false
