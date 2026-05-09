@@ -77,20 +77,24 @@ rir_augmentation:
     - ~/.cache/openslr-28/real_rirs_isotropic_noises
   prob: 0.5
 
-# Noise augmentation — MUSAN ambient + always-on Gaussian sensor floor +
-# EQ + clipping + OneOf{LPF, telephony BPF}. Music/speech/babble subsets
-# are excluded; only the ~930-clip ambient noise subset is used.
+# Noise augmentation — MUSAN ambient + MUSAN babble + always-on Gaussian
+# sensor floor + EQ + clipping + OneOf{LPF, telephony BPF} + gain.
+# Music subset is excluded; ambient and speech (babble) subsets are
+# wired in as separate AddBackgroundNoise stages with independent SNR
+# ranges and probabilities.
 noise_augmentation:
   enabled: true
-  # MUSAN ambient subset only (`musan/noise` — ~930 wav, ~6 hours: rain,
+  # MUSAN ambient subset (`musan/noise` — ~930 wav, ~6 hours: rain,
   # thunder, wind, crowd chatter, cafeteria, footsteps, paper, mechanical,
-  # phone tones). Excludes `musan/music` and `musan/speech` (babble).
+  # phone tones). Stationary background; pairs with babble below for
+  # multi-talker scenes.
   corpus_path:
     - ~/.cache/musan/musan/noise
-  # Apply to ~60% of utterances. Lower than the prior 0.8 to preserve a
-  # ~10% fully-clean tail (clean = no MUSAN AND bandlimit didn't fire),
-  # so the model also sees its training distribution undisturbed.
-  prob: 0.6
+  # Dropped from 0.6 → 0.45 when babble was added, so the union of
+  # "any background mixture fired" stays in the ~55% range and the
+  # ~10% fully-clean tail (clean = no MUSAN AND bandlimit didn't fire)
+  # is preserved.
+  prob: 0.45
   # SNR floor of 5 dB — below this, frozen Whisper produces encoder features
   # outside its training distribution, so the projector trains on features
   # that don't correspond to anything realistic at inference. Only drop
@@ -98,12 +102,31 @@ noise_augmentation:
   # 30 dB lets some samples be effectively clean.
   min_snr_db: 5.0
   max_snr_db: 30.0
-  # Always-on additive Gaussian sensor floor — present whether or not
-  # MUSAN fired this clip, since real recordings always have per-clip
+  # MUSAN babble (`musan/speech` — multi-talker speech). Targets the
+  # acoustic signature of meeting / conference / uncontrolled-mic evals
+  # (Earnings22, AMI, Peoples) that stationary ambient noise underspecifies.
+  # SNR floor (10 dB) is intentionally higher than ambient (5 dB) — at
+  # lower babble SNR the masker speech competes with the target and the
+  # label becomes ambiguous.
+  babble_corpus_path:
+    - ~/.cache/musan/musan/speech
+  babble_prob: 0.20
+  babble_min_snr_db: 10.0
+  babble_max_snr_db: 25.0
+  # Always-on additive colored-noise sensor floor — present whether or
+  # not MUSAN fired this clip, since real recordings always have per-clip
   # background dither. SNR sampled uniformly per clip; 20-40 dB is the
-  # canonical "background dither" range. Set both to null to disable.
-  gaussian_min_snr_db: 20.0
-  gaussian_max_snr_db: 40.0
+  # canonical "background dither" range. Spectral shape sits around pink
+  # (-3 dB/octave) with a narrow spread: pink/brown matches real
+  # mic-preamp 1/f noise and acoustic-room HVAC far better than white
+  # Gaussian, and Whisper has seen far more pink-ish dither in
+  # pretraining than flat-spectrum noise. Set both SNR bounds to null
+  # to disable.
+  color_noise_min_snr_db: 20.0
+  color_noise_max_snr_db: 40.0
+  # f_decay in dB/octave: 0 = white, -3 = pink, -6 = brown.
+  color_noise_min_f_decay: -4.0
+  color_noise_max_f_decay: -2.0
   # Sparse short-duration transient events (phone dings, key clicks, dog
   # barks, doors) layered on top of the stationary background mix. MUST be
   # a sound-event corpus (FSD50K), NOT MUSAN — MUSAN/noise is stationary
@@ -138,6 +161,26 @@ noise_augmentation:
   bandpass_max_center_freq: 2200.0
   bandpass_min_bandwidth_fraction: 1.7
   bandpass_max_bandwidth_fraction: 1.9
+  # Gain perturbation — applied late, so it shifts target+noise together
+  # and simulates ADC / input-level variability. Whisper normalizes mels
+  # per-clip but not perfectly across very different input levels, so
+  # this actually moves encoder features (unlike speed perturbation,
+  # which a frozen encoder largely absorbs). ±6 dB is the canonical
+  # range; targets Earnings22's variable-level conference audio.
+  gain_prob: 0.5
+  gain_min_db: -6.0
+  gain_max_db: 6.0
+  # MP3 round-trip — applied last, so the codec sees the leveled mixed
+  # signal (matches real ADC → encoder chain). Targets web / YouTube /
+  # podcast-derived corpora (Peoples, CV, Loquacious YODAS) where the
+  # training audio has already been MP3'd at least once. 32-128 kbps
+  # spans cheap-podcast through high-quality-streaming bitrates;
+  # min=32 is aggressive but realistic for older YouTube uploads.
+  # p=0.20 keeps the artifact share modest — at low bitrates stacking
+  # with babble + bandlimit can push clips OOD.
+  mp3_prob: 0.20
+  mp3_min_bitrate: 32
+  mp3_max_bitrate: 128
 
 # Probability of replacing a training sample's audio with a noise-only
 # clip + empty target. Teaches the model "no speech → emit nothing" — a

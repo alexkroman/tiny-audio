@@ -269,6 +269,11 @@ class DataCollator:
     # training the model to transcribe content it never sees. Drop those rows.
     # EdAcc and Earnings22 both ship a small fraction of >30s clips.
     _MAX_AUDIO_SECONDS = 30.0
+    # Sub-100ms clips can't contain meaningful speech (single phonemes alone
+    # run 50-150ms) and break some downstream augmentations (e.g.
+    # Mp3Compression's fast-mp3-augment backend rejects <100ms input).
+    # Observed in a small fraction of segment-level corpora; safe to drop.
+    _MIN_AUDIO_SECONDS = 0.1
 
     def _extract_audio_arrays(self, features):
         audio_arrays = []
@@ -295,7 +300,10 @@ class DataCollator:
                     continue
                 if not _normalize_label(f.get("text") or ""):
                     continue
-                if audio.size / self.sample_rate > self._MAX_AUDIO_SECONDS:
+                duration_s = audio.size / self.sample_rate
+                if duration_s > self._MAX_AUDIO_SECONDS:
+                    continue
+                if duration_s < self._MIN_AUDIO_SECONDS:
                     continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
@@ -556,6 +564,11 @@ def main(cfg: DictConfig) -> None:
         )
 
     if augmentations or silence_injection_prob > 0.0:
+        # Skip augmentation for clips below the DataCollator's drop threshold:
+        # the row will be filtered out of the batch downstream, and some
+        # audiomentations stages (Mp3Compression's fast-mp3-augment backend)
+        # error on sub-100ms input rather than no-op'ing.
+        _aug_min_samples = int(cfg.data.sample_rate * DataCollator._MIN_AUDIO_SECONDS)
 
         def _apply_aug(batch):
             audios = batch.get("audio") or []
@@ -565,6 +578,8 @@ def main(cfg: DictConfig) -> None:
                 if not a or "array" not in a:
                     continue
                 arr = a["array"]
+                if arr.shape[-1] < _aug_min_samples:
+                    continue
                 # Silence injection targets backchannel hallucinations
                 # ("yeah" / "huh" on empty GT) — a documented Whisper /
                 # SALMONN failure mode — by pairing noise-only audio with

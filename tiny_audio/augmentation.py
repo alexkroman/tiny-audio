@@ -28,13 +28,15 @@ import soundfile as sf
 import torch
 from audiomentations import (
     AddBackgroundNoise,
-    AddGaussianSNR,
+    AddColorNoise,
     AddShortNoises,
     ApplyImpulseResponse,
     BandPassFilter,
     ClippingDistortion,
     Compose,
+    Gain,
     LowPassFilter,
+    Mp3Compression,
     OneOf,
     SevenBandParametricEQ,
 )
@@ -58,6 +60,26 @@ def _resolve_corpus_roots(corpus_path: str | Sequence[str], hint: str = "") -> l
 _SPEECH_DIR = "speech"  # MUSAN convention; pairing speech audio with empty
 # transcripts during silence injection would teach
 # the model to skip real speech.
+
+
+def _build_background_noise(
+    corpus_path: str | Sequence[str],
+    *,
+    min_snr_db: float,
+    max_snr_db: float,
+    prob: float,
+    hint: str,
+) -> AddBackgroundNoise:
+    roots = _resolve_corpus_roots(corpus_path, hint=hint)
+    transform = AddBackgroundNoise(
+        sounds_path=roots,
+        min_snr_db=min_snr_db,
+        max_snr_db=max_snr_db,
+        p=prob,
+    )
+    if not transform.sound_file_paths:
+        raise ValueError(f"No audio files found under {roots}")
+    return transform
 
 
 def _to_mono_float32(audio: np.ndarray) -> np.ndarray:
@@ -111,12 +133,30 @@ class NoiseAugmentation:
         min_snr_db: float = 5.0,
         max_snr_db: float = 30.0,
         corpus_path: str | Sequence[str] | None = None,
-        # Always-on additive Gaussian sensor floor (when configured).
+        # Babble (multi-talker) background — second AddBackgroundNoise
+        # pointing at MUSAN's `speech/` subdir. Targets meeting / conference
+        # / uncontrolled-mic evals where stationary ambient noise alone
+        # underspecifies the acoustic scene. SNR floor is intentionally
+        # higher than ambient: at low babble SNR the masker speech competes
+        # with the target and the label becomes ambiguous, so we keep the
+        # background recognisable as background.
+        babble_corpus_path: str | Sequence[str] | None = None,
+        babble_prob: float = 0.0,
+        babble_min_snr_db: float = 10.0,
+        babble_max_snr_db: float = 25.0,
+        # Always-on additive colored-noise sensor floor (when configured).
         # Models the per-clip background dither that real recordings have
-        # whether or not MUSAN ambient noise was layered on. Set both to
+        # whether or not MUSAN ambient noise was layered on. Spectral shape
+        # defaults bracket pink (~-3 dB/octave): pink/brown matches real
+        # mic + analog-front-end + acoustic-room noise far better than
+        # white Gaussian, and Whisper has seen vastly more pink-ish dither
+        # in pretraining than flat-spectrum noise. Set both SNR bounds to
         # None to disable.
-        gaussian_min_snr_db: float | None = None,
-        gaussian_max_snr_db: float | None = None,
+        color_noise_min_snr_db: float | None = None,
+        color_noise_max_snr_db: float | None = None,
+        # f_decay in dB/octave: 0 = white, -3 = pink, -6 = brown.
+        color_noise_min_f_decay: float = -4.0,
+        color_noise_max_f_decay: float = -2.0,
         # Short-duration transient events — must be a corpus of sound events
         # (e.g. FSD50K), NOT MUSAN. MUSAN/noise is stationary, so sampling
         # short windows from it duplicates AddBackgroundNoise's distribution.
@@ -142,6 +182,24 @@ class NoiseAugmentation:
         bandpass_max_center_freq: float = 2200.0,
         bandpass_min_bandwidth_fraction: float = 1.7,
         bandpass_max_bandwidth_fraction: float = 1.9,
+        # Gain perturbation — applied late in the chain so it shifts the
+        # mixed signal level (target + noise together), simulating ADC /
+        # input-level variability. Whisper normalizes mels per-clip but
+        # not perfectly across very different input levels, so this
+        # actually shifts encoder features (unlike speed perturbation,
+        # which a frozen encoder largely absorbs).
+        gain_prob: float = 0.0,
+        gain_min_db: float = -6.0,
+        gain_max_db: float = 6.0,
+        # MP3 round-trip — applied last so the codec sees the leveled
+        # mixed signal, matching the real-world chain (ADC → encoder).
+        # Targets web/YouTube-derived training corpora and inference on
+        # MP3-compressed audio. Even though Whisper saw lots of MP3 in
+        # pretraining, encoder features still drift across bitrates and
+        # the projector benefits from explicit exposure.
+        mp3_prob: float = 0.0,
+        mp3_min_bitrate: int = 32,
+        mp3_max_bitrate: int = 128,
         rms_epsilon: float = 1e-4,
         tile_silence_sec: float = 0.25,
     ):
@@ -152,34 +210,42 @@ class NoiseAugmentation:
 
         transforms: list = []
         if corpus_path is not None:
-            roots = _resolve_corpus_roots(
-                corpus_path, hint="Run `ta dev download-musan` to fetch MUSAN."
-            )
-            bg = AddBackgroundNoise(
-                sounds_path=roots,
+            bg = _build_background_noise(
+                corpus_path,
                 min_snr_db=min_snr_db,
                 max_snr_db=max_snr_db,
-                p=prob,
+                prob=prob,
+                hint="Run `ta dev download-musan` to fetch MUSAN.",
             )
-            if not bg.sound_file_paths:
-                raise ValueError(f"No audio files found under {roots}")
             # Precompute the non-speech subset for `sample_noise_only`.
             # Reuses audiomentations' walk so we don't re-rglob.
             self.non_speech_paths = [
                 Path(p) for p in bg.sound_file_paths if _SPEECH_DIR not in Path(p).parts
             ]
             transforms.append(bg)
+        if babble_prob > 0.0 and babble_corpus_path is not None:
+            transforms.append(
+                _build_background_noise(
+                    babble_corpus_path,
+                    min_snr_db=babble_min_snr_db,
+                    max_snr_db=babble_max_snr_db,
+                    prob=babble_prob,
+                    hint="Run `ta dev download-musan` to fetch MUSAN (provides musan/speech).",
+                )
+            )
         if short_noises_prob > 0.0 and short_noises_corpus_path is not None:
             short_roots = _resolve_corpus_roots(
                 short_noises_corpus_path,
                 hint="Run `ta dev download-fsd50k` to fetch FSD50K sound events.",
             )
             transforms.append(AddShortNoises(sounds_path=short_roots, p=short_noises_prob))
-        if gaussian_min_snr_db is not None and gaussian_max_snr_db is not None:
+        if color_noise_min_snr_db is not None and color_noise_max_snr_db is not None:
             transforms.append(
-                AddGaussianSNR(
-                    min_snr_db=gaussian_min_snr_db,
-                    max_snr_db=gaussian_max_snr_db,
+                AddColorNoise(
+                    min_snr_db=color_noise_min_snr_db,
+                    max_snr_db=color_noise_max_snr_db,
+                    min_f_decay=color_noise_min_f_decay,
+                    max_f_decay=color_noise_max_f_decay,
                     p=1.0,
                 )
             )
@@ -212,6 +278,12 @@ class NoiseAugmentation:
                     ],
                     p=bandlimit_prob,
                 )
+            )
+        if gain_prob > 0.0:
+            transforms.append(Gain(min_gain_db=gain_min_db, max_gain_db=gain_max_db, p=gain_prob))
+        if mp3_prob > 0.0:
+            transforms.append(
+                Mp3Compression(min_bitrate=mp3_min_bitrate, max_bitrate=mp3_max_bitrate, p=mp3_prob)
             )
         self.transform = Compose(transforms)
 

@@ -2,28 +2,29 @@
 #
 # Gap-targeted mix: rebalanced from the prior robustness-first split to put
 # more share on the datasets matching the largest closable eval gaps vs
-# universal-3-pro (CV +4.4, Peoples +2.6). Loquacious runs at natural cap
-# to keep its unique LibriHeavy + YODAS exposure (those two sources
-# aren't elsewhere in the mix); the CV / Peoples overlap with
-# Loquacious's internal slices is distributional, not example-level.
-# Switchboard and AMI run at natural cap (already at parity or winning).
-# No dataset is repeated — every target_samples is at or below the
-# natural train-split size, so each example is seen at most once per
-# epoch.
+# universal-3-pro (Peoples +5.2, CV +3.4). Peoples runs on MLCommons's
+# `clean` config (~1.5M, CC-BY) — 5.8× the prior `clean_sa` cap with
+# the same CER ≤ 20% alignment tier. Loquacious runs at natural cap to
+# keep its unique LibriHeavy + YODAS exposure (those two sources aren't
+# elsewhere in the mix); the CV / Peoples overlap with Loquacious's
+# internal slices is distributional, not example-level. Switchboard and
+# AMI run at natural cap (already at parity or winning). No dataset is
+# repeated — every target_samples is at or below the natural train-split
+# size, so each example is seen at most once per epoch.
 #
 # ┌──────────────────────────┬───────────┬─────────┐
 # │ Dataset                  │ Samples   │ Percent │
 # ├──────────────────────────┼───────────┼─────────┤
-# │ CommonVoice 17 en (all)  │ ~1,100,000│   26.3% │
-# │ Loquacious medium (all)  │ 1,074,114 │   25.7% │
-# │ Gigaspeech M (natural)   │   910,000 │   21.8% │
-# │ SPGISpeech M (natural)   │   385,000 │    9.2% │
-# │ People's Speech clean_sa │   310,613 │    7.4% │
-# │ Switchboard (natural)    │   185,402 │    4.4% │
-# │ AMI IHM (natural)        │   108,502 │    2.6% │
-# │ AMI SDM (natural)        │   107,319 │    2.6% │
+# │ Peoples clean (natural)  │ 1,501,271 │   28.0% │
+# │ CommonVoice 17 en (all)  │ ~1,100,000│   20.5% │
+# │ Loquacious medium (all)  │ 1,074,114 │   20.0% │
+# │ Gigaspeech M (natural)   │   910,000 │   16.9% │
+# │ SPGISpeech M (natural)   │   385,000 │    7.2% │
+# │ Switchboard (natural)    │   185,402 │    3.5% │
+# │ AMI IHM (natural)        │   108,502 │    2.0% │
+# │ AMI SDM (natural)        │   107,319 │    2.0% │
 # └──────────────────────────┴           ┴         ┘
-# Total: ~4,180,950 samples (effectively trained on)
+# Total: ~5,371,608 samples (effectively trained on)
 # (TEDLIUM and EdAcc were dropped during a prior streaming experiment;
 #  TED-talk + accent coverage currently come from Loquacious + CommonVoice.
 #  Both can be re-added safely under map-mode if desired.)
@@ -33,10 +34,6 @@
 # / ~910K segments) — same source distribution, ~9× less to download.
 # Natural cap used (no replay); the prior 1.2M cap on L was sampling
 # ~60% of L, so M gives full exposure with a smaller footprint.
-# People's Speech switched from fixie's `clean` (1.55M, CC-BY) to
-# MLCommons's `clean_sa` (311K, CC-BY-SA): both are CER ≤ 20% alignment
-# quality (per arxiv 2111.09344), so quality is preserved, but the
-# Peoples mix share drops 11.6% → 6.9% as the natural cap shrinks.
 # CommonVoice still uses the fixie mirror for its sharded layout.
 
 datasets:
@@ -56,25 +53,20 @@ datasets:
     eval_splits: [dev]
     target_samples: 1074114
 
-  # People's Speech (MLCommons official, clean_sa subset, ~311K train).
-  # Switched from fixie-ai/peoples_speech `clean` (1.55M) to cut download
-  # ~5×: target_samples slices post-download, so the prior config was
-  # pulling 1.55M to train on 550K. clean_sa is the same alignment-quality
-  # tier (CER ≤ 20% between forced-aligner output and ground-truth
-  # transcript, per arxiv 2111.09344) — just CC-BY-SA licensed instead
-  # of CC-BY. Disjoint from `clean`, not a nested subset. Natural cap
-  # used (no target_samples), so the Peoples-gap attack drops from 550K
-  # to 311K and mix share drops 11.6% → 6.9% — a download-vs-mix-share
-  # tradeoff we accept (no quality cost, just less volume). Validation
-  # lives in the sibling 'validation' config below.
+  # People's Speech (MLCommons official, `clean` subset, ~1.5M train,
+  # CC-BY). CER ≤ 20% alignment quality (per arxiv 2111.09344). Natural
+  # cap used (target_samples omitted) — Peoples is the largest closable
+  # eval gap (+5.2 vs universal-3-pro), and the lever is direct exposure
+  # since Peoples covers acoustic conditions (uncontrolled mics, varied
+  # environments) that no other corpus in the mix captures at scale.
+  # Validation lives in the sibling 'validation' config below.
   - path: MLCommons/peoples_speech
-    name: clean_sa
+    name: clean
     audio_column: audio
     text_column: text
     task: transcribe
     train_splits: [train]
     eval_splits: []
-    target_samples: 310613
 
   # People's Speech validation split — MLCommons ships dev/test as separate
   # configs (not splits inside clean_sa). Pairs with the train-only entry

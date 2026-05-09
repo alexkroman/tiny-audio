@@ -104,13 +104,13 @@ class TestNoiseAugmentation:
         out = aug(audio)
         assert out.shape == audio.shape
 
-    def test_gaussian_layer_applied_on_top_of_corpus(self, tmp_path):
+    def test_color_noise_layer_applied_on_top_of_corpus(self, tmp_path):
         _write_synthetic_noise_corpus(tmp_path, n=3)
         aug = NoiseAugmentation(
             prob=1.0,
             corpus_path=str(tmp_path),
-            gaussian_min_snr_db=20.0,
-            gaussian_max_snr_db=40.0,
+            color_noise_min_snr_db=20.0,
+            color_noise_max_snr_db=40.0,
         )
         audio = np.random.randn(16000).astype(np.float32) * 0.1
         out = aug(audio)
@@ -125,8 +125,8 @@ class TestNoiseAugmentation:
         aug = NoiseAugmentation(
             prob=1.0,
             corpus_path=str(bg),
-            gaussian_min_snr_db=20.0,
-            gaussian_max_snr_db=40.0,
+            color_noise_min_snr_db=20.0,
+            color_noise_max_snr_db=40.0,
             short_noises_corpus_path=str(events),
             short_noises_prob=1.0,
             eq_prob=1.0,

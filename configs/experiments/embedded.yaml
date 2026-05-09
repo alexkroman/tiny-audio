@@ -1,6 +1,7 @@
 # @package _global_
-# ASR transcription training with GLM-ASR-Nano-2512 + Qwen3-0.6B
-# Same recipe as transcription.yaml, ASR-pretrained encoder for stronger init.
+# Continued training of mazesmazes/tiny-audio-embedded
+# (GLM-ASR-Nano-2512 + Qwen3-0.6B, full-decoder fine-tune).
+# Loads projector + decoder weights from the Hub checkpoint and resumes training.
 #
 # Usage:
 #   poetry run python scripts/train.py +experiments=embedded
@@ -15,6 +16,9 @@ model:
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
   text_model_id: Qwen/Qwen3-0.6B
+  # Load projector + decoder weights from the published checkpoint and continue
+  # training from there. ASRModel.from_pretrained overlays both via load_state_dict.
+  pretrained_model_path: mazesmazes/tiny-audio-embedded
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-embedded"
@@ -23,9 +27,9 @@ training:
   freeze_language_model: false
   learning_rate: 1e-3
   decoder_learning_rate: 1e-4
-  warmup_steps: 2000
+  warmup_steps: 100
   lr_scheduler_type: cosine
-  seed: 42
+  seed: 43
   auto_find_batch_size: false
   per_device_train_batch_size: 32
   per_device_eval_batch_size: 32
