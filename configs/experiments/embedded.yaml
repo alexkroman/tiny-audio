@@ -42,7 +42,16 @@ training:
   # too-high peak, and a lower peak still benefits from a gradual ramp
   # so fresh Adam moments settle before steady-state.
   warmup_steps: 500
-  lr_scheduler_type: cosine
+  # constant_with_warmup (vs the prior cosine): cosine is designed for
+  # from-scratch training where the model needs high LR while actively
+  # learning then gradual decay to settle into a minimum. Stage 2 starts
+  # from a converged minimum and adapts to a steady distribution shift
+  # (Peoples 28% mix + new augs) over the full epoch. We want consistent
+  # adaptation throughout, not a front-loaded schedule that cuts the
+  # back half of training to LR < 5e-5 where the model can barely move.
+  # Constant 1e-4 throughout matches stage-1's late-refinement regime
+  # without diminishing returns past the midpoint.
+  lr_scheduler_type: constant_with_warmup
   seed: 43
   auto_find_batch_size: false
   per_device_train_batch_size: 32
