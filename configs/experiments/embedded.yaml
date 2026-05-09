@@ -25,12 +25,19 @@ training:
   group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
   # Full decoder fine-tuning (projector + Qwen3-0.6B). Saved checkpoints contain the full LM.
   freeze_language_model: false
-  learning_rate: 1e-3
-  decoder_learning_rate: 1e-4
-  # 500 steps for resumed-from-converged training: too-tight warmup (e.g. 100)
-  # ramps LR to 1e-4 fast enough to knock the decoder out of its prior basin
-  # before cosine decay pulls it back. 500 gives the optimizer time to develop
-  # sensible Adam moments under the new aug distribution before peak LR.
+  # Stage-2 LRs are ~3× lower than stage 1 (which used 1e-3 / 1e-4). For a
+  # resumed-from-converged checkpoint, peak LR matched to the prior fresh-
+  # from-scratch run is too high: the fresh Adam moments + high peak LR
+  # knock weights out of the prior basin before cosine can pull them back.
+  # The empirical signal was the prior stage-2 attempt regressing on 10/13
+  # eval corpora despite the milder aug recipe. Refining a converged model
+  # wants gentler steps; 3e-4 / 3e-5 still leaves headroom to absorb the
+  # new aug distribution without overshooting.
+  learning_rate: 3e-4
+  decoder_learning_rate: 3e-5
+  # 500 steps complements the lower peak LR: warmup alone doesn't fix a
+  # too-high peak, and a lower peak still benefits from a gradual ramp
+  # so fresh Adam moments settle before steady-state.
   warmup_steps: 500
   lr_scheduler_type: cosine
   seed: 43
