@@ -25,16 +25,19 @@ training:
   group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
   # Full decoder fine-tuning (projector + Qwen3-0.6B). Saved checkpoints contain the full LM.
   freeze_language_model: false
-  # Stage-2 LRs are ~3× lower than stage 1 (which used 1e-3 / 1e-4). For a
-  # resumed-from-converged checkpoint, peak LR matched to the prior fresh-
-  # from-scratch run is too high: the fresh Adam moments + high peak LR
-  # knock weights out of the prior basin before cosine can pull them back.
-  # The empirical signal was the prior stage-2 attempt regressing on 10/13
-  # eval corpora despite the milder aug recipe. Refining a converged model
-  # wants gentler steps; 3e-4 / 3e-5 still leaves headroom to absorb the
-  # new aug distribution without overshooting.
-  learning_rate: 3e-4
-  decoder_learning_rate: 3e-5
+  # Stage-2 LRs are 10× lower than stage 1 (which used 1e-3 / 1e-4),
+  # derived from stage 1's actual eval/loss vs LR trajectory rather than
+  # a heuristic. Stage 1's final 0.011 nats of eval-loss convergence
+  # (0.2154 → 0.2044) happened during steps 45K–65K, when projector LR
+  # was between 1.5e-4 and ~0. 1e-4 corresponds to that late-refinement
+  # regime — the speed at which the model was still actively improving
+  # at the end of stage 1. Starting stage 2 here means peak LR matches
+  # the LR that produced the last meaningful refinement, with enough
+  # headroom to absorb the new aug distribution + Peoples mix shift
+  # without injecting energy at the active-learning LR (3e-4+) that
+  # would risk knocking the converged decoder out of its basin.
+  learning_rate: 1e-4
+  decoder_learning_rate: 1e-5
   # 500 steps complements the lower peak LR: warmup alone doesn't fix a
   # too-high peak, and a lower peak still benefits from a gradual ramp
   # so fresh Adam moments settle before steady-state.
