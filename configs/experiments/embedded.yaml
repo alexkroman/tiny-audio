@@ -27,7 +27,11 @@ training:
   freeze_language_model: false
   learning_rate: 1e-3
   decoder_learning_rate: 1e-4
-  warmup_steps: 100
+  # 500 steps for resumed-from-converged training: too-tight warmup (e.g. 100)
+  # ramps LR to 1e-4 fast enough to knock the decoder out of its prior basin
+  # before cosine decay pulls it back. 500 gives the optimizer time to develop
+  # sensible Adam moments under the new aug distribution before peak LR.
+  warmup_steps: 500
   lr_scheduler_type: cosine
   seed: 43
   auto_find_batch_size: false

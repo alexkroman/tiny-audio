@@ -104,14 +104,17 @@ noise_augmentation:
   max_snr_db: 30.0
   # MUSAN babble (`musan/speech` — multi-talker speech). Targets the
   # acoustic signature of meeting / conference / uncontrolled-mic evals
-  # (Earnings22, AMI, Peoples) that stationary ambient noise underspecifies.
-  # SNR floor (10 dB) is intentionally higher than ambient (5 dB) — at
-  # lower babble SNR the masker speech competes with the target and the
-  # label becomes ambiguous.
+  # (Earnings22, AMI IHM) that stationary ambient noise underspecifies.
+  # SNR floor (15 dB) is intentionally higher than ambient (5 dB) — empirically
+  # at 10 dB the synthetic masker stacks on natively-overlapping training
+  # corpora (Peoples / AMI source already has multi-speaker content) and the
+  # label becomes ambiguous; 15 dB keeps babble recognisable as background.
+  # Probability 0.15 was 0.20 in the prior run; reduced after observing
+  # collateral regression on clean-source corpora.
   babble_corpus_path:
     - ~/.cache/musan/musan/speech
-  babble_prob: 0.20
-  babble_min_snr_db: 10.0
+  babble_prob: 0.15
+  babble_min_snr_db: 15.0
   babble_max_snr_db: 25.0
   # Always-on additive colored-noise sensor floor — present whether or
   # not MUSAN fired this clip, since real recordings always have per-clip
@@ -170,16 +173,15 @@ noise_augmentation:
   gain_prob: 0.5
   gain_min_db: -6.0
   gain_max_db: 6.0
-  # MP3 round-trip — applied last, so the codec sees the leveled mixed
-  # signal (matches real ADC → encoder chain). Targets web / YouTube /
-  # podcast-derived corpora (Peoples, CV, Loquacious YODAS) where the
-  # training audio has already been MP3'd at least once. 32-128 kbps
-  # spans cheap-podcast through high-quality-streaming bitrates;
-  # min=32 is aggressive but realistic for older YouTube uploads.
-  # p=0.20 keeps the artifact share modest — at low bitrates stacking
-  # with babble + bandlimit can push clips OOD.
-  mp3_prob: 0.20
-  mp3_min_bitrate: 32
+  # MP3 round-trip — disabled. Empirically, even at p=0.20 the 32 kbps
+  # min-bitrate stacked with bandlimit produced systematic regressions
+  # on clean-source corpora (CV / LS / Tedlium / VoxPopuli / Switchboard
+  # all moved +0.4-1.9 WER) and a catastrophic AMI-SDM regression
+  # (+9.7 WER) where the codec compounded with already-bandlimited
+  # far-field audio. Re-enable only with min_bitrate ≥ 64 kbps and
+  # consider gating off bandlimit when MP3 fires.
+  mp3_prob: 0.0
+  mp3_min_bitrate: 64
   mp3_max_bitrate: 128
 
 # Probability of replacing a training sample's audio with a noise-only
