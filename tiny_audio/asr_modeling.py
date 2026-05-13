@@ -449,34 +449,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
-        hidden_states = self._maybe_drop_audio_tokens(hidden_states)
         audio_embeds = self.projector(hidden_states)
 
         token_counts = expected_token_counts.to(device=audio_embeds.device, dtype=torch.long)
         return _gather_audio_embeds(audio_embeds, token_counts)
-
-    def _maybe_drop_audio_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Per-time-step Bernoulli zero-mask on encoder output (train-only).
-
-        SpecAugment-equivalent for frozen-encoder setups: drops whole frames
-        from the encoder output sequence so the projector learns robustness
-        to missing context. Length-preserving (zeros, not deletions) so
-        audio token counts in the prompt stay consistent. No magnitude
-        rescaling — the projector should not learn to compensate.
-        """
-        p = float(getattr(self.config, "audio_token_dropout", 0.0))
-        if not self.training or p <= 0.0:
-            return hidden_states
-        keep = 1.0 - p
-        mask = torch.bernoulli(
-            torch.full(
-                hidden_states.shape[:-1],
-                keep,
-                device=hidden_states.device,
-                dtype=hidden_states.dtype,
-            )
-        ).unsqueeze(-1)
-        return hidden_states * mask
 
     def forward(
         self,

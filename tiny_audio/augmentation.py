@@ -5,11 +5,13 @@ RIRAugmentation models acoustic propagation: convolves with a recorded RIR
 including air absorption at the recorded distance, so no separate
 AirAbsorption stage is added.
 
-NoiseAugmentation models capture-side corruptions: long-stationary
-background noise (e.g. MUSAN), sparse short transients, an always-on
-Gaussian sensor floor, EQ, clipping, and a band-limit branch (low-pass
-or telephony band-pass, exactly one). Order roughly follows the
-physical signal chain (mic → preamp → channel).
+NoiseAugmentation models source-side speaker variability (pitch shift)
+plus capture-side corruptions: long-stationary background noise (e.g.
+MUSAN), sparse short transients, an always-on Gaussian sensor floor,
+EQ, clipping, and a band-limit branch (low-pass or telephony band-pass,
+exactly one). Pitch shift runs first so noise / RIR mix onto the
+pitch-shifted signal; the rest of the order follows the physical
+capture chain (mic → preamp → channel).
 
 NoiseAugmentation also exposes ``sample_noise_only`` for silence-injection
 training: pulls a noise-only clip from the background corpus (excluding
@@ -26,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 import torch
-from audiomentations import (
+from audiomentations import (  # pyright: ignore[reportMissingImports]
     AddBackgroundNoise,
     AddColorNoise,
     AddShortNoises,
@@ -38,6 +40,7 @@ from audiomentations import (
     LowPassFilter,
     Mp3Compression,
     OneOf,
+    PitchShift,
     SevenBandParametricEQ,
 )
 from torchaudio import functional as taf
@@ -116,12 +119,26 @@ class RIRAugmentation:
 
 
 class NoiseAugmentation:
-    """MUSAN background + short transients + always-on Gaussian floor +
-    EQ + clipping + OneOf{low-pass, telephony band-pass}."""
+    """Pitch shift (source-side) + MUSAN background + short transients +
+    always-on Gaussian floor + EQ + clipping + OneOf{low-pass, telephony
+    band-pass} + gain + MP3."""
 
     def __init__(
         self,
         sample_rate: int = 16000,
+        # Pitch shift — source-side speaker-variation proxy applied before
+        # any channel/capture artifacts. Cheap stand-in for accent /
+        # speaker-diversity exposure that helps CommonVoice-style evals
+        # where speaker variation (not mic / channel) is the dominant gap.
+        # ±2 semitones stays inside Whisper's pretraining voice
+        # distribution (∼1 octave of natural pitch variability spans most
+        # adult voices); larger shifts move features OOD for a frozen
+        # encoder. Placed first in the chain so background noise / RIR
+        # mix onto the pitch-shifted signal, matching the physical reality
+        # of a different speaker in the same room.
+        pitch_shift_prob: float = 0.0,
+        pitch_shift_min_semitones: float = -2.0,
+        pitch_shift_max_semitones: float = 2.0,
         prob: float = 0.5,
         # Default lower bound is 5 dB. With a frozen Whisper encoder, going
         # below ~5 dB sustained SNR pushes encoder features outside the
@@ -209,6 +226,14 @@ class NoiseAugmentation:
         self.non_speech_paths: list[Path] = []
 
         transforms: list = []
+        if pitch_shift_prob > 0.0:
+            transforms.append(
+                PitchShift(
+                    min_semitones=pitch_shift_min_semitones,
+                    max_semitones=pitch_shift_max_semitones,
+                    p=pitch_shift_prob,
+                )
+            )
         if corpus_path is not None:
             bg = _build_background_noise(
                 corpus_path,

@@ -23,6 +23,18 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 class MLPAudioProjector(nn.Module):
     """2-layer MLP projector with frame-stacking downsampling (matches GLM-ASR)."""
 
+    # RMSNorm init weight chosen to match Qwen3-0.6B's embed_tokens median
+    # RMS (empirically 0.0292 across 151,936 tokens × dim=1024). With this
+    # init the projector outputs enter the LM at the same per-position
+    # residual-stream magnitude as text embed_tokens — avoiding the
+    # ~34× over-magnitude that LlamaRMSNorm's default weight=1.0 produces.
+    # Adam's per-parameter normalization means this small init does NOT
+    # starve projector gradient flow; the norm-before-GELU placement keeps
+    # gradients healthy regardless of init magnitude. If you swap to a
+    # different LM, re-measure with
+    # `model.get_input_embeddings().weight.pow(2).mean().sqrt()` and update.
+    _NORM_INIT = 0.029
+
     def __init__(self, config):
         """Initialize MLP projector.
 
@@ -41,13 +53,14 @@ class MLPAudioProjector(nn.Module):
         hidden_dim = getattr(config, "projector_hidden_dim", None) or llm_dim
         self.linear_1 = nn.Linear(in_dim, hidden_dim, bias=False)
         self.norm = LlamaRMSNorm(hidden_dim, eps=1e-6)
+        self.norm.weight.data.fill_(self._NORM_INIT)
         self.act = nn.GELU()
         self.linear_2 = nn.Linear(hidden_dim, llm_dim, bias=False)
         # Output norm aligns the projector's RMS with the LM's embed_tokens
-        # distribution. Without it, linear_2's Kaiming-uniform init produces
-        # outputs ~30× quieter than embed rows, which saturates softmax at
-        # audio positions and starves them of gradient.
+        # distribution. See _NORM_INIT comment above for the magnitude
+        # derivation.
         self.norm_2 = LlamaRMSNorm(llm_dim, eps=1e-6)
+        self.norm_2.weight.data.fill_(self._NORM_INIT)
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length (matches GLM-ASR)."""

@@ -7,6 +7,12 @@ learning_rate: 1e-3
 max_grad_norm: 1.0
 warmup_steps: 2000
 lr_scheduler_type: cosine
+# bf16 training: Adam's `1 / sqrt(v_hat + eps)` denominator can underflow
+# at the bf16 default eps=1e-8 when second moments get small. Lifting eps
+# to 1e-6 stays well within bf16's ~7-bit mantissa precision range and
+# avoids numerical instability on the rare-token / low-gradient params.
+# Matches LLaMA / Mistral / Qwen pretraining convention for bf16.
+adam_epsilon: 1e-6
 
 # Training
 max_steps: -1
@@ -77,13 +83,30 @@ rir_augmentation:
     - ~/.cache/openslr-28/real_rirs_isotropic_noises
   prob: 0.5
 
-# Noise augmentation — MUSAN ambient + MUSAN babble + always-on Gaussian
-# sensor floor + EQ + clipping + OneOf{LPF, telephony BPF} + gain.
-# Music subset is excluded; ambient and speech (babble) subsets are
-# wired in as separate AddBackgroundNoise stages with independent SNR
-# ranges and probabilities.
+# Noise augmentation — pitch shift (source-side) + MUSAN ambient + MUSAN
+# babble + always-on Gaussian sensor floor + EQ + clipping + OneOf{LPF,
+# telephony BPF} + gain + MP3. Music subset is excluded; ambient and
+# speech (babble) subsets are wired in as separate AddBackgroundNoise
+# stages with independent SNR ranges and probabilities. Pitch shift runs
+# first so the rest of the chain layers onto the pitch-shifted signal.
 noise_augmentation:
   enabled: true
+  # Pitch shift — speaker-variation proxy, applied before any channel /
+  # capture artifacts. The one canonical ASR aug not previously in the
+  # stack. Cheap stand-in for the accent / speaker-diversity exposure
+  # that helps CommonVoice (currently +3.14 gap vs universal-3-pro, the
+  # 2nd-largest gap and one where CV training data is already at natural
+  # cap — i.e. speaker diversity is the residual lever, not quantity).
+  # ±2 semitones stays inside Whisper's pretraining voice distribution
+  # (~1 octave of natural pitch variability spans most adult voices);
+  # larger shifts push features OOD for a frozen encoder. p=0.05 so
+  # joint-firing with other augs stays rare (~3-4% with bandlimit, ~2%
+  # with MP3) and the -5.02 Switchboard / -3.91 AMI-SDM wins are not
+  # at risk from the new stage. Treat as a low-cost experiment: if the
+  # CV gap doesn't close by ≥0.2 on next eval, drop back to 0.
+  pitch_shift_prob: 0.05
+  pitch_shift_min_semitones: -2.0
+  pitch_shift_max_semitones: 2.0
   # MUSAN ambient subset (`musan/noise` — ~930 wav, ~6 hours: rain,
   # thunder, wind, crowd chatter, cafeteria, footsteps, paper, mechanical,
   # phone tones). Stationary background; pairs with babble below for

@@ -268,6 +268,13 @@ pip install --user -r /tmp/requirements.txt
 # Install project in editable mode
 pip install --user -e . --no-deps
 
+# Pre-fetch the NLTK punkt tokenizer used by truecase in scripts/train.py's
+# label normalizer. NLTK 3.9+ uses `punkt_tab` (new data package format);
+# older NLTKs use `punkt`. Download both so the code works regardless of
+# which NLTK version the base image ships. Doing the download here (during
+# install) avoids multi-worker race on the cache path at first training step.
+python -c "import nltk; nltk.download('punkt_tab', quiet=True); nltk.download('punkt', quiet=True)"
+
 # Verify torch is available (from base image) — we never pin or replace torch.
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 
@@ -278,7 +285,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # runs under (e.g., python3.10 vs python3.11 in the base image), and
 # every subsequent `ta dev <cmd>` will fail with `ModuleNotFoundError`.
 TA_PYTHON=$(head -1 /root/.local/bin/ta | sed 's|^#!||')
-if ! "$TA_PYTHON" -c "import typer, hydra, omegaconf, datasets, transformers" 2>/tmp/tiny_audio_import_check.err; then
+if ! "$TA_PYTHON" -c "import typer, hydra, omegaconf, datasets, transformers, truecase, ftfy" 2>/tmp/tiny_audio_import_check.err; then
     echo "ERROR: deps did not install into the python that /root/.local/bin/ta uses." >&2
     echo "  ta interpreter: $TA_PYTHON" >&2
     echo "  pip used:        $(which pip) ($(pip --version))" >&2

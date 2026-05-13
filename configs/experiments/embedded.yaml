@@ -15,7 +15,7 @@ model:
   projector_hidden_dim: 2048
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
-  text_model_id: Qwen/Qwen3.5-0.8B
+  text_model_id: Qwen/Qwen3-0.6B
   # Load projector + decoder weights from the published checkpoint and continue
   # training from there. ASRModel.from_pretrained overlays both via load_state_dict.
   # pretrained_model_path: mazesmazes/tiny-audio-embedded-next
@@ -38,10 +38,17 @@ training:
   # would risk knocking the converged decoder out of its basin.
   learning_rate: 1e-3
   decoder_learning_rate: 1e-4
+  # 0.01 (vs HF default 0.0) damps unbounded rare-token embedding drift under
+  # tie_word_embeddings=True. Previous tiny-audio run (WD=0) showed rare CJK/
+  # Arabic embedding tokens drifting ~3.1× while common English subwords moved
+  # ~0.25× — drift inversely proportional to token_frequency. Without WD,
+  # rare-token embeddings only receive "you're wrong" gradients and nothing
+  # pulls them back. 0.01 is LLaVA/Qwen-Audio/LLaMA standard.
+  weight_decay: 0.01
   # 500 steps complements the lower peak LR: warmup alone doesn't fix a
   # too-high peak, and a lower peak still benefits from a gradual ramp
   # so fresh Adam moments settle before steady-state.
-  warmup_steps: 2000
+  warmup_steps: 3000
   # constant_with_warmup (vs the prior cosine): cosine is designed for
   # from-scratch training where the model needs high LR while actively
   # learning then gradual decay to settle into a minimum. Stage 2 starts
@@ -64,8 +71,18 @@ training:
   # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck
   # at this batch size. AMD EPYC 9355 has 32 cores / 64 threads — leave a
   # handful free for the main process, GPU sync, and tokenizer threads.
-  dataloader_num_workers: 8
-  dataloader_prefetch_factor: 2
+  # Bumped 12 → 16 workers + prefetch 6 → 8 to keep up with batch_size=64
+  # (per-worker batch prep time doubled vs batch=32, so we want more
+  # parallel workers AND a deeper prefetch queue to absorb augmentation
+  # jitter). Chain: ftfy + truecase + MUSAN noise + babble + RIR +
+  # FSD50K short events + EQ + bandlimit + MP3 round-trip + PitchShift.
+  # Extra CPU RAM spend: ~16-24 GB (16 workers × ~1 GB process) plus
+  # ~8-12 GB pinned memory for the deeper prefetch buffer (128 batches
+  # × ~80 MB each at batch=64 with audio + features). 16 workers /
+  # 32 physical cores leaves 16 cores for the main process, GPU sync,
+  # tokenizer thread pool, and OS page cache.
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 8
 
   # SDPA (PyTorch-native, cuDNN flash backend on Blackwell) — avoids the slow
   # flash-attn source build on RunPod and is fast enough at our seq lengths.

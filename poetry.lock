@@ -1778,6 +1778,21 @@ test-full = ["adlfs", "aiohttp (!=4.0.0a0,!=4.0.0a1)", "cloudpickle", "dask", "d
 tqdm = ["tqdm"]
 
 [[package]]
+name = "ftfy"
+version = "6.3.1"
+description = "Fixes mojibake and other problems with Unicode, after the fact"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "ftfy-6.3.1-py3-none-any.whl", hash = "sha256:7c70eb532015cd2f9adb53f101fb6c7945988d023a085d127d1573dc49dd0083"},
+    {file = "ftfy-6.3.1.tar.gz", hash = "sha256:9b3c3d90f84fb267fe64d375a07b7f8912d817cf86009ae134aa03e1819506ec"},
+]
+
+[package.dependencies]
+wcwidth = "*"
+
+[[package]]
 name = "future"
 version = "1.0.0"
 description = "Clean single-source support for Python 3 and 2"
@@ -7266,6 +7281,21 @@ vllm = ["fastapi", "pydantic", "requests", "uvicorn", "vllm (>=0.10.2,<0.13.0)"]
 vlm = ["Pillow", "num2words (==0.5.14)", "torchvision"]
 
 [[package]]
+name = "truecase"
+version = "0.0.14"
+description = "A library to restore capitalization for text"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "truecase-0.0.14-py3-none-any.whl", hash = "sha256:80e93b9d45a430d4bce4d9fe19fe0c185976ecf244779cf92e0901531ce86ced"},
+    {file = "truecase-0.0.14.tar.gz", hash = "sha256:3a47b58c1724fcca7268cbeaf4056bb2c0cd041bd81f3b99a85ea263d7fc2d20"},
+]
+
+[package.dependencies]
+nltk = "*"
+
+[[package]]
 name = "typer"
 version = "0.25.1"
 description = "Typer, build great CLIs. Easy to code. Based on Python type hints."
@@ -7466,6 +7496,18 @@ files = [
 
 [package.dependencies]
 colorama = {version = ">=0.4.6", markers = "sys_platform == \"win32\" and python_version >= \"3.7\""}
+
+[[package]]
+name = "wcwidth"
+version = "0.7.0"
+description = "Measures the displayed width of unicode strings in a terminal"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "wcwidth-0.7.0-py3-none-any.whl", hash = "sha256:5d69154c429a82910e241c738cd0e2976fac8a2dd47a1a805f4afed1c0f136f2"},
+    {file = "wcwidth-0.7.0.tar.gz", hash = "sha256:90e3a7ea092341c44b99562e75d09e4d5160fe7a3974c6fb842a101a95e7eed0"},
+]
 
 [[package]]
 name = "weasel"
@@ -8053,4 +8095,4 @@ local = ["pyaudio"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "b6ce556e1fc4c3c110cda026c83095b87e22f6b144ef0bbbb9e3a31580e0dc36"
+content-hash = "6186a240049ee0a720ec96cc2a44099795cd179a452e8fef2de3343f7fcc1c2c"
