@@ -93,14 +93,24 @@ noise_augmentation:
   # Dropped from 0.6 → 0.45 when babble was added, so the union of
   # "any background mixture fired" stays in the ~55% range and the
   # ~10% fully-clean tail (clean = no MUSAN AND bandlimit didn't fire)
-  # is preserved.
-  prob: 0.45
-  # SNR floor of 5 dB — below this, frozen Whisper produces encoder features
-  # outside its training distribution, so the projector trains on features
-  # that don't correspond to anything realistic at inference. Only drop
-  # below 5 if deployment audio sustains lower SNRs (rare). Upper bound of
-  # 30 dB lets some samples be effectively clean.
-  min_snr_db: 5.0
+  # is preserved. Further dropped 0.45 → 0.35 after eval showed
+  # clean-source corpora (LS Clean +0.63, LS Other +1.10, Tedlium +2.08)
+  # all trailing universal-3-pro despite no data shortage on read
+  # speech. Switchboard (-5.02) and AMI-SDM (-3.91) wins prove noise
+  # robustness is well-covered, so the aug footprint can shrink without
+  # losing those wins.
+  prob: 0.35
+  # SNR floor raised from 5 → 8 dB after eval data confirmed the OOD
+  # concern below: clean-source corpora trailing universal-3-pro despite
+  # the model having no data shortage on read speech. The 5 dB floor was
+  # pushing frozen Whisper features OOD on a meaningful fraction of clips.
+  # 8 dB stays within realistic SNR distributions for almost all evals
+  # while protecting the encoder feature distribution. Below 8, frozen
+  # Whisper produces encoder features outside its training distribution
+  # so the projector trains on features that don't correspond to anything
+  # realistic at inference. Upper bound of 30 dB lets some samples be
+  # effectively clean.
+  min_snr_db: 8.0
   max_snr_db: 30.0
   # MUSAN babble (`musan/speech` — multi-talker speech). Targets the
   # acoustic signature of meeting / conference / uncontrolled-mic evals
@@ -109,11 +119,18 @@ noise_augmentation:
   # at 10 dB the synthetic masker stacks on natively-overlapping training
   # corpora (Peoples / AMI source already has multi-speaker content) and the
   # label becomes ambiguous; 15 dB keeps babble recognisable as background.
-  # Probability 0.15 was 0.20 in the prior run; reduced after observing
-  # collateral regression on clean-source corpora.
+  # Probability dropped 0.20 → 0.15 → 0.10 across successive runs after
+  # repeatedly observing collateral regression on clean-source corpora.
+  # Switchboard (-5.02) wins partly come from babble, but the win has
+  # enough margin to absorb a small babble reduction; meanwhile clean
+  # corpora (LS Clean / LS Other / Tedlium / VoxPopuli) all trail
+  # universal-3-pro at the current setting. Drop trades a small slice
+  # of conversational-overlap robustness for clean-source feature
+  # stability. Watch Switchboard on next eval — if the lead shrinks
+  # below 3pt, revert.
   babble_corpus_path:
     - ~/.cache/musan/musan/speech
-  babble_prob: 0.15
+  babble_prob: 0.10
   babble_min_snr_db: 15.0
   babble_max_snr_db: 25.0
   # Always-on additive colored-noise sensor floor — present whether or
@@ -149,8 +166,11 @@ noise_augmentation:
   # Hard clipping at a low percentile (top 10% of samples). Library
   # default of 40 is more aggressive than Whisper's training distribution.
   # max_percentile=10 is tuned for projector training; push to 20 if
-  # training the encoder from scratch.
-  clipping_prob: 0.1
+  # training the encoder from scratch. Probability lowered 0.10 → 0.05
+  # as part of a broader noise-aug footprint reduction targeted at the
+  # clean-source eval gaps; Switchboard / AMI don't depend on clipping
+  # aug specifically, so this shouldn't regress those wins.
+  clipping_prob: 0.05
   clipping_max_percentile: 10
   # Band-limit branch — when fired, picks exactly one of low-pass
   # (cheap-mic / consumer-device cutoff, 3-7.5 kHz) or telephony band-pass
@@ -173,15 +193,21 @@ noise_augmentation:
   gain_prob: 0.5
   gain_min_db: -6.0
   gain_max_db: 6.0
-  # MP3 round-trip — disabled. Empirically, even at p=0.20 the 32 kbps
-  # min-bitrate stacked with bandlimit produced systematic regressions
-  # on clean-source corpora (CV / LS / Tedlium / VoxPopuli / Switchboard
-  # all moved +0.4-1.9 WER) and a catastrophic AMI-SDM regression
-  # (+9.7 WER) where the codec compounded with already-bandlimited
-  # far-field audio. Re-enable only with min_bitrate ≥ 64 kbps and
-  # consider gating off bandlimit when MP3 fires.
-  mp3_prob: 0.0
-  mp3_min_bitrate: 64
+  # MP3 round-trip — conservatively re-enabled at p=0.10 with
+  # min_bitrate=96. The prior failed experiment used p=0.20 with 32 kbps
+  # min-bitrate which stacked with bandlimit to produce systematic
+  # regressions on clean-source corpora (CV / LS / Tedlium / VoxPopuli /
+  # Switchboard all moved +0.4-1.9 WER) and a catastrophic AMI-SDM
+  # regression (+9.7 WER) where the codec compounded with already-
+  # bandlimited far-field audio. At 96-128 kbps the codec stays within
+  # the realistic distribution of modern podcast / streaming encoding
+  # (Gigaspeech podcast slice, in-the-wild YouTube content) and the
+  # halved probability reduces the joint MP3+bandlimit firing rate to
+  # ~3% (vs the prior failed 6%). Watch AMI-SDM on the next eval — if
+  # the -3.91 lead shrinks meaningfully, MP3 is still re-stacking
+  # despite the lower prob and should drop back to 0.
+  mp3_prob: 0.10
+  mp3_min_bitrate: 96
   mp3_max_bitrate: 128
 
 # Probability of replacing a training sample's audio with a noise-only

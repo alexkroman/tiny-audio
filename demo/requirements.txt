@@ -1,13 +1,12 @@
-# Use latest compatible versions
-gradio>=4.44.1
 transformers>=4.57.1
 torch
-soundfile
-librosa
+torchaudio
 peft
-
-# Forced alignment for word-level timestamps
-ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
-
-# Speaker diarization (TEN-VAD + WavLM)
+safetensors
+numpy
+scipy
+scikit-learn
+librosa
+soundfile
+speechbrain
 ten-vad>=1.0.6

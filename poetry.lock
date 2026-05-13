@@ -1526,6 +1526,28 @@ paramiko = ">=2.4"
 pytest = ["pytest (>=7)"]
 
 [[package]]
+name = "fast-mp3-augment"
+version = "0.2.0"
+description = "Fast in‑memory MP3 encode‑decode augmentation for audiomentations"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "fast_mp3_augment-0.2.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:192a1193641253a3755bbe868a189cdf068e266a6a3b695f7e63daee5ee29eb0"},
+    {file = "fast_mp3_augment-0.2.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4b404f8ca64505c9f35faf8c966af9a9877f44c060dcc492d90be47e32994724"},
+    {file = "fast_mp3_augment-0.2.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d55288625b052635defbb0ab627fb49734b52985eb6d3ef69c35237cd80e2075"},
+    {file = "fast_mp3_augment-0.2.0-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:ef8c0d0253e0a2a69d7afdde1fdd707b7d6dc051f017a53732eb23eaaa59c27f"},
+    {file = "fast_mp3_augment-0.2.0-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:eda7af23231a657169f0f6f5be738e65b352e66b3a1b94dbd4d42b5e32825a31"},
+    {file = "fast_mp3_augment-0.2.0-cp39-abi3-win_amd64.whl", hash = "sha256:ebd3c60b00e2fbd8f2f507d867dab150979df23ad07b6da31da1163a448e43d2"},
+    {file = "fast_mp3_augment-0.2.0-pp311-pypy311_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fa99e21ada08dd4cbf3145a89f9c33947881e52a9b13c432740b064f5a3f53d0"},
+    {file = "fast_mp3_augment-0.2.0.tar.gz", hash = "sha256:dae94a3abb7f8336d3d00b528f6132413cee72dfcdc91baf617f0a1d1bc8b8a9"},
+]
+
+[package.dependencies]
+numpy = ">=1.22,<3"
+numpy-minmax = "*"
+
+[[package]]
 name = "fastapi"
 version = "0.136.1"
 description = "FastAPI framework, high performance, easy to learn, fast to code, ready for production"
@@ -8031,4 +8053,4 @@ local = ["pyaudio"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "6efd977aa9a2c292f294544ab66aaa9bc234451ec303e2bae7c3e769b70ff2ae"
+content-hash = "b6ce556e1fc4c3c110cda026c83095b87e22f6b144ef0bbbb9e3a31580e0dc36"

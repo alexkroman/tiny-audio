@@ -68,12 +68,11 @@ def format_code():
         ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
     )
     md_excludes = ("docs/course/",)
+    md_skip_exact = {"MODEL_CARD.md", "demo/README.md"}
     md_files = [
         line
         for line in tracked.stdout.splitlines()
-        if line
-        and not any(line.startswith(p) for p in md_excludes)
-        and Path(line).name != "MODEL_CARD.md"
+        if line and not any(line.startswith(p) for p in md_excludes) and line not in md_skip_exact
     ]
     if md_files:
         run("mdformat", *md_files)

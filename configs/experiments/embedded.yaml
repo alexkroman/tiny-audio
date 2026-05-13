@@ -15,13 +15,13 @@ model:
   projector_hidden_dim: 2048
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
-  text_model_id: Qwen/Qwen3-0.6B
+  text_model_id: Qwen/Qwen3.5-0.8B
   # Load projector + decoder weights from the published checkpoint and continue
   # training from there. ASRModel.from_pretrained overlays both via load_state_dict.
-  pretrained_model_path: mazesmazes/tiny-audio-embedded
+  # pretrained_model_path: mazesmazes/tiny-audio-embedded-next
 
 training:
-  hub_model_id: "mazesmazes/tiny-audio-embedded"
+  hub_model_id: "mazesmazes/tiny-audio-next"
   group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
   # Full decoder fine-tuning (projector + Qwen3-0.6B). Saved checkpoints contain the full LM.
   freeze_language_model: false
@@ -36,12 +36,12 @@ training:
   # headroom to absorb the new aug distribution + Peoples mix shift
   # without injecting energy at the active-learning LR (3e-4+) that
   # would risk knocking the converged decoder out of its basin.
-  learning_rate: 1e-4
-  decoder_learning_rate: 1e-5
+  learning_rate: 1e-3
+  decoder_learning_rate: 1e-4
   # 500 steps complements the lower peak LR: warmup alone doesn't fix a
   # too-high peak, and a lower peak still benefits from a gradual ramp
   # so fresh Adam moments settle before steady-state.
-  warmup_steps: 500
+  warmup_steps: 2000
   # constant_with_warmup (vs the prior cosine): cosine is designed for
   # from-scratch training where the model needs high LR while actively
   # learning then gradual decay to settle into a minimum. Stage 2 starts
@@ -51,13 +51,13 @@ training:
   # back half of training to LR < 5e-5 where the model can barely move.
   # Constant 1e-4 throughout matches stage-1's late-refinement regime
   # without diminishing returns past the midpoint.
-  lr_scheduler_type: constant_with_warmup
+  lr_scheduler_type: cosine
   seed: 43
   auto_find_batch_size: false
   per_device_train_batch_size: 32
   per_device_eval_batch_size: 32
   gradient_accumulation_steps: 2
-  num_train_epochs: 1
+  num_train_epochs: 2
   save_steps: 1000
   eval_steps: 1000
 
@@ -72,4 +72,4 @@ training:
   attn_implementation: sdpa
 
 
-  torch_compile: false
+  torch_compile: true

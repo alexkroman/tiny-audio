@@ -88,6 +88,7 @@ ten-vad = ">=1.0.6"
 speechbrain = {git = "https://github.com/speechbrain/speechbrain.git"}
 pytz = "*"
 audiomentations = ">=0.40.0"
+fast-mp3-augment = "*"
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]
@@ -247,8 +248,8 @@ extend-ignore = [
 [tool.mdformat]
 wrap = 100
 number = false
-# Exclude model_card.md to preserve YAML front matter
-exclude = ["model_card.md"]
+# Exclude files with YAML front matter (mdformat mangles `---` delimiters)
+exclude = ["MODEL_CARD.md", "demo/README.md"]
 
 [tool.bandit]
 # Skip B615: We intentionally want latest HuggingFace model versions

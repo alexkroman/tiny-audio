@@ -263,30 +263,99 @@ class AssemblyAIEvaluator(Evaluator):
 class AssemblyAIStreamingEvaluator(Evaluator):
     """Evaluator for AssemblyAI Streaming API (Universal-Streaming model).
 
-    Reuses a single websocket connection across all samples for efficiency.
+    Opens a fresh websocket per call so parallel workers don't share state.
+    A class-level semaphore caps real concurrent streams below the account's
+    server-side limit; override via ASSEMBLYAI_STREAM_CONCURRENCY.
     """
+
+    # WebSocket close codes the server uses for transient backpressure
+    # (concurrent-stream cap, overload). These deserve a retry rather than
+    # bubbling up as a permanent failure.
+    _RETRYABLE_CODES = frozenset({1008, 1011, 1013, 4029, 4102})
+    _MAX_RETRIES = 6
+    _BACKOFF_CAP = 30.0
+    _DEFAULT_CONCURRENCY = 8
+
+    _stream_semaphore: threading.Semaphore | None = None
+    _semaphore_lock = threading.Lock()
 
     def __init__(self, api_key: str, **kwargs):
         super().__init__(**kwargs)
         self.api_key = api_key
-        self._client = None
-        self._transcripts = {}
-        self._error = None
-        self._turn_done = None
+        self._ensure_semaphore()
 
-    def _ensure_connected(self):
-        """Lazily connect to the streaming API on first use."""
-        if self._client is not None:
+    @classmethod
+    def _ensure_semaphore(cls) -> None:
+        if cls._stream_semaphore is not None:
             return
+        with cls._semaphore_lock:
+            if cls._stream_semaphore is None:
+                cap = int(os.environ.get("ASSEMBLYAI_STREAM_CONCURRENCY", cls._DEFAULT_CONCURRENCY))
+                cls._stream_semaphore = threading.Semaphore(cap)
+
+    def transcribe(self, audio) -> tuple[str, float]:
+        import random
+
+        pcm_data = self._prepare_pcm(audio)
+
+        last_err = None
+        for attempt in range(self._MAX_RETRIES + 1):
+            try:
+                assert self._stream_semaphore is not None
+                with self._stream_semaphore:
+                    return self._run_session(pcm_data)
+            except RuntimeError as e:
+                last_err = e
+                code = getattr(e, "streaming_code", None)
+                if code not in self._RETRYABLE_CODES or attempt == self._MAX_RETRIES:
+                    raise
+                # Exponential backoff with jitter, capped to keep latency bounded.
+                delay = min(self._BACKOFF_CAP, 0.5 * (2**attempt)) * (1 + random.random())
+                time.sleep(delay)
+        raise last_err  # unreachable; appeases type checker
+
+    def _prepare_pcm(self, audio) -> bytes:
+        import numpy as np
+        import soundfile as sf
+
+        if isinstance(audio, dict) and "array" in audio:
+            audio_array = audio["array"]
+            sample_rate = audio.get("sampling_rate", 16000)
+        else:
+            wav_bytes = prepare_wav_bytes(audio)
+            audio_array, sample_rate = sf.read(io.BytesIO(wav_bytes))
+
+        if sample_rate != 16000:
+            import librosa
+
+            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
+
+        if isinstance(audio_array, np.ndarray):
+            if audio_array.dtype != np.float32:
+                audio_array = audio_array.astype(np.float32)
+            if np.abs(audio_array).max() > 1.0:
+                audio_array = audio_array / np.abs(audio_array).max()
+            return (audio_array * 32767).astype(np.int16).tobytes()
+        return audio_array
+
+    def _run_session(self, pcm_data: bytes) -> tuple[str, float]:
+        import threading
 
         from assemblyai.streaming.v3 import (
+            SpeechModel,
             StreamingClient,
             StreamingClientOptions,
             StreamingEvents,
             StreamingParameters,
         )
 
-        self._client = StreamingClient(
+        # Per-call state — closures capture these, so threads cannot stomp on
+        # each other's connection or callback buckets.
+        transcripts: dict[int, str] = {}
+        error_box: list[object] = [None]
+        turn_done = threading.Event()
+
+        client = StreamingClient(
             StreamingClientOptions(
                 api_key=self.api_key,
                 api_host="streaming.assemblyai.com",
@@ -295,92 +364,49 @@ class AssemblyAIStreamingEvaluator(Evaluator):
 
         def on_turn(_client, event):
             if event.transcript and event.end_of_turn and event.turn_is_formatted:
-                self._transcripts[event.turn_order] = event.transcript
-                if self._turn_done:
-                    self._turn_done.set()
+                transcripts[event.turn_order] = event.transcript
+                turn_done.set()
 
-        def on_error(_client, error):
-            self._error = error
-            if self._turn_done:
-                self._turn_done.set()
+        def on_error(_client, err):
+            error_box[0] = err
+            turn_done.set()
 
         def on_terminated(_client, _event):
-            if self._turn_done:
-                self._turn_done.set()
+            turn_done.set()
 
-        self._client.on(StreamingEvents.Turn, on_turn)
-        self._client.on(StreamingEvents.Error, on_error)
-        self._client.on(StreamingEvents.Termination, on_terminated)
-        self._client.connect(StreamingParameters(sample_rate=16000, format_turns=True))
-
-    def transcribe(self, audio) -> tuple[str, float]:
-        import threading
-
-        import numpy as np
-        import soundfile as sf
-
-        self._ensure_connected()
-
-        # Convert audio to raw PCM bytes (16kHz, 16-bit mono)
-        if isinstance(audio, dict) and "array" in audio:
-            audio_array = audio["array"]
-            sample_rate = audio.get("sampling_rate", 16000)
-        else:
-            wav_bytes = prepare_wav_bytes(audio)
-            audio_array, sample_rate = sf.read(io.BytesIO(wav_bytes))
-
-        # Resample to 16kHz if needed
-        if sample_rate != 16000:
-            import librosa
-
-            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
-
-        # Convert to 16-bit PCM bytes
-        if isinstance(audio_array, np.ndarray):
-            if audio_array.dtype != np.float32:
-                audio_array = audio_array.astype(np.float32)
-            if np.abs(audio_array).max() > 1.0:
-                audio_array = audio_array / np.abs(audio_array).max()
-            pcm_data = (audio_array * 32767).astype(np.int16).tobytes()
-        else:
-            pcm_data = audio_array
-
-        # Reset state for this transcription
-        self._transcripts = {}
-        self._error = None
-        self._turn_done = threading.Event()
+        client.on(StreamingEvents.Turn, on_turn)
+        client.on(StreamingEvents.Error, on_error)
+        client.on(StreamingEvents.Termination, on_terminated)
+        client.connect(
+            StreamingParameters(
+                sample_rate=16000,
+                format_turns=True,
+                speech_model=SpeechModel.universal_streaming_english,
+            )
+        )
 
         start_time = time.time()
 
-        # Stream audio in chunks
         chunk_size = 3200  # 100ms of 16kHz 16-bit audio
         for i in range(0, len(pcm_data), chunk_size):
-            self._client.stream(pcm_data[i : i + chunk_size])
+            client.stream(pcm_data[i : i + chunk_size])
             time.sleep(0.02)
 
-        # End session and wait for final transcript
-        self._client.disconnect(terminate=True)
-        self._turn_done.wait(timeout=30)
-
-        # Must reconnect for next sample
-        self._client = None
+        client.disconnect(terminate=True)
+        turn_done.wait(timeout=30)
 
         elapsed = time.time() - start_time
 
-        if self._error:
-            raise RuntimeError(f"Streaming error: {self._error}")
+        if error_box[0] is not None:
+            err = error_box[0]
+            code = getattr(err, "code", None)
+            msg = str(err) or "no message"
+            exc = RuntimeError(f"Streaming error (code={code}): {msg}")
+            exc.streaming_code = code  # type: ignore[attr-defined]
+            raise exc
 
-        full_transcript = " ".join(self._transcripts[k] for k in sorted(self._transcripts.keys()))
+        full_transcript = " ".join(transcripts[k] for k in sorted(transcripts.keys()))
         return full_transcript, elapsed
-
-    def close(self):
-        """Close the streaming connection."""
-        if self._client:
-            self._client.disconnect(terminate=True)
-            self._client = None
-
-    def __del__(self):
-        self.close()
 
 
 class DeepgramEvaluator(Evaluator):

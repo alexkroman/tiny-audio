@@ -131,6 +131,21 @@ class DatasetLoader:
             trust_remote_code=True,
         )
 
+        # CommonVoice strict-validated filter: Mozilla's `train` split is
+        # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
+        # but still admits clips with non-zero down_votes. Filtering to
+        # down_votes == 0 cuts the small tail of community-flagged
+        # audio/transcript mismatches. Applied to all CV splits (train +
+        # eval) for consistency with the TEDLIUM marker-filter pattern
+        # below. Guarded on column presence in case a future mirror strips
+        # the voting metadata.
+        if "common_voice" in dataset_path.lower() and "down_votes" in ds.column_names:
+            ds = ds.filter(
+                lambda dv: dv == 0,
+                num_proc=self.num_proc,
+                input_columns="down_votes",
+            )
+
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
             "audio": dataset_cfg.get("audio_column", "audio"),
@@ -269,11 +284,15 @@ class DataCollator:
     # training the model to transcribe content it never sees. Drop those rows.
     # EdAcc and Earnings22 both ship a small fraction of >30s clips.
     _MAX_AUDIO_SECONDS = 30.0
-    # Sub-100ms clips can't contain meaningful speech (single phonemes alone
-    # run 50-150ms) and break some downstream augmentations (e.g.
-    # Mp3Compression's fast-mp3-augment backend rejects <100ms input).
-    # Observed in a small fraction of segment-level corpora; safe to drop.
-    _MIN_AUDIO_SECONDS = 0.1
+    # Sub-0.8s clips are dominated by boundary-cut segments and isolated
+    # backchannels ("yeah", "ok", "umhum") where the audio span and the
+    # reference transcript don't actually line up — eval-side analysis on
+    # Peoples / CV / Switchboard / AMI showed these as the bulk of >=50%
+    # WER samples, with model output reflecting adjacent content rather
+    # than the labeled token. Sub-100ms clips also break augmentations
+    # (Mp3Compression's fast-mp3-augment backend rejects <100ms input);
+    # raising the floor to 0.8s subsumes that constraint.
+    _MIN_AUDIO_SECONDS = 0.8
 
     def _extract_audio_arrays(self, features):
         audio_arrays = []
