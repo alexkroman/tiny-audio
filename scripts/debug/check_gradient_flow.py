@@ -493,7 +493,7 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
 
     # New: projector linear_1 starvation check (relies on [4b])
     if sub_norms:
-        max_sub = max(sub_norms.values()) if sub_norms else 0.0
+        max_sub = max(sub_norms.values())
         linear_1_norm = sub_norms.get("linear_1.weight", 0.0)
         if max_sub > 0 and linear_1_norm < 0.01 * max_sub:
             warnings.append(
