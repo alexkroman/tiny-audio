@@ -472,7 +472,7 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     print("[10] Effective per-step update estimate (lr × ||grad||, SGD-style approximation):")
     print(f"    projector contribution: {eff['projector']:.2e}")
     print(f"    decoder   contribution: {eff['decoder']:.2e}")
-    ratio_str = f"{eff['ratio']:.3f}" if eff["ratio"] != float("inf") else "inf (decoder=0)"
+    ratio_str = "inf (decoder=0)" if math.isinf(eff["ratio"]) else f"{eff['ratio']:.3f}"
     print(f"    ratio (projector / decoder): {ratio_str}")
     print("    note: Adam's per-parameter normalization will modify these; this is a")
     print("          sanity check on the LR split, not a literal step magnitude.")
