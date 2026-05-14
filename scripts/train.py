@@ -12,7 +12,9 @@ import logging
 import os
 import random
 import re
+import subprocess
 from dataclasses import fields
+from pathlib import Path
 from typing import Any
 
 os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
@@ -618,6 +620,28 @@ def get_valid_training_args(config: dict) -> dict:
     return {k: v for k, v in config.items() if k in valid_fields}
 
 
+def _git_state() -> tuple[str | None, bool]:
+    """Return (commit_sha, is_dirty) for the repo containing this script.
+
+    Returns (None, False) if git is unavailable or this isn't a checkout
+    (e.g. shipped wheel, pip install). Run from the script's directory so
+    Hydra's cwd change doesn't push us outside the repo.
+    """
+    cwd = Path(__file__).resolve().parent
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, stderr=subprocess.DEVNULL, text=True
+        ).strip()
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=cwd, stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        )
+        return sha, dirty
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None, False
+
+
 TRAINING_MODEL_PARAMS = [
     "attn_implementation",
     "use_lora",
@@ -640,10 +664,23 @@ def main(cfg: DictConfig) -> None:
         )
 
     if cfg.training.get("report_to") == "wandb":
+        wandb_config = OmegaConf.to_container(cfg, resolve=True)
+        assert isinstance(wandb_config, dict)
+        git_commit, git_dirty = _git_state()
+        if git_commit:
+            # Surface the commit in the run config so it's queryable/filterable
+            # in the wandb UI alongside the run's hyperparameters. Wandb does
+            # capture git metadata on its own, but it lives in a separate panel
+            # and can't be used to group/filter runs.
+            wandb_config["git_commit"] = git_commit
+            wandb_config["git_dirty"] = git_dirty
         wandb.init(
             project=cfg.training.get("wandb_project", "tiny-audio"),
-            config=OmegaConf.to_container(cfg, resolve=True),
+            config=wandb_config,
         )
+        if git_commit:
+            wandb.run.summary["git_commit"] = git_commit
+            wandb.run.summary["git_dirty"] = git_dirty
 
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_config_dict, dict), "model config must be a dict"
