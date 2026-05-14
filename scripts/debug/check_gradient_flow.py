@@ -24,12 +24,107 @@ from __future__ import annotations
 import argparse
 import math
 from collections import defaultdict
+from pathlib import Path
 
 import torch
+import yaml
 
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.projectors import MLPAudioProjector
+
+
+def load_embedded_training_knobs() -> dict[str, float | None]:
+    """Read training LR/WD knobs from configs/experiments/embedded.yaml.
+
+    Returns a dict with keys: learning_rate, decoder_learning_rate,
+    weight_decay, projector_weight_decay. Missing keys map to None;
+    the caller falls back to printing actuals without the mismatch check.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    yaml_path = repo_root / "configs" / "experiments" / "embedded.yaml"
+    if not yaml_path.exists():
+        return {
+            "learning_rate": None,
+            "decoder_learning_rate": None,
+            "weight_decay": None,
+            "projector_weight_decay": None,
+        }
+    with yaml_path.open() as f:
+        cfg = yaml.safe_load(f) or {}
+    training = cfg.get("training") or {}
+
+    def _to_float(v):
+        return float(v) if v is not None else None
+
+    return {
+        "learning_rate": _to_float(training.get("learning_rate")),
+        "decoder_learning_rate": _to_float(training.get("decoder_learning_rate")),
+        "weight_decay": _to_float(training.get("weight_decay")),
+        "projector_weight_decay": _to_float(training.get("projector_weight_decay")),
+    }
+
+
+def build_param_groups(
+    model: ASRModel,
+    knobs: dict[str, float | None],
+) -> list[dict]:
+    """Mirror scripts/train.py ASRTrainer.create_optimizer's four-group split.
+
+    Groups: (is_decoder, decay) for is_decoder in {False, True} and
+    decay in {True, False}. is_decoder = name.startswith("language_model.").
+    decay = name in get_parameter_names(model, ALL_LAYERNORM_LAYERS) and
+    "bias" not in name. Each group dict also carries `param_names` for the
+    routing audit and the configured `lr` / `wd` that ASRTrainer would
+    apply under embedded.yaml's knobs.
+    """
+    from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+    from transformers.trainer_pt_utils import get_parameter_names
+
+    decay_set = set(get_parameter_names(model, ALL_LAYERNORM_LAYERS))
+    decay_set = {n for n in decay_set if "bias" not in n}
+
+    base_lr = knobs["learning_rate"]
+    base_wd = knobs["weight_decay"]
+    dec_lr = (
+        knobs["decoder_learning_rate"] if knobs["decoder_learning_rate"] is not None else base_lr
+    )
+    dec_wd = base_wd  # ASRTrainer falls back to args.weight_decay when no decoder override
+    proj_wd = (
+        knobs["projector_weight_decay"] if knobs["projector_weight_decay"] is not None else base_wd
+    )
+
+    buckets: dict[tuple[bool, bool], list[tuple[str, torch.nn.Parameter]]] = {
+        (False, True): [],
+        (False, False): [],
+        (True, True): [],
+        (True, False): [],
+    }
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        key = (name.startswith("language_model."), name in decay_set)
+        buckets[key].append((name, param))
+
+    labels = {
+        (False, True): ("projector / decay", base_lr, proj_wd),
+        (False, False): ("projector / no-decay", base_lr, 0.0),
+        (True, True): ("decoder   / decay", dec_lr, dec_wd),
+        (True, False): ("decoder   / no-decay", dec_lr, 0.0),
+    }
+    groups: list[dict] = []
+    for key, items in buckets.items():
+        label, lr, wd = labels[key]
+        groups.append(
+            {
+                "label": label,
+                "params": [p for _, p in items],
+                "param_names": [n for n, _ in items],
+                "lr": lr,
+                "wd": wd,
+            }
+        )
+    return groups
 
 
 def build_model(dtype: torch.dtype, device: str, model_id: str | None = None) -> ASRModel:
@@ -303,6 +398,48 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     if bad == 0:
         print("    all grads finite")
     print()
+
+    print("[9] Optimizer param-group routing (mirrors scripts/train.py ASRTrainer):")
+    knobs = load_embedded_training_knobs()
+    groups = build_param_groups(model, knobs)
+    print(
+        f"    {'group':22s} {'params':>6s} {'numel':>14s}  {'||grad||':>12s}  {'lr':>8s}  {'wd':>6s}"
+    )
+    total_routed = 0
+    for g in groups:
+        numel = sum(p.numel() for p in g["params"])
+        gn = grad_norm(g["params"])
+        lr_str = f"{g['lr']:.1e}" if g["lr"] is not None else "?"
+        wd_str = f"{g['wd']}" if g["wd"] is not None else "?"
+        print(
+            f"    {g['label']:22s} {len(g['params']):>6d} {numel:>14,d}  "
+            f"{gn:>12.2e}  {lr_str:>8s}  {wd_str:>6s}"
+        )
+        total_routed += len(g["params"])
+
+    expected_trainable = sum(1 for p in model.parameters() if p.requires_grad)
+    print(
+        f"    coverage: {total_routed} trainable params placed in {expected_trainable} group slots "
+        f"({'no orphans' if total_routed == expected_trainable else 'ORPHANS PRESENT'})"
+    )
+
+    encoder_in_groups = 0
+    encoder_param_ptrs = {p.data_ptr() for p in model.audio_tower.parameters()}
+    for g in groups:
+        for p in g["params"]:
+            if p.data_ptr() in encoder_param_ptrs:
+                encoder_in_groups += 1
+    if encoder_in_groups:
+        print(f"    !! encoder params in optimizer groups: {encoder_in_groups} (should be 0)")
+    print()
+
+    # Stash for the verdict in [11] to consult without re-running build_param_groups.
+    report._last_routing_audit = {
+        "total_routed": total_routed,
+        "expected_trainable": expected_trainable,
+        "encoder_in_groups": encoder_in_groups,
+        "knobs": knobs,
+    }
 
     print("[8] Verdict:")
     issues = []
