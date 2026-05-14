@@ -13,22 +13,19 @@ model:
   projector_type: mlp
   projector_pool_stride: 4
   projector_hidden_dim: 2048
+  # 0.1 matches Granite-Speech 4.1's Q-Former hidden_dropout_prob=0.1 —
+  # the only published frozen-encoder speech-LLM config with explicit
+  # projector dropout values. Stage 2 of Granite's pipeline (frozen
+  # encoder + Q-Former projector + LLM LoRA) is the closest direct
+  # precedent for our setup. With waveform aug disabled, this is the
+  # primary remaining regularizer for the projector.
+  projector_dropout: 0.1
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
   text_model_id: Qwen/Qwen3-0.6B
   # Load projector + decoder weights from the published checkpoint and continue
   # training from there. ASRModel.from_pretrained overlays both via load_state_dict.
   # pretrained_model_path: mazesmazes/tiny-audio-embedded-next
-  # Encoder-output time masking — SpecAugment-equivalent regularizer for
-  # frozen-encoder projector training. Mel-side SpecAugment (the standard
-  # NeMo/OWSM 2025 SOTA at F=2, T=10, Tw=0.05) can't be used here because
-  # it'd push the frozen Whisper encoder OOD; masking the encoder OUTPUT
-  # before the projector is the equivalent regularizer applied at the
-  # right layer for our setup. 5 masks of up to 4% of the encoder output
-  # time positions each → up to ~20% time positions masked per sample
-  # (avg ~12-15% with overlap), matching the NeMo time-mask budget.
-  encoder_output_time_mask_num: 5
-  encoder_output_time_mask_max_width_ratio: 0.04
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-next"
@@ -58,7 +55,7 @@ training:
   # 500 steps complements the lower peak LR: warmup alone doesn't fix a
   # too-high peak, and a lower peak still benefits from a gradual ramp
   # so fresh Adam moments settle before steady-state.
-  warmup_steps: 3000
+  warmup_steps: 2000
   # constant_with_warmup (vs the prior cosine): cosine is designed for
   # from-scratch training where the model needs high LR while actively
   # learning then gradual decay to settle into a minimum. Stage 2 starts

@@ -75,20 +75,27 @@ length_column_name: duration
 # audio. SOTA recipe used by NeMo / Canary / Parakeet. Run
 # `ta dev download-rirs` to fetch OpenSLR-28 to ~/.cache/openslr-28.
 rir_augmentation:
-  enabled: true
+  # Disabled — running zero-waveform-aug baseline to match the published
+  # frozen-encoder speech-LLM regime. SLAM-ASR (arXiv 2402.08846) trains
+  # "without any data augmentation or splicing", and no other 2024-2026
+  # frozen-encoder speech-LLM paper publishes a waveform aug recipe.
+  # Re-enable by flipping this flag; all per-aug probabilities below are
+  # preserved as a known-working starting point if we want to layer aug
+  # back in.
+  enabled: false
   # OpenSLR-28's real recorded RIRs. pointsource_noises is intentionally
   # excluded — those are noise clips, not impulse responses. simulated_rirs
   # is also excluded — only real RIRs are used.
   corpus_path:
     - ~/.cache/openslr-28/real_rirs_isotropic_noises
-  # Dropped 0.5 → 0.3 as part of the E22 / Peoples / GS tilt: heavy RIR
-  # primarily helps AMI-SDM (far-field meeting) and to a lesser extent
-  # Switchboard, neither of which is a target eval anymore. 0.3 still
-  # provides enough room-acoustics exposure to route SPGI's clean
-  # finance audio toward E22's conference-room distribution (which is
-  # the SPGI→E22 transfer lever we're keeping), while shrinking the
-  # encoder-feature smear that was costing on clean-source corpora.
-  prob: 0.3
+  # Trajectory: 0.5 (heavy AMI/SW protection) → 0.3 (E22/GS/Peoples
+  # tilt) → 0.2 here as part of the broader aug-density reduction. RIR
+  # primarily helped AMI-SDM (far-field meeting) and Switchboard, both
+  # de-emphasized in the current mix; 0.2 keeps enough room-acoustics
+  # exposure to route SPGI's clean finance audio toward E22's
+  # conference-room distribution without dominating the encoder-feature
+  # distribution.
+  prob: 0.2
 
 # Noise augmentation — pitch shift (source-side) + MUSAN ambient + MUSAN
 # babble + always-on Gaussian sensor floor + EQ + clipping + OneOf{LPF,
@@ -97,21 +104,25 @@ rir_augmentation:
 # stages with independent SNR ranges and probabilities. Pitch shift runs
 # first so the rest of the chain layers onto the pitch-shifted signal.
 noise_augmentation:
-  enabled: true
-  # Time stretch — pitch-preserving speed perturbation. Canonical
-  # Kaldi/ESPnet ASR aug that was previously absent from the stack.
-  # Proxies speaking-rate diversity: Peoples (variable archive speakers
-  # at different paces), CV (L2 accented speakers with non-native
-  # rhythm), and E22 (Q&A spontaneity vs prepared remarks). 0.95-1.05x
-  # stays well inside Whisper's natural speaking-rate distribution so
-  # the frozen encoder absorbs it without feature drift. p=0.10 keeps
-  # joint-firing with other source-side / capture augs in the low-
-  # single-digit range. leave_length_unchanged=True (hard-coded in the
-  # Python wrapper) pads or trims to match input length — at slowdown
-  # the tail trim drops a small fraction of speech, at speedup the
-  # zero-pad shows up as trailing silence; both are tolerable for
-  # frozen-encoder projector training.
-  time_stretch_prob: 0.10
+  # Disabled — running zero-waveform-aug baseline to match the published
+  # frozen-encoder speech-LLM regime (SLAM-ASR, SALMONN, WavLLM, BLSP,
+  # LLaMA-Omni, Audio-Flamingo, DeSTA, Voxtral, Phi-4-Multimodal, U-SAM
+  # — none publish a waveform aug recipe; SLAM-ASR explicitly trains
+  # without aug). Frozen Whisper provides substantial pretrained noise
+  # robustness; the projector + decoder fine-tune learns the encoder→LLM
+  # mapping without needing additional waveform-level perturbation.
+  # Re-enable by flipping this flag; all per-aug probabilities below are
+  # preserved as a known-working starting point if we want to layer aug
+  # back in.
+  enabled: false
+  # Time stretch — pitch-preserving speed perturbation. Speaking-rate
+  # diversity proxy for Peoples archive speakers, CV L2 accents, and
+  # E22 Q&A spontaneity. 0.95-1.05x stays well inside Whisper's natural
+  # speaking-rate distribution so the frozen encoder absorbs it without
+  # feature drift. Dropped 0.10 → 0.05 as part of the aug-density
+  # reduction — pitch_shift below provides a complementary speaker-
+  # variation signal, so single-digit prob on the rate axis is enough.
+  time_stretch_prob: 0.05
   time_stretch_min_rate: 0.95
   time_stretch_max_rate: 1.05
   # Pitch shift — speaker-variation proxy, applied after time stretch.
@@ -130,14 +141,13 @@ noise_augmentation:
   # multi-talker scenes.
   corpus_path:
     - ~/.cache/musan/musan/noise
-  # Trajectory: 0.6 → 0.45 (when babble added) → 0.35 (when LS-clean /
-  # Tedlium clean-source gaps surfaced) → 0.25 here, as part of the
-  # E22 / Peoples / GS tilt. The previous wins this aug was protecting
-  # (Switchboard -5.02 and AMI-SDM -3.91 leads) are no longer target
-  # evals, so the noise-robustness footprint can shrink further to free
-  # clean-feature capacity for the corpora where the gaps live. ~12-15%
-  # fully-clean tail (no MUSAN AND no LPF AND no BPF) is preserved.
-  prob: 0.25
+  # Trajectory: 0.6 → 0.45 → 0.35 → 0.25 → 0.15 here, as part of the
+  # aug-density reduction. The wins this aug protected (Switchboard
+  # -5.02 and AMI-SDM -3.91 leads) are no longer target evals, and
+  # stationary ambient noise was the heaviest single contributor to the
+  # encoder-feature smear on clean-source corpora. ~25% fully-clean
+  # tail (no aug fired) preserved at the new setting.
+  prob: 0.15
   # SNR floor raised 8 → 10 dB as part of the same tilt. Below 10 dB,
   # frozen Whisper produces encoder features near the edge of its
   # training distribution — fine for noise-robustness wins on
@@ -196,33 +206,32 @@ noise_augmentation:
   # Set short_noises_corpus_path: null to disable.
   short_noises_corpus_path:
     - ~/.cache/fsd50k/FSD50K.eval_audio
-  # Dropped 0.5 → 0.2 as part of the E22 / Peoples / GS tilt. The favored
-  # target evals (E22 prepared earnings calls, GS curated podcast /
-  # audiobook slice, SPGI studio, LibriHeavy audiobook, CV controlled-
-  # recording) are relatively clean of sporadic transient events; Peoples
-  # dirty source has natural events and doesn't need synthetic ones piled
-  # on. p=0.5 was tuned when AMI-SDM and in-the-wild robustness were
-  # targets — those wins are no longer being protected, so half of training
-  # clips getting random barks / clicks / doors / paper rustle is more
-  # feature-distribution smear than the target evals can use. p=0.2 keeps
-  # some transient exposure for the small Peoples-dirty / AMI-IHM slices
-  # without flooding the encoder feature distribution.
-  short_noises_prob: 0.2
+  # Trajectory: 0.5 (when AMI-SDM was a target) → 0.2 → 0.1 here, as
+  # part of the aug-density reduction. The favored target evals (E22
+  # prepared earnings calls, GS curated podcast / audiobook slice, SPGI
+  # studio, LibriHeavy audiobook, CV controlled-recording) are
+  # relatively clean of sporadic transient events; Peoples dirty source
+  # and AMI-IHM have natural events without needing synthetic ones piled
+  # on. 0.1 keeps a small slice of transient exposure for those corpora.
+  short_noises_prob: 0.1
   # High-pass filter — mic-bus stage roll-off. Every podcast / broadcast
   # capture chain applies a low-cut (typically 60-120 Hz) to remove
-  # rumble, A/C noise, and mic-handling thumps before EQ. The stack has
-  # LPF (consumer-device cutoff at the listener end); HPF completes the
-  # picture at the capture end. In-distribution for the GS podcast
-  # slice and most E22 conference-mic recordings. p=0.15 — common
-  # enough in target evals that we want substantial exposure.
-  high_pass_prob: 0.15
+  # rumble, A/C noise, and mic-handling thumps before EQ. Dropped 0.15
+  # → 0.10 as part of the aug-density reduction. Still in-distribution
+  # for GS podcast and E22 conference-mic recordings.
+  high_pass_prob: 0.10
   high_pass_min_cutoff: 60.0
   high_pass_max_cutoff: 120.0
   # Seven-band parametric EQ — simulates mic / preamp coloration. ±4 dB
   # (vs library default ±12) is tuned for projector training: Whisper has
   # already seen wide EQ variation in pretraining and aggressive EQ pushes
-  # features OOD. For training the encoder from scratch, push to ±6-8 dB.
-  eq_prob: 0.5
+  # features OOD. Dropped 0.5 → 0.3 as part of the aug-density
+  # reduction; EQ was the single biggest contributor to per-sample
+  # stacking density at p=0.5 (joint-fired with Gain on 25% of samples),
+  # so this is the largest individual lever for shrinking the stacking
+  # distribution. ±4 dB range unchanged — the range is what stays in-
+  # distribution, prob is what controls exposure rate.
+  eq_prob: 0.3
   eq_min_db: -4.0
   eq_max_db: 4.0
   # Tanh soft saturation — analog preamp / front-end overdrive. Smooth,
@@ -249,11 +258,10 @@ noise_augmentation:
   # independently. Previously a OneOf at 0.3 (~0.15 LPF / ~0.15 BPF
   # mutually exclusive); split so LPF and BPF can be tuned separately.
   #
-  # LPF bumped 0.15 → 0.25: consumer-device cutoff is in-distribution
-  # for Peoples dirty source, GS YouTube, and E22 conference-mic audio
-  # — exactly the corpora whose gaps we're targeting. Slightly more
-  # exposure helps device-diversity coverage without the encoder-OOD
-  # cost that the SNR-floor drops were guarding against.
+  # LPF trajectory: 0.15 → 0.25 (E22/GS/Peoples tilt) → 0.15 here as
+  # part of the aug-density reduction. Consumer-device cutoff is still
+  # in-distribution for those corpora; 0.15 just lowers the exposure
+  # rate alongside the other aug cuts.
   #
   # BPF dropped 0.15 → 0.03: telephony passband is essentially a
   # Switchboard-specific aug; E22 / Peoples / GS / CV / LibriHeavy /
@@ -264,7 +272,7 @@ noise_augmentation:
   # Joint LPF+BPF fire rate is 0.25 * 0.03 = 0.75% — well below the
   # ~2.25% level the prior OneOf was guarding against, so the
   # incoherent-stack concern is negligible.
-  lowpass_prob: 0.25
+  lowpass_prob: 0.15
   lowpass_min_cutoff: 3000.0
   lowpass_max_cutoff: 7500.0
   bandpass_prob: 0.03
@@ -276,24 +284,20 @@ noise_augmentation:
   # and simulates ADC / input-level variability. Whisper normalizes mels
   # per-clip but not perfectly across very different input levels, so
   # this actually moves encoder features (unlike speed perturbation,
-  # which a frozen encoder largely absorbs). ±6 dB is the canonical
-  # range; targets Earnings22's variable-level conference audio.
-  gain_prob: 0.5
+  # which a frozen encoder largely absorbs). ±6 dB range unchanged.
+  # Dropped 0.5 → 0.3 as part of the aug-density reduction — Gain was
+  # the other p=0.5 aug driving the stacking distribution, so cutting
+  # alongside EQ is what re-opens the clean tail of training samples.
+  gain_prob: 0.3
   gain_min_db: -6.0
   gain_max_db: 6.0
-  # MP3 round-trip — bumped 0.10 → 0.25 and min_bitrate 96 → 64 kbps
-  # as part of the E22 / Peoples / GS tilt. Lossy codec is in-distribution
-  # for the favored corpora (GS YouTube slice is natively MP3/AAC,
-  # Peoples dirty source is heavily lossy) and the prior worry — codec
-  # stacking on bandlimit producing systematic regressions — no longer
-  # applies because BPF is at 0.03 (joint MP3+BPF firing rate is
-  # 0.25 * 0.03 = 0.75%, vs the 6% in the failed earlier experiment) and
-  # because Switchboard / AMI-SDM are no longer wins we're protecting.
-  # 64 kbps lower bound matches realistic streaming / YouTube encoding
-  # quality. If clean-source corpora (LibriHeavy / CV) regress > ~0.5
-  # WER on the next eval, walk back to mp3_min_bitrate=96 first before
-  # touching prob — bitrate is the more aggressive lever.
-  mp3_prob: 0.25
+  # MP3 round-trip — trajectory: 0.10 → 0.25 (E22/GS/Peoples tilt) →
+  # 0.15 here as part of the aug-density reduction. min_bitrate 64
+  # kept (matches realistic YouTube / streaming encoding quality);
+  # only the exposure rate drops. Joint MP3+BPF firing rate is still
+  # negligible (0.15 × 0.03 = 0.45%) so the historical codec+bandlimit
+  # stacking concern remains controlled.
+  mp3_prob: 0.15
   mp3_min_bitrate: 64
   mp3_max_bitrate: 128
 
@@ -301,9 +305,10 @@ noise_augmentation:
 # clip + empty target. Teaches the model "no speech → emit nothing" — a
 # documented failure mode for Whisper-based and SALMONN-based speech LLMs
 # (backchanneling "yeah" / "huh" / "i" on AMI silence segments).
-# Speech-LLM-recipe modal range is 0.03-0.10. Requires
-# noise_augmentation.enabled (the corpus is the noise-only source).
-silence_injection_prob: 0.05
+# Disabled alongside noise_augmentation.enabled=false (which is the
+# noise-only corpus source — silence_injection can't fire without it).
+# Re-enable to 0.03-0.10 if/when noise_augmentation is re-enabled.
+silence_injection_prob: 0.0
 
 # Misc
 disable_tqdm: false

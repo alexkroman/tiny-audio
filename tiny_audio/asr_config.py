@@ -50,6 +50,13 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_pool_stride: int = 4,
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
+        # Projector dropout — applied between activation and the second
+        # linear in MLPAudioProjector. Matches Granite-Speech 4.1's
+        # Q-Former dropout (hidden_dropout_prob=0.1) used in its frozen-
+        # encoder + LoRA-LLM training stage. Default 0.0 for backward
+        # compatibility with existing checkpoints; experiment configs
+        # opt in to 0.1.
+        projector_dropout: float = 0.0,
         projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
         # MoE-specific configuration
         num_experts: int = 4,  # Number of experts in MoE projectors
@@ -69,17 +76,6 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,  # Default: all linear layers
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
-        # Encoder-output time masking — SpecAugment-style time masking applied
-        # AFTER the frozen encoder, BEFORE the projector. The actual SOTA-
-        # equivalent regularizer for frozen-encoder projector training: mel-
-        # side SpecAugment (the NeMo / OWSM default at ~F=2,T=10 for trainable
-        # encoders) would push a frozen Whisper encoder OOD, so we instead
-        # mask the encoder's output features and let the projector learn to
-        # reconstruct missing time positions. Disabled by default (0 / 0.0);
-        # canonical setting is num=5 masks of max_width_ratio=0.04 (up to
-        # ~20% of encoder output time positions masked per sample).
-        encoder_output_time_mask_num: int = 0,
-        encoder_output_time_mask_max_width_ratio: float = 0.0,
         do_sample: bool = False,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -127,6 +123,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_pool_stride = projector_pool_stride
         self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
+        self.projector_dropout = projector_dropout
         self.projector_type = projector_type
         # MoE-specific configuration
         self.num_experts = num_experts
@@ -154,8 +151,6 @@ class ASRConfig(transformers.PretrainedConfig):
         ]
         self.freeze_projector = freeze_projector
         self.freeze_language_model = freeze_language_model
-        self.encoder_output_time_mask_num = encoder_output_time_mask_num
-        self.encoder_output_time_mask_max_width_ratio = encoder_output_time_mask_max_width_ratio
 
         explicit_generation_args = {
             "num_beams": num_beams,

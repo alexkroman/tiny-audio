@@ -76,6 +76,42 @@ class TestMLPAudioProjector:
             expected_len = projector.get_output_length(seq_len)
             assert out.shape[1] == expected_len
 
+    def test_dropout_disabled_by_default(self, projector):
+        """projector_dropout defaults to 0.0 (no-op) — output deterministic."""
+        projector.train(False)
+        x = torch.randn(2, 16, 256)
+        out_a = projector(x)
+        out_b = projector(x)
+        torch.testing.assert_close(out_a, out_b)
+        assert projector.dropout.p == 0.0
+
+    def test_dropout_enabled_perturbs_training_output(self):
+        """When projector_dropout>0, training-mode outputs are non-deterministic."""
+        cfg = MockProjectorConfig(
+            encoder_dim=256, llm_dim=512, projector_pool_stride=4, projector_dropout=0.5
+        )
+        proj = MLPAudioProjector(cfg)
+        proj.train(True)
+        torch.manual_seed(0)
+        x = torch.randn(2, 16, 256)
+        out_a = proj(x)
+        out_b = proj(x)
+        # Two passes with dropout active should differ.
+        assert not torch.allclose(out_a, out_b)
+        assert proj.dropout.p == 0.5
+
+    def test_dropout_inactive_outside_training(self):
+        """Even with projector_dropout>0, training=False disables dropout."""
+        cfg = MockProjectorConfig(
+            encoder_dim=256, llm_dim=512, projector_pool_stride=4, projector_dropout=0.5
+        )
+        proj = MLPAudioProjector(cfg)
+        proj.train(False)
+        x = torch.randn(2, 16, 256)
+        out_a = proj(x)
+        out_b = proj(x)
+        torch.testing.assert_close(out_a, out_b)
+
 
 # =============================================================================
 # MOSA Projector Tests

@@ -55,6 +55,12 @@ class MLPAudioProjector(nn.Module):
         self.norm = LlamaRMSNorm(hidden_dim, eps=1e-6)
         self.norm.weight.data.fill_(self._NORM_INIT)
         self.act = nn.GELU()
+        # Dropout matches Granite-Speech 4.1's Q-Former hidden_dropout_prob=0.1
+        # in its frozen-encoder modality-alignment stage — the closest
+        # published precedent for our regime. Default 0.0 in config means
+        # nn.Dropout(0.0) is a no-op for existing experiments.
+        projector_dropout = float(getattr(config, "projector_dropout", 0.0))
+        self.dropout = nn.Dropout(projector_dropout)
         self.linear_2 = nn.Linear(hidden_dim, llm_dim, bias=False)
         # Output norm aligns the projector's RMS with the LM's embed_tokens
         # distribution. See _NORM_INIT comment above for the magnitude
@@ -80,6 +86,7 @@ class MLPAudioProjector(nn.Module):
         x = self.linear_1(x)
         x = self.norm(x)
         x = self.act(x)
+        x = self.dropout(x)
         x = self.linear_2(x)
         return self.norm_2(x)
 

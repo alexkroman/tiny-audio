@@ -211,6 +211,7 @@ class MockProjectorConfig:
         self.llm_dim = kwargs.get("llm_dim", 512)
         self.projector_hidden_dim = kwargs.get("projector_hidden_dim", 1024)
         self.projector_pool_stride = kwargs.get("projector_pool_stride", 4)
+        self.projector_dropout = kwargs.get("projector_dropout", 0.0)
 
         # MoE settings
         self.num_experts = kwargs.get("num_experts", 4)
