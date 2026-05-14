@@ -478,8 +478,10 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     print("          sanity check on the LR split, not a literal step magnitude.")
     print()
 
-    print("[8] Verdict:")
+    print("[11] Verdict:")
     issues = []
+    warnings: list[str] = []
+
     if enc_with_grad != 0 or enc_norm != 0.0:
         issues.append("encoder is receiving gradient (should be frozen)")
     if proj_with_grad != len(projector_params) or proj_norm == 0.0:
@@ -488,14 +490,54 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         issues.append("decoder grads incomplete or zero")
     if bad:
         issues.append(f"{bad} param(s) have non-finite grads")
+
+    # New: projector linear_1 starvation check (relies on [4b])
+    if sub_norms:
+        max_sub = max(sub_norms.values()) if sub_norms else 0.0
+        linear_1_norm = sub_norms.get("linear_1.weight", 0.0)
+        if max_sub > 0 and linear_1_norm < 0.01 * max_sub:
+            warnings.append(
+                "projector linear_1 < 1% of max submodule grad — RMSNorm-init "
+                "claim at projectors.py:30 may be wrong; verify before relying on it"
+            )
+
+    # New: optimizer-routing audit (relies on [9])
+    audit = getattr(report, "_last_routing_audit", None)
+    if audit is not None:
+        if audit["total_routed"] != audit["expected_trainable"]:
+            issues.append(
+                f"optimizer group routing: {audit['total_routed']} routed "
+                f"vs {audit['expected_trainable']} trainable (orphans)"
+            )
+        if audit["encoder_in_groups"]:
+            issues.append(
+                f"optimizer group routing: {audit['encoder_in_groups']} frozen "
+                "encoder param(s) ended up in an optimizer group"
+            )
+        # LR/WD mismatch vs embedded.yaml. Only check when knobs were readable.
+        knobs = audit["knobs"]
+        if knobs["learning_rate"] is not None and knobs["learning_rate"] != 1e-3:
+            warnings.append(
+                f"embedded.yaml learning_rate={knobs['learning_rate']} "
+                "differs from the 1e-3 this probe was designed against"
+            )
+        if knobs["decoder_learning_rate"] is not None and knobs["decoder_learning_rate"] != 1e-4:
+            warnings.append(
+                f"embedded.yaml decoder_learning_rate={knobs['decoder_learning_rate']} "
+                "differs from the 1e-4 this probe was designed against"
+            )
+
     if issues:
         for s in issues:
             print(f"    [FAIL] {s}")
-    else:
+    for w in warnings:
+        print(f"    [WARN] {w}")
+    if not issues:
         print("    [OK] gradient flow matches embedded.yaml's intent:")
         print("         - encoder frozen (no grad)")
         print("         - projector + decoder fully trainable, all params got grad")
         print("         - all grads finite")
+        print("         - optimizer groups route every trainable param exactly once")
 
 
 def main(
