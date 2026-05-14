@@ -127,6 +127,33 @@ def build_param_groups(
     return groups
 
 
+def effective_update_norms(groups: list[dict]) -> dict[str, float]:
+    """SGD-style lr × ||grad|| approximation aggregated to projector/decoder.
+
+    NOT Adam's true update: Adam normalizes per-parameter by sqrt(v) + eps,
+    which we don't have at step 0. This is a back-of-envelope sanity check
+    on whether the LR split is producing roughly the per-step motion ratio
+    it was tuned for.
+    """
+    proj_total = 0.0
+    dec_total = 0.0
+    for g in groups:
+        if g["lr"] is None or not g["params"]:
+            continue
+        gn = grad_norm(g["params"])
+        contribution = g["lr"] * gn
+        if g["label"].startswith("projector"):
+            proj_total += contribution
+        else:
+            dec_total += contribution
+    ratio = (proj_total / dec_total) if dec_total > 0 else float("inf")
+    return {
+        "projector": proj_total,
+        "decoder": dec_total,
+        "ratio": ratio,
+    }
+
+
 def build_model(dtype: torch.dtype, device: str, model_id: str | None = None) -> ASRModel:
     """Build the model used by configs/experiments/embedded.yaml.
 
@@ -440,6 +467,16 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         "encoder_in_groups": encoder_in_groups,
         "knobs": knobs,
     }
+
+    eff = effective_update_norms(groups)
+    print("[10] Effective per-step update estimate (lr × ||grad||, SGD-style approximation):")
+    print(f"    projector contribution: {eff['projector']:.2e}")
+    print(f"    decoder   contribution: {eff['decoder']:.2e}")
+    ratio_str = f"{eff['ratio']:.3f}" if eff["ratio"] != float("inf") else "inf (decoder=0)"
+    print(f"    ratio (projector / decoder): {ratio_str}")
+    print("    note: Adam's per-parameter normalization will modify these; this is a")
+    print("          sanity check on the LR split, not a literal step magnitude.")
+    print()
 
     print("[8] Verdict:")
     issues = []
