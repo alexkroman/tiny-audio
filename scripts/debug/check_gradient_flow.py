@@ -29,6 +29,7 @@ import torch
 
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
+from tiny_audio.projectors import MLPAudioProjector
 
 
 def build_model(dtype: torch.dtype, device: str, model_id: str | None = None) -> ASRModel:
@@ -162,8 +163,6 @@ def projector_submodule_norms(model: ASRModel) -> dict[str, float] | None:
     structures and would each need their own carve-up (out of scope per the
     design spec).
     """
-    from tiny_audio.projectors import MLPAudioProjector
-
     if not isinstance(model.projector, MLPAudioProjector):
         return None
 
@@ -240,7 +239,7 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         )
     else:
         print("[4b] Projector submodule gradient norms:")
-        max_norm = max(sub_norms.values()) if sub_norms else 0.0
+        max_norm = max(sub_norms.values())
         for name, n in sub_norms.items():
             ratio = (n / max_norm) if max_norm > 0 else 0.0
             print(f"    {name:18s} ||grad|| = {n:.6e}  ({ratio:5.2f}x of max)")
