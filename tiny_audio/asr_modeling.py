@@ -44,6 +44,41 @@ def _gather_audio_embeds(audio_embeds: torch.Tensor, token_counts: torch.Tensor)
     return audio_embeds[mask]
 
 
+def _time_mask_encoder_output(
+    hidden_states: torch.Tensor,
+    num_masks: int,
+    max_width_ratio: float,
+) -> torch.Tensor:
+    """SpecAugment-style time masking on encoder output features.
+
+    Zero-fills ``num_masks`` random contiguous time spans per sample. Each
+    span has width sampled uniformly from ``[0, max_width]`` where
+    ``max_width = max(1, int(time_len * max_width_ratio))``. Returns the
+    input unchanged when ``num_masks <= 0`` or ``max_width_ratio <= 0``.
+
+    Args:
+        hidden_states: ``(batch, time, dim)`` encoder output.
+        num_masks: Number of time-mask spans applied per sample.
+        max_width_ratio: Maximum mask width as a fraction of ``time``.
+    """
+    if num_masks <= 0 or max_width_ratio <= 0.0:
+        return hidden_states
+    batch, time_len, _ = hidden_states.shape
+    max_width = max(1, int(time_len * max_width_ratio))
+    device = hidden_states.device
+
+    widths = torch.randint(0, max_width + 1, (batch, num_masks), device=device)
+    max_starts = (time_len - widths).clamp(min=1)
+    starts = (torch.rand(batch, num_masks, device=device) * max_starts).long()
+
+    indices = torch.arange(time_len, device=device).view(1, 1, -1)
+    starts_e = starts.unsqueeze(-1)
+    ends_e = (starts + widths).unsqueeze(-1)
+    in_any_mask = ((indices >= starts_e) & (indices < ends_e)).any(dim=1)
+    keep = (~in_any_mask).to(dtype=hidden_states.dtype).unsqueeze(-1)
+    return hidden_states * keep
+
+
 class ASRModel(PreTrainedModel, GenerationMixin):
     """Audio-to-text model combining an audio encoder, projector, and language model."""
 
@@ -431,6 +466,26 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             self.config.encoder_conv_layers,
         )
 
+    def _apply_encoder_output_time_masking(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """SpecAugment-style time masking on encoder OUTPUT features.
+
+        For frozen-encoder projector training, mel-side SpecAugment would
+        push the encoder OOD (it was never trained with masked mels), so
+        we mask the encoder output instead. The projector learns to be
+        robust to missing encoder-output time positions. Disabled outside
+        training; otherwise delegates to ``_time_mask_encoder_output`` with
+        the config knobs.
+        """
+        if not self.training:
+            return hidden_states
+        return _time_mask_encoder_output(
+            hidden_states,
+            num_masks=int(getattr(self.config, "encoder_output_time_mask_num", 0)),
+            max_width_ratio=float(
+                getattr(self.config, "encoder_output_time_mask_max_width_ratio", 0.0)
+            ),
+        )
+
     def _encode_audio(
         self,
         audio_features: torch.Tensor,
@@ -449,6 +504,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
+        hidden_states = self._apply_encoder_output_time_masking(hidden_states)
         audio_embeds = self.projector(hidden_states)
 
         token_counts = expected_token_counts.to(device=audio_embeds.device, dtype=torch.long)

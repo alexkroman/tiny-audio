@@ -69,6 +69,17 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,  # Default: all linear layers
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
+        # Encoder-output time masking — SpecAugment-style time masking applied
+        # AFTER the frozen encoder, BEFORE the projector. The actual SOTA-
+        # equivalent regularizer for frozen-encoder projector training: mel-
+        # side SpecAugment (the NeMo / OWSM default at ~F=2,T=10 for trainable
+        # encoders) would push a frozen Whisper encoder OOD, so we instead
+        # mask the encoder's output features and let the projector learn to
+        # reconstruct missing time positions. Disabled by default (0 / 0.0);
+        # canonical setting is num=5 masks of max_width_ratio=0.04 (up to
+        # ~20% of encoder output time positions masked per sample).
+        encoder_output_time_mask_num: int = 0,
+        encoder_output_time_mask_max_width_ratio: float = 0.0,
         do_sample: bool = False,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -143,6 +154,8 @@ class ASRConfig(transformers.PretrainedConfig):
         ]
         self.freeze_projector = freeze_projector
         self.freeze_language_model = freeze_language_model
+        self.encoder_output_time_mask_num = encoder_output_time_mask_num
+        self.encoder_output_time_mask_max_width_ratio = encoder_output_time_mask_max_width_ratio
 
         explicit_generation_args = {
             "num_beams": num_beams,

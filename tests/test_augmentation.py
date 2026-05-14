@@ -119,19 +119,29 @@ class TestNoiseAugmentation:
 
     def test_full_chain_composes(self, tmp_path):
         bg = tmp_path / "bg"
+        music = tmp_path / "music"
         events = tmp_path / "events"
         _write_synthetic_noise_corpus(bg, n=3)
+        _write_synthetic_noise_corpus(music, n=3)
         _write_synthetic_noise_corpus(events, n=3)
         aug = NoiseAugmentation(
             prob=1.0,
             corpus_path=str(bg),
+            music_corpus_path=str(music),
+            music_prob=1.0,
             color_noise_min_snr_db=20.0,
             color_noise_max_snr_db=40.0,
             short_noises_corpus_path=str(events),
             short_noises_prob=1.0,
+            time_stretch_prob=1.0,
+            pitch_shift_prob=1.0,
+            high_pass_prob=1.0,
             eq_prob=1.0,
+            tanh_distortion_prob=1.0,
             clipping_prob=1.0,
-            bandlimit_prob=1.0,
+            lowpass_prob=1.0,
+            bandpass_prob=1.0,
+            gain_prob=1.0,
         )
         audio = np.random.randn(16000).astype(np.float32) * 0.1
         out = aug(audio)
@@ -160,11 +170,78 @@ class TestNoiseAugmentation:
         assert out.shape == audio.shape
         assert not np.allclose(out, audio)
 
-    def test_bandlimit_modifies_audio(self):
-        # OneOf{LPF, BPF} fires; assert audio is modified. Either branch
-        # (LPF cutoff 3-7.5 kHz, BPF telephony 200-4000 Hz) attenuates
-        # white-noise content enough to be detectable.
-        aug = NoiseAugmentation(prob=0.0, bandlimit_prob=1.0)
+    def test_lowpass_modifies_audio(self):
+        # LPF cutoff 3-7.5 kHz attenuates high-frequency white-noise content
+        # enough to be detectable.
+        aug = NoiseAugmentation(prob=0.0, lowpass_prob=1.0)
+        audio = np.random.randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        assert out.shape == audio.shape
+        assert not np.allclose(out, audio)
+
+    def test_bandpass_modifies_audio(self):
+        # BPF telephony 200-4000 Hz attenuates content outside the passband
+        # enough to be detectable.
+        aug = NoiseAugmentation(prob=0.0, bandpass_prob=1.0)
+        audio = np.random.randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        assert out.shape == audio.shape
+        assert not np.allclose(out, audio)
+
+    def test_high_pass_modifies_audio(self):
+        # HPF cutoff 60-120 Hz attenuates low-frequency content enough to
+        # be detectable on broadband white noise.
+        aug = NoiseAugmentation(prob=0.0, high_pass_prob=1.0)
+        audio = np.random.randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        assert out.shape == audio.shape
+        assert not np.allclose(out, audio)
+
+    def test_time_stretch_modifies_audio(self):
+        # TimeStretch with leave_length_unchanged=True preserves output
+        # length but changes the per-sample content (rate-perturbed signal,
+        # then pad/trim to original length).
+        aug = NoiseAugmentation(
+            prob=0.0,
+            time_stretch_prob=1.0,
+            time_stretch_min_rate=0.9,
+            time_stretch_max_rate=0.9,
+        )
+        audio = np.random.randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        assert out.shape == audio.shape
+        assert not np.allclose(out, audio)
+
+    def test_tanh_distortion_modifies_audio(self):
+        # TanhDistortion applies smooth saturation; with non-trivial drive
+        # the output diverges from the input.
+        aug = NoiseAugmentation(
+            prob=0.0,
+            tanh_distortion_prob=1.0,
+            tanh_distortion_min_distortion=0.3,
+            tanh_distortion_max_distortion=0.3,
+        )
+        audio = np.random.randn(16000).astype(np.float32) * 0.1
+        out = aug(audio)
+        assert out.shape == audio.shape
+        assert not np.allclose(out, audio)
+
+    def test_music_background_modifies_audio(self, tmp_path):
+        # Music is wired identically to the babble path (third
+        # AddBackgroundNoise pointing at a separate corpus subdir).
+        # Verify the music branch fires when configured.
+        bg = tmp_path / "bg"
+        music = tmp_path / "music"
+        _write_synthetic_noise_corpus(bg, n=3)
+        _write_synthetic_noise_corpus(music, n=3)
+        aug = NoiseAugmentation(
+            prob=1.0,
+            corpus_path=str(bg),
+            music_corpus_path=str(music),
+            music_prob=1.0,
+            music_min_snr_db=20.0,
+            music_max_snr_db=30.0,
+        )
         audio = np.random.randn(16000).astype(np.float32) * 0.1
         out = aug(audio)
         assert out.shape == audio.shape

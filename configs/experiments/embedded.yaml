@@ -19,6 +19,16 @@ model:
   # Load projector + decoder weights from the published checkpoint and continue
   # training from there. ASRModel.from_pretrained overlays both via load_state_dict.
   # pretrained_model_path: mazesmazes/tiny-audio-embedded-next
+  # Encoder-output time masking — SpecAugment-equivalent regularizer for
+  # frozen-encoder projector training. Mel-side SpecAugment (the standard
+  # NeMo/OWSM 2025 SOTA at F=2, T=10, Tw=0.05) can't be used here because
+  # it'd push the frozen Whisper encoder OOD; masking the encoder OUTPUT
+  # before the projector is the equivalent regularizer applied at the
+  # right layer for our setup. 5 masks of up to 4% of the encoder output
+  # time positions each → up to ~20% time positions masked per sample
+  # (avg ~12-15% with overlap), matching the NeMo time-mask budget.
+  encoder_output_time_mask_num: 5
+  encoder_output_time_mask_max_width_ratio: 0.04
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-next"
@@ -61,8 +71,8 @@ training:
   lr_scheduler_type: cosine
   seed: 43
   auto_find_batch_size: false
-  per_device_train_batch_size: 32
-  per_device_eval_batch_size: 32
+  per_device_train_batch_size: 48
+  per_device_eval_batch_size: 48
   gradient_accumulation_steps: 2
   num_train_epochs: 2
   save_steps: 1000

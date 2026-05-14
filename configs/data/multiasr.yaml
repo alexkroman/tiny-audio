@@ -1,8 +1,18 @@
 # Multi-ASR dataset configuration
 #
-# Gap-targeted mix focused on closing the largest WER deltas vs
-# universal-3-pro: Peoples (+6.27), CV (+3.14), Earnings22 (+2.61),
-# TEDLIUM (+2.08), LS-other (+1.10), Gigaspeech (+1.58), LS-clean (+0.63).
+# Mix tilted toward Earnings22 / Peoples / GigaSpeech, deliberately
+# trading some Switchboard, AMI-SDM, and SPGI headroom (where we
+# already lead universal-3-pro comfortably) for closure on the larger
+# residual gaps: Peoples (+6.27), Earnings22 (+2.61), Gigaspeech (+1.58).
+# Paired with the aug-stack tilt in production.yaml (RIR 0.5→0.3,
+# MUSAN ambient 0.35→0.25 + SNR floor 8→10 dB, babble 0.10→0.03,
+# bandlimit split into LPF=0.25 + BPF=0.03, MP3 0.10→0.25 @ 64-128 kbps)
+# which together pull encoder-feature mass out of the telephony /
+# heavy-reverb / multi-talker basin and toward conference-room /
+# consumer-device / lossy-codec distributions where the target evals
+# live. Peoples can't grow on quantity here because un-sa-filtered
+# pools fail the alignment-quality bar — Peoples gap closure has to
+# come from aug landing the model in dirty_sa's acoustic distribution.
 # LoquaciousSet was dropped in a prior revision; the unique coverage
 # Loquacious bundled (LibriHeavy / VoxPopuli) is restored here as
 # direct HF slices with explicit per-source sizing:
@@ -43,27 +53,30 @@
 # ┌──────────────────────────┬───────────┬─────────┐
 # │ Dataset                  │ Samples   │ Percent │
 # ├──────────────────────────┼───────────┼─────────┤
-# │ LibriHeavy medium (nat)  │ ~1,100,000│   21.2% │
-# │ CommonVoice 17 en (flt)  │ ~1,050,000│   20.2% │
-# │ Gigaspeech M (natural)   │   910,000 │   17.5% │
-# │ Peoples dirty_sa (nat)   │  ~602,000 │   11.6% │
-# │ SPGISpeech M (natural)   │   385,000 │    7.4% │
-# │ Peoples clean_sa (nat)   │   311,000 │    6.0% │
-# │ TEDLIUM-3 (natural)      │  ~268,000 │    5.2% │
-# │ Switchboard (natural)    │   185,402 │    3.6% │
-# │ VoxPopuli en (natural)   │  ~168,000 │    3.2% │
-# │ AMI IHM (natural)        │   108,502 │    2.1% │
-# │ AMI SDM (natural)        │   107,319 │    2.1% │
+# │ Gigaspeech L (natural)   │ ~2,000,000│   34.1% │
+# │ LibriHeavy medium (nat)  │ ~1,100,000│   18.7% │
+# │ CommonVoice 17 en (flt)  │ ~1,050,000│   17.9% │
+# │ Peoples dirty_sa (nat)   │  ~602,000 │   10.3% │
+# │ Peoples clean_sa (nat)   │   311,000 │    5.3% │
+# │ TEDLIUM-3 (natural)      │  ~268,000 │    4.6% │
+# │ VoxPopuli en (natural)   │  ~168,000 │    2.9% │
+# │ SPGISpeech M (capped)    │   150,000 │    2.6% │
+# │ AMI IHM (natural)        │   108,502 │    1.8% │
+# │ Switchboard (capped)     │    75,000 │    1.3% │
+# │ AMI SDM (capped)         │    40,000 │    0.7% │
 # └──────────────────────────┴           ┴         ┘
-# Total: ~5,195,000 samples (effectively trained on)
-# (Peoples combined: 913K = 17.6% of mix, up from 12.6% prior — targets
-#  the dominant +6.27 universal-3-pro gap; dirty_sa natural 602K lifted
-#  from the prior 311K cap. clean_sa natural is 311K per MLCommons
-#  dataset card. CV row count is post the down_votes==0 filter applied
-#  in scripts/train.py, which drops ~5% of train.)
+# Total: ~5,872,500 samples (effectively trained on)
+# (Peoples combined: 913K = 15.6% of mix — absolute Peoples count
+#  unchanged from prior 913K; share dropped only because GS L step
+#  pushed the denominator up. Peoples is still the dominant residual
+#  gap, but the closure lever here is aug not quantity since un-sa
+#  pools fail the alignment-quality bar. CV row count is post the
+#  down_votes==0 filter applied in scripts/train.py, which drops ~5%
+#  of train.)
 #
-# Download-size choices: Gigaspeech uses speechcolab's official M tier
-# (~1,000hr / ~910K segments). CommonVoice and LibriSpeech both use the
+# Download-size choices: Gigaspeech uses speechcolab's official L tier
+# (~2,500hr / ~2M segments — stepped up from M for the +1.58 gap, full
+# natural cap, no replay). CommonVoice and LibriSpeech both use the
 # fixie-ai mirrors for their sharded parquet layouts. TEDLIUM uses the
 # canonical LIUM mirror. LibriHeavy uses mythicinfinity's mirror (audio
 # arrays included, Opus-encoded) — pkufool/libriheavy is a Lhotse
@@ -186,21 +199,26 @@ datasets:
     train_splits: [train]
     eval_splits: [validation]
 
-  # Gigaspeech M (official speechcolab repo). M tier is ~1,000hr / ~910K
-  # segments — natural cap, no replay. Stepped down from L (~2,500hr /
-  # ~2M) since the prior 1.2M cap on L was already sampling ~60% of L;
-  # M gives full natural exposure and a further ~2× download reduction.
-  # M is a curated subset of L/XL — same source distribution, just less
-  # volume. Long-form / podcast / audiobook register coverage preserved.
-  # Requires accepting the dataset license on HF and HF_TOKEN at load.
+  # Gigaspeech L (official speechcolab repo). L tier is ~2,500hr / ~2M
+  # segments — natural cap, no replay. Stepped up from M (~1,000hr /
+  # ~910K) because GS is one of the three target evals (+1.58 gap) and
+  # quantity is the cleanest lever: L is a strict superset of M (same
+  # source distribution + curation pipeline, just more hours) so the
+  # step has no label-quality cost. Long-form / podcast / YouTube
+  # register coverage preserved and expanded. Lossy-codec content in
+  # L (YouTube slice) pairs naturally with the bumped MP3 aug in
+  # production.yaml (p=0.25 @ 64-128 kbps). Requires accepting the
+  # dataset license on HF and HF_TOKEN at load. Download footprint is
+  # ~2.5× the prior M tier — verify disk / network budget on the
+  # training host before kicking off.
   - path: speechcolab/gigaspeech
-    name: m
+    name: l
     audio_column: audio
     text_column: text
     task: transcribe
     train_splits: [train]
     eval_splits: []
-    target_samples: 910000
+    target_samples: 2000000
 
   # Gigaspeech dev split — official repo ships dev/test as separate configs
   # (same pattern as the fixie mirror). The `dev` config exposes its data
@@ -213,9 +231,18 @@ datasets:
     train_splits: []
     eval_splits: [validation]
 
-  # SPGISpeech M - financial earnings calls (~385K train). Targets Earnings22.
-  # Natural size (target_samples omitted) to maximize finance/earnings
-  # register coverage.
+  # SPGISpeech M - financial earnings calls. Capped 385K → 150K as part
+  # of the E22 / Peoples / GS tilt: SPGI is read prepared earnings-call
+  # remarks in studio conditions, while E22 (the eval SPGI was meant to
+  # target) is conference-room audio with Q&A spontaneity and L2 accents
+  # — more SPGI hours don't actually close the SPGI-to-E22 distribution
+  # gap because the gap is acoustic / register, not vocabulary. 150K
+  # preserves finance/earnings vocabulary exposure while freeing ~235K
+  # mix slots that GS L absorbs. SPGI is also already performing well
+  # on its native eval, so 1-2 WER of SPGI-eval loss is an acceptable
+  # trade. The SPGI→E22 transfer aug (small-room RIR at 0.3) does the
+  # work of pushing SPGI's clean finance audio into E22's conference
+  # acoustic distribution.
   - path: kensho/spgispeech
     name: M
     audio_column: audio
@@ -223,7 +250,7 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 385000
+    target_samples: 150000
 
   # VoxPopuli `en` (facebook, natural ~168K / ~543hr). European Parliament
   # L2-accented English read by parliamentarians — restores the VP
@@ -242,16 +269,24 @@ datasets:
     train_splits: [train]
     eval_splits: [validation]
 
-  # Switchboard - conversational telephone speech. Natural size (~185,402);
-  # target_samples omitted. Prior 252K target was 1.36x repeat — dropped to
-  # avoid replay since this eval already beats universal-3-pro by ~4pt.
+  # Switchboard - conversational telephone speech. Capped 185K → 75K
+  # as part of the E22 / Peoples / GS tilt. Switchboard is no longer a
+  # target eval (we lead universal-3-pro by -5.02 WER and that lead is
+  # surplus relative to where the gaps actually are), and the telephony-
+  # band + babble-overlap distribution it lives in is exactly what the
+  # aug-stack tilt is moving the model away from. 75K preserves enough
+  # exposure to keep the telephony-band representation alive (joint
+  # with the bandpass_prob=0.03 residual) without spending mix budget
+  # on a basin we're trying to de-emphasize. Expect SW lead to compress
+  # from -5.02 to roughly -1 to -2 — still leading, but no longer
+  # over-allocated.
   - path: hhoangphuoc/switchboard
     audio_column: audio
     text_column: transcript
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 185402
+    target_samples: 75000
 
   # AMI corpus IHM - close-talk meeting mic. Natural size (~108,502),
   # target_samples omitted. Prior 305K target was ~3x replay on the same
@@ -266,10 +301,16 @@ datasets:
     eval_splits: [validation]
     target_samples: 108502
 
-  # AMI corpus SDM - single distant mic (far-field). Natural size
-  # (~107,319), target_samples omitted. Prior 168K target was 1.57x replay.
-  # With CHiME-6 / AliMeeting unavailable on HF, SDM + noise/speaker-mix
-  # augmentation is the recipe for ami-sdm.
+  # AMI corpus SDM - single distant mic (far-field). Capped 107K → 40K
+  # as part of the E22 / Peoples / GS tilt. AMI-SDM is no longer a
+  # target eval (-3.91 WER lead vs universal-3-pro is surplus), and the
+  # far-field / multi-talker / heavy-reverb distribution it lives in is
+  # exactly what the RIR / babble / ambient-noise cuts are moving the
+  # model away from. 40K preserves residual far-field exposure at a
+  # share (~0.7% of mix) that won't dominate the encoder-feature
+  # distribution. Expect AMI-SDM lead to compress from -3.91 toward
+  # roughly parity with universal-3-pro — acceptable given E22 /
+  # Peoples / GS are the corpora the model is being tuned for.
   - path: edinburghcstr/ami
     name: sdm
     audio_column: audio
@@ -277,7 +318,7 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 107319
+    target_samples: 40000
 
 # Audio processing
 sample_rate: 16000
