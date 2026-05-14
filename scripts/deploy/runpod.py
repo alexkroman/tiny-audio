@@ -170,30 +170,13 @@ def setup_remote_environment(conn: Connection) -> None:
     """
     print("\nSetting up remote environment...")
     conn.run("apt-get update -qq || true")
-    # Required packages — training and corpus extraction need these.
     conn.run(
-        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1 unzip",
+        "apt-get install -y -qq ffmpeg tmux rsync libsndfile1",
     )
-    # Optional perf adds — fall back gracefully on pods where these aren't
-    # available (e.g. minimal images, universe repo disabled, partial apt
-    # cache). aria2 → faster RIRs/MUSAN download (urllib fallback exists);
-    # pigz → parallel gzip for MUSAN tar (single-threaded fallback);
-    # p7zip-full → parallel zip extract for OpenSLR-28 (unzip fallback);
-    # zip → `zip -s-` reassembly of FSD50K's split archive;
-    # portaudio19-dev → only needed for pyaudio runtime, never training.
+    # portaudio19-dev is only needed for pyaudio runtime, never training;
+    # fall back gracefully on pods where it isn't available.
     conn.run(
-        "apt-get install -y aria2 pigz p7zip-full zip portaudio19-dev || true",
-    )
-    # Pin augmentation corpora onto the persistent /workspace volume so they
-    # survive container restarts. ~/.cache/<name> becomes a symlink, which
-    # keeps `corpus_path: ~/.cache/...` in production.yaml portable across
-    # local dev and RunPod without per-environment config branches.
-    conn.run(
-        "mkdir -p /workspace/.cache/openslr-28 /workspace/.cache/musan "
-        "/workspace/.cache/fsd50k /root/.cache && "
-        "ln -sfn /workspace/.cache/openslr-28 /root/.cache/openslr-28 && "
-        "ln -sfn /workspace/.cache/musan /root/.cache/musan && "
-        "ln -sfn /workspace/.cache/fsd50k /root/.cache/fsd50k",
+        "apt-get install -y portaudio19-dev || true",
     )
     print("Remote environment setup complete!")
 
@@ -321,124 +304,6 @@ echo "Dependencies verified for $TA_PYTHON"
     print(f"Dependencies installed successfully! Full log: {log_path}")
 
 
-def _download_corpus(conn: Connection, label: str, ta_subcommand: str) -> None:
-    """Run ``ta dev <ta_subcommand>`` on the remote to fetch a corpus (idempotent).
-
-    Output is captured silently to ``/tmp/tiny_audio_<subcommand>.log`` on
-    the remote rather than streamed live — aria2c progress bars and rich
-    Console color codes corrupt the local TTY when piped through Fabric.
-    On failure, the tail of the log is fetched and printed as plain text.
-    ``NO_COLOR``/``TERM=dumb`` belt-and-suspenders the suppression in case
-    a future remote command does stream output.
-    """
-    log_path = f"/tmp/tiny_audio_{ta_subcommand}.log"
-    print(f"\nDownloading {label}... (silent; remote log: {log_path})")
-    cmd = (
-        f'bash -lc "cd /workspace && '
-        f"export PATH=/root/.local/bin:$PATH && "
-        f"export NO_COLOR=1 TERM=dumb PYTHONUNBUFFERED=1 && "
-        f'ta dev {ta_subcommand} > {log_path} 2>&1"'
-    )
-    try:
-        conn.run(cmd, hide=True)
-    except UnexpectedExit:
-        print(f"\n[{label}] FAILED. Last 80 lines of {log_path}:\n")
-        tail = conn.run(f"tail -n 80 {log_path}", hide=True, warn=True)
-        sys.stdout.write(tail.stdout)
-        sys.stdout.flush()
-        raise
-    print(f"{label} ready.")
-
-
-def download_rirs(conn: Connection) -> None:
-    """Download OpenSLR-28 to ~/.cache/openslr-28 on the remote."""
-    _download_corpus(conn, "RIR corpus (OpenSLR-28)", "download-rirs")
-
-
-def download_musan(conn: Connection) -> None:
-    """Download MUSAN to ~/.cache/musan on the remote."""
-    _download_corpus(conn, "noise corpus (MUSAN)", "download-musan")
-
-
-def download_fsd50k(conn: Connection) -> None:
-    """Download FSD50K eval split to ~/.cache/fsd50k on the remote."""
-    _download_corpus(conn, "sound-event corpus (FSD50K)", "download-fsd50k")
-
-
-def resample_fsd50k(conn: Connection) -> None:
-    """Resample FSD50K .wav files to 16 kHz mono in-place on the remote.
-
-    FSD50K ships at 44.1 kHz; the training pipeline runs at 16 kHz, so
-    audiomentations resamples on every load — wasted CPU on every batch
-    and a flood of "had to be resampled" warnings. Pre-resampling once
-    here trades disk for runtime cost (the files get smaller too).
-
-    Idempotent via a sentinel file: subsequent deploys see the sentinel
-    and skip the work. ``ffprobe`` per-file lets the worker also skip any
-    individual clip that's already 16 kHz.
-    """
-    target = "/root/.cache/fsd50k/FSD50K.eval_audio"
-    sentinel = f"{target}.16k.done"
-    script_path = "/tmp/tiny_audio_resample_fsd50k.sh"
-    log_path = "/tmp/tiny_audio_resample-fsd50k.log"
-
-    # Heredoc-uploaded script avoids double-quote escaping hell (find/xargs
-    # plus per-file bash -c is hostile to single-line ssh quoting).
-    script = f"""#!/bin/bash
-set -eo pipefail
-
-if [ -f "{sentinel}" ]; then
-    echo "FSD50K already resampled (sentinel: {sentinel}). Skipping."
-    exit 0
-fi
-if [ ! -d "{target}" ]; then
-    echo "ERROR: FSD50K not found at {target}." >&2
-    echo "Run 'ta dev download-fsd50k' (or remove --skip-fsd50k) first." >&2
-    exit 1
-fi
-if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
-    echo "ERROR: ffmpeg/ffprobe required. apt-get install ffmpeg." >&2
-    exit 1
-fi
-
-total=$(find "{target}" -name '*.wav' | wc -l)
-echo "Resampling $total FSD50K clips to 16 kHz mono in-place..."
-export NO_COLOR=1 TERM=dumb
-
-# `xargs -P $(nproc)` parallelizes per-clip ffmpeg across all cores.
-# Per-clip: probe sample rate, skip if already 16 kHz, else re-encode
-# to a sibling .tmp.wav and atomic-rename. -ac 1 forces mono (matches
-# our pipeline; FSD50K mixes mono/stereo).
-find "{target}" -name '*.wav' -print0 | \\
-  xargs -0 -n 1 -P "$(nproc)" bash -c '
-    f="$0"
-    sr=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate \\
-           -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null || echo unknown)
-    if [ "$sr" = "16000" ]; then exit 0; fi
-    ffmpeg -hide_banner -loglevel error -y -i "$f" -ar 16000 -ac 1 "$f.tmp.wav"
-    mv "$f.tmp.wav" "$f"
-  '
-
-touch "{sentinel}"
-echo "Done. Sentinel: {sentinel}"
-"""
-
-    print(f"\nResampling FSD50K to 16 kHz... (silent; remote log: {log_path})")
-    conn.run(
-        f"cat > {script_path} << 'RESAMPLE_FSD50K_EOF'\n{script}\nRESAMPLE_FSD50K_EOF",
-        hide=True,
-    )
-    try:
-        conn.run(f"bash {script_path} > {log_path} 2>&1", hide=True)
-    except UnexpectedExit:
-        print(f"\n[resample_fsd50k] FAILED. Last 80 lines of {log_path}:\n")
-        tail = conn.run(f"tail -n 80 {log_path}", hide=True, warn=True)
-        sys.stdout.write(tail.stdout)
-        sys.stdout.flush()
-        raise
-    print(f"FSD50K resample complete. Sentinel: {sentinel}")
-
-
 @app.command()
 def deploy(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
@@ -447,18 +312,6 @@ def deploy(
     skip_sync: bool = typer.Option(False, "--skip-sync", help="Skip project file sync"),
     skip_deps: bool = typer.Option(
         False, "--skip-deps", help="Skip Python dependency installation"
-    ),
-    skip_rirs: bool = typer.Option(
-        False, "--skip-rirs", help="Skip OpenSLR-28 RIR corpus download"
-    ),
-    skip_musan: bool = typer.Option(False, "--skip-musan", help="Skip MUSAN noise corpus download"),
-    skip_fsd50k: bool = typer.Option(
-        False, "--skip-fsd50k", help="Skip FSD50K sound-event corpus download"
-    ),
-    skip_resample_fsd50k: bool = typer.Option(
-        False,
-        "--skip-resample-fsd50k",
-        help="Skip resampling FSD50K to 16 kHz (skip if pre-resampled or already done)",
     ),
 ):
     """Deploy ASR project to a RunPod instance."""
@@ -477,18 +330,6 @@ def deploy(
 
     if not skip_deps:
         install_dependencies(conn)
-
-    if not skip_rirs:
-        download_rirs(conn)
-
-    if not skip_musan:
-        download_musan(conn)
-
-    if not skip_fsd50k:
-        download_fsd50k(conn)
-
-    if not skip_resample_fsd50k:
-        resample_fsd50k(conn)
 
     print("\nDeployment finished!")
     print(f"To connect: ssh -i ~/.ssh/id_ed25519 -p {port} root@{host}")

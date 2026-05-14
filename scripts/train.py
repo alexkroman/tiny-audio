@@ -49,7 +49,6 @@ from tiny_audio.asr_config import (
     compute_encoder_output_length,
 )
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
@@ -403,9 +402,7 @@ class DataCollator:
     # reference transcript don't actually line up — eval-side analysis on
     # Peoples / CV / Switchboard / AMI showed these as the bulk of >=50%
     # WER samples, with model output reflecting adjacent content rather
-    # than the labeled token. Sub-100ms clips also break augmentations
-    # (Mp3Compression's fast-mp3-augment backend rejects <100ms input);
-    # raising the floor to 0.8s subsumes that constraint.
+    # than the labeled token.
     _MIN_AUDIO_SECONDS = 0.8
 
     def _extract_audio_arrays(self, features):
@@ -717,72 +714,6 @@ def main(cfg: DictConfig) -> None:
     multitask_enabled = cfg.get("multitask", {}).get("enabled", False)
 
     train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
-
-    augmentations: list = []
-
-    def _aug_kwargs(cfg_block) -> dict:
-        # Forward every yaml key (minus `enabled`) as a kwarg — defaults
-        # live on the augmentation class signatures, not duplicated here.
-        d = OmegaConf.to_container(cfg_block, resolve=True)
-        d.pop("enabled", None)
-        return d
-
-    rir_aug: RIRAugmentation | None = None
-    rir_cfg = cfg.training.get("rir_augmentation") or {}
-    if rir_cfg.get("enabled"):
-        rir_aug = RIRAugmentation(sample_rate=cfg.data.sample_rate, **_aug_kwargs(rir_cfg))
-        augmentations.append(rir_aug)
-
-    noise_aug: NoiseAugmentation | None = None
-    noise_cfg = cfg.training.get("noise_augmentation") or {}
-    if noise_cfg.get("enabled"):
-        noise_aug = NoiseAugmentation(sample_rate=cfg.data.sample_rate, **_aug_kwargs(noise_cfg))
-        augmentations.append(noise_aug)
-
-    silence_injection_prob = float(cfg.training.get("silence_injection_prob", 0.0))
-    if silence_injection_prob > 0.0 and noise_aug is None:
-        raise ValueError(
-            "silence_injection_prob > 0 requires noise_augmentation.enabled "
-            "(the noise corpus is the source of noise-only samples)."
-        )
-
-    if augmentations or silence_injection_prob > 0.0:
-        # Skip augmentation for clips below the DataCollator's drop threshold:
-        # the row will be filtered out of the batch downstream, and some
-        # audiomentations stages (Mp3Compression's fast-mp3-augment backend)
-        # error on sub-100ms input rather than no-op'ing.
-        _aug_min_samples = int(cfg.data.sample_rate * DataCollator._MIN_AUDIO_SECONDS)
-
-        def _apply_aug(batch):
-            audios = batch.get("audio") or []
-            texts = batch.get("text")
-            n_texts = len(texts) if texts is not None else 0
-            for i, a in enumerate(audios):
-                if not a or "array" not in a:
-                    continue
-                arr = a["array"]
-                if arr.shape[-1] < _aug_min_samples:
-                    continue
-                # Silence injection targets backchannel hallucinations
-                # ("yeah" / "huh" on empty GT) — a documented Whisper /
-                # SALMONN failure mode — by pairing noise-only audio with
-                # an empty transcript so the model learns "no speech → EOS".
-                if (
-                    silence_injection_prob > 0.0
-                    and noise_aug is not None
-                    and i < n_texts
-                    and random.random() < silence_injection_prob
-                ):
-                    noise = noise_aug.sample_noise_only(arr.shape[-1])
-                    if noise is not None:
-                        arr = noise.astype(arr.dtype)
-                        texts[i] = ""
-                for aug in augmentations:
-                    arr = aug(arr)
-                a["array"] = arr
-            return batch
-
-        train_dataset = train_dataset.with_transform(_apply_aug)
 
     if multitask_enabled:
         data_collator = MultiTaskDataCollator(

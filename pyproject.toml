@@ -87,8 +87,6 @@ spacy = "^3.8.11"
 ten-vad = ">=1.0.6"
 speechbrain = {git = "https://github.com/speechbrain/speechbrain.git"}
 pytz = "*"
-audiomentations = ">=0.40.0"
-fast-mp3-augment = "*"
 truecase = ">=0.0.14"  # Statistical re-casing for ASR label normalization
 ftfy = ">=6.0"  # Unicode cleanup (mojibake, smart quotes) + NFKC before normalize
 
