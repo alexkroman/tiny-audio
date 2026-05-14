@@ -154,6 +154,27 @@ def grad_norm(params) -> float:
     return math.sqrt(total)
 
 
+def projector_submodule_norms(model: ASRModel) -> dict[str, float] | None:
+    """Per-named-submodule grad norms for the MLP projector.
+
+    Returns None for non-MLP projectors so the caller can print a skip note;
+    the other projector types (MOSA, MoE, QFormer) have different internal
+    structures and would each need their own carve-up (out of scope per the
+    design spec).
+    """
+    from tiny_audio.projectors import MLPAudioProjector
+
+    if not isinstance(model.projector, MLPAudioProjector):
+        return None
+
+    norms: dict[str, float] = {}
+    for name, param in model.projector.named_parameters():
+        if param.grad is None:
+            continue
+        norms[name] = float(param.grad.detach().float().pow(2).sum().sqrt().item())
+    return norms
+
+
 def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     print(f"== embedded.yaml gradient flow probe ({dtype}, {device}) ==\n")
 
@@ -209,6 +230,20 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     print(f"    ||grad_decoder||   = {lm_norm:.6e}")
     if lm_norm > 0:
         print(f"    projector / decoder norm ratio = {proj_norm / lm_norm:.3f}")
+    print()
+
+    sub_norms = projector_submodule_norms(model)
+    if sub_norms is None:
+        print(
+            "[4b] Projector submodule gradient norms: "
+            f"(skipped — projector is {type(model.projector).__name__}, not MLPAudioProjector)"
+        )
+    else:
+        print("[4b] Projector submodule gradient norms:")
+        max_norm = max(sub_norms.values()) if sub_norms else 0.0
+        for name, n in sub_norms.items():
+            ratio = (n / max_norm) if max_norm > 0 else 0.0
+            print(f"    {name:18s} ||grad|| = {n:.6e}  ({ratio:5.2f}x of max)")
     print()
 
     print("[5] Per-submodule gradient norms (decoder breakdown):")
