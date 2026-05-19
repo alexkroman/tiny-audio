@@ -251,6 +251,21 @@ pip install --user -r /tmp/requirements.txt
 # Install project in editable mode
 pip install --user -e . --no-deps
 
+# flash-attn imports torch during its setup.py, so PEP 517 build isolation
+# (the default) would pull a *different* torch into the build venv and
+# compile against ABI it doesn't actually have. --no-build-isolation makes
+# it build against the runpod image's torch + CUDA, which is what training
+# loads. Required by configs/training/production.yaml's
+# attn_implementation=flash_attention_2 — without flash-attn the model load
+# falls back to sdpa with a warning.
+pip install --user flash-attn --no-build-isolation --quiet
+
+# liger-kernel provides the fused linear cross-entropy used by
+# apply_liger_kernel_to_qwen3() in scripts/train.py. poetry export already
+# pulls it on linux, but reinstall defensively in case the editable
+# project install ordering above left it behind.
+pip install --user --upgrade liger-kernel --quiet
+
 # Pre-fetch the NLTK punkt tokenizer used by truecase in scripts/train.py's
 # label normalizer. NLTK 3.9+ uses `punkt_tab` (new data package format);
 # older NLTKs use `punkt`. Download both so the code works regardless of

@@ -431,6 +431,32 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             self.config.encoder_conv_layers,
         )
 
+    def _time_mask_encoder_output(
+        self,
+        x: torch.Tensor,
+        num_masks: int = 2,
+        mask_length: int = 10,
+    ) -> torch.Tensor:
+        """SpecAugment-style time masking on the frozen encoder's output.
+
+        Train-mode only. For each example, zero out `num_masks` spans of
+        `mask_length` frames at uniformly-sampled positions. With GLM-ASR's
+        ~20 ms/frame stride after conv-stack downsampling, mask_length=10
+        is ~200 ms — enough to force the projector to interpolate over
+        silence-sized gaps without erasing entire phonemes.
+        """
+        if not self.training or num_masks <= 0 or mask_length <= 0:
+            return x
+        bsz, seq_len, _ = x.shape
+        if seq_len <= mask_length:
+            return x
+        x = x.clone()
+        starts = torch.randint(0, seq_len - mask_length, (bsz, num_masks), device=x.device)
+        for b in range(bsz):
+            for s in starts[b].tolist():
+                x[b, s : s + mask_length] = 0
+        return x
+
     def _encode_audio(
         self,
         audio_features: torch.Tensor,
@@ -449,6 +475,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
+        hidden_states = self._time_mask_encoder_output(hidden_states)
         audio_embeds = self.projector(hidden_states)
 
         token_counts = expected_token_counts.to(device=audio_embeds.device, dtype=torch.long)
@@ -489,6 +516,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 audio_token_mask.to(inputs_embeds.device),
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
             )
+
+        # Forward label_smoothing to the LM's loss_function via **kwargs.
+        # transformers.loss.loss_utils.ForCausalLMLoss → fixed_cross_entropy
+        # forwards extra kwargs to F.cross_entropy, which accepts label_smoothing.
+        # When apply_liger_kernel_to_qwen3() has patched the LM, the smoothing
+        # is consumed by liger's fused linear CE (no (B,T,V) materialization).
+        # Zeroed on eval so eval/loss is raw CE and comparable to LS=0 runs.
+        if labels is not None and self.training and self.config.label_smoothing > 0:
+            kwargs.setdefault("label_smoothing", self.config.label_smoothing)
 
         outputs = self.language_model(
             attention_mask=attention_mask,

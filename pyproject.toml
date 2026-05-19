@@ -80,6 +80,7 @@ torchvision = ">=0.23.0,<0.24.0"  # Pairs with torch 2.8.x
 pyannote-core = ">=6.0.0"  # For DER metric calculation
 pyannote-metrics = ">=4.0.0"  # For DER metric calculation
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
+liger-kernel = {version = ">=0.5.0", markers = "sys_platform == 'linux'"}
 pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
 fabric = ">=3.0.0"
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}

@@ -23,6 +23,15 @@ model:
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
   text_model_id: Qwen/Qwen3-0.6B
+  # Label smoothing applied inside the LM's loss_function (consumed by liger's
+  # fused linear CE when apply_liger_kernel_to_qwen3() is active in
+  # scripts/train.py). ASRModel.forward zeros it on eval so eval/loss reports
+  # raw CE — comparable to the prior LS=0 loquacious_plus run. HF Trainer's
+  # label_smoothing_factor stays at 0 to avoid double-smoothing and to avoid
+  # the LabelSmoother's (B,T,V) fp32 log_softmax materialization (~15GB at
+  # B=50/V=152k on Qwen3-0.6B) that previously forced the batch size down
+  # from 50 to 32.
+  label_smoothing: 0.1
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-next-multiasr"
@@ -57,18 +66,14 @@ training:
   learning_rate: 1e-3
   decoder_learning_rate: 1e-5
 
-  # Label smoothing damps decoder overconfidence on next-token predictions —
-  # exactly the failure mode driving train/eval-gap widening in the prior
-  # loquacious_plus run (gap doubled 0.11 → 0.16 as train kept dropping but
-  # eval flattened). 0.1 matches Whisper / NLLB / most modern ASR fine-tune
-  # conventions. Works correctly under DataCollatorForChatML's -100 prompt
-  # masking (LabelSmoother ignores ignore_index positions). MLP projector
-  # has no get_aux_loss method, so no aux-loss / smoothing interaction.
-  # Implementation note: HF Trainer pops `labels` before the forward pass
-  # when label_smoothing_factor > 0, so the model returns logits-only and
-  # the trainer computes its own smoothed CE — same path as Whisper /
-  # Wav2Vec2 trainers.
-  label_smoothing_factor: 0.1
+  # Label smoothing is routed through model.label_smoothing (above) so it
+  # rides liger's fused linear CE and is automatically disabled on eval.
+  # Keep HF Trainer's label_smoothing_factor at 0 — setting it >0 would
+  # cause HF to pop labels before the forward pass and apply its own
+  # Python-level LabelSmoother, which (a) double-smooths on top of the
+  # model-internal smoothing and (b) materializes a (B,T,V) fp32 log_softmax
+  # tensor (~15GB at B=50/V=152k) that capped batch size on the prior run.
+  label_smoothing_factor: 0.0
 
   # 0.01 (vs HF default 0.0) damps unbounded rare-token embedding drift under
   # tie_word_embeddings=True. Previous tiny-audio run (WD=0) showed rare CJK/

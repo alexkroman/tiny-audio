@@ -51,6 +51,13 @@ class ASRConfig(transformers.PretrainedConfig):
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
         projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
+        # Label smoothing applied inside the LM's loss function (not HF Trainer's
+        # LabelSmoother). Train-only — ASRModel.forward zeros it on eval. Routing
+        # smoothing through the loss_function flows through liger's fused linear
+        # CE when apply_liger_kernel_to_qwen3() is active, avoiding the
+        # (B,T,V) fp32 log_softmax materialization that the HF LabelSmoother
+        # path requires (~15GB at B=50/V=152k on Qwen3-0.6B).
+        label_smoothing: float = 0.0,
         # MoE-specific configuration
         num_experts: int = 4,  # Number of experts in MoE projectors
         num_experts_per_tok: int = 2,  # Top-k experts per token
@@ -117,6 +124,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
+        self.label_smoothing = label_smoothing
         # MoE-specific configuration
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok

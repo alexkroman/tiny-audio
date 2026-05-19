@@ -2491,6 +2491,26 @@ files = [
 ]
 
 [[package]]
+name = "liger-kernel"
+version = "0.8.0"
+description = "Efficient Triton kernels for LLM Training"
+optional = false
+python-versions = "*"
+groups = ["main"]
+markers = "sys_platform == \"linux\""
+files = [
+    {file = "liger_kernel-0.8.0-py3-none-any.whl", hash = "sha256:e1f03eeb4ba6a6a413d585dacf92c4c15d164bab5844fa4ead2fede6bcac469c"},
+    {file = "liger_kernel-0.8.0.tar.gz", hash = "sha256:f98b94faf018814a0757e7b72bb8ebaaf12a78782cd09b157732acca2791e72c"},
+]
+
+[package.dependencies]
+torch = ">=2.1.2"
+triton = ">=2.3.1"
+
+[package.extras]
+dev = ["datasets (>=2.19.2)", "matplotlib (>=3.7.2)", "mkdocs-material", "prek (>=0.2.28)", "pytest (>=7.1.2)", "pytest-asyncio", "pytest-cov", "pytest-rerunfailures", "pytest-xdist", "ruff (>=0.12.0)", "seaborn", "torchvision (>=0.20)", "transformers (>=4.52.0)"]
+
+[[package]]
 name = "llvmlite"
 version = "0.44.0"
 description = "lightweight wrapper around basic LLVM functionality"
@@ -7015,7 +7035,7 @@ description = "A language and compiler for custom Deep Learning operations"
 optional = false
 python-versions = "<3.14,>=3.9"
 groups = ["main"]
-markers = "platform_system == \"Linux\" and platform_machine == \"x86_64\""
+markers = "(platform_system == \"Linux\" or sys_platform == \"linux\") and (platform_machine == \"x86_64\" or sys_platform == \"linux\")"
 files = [
     {file = "triton-3.4.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7ff2785de9bc02f500e085420273bb5cc9c9bb767584a4aa28d6e360cec70128"},
     {file = "triton-3.4.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7b70f5e6a41e52e48cfc087436c8a28c17ff98db369447bcaff3b887a3ab4467"},
@@ -7882,4 +7902,4 @@ local = ["pyaudio"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "83928a14d3145671ef3de400585064a3445e71c848e92f84b21e5d5a02919549"
+content-hash = "4c06ef3a0fe9a2b08c545ef1edb889b7fcafac9123bb265b41945a085bc0a931"

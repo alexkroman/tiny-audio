@@ -738,6 +738,26 @@ def main(cfg: DictConfig) -> None:
             wandb.run.summary["git_commit"] = git_commit
             wandb.run.summary["git_dirty"] = git_dirty
 
+    # Patch transformers.models.qwen3 with liger fused kernels before the LM
+    # class is instantiated. The big win is fused linear cross-entropy: instead
+    # of materializing the (B, T, V) fp32 log-softmax tensor that HF's standard
+    # CE / LabelSmoother path requires (~15GB at B=50, V=151k on Qwen3-0.6B),
+    # liger fuses lm_head @ hidden_states + softmax + CE into a single kernel
+    # with peak memory O(B·T·D). Label smoothing flows through this kernel via
+    # the loss_function's **kwargs path (see ASRModel.forward) — so set HF
+    # Trainer's label_smoothing_factor=0 in configs to bypass the LabelSmoother
+    # and rely on model.config.label_smoothing instead.
+    if cfg.training.get("use_liger", True):
+        try:
+            from liger_kernel.transformers import apply_liger_kernel_to_qwen3
+
+            apply_liger_kernel_to_qwen3()
+        except ImportError:
+            logging.warning(
+                "liger-kernel not installed — falling back to stock Qwen3 kernels. "
+                "Install with `poetry install` on Linux to enable fused linear CE."
+            )
+
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_config_dict, dict), "model config must be a dict"
     for param in TRAINING_MODEL_PARAMS:
