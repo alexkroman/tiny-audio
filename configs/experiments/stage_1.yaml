@@ -154,4 +154,10 @@ training:
   # flash-attn source build on RunPod and is fast enough at our seq lengths.
   attn_implementation: sdpa
 
-  torch_compile: true
+  # Inductor's decompose_triton_kernel_wrapper_functional post-grad pass
+  # asserts on liger's wrapped triton kernels (RMSNorm/SwiGLU/RoPE/fused
+  # linear CE). liger's wins don't depend on torch.compile, so disable it
+  # rather than lose liger. Re-enable when liger v0.9+ improves Inductor
+  # compat. (Also disabled in configs/training/production.yaml — repeating
+  # here because this experiment file overrides the training base.)
+  torch_compile: false

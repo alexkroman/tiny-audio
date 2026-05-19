@@ -382,7 +382,15 @@ export HF_TOKEN="{hf_token}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
 export TORCH_CUDNN_BENCHMARK=1
-export TORCHINDUCTOR_CACHE_DIR=/workspace/.inductor_cache
+# Keep the inductor + triton caches on local NVMe (/root/.cache/...), not on
+# the NFS-backed /workspace volume. /workspace previously caused ESTALE
+# (Errno 116, "Stale file handle") crashes inside Inductor's compile-worker
+# pool when the underlying NFS handle expired mid-write — typical for any
+# parallel-write workload on a networked FS. The cost of putting these on
+# local NVMe is one cold-cache compile per pod boot (seconds–minutes);
+# the cost of ESTALE is a dead training job.
+export TORCHINDUCTOR_CACHE_DIR=/root/.cache/torch_inductor
+export TRITON_CACHE_DIR=/root/.cache/triton
 export TORCHINDUCTOR_FX_GRAPH_CACHE=1
 export TORCH_DYNAMO_ALLOW_UNSPEC_INT_ON_NN_MODULE=1
 export TORCH_CUDA_GRAPHS_ENABLED=0
