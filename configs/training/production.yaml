@@ -54,11 +54,15 @@ hub_private_repo: false
 fp16: false
 bf16: true
 tf32: true
-torch_compile: true
-# group_by_length varies the batch shape per bucket, which would otherwise
-# blow past dynamo's default cache_size_limit=8 and force eager fallback.
-torch_compile_config:
-  cache_size_limit: 256
+# torch.compile disabled: Inductor's post-grad
+# decompose_triton_kernel_wrapper_functional pass asserts on liger's wrapped
+# triton kernels (RMSNorm / SwiGLU / RoPE / fused-linear-CE), crashing the
+# compile step. liger's kernels don't need torch.compile to deliver their
+# wins — the fused linear CE (the load-bearing one for label_smoothing
+# memory) is invoked directly from Qwen3ForCausalLM.forward after
+# apply_liger_kernel_to_qwen3 patches it. Re-enable once liger v0.9+ ships
+# improved Inductor compat.
+torch_compile: false
 attn_implementation: flash_attention_2
 
 # Data loading
