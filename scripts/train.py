@@ -828,8 +828,21 @@ def main(cfg: DictConfig) -> None:
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     decoder_weight_decay = training_config.pop("decoder_weight_decay", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
+    # Dynamo flags set unconditionally — applies whether the user enables
+    # torch.compile via TrainingArguments or whether some upstream dep
+    # (liger / transformers) invokes dynamo internally. cache_size_limit
+    # defaults to 8, which audio batches blow past quickly because
+    # group_by_length=false + variable seq lengths produce dozens of
+    # distinct shapes; without bumping it dynamo gives up and falls back
+    # to eager mid-run (you see "torch._dynamo hit config.recompile_limit"
+    # warnings). capture_scalar_outputs lets dynamo capture .item() /
+    # scalar-tensor outputs into the graph instead of graph-breaking on
+    # the first scalar-producing op (e.g. token_counts.max().item() in
+    # _gather_audio_embeds).
+    torch._dynamo.config.cache_size_limit = 256
+    torch._dynamo.config.capture_scalar_outputs = True
     if compile_config := training_config.pop("torch_compile_config", None):
-        torch._dynamo.config.cache_size_limit = compile_config.get("cache_size_limit", 64)
+        torch._dynamo.config.cache_size_limit = compile_config.get("cache_size_limit", 256)
         torch._dynamo.config.capture_scalar_outputs = compile_config.get(
             "capture_scalar_outputs", True
         )
