@@ -444,18 +444,21 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         ~20 ms/frame stride after conv-stack downsampling, mask_length=10
         is ~200 ms — enough to force the projector to interpolate over
         silence-sized gaps without erasing entire phonemes.
+
+        Vectorized (no Python loop, no in-place indexed assignment) so the
+        whole pass stays inside torch.compile's traced graph instead of
+        forcing a graph break / eager fallback at every step.
         """
         if not self.training or num_masks <= 0 or mask_length <= 0:
             return x
         bsz, seq_len, _ = x.shape
         if seq_len <= mask_length:
             return x
-        x = x.clone()
-        starts = torch.randint(0, seq_len - mask_length, (bsz, num_masks), device=x.device)
-        for b in range(bsz):
-            for s in starts[b].tolist():
-                x[b, s : s + mask_length] = 0
-        return x
+        starts = torch.randint(0, seq_len - mask_length, (bsz, num_masks, 1), device=x.device)
+        positions = torch.arange(seq_len, device=x.device)
+        in_mask = ((positions >= starts) & (positions < starts + mask_length)).any(dim=1)
+        keep = (~in_mask).unsqueeze(-1).to(x.dtype)
+        return x * keep
 
     def _encode_audio(
         self,
