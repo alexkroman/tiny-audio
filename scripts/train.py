@@ -81,20 +81,69 @@ _GIGASPEECH_PUNCT_RE = re.compile(
 # preserves partial speech transcripts (audio may have speech around the
 # tagged non-speech moment) and the empty-label filter at the collator
 # still catches the edge case where the entire label was just a tag.
-_CORPUS_MARKER_RE = re.compile(
-    r"\s*<("
-    r"sil|music|noise|other|unk|"
-    r"overlap|laugh|dtmf|foreign|no-speech|lipsmack|"
-    r"clear_throat|inaudible|crosstalk"
-    r")>",
-    re.IGNORECASE,
-)
+# After the Gigaspeech punct map converts <COMMA>/<PERIOD>/etc. to real
+# punctuation, any remaining `<...>` token is a non-speech annotation
+# marker (Gigaspeech <MUSIC>/<NOISE>/<SIL>/<OTHER>, TEDLIUM <unk>,
+# Switchboard <LAUGH>, EdAcc <overlap>/<dtmf>/<foreign>/<no-speech>/
+# <lipsmack>, Earnings22 <clear_throat>/<inaudible>/<crosstalk>, plus the
+# long tail of bodily-noise tags like <inhale>/<sigh>/<cough> that vary
+# across corpora). ASR transcripts never legitimately contain `<word>`
+# tokens, so a generic strip is safer than a whitelist (whitelists
+# silently leak whichever marker variant a new corpus happens to use,
+# training the decoder to emit it as a literal token). Substitution
+# uses a single space so adjacent-no-whitespace forms (`word<sigh>word`)
+# don't collapse to a concatenated string before the whitespace pass.
+_RESIDUAL_ANGLE_TAG_RE = re.compile(r"<[^>]+>")
 # TEDLIUM occasionally inlines editorial commentary in square brackets
 # ([ medicine ], [ multi-word stage direction ]) — ~0.25% of train rows;
-# zero in dev/test. Strip the entire bracketed block, including any
-# preceding whitespace, to avoid leaving a double-space behind.
-_TEDLIUM_BRACKET_RE = re.compile(r"\s*\[[^\]]*\]")
+# zero in dev/test. Same single-space substitution rationale as above.
+_TEDLIUM_BRACKET_RE = re.compile(r"\[[^\]]*\]")
+# Word-bounded `per cent` → `percent` to avoid false positives on
+# `per centage` / `per centimeter` / etc.; the prior `text.replace("per cent", "percent")`
+# silently mangled those. `\bper ?cent\b` also harmlessly matches an
+# already-collapsed `percent` (the replacement is identical, so it's a no-op).
+_PER_CENT_RE = re.compile(r"\bper ?cent\b")
+# TEDLIUM occasionally tokenizes negation contractions with the apostrophe-t
+# split off the verb stem — `didn 't` instead of `didn't` or `did n't`. Probe
+# of 500 TEDLIUM train rows showed this in ~10%, dominated by
+# `don 't` / `didn 't` / `wouldn 't` / `can 't` / `wasn 't`. Truecase
+# tokenizes the orphan `'t` as a standalone token and uppercases it, so
+# labels arrive as `didn 'T embrace` and train the decoder to emit broken
+# contractions. Pre-collapse the orphan before truecase runs. The `\w+n`
+# anchor means we only target the negation-contraction shape, so we never
+# touch space-before-apostrophe forms like `she 'd` / `it 's` / `friends '`
+# that truecase already handles correctly via its contraction vocabulary.
+_ORPHAN_NT_RE = re.compile(r"\b(\w+n)\s+'t\b")
 _WHITESPACE_RE = re.compile(r"\s+")
+
+# Post-truecase cleanup. Truecase's NLTK-backed tokenizer reformats text
+# in three ways that survive into training labels:
+#   1. Sentence-final periods get split off as standalone tokens, then
+#      re-joined with a leading space (`rate . But` instead of `rate. But`).
+#      Found in ~25% of Gigaspeech rows (the multi-sentence ones).
+#   2. Truecase fails to capitalize the next sentence after a mid-sentence
+#      period (`E T. the Video game.` instead of `E T. The Video game.`).
+#   3. Em-dash spaces get eaten (`for -- we` → `for--we`); seen in SPGI.
+#   4. Informal `gonna`/`wanna` get mangled to `gonNA`/`wanNA` regardless
+#      of input casing; seen across AMI / Switchboard / Gigaspeech.
+# These post-fixes run only when truecase actually fired (already-cased
+# sources skip truecase and don't need this cleanup).
+_SPACE_BEFORE_SENT_PUNCT_RE = re.compile(r"\s+([.,!?])")
+_SENT_START_LOWERCASE_RE = re.compile(r"([.!?])\s+([a-z])")
+_EM_DASH_RE = re.compile(r"\s*--\s*")
+_GONNA_ARTIFACT_RE = re.compile(r"\bgonNA\b")
+_WANNA_ARTIFACT_RE = re.compile(r"\bwanNA\b")
+_GOTTA_ARTIFACT_RE = re.compile(r"\bgotTA\b")
+
+
+def _post_truecase_cleanup(text: str) -> str:
+    text = _SPACE_BEFORE_SENT_PUNCT_RE.sub(r"\1", text)
+    text = _SENT_START_LOWERCASE_RE.sub(lambda m: f"{m.group(1)} {m.group(2).upper()}", text)
+    text = _EM_DASH_RE.sub(" -- ", text)
+    text = _GONNA_ARTIFACT_RE.sub("gonna", text)
+    text = _WANNA_ARTIFACT_RE.sub("wanna", text)
+    return _GOTTA_ARTIFACT_RE.sub("gotta", text)
+
 
 # Unicode cleanup: ftfy fixes mojibake (â€™ → '), unescapes HTML entities
 # (&amp; → &), and folds smart quotes (' " → ' "); NFKC further normalizes
@@ -182,14 +231,17 @@ def _normalize_label(raw_text: str) -> str:
         return ""
     text = ftfy.fix_text(text, normalization="NFKC")
     text = _GIGASPEECH_PUNCT_RE.sub(lambda m: _GIGASPEECH_PUNCT_MAP[m.group(1).upper()], text)
-    text = _CORPUS_MARKER_RE.sub("", text)
-    text = _TEDLIUM_BRACKET_RE.sub("", text)
-    text = text.replace("%", " percent").replace("per cent", "percent")
+    text = _RESIDUAL_ANGLE_TAG_RE.sub(" ", text)
+    text = _TEDLIUM_BRACKET_RE.sub(" ", text)
+    text = text.replace("%", " percent")
+    text = _PER_CENT_RE.sub("percent", text)
+    text = _ORPHAN_NT_RE.sub(r"\1't", text)
     text = _WHITESPACE_RE.sub(" ", text).strip()
     if not text:
         return ""
     if _needs_truecase(text):
         text = truecase.get_true_case(text)
+        text = _post_truecase_cleanup(text)
     return text
 
 
@@ -550,11 +602,18 @@ class ASRTrainer(Trainer):
         if self.optimizer is not None or not overrides:
             return super().create_optimizer()
 
+        from transformers.models.llama.modeling_llama import LlamaRMSNorm
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
         from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
         from transformers.trainer_pt_utils import get_parameter_names
 
+        # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm. Qwen3 / Llama
+        # use RMSNorm subclasses, so without these their gain weights silently
+        # land in the decay group and get pulled toward zero — destabilizing
+        # the residual-stream scale the projector's _NORM_INIT was tuned to.
         opt_model = self.model
-        decay_parameters = set(get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS))
+        forbidden = list(ALL_LAYERNORM_LAYERS) + [Qwen3RMSNorm, LlamaRMSNorm]
+        decay_parameters = set(get_parameter_names(opt_model, forbidden))
         decay_parameters = {n for n in decay_parameters if "bias" not in n}
 
         groups: dict[tuple[bool, bool], list] = {

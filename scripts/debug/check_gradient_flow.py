@@ -78,10 +78,13 @@ def build_param_groups(
     routing audit and the configured `lr` / `wd` that ASRTrainer would
     apply under embedded.yaml's knobs.
     """
+    from transformers.models.llama.modeling_llama import LlamaRMSNorm
+    from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
     from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
     from transformers.trainer_pt_utils import get_parameter_names
 
-    decay_set = set(get_parameter_names(model, ALL_LAYERNORM_LAYERS))
+    forbidden = list(ALL_LAYERNORM_LAYERS) + [Qwen3RMSNorm, LlamaRMSNorm]
+    decay_set = set(get_parameter_names(model, forbidden))
     decay_set = {n for n in decay_set if "bias" not in n}
 
     base_lr = knobs["learning_rate"]

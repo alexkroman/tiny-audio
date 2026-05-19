@@ -91,11 +91,13 @@ class TestGigaspeechEdgeCases:
         # mapping rule; downstream WER scoring normalizes regardless.
         assert _normalize_label("<period>boost") == ".Boost"
 
-    def test_unknown_angle_bracket_token_preserved(self):
-        # We only strip the documented marker set. <foo> is unrecognized
-        # so it stays in the label — truecase capitalizes the F since
-        # it's at sentence start.
-        assert _normalize_label("<foo> hello") == "<Foo> hello"
+    def test_unknown_angle_bracket_token_stripped(self):
+        # ASR transcripts never legitimately contain `<word>` tokens, so
+        # ALL residual `<...>` (after the Gigaspeech punct map runs) are
+        # treated as annotation markers and stripped. Prior whitelist
+        # approach silently leaked novel marker variants into training
+        # labels, teaching the decoder to emit them as literal tokens.
+        assert _normalize_label("<foo> hello") == "Hello"
 
 
 class TestCombinedNormalization:
@@ -209,7 +211,7 @@ class TestEdAccNormalization:
         ["overlap", "laugh", "dtmf", "foreign", "no-speech", "lipsmack"],
     )
     def test_lowercase_form_also_stripped(self, marker):
-        # _CORPUS_MARKER_RE has re.IGNORECASE; verify lowercase variant.
+        # Generic `<[^>]+>` strip is case-agnostic — both cases handled.
         assert _normalize_label(f"hello <{marker}> world") == "Hello world"
 
 
@@ -225,3 +227,146 @@ class TestEarnings22Normalization:
 
     def test_crosstalk_marker_stripped(self):
         assert _normalize_label("yeah <crosstalk> i agree") == "Yeah I agree"
+
+
+class TestBodilyNoiseMarkers:
+    """Bodily-noise annotation tags surface across corpora (sigh, inhale,
+    cough, etc.). Probe of the multiasr mix surfaced these surviving the
+    prior whitelist-only stripper. Generic `<[^>]+>` strip catches them
+    along with any novel marker a future corpus introduces."""
+
+    @pytest.mark.parametrize(
+        "marker",
+        ["sigh", "inhale", "exhale", "breath", "cough", "throat", "sniff", "click"],
+    )
+    def test_bodily_noise_marker_stripped(self, marker):
+        assert _normalize_label(f"hello <{marker}> world") == "Hello world"
+
+
+class TestPerCentBoundary:
+    """`per cent` → `percent` must respect word boundaries; prior unbounded
+    `text.replace("per cent", "percent")` mangled `per centage` → `percentage`
+    and would have mangled `per centimeter` → `percentimeter`."""
+
+    def test_per_centage_preserved(self):
+        # Lowercase mono-case → truecase fires → sentence-initial cap, and
+        # may also cap "centage" as a perceived proper-noun (truecase
+        # library artifact, unrelated to the regex fix). The contract this
+        # test enforces is: `per centage` does NOT collapse to `percentage`.
+        result = _normalize_label("the per centage was high").lower()
+        assert "percentage" not in result
+        assert "per centage" in result
+
+    def test_per_centimeter_preserved(self):
+        result = _normalize_label("five per centimeter").lower()
+        assert "percentimeter" not in result
+        assert "per centimeter" in result
+
+    def test_per_cent_still_collapsed_when_word_bounded(self):
+        assert _normalize_label("five per cent here") == "Five percent here"
+
+
+class TestTruecaseArtifactCleanup:
+    """Truecase's NLTK tokenizer introduces three classes of artifact in
+    its output. The post-truecase cleanup function fixes each."""
+
+    def test_mid_sentence_period_no_leading_space(self):
+        # Truecase output `rate . But` → cleaned to `rate. But`. The
+        # `<PERIOD>` substitution happens in ~25% of Gigaspeech rows.
+        assert (
+            _normalize_label("USE A RATE <PERIOD> BUT TODAY IT WORKS")
+            == "Use a rate. But today it works"
+        )
+
+    def test_sentence_start_after_period_capitalized(self):
+        # Truecase may leave the next sentence lowercase after a
+        # mid-sentence period (`E T. the Video game`). Post-cleanup caps it.
+        assert _normalize_label("E T <PERIOD> THE VIDEO GAME <PERIOD>") == "E T. The Video game."
+
+    def test_em_dash_spaces_restored(self):
+        # Truecase collapses ` -- ` → `--`. Post-cleanup restores spacing.
+        # Input is mono-case lowercase so truecase fires; the cleanup
+        # then re-inserts the em-dash spaces.
+        assert _normalize_label("we agreed -- it was fine") == "We agreed -- it was fine"
+
+    def test_gonna_artifact_normalized(self):
+        # Truecase mangles `GONNA`/`gonna` → `gonNA` regardless of input case.
+        assert _normalize_label("I'M GONNA DO IT NOW") == "I'm gonna do it now"
+
+    def test_wanna_artifact_normalized(self):
+        assert _normalize_label("you wanna go home") == "You wanna go home"
+
+    def test_gotta_artifact_normalized(self):
+        # Same MidWord-caps family as gonna/wanna — truecase outputs `gotTA`.
+        assert _normalize_label("YOU GOTTA DO IT NOW") == "You gotta do it now"
+
+
+class TestOrphanedNtContraction:
+    """TEDLIUM tokenizes ~10% of negation contractions with the apostrophe-t
+    split off the verb stem (`didn 't` instead of `didn't`). Truecase then
+    treats `'t` as a standalone token and uppercases it, producing
+    `didn 'T embrace`. Pre-collapse fixes this before truecase runs."""
+
+    @pytest.mark.parametrize(
+        "stem",
+        [
+            "didn",
+            "don",
+            "wouldn",
+            "wasn",
+            "doesn",
+            "isn",
+            "aren",
+            "shouldn",
+            "couldn",
+            "hasn",
+            "haven",
+            "hadn",
+            "won",
+            "weren",
+        ],
+    )
+    def test_orphan_nt_joined(self, stem):
+        assert _normalize_label(f"i {stem} 't think so").lower().startswith(f"i {stem}'t")
+
+    def test_does_not_break_correct_form(self):
+        # Already-joined `didn't` (no space) must be untouched.
+        result = _normalize_label("i didn't think so")
+        assert "didn't" in result
+        assert "didn 't" not in result and "didn 'T" not in result
+
+    def test_does_not_break_alternate_tokenization(self):
+        # TEDLIUM's other tokenization style — `did n't` — joins correctly
+        # via truecase's existing contraction vocabulary. Our regex must
+        # not interfere.
+        result = _normalize_label("they did n't think so")
+        assert "didn't" in result
+
+    def test_does_not_match_apostrophe_followed_by_letters(self):
+        # `'tis` / `'twas` (archaic) — apostrophe followed by letters that
+        # aren't a contraction suffix. Our regex requires `\w+n` before the
+        # space; `hark` ends in `k`, so the orphan-n't fix does NOT fire.
+        # (Truecase may still upper-case the post-apostrophe letter, but
+        # that's pre-existing behavior independent of this fix.)
+        result = _normalize_label("hark 'tis the night")
+        assert "'tis" in result.lower()  # case-insensitive: regex didn't mangle it
+
+    def test_no_change_when_preceding_word_doesnt_end_in_n(self):
+        # The `\w+n` anchor restricts our fix to negation contractions.
+        # Forms like `friends ' mothers` (plural possessive) and `it 's`
+        # (which truecase handles) stay on the existing code path.
+        result = _normalize_label("my friends 's car broke")
+        # Verify no n't-style mangling crept in
+        assert " 't" not in result.lower()
+
+
+class TestAdjacentNoWhitespaceMarkers:
+    """Markers without surrounding whitespace must not collapse adjacent
+    words. The substitute-with-space approach (vs. substitute-with-empty)
+    keeps `hello<unk>world` from becoming `helloworld`."""
+
+    def test_angle_tag_no_whitespace(self):
+        assert _normalize_label("hello<unk>world") == "Hello world"
+
+    def test_square_bracket_no_whitespace(self):
+        assert _normalize_label("abc[laughter]def") == "Abc def"

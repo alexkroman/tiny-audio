@@ -21,19 +21,15 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 
 class MLPAudioProjector(nn.Module):
-    """2-layer MLP projector with frame-stacking downsampling (matches GLM-ASR)."""
+    """2-layer MLP projector with frame-stacking downsampling (matches GLM-ASR).
 
-    # RMSNorm init weight chosen to match Qwen3-0.6B's embed_tokens median
-    # RMS (empirically 0.0292 across 151,936 tokens × dim=1024). With this
-    # init the projector outputs enter the LM at the same per-position
-    # residual-stream magnitude as text embed_tokens — avoiding the
-    # ~34× over-magnitude that LlamaRMSNorm's default weight=1.0 produces.
-    # Adam's per-parameter normalization means this small init does NOT
-    # starve projector gradient flow; the norm-before-GELU placement keeps
-    # gradients healthy regardless of init magnitude. If you swap to a
-    # different LM, re-measure with
-    # `model.get_input_embeddings().weight.pow(2).mean().sqrt()` and update.
-    _NORM_INIT = 0.029
+    Both RMSNorms use LlamaRMSNorm's default weight=1.0 init. A prior version
+    initialized both to 0.029 (Qwen3-0.6B's embed_tokens RMS) to put projector
+    outputs at residual-stream scale on step 1. Empirically, after training the
+    model drifted both norms back to ~1.0 (norm) and ~1.2 (norm_2) — the small
+    init wasted compute on a 35× scale-correction phase the optimizer would
+    have skipped from default init.
+    """
 
     def __init__(self, config):
         """Initialize MLP projector.
@@ -53,20 +49,9 @@ class MLPAudioProjector(nn.Module):
         hidden_dim = getattr(config, "projector_hidden_dim", None) or llm_dim
         self.linear_1 = nn.Linear(in_dim, hidden_dim, bias=False)
         self.norm = LlamaRMSNorm(hidden_dim, eps=1e-6)
-        self.norm.weight.data.fill_(self._NORM_INIT)
         self.act = nn.GELU()
-        # Dropout matches Granite-Speech 4.1's Q-Former hidden_dropout_prob=0.1
-        # in its frozen-encoder modality-alignment stage — the closest
-        # published precedent for our regime. Default 0.0 in config means
-        # nn.Dropout(0.0) is a no-op for existing experiments.
-        projector_dropout = float(getattr(config, "projector_dropout", 0.0))
-        self.dropout = nn.Dropout(projector_dropout)
         self.linear_2 = nn.Linear(hidden_dim, llm_dim, bias=False)
-        # Output norm aligns the projector's RMS with the LM's embed_tokens
-        # distribution. See _NORM_INIT comment above for the magnitude
-        # derivation.
         self.norm_2 = LlamaRMSNorm(llm_dim, eps=1e-6)
-        self.norm_2.weight.data.fill_(self._NORM_INIT)
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length (matches GLM-ASR)."""
@@ -86,7 +71,6 @@ class MLPAudioProjector(nn.Module):
         x = self.linear_1(x)
         x = self.norm(x)
         x = self.act(x)
-        x = self.dropout(x)
         x = self.linear_2(x)
         return self.norm_2(x)
 

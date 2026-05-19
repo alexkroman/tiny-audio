@@ -32,6 +32,93 @@ def _threshold_status(value: float, warn: float, high: float) -> str:
     return "❌ HIGH"
 
 
+COMPONENT_FILTERS = {
+    "projector": "projector",
+    "decoder": "language_model",
+    "encoder": "audio_tower",
+    "all": "",
+}
+
+
+def _tensor_kind(name: str, shape: tuple) -> str:
+    """Classify tensor for type-aware analysis.
+
+    Returns one of: 'norm', 'embed', 'lm_head', 'bias', 'linear', 'other'.
+    Used to skip false-positive >1 warnings on RMSNorm gain weights and to
+    drive embed_tokens-specific row-norm analysis.
+    """
+    nl = name.lower()
+    if "norm" in nl and len(shape) == 1:
+        return "norm"
+    if "embed_tokens" in nl:
+        return "embed"
+    if "lm_head" in nl:
+        return "lm_head"
+    if "bias" in nl and len(shape) == 1:
+        return "bias"
+    if len(shape) == 2:
+        return "linear"
+    return "other"
+
+
+def _extract_layer_idx(name: str) -> int | None:
+    """Pull the decoder layer index out of names like 'language_model.model.layers.5.self_attn.q_proj.weight'."""
+    import re
+
+    m = re.search(r"\.layers\.(\d+)\.", name)
+    return int(m.group(1)) if m else None
+
+
+def _strip_lm_prefix(name: str) -> str:
+    """Map a tiny-audio decoder tensor name to its base-LM name."""
+    return name.removeprefix("language_model.")
+
+
+def load_base_weights(text_model_id: str) -> dict[str, torch.Tensor] | None:
+    """Download and load base LM weights for delta-from-base analysis.
+
+    Tries single-file model.safetensors first, then falls back to sharded
+    safetensors via the index manifest. Returns None on any failure so
+    callers can degrade gracefully to absolute-value analysis.
+    """
+    try:
+        try:
+            path = hf_hub_download(repo_id=text_model_id, filename="model.safetensors")
+            return load_file(path)
+        except Exception:
+            index_path = hf_hub_download(
+                repo_id=text_model_id, filename="model.safetensors.index.json"
+            )
+            with Path(index_path).open() as f:
+                index = json.load(f)
+            shard_files = set(index["weight_map"].values())
+            weights: dict[str, torch.Tensor] = {}
+            for shard in shard_files:
+                shard_path = hf_hub_download(repo_id=text_model_id, filename=shard)
+                weights.update(load_file(shard_path))
+            return weights
+    except Exception as e:
+        console.print(f"[yellow]⚠️  Could not load base weights from {text_model_id}: {e}[/yellow]")
+        console.print("[yellow]    Falling back to absolute-value analysis (no delta).[/yellow]")
+        return None
+
+
+def _decoder_module(name: str) -> str:
+    """Classify a decoder tensor's module: 'attn', 'mlp', 'norm', 'embed', 'lm_head', 'other'."""
+    nl = name.lower()
+    if "embed_tokens" in nl:
+        return "embed"
+    if "lm_head" in nl:
+        return "lm_head"
+    if "self_attn" in nl or any(x in nl for x in [".q_proj.", ".k_proj.", ".v_proj.", ".o_proj."]):
+        return "attn"
+    if ".mlp." in nl or any(x in nl for x in [".gate_proj.", ".up_proj.", ".down_proj."]):
+        return "mlp"
+    if "norm" in nl:
+        return "norm"
+    return "other"
+
+
 def estimate_effective_rank(tensor: torch.Tensor, threshold: float = 0.99) -> tuple[int, int]:
     """Estimate effective rank of a weight matrix using SVD.
 
@@ -59,8 +146,18 @@ def estimate_effective_rank(tensor: torch.Tensor, threshold: float = 0.99) -> tu
     return (effective_rank, full_rank)
 
 
-def analyze_tensor(name: str, tensor: torch.Tensor, verbose: bool = False) -> dict:
-    """Analyze a single tensor and return health metrics."""
+def analyze_tensor(
+    name: str, tensor: torch.Tensor, verbose: bool = False, compute_rank: bool = True
+) -> dict:
+    """Analyze a single tensor and return health metrics.
+
+    Args:
+        name: Tensor name (used for type classification).
+        tensor: The weight tensor.
+        verbose: Include percentile and distribution analysis.
+        compute_rank: Run SVD-based effective-rank estimate. Disable for
+            large decoder runs where 300+ SVDs dominate runtime.
+    """
     t = tensor.float()
     numel = t.numel()
 
@@ -70,6 +167,7 @@ def analyze_tensor(name: str, tensor: torch.Tensor, verbose: bool = False) -> di
         "shape": list(t.shape),
         "numel": numel,
         "dtype": str(tensor.dtype),
+        "tensor_kind": _tensor_kind(name, tuple(t.shape)),
         "mean": t.mean().item(),
         "std": t.std().item(),
         "var": t.var().item(),
@@ -115,11 +213,13 @@ def analyze_tensor(name: str, tensor: torch.Tensor, verbose: bool = False) -> di
         stats["dead_rows"] = (row_norms < 1e-5).sum().item()
         stats["dead_cols"] = (col_norms < 1e-5).sum().item()
 
-        # Effective rank (training capacity indicator)
-        eff_rank, full_rank = estimate_effective_rank(t)
-        stats["effective_rank"] = eff_rank
-        stats["full_rank"] = full_rank
-        stats["rank_utilization"] = eff_rank / full_rank if full_rank > 0 else 0
+        # Effective rank (training capacity indicator). Skipped for large
+        # decoder runs because SVD on 300+ Qwen3 matrices is dominantly slow.
+        if compute_rank:
+            eff_rank, full_rank = estimate_effective_rank(t)
+            stats["effective_rank"] = eff_rank
+            stats["full_rank"] = full_rank
+            stats["rank_utilization"] = eff_rank / full_rank if full_rank > 0 else 0
 
     # Value distribution (binned)
     if verbose:
@@ -181,9 +281,14 @@ def print_tensor_analysis(stats: dict, verbose: bool = False):
     inf_status = "❌ CRITICAL" if stats["inf_count"] > 0 else "✅ OK"
     zero_status = _threshold_status(stats["exact_zero_pct"], 1, 10)
     near_zero_status = _threshold_status(stats["near_zero_pct"], 1, 10)
-    large_status = _threshold_status(stats["large_pct"], 5, 20)
     very_large_pct = 100 * stats["very_large_count"] / stats["numel"]
     very_large_status = _threshold_status(very_large_pct, 1, 5)
+    # For RMSNorm gain weights, values > 1 are expected (per-channel amplification)
+    # and the linear-weight threshold (5%/20%) doesn't apply.
+    if stats.get("tensor_kind") == "norm":
+        large_status = "✅ OK (norm gain)"
+    else:
+        large_status = _threshold_status(stats["large_pct"], 5, 20)
 
     console.print(f"    NaN values:        {stats['nan_count']:>12,} {nan_status}")
     console.print(f"    Inf values:        {stats['inf_count']:>12,} {inf_status}")
@@ -269,10 +374,282 @@ def print_tensor_analysis(stats: dict, verbose: bool = False):
                 )
 
 
+def print_decoder_summary(
+    weights: dict[str, torch.Tensor],
+    all_stats: list[dict],
+    base_weights: dict[str, torch.Tensor] | None = None,
+    top_k: int = 10,
+) -> dict:
+    """Decoder-specific aggregate view.
+
+    When `base_weights` is provided, all sections show drift *from base* —
+    far more useful than absolute values because pretrained LM weights
+    (especially RMSNorm gains) already have non-uniform structure that
+    swamps any fine-tuning signal in absolute terms.
+
+    Returns a small dict of summary metrics used by the verdict at the end.
+    """
+    summary: dict = {}
+    if base_weights is None:
+        console.print(
+            "\n[dim]Note: no base-model weights loaded — showing absolute values. "
+            "Pass --compare-base to see fine-tuning delta from base.[/dim]"
+        )
+
+    layer_groups: dict[int, list[dict]] = {}
+    for s in all_stats:
+        idx = _extract_layer_idx(s["name"])
+        if idx is not None:
+            layer_groups.setdefault(idx, []).append(s)
+
+    if layer_groups:
+        _section("DECODER PER-LAYER DRIFT" + (" (Δ FROM BASE)" if base_weights else ""))
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Layer", justify="right")
+        if base_weights:
+            table.add_column("Δ attn", justify="right")
+            table.add_column("Δ mlp", justify="right")
+            table.add_column("Δ norm", justify="right")
+            table.add_column("max Δ ch", justify="right")
+        else:
+            table.add_column("attn std", justify="right")
+            table.add_column("mlp std", justify="right")
+            table.add_column("norm mean", justify="right")
+            table.add_column("norm range", justify="right")
+
+        for idx in sorted(layer_groups):
+            stats_for_layer = layer_groups[idx]
+            attn = [s for s in stats_for_layer if _decoder_module(s["name"]) == "attn"]
+            mlp = [s for s in stats_for_layer if _decoder_module(s["name"]) == "mlp"]
+            norm = [s for s in stats_for_layer if _decoder_module(s["name"]) == "norm"]
+
+            if base_weights:
+                # Relative L2 drift: ||trained - base|| / ||base||. Skip
+                # tensors with shape mismatches (e.g., resized vocab) — those
+                # are reported separately in the embed_tokens section.
+                def rel_drift(group: list[dict]) -> float:
+                    total_d, total_b = 0.0, 0.0
+                    for s in group:
+                        base = base_weights.get(_strip_lm_prefix(s["name"]))
+                        if base is None:
+                            continue
+                        cur = weights[s["name"]].float()
+                        b = base.float()
+                        if cur.shape != b.shape:
+                            continue
+                        total_d += float((cur - b).pow(2).sum().item())
+                        total_b += float(b.pow(2).sum().item())
+                    return (total_d / total_b) ** 0.5 if total_b > 0 else 0.0
+
+                def max_channel_delta(group: list[dict]) -> float:
+                    m = 0.0
+                    for s in group:
+                        base = base_weights.get(_strip_lm_prefix(s["name"]))
+                        if base is None:
+                            continue
+                        cur = weights[s["name"]].float()
+                        b = base.float()
+                        if cur.shape != b.shape:
+                            continue
+                        m = max(m, float((cur - b).abs().max().item()))
+                    return m
+
+                attn_d = rel_drift(attn)
+                mlp_d = rel_drift(mlp)
+                norm_d = rel_drift(norm)
+                norm_max_ch = max_channel_delta(norm)
+
+                table.add_row(
+                    str(idx),
+                    f"{attn_d:.4f}",
+                    f"{mlp_d:.4f}",
+                    f"{norm_d:.4f}",
+                    f"{norm_max_ch:.4f}",
+                )
+            else:
+                attn_std = sum(s["std"] for s in attn) / len(attn) if attn else 0.0
+                mlp_std = sum(s["std"] for s in mlp) / len(mlp) if mlp else 0.0
+                norm_mean = sum(s["mean"] for s in norm) / len(norm) if norm else 0.0
+                norm_min = min((s["min"] for s in norm), default=0.0)
+                norm_max = max((s["max"] for s in norm), default=0.0)
+                table.add_row(
+                    str(idx),
+                    f"{attn_std:.4f}",
+                    f"{mlp_std:.4f}",
+                    f"{norm_mean:.4f}",
+                    f"[{norm_min:.3f}, {norm_max:.3f}]",
+                )
+        console.print(table)
+        if base_weights:
+            console.print(
+                "  [dim]Δ attn/mlp/norm = relative L2 drift ||trained-base|| / ||base||. "
+                "max Δ ch = largest single-channel absolute change in a norm weight.[/dim]"
+            )
+
+    embed_stats = next((s for s in all_stats if s.get("tensor_kind") == "embed"), None)
+    if embed_stats is not None and embed_stats["name"] in weights:
+        _section(
+            "EMBED_TOKENS" + (" DRIFT FROM BASE" if base_weights else " ROW-NORM DISTRIBUTION")
+        )
+        embed = weights[embed_stats["name"]].float()
+        base_embed = (
+            base_weights.get(_strip_lm_prefix(embed_stats["name"])).float()
+            if base_weights and _strip_lm_prefix(embed_stats["name"]) in base_weights
+            else None
+        )
+
+        if base_embed is not None:
+            # Vocab sizes commonly differ between base and fine-tuned: the
+            # tiny-audio model adds <audio>, drops base's vocab padding, and
+            # ends up at 151,670 vs Qwen3's 151,936. Token IDs 0..n-1 are
+            # aligned in both (same BPE), so compare the overlapping prefix.
+            n = min(embed.shape[0], base_embed.shape[0])
+            if embed.shape[0] != base_embed.shape[0]:
+                console.print(
+                    f"  [yellow]Vocab size mismatch — trained {embed.shape[0]:,} "
+                    f"vs base {base_embed.shape[0]:,}. "
+                    f"Comparing first {n:,} aligned rows.[/yellow]"
+                )
+            embed = embed[:n]
+            base_embed = base_embed[:n]
+            delta = embed - base_embed
+            delta_norms = delta.norm(dim=1)
+            base_norms = base_embed.norm(dim=1)
+            console.print(
+                f"  Shape: {list(embed.shape)} ({embed.shape[0]:,} tokens × {embed.shape[1]} dim)"
+            )
+            console.print(
+                f"  Per-row Δ L2 norm: mean={delta_norms.mean().item():.4f}, "
+                f"std={delta_norms.std().item():.4f}, "
+                f"min={delta_norms.min().item():.4f}, "
+                f"max={delta_norms.max().item():.4f}"
+            )
+            relative = delta_norms / base_norms.clamp(min=1e-6)
+            console.print(
+                f"  Relative drift  (Δ/base): mean={relative.mean().item():.4f}, "
+                f"max={relative.max().item():.4f}"
+            )
+
+            top_indices = torch.topk(delta_norms, k=top_k).indices.tolist()
+            console.print(f"\n  Top {top_k} most-drifted tokens (||Δ row||):")
+            for i in top_indices:
+                console.print(
+                    f"    token_id {i:>6d}: ||Δ||={delta_norms[i].item():.4f} "
+                    f"(base ||row||={base_norms[i].item():.4f}, "
+                    f"relative={relative[i].item():.2%})"
+                )
+
+            mean_drift = delta_norms.mean().item()
+            max_drift = delta_norms.max().item()
+            summary["embed_mean_drift"] = mean_drift
+            summary["embed_max_drift"] = max_drift
+            # Heuristic: if max drift dominates mean by >100x, a small number
+            # of tokens have shifted dramatically (rare-token drift signature).
+            if max_drift > 100 * mean_drift:
+                console.print(
+                    f"\n  ⚠️  Max drift ({max_drift:.3f}) dominates mean ({mean_drift:.3f}) "
+                    "by >100× — a few tokens have moved dramatically (possible rare-token drift)."
+                )
+            else:
+                console.print(
+                    f"\n  ✅ Drift distribution balanced "
+                    f"(max/mean = {max_drift / mean_drift:.1f}×) — "
+                    "no runaway tokens detected."
+                )
+        else:
+            # Fallback to absolute row-norm distribution.
+            row_norms = embed.norm(dim=1)
+            console.print(
+                f"  Shape: {list(embed.shape)} ({embed.shape[0]:,} tokens × {embed.shape[1]} dim)"
+            )
+            console.print(
+                f"  Row norms: mean={row_norms.mean().item():.4f}, "
+                f"std={row_norms.std().item():.4f}, "
+                f"min={row_norms.min().item():.4f}, "
+                f"max={row_norms.max().item():.4f}"
+            )
+            ratio = (row_norms.max() / row_norms.min().clamp(min=1e-6)).item()
+            console.print(f"  Max/min ratio: {ratio:.2f}x")
+
+    norm_stats = [s for s in all_stats if s.get("tensor_kind") == "norm"]
+    if norm_stats:
+        _section("RMSNORM GAIN" + (" Δ FROM BASE" if base_weights else " COHERENCE"))
+
+        if base_weights:
+            deltas: list[float] = []
+            max_layer = (None, 0.0)
+            for s in norm_stats:
+                base = base_weights.get(_strip_lm_prefix(s["name"]))
+                if base is None:
+                    continue
+                cur = weights[s["name"]].float()
+                b = base.float()
+                if cur.shape != b.shape:
+                    continue
+                d = float((cur - b).pow(2).sum().sqrt().item())
+                rel = d / float(b.pow(2).sum().sqrt().clamp(min=1e-6).item())
+                deltas.append(rel)
+                if rel > max_layer[1]:
+                    max_layer = (s["name"], rel)
+
+            if deltas:
+                avg_rel = sum(deltas) / len(deltas)
+                summary["norm_mean_rel_drift"] = avg_rel
+                summary["norm_max_rel_drift"] = max_layer[1]
+                console.print(f"  Number of norm tensors: {len(deltas)}")
+                console.print(
+                    f"  Relative drift ||Δ||/||base||: avg={avg_rel:.4f}, max={max_layer[1]:.4f}"
+                )
+                console.print(f"  Largest drift: {max_layer[0]}")
+
+                # Calibration: at 7000-step fine-tune, expect avg <0.05 (5% L2
+                # drift) for healthy WD routing. If the WD-on-RMSNorm bug were
+                # still pulling norms toward zero, we'd see avg drift much
+                # larger than the linear-weight drift (since norms have higher
+                # effective LR under Adam).
+                if avg_rel < 0.05:
+                    console.print(
+                        f"\n  ✅ Norm gains close to base (avg {avg_rel:.1%} drift) — "
+                        "WD-on-RMSNorm routing is healthy."
+                    )
+                elif avg_rel < 0.2:
+                    console.print(
+                        f"\n  ✅ Norm gains moderately drifted "
+                        f"(avg {avg_rel:.1%}) — within normal fine-tuning range."
+                    )
+                else:
+                    console.print(
+                        f"\n  ⚠️  Norm gains significantly drifted "
+                        f"(avg {avg_rel:.1%}) — check WD routing if larger than "
+                        "linear-weight drift."
+                    )
+        else:
+            # Fallback: report absolute stats (uncalibrated against base).
+            means = [s["mean"] for s in norm_stats]
+            stds = [s["std"] for s in norm_stats]
+            avg_mean = sum(means) / len(means)
+            console.print(f"  Number of norm tensors: {len(norm_stats)}")
+            console.print(
+                f"  Per-tensor mean (gain):  avg={avg_mean:.4f}, "
+                f"range=[{min(means):.4f}, {max(means):.4f}]"
+            )
+            console.print(f"  Per-tensor std:          avg={sum(stds) / len(stds):.4f}")
+            console.print(
+                "\n  [dim]Note: absolute norm gains reflect base-LM pretraining "
+                "as much as fine-tuning. Pass --compare-base for delta analysis.[/dim]"
+            )
+
+    return summary
+
+
 def analyze_weights(
     model_id: str,
     filter_prefix: str | None = None,
     verbose: bool = False,
+    component: str = "projector",
+    per_tensor: bool = True,
+    skip_rank: bool = False,
+    compare_base: bool = True,
 ):
     """Analyze model weights for training health."""
     _section(f"Weight Analysis: {model_id}")
@@ -313,8 +690,25 @@ def analyze_weights(
 
     _section("WEIGHT TENSORS")
 
+    # Determine trainability from the saved config rather than hardcoding
+    # "projector" — language_model.* is trainable when freeze_language_model
+    # is False (the default for embedded.yaml's full-decoder fine-tune).
+    freeze_lm = config.get("freeze_language_model", True)
+    use_lora = bool(config.get("use_lora", False))
+
+    def _is_trainable(name: str) -> bool:
+        if "projector" in name:
+            return True
+        if "language_model" in name and not freeze_lm:
+            return True
+        return bool(use_lora and "lora" in name.lower())
+
     total_params = 0
     trainable_params = 0
+
+    # In decoder mode, a 311-row table is noise — collapse to a summary count.
+    # Per-tensor inspection still available via --per-tensor.
+    collapse_table = component == "decoder" and not per_tensor
 
     table = Table(show_header=True, header_style="bold")
     table.add_column("Name", style="cyan")
@@ -326,26 +720,53 @@ def analyze_weights(
         tensor = weights[name]
         params = tensor.numel()
         total_params += params
-        is_trainable = "projector" in name
+        is_trainable = _is_trainable(name)
         if is_trainable:
             trainable_params += params
             marker = "🎯 trainable"
         else:
             marker = "❄️ frozen"
-        table.add_row(name, str(list(tensor.shape)), f"{params:,}", marker)
+        if not collapse_table:
+            table.add_row(name, str(list(tensor.shape)), f"{params:,}", marker)
 
-    console.print(table)
+    if collapse_table:
+        console.print(
+            f"  [{len(weights)} decoder tensors — table suppressed in decoder mode "
+            "(pass --per-tensor to expand)]"
+        )
+    else:
+        console.print(table)
     console.print(f"\n  Total parameters:     {total_params:,}")
     console.print(f"  Trainable parameters: {trainable_params:,}")
     console.print(f"  Frozen parameters:    {total_params - trainable_params:,}")
 
-    _section("DETAILED WEIGHT ANALYSIS")
+    # Decoder mode: 311 Qwen3 tensors at full per-tensor verbosity is unreadable
+    # and the effective-rank SVDs dominate runtime. Default to aggregate view;
+    # opt back in to the firehose with --per-tensor.
+    is_decoder_mode = component == "decoder"
+    show_per_tensor = (not is_decoder_mode) or per_tensor
+    compute_rank = (not skip_rank) and show_per_tensor
+
+    if show_per_tensor:
+        _section("DETAILED WEIGHT ANALYSIS")
 
     all_stats = []
     for name in sorted(weights.keys()):
-        stats = analyze_tensor(name, weights[name], verbose=verbose)
+        stats = analyze_tensor(name, weights[name], verbose=verbose, compute_rank=compute_rank)
         all_stats.append(stats)
-        print_tensor_analysis(stats, verbose=verbose)
+        if show_per_tensor:
+            print_tensor_analysis(stats, verbose=verbose)
+
+    if is_decoder_mode:
+        base_weights = None
+        if compare_base:
+            text_model_id = config.get("text_model_id")
+            if text_model_id:
+                console.print(
+                    f"\n[dim]Loading base weights from {text_model_id} for delta analysis...[/dim]"
+                )
+                base_weights = load_base_weights(text_model_id)
+        print_decoder_summary(weights, all_stats, base_weights=base_weights)
 
     _section("OVERALL TRAINING HEALTH SUMMARY")
 
@@ -367,12 +788,17 @@ def analyze_weights(
         f"     Dead neurons: {total_dead_neurons} {'❌' if total_dead_neurons > 0 else '✅'}"
     )
 
-    console.print("\n  📊 Layer-wise Weight Statistics:")
-    for s in all_stats:
-        short_name = s["name"].replace("projector.", "")
-        console.print(
-            f"     {short_name:25s}: mean={s['mean']:>10.6f}, std={s['std']:>8.6f}, range=[{s['min']:>8.4f}, {s['max']:>7.4f}]"
-        )
+    # Per-tensor listing is useful for projector (4 tensors) but unreadable
+    # for decoder (311 tensors); decoder mode prints per-layer aggregates via
+    # print_decoder_summary instead.
+    if not is_decoder_mode:
+        console.print("\n  📊 Layer-wise Weight Statistics:")
+        for s in all_stats:
+            short_name = s["name"].replace("projector.", "").replace("audio_tower.", "")
+            console.print(
+                f"     {short_name:25s}: mean={s['mean']:>10.6f}, "
+                f"std={s['std']:>8.6f}, range=[{s['min']:>8.4f}, {s['max']:>7.4f}]"
+            )
 
     console.print("\n  📈 Training Capacity Analysis:")
 
@@ -463,16 +889,46 @@ def main(
         str,
         typer.Argument(help="HuggingFace model ID"),
     ] = "mazesmazes/tiny-audio",
+    component: Annotated[
+        str,
+        typer.Option(
+            "--component",
+            "-c",
+            help="Which model component to analyze: projector / decoder / encoder / all",
+        ),
+    ] = "projector",
     filter: Annotated[
         str | None,
         typer.Option(
-            "--filter", "-f", help="Filter to weights containing this string (e.g., 'projector')"
+            "--filter",
+            "-f",
+            help="Override --component with an arbitrary substring filter",
         ),
-    ] = "projector",
+    ] = None,
     verbose: Annotated[
         bool,
         typer.Option("--verbose", "-v", help="Show detailed percentile and distribution analysis"),
     ] = False,
+    per_tensor: Annotated[
+        bool,
+        typer.Option(
+            "--per-tensor",
+            help="Force per-tensor printout (default off for decoder, on for everything else)",
+        ),
+    ] = False,
+    skip_rank: Annotated[
+        bool,
+        typer.Option("--skip-rank", help="Skip effective-rank SVDs (slow on large decoder runs)"),
+    ] = False,
+    compare_base: Annotated[
+        bool,
+        typer.Option(
+            "--compare-base/--no-compare-base",
+            help="(decoder) Download base LM weights to report drift from base "
+            "instead of absolute values. Default on; pass --no-compare-base to "
+            "skip the download.",
+        ),
+    ] = True,
 ):
     """Analyze model weights for training health diagnostics.
 
@@ -481,8 +937,32 @@ def main(
     - Dead neurons
     - Weight magnitude issues
     - Initialization divergence
+    - (decoder) per-layer attn/mlp/norm drift
+    - (decoder) embed_tokens row-norm distribution (rare-token drift)
+    - (decoder) RMSNorm gain coherence (WD-on-norm routing health)
     """
-    success = analyze_weights(model_id, filter_prefix=filter, verbose=verbose)
+    if filter is not None:
+        # Explicit filter — try to auto-detect component for display mode.
+        effective_filter = filter
+        for comp, fil in COMPONENT_FILTERS.items():
+            if fil and fil in filter:
+                component = comp
+                break
+    else:
+        effective_filter = COMPONENT_FILTERS.get(component)
+        if effective_filter is None:
+            console.print(f"[red]Unknown --component: {component}[/red]")
+            sys.exit(2)
+
+    success = analyze_weights(
+        model_id,
+        filter_prefix=effective_filter or None,
+        verbose=verbose,
+        component=component,
+        per_tensor=per_tensor,
+        skip_rank=skip_rank,
+        compare_base=compare_base,
+    )
     sys.exit(0 if success else 1)
 
 

@@ -579,21 +579,28 @@ class AppleSpeechEvaluator(Evaluator):
 class SwiftSDKEvaluator(Evaluator):
     """Evaluator for the TinyAudio Swift SDK on Apple Silicon.
 
-    Triggered by `ta eval -m swift://<repo-id>`. Builds the SDK in release
-    mode, then subprocesses to a persistent Swift binary
-    (`tiny-audio-swift-eval`) that loads the SDK's bundled Transcriber once
+    Triggered by `ta eval -m swift://<repo-id>` or `ta eval -m swift://<path>`.
+    Builds the SDK in release mode, then subprocesses to a persistent Swift
+    binary (`tiny-audio-swift-eval`) that loads the SDK's Transcriber once
     and processes audio files from stdin.
 
-    The Swift SDK ships with bundled model weights, so the `<repo-id>`
-    suffix is informational only — the binary always uses its embedded
-    weights.
+    By default the binary downloads the bundled HF weights at first run.
+    Pass ``model_dir`` to evaluate against a locally-built bundle (sets
+    ``TINY_AUDIO_LOCAL_MODEL_DIR`` in the subprocess env — see
+    ``Transcriber.load()`` in tiny-audio-swift). The ``repo_id`` arg is
+    informational only.
 
     The Swift package now lives in a sibling repo. Override its location
     via the ``TINY_AUDIO_SWIFT_DIR`` env var (path to the ``swift/``
-    package root). Default: ``~/Code/tiny-audio-swift/swift``.
+    package root). Default: ``~/Code/ios/tiny-audio-swift/swift``.
     """
 
-    def __init__(self, repo_id: str = "mazesmazes/tiny-audio-mlx", **kwargs):
+    def __init__(
+        self,
+        repo_id: str = "mazesmazes/tiny-audio-mlx",
+        model_dir: Path | None = None,
+        **kwargs,
+    ):
         if kwargs.get("num_workers", 1) > 1:
             console.print(
                 "[yellow]Warning: SwiftSDKEvaluator forces num_workers=1 "
@@ -601,13 +608,21 @@ class SwiftSDKEvaluator(Evaluator):
             )
             kwargs["num_workers"] = 1
         super().__init__(**kwargs)
-        # repo_id is informational only — the Swift binary uses bundled weights.
-        console.print(f"[dim]Swift SDK ignores repo_id={repo_id!r} (bundled weights)[/dim]")
+        self.model_dir = Path(model_dir).expanduser().resolve() if model_dir else None
+        if self.model_dir is not None:
+            console.print(
+                f"[bold green]Swift SDK using local model dir:[/bold green] {self.model_dir}"
+            )
+        else:
+            console.print(
+                f"[dim]Swift SDK ignores repo_id={repo_id!r} "
+                "(loads bundled HF weights — pass swift://<path> to override)[/dim]"
+            )
 
         swift_dir = Path(
             os.environ.get(
                 "TINY_AUDIO_SWIFT_DIR",
-                Path.home() / "Code" / "tiny-audio-swift" / "swift",
+                Path.home() / "Code" / "ios" / "tiny-audio-swift" / "swift",
             )
         ).expanduser()
         if not (swift_dir / "Package.swift").exists():
@@ -708,6 +723,10 @@ class SwiftSDKEvaluator(Evaluator):
         cmd = [str(binary)]
         console.print(f"[bold cyan]Spawning Swift SDK eval subprocess:[/bold cyan] {' '.join(cmd)}")
 
+        env = os.environ.copy()
+        if self.model_dir is not None:
+            env["TINY_AUDIO_LOCAL_MODEL_DIR"] = str(self.model_dir)
+
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -715,6 +734,7 @@ class SwiftSDKEvaluator(Evaluator):
             stderr=subprocess.PIPE,  # captured for diagnostics on crash
             text=True,
             bufsize=1,  # line-buffered
+            env=env,
         )
 
         # Wait for the binary to emit `{"ready": true}` once load + warmup is done.

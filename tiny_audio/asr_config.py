@@ -50,13 +50,6 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_pool_stride: int = 4,
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
-        # Projector dropout — applied between activation and the second
-        # linear in MLPAudioProjector. Matches Granite-Speech 4.1's
-        # Q-Former dropout (hidden_dropout_prob=0.1) used in its frozen-
-        # encoder + LoRA-LLM training stage. Default 0.0 for backward
-        # compatibility with existing checkpoints; experiment configs
-        # opt in to 0.1.
-        projector_dropout: float = 0.0,
         projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
         # MoE-specific configuration
         num_experts: int = 4,  # Number of experts in MoE projectors
@@ -123,7 +116,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_pool_stride = projector_pool_stride
         self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
-        self.projector_dropout = projector_dropout
         self.projector_type = projector_type
         # MoE-specific configuration
         self.num_experts = num_experts

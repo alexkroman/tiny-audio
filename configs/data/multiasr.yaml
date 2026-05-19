@@ -1,18 +1,16 @@
 # Multi-ASR dataset configuration
 #
-# Mix tilted toward Earnings22 / Peoples / GigaSpeech, deliberately
-# trading some Switchboard, AMI-SDM, and SPGI headroom (where we
-# already lead universal-3-pro comfortably) for closure on the larger
-# residual gaps: Peoples (+6.27), Earnings22 (+2.61), Gigaspeech (+1.58).
-# Paired with the aug-stack tilt in production.yaml (RIR 0.5→0.3,
-# MUSAN ambient 0.35→0.25 + SNR floor 8→10 dB, babble 0.10→0.03,
-# bandlimit split into LPF=0.25 + BPF=0.03, MP3 0.10→0.25 @ 64-128 kbps)
-# which together pull encoder-feature mass out of the telephony /
-# heavy-reverb / multi-talker basin and toward conference-room /
-# consumer-device / lossy-codec distributions where the target evals
-# live. Peoples can't grow on quantity here because un-sa-filtered
-# pools fail the alignment-quality bar — Peoples gap closure has to
-# come from aug landing the model in dirty_sa's acoustic distribution.
+# Natural-cap mix: every dataset runs at its full natural train-split
+# size (no explicit target_samples cap on any source), with Gigaspeech
+# on the curated M tier rather than L. The prior revision's "tilt"
+# (downcap Switchboard / AMI-SDM / SPGI to fund GS L expansion) was
+# rolled back after observing cross-eval regression: cutting exposure
+# on the "already-winning" evals removed cross-corpus regularization
+# without producing matching gains on the target evals, and stepping
+# GS to L pushed one corpus to 34% of the mix and dragged the decoder
+# toward GS's register. Natural caps treat every source as a balanced
+# contributor sized by its own data availability rather than by which
+# eval we're chasing.
 # LoquaciousSet was dropped in a prior revision; the unique coverage
 # Loquacious bundled (LibriHeavy / VoxPopuli) is restored here as
 # direct HF slices with explicit per-source sizing:
@@ -40,47 +38,69 @@
 # already provides curated in-the-wild coverage at higher label quality
 # and ~22× smaller footprint; revisit YODAS only if a streaming-mode
 # data path lands or if Gigaspeech long-form eval gaps persist.
-# Peoples mix unchanged from prior revision: `clean_sa` + `dirty_sa`
-# pair (~311K each) — sentence-aligned alignment quality on both tiers,
-# spanning the clean-source + dirty-source acoustic spectrum. Peoples
-# eval refs are human-transcribed (paid native-English transcribers per
-# the MLCommons dataset card), so the +6.27 gap is genuine acoustic /
-# distribution coverage, not ref-noise inflation. CV / Gigaspeech /
-# SPGISpeech / Switchboard / AMI retained at prior caps. No dataset is
-# repeated — every target_samples is at or below the natural train-split
+# Peoples: `clean_sa` only (311K). Both `_sa` configs apply the
+# sentence-alignment filter on top of the corpus-level CER ≤ 20%
+# bound, so each segment's audio span matches its label span; the
+# prior `clean` (1.5M, NOT sentence-aligned) revision regressed
+# training because per-segment audio/text drift on what became the
+# largest corpus poisoned the gradient. `dirty_sa` (602K, noisier
+# `dirty` source tier with uncontrolled mics / older archival audio /
+# varying SNR) was dropped after observing its share of the
+# supervision signal was net-negative for eval — at 12% of the mix
+# its label-quality and acoustic-conditions tradeoff didn't earn the
+# slot relative to expanding cleaner-label corpora. Peoples eval refs
+# are human-transcribed (paid native-English transcribers per the
+# MLCommons dataset card), so the eval signal itself is clean. No
+# dataset is repeated — every source runs at natural train-split
 # size, so each example is seen at most once per epoch.
 #
-# ┌──────────────────────────┬───────────┬─────────┐
-# │ Dataset                  │ Samples   │ Percent │
-# ├──────────────────────────┼───────────┼─────────┤
-# │ Gigaspeech L (natural)   │ ~2,000,000│   34.1% │
-# │ LibriHeavy medium (nat)  │ ~1,100,000│   18.7% │
-# │ CommonVoice 17 en (flt)  │ ~1,050,000│   17.9% │
-# │ Peoples dirty_sa (nat)   │  ~602,000 │   10.3% │
-# │ Peoples clean_sa (nat)   │   311,000 │    5.3% │
-# │ TEDLIUM-3 (natural)      │  ~268,000 │    4.6% │
-# │ VoxPopuli en (natural)   │  ~168,000 │    2.9% │
-# │ SPGISpeech M (capped)    │   150,000 │    2.6% │
-# │ AMI IHM (natural)        │   108,502 │    1.8% │
-# │ Switchboard (capped)     │    75,000 │    1.3% │
-# │ AMI SDM (capped)         │    40,000 │    0.7% │
-# └──────────────────────────┴           ┴         ┘
-# Total: ~5,872,500 samples (effectively trained on)
-# (Peoples combined: 913K = 15.6% of mix — absolute Peoples count
-#  unchanged from prior 913K; share dropped only because GS L step
-#  pushed the denominator up. Peoples is still the dominant residual
-#  gap, but the closure lever here is aug not quantity since un-sa
-#  pools fail the alignment-quality bar. CV row count is post the
-#  down_votes==0 filter applied in scripts/train.py, which drops ~5%
-#  of train.)
+# Two columns: the raw load_dataset() row count (pre-filter), and the
+# count after the DataCollator drops (audio <0.8s, >30s, empty-norm
+# label) plus the CV down_votes filter. Audit (2026-05-15, 200–500
+# samples streamed per dataset) is the source for the loss-rate column;
+# percentages are of the post-filter total.
+# ┌──────────────────────────┬───────────┬───────────┬─────────┐
+# │ Dataset                  │ Raw       │ Effective │ Percent │
+# ├──────────────────────────┼───────────┼───────────┼─────────┤
+# │ LibriHeavy medium        │ ~1,100,000│ ~1,067,000│   24.3% │
+# │ CommonVoice 17 en        │ ~1,100,000│   ~957,000│   21.8% │
+# │ Gigaspeech M             │  ~910,000 │   ~910,000│   20.7% │
+# │ SPGISpeech M             │   385,000 │   385,000 │    8.8% │
+# │ Peoples clean_sa         │   311,000 │   311,000 │    7.1% │
+# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    6.1% │
+# │ Switchboard              │   185,402 │  ~180,000 │    4.1% │
+# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    3.8% │
+# │ AMI IHM                  │   108,502 │   ~79,000 │    1.8% │
+# │ AMI SDM                  │   107,319 │   ~67,000 │    1.5% │
+# └──────────────────────────┴           ┴           ┴         ┘
+# Total raw: ~4,643,200  →  Total effective: ~4,389,000 (-5.5%)
 #
-# Download-size choices: Gigaspeech uses speechcolab's official L tier
-# (~2,500hr / ~2M segments — stepped up from M for the +1.58 gap, full
-# natural cap, no replay). CommonVoice and LibriSpeech both use the
-# fixie-ai mirrors for their sharded parquet layouts. TEDLIUM uses the
-# canonical LIUM mirror. LibriHeavy uses mythicinfinity's mirror (audio
-# arrays included, Opus-encoded) — pkufool/libriheavy is a Lhotse
-# manifest repo, not a directly-loadable audio dataset.
+# Filter loss by source (measured 2026-05-15):
+# - CommonVoice down_votes filter (in scripts/train.py): drops ~13% of
+#   the raw train split. Prior estimate of 2–5% in the per-dataset
+#   comment block below was an underestimate. Filter behavior is
+#   correct — Mozilla's `train` split admits clips with non-zero
+#   down_votes despite up_votes>down_votes; we tighten to down_votes==0.
+# - AMI IHM/SDM <0.8s filter (DataCollator._MIN_AUDIO_SECONDS): drops
+#   ~27% (IHM) / ~30–37% (SDM) of rows. The filtered rows are isolated
+#   backchannels — "YEAH", "HMM", "OKAY", etc. — where the audio span
+#   and reference transcript don't actually align. Filter behavior is
+#   correct; the prior natural-cap rationale just didn't account for
+#   the loss. AMI's mix share is correspondingly smaller than the
+#   row-count alone suggests.
+# - LibriHeavy >30s filter (DataCollator._MAX_AUDIO_SECONDS): drops ~3%.
+#   Whisper's 30s window forces this — longer audio gets silently
+#   truncated while the label is kept whole.
+# - Switchboard pure-`<LAUGH>` rows: ~2.5% normalize to empty label.
+# - VoxPopuli >30s rows: ~1.5%.
+#
+# Download-size choices: Gigaspeech uses speechcolab's official M tier
+# (~1,000hr / ~910K segments — curated subset of L/XL, natural cap,
+# no replay). CommonVoice and LibriSpeech both use the fixie-ai
+# mirrors for their sharded parquet layouts. TEDLIUM uses the
+# canonical LIUM mirror. LibriHeavy uses mythicinfinity's mirror
+# (audio arrays included, Opus-encoded) — pkufool/libriheavy is a
+# Lhotse manifest repo, not a directly-loadable audio dataset.
 
 datasets:
   # TEDLIUM-3 — TED talk presentational speech. Re-added after a prior
@@ -127,40 +147,15 @@ datasets:
 
   # People's Speech `clean_sa` (311K train natural, CC-BY). Sentence-
   # aligned subset of `clean` — same CER ≤ 20% upper bound on alignment
-  # quality, but additionally filtered to require cleanly-aligned
-  # sentence boundaries. Paired with `dirty_sa` below to hedge across the
-  # alignment-quality axis (sa on both) and the acoustic-coverage axis
-  # (clean source pool here, dirty source pool in the sibling entry).
-  # Peoples eval refs are human-transcribed (paid native-English
-  # transcribers, not auto-aligned), so the +6.27 eval gap is real
-  # model-quality not ref-noise — the lever is acoustic exposure to the
-  # eval distribution, balanced against avoiding over-fit to noisy
-  # auto-aligned training labels. Validation lives in the sibling
-  # 'validation' config below.
+  # quality, plus a per-segment sentence-boundary alignment filter.
+  # `dirty_sa` was dropped from the mix; clean_sa is the only Peoples
+  # train source. Peoples eval refs are human-transcribed (paid
+  # native-English transcribers, not auto-aligned), so the +6.27 eval
+  # gap is genuine model quality, not ref noise — the lever is
+  # acoustic exposure to the eval distribution, balanced against
+  # avoiding overfit to noisy auto-aligned training labels.
   - path: MLCommons/peoples_speech
     name: clean_sa
-    audio_column: audio
-    text_column: text
-    task: transcribe
-    train_splits: [train]
-    eval_splits: []
-
-  # People's Speech `dirty_sa` (natural 602K, no cap). Same sentence-
-  # aligned alignment-quality bar as clean_sa, but drawn from the
-  # noisier `dirty` source tier (uncontrolled mics, older/archival
-  # audio, varying SNR). Prior revision capped to 311K for 1:1
-  # clean/dirty balance — lifted to natural 602K because Peoples is the
-  # dominant residual gap vs universal-3-pro (+6.27 on tiny-audio-
-  # embedded baseline; further regressed to +9.18 on the 622K sa-pair
-  # mid-run, indicating quantity matters more than 1:1 source-tier
-  # balance for closing this gap). Combined with clean_sa's 311K
-  # natural, Peoples mix share rises to ~18% (vs ~12.6% when capped).
-  # If the gap closes asymmetrically (e.g., dirty closes faster than
-  # clean), revisit by adding the un-sa-filtered `clean` (1.5M) pool
-  # next — quantity-over-alignment-quality has direct empirical support
-  # in this gap.
-  - path: MLCommons/peoples_speech
-    name: dirty_sa
     audio_column: audio
     text_column: text
     task: transcribe
@@ -170,9 +165,9 @@ datasets:
   # People's Speech validation split — MLCommons ships dev/test as separate
   # configs (not splits inside clean_sa). Validation is human-transcribed
   # (paid native-English transcribers) so eval refs are clean ground
-  # truth, not auto-aligned. Pairs with the clean_sa + dirty_sa train
-  # entries above (validation is config-independent — same split serves
-  # whichever train config is loaded).
+  # truth, not auto-aligned. Pairs with the clean_sa train entry above
+  # (validation is config-independent — same split serves whichever
+  # train config is loaded).
   - path: MLCommons/peoples_speech
     name: validation
     audio_column: audio
@@ -183,14 +178,15 @@ datasets:
 
   # CommonVoice 17 English (fixie-ai mirror, ~1.1M train pre-filter).
   # Strict-validated filter applied in scripts/train.py: rows with
-  # down_votes != 0 are dropped, cutting the small tail of community-
-  # flagged audio/transcript mismatches that Mozilla's standard `train`
-  # split still admits (validated requires up_votes > down_votes, not
-  # down_votes == 0). Expected to drop ~2-5% of train rows. Natural cap;
-  # target_samples omitted to maximize CV exposure. CV is a +3.14 eval
-  # gap vs universal-3-pro driven primarily by accent + device-diversity
-  # distribution shift, not reference noise — filtering helps but won't
-  # close it fully.
+  # down_votes != 0 are dropped, cutting the tail of community-flagged
+  # audio/transcript mismatches that Mozilla's standard `train` split
+  # still admits (validated requires up_votes > down_votes, not
+  # down_votes == 0). Drops ~13% of train rows (measured 2026-05-15 on
+  # a 200-sample stream — earlier estimate of ~2-5% was wrong). Natural
+  # cap; target_samples omitted to maximize CV exposure. CV is a +3.14
+  # eval gap vs universal-3-pro driven primarily by accent + device-
+  # diversity distribution shift, not reference noise — filtering helps
+  # but won't close it fully.
   - path: fixie-ai/common_voice_17_0
     name: en
     audio_column: audio
@@ -199,26 +195,21 @@ datasets:
     train_splits: [train]
     eval_splits: [validation]
 
-  # Gigaspeech L (official speechcolab repo). L tier is ~2,500hr / ~2M
-  # segments — natural cap, no replay. Stepped up from M (~1,000hr /
-  # ~910K) because GS is one of the three target evals (+1.58 gap) and
-  # quantity is the cleanest lever: L is a strict superset of M (same
-  # source distribution + curation pipeline, just more hours) so the
-  # step has no label-quality cost. Long-form / podcast / YouTube
-  # register coverage preserved and expanded. Lossy-codec content in
-  # L (YouTube slice) pairs naturally with the bumped MP3 aug in
-  # production.yaml (p=0.25 @ 64-128 kbps). Requires accepting the
-  # dataset license on HF and HF_TOKEN at load. Download footprint is
-  # ~2.5× the prior M tier — verify disk / network budget on the
-  # training host before kicking off.
+  # Gigaspeech M (official speechcolab repo). M tier is ~1,000hr / ~910K
+  # segments — natural cap, no replay. Stepped back down from L
+  # (~2,500hr / ~2M) after the L step pushed GS to 34% of the mix and
+  # pulled the decoder toward GS's register at the expense of cross-eval
+  # performance. M is the curated subset of L/XL — same source
+  # distribution, tighter label quality, ~2.5× smaller download. Long-
+  # form / podcast / YouTube register coverage preserved. Requires
+  # accepting the dataset license on HF and HF_TOKEN at load.
   - path: speechcolab/gigaspeech
-    name: l
+    name: m
     audio_column: audio
     text_column: text
     task: transcribe
     train_splits: [train]
     eval_splits: []
-    target_samples: 2000000
 
   # Gigaspeech dev split — official repo ships dev/test as separate configs
   # (same pattern as the fixie mirror). The `dev` config exposes its data
@@ -231,18 +222,13 @@ datasets:
     train_splits: []
     eval_splits: [validation]
 
-  # SPGISpeech M - financial earnings calls. Capped 385K → 150K as part
-  # of the E22 / Peoples / GS tilt: SPGI is read prepared earnings-call
-  # remarks in studio conditions, while E22 (the eval SPGI was meant to
-  # target) is conference-room audio with Q&A spontaneity and L2 accents
-  # — more SPGI hours don't actually close the SPGI-to-E22 distribution
-  # gap because the gap is acoustic / register, not vocabulary. 150K
-  # preserves finance/earnings vocabulary exposure while freeing ~235K
-  # mix slots that GS L absorbs. SPGI is also already performing well
-  # on its native eval, so 1-2 WER of SPGI-eval loss is an acceptable
-  # trade. The SPGI→E22 transfer aug (small-room RIR at 0.3) does the
-  # work of pushing SPGI's clean finance audio into E22's conference
-  # acoustic distribution.
+  # SPGISpeech M — financial earnings calls. Natural cap ~385K (was
+  # capped to 150K in the prior tilt to fund GS L expansion; uncapped
+  # here as part of the natural-cap reset). Kensho-employed
+  # professional transcribers — highest label fidelity in the mix.
+  # Carries the finance / earnings vocabulary, and the clean studio
+  # acoustics serve as a high-fidelity supervision anchor for the
+  # projector.
   - path: kensho/spgispeech
     name: M
     audio_column: audio
@@ -250,7 +236,6 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 150000
 
   # VoxPopuli `en` (facebook, natural ~168K / ~543hr). European Parliament
   # L2-accented English read by parliamentarians — restores the VP
@@ -269,29 +254,25 @@ datasets:
     train_splits: [train]
     eval_splits: [validation]
 
-  # Switchboard - conversational telephone speech. Capped 185K → 75K
-  # as part of the E22 / Peoples / GS tilt. Switchboard is no longer a
-  # target eval (we lead universal-3-pro by -5.02 WER and that lead is
-  # surplus relative to where the gaps actually are), and the telephony-
-  # band + babble-overlap distribution it lives in is exactly what the
-  # aug-stack tilt is moving the model away from. 75K preserves enough
-  # exposure to keep the telephony-band representation alive (joint
-  # with the bandpass_prob=0.03 residual) without spending mix budget
-  # on a basin we're trying to de-emphasize. Expect SW lead to compress
-  # from -5.02 to roughly -1 to -2 — still leading, but no longer
-  # over-allocated.
+  # Switchboard — conversational telephone speech. Natural cap ~185K
+  # (was capped to 75K in the prior tilt; uncapped here as part of the
+  # natural-cap reset). Telephony-band + multi-talker disfluency
+  # supervision that nothing else in the mix provides; cross-eval
+  # regression on the capped run suggests removing this exposure was
+  # net-negative even on non-SW evals.
   - path: hhoangphuoc/switchboard
     audio_column: audio
     text_column: transcript
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 75000
 
-  # AMI corpus IHM - close-talk meeting mic. Natural size (~108,502),
-  # target_samples omitted. Prior 305K target was ~3x replay on the same
-  # speakers and almost certainly drove the 29% IHM eval (overfit, not
-  # data-limited).
+  # AMI corpus IHM — close-talk meeting mic. Natural cap ~108,502
+  # (target_samples omitted). DataCollator's <0.8s filter drops ~27%
+  # of rows as isolated backchannels ("YEAH"/"HMM"/"OKAY") where the
+  # audio/transcript span doesn't align — effective contribution is
+  # ~79K. Prior 305K target was ~3x replay on the same speakers and
+  # almost certainly drove the 29% IHM eval (overfit, not data-limited).
   - path: edinburghcstr/ami
     name: ihm
     audio_column: audio
@@ -299,18 +280,16 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 108502
 
-  # AMI corpus SDM - single distant mic (far-field). Capped 107K → 40K
-  # as part of the E22 / Peoples / GS tilt. AMI-SDM is no longer a
-  # target eval (-3.91 WER lead vs universal-3-pro is surplus), and the
-  # far-field / multi-talker / heavy-reverb distribution it lives in is
-  # exactly what the RIR / babble / ambient-noise cuts are moving the
-  # model away from. 40K preserves residual far-field exposure at a
-  # share (~0.7% of mix) that won't dominate the encoder-feature
-  # distribution. Expect AMI-SDM lead to compress from -3.91 toward
-  # roughly parity with universal-3-pro — acceptable given E22 /
-  # Peoples / GS are the corpora the model is being tuned for.
+  # AMI corpus SDM — single distant mic (far-field). Natural cap
+  # ~107,319 (was capped to 40K in the prior tilt; uncapped here as
+  # part of the natural-cap reset). DataCollator's <0.8s filter drops
+  # ~30–37% of rows — the same backchannel pattern as IHM but more
+  # severe because SDM segmentation slices more aggressively — so
+  # effective contribution is ~67K. Shares hand-transcribed labels
+  # with IHM; supervision signal is identical at the text level, only
+  # the acoustics differ. Restores far-field / multi-talker / heavy-
+  # reverb exposure that the aug-off baseline can't synthesize.
   - path: edinburghcstr/ami
     name: sdm
     audio_column: audio
@@ -318,7 +297,6 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-    target_samples: 40000
 
 # Audio processing
 sample_rate: 16000

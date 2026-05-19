@@ -1,0 +1,152 @@
+# @package _global_
+# Joint from-scratch training of tiny-audio-embedded:
+#   GLM-ASR-Nano-2512 encoder (frozen) + MLP projector (fresh init, trained) +
+#   Qwen3-0.6B decoder (base weights, fully fine-tuned).
+#
+# Single-stage replacement for the prior projector-only → joint two-stage
+# recipe. The decoder is unfrozen from step 0 and trained jointly with the
+# projector. Audio→text via Whisper-style encoders is a narrow enough semantic
+# gap that the LLaVA-style projector-warmup stage isn't load-bearing; the
+# joint gradient signal is what actually moves eval/loss after the first
+# few hundred steps.
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=stage_1
+
+defaults:
+  - override /data: multiasr
+
+model:
+  projector_type: mlp
+  projector_pool_stride: 4
+  projector_hidden_dim: 1024
+  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
+  text_model_id: Qwen/Qwen3-0.6B
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-next-multiasr"
+  group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
+
+  # Joint training: projector trains from fresh init, decoder fine-tunes from
+  # Qwen3-0.6B base weights. Encoder stays frozen via the default in asr_modeling.
+  freeze_language_model: false
+  freeze_projector: false
+
+  # Asymmetric LR for joint from-scratch training (100× gap):
+  #   - Projector (fresh init): 1e-3. Needs the high LR to converge quickly
+  #     through warmup; observed ||grad_proj|| starts at ~9 and stabilizes
+  #     around 0.4–0.6 once the bridge function is learned.
+  #   - Decoder (Qwen3-0.6B base): 1e-5. Empirically derived from the prior
+  #     stage_1 trajectory probe (scripts/debug/probe_stage1_trajectory.py
+  #     against the loquacious_plus run zot1zdu9):
+  #       step  2000:  ||grad_dec||=87.1,  dec/proj= 9.4×
+  #       step  6000:  ||grad_dec||=50.4,  dec/proj=22.3×
+  #       step 30000:  ||grad_dec||=23.6,  dec/proj=63.7×
+  #       step 85000:  ||grad_dec||=37.1,  dec/proj=62.1×
+  #     The decoder/projector gradient ratio widens from ~9× to ~62× as
+  #     training progresses — so the LR ratio needs to widen too. At the
+  #     prior run's (1e-3 / 1e-4) the per-param SGD update was 6× decoder-
+  #     dominant from step 30k onward, and the eval-train gap widened
+  #     correspondingly (gap doubled from 0.11 at step 6k to 0.16 at step
+  #     85k while train kept dropping but eval flattened). 1e-5 keeps the
+  #     update ratio in the balanced 0.5–2.0 band for the majority of
+  #     training and protects Qwen3 from continued over-adaptation to
+  #     projector quirks. Matches LLaVA / Qwen-Audio / Freeze-Omni fine-
+  #     tune-LR conventions.
+  learning_rate: 1e-3
+  decoder_learning_rate: 1e-5
+
+  # Label smoothing damps decoder overconfidence on next-token predictions —
+  # exactly the failure mode driving train/eval-gap widening in the prior
+  # loquacious_plus run (gap doubled 0.11 → 0.16 as train kept dropping but
+  # eval flattened). 0.1 matches Whisper / NLLB / most modern ASR fine-tune
+  # conventions. Works correctly under DataCollatorForChatML's -100 prompt
+  # masking (LabelSmoother ignores ignore_index positions). MLP projector
+  # has no get_aux_loss method, so no aux-loss / smoothing interaction.
+  # Implementation note: HF Trainer pops `labels` before the forward pass
+  # when label_smoothing_factor > 0, so the model returns logits-only and
+  # the trainer computes its own smoothed CE — same path as Whisper /
+  # Wav2Vec2 trainers.
+  label_smoothing_factor: 0.1
+
+  # 0.01 (vs HF default 0.0) damps unbounded rare-token embedding drift under
+  # tie_word_embeddings=True. Previous tiny-audio run (WD=0) showed rare CJK/
+  # Arabic embedding tokens drifting ~3.1× while common English subwords moved
+  # ~0.25× — drift inversely proportional to token_frequency. Without WD,
+  # rare-token embeddings only receive "you're wrong" gradients and nothing
+  # pulls them back. 0.01 is LLaVA/Qwen-Audio/LLaMA standard.
+  #
+  # WD is correctly routed to non-norm params only. ASRTrainer.create_optimizer
+  # adds Qwen3RMSNorm + LlamaRMSNorm to the forbidden-layers set so RMSNorm
+  # gains land in the no-decay group (HF's default ALL_LAYERNORM_LAYERS only
+  # contains torch.nn.LayerNorm and would miss them silently).
+  weight_decay: 0.01
+  # Projector overrides base WD to 0.0. Rare-token drift (the reason base WD
+  # exists) only affects the decoder's tied embedding matrix; pulling projector
+  # linear weights toward zero would just bias the projection magnitude away
+  # from whatever scale the LM actually wants.
+  projector_weight_decay: 0.0
+
+  # Warmup tuned from the prior run's (zot1zdu9, 5000-step warmup) early
+  # trajectory:
+  #   - Projector noise→signal transition completes at step 488 (loss
+  #     drops 3.49 → 0.88 in one log window as the projector finds its
+  #     basic audio-token → text-token mapping).
+  #   - Loss plateaus at 0.39 by step ~1500 and stays flat through end
+  #     of warmup (0.39 at step 1952, 0.39 at step 4979, 0.38 at step
+  #     5955). The last 3500 warmup steps in the prior run did not move
+  #     the loss curve.
+  #   - grad_norm settles into the 1.5–2.5 operating range by step ~2000
+  #     and is statistically identical at step 5000 (2.36 vs 2.18).
+  #     Adam's variance estimator is well-calibrated by step 2000.
+  # The 5000-step warmup was originally protective for the (1e-3 / 1e-4)
+  # decoder LR — hitting peak with the decoder still in its high-grad
+  # regime (||grad_dec||≈87 at step 2000) risked destabilizing Qwen3.
+  # That concern collapses under the new (1e-3 / 1e-5) recipe: peak
+  # decoder update is 1e-5 × 87 ≈ 8.7e-4, small enough that warmup tail
+  # protection is no longer load-bearing. 2000 steps is 2.4% of the
+  # 85k-step run — in the standard 1–5% pretraining-warmup range.
+  warmup_steps: 2000
+
+  # Cosine-with-min-lr: peak LR while projector is actively learning, decay
+  # to 10% floor so late-stage tied-embedding rare-token refinement (which
+  # carries the dominant late-stage decoder gradient) stays productive.
+  # Plain cosine→0 would effectively halt that refinement in the final ~5%
+  # of training.
+  lr_scheduler_type: cosine_with_min_lr
+  lr_scheduler_kwargs:
+    min_lr_rate: 0.1
+
+  # Raised from production.yaml's 1.0 default: decoder ||grad||≈128 once the
+  # projector stops producing noise, so max_grad_norm=1.0 would clip ~99% of
+  # the decoder gradient and defeat the point of unfreezing. 5.0 is standard
+  # LLM fine-tune territory and still catches blow-up spikes. Verify against
+  # actual logged train/grad_norm in W&B early in the run; tighten if values
+  # stay << 5 after the first few hundred steps.
+  max_grad_norm: 1.0
+
+  seed: 43
+  auto_find_batch_size: false
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 2
+  num_train_epochs: 2
+  save_steps: 2000
+  eval_steps: 2000
+
+  # Keep the Blackwell fed; audio decode + mel extraction is the bottleneck
+  # at this batch size. AMD EPYC 9355 has 32 cores / 64 threads — leave a
+  # handful free for the main process, GPU sync, and tokenizer threads.
+  # 16 workers + prefetch 8 keep up with batch_size=64 (ftfy + truecase
+  # label normalization is the dominant per-row cost). 16 workers /
+  # 32 physical cores leaves 16 cores for the main process, GPU sync,
+  # tokenizer thread pool, and OS page cache.
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 8
+
+  # SDPA (PyTorch-native, cuDNN flash backend on Blackwell) — avoids the slow
+  # flash-attn source build on RunPod and is fast enough at our seq lengths.
+  attn_implementation: sdpa
+
+  torch_compile: true
