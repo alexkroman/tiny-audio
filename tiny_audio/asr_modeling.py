@@ -232,6 +232,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
+        # Explicit cast: from_pretrained's `dtype=` kwarg is honored
+        # inconsistently across loader paths (especially trust_remote_code
+        # branches like GLM-ASR), leaving submodules in fp32. FA2's startup
+        # then complains "current dype is torch.float32, expected fp16/bf16",
+        # and even with sdpa the projector→encoder feed mismatches dtypes.
+        # `.to(dtype=...)` after load is idempotent and forces the issue.
+        encoder = encoder.to(dtype=dtype)
         encoder.requires_grad_(False)
         encoder.eval()
         return encoder
@@ -247,6 +254,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         }
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
+        # See _load_audio_encoder note: idempotent post-load cast to dodge the
+        # FA2 "current dype is fp32" warning when from_pretrained's dtype kwarg
+        # isn't fully propagated to every submodule.
+        decoder = decoder.to(dtype=dtype)
         decoder.config.use_cache = getattr(config, "use_cache", True)
         if getattr(config, "freeze_language_model", True):
             decoder.requires_grad_(False)
