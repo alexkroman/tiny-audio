@@ -238,17 +238,14 @@ def compare_to_base(
             if li is None:
                 continue
             comp = classify_component(bk)
-            bucket = (
-                "attn"
-                if comp.startswith("self_attn")
-                else (
-                    "mlp"
-                    if comp.startswith("mlp")
-                    else "norm"
-                    if "layernorm" in comp or comp.endswith("_norm")
-                    else "other"
-                )
-            )
+            if comp.startswith("self_attn"):
+                bucket = "attn"
+            elif comp.startswith("mlp"):
+                bucket = "mlp"
+            elif "layernorm" in comp or comp.endswith("_norm"):
+                bucket = "norm"
+            else:
+                bucket = "other"
             by_layer[li][bucket].append(stats)
 
         table = Table(show_header=True, header_style="bold")

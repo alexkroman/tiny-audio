@@ -24,6 +24,19 @@ except ImportError:
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
+def _resolve_attn_implementation(requested: Optional[str]) -> Optional[str]:
+    """Coerce flash_attention_2 to sdpa when CUDA isn't available.
+
+    FA2 is CUDA-only. On MPS/CPU, requesting it either errors at load or
+    silently falls back to a slower path; either way the user pays the FA2
+    install + import cost for no win. Coerce here so a saved config that
+    pins flash_attention_2 still loads on Mac / CPU-only Linux boxes.
+    """
+    if requested == "flash_attention_2" and not torch.cuda.is_available():
+        return "sdpa"
+    return requested
+
+
 def _gather_audio_embeds(audio_embeds: torch.Tensor, token_counts: torch.Tensor) -> torch.Tensor:
     """Flatten per-sample audio embeddings into a packed tensor.
 
@@ -184,6 +197,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if getattr(config, "freeze_projector", False):
             self.projector.requires_grad_(False)
 
+        # Freeze the text-vocab embedding table (preserves base Qwen3's
+        # token→embedding mapping during joint fine-tune). With
+        # tie_word_embeddings=True the same tensor backs lm_head, so this
+        # also freezes the output projection. Audio tokens bypass this
+        # table — they're scattered into inputs_embeds via masked_scatter
+        # at <audio> positions (forward(), below), so the audio path is
+        # unaffected. Mirrors Baichuan-Audio's stage-2 policy of training
+        # all decoder params except the text embedding and LM head.
+        if getattr(config, "freeze_text_embed_tokens", False):
+            self.language_model.get_input_embeddings().weight.requires_grad_(False)
+
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
@@ -204,7 +228,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def _load_audio_encoder(cls, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
         """Load and freeze the audio encoder."""
         encoder_kwargs = {
-            "attn_implementation": config.attn_implementation,
+            "attn_implementation": _resolve_attn_implementation(config.attn_implementation),
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
@@ -232,6 +256,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
+        # Explicit cast: from_pretrained's `dtype=` kwarg is honored
+        # inconsistently across loader paths (especially trust_remote_code
+        # branches like GLM-ASR), leaving submodules in fp32. FA2's startup
+        # then complains "current dype is torch.float32, expected fp16/bf16",
+        # and even with sdpa the projector→encoder feed mismatches dtypes.
+        # `.to(dtype=...)` after load is idempotent and forces the issue.
+        encoder = encoder.to(dtype=dtype)
         encoder.requires_grad_(False)
         encoder.eval()
         return encoder
@@ -240,13 +271,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def _load_language_model(cls, config: ASRConfig, dtype: torch.dtype) -> PreTrainedModel:
         """Load and freeze the language model."""
         decoder_kwargs = {
-            "attn_implementation": config.attn_implementation,
+            "attn_implementation": _resolve_attn_implementation(config.attn_implementation),
             "trust_remote_code": True,
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
+        # See _load_audio_encoder note: idempotent post-load cast to dodge the
+        # FA2 "current dype is fp32" warning when from_pretrained's dtype kwarg
+        # isn't fully propagated to every submodule.
+        decoder = decoder.to(dtype=dtype)
         decoder.config.use_cache = getattr(config, "use_cache", True)
         if getattr(config, "freeze_language_model", True):
             decoder.requires_grad_(False)
@@ -449,34 +484,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
-        hidden_states = self._maybe_drop_audio_tokens(hidden_states)
         audio_embeds = self.projector(hidden_states)
 
         token_counts = expected_token_counts.to(device=audio_embeds.device, dtype=torch.long)
         return _gather_audio_embeds(audio_embeds, token_counts)
-
-    def _maybe_drop_audio_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Per-time-step Bernoulli zero-mask on encoder output (train-only).
-
-        SpecAugment-equivalent for frozen-encoder setups: drops whole frames
-        from the encoder output sequence so the projector learns robustness
-        to missing context. Length-preserving (zeros, not deletions) so
-        audio token counts in the prompt stay consistent. No magnitude
-        rescaling — the projector should not learn to compensate.
-        """
-        p = float(getattr(self.config, "audio_token_dropout", 0.0))
-        if not self.training or p <= 0.0:
-            return hidden_states
-        keep = 1.0 - p
-        mask = torch.bernoulli(
-            torch.full(
-                hidden_states.shape[:-1],
-                keep,
-                device=hidden_states.device,
-                dtype=hidden_states.dtype,
-            )
-        ).unsqueeze(-1)
-        return hidden_states * mask
 
     def forward(
         self,
@@ -513,6 +524,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 audio_token_mask.to(inputs_embeds.device),
                 audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
             )
+
+        # Forward label_smoothing to the LM's loss_function via **kwargs.
+        # transformers.loss.loss_utils.ForCausalLMLoss → fixed_cross_entropy
+        # forwards extra kwargs to F.cross_entropy, which accepts label_smoothing.
+        # When apply_liger_kernel_to_qwen3() has patched the LM, the smoothing
+        # is consumed by liger's fused linear CE (no (B,T,V) materialization).
+        # Zeroed on eval so eval/loss is raw CE and comparable to LS=0 runs.
+        if labels is not None and self.training and self.config.label_smoothing > 0:
+            kwargs.setdefault("label_smoothing", self.config.label_smoothing)
 
         outputs = self.language_model(
             attention_mask=attention_mask,

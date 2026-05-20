@@ -21,7 +21,15 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 
 class MLPAudioProjector(nn.Module):
-    """2-layer MLP projector with frame-stacking downsampling (matches GLM-ASR)."""
+    """2-layer MLP projector with frame-stacking downsampling (matches GLM-ASR).
+
+    Both RMSNorms use LlamaRMSNorm's default weight=1.0 init. A prior version
+    initialized both to 0.029 (Qwen3-0.6B's embed_tokens RMS) to put projector
+    outputs at residual-stream scale on step 1. Empirically, after training the
+    model drifted both norms back to ~1.0 (norm) and ~1.2 (norm_2) — the small
+    init wasted compute on a 35× scale-correction phase the optimizer would
+    have skipped from default init.
+    """
 
     def __init__(self, config):
         """Initialize MLP projector.
@@ -42,11 +50,8 @@ class MLPAudioProjector(nn.Module):
         self.linear_1 = nn.Linear(in_dim, hidden_dim, bias=False)
         self.norm = LlamaRMSNorm(hidden_dim, eps=1e-6)
         self.act = nn.GELU()
+        self.dropout = nn.Dropout(getattr(config, "projector_dropout", 0.0))
         self.linear_2 = nn.Linear(hidden_dim, llm_dim, bias=False)
-        # Output norm aligns the projector's RMS with the LM's embed_tokens
-        # distribution. Without it, linear_2's Kaiming-uniform init produces
-        # outputs ~30× quieter than embed rows, which saturates softmax at
-        # audio positions and starves them of gradient.
         self.norm_2 = LlamaRMSNorm(llm_dim, eps=1e-6)
 
     def get_output_length(self, input_length: int) -> int:
@@ -67,6 +72,7 @@ class MLPAudioProjector(nn.Module):
         x = self.linear_1(x)
         x = self.norm(x)
         x = self.act(x)
+        x = self.dropout(x)
         x = self.linear_2(x)
         return self.norm_2(x)
 

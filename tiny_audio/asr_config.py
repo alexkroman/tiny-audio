@@ -51,12 +51,14 @@ class ASRConfig(transformers.PretrainedConfig):
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
         projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
-        # Per-time-step Bernoulli zero-mask on encoder output before the
-        # projector (training-only). 0.05–0.15 is the SpecAugment-equivalent
-        # range for frozen-encoder setups; drops whole encoder frames so
-        # the projector learns robustness to missing context. No magnitude
-        # rescaling. 0.0 disables.
-        audio_token_dropout: float = 0.0,
+        projector_dropout: float = 0.0,
+        # Label smoothing applied inside the LM's loss function (not HF Trainer's
+        # LabelSmoother). Train-only — ASRModel.forward zeros it on eval. Routing
+        # smoothing through the loss_function flows through liger's fused linear
+        # CE when apply_liger_kernel_to_qwen3() is active, avoiding the
+        # (B,T,V) fp32 log_softmax materialization that the HF LabelSmoother
+        # path requires (~15GB at B=50/V=152k on Qwen3-0.6B).
+        label_smoothing: float = 0.0,
         # MoE-specific configuration
         num_experts: int = 4,  # Number of experts in MoE projectors
         num_experts_per_tok: int = 2,  # Top-k experts per token
@@ -75,6 +77,7 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,  # Default: all linear layers
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
+        freeze_text_embed_tokens: bool = False,
         do_sample: bool = False,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -123,7 +126,8 @@ class ASRConfig(transformers.PretrainedConfig):
         self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
-        self.audio_token_dropout = audio_token_dropout
+        self.projector_dropout = projector_dropout
+        self.label_smoothing = label_smoothing
         # MoE-specific configuration
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
@@ -150,6 +154,7 @@ class ASRConfig(transformers.PretrainedConfig):
         ]
         self.freeze_projector = freeze_projector
         self.freeze_language_model = freeze_language_model
+        self.freeze_text_embed_tokens = freeze_text_embed_tokens
 
         explicit_generation_args = {
             "num_beams": num_beams,

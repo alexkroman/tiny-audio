@@ -12,7 +12,9 @@ import logging
 import os
 import random
 import re
+import subprocess
 from dataclasses import fields
+from pathlib import Path
 from typing import Any
 
 os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
@@ -47,54 +49,200 @@ from tiny_audio.asr_config import (
     compute_encoder_output_length,
 )
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.augmentation import NoiseAugmentation, RIRAugmentation
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
 
-# Markers that pollute training labels but are absent from corresponding
-# eval splits. Gigaspeech ships <comma>/<period>/etc. in ~55% of train rows
-# and zero in dev. TEDLIUM ships <unk> in ~92% of train rows and zero in
-# validation/test. EdAcc ships <overlap>/<laugh>/<dtmf>/<foreign>/<no-speech>/
-# <lipsmack> in ~20% of rows; Earnings22 ships <clear_throat>/<inaudible>/
-# <crosstalk> in ~3% of rows. Stripping is safe across all corpora — these
-# are ASR annotation conventions, never literal user-intended words.
-_CORPUS_MARKER_RE = re.compile(
-    r"\s*<("
-    r"comma|period|exclamationpoint|questionmark|"
-    r"sil|music|noise|other|unk|"
-    r"overlap|laugh|dtmf|foreign|no-speech|lipsmack|"
-    r"clear_throat|inaudible|crosstalk"
-    r")>",
+# Gigaspeech ships inline punctuation as angle-bracket tags so we restore
+# them to real punctuation before any other normalization. Pattern follows
+# the Ultravox text_proc.format_asr_text recipe.
+_GIGASPEECH_PUNCT_MAP = {
+    "COMMA": ",",
+    "PERIOD": ".",
+    "QUESTIONMARK": "?",
+    "EXCLAMATIONPOINT": "!",
+}
+_GIGASPEECH_PUNCT_RE = re.compile(
+    r"\s*<(COMMA|PERIOD|QUESTIONMARK|EXCLAMATIONPOINT)>",
     re.IGNORECASE,
 )
+# Non-punct annotation markers worth stripping (but keep the rest of the
+# label). Gigaspeech ships <SIL>/<NOISE>/<MUSIC>/<OTHER> for non-speech
+# segments; TEDLIUM ships <unk> in ~92% of train rows; Switchboard ships
+# <laugh>; EdAcc ships <overlap>/<dtmf>/<foreign>/<no-speech>/<lipsmack>;
+# Earnings22 ships <clear_throat>/<inaudible>/<crosstalk>. These mark
+# intra-utterance events that the eval refs do NOT include, so stripping
+# is safe.
+#
+# Strip-don't-drop is deliberate: a previous revision tried Ultravox's
+# whole-sample-drop pattern for the four Gigaspeech non-speech tags and
+# broke eval — small eval batches that happened to draw samples with
+# those tags came back fully empty and crashed the collator. Stripping
+# preserves partial speech transcripts (audio may have speech around the
+# tagged non-speech moment) and the empty-label filter at the collator
+# still catches the edge case where the entire label was just a tag.
+# After the Gigaspeech punct map converts <COMMA>/<PERIOD>/etc. to real
+# punctuation, any remaining `<...>` token is a non-speech annotation
+# marker (Gigaspeech <MUSIC>/<NOISE>/<SIL>/<OTHER>, TEDLIUM <unk>,
+# Switchboard <LAUGH>, EdAcc <overlap>/<dtmf>/<foreign>/<no-speech>/
+# <lipsmack>, Earnings22 <clear_throat>/<inaudible>/<crosstalk>, plus the
+# long tail of bodily-noise tags like <inhale>/<sigh>/<cough> that vary
+# across corpora). ASR transcripts never legitimately contain `<word>`
+# tokens, so a generic strip is safer than a whitelist (whitelists
+# silently leak whichever marker variant a new corpus happens to use,
+# training the decoder to emit it as a literal token). Substitution
+# uses a single space so adjacent-no-whitespace forms (`word<sigh>word`)
+# don't collapse to a concatenated string before the whitespace pass.
+_RESIDUAL_ANGLE_TAG_RE = re.compile(r"<[^>]+>")
 # TEDLIUM occasionally inlines editorial commentary in square brackets
 # ([ medicine ], [ multi-word stage direction ]) — ~0.25% of train rows;
-# zero in dev/test. Strip the entire bracketed block, including any
-# preceding whitespace, to avoid leaving a double-space behind.
-_TEDLIUM_BRACKET_RE = re.compile(r"\s*\[[^\]]*\]")
+# zero in dev/test. Same single-space substitution rationale as above.
+_TEDLIUM_BRACKET_RE = re.compile(r"\[[^\]]*\]")
+# Word-bounded `per cent` → `percent` to avoid false positives on
+# `per centage` / `per centimeter` / etc.; the prior `text.replace("per cent", "percent")`
+# silently mangled those. `\bper ?cent\b` also harmlessly matches an
+# already-collapsed `percent` (the replacement is identical, so it's a no-op).
+_PER_CENT_RE = re.compile(r"\bper ?cent\b")
+# TEDLIUM occasionally tokenizes negation contractions with the apostrophe-t
+# split off the verb stem — `didn 't` instead of `didn't` or `did n't`. Probe
+# of 500 TEDLIUM train rows showed this in ~10%, dominated by
+# `don 't` / `didn 't` / `wouldn 't` / `can 't` / `wasn 't`. Truecase
+# tokenizes the orphan `'t` as a standalone token and uppercases it, so
+# labels arrive as `didn 'T embrace` and train the decoder to emit broken
+# contractions. Pre-collapse the orphan before truecase runs. The `\w+n`
+# anchor means we only target the negation-contraction shape, so we never
+# touch space-before-apostrophe forms like `she 'd` / `it 's` / `friends '`
+# that truecase already handles correctly via its contraction vocabulary.
+_ORPHAN_NT_RE = re.compile(r"\b(\w+n)\s+'t\b")
 _WHITESPACE_RE = re.compile(r"\s+")
+
+# Post-truecase cleanup. Truecase's NLTK-backed tokenizer reformats text
+# in three ways that survive into training labels:
+#   1. Sentence-final periods get split off as standalone tokens, then
+#      re-joined with a leading space (`rate . But` instead of `rate. But`).
+#      Found in ~25% of Gigaspeech rows (the multi-sentence ones).
+#   2. Truecase fails to capitalize the next sentence after a mid-sentence
+#      period (`E T. the Video game.` instead of `E T. The Video game.`).
+#   3. Em-dash spaces get eaten (`for -- we` → `for--we`); seen in SPGI.
+#   4. Informal `gonna`/`wanna` get mangled to `gonNA`/`wanNA` regardless
+#      of input casing; seen across AMI / Switchboard / Gigaspeech.
+# These post-fixes run only when truecase actually fired (already-cased
+# sources skip truecase and don't need this cleanup).
+_SPACE_BEFORE_SENT_PUNCT_RE = re.compile(r"\s+([.,!?])")
+_SENT_START_LOWERCASE_RE = re.compile(r"([.!?])\s+([a-z])")
+_EM_DASH_RE = re.compile(r"\s*--\s*")
+_GONNA_ARTIFACT_RE = re.compile(r"\bgonNA\b")
+_WANNA_ARTIFACT_RE = re.compile(r"\bwanNA\b")
+_GOTTA_ARTIFACT_RE = re.compile(r"\bgotTA\b")
+
+
+def _post_truecase_cleanup(text: str) -> str:
+    text = _SPACE_BEFORE_SENT_PUNCT_RE.sub(r"\1", text)
+    text = _SENT_START_LOWERCASE_RE.sub(lambda m: f"{m.group(1)} {m.group(2).upper()}", text)
+    text = _EM_DASH_RE.sub(" -- ", text)
+    text = _GONNA_ARTIFACT_RE.sub("gonna", text)
+    text = _WANNA_ARTIFACT_RE.sub("wanna", text)
+    return _GOTTA_ARTIFACT_RE.sub("gotta", text)
+
+
+# Unicode cleanup: ftfy fixes mojibake (â€™ → '), unescapes HTML entities
+# (&amp; → &), and folds smart quotes (' " → ' "); NFKC further normalizes
+# composed/decomposed forms (café vs cafe + ◌́) and width variants
+# (full-width Latin → half-width). Applied first in _normalize_label so
+# downstream regexes see canonical ASCII-leaning text.
+import ftfy  # noqa: E402  pyright: ignore[reportMissingImports]
+
+# Truecase: NLTK-backed statistical recasing for transcripts that arrive
+# in mono-case form (all-upper or zero-caps). LOCAL_RANK=0 guard mirrors
+# Ultravox — avoids multiple workers racing on the punkt download.
+import truecase  # noqa: E402  pyright: ignore[reportMissingImports]
+
+if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+    try:
+        truecase.get_true_case("test")
+    except LookupError:
+        import nltk  # noqa: E402  pyright: ignore[reportMissingImports]
+
+        # NLTK 3.9+ requires `punkt_tab`; older NLTKs use `punkt`. Download
+        # both so this works on either base image. Quiet=True suppresses
+        # progress bars; the fetch is ~13 MB and usually completes in
+        # seconds.
+        nltk.download("punkt_tab", quiet=True)
+        nltk.download("punkt", quiet=True)
+
+
+def _needs_truecase(text: str) -> bool:
+    """Apply truecase only to mono-case text. Already-cased sources
+    (LibriHeavy text_original, CV, VoxPopuli raw_text, SPGISpeech) carry
+    proper-noun casing that the statistical truecaser would damage
+    (e.g. "McClarnon" -> "Mcclarnon"). Heuristic: text with any internal
+    capitalization beyond what truecase would produce is already cased.
+    """
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 5:
+        # Too short to recase meaningfully ("yeah", "OH"). Leave alone.
+        return False
+    upper_count = sum(c.isupper() for c in letters)
+    upper_frac = upper_count / len(letters)
+    if upper_frac > 0.9:
+        return True  # ALL-CAPS source (Gigaspeech post-restoration, AMI)
+    # zero-cap (TEDLIUM, Peoples, Switchboard) → truecase;
+    # otherwise already cased (LibriHeavy, CV, SPGI, VoxPopuli) → skip.
+    return upper_count == 0
 
 
 def _normalize_label(raw_text: str) -> str:
-    """Canonicalize a training transcript label.
+    """Canonicalize a training transcript label to cased+punct form.
 
-    Mirrors the percent rule from scripts/analysis.py:normalize_text so train
-    and eval agree on canonical surface form for percent values, and strips
-    annotation markers that pollute train rows while being absent from the
-    matching eval splits.
+    Pipeline (in order):
+    1. ftfy + NFKC unicode cleanup: fix mojibake (â€™ → '), unescape HTML
+       entities, fold smart quotes to straight, normalize composed /
+       decomposed forms and width variants. Defensive — our 100-sample-
+       per-dataset audit found zero non-ASCII in current sources, but
+       tail samples (especially OCR-derived audiobook text in LibriHeavy)
+       may carry curly quotes / Unicode oddities. Idempotent on clean
+       text; ~10us per call.
+    2. Map Gigaspeech inline-punct tags (<COMMA>/<PERIOD>/etc.) to real
+       punctuation. Done before the residual-marker strip so the tags
+       become punct rather than getting stripped to nothing.
+    3. Strip non-punct annotation markers (<unk>, <LAUGH>, <inaudible>,
+       Gigaspeech <MUSIC>/<NOISE>/<SIL>/<OTHER>, etc.) and TEDLIUM
+       editorial brackets ([ ... ]). For Gigaspeech non-speech tags the
+       audio segment may still contain speech around the tagged moment;
+       strip-not-drop preserves the partial transcript. The collator's
+       empty-label filter catches the entire-label-was-just-a-tag case.
+    4. Canonicalize percent — mirrors scripts/analysis.py:normalize_text
+       so the train-time label matches eval-time WER canonicalization.
+    5. Collapse whitespace.
+    6. Apply truecase only to mono-case text (see _needs_truecase). This
+       lifts ALL-CAPS sources (Gigaspeech, AMI) and zero-cap sources
+       (TEDLIUM, Peoples, Switchboard) to proper-cased form without
+       damaging already-cased sources (LibriHeavy, CV, SPGI, VoxPopuli).
 
-    Order matters: lowercase first (so the IGNORECASE on markers is belt-and-
-    suspenders), strip angle-bracket markers (consuming any preceding
-    whitespace so we don't leave double-spaces), strip TEDLIUM editorial
-    brackets (same whitespace handling), then canonicalize percent, then
-    collapse whitespace, then strip ends.
+    Output target format is cased text with punctuation where available —
+    aligning the dominant training label distribution to the Qwen3
+    decoder's native output format. WER scoring uses Whisper's
+    EnglishTextNormalizer which lowercases + strips punct on both
+    prediction and reference, so the format choice does not affect WER
+    comparability across runs.
     """
-    text = (raw_text or "").strip().lower()
-    text = _CORPUS_MARKER_RE.sub("", text)
-    text = _TEDLIUM_BRACKET_RE.sub("", text)
-    text = text.replace("%", " percent").replace("per cent", "percent")
-    return _WHITESPACE_RE.sub(" ", text).strip()
+    text = (raw_text or "").strip()
+    if not text:
+        return ""
+    text = ftfy.fix_text(text, normalization="NFKC")
+    text = _GIGASPEECH_PUNCT_RE.sub(lambda m: _GIGASPEECH_PUNCT_MAP[m.group(1).upper()], text)
+    text = _RESIDUAL_ANGLE_TAG_RE.sub(" ", text)
+    text = _TEDLIUM_BRACKET_RE.sub(" ", text)
+    text = text.replace("%", " percent")
+    text = _PER_CENT_RE.sub("percent", text)
+    text = _ORPHAN_NT_RE.sub(r"\1't", text)
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    if not text:
+        return ""
+    if _needs_truecase(text):
+        text = truecase.get_true_case(text)
+        text = _post_truecase_cleanup(text)
+    return text
 
 
 class DatasetLoader:
@@ -130,6 +278,21 @@ class DatasetLoader:
             num_proc=self.num_proc,
             trust_remote_code=True,
         )
+
+        # CommonVoice strict-validated filter: Mozilla's `train` split is
+        # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
+        # but still admits clips with non-zero down_votes. Filtering to
+        # down_votes == 0 cuts the small tail of community-flagged
+        # audio/transcript mismatches. Applied to all CV splits (train +
+        # eval) for consistency with the TEDLIUM marker-filter pattern
+        # below. Guarded on column presence in case a future mirror strips
+        # the voting metadata.
+        if "common_voice" in dataset_path.lower() and "down_votes" in ds.column_names:
+            ds = ds.filter(
+                lambda dv: dv == 0,
+                num_proc=self.num_proc,
+                input_columns="down_votes",
+            )
 
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
@@ -219,8 +382,17 @@ class DatasetLoader:
                     ds = self._ensure_duration(ds)
                 train_datasets.append(ds)
 
+            # Per-dataset eval cap applied here (pre-concat) so each eval
+            # source contributes a balanced slice. Prior behavior — cap-
+            # then-concat-then-truncate — silently dropped late-list eval
+            # splits (e.g. AMI, Switchboard) because the global
+            # max_eval_samples cap filled up on early-list splits (TEDLIUM
+            # + head of Peoples val) before reaching them.
+            eval_cap_per_dataset = self.config.get("max_eval_samples_per_dataset")
             for val_split in val_splits:
                 ds = self._prepare_split(d_cfg, val_split)
+                if eval_cap_per_dataset:
+                    ds = ds.select(range(min(len(ds), eval_cap_per_dataset)))
                 if self.needs_duration:
                     ds = self._ensure_duration(ds)
                 val_datasets.append(ds)
@@ -230,6 +402,9 @@ class DatasetLoader:
         )
         val_ds = concatenate_datasets(val_datasets) if val_datasets else None
 
+        # Global cap still applied last as a backstop. With per-dataset
+        # cap set, this is usually a no-op (per-dataset × num-eval-sets
+        # comes in under the global limit).
         if val_ds and self.config.get("max_eval_samples"):
             n_samples = min(len(val_ds), self.config.max_eval_samples)
             val_ds = val_ds.select(range(n_samples))
@@ -262,13 +437,25 @@ class DataCollator:
             if type(feature_extractor).__name__ == "WhisperFeatureExtractor"
             else "longest"
         )
-        self.text_collator = DataCollatorForChatML(tokenizer=tokenizer, max_length=2048)
+        # 4096 tokens accommodates the long-tail of audio (up to 30s ≈ 187
+        # audio tokens) + system prompt + user prompt + assistant transcript
+        # (dense speech can produce 1000-1500 transcript tokens). At 2048 the
+        # longest TEDLIUM / Earnings22 samples silently truncated the
+        # assistant turn — model trained on partial labels. Qwen3-0.6B
+        # supports 32K context so 4096 is well within capacity.
+        self.text_collator = DataCollatorForChatML(tokenizer=tokenizer, max_length=4096)
 
     # Whisper's feature extractor pads/truncates to a fixed 30s window. Audio
     # longer than this is silently truncated while the label is kept whole,
     # training the model to transcribe content it never sees. Drop those rows.
-    # EdAcc and Earnings22 both ship a small fraction of >30s clips.
     _MAX_AUDIO_SECONDS = 30.0
+    # Sub-0.8s clips are dominated by boundary-cut segments and isolated
+    # backchannels ("yeah", "ok", "umhum") where the audio span and the
+    # reference transcript don't actually line up — eval-side analysis on
+    # Peoples / CV / Switchboard / AMI showed these as the bulk of >=50%
+    # WER samples, with model output reflecting adjacent content rather
+    # than the labeled token.
+    _MIN_AUDIO_SECONDS = 0.8
 
     def _extract_audio_arrays(self, features):
         audio_arrays = []
@@ -281,25 +468,43 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
-                # Drop samples that would poison the gradient: empty audio,
-                # NaN/Inf samples (encoding glitches in community datasets),
-                # text labels that normalize to empty (entire label was an
-                # annotation marker like <noise>, observed in ~2% of
-                # Switchboard rows), or audio longer than the Whisper window
-                # (label/audio mismatch via silent truncation). One bad
-                # sample is enough to NaN the optimizer state and every
-                # subsequent step.
+                # Drop samples that would poison the gradient or break the
+                # encoder: empty / NaN audio, labels that normalize to empty
+                # (entire label was an annotation marker like <noise>), audio
+                # longer than Whisper's 30s window (label/audio mismatch via
+                # silent truncation), or sub-floor backchannels (label/audio
+                # don't actually line up — boundary-cut segments dominate the
+                # >50% WER tail). One bad sample is enough to NaN the
+                # optimizer state. Applied uniformly to train and eval — the
+                # filter is correctness, not policy, and the per-dataset eval
+                # cap (max_eval_samples_per_dataset) keeps any single dataset
+                # cluster from saturating an eval batch.
                 if audio.size == 0:
                     continue
                 if not np.isfinite(audio).all():
                     continue
                 if not _normalize_label(f.get("text") or ""):
                     continue
-                if audio.size / self.sample_rate > self._MAX_AUDIO_SECONDS:
+                duration_s = audio.size / self.sample_rate
+                if duration_s > self._MAX_AUDIO_SECONDS:
+                    continue
+                if duration_s < self._MIN_AUDIO_SECONDS:
                     continue
                 audio_arrays.append(audio)
                 valid_features.append(f)
-            except Exception:
+            except (KeyError, TypeError, AttributeError, ValueError, OSError) as e:
+                # Narrow exception set covers genuine per-row decode/access
+                # failures: missing audio dict keys, audio==None, shape
+                # mismatch on squeeze, soundfile decode errors. Everything
+                # else (LookupError from NLTK punkt_tab, ImportError,
+                # RuntimeError from a CUDA path, AssertionError on broken
+                # invariants) MUST propagate — silently swallowing them
+                # masks real bugs and silently drops samples from training.
+                # The prior `except Exception: continue` was hiding an
+                # NLTK punkt_tab LookupError that was silently dropping
+                # ~48% of training samples (every mono-case row from
+                # Gigaspeech / AMI / Peoples / TEDLIUM / Switchboard).
+                logging.debug("Skipping row in DataCollator: %s: %s", type(e).__name__, e)
                 continue
             finally:
                 f["audio"] = None
@@ -397,11 +602,18 @@ class ASRTrainer(Trainer):
         if self.optimizer is not None or not overrides:
             return super().create_optimizer()
 
+        from transformers.models.llama.modeling_llama import LlamaRMSNorm
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
         from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
         from transformers.trainer_pt_utils import get_parameter_names
 
+        # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm. Qwen3 / Llama
+        # use RMSNorm subclasses, so without these their gain weights silently
+        # land in the decay group and get pulled toward zero — destabilizing
+        # the residual-stream scale the projector's _NORM_INIT was tuned to.
         opt_model = self.model
-        decay_parameters = set(get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS))
+        forbidden = list(ALL_LAYERNORM_LAYERS) + [Qwen3RMSNorm, LlamaRMSNorm]
+        decay_parameters = set(get_parameter_names(opt_model, forbidden))
         decay_parameters = {n for n in decay_parameters if "bias" not in n}
 
         groups: dict[tuple[bool, bool], list] = {
@@ -464,6 +676,28 @@ def get_valid_training_args(config: dict) -> dict:
     return {k: v for k, v in config.items() if k in valid_fields}
 
 
+def _git_state() -> tuple[str | None, bool]:
+    """Return (commit_sha, is_dirty) for the repo containing this script.
+
+    Returns (None, False) if git is unavailable or this isn't a checkout
+    (e.g. shipped wheel, pip install). Run from the script's directory so
+    Hydra's cwd change doesn't push us outside the repo.
+    """
+    cwd = Path(__file__).resolve().parent
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, stderr=subprocess.DEVNULL, text=True
+        ).strip()
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=cwd, stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        )
+        return sha, dirty
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None, False
+
+
 TRAINING_MODEL_PARAMS = [
     "attn_implementation",
     "use_lora",
@@ -473,6 +707,7 @@ TRAINING_MODEL_PARAMS = [
     "lora_target_modules",
     "freeze_projector",
     "freeze_language_model",
+    "freeze_text_embed_tokens",
 ]
 
 
@@ -486,10 +721,43 @@ def main(cfg: DictConfig) -> None:
         )
 
     if cfg.training.get("report_to") == "wandb":
+        wandb_config = OmegaConf.to_container(cfg, resolve=True)
+        assert isinstance(wandb_config, dict)
+        git_commit, git_dirty = _git_state()
+        if git_commit:
+            # Surface the commit in the run config so it's queryable/filterable
+            # in the wandb UI alongside the run's hyperparameters. Wandb does
+            # capture git metadata on its own, but it lives in a separate panel
+            # and can't be used to group/filter runs.
+            wandb_config["git_commit"] = git_commit
+            wandb_config["git_dirty"] = git_dirty
         wandb.init(
             project=cfg.training.get("wandb_project", "tiny-audio"),
-            config=OmegaConf.to_container(cfg, resolve=True),
+            config=wandb_config,
         )
+        if git_commit:
+            wandb.run.summary["git_commit"] = git_commit
+            wandb.run.summary["git_dirty"] = git_dirty
+
+    # Patch transformers.models.qwen3 with liger fused kernels before the LM
+    # class is instantiated. The big win is fused linear cross-entropy: instead
+    # of materializing the (B, T, V) fp32 log-softmax tensor that HF's standard
+    # CE / LabelSmoother path requires (~15GB at B=50, V=151k on Qwen3-0.6B),
+    # liger fuses lm_head @ hidden_states + softmax + CE into a single kernel
+    # with peak memory O(B·T·D). Label smoothing flows through this kernel via
+    # the loss_function's **kwargs path (see ASRModel.forward) — so set HF
+    # Trainer's label_smoothing_factor=0 in configs to bypass the LabelSmoother
+    # and rely on model.config.label_smoothing instead.
+    if cfg.training.get("use_liger", True):
+        try:
+            from liger_kernel.transformers import apply_liger_kernel_to_qwen3
+
+            apply_liger_kernel_to_qwen3()
+        except ImportError:
+            logging.warning(
+                "liger-kernel not installed — falling back to stock Qwen3 kernels. "
+                "Install with `poetry install` on Linux to enable fused linear CE."
+            )
 
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_config_dict, dict), "model config must be a dict"
@@ -527,65 +795,6 @@ def main(cfg: DictConfig) -> None:
 
     train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
 
-    augmentations: list = []
-
-    def _aug_kwargs(cfg_block) -> dict:
-        # Forward every yaml key (minus `enabled`) as a kwarg — defaults
-        # live on the augmentation class signatures, not duplicated here.
-        d = OmegaConf.to_container(cfg_block, resolve=True)
-        d.pop("enabled", None)
-        return d
-
-    rir_aug: RIRAugmentation | None = None
-    rir_cfg = cfg.training.get("rir_augmentation") or {}
-    if rir_cfg.get("enabled"):
-        rir_aug = RIRAugmentation(sample_rate=cfg.data.sample_rate, **_aug_kwargs(rir_cfg))
-        augmentations.append(rir_aug)
-
-    noise_aug: NoiseAugmentation | None = None
-    noise_cfg = cfg.training.get("noise_augmentation") or {}
-    if noise_cfg.get("enabled"):
-        noise_aug = NoiseAugmentation(sample_rate=cfg.data.sample_rate, **_aug_kwargs(noise_cfg))
-        augmentations.append(noise_aug)
-
-    silence_injection_prob = float(cfg.training.get("silence_injection_prob", 0.0))
-    if silence_injection_prob > 0.0 and noise_aug is None:
-        raise ValueError(
-            "silence_injection_prob > 0 requires noise_augmentation.enabled "
-            "(the noise corpus is the source of noise-only samples)."
-        )
-
-    if augmentations or silence_injection_prob > 0.0:
-
-        def _apply_aug(batch):
-            audios = batch.get("audio") or []
-            texts = batch.get("text")
-            n_texts = len(texts) if texts is not None else 0
-            for i, a in enumerate(audios):
-                if not a or "array" not in a:
-                    continue
-                arr = a["array"]
-                # Silence injection targets backchannel hallucinations
-                # ("yeah" / "huh" on empty GT) — a documented Whisper /
-                # SALMONN failure mode — by pairing noise-only audio with
-                # an empty transcript so the model learns "no speech → EOS".
-                if (
-                    silence_injection_prob > 0.0
-                    and noise_aug is not None
-                    and i < n_texts
-                    and random.random() < silence_injection_prob
-                ):
-                    noise = noise_aug.sample_noise_only(arr.shape[-1])
-                    if noise is not None:
-                        arr = noise.astype(arr.dtype)
-                        texts[i] = ""
-                for aug in augmentations:
-                    arr = aug(arr)
-                a["array"] = arr
-            return batch
-
-        train_dataset = train_dataset.with_transform(_apply_aug)
-
     if multitask_enabled:
         data_collator = MultiTaskDataCollator(
             tokenizer=model.tokenizer,
@@ -620,8 +829,21 @@ def main(cfg: DictConfig) -> None:
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     decoder_weight_decay = training_config.pop("decoder_weight_decay", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
+    # Dynamo flags set unconditionally — applies whether the user enables
+    # torch.compile via TrainingArguments or whether some upstream dep
+    # (liger / transformers) invokes dynamo internally. cache_size_limit
+    # defaults to 8, which audio batches blow past quickly because
+    # group_by_length=false + variable seq lengths produce dozens of
+    # distinct shapes; without bumping it dynamo gives up and falls back
+    # to eager mid-run (you see "torch._dynamo hit config.recompile_limit"
+    # warnings). capture_scalar_outputs lets dynamo capture .item() /
+    # scalar-tensor outputs into the graph instead of graph-breaking on
+    # the first scalar-producing op (e.g. token_counts.max().item() in
+    # _gather_audio_embeds).
+    torch._dynamo.config.cache_size_limit = 256
+    torch._dynamo.config.capture_scalar_outputs = True
     if compile_config := training_config.pop("torch_compile_config", None):
-        torch._dynamo.config.cache_size_limit = compile_config.get("cache_size_limit", 64)
+        torch._dynamo.config.cache_size_limit = compile_config.get("cache_size_limit", 256)
         torch._dynamo.config.capture_scalar_outputs = compile_config.get(
             "capture_scalar_outputs", True
         )

@@ -774,15 +774,30 @@ def main(
                 text_field=cfg.text_field,
             )
         elif model == "swift" or model.startswith("swift://"):
-            repo_id = (
-                model[len("swift://") :] if model.startswith("swift://") else ""
-            ) or "mazesmazes/tiny-audio-mlx"
-            model_id = get_model_name(repo_id)
-            evaluator = SwiftSDKEvaluator(
-                repo_id=repo_id,
-                audio_field=cfg.audio_field,
-                text_field=cfg.text_field,
-            )
+            suffix = model[len("swift://") :] if model.startswith("swift://") else ""
+            # Treat path-like suffixes (`/`, `~`, `./`, `../`) as a local
+            # model directory; everything else is an HF repo id (ignored by
+            # the Swift binary, but recorded for the results dir name).
+            if suffix.startswith(("/", "~", "./", "../")):
+                model_dir = Path(suffix).expanduser().resolve()
+                if not model_dir.is_dir():
+                    raise typer.BadParameter(
+                        f"swift:// path does not resolve to a directory: {model_dir}"
+                    )
+                model_id = f"swift-local-{model_dir.name}"
+                evaluator = SwiftSDKEvaluator(
+                    model_dir=model_dir,
+                    audio_field=cfg.audio_field,
+                    text_field=cfg.text_field,
+                )
+            else:
+                repo_id = suffix or "mazesmazes/tiny-audio-mlx"
+                model_id = get_model_name(repo_id)
+                evaluator = SwiftSDKEvaluator(
+                    repo_id=repo_id,
+                    audio_field=cfg.audio_field,
+                    text_field=cfg.text_field,
+                )
         elif endpoint:
             model_id = get_model_name(model)
             evaluator = EndpointEvaluator(
