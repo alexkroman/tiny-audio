@@ -51,6 +51,7 @@ class ASRConfig(transformers.PretrainedConfig):
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
         projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
+        projector_dropout: float = 0.0,
         # Label smoothing applied inside the LM's loss function (not HF Trainer's
         # LabelSmoother). Train-only — ASRModel.forward zeros it on eval. Routing
         # smoothing through the loss_function flows through liger's fused linear
@@ -76,6 +77,7 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_target_modules: Optional[list] = None,  # Default: all linear layers
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
+        freeze_text_embed_tokens: bool = False,
         do_sample: bool = False,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -124,6 +126,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
+        self.projector_dropout = projector_dropout
         self.label_smoothing = label_smoothing
         # MoE-specific configuration
         self.num_experts = num_experts
@@ -151,6 +154,7 @@ class ASRConfig(transformers.PretrainedConfig):
         ]
         self.freeze_projector = freeze_projector
         self.freeze_language_model = freeze_language_model
+        self.freeze_text_embed_tokens = freeze_text_embed_tokens
 
         explicit_generation_args = {
             "num_beams": num_beams,

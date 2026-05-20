@@ -20,6 +20,12 @@ model:
   projector_type: mlp
   projector_pool_stride: 4
   projector_hidden_dim: 1024
+  # Regularize the projector during joint training. 0.1 is the standard
+  # transformer FFN dropout rate. Applied between act and linear_2, so it
+  # perturbs the projection into LLM-embed space — what both the projector
+  # and the now-trainable decoder consume. Auto-disabled at eval via
+  # nn.Dropout.training.
+  projector_dropout: 0.1
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
   text_model_id: Qwen/Qwen3-0.6B
@@ -41,6 +47,18 @@ training:
   # Qwen3-0.6B base weights. Encoder stays frozen via the default in asr_modeling.
   freeze_language_model: false
   freeze_projector: false
+  # Freeze the text-vocab embedding table during joint fine-tune. The published
+  # tiny-audio recipe (uniform 1e-4 across all decoder params, no WD, no
+  # label smoothing) drifted embed_tokens by 1.18× its base Frobenius norm —
+  # essentially rewriting the text-token→embedding mapping and (via Qwen3's
+  # tie_word_embeddings=True) the lm_head simultaneously. The mechanism is
+  # asymmetric: common tokens appear in every batch and get task gradients,
+  # rare tokens (CJK, niche Unicode, code syntax) never appear and get only
+  # the WD pull → base vocab gets destroyed. Freezing preserves the base
+  # mapping completely; the audio path is unaffected because audio embeddings
+  # come from the projector (scattered into inputs_embeds via masked_scatter),
+  # not from this table. Matches Baichuan-Audio's stage-2 policy.
+  freeze_text_embed_tokens: true
 
   # Asymmetric LR for joint from-scratch training (100× gap):
   #   - Projector (fresh init): 1e-3. Needs the high LR to converge quickly
@@ -132,7 +150,7 @@ training:
   max_grad_norm: 1.0
 
   seed: 43
-  auto_find_batch_size: true
+  auto_find_batch_size: false
   per_device_train_batch_size: 100
   per_device_eval_batch_size: 100
   gradient_accumulation_steps: 1
@@ -156,4 +174,4 @@ training:
   # rather than lose liger. Re-enable when liger v0.9+ improves Inductor
   # compat. (Also disabled in configs/training/production.yaml — repeating
   # here because this experiment file overrides the training base.)
-  torch_compile: true
+  torch_compile: false

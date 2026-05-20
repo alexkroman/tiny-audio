@@ -24,6 +24,19 @@ except ImportError:
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
+def _resolve_attn_implementation(requested: Optional[str]) -> Optional[str]:
+    """Coerce flash_attention_2 to sdpa when CUDA isn't available.
+
+    FA2 is CUDA-only. On MPS/CPU, requesting it either errors at load or
+    silently falls back to a slower path; either way the user pays the FA2
+    install + import cost for no win. Coerce here so a saved config that
+    pins flash_attention_2 still loads on Mac / CPU-only Linux boxes.
+    """
+    if requested == "flash_attention_2" and not torch.cuda.is_available():
+        return "sdpa"
+    return requested
+
+
 def _gather_audio_embeds(audio_embeds: torch.Tensor, token_counts: torch.Tensor) -> torch.Tensor:
     """Flatten per-sample audio embeddings into a packed tensor.
 
@@ -184,6 +197,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if getattr(config, "freeze_projector", False):
             self.projector.requires_grad_(False)
 
+        # Freeze the text-vocab embedding table (preserves base Qwen3's
+        # token→embedding mapping during joint fine-tune). With
+        # tie_word_embeddings=True the same tensor backs lm_head, so this
+        # also freezes the output projection. Audio tokens bypass this
+        # table — they're scattered into inputs_embeds via masked_scatter
+        # at <audio> positions (forward(), below), so the audio path is
+        # unaffected. Mirrors Baichuan-Audio's stage-2 policy of training
+        # all decoder params except the text embedding and LM head.
+        if getattr(config, "freeze_text_embed_tokens", False):
+            self.language_model.get_input_embeddings().weight.requires_grad_(False)
+
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
@@ -204,7 +228,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def _load_audio_encoder(cls, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
         """Load and freeze the audio encoder."""
         encoder_kwargs = {
-            "attn_implementation": config.attn_implementation,
+            "attn_implementation": _resolve_attn_implementation(config.attn_implementation),
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
@@ -247,7 +271,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def _load_language_model(cls, config: ASRConfig, dtype: torch.dtype) -> PreTrainedModel:
         """Load and freeze the language model."""
         decoder_kwargs = {
-            "attn_implementation": config.attn_implementation,
+            "attn_implementation": _resolve_attn_implementation(config.attn_implementation),
             "trust_remote_code": True,
             "low_cpu_mem_usage": True,
             "dtype": dtype,
@@ -442,35 +466,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             self.config.encoder_conv_layers,
         )
 
-    def _time_mask_encoder_output(
-        self,
-        x: torch.Tensor,
-        num_masks: int = 2,
-        mask_length: int = 10,
-    ) -> torch.Tensor:
-        """SpecAugment-style time masking on the frozen encoder's output.
-
-        Train-mode only. For each example, zero out `num_masks` spans of
-        `mask_length` frames at uniformly-sampled positions. With GLM-ASR's
-        ~20 ms/frame stride after conv-stack downsampling, mask_length=10
-        is ~200 ms — enough to force the projector to interpolate over
-        silence-sized gaps without erasing entire phonemes.
-
-        Vectorized (no Python loop, no in-place indexed assignment) so the
-        whole pass stays inside torch.compile's traced graph instead of
-        forcing a graph break / eager fallback at every step.
-        """
-        if not self.training or num_masks <= 0 or mask_length <= 0:
-            return x
-        bsz, seq_len, _ = x.shape
-        if seq_len <= mask_length:
-            return x
-        starts = torch.randint(0, seq_len - mask_length, (bsz, num_masks, 1), device=x.device)
-        positions = torch.arange(seq_len, device=x.device)
-        in_mask = ((positions >= starts) & (positions < starts + mask_length)).any(dim=1)
-        keep = (~in_mask).unsqueeze(-1).to(x.dtype)
-        return x * keep
-
     def _encode_audio(
         self,
         audio_features: torch.Tensor,
@@ -489,7 +484,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
-        hidden_states = self._time_mask_encoder_output(hidden_states)
         audio_embeds = self.projector(hidden_states)
 
         token_counts = expected_token_counts.to(device=audio_embeds.device, dtype=torch.long)

@@ -50,6 +50,7 @@ class MLPAudioProjector(nn.Module):
         self.linear_1 = nn.Linear(in_dim, hidden_dim, bias=False)
         self.norm = LlamaRMSNorm(hidden_dim, eps=1e-6)
         self.act = nn.GELU()
+        self.dropout = nn.Dropout(getattr(config, "projector_dropout", 0.0))
         self.linear_2 = nn.Linear(hidden_dim, llm_dim, bias=False)
         self.norm_2 = LlamaRMSNorm(llm_dim, eps=1e-6)
 
@@ -71,6 +72,7 @@ class MLPAudioProjector(nn.Module):
         x = self.linear_1(x)
         x = self.norm(x)
         x = self.act(x)
+        x = self.dropout(x)
         x = self.linear_2(x)
         return self.norm_2(x)
 
