@@ -60,29 +60,26 @@ training:
   # not from this table. Matches Baichuan-Audio's stage-2 policy.
   freeze_text_embed_tokens: true
 
-  # Asymmetric LR for joint from-scratch training (100× gap):
+  # Asymmetric LR for joint from-scratch training (50× gap):
   #   - Projector (fresh init): 1e-3. Needs the high LR to converge quickly
   #     through warmup; observed ||grad_proj|| starts at ~9 and stabilizes
   #     around 0.4–0.6 once the bridge function is learned.
-  #   - Decoder (Qwen3-0.6B base): 1e-5. Empirically derived from the prior
-  #     stage_1 trajectory probe (scripts/debug/probe_stage1_trajectory.py
-  #     against the loquacious_plus run zot1zdu9):
-  #       step  2000:  ||grad_dec||=87.1,  dec/proj= 9.4×
-  #       step  6000:  ||grad_dec||=50.4,  dec/proj=22.3×
-  #       step 30000:  ||grad_dec||=23.6,  dec/proj=63.7×
-  #       step 85000:  ||grad_dec||=37.1,  dec/proj=62.1×
-  #     The decoder/projector gradient ratio widens from ~9× to ~62× as
-  #     training progresses — so the LR ratio needs to widen too. At the
-  #     prior run's (1e-3 / 1e-4) the per-param SGD update was 6× decoder-
-  #     dominant from step 30k onward, and the eval-train gap widened
-  #     correspondingly (gap doubled from 0.11 at step 6k to 0.16 at step
-  #     85k while train kept dropping but eval flattened). 1e-5 keeps the
-  #     update ratio in the balanced 0.5–2.0 band for the majority of
-  #     training and protects Qwen3 from continued over-adaptation to
-  #     projector quirks. Matches LLaVA / Qwen-Audio / Freeze-Omni fine-
-  #     tune-LR conventions.
+  #   - Decoder (Qwen3-0.6B base): 2e-5. Prior choice was 1e-5 derived from
+  #     the loquacious_plus probe (scripts/debug/probe_stage1_trajectory.py
+  #     against zot1zdu9) where decoder/projector grad ratio widened from
+  #     ~9× to ~62× over training, suggesting a wider LR gap was needed.
+  #     But 1e-5 was *also* set partly to mitigate rare-token embedding
+  #     drift via Qwen3's tie_word_embeddings — with
+  #     freeze_text_embed_tokens=true (above) the tied embed/lm_head
+  #     drift channel is closed entirely, so the LR can move up without
+  #     reintroducing that failure mode. The remaining decoder params
+  #     (attn / mlp / RMSNorm) on run xxy2327u showed only 1–4% relative
+  #     drift at step 11,650 — small enough to suggest the decoder is
+  #     under-learning. 2e-5 doubles the per-step decoder update while
+  #     keeping the update ratio well inside the safe band. Tighten back
+  #     toward 1e-5 if attn/mlp drift accelerates past 8% by step ~20k.
   learning_rate: 1e-3
-  decoder_learning_rate: 1e-5
+  decoder_learning_rate: 2e-5
 
   # Label smoothing is routed through model.label_smoothing (above) so it
   # rides liger's fused linear CE and is automatically disabled on eval.
@@ -141,13 +138,17 @@ training:
   lr_scheduler_kwargs:
     min_lr_rate: 0.1
 
-  # Raised from production.yaml's 1.0 default: decoder ||grad||≈128 once the
-  # projector stops producing noise, so max_grad_norm=1.0 would clip ~99% of
-  # the decoder gradient and defeat the point of unfreezing. 5.0 is standard
-  # LLM fine-tune territory and still catches blow-up spikes. Verify against
-  # actual logged train/grad_norm in W&B early in the run; tighten if values
-  # stay << 5 after the first few hundred steps.
-  max_grad_norm: 1.0
+  # Raised from production.yaml's 1.0 default. Empirically grounded against
+  # run xxy2327u (this recipe with max_grad_norm=1.0): post-warmup grad-norm
+  # distribution over 184 logged steps was median=1.18, p90=1.40, p95=1.50,
+  # p99=2.19, max=2.24 — so a 1.0 cap clipped 90% of post-warmup steps and
+  # scaled the median update down by ~15%. 2.5 sits comfortably above the
+  # observed p99 (covers routine variation with margin) while still catching
+  # genuine blow-up spikes (anything >2× the historical max would be
+  # noteworthy). Re-check on the next run: if grad_norm trends still sit
+  # well under 2.5 through epoch 1, the cap is doing nothing useful and
+  # could be raised further or removed.
+  max_grad_norm: 2.5
 
   seed: 43
   auto_find_batch_size: false

@@ -707,6 +707,7 @@ TRAINING_MODEL_PARAMS = [
     "lora_target_modules",
     "freeze_projector",
     "freeze_language_model",
+    "freeze_text_embed_tokens",
 ]
 
 
