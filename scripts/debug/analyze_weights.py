@@ -543,9 +543,14 @@ def print_decoder_summary(
             max_drift = delta_norms.max().item()
             summary["embed_mean_drift"] = mean_drift
             summary["embed_max_drift"] = max_drift
+            if mean_drift == 0.0 and max_drift == 0.0:
+                # freeze_text_embed_tokens=true keeps every row at its base value.
+                console.print(
+                    "\n  ✅ Embed_tokens frozen — zero drift, rare-token vocab fully preserved."
+                )
             # Heuristic: if max drift dominates mean by >100x, a small number
             # of tokens have shifted dramatically (rare-token drift signature).
-            if max_drift > 100 * mean_drift:
+            elif max_drift > 100 * mean_drift:
                 console.print(
                     f"\n  ⚠️  Max drift ({max_drift:.3f}) dominates mean ({mean_drift:.3f}) "
                     "by >100× — a few tokens have moved dramatically (possible rare-token drift)."

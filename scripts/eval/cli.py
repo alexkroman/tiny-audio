@@ -512,6 +512,14 @@ def main(
         bool,
         typer.Option("--verbose", "-v", help="Show word-by-word alignment details"),
     ] = False,
+    model_name: Annotated[
+        Optional[str],
+        typer.Option(
+            "--model-name",
+            help="Override the auto-derived model label used in output dir names "
+            "and downstream `ta analysis` matching (otherwise derived from --model).",
+        ),
+    ] = None,
 ):
     """Evaluate ASR models on standard datasets."""
     # If a subcommand was invoked, skip
@@ -590,7 +598,9 @@ def main(
 
             results = evaluator.evaluate(dataset, max_samples)
             metrics = evaluator.compute_metrics()
-            save_diarization_results(model_id, dataset_name, results, metrics, output_dir)
+            save_diarization_results(
+                model_name or model_id, dataset_name, results, metrics, output_dir
+            )
             print_diarization_metrics(dataset_name, metrics)
             continue
 
@@ -642,7 +652,9 @@ def main(
 
             results = evaluator.evaluate(dataset, max_samples)
             metrics = evaluator.compute_metrics()
-            save_alignment_results(model_id, dataset_name, results, metrics, output_dir)
+            save_alignment_results(
+                model_name or model_id, dataset_name, results, metrics, output_dir
+            )
             print_alignment_metrics(dataset_name, metrics)
             continue
 
@@ -680,7 +692,7 @@ def main(
 
             results = evaluator.evaluate(dataset, max_samples)
             metrics = evaluator.compute_metrics()
-            save_mcq_results(model_id, dataset_name, results, metrics, output_dir)
+            save_mcq_results(model_name or model_id, dataset_name, results, metrics, output_dir)
             print_mcq_metrics(dataset_name, metrics)
             continue
 
@@ -720,7 +732,9 @@ def main(
 
             results = evaluator.evaluate(dataset, max_samples)
             metrics = evaluator.compute_metrics()
-            save_classification_results(model_id, dataset_name, results, metrics, output_dir)
+            save_classification_results(
+                model_name or model_id, dataset_name, results, metrics, output_dir
+            )
             print_classification_metrics(dataset_name, metrics)
             continue
 
@@ -775,9 +789,12 @@ def main(
             )
         elif model == "swift" or model.startswith("swift://"):
             suffix = model[len("swift://") :] if model.startswith("swift://") else ""
-            # Treat path-like suffixes (`/`, `~`, `./`, `../`) as a local
-            # model directory; everything else is an HF repo id (ignored by
-            # the Swift binary, but recorded for the results dir name).
+            # Path-like suffix → load that local bundle (TINY_AUDIO_LOCAL_MODEL_DIR
+            # path: the Swift binary actually honors this).
+            # Empty suffix → load the Swift SDK's pinned default bundle.
+            # Anything else (a repo id) is rejected — the Swift binary ignores
+            # `repo_id`, which previously produced output dirs labeled with a
+            # model that was never actually evaluated.
             if suffix.startswith(("/", "~", "./", "../")):
                 model_dir = Path(suffix).expanduser().resolve()
                 if not model_dir.is_dir():
@@ -790,13 +807,26 @@ def main(
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
                 )
-            else:
-                repo_id = suffix or "mazesmazes/tiny-audio-mlx"
-                model_id = get_model_name(repo_id)
+            elif suffix == "":
+                model_id = "swift-default-bundle"
                 evaluator = SwiftSDKEvaluator(
-                    repo_id=repo_id,
                     audio_field=cfg.audio_field,
                     text_field=cfg.text_field,
+                )
+            else:
+                raise typer.BadParameter(
+                    f"swift://{suffix!r} is not supported — the Swift binary loads "
+                    "the SDK-pinned bundle and ignores arbitrary repo ids, so this "
+                    "form would silently evaluate the default bundle while labeling "
+                    "outputs with your repo id (see asr_pipeline.py docstring).\n\n"
+                    "To evaluate that model via the Swift SDK, build a local bundle "
+                    "from it first:\n"
+                    "  cd ~/Code/ios/tiny-audio-swift\n"
+                    f"  poetry run python -m scripts.bundle.cli build-bundle --projector {suffix}\n"
+                    "  cd -\n"
+                    "  ta eval -m swift://~/Code/ios/tiny-audio-swift/swift/Sources/TinyAudio/Resources/Model -d ...\n\n"
+                    "Or evaluate the HF checkpoint directly (PyTorch path, no Swift):\n"
+                    f"  ta eval -m {suffix} -d ..."
                 )
         elif endpoint:
             model_id = get_model_name(model)
@@ -824,7 +854,7 @@ def main(
 
         results = evaluator.evaluate(dataset, max_samples)
         metrics = evaluator.compute_metrics()
-        save_results(model_id, dataset_name, results, metrics, output_dir, base_url)
+        save_results(model_name or model_id, dataset_name, results, metrics, output_dir, base_url)
         print_asr_metrics(dataset_name, metrics)
 
 
