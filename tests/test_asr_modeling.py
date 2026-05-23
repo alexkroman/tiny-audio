@@ -144,7 +144,7 @@ class TestLoadAudioEncoder:
         mock_full = MagicMock()
         mock_full.audio_tower = MagicMock(spec=torch.nn.Module)
         mock_full.audio_tower.requires_grad_ = MagicMock()
-        mock_full.audio_tower.eval = MagicMock()
+        mock_full.audio_tower.train = MagicMock()
         # _load_audio_encoder applies an idempotent dtype cast post-load
         # (`encoder = encoder.to(dtype=dtype)`), so the returned encoder is
         # whatever audio_tower.to() yields. Pin .to() to return audio_tower
@@ -159,6 +159,7 @@ class TestLoadAudioEncoder:
             cfg = MagicMock()
             cfg.audio_model_id = "zai-org/GLM-ASR-something"
             cfg.attn_implementation = "eager"
+            cfg.freeze_audio_encoder = True
 
             encoder = ASRModel._load_audio_encoder(cfg, torch.float32)
 
@@ -167,7 +168,8 @@ class TestLoadAudioEncoder:
             assert encoder is mock_full.audio_tower
             mock_full.audio_tower.to.assert_called_once_with(dtype=torch.float32)
             mock_full.audio_tower.requires_grad_.assert_called_with(False)
-            mock_full.audio_tower.eval.assert_called_once()
+            # Frozen encoder gets switched to inference mode via `.train(False)`.
+            mock_full.audio_tower.train.assert_called_once_with(False)
 
 
 class TestLoadLanguageModel:

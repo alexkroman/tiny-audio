@@ -1,27 +1,98 @@
-# Production training configuration
+# Production training configuration — joint from-scratch tiny-audio recipe.
+#
+# Projector (fresh init) + Qwen3-0.6B decoder train jointly from step 0;
+# encoder stays frozen via ASRModel default. Single-stage replacement for
+# the prior projector-only → joint two-stage recipe: audio→text via
+# Whisper-style encoders is a narrow enough semantic gap that LLaVA-style
+# projector warmup isn't load-bearing — the joint gradient signal is what
+# moves eval/loss after the first few hundred steps.
+
 output_dir: ./outputs/production_model
+
+# Freeze policy: encoder stays frozen (ASRModel default). Projector and
+# decoder train jointly. embed_tokens is frozen on top of that: tying via
+# Qwen3's tie_word_embeddings=True would otherwise let common-token gradients
+# rewrite the lm_head while rare tokens (CJK / niche Unicode / code syntax)
+# get only the WD pull and drift uncontrolled. Audio embeddings flow through
+# the projector via masked_scatter, so freezing the text-vocab table doesn't
+# block the audio path. Matches Baichuan-Audio stage-2.
+freeze_language_model: false
+freeze_projector: false
+freeze_text_embed_tokens: true
 
 # Optimizer
 optim: adamw_torch_fused
+# Asymmetric LR for joint from-scratch training (50× gap):
+#   - Projector (fresh init): 1e-3. Needs the high LR to converge quickly
+#     through warmup; observed ||grad_proj|| starts at ~9 and stabilizes
+#     around 0.4–0.6 once the bridge function is learned.
+#   - Decoder (Qwen3-0.6B base): 2e-5. With freeze_text_embed_tokens=true
+#     the tied embed/lm_head drift channel is closed entirely, so the LR
+#     can sit above the 1e-5 derived from earlier loquacious_plus probes
+#     without reintroducing rare-token embedding drift. attn/mlp/RMSNorm
+#     showed only 1–4% relative drift at step 11,650; tighten back toward
+#     1e-5 if attn/mlp drift accelerates past 8% by step ~20k.
 learning_rate: 1e-3
-max_grad_norm: 1.0
-warmup_steps: 2000
-lr_scheduler_type: cosine
-# bf16 training: Adam's `1 / sqrt(v_hat + eps)` denominator can underflow
-# at the bf16 default eps=1e-8 when second moments get small. Lifting eps
-# to 1e-6 stays well within bf16's ~7-bit mantissa precision range and
-# avoids numerical instability on the rare-token / low-gradient params.
-# Matches LLaMA / Mistral / Qwen pretraining convention for bf16.
+decoder_learning_rate: 2e-5
+
+# WD damps unbounded rare-token embedding drift under tie_word_embeddings=True.
+# 0.01 is LLaVA/Qwen-Audio/LLaMA standard. WD is correctly routed to non-norm
+# params only — ASRTrainer.create_optimizer adds Qwen3RMSNorm + LlamaRMSNorm
+# to the forbidden-layers set so RMSNorm gains land in the no-decay group
+# (HF's ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm and misses
+# them silently).
+weight_decay: 0.01
+# Projector overrides base WD to 0. Rare-token drift (the reason base WD
+# exists) only affects the decoder's tied embedding matrix; pulling projector
+# linear weights toward zero would just bias the projection magnitude away
+# from whatever scale the LM actually wants.
+projector_weight_decay: 0.0
+
+# Adam eps: bf16 default 1e-8 can underflow in `1 / sqrt(v_hat + eps)` once
+# second moments get small. 1e-6 stays well within bf16's ~7-bit mantissa
+# range. Matches LLaMA / Mistral / Qwen pretraining convention for bf16.
 adam_epsilon: 1e-6
+
+# Empirically grounded against run xxy2327u (same recipe with
+# max_grad_norm=1.0): post-warmup grad-norm distribution over 184 logged
+# steps was median=1.18, p90=1.40, p95=1.50, p99=2.19, max=2.24 — so a 1.0
+# cap clipped 90% of post-warmup steps and scaled the median update down by
+# ~15%. 2.5 sits comfortably above the observed p99 while still catching
+# genuine blow-up spikes. Re-check on the next run.
+max_grad_norm: 2.5
+
+# Warmup tuned from prior run zot1zdu9: projector noise→signal transition
+# completes at step 488; loss plateaus by ~step 1500 and grad_norm settles
+# into the 1.5–2.5 operating range by step 2000. The 5000-step warmup in
+# that run had a flat 0.39 loss for its last 3500 steps. Under the new
+# (1e-3 / 2e-5) decoder LR the peak update is 2e-5 × 87 ≈ 1.7e-3, so the
+# long warmup-tail decoder protection is no longer load-bearing.
+warmup_steps: 2000
+
+# Cosine-with-min-lr: peak LR while projector is actively learning, decay
+# to 10% floor so late-stage tied-embedding rare-token refinement (which
+# carries the dominant late-stage decoder gradient) stays productive.
+# Plain cosine→0 would effectively halt that refinement in the final ~5%.
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr_rate: 0.1
+
+# Label smoothing is routed through model.label_smoothing so it rides
+# liger's fused linear CE and auto-disables on eval. Keep HF Trainer's
+# label_smoothing_factor at 0 — >0 would double-smooth and materialize
+# the (B,T,V) fp32 log_softmax tensor (~15GB at B=50/V=152k) that capped
+# batch size on prior runs.
+label_smoothing_factor: 0.0
 
 # Training
 max_steps: -1
-num_train_epochs: 1
-seed: 42
-per_device_train_batch_size: 6
-per_device_eval_batch_size: 6
-gradient_accumulation_steps: 3
+num_train_epochs: 2
+seed: 43
+per_device_train_batch_size: 100
+per_device_eval_batch_size: 100
+gradient_accumulation_steps: 1
 eval_accumulation_steps: 3
+auto_find_batch_size: false
 
 # Logging
 logging_steps: 50
@@ -32,11 +103,11 @@ wandb_project: tiny-audio
 
 # Evaluation
 eval_strategy: steps
-eval_steps: 1000
+eval_steps: 2000
 
 # Saving
 save_strategy: steps
-save_steps: 500
+save_steps: 2000
 save_total_limit: 5
 load_best_model_at_end: false
 metric_for_best_model: eval_loss
@@ -45,7 +116,7 @@ save_safetensors: true
 
 # Hub
 push_to_hub: true
-hub_model_id: "mazesmazes/tiny-audio"
+hub_model_id: "mazesmazes/tiny-audio-next-multiasr"
 hub_strategy: every_save
 hub_token: null
 hub_private_repo: false
@@ -65,13 +136,17 @@ tf32: true
 torch_compile: false
 attn_implementation: flash_attention_2
 
-# Data loading
-dataloader_num_workers: 24
-dataloader_prefetch_factor: 2
+# Data loading. EPYC 9355 has 32 cores / 64 threads; 16 workers + prefetch 8
+# keep up with batch_size=100 (ftfy + truecase label normalization is the
+# dominant per-row cost) while leaving cores for the main process, GPU sync,
+# tokenizer thread pool, and OS page cache.
+dataloader_num_workers: 16
+dataloader_prefetch_factor: 8
 dataloader_pin_memory: true
 dataloader_persistent_workers: true
 dataloader_drop_last: true
-group_by_length: true
+# Disabled: multi-dataset configs have inconsistent duration columns.
+group_by_length: false
 length_column_name: duration
 
 # Misc

@@ -69,11 +69,30 @@ class LocalEvaluator(Evaluator):
 
         print_generation_config(self.pipe.model, model_path)
 
-    def transcribe(self, audio) -> tuple[str, float]:
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
         start = time.time()
-        result = self.pipe(audio, user_prompt=self.user_prompt)
+        # Request per-step top-1/top-2 logprobs. The Hub-loaded pipeline may be
+        # an older version without scores support, in which case the kwarg is
+        # absorbed by generate() but the result dict won't include the new
+        # `top1_logprob` / `top2_logprob` fields and we return confidence=None.
+        result = self.pipe(audio, user_prompt=self.user_prompt, output_scores=True)
         elapsed = time.time() - start
-        return result.get("text", "") if isinstance(result, dict) else str(result), elapsed
+
+        text = result.get("text", "") if isinstance(result, dict) else str(result)
+        confidence: dict | None = None
+        if isinstance(result, dict):
+            top1 = result.get("top1_logprob")
+            top2 = result.get("top2_logprob")
+            if top1 and top2 and len(top1) == len(top2):
+                n = len(top1)
+                mean_top1 = sum(top1) / n
+                mean_margin = sum(a - b for a, b in zip(top1, top2)) / n
+                confidence = {
+                    "mean_top1_logprob": mean_top1,
+                    "mean_margin": mean_margin,
+                    "num_tokens": n,
+                }
+        return text, elapsed, confidence
 
 
 class LocalStreamingEvaluator(Evaluator):

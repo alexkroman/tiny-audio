@@ -579,25 +579,37 @@ class ASRTrainer(Trainer):
         decoder_learning_rate: float | None = None,
         decoder_weight_decay: float | None = None,
         projector_weight_decay: float | None = None,
+        encoder_learning_rate: float | None = None,
+        encoder_weight_decay: float | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.decoder_learning_rate = decoder_learning_rate
         self.decoder_weight_decay = decoder_weight_decay
         self.projector_weight_decay = projector_weight_decay
+        self.encoder_learning_rate = encoder_learning_rate
+        self.encoder_weight_decay = encoder_weight_decay
 
     def create_optimizer(self):
-        """Optimizer with separate LR / weight decay for projector and language model.
+        """Optimizer with separate LR / weight decay per component.
 
         Mirrors HF Trainer.create_optimizer's decay/no-decay split, but adds a
-        second axis: parameters under `language_model.` get `decoder_learning_rate`
-        and `decoder_weight_decay`; projector params get `projector_weight_decay`
-        (when set). Each falls back to `args.learning_rate` / `args.weight_decay`.
+        second axis: parameters under `audio_tower.` get `encoder_learning_rate`
+        / `encoder_weight_decay`; parameters under `language_model.` get
+        `decoder_learning_rate` / `decoder_weight_decay`; everything else
+        (projector) gets `projector_weight_decay` (when set). Each falls back
+        to `args.learning_rate` / `args.weight_decay`.
+
+        The encoder LR override is only meaningful when
+        `config.freeze_audio_encoder=False` — frozen encoder parameters have
+        `requires_grad=False` and never enter the optimizer regardless.
         """
         overrides = (
             self.decoder_learning_rate is not None
             or self.decoder_weight_decay is not None
             or self.projector_weight_decay is not None
+            or self.encoder_learning_rate is not None
+            or self.encoder_weight_decay is not None
         )
         if self.optimizer is not None or not overrides:
             return super().create_optimizer()
@@ -616,18 +628,28 @@ class ASRTrainer(Trainer):
         decay_parameters = set(get_parameter_names(opt_model, forbidden))
         decay_parameters = {n for n in decay_parameters if "bias" not in n}
 
-        groups: dict[tuple[bool, bool], list] = {
-            (True, True): [],  # decoder, decay
-            (True, False): [],  # decoder, no decay
-            (False, True): [],  # other, decay
-            (False, False): [],  # other, no decay
+        # Three-way component split. Names are checked against fixed prefixes
+        # so the routing matches the freeze flags exactly: `audio_tower.*`,
+        # `language_model.*`, and everything else (projector + auxiliary).
+        groups: dict[tuple[str, bool], list] = {
+            ("encoder", True): [],
+            ("encoder", False): [],
+            ("decoder", True): [],
+            ("decoder", False): [],
+            ("other", True): [],
+            ("other", False): [],
         }
         for name, param in opt_model.named_parameters():
             if not param.requires_grad:
                 continue
-            is_decoder = name.startswith("language_model.")
+            if name.startswith("audio_tower."):
+                component = "encoder"
+            elif name.startswith("language_model."):
+                component = "decoder"
+            else:
+                component = "other"
             decay = name in decay_parameters
-            groups[(is_decoder, decay)].append(param)
+            groups[(component, decay)].append(param)
 
         base_wd = self.args.weight_decay
         base_lr = self.args.learning_rate
@@ -636,11 +658,16 @@ class ASRTrainer(Trainer):
         proj_wd = (
             self.projector_weight_decay if self.projector_weight_decay is not None else base_wd
         )
+        enc_lr = self.encoder_learning_rate if self.encoder_learning_rate is not None else base_lr
+        enc_wd = self.encoder_weight_decay if self.encoder_weight_decay is not None else base_wd
+
         optimizer_grouped_parameters = [
-            {"params": groups[(False, True)], "weight_decay": proj_wd, "lr": base_lr},
-            {"params": groups[(False, False)], "weight_decay": 0.0, "lr": base_lr},
-            {"params": groups[(True, True)], "weight_decay": dec_wd, "lr": dec_lr},
-            {"params": groups[(True, False)], "weight_decay": 0.0, "lr": dec_lr},
+            {"params": groups[("other", True)], "weight_decay": proj_wd, "lr": base_lr},
+            {"params": groups[("other", False)], "weight_decay": 0.0, "lr": base_lr},
+            {"params": groups[("decoder", True)], "weight_decay": dec_wd, "lr": dec_lr},
+            {"params": groups[("decoder", False)], "weight_decay": 0.0, "lr": dec_lr},
+            {"params": groups[("encoder", True)], "weight_decay": enc_wd, "lr": enc_lr},
+            {"params": groups[("encoder", False)], "weight_decay": 0.0, "lr": enc_lr},
         ]
         optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
 
@@ -708,6 +735,7 @@ TRAINING_MODEL_PARAMS = [
     "freeze_projector",
     "freeze_language_model",
     "freeze_text_embed_tokens",
+    "freeze_audio_encoder",
 ]
 
 
@@ -753,10 +781,12 @@ def main(cfg: DictConfig) -> None:
             from liger_kernel.transformers import apply_liger_kernel_to_qwen3
 
             apply_liger_kernel_to_qwen3()
-        except ImportError:
+        except (ImportError, AttributeError) as e:
             logging.warning(
-                "liger-kernel not installed — falling back to stock Qwen3 kernels. "
-                "Install with `poetry install` on Linux to enable fused linear CE."
+                "liger-kernel unavailable (%s) — falling back to stock Qwen3 kernels. "
+                "Install with `poetry install` on Linux and pin a version that exports "
+                "apply_liger_kernel_to_qwen3 (Liger >=0.5.5) to enable fused linear CE.",
+                e,
             )
 
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
@@ -829,6 +859,8 @@ def main(cfg: DictConfig) -> None:
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     decoder_weight_decay = training_config.pop("decoder_weight_decay", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
+    encoder_learning_rate = training_config.pop("encoder_learning_rate", None)
+    encoder_weight_decay = training_config.pop("encoder_weight_decay", None)
     # Dynamo flags set unconditionally — applies whether the user enables
     # torch.compile via TrainingArguments or whether some upstream dep
     # (liger / transformers) invokes dynamo internally. cache_size_limit
@@ -860,6 +892,8 @@ def main(cfg: DictConfig) -> None:
         decoder_learning_rate=decoder_learning_rate,
         decoder_weight_decay=decoder_weight_decay,
         projector_weight_decay=projector_weight_decay,
+        encoder_learning_rate=encoder_learning_rate,
+        encoder_weight_decay=encoder_weight_decay,
     )
 
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))

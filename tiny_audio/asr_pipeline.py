@@ -211,10 +211,16 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         Args:
             model_inputs: Dict with input_features and attention_mask
-            **generate_kwargs: Generation parameters
+            **generate_kwargs: Generation parameters. Pass ``output_scores=True``
+                (and ``return_dict_in_generate=True``, which is then implied) to
+                also return per-step top-1 and top-2 log-probabilities — used by
+                the eval harness's confidence metric. Backward-compatible: when
+                unset, returns just token IDs as before.
 
         Returns:
-            Dict with generated token IDs
+            Dict with generated token IDs, and optionally per-step
+            ``top1_logprob`` / ``top2_logprob`` tensors when scores were
+            requested.
         """
         # Extract audio features and is_last flag
         is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
@@ -222,13 +228,43 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         input_features = model_inputs["input_features"].to(self.model.device)
         audio_attention_mask = model_inputs["attention_mask"].to(self.model.device)
 
-        generated_ids = self.model.generate(
+        # Opt-in: when output_scores is requested, force return_dict_in_generate
+        # so we get a GenerateOutput rather than a bare token tensor.
+        want_scores = bool(generate_kwargs.get("output_scores", False))
+        if want_scores:
+            generate_kwargs.setdefault("return_dict_in_generate", True)
+
+        generate_output = self.model.generate(
             input_features=input_features,
             audio_attention_mask=audio_attention_mask,
             **generate_kwargs,
         )
 
-        return {"tokens": generated_ids, "is_last": is_last}
+        # Default (no scores requested): generate returns a tensor of token IDs.
+        if torch.is_tensor(generate_output):
+            return {"tokens": generate_output, "is_last": is_last}
+
+        # Scores requested: GenerateOutput dict-like with .sequences and .scores.
+        # `scores` is a tuple of per-step logits tensors (batch, vocab); convert
+        # each to log-probs and take top-2 to produce two short tensors over the
+        # generation horizon — kept small (no full vocab) so this is cheap to
+        # carry through postprocess.
+        sequences = generate_output.sequences
+        scores = generate_output.scores
+        top1_logprobs: list[float] = []
+        top2_logprobs: list[float] = []
+        if scores:
+            for step_logits in scores:
+                step_logprobs = torch.log_softmax(step_logits[0].float(), dim=-1)
+                top2 = torch.topk(step_logprobs, k=2)
+                top1_logprobs.append(top2.values[0].item())
+                top2_logprobs.append(top2.values[1].item())
+        return {
+            "tokens": sequences,
+            "top1_logprob": top1_logprobs,
+            "top2_logprob": top2_logprobs,
+            "is_last": is_last,
+        }
 
     def postprocess(self, model_outputs, **kwargs) -> dict[str, str]:
         """Convert model output tokens to text.
@@ -266,7 +302,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if "<think>" in text:
             text = _THINK_TAG_RE.sub("", text).strip()
         text = _truncate_repetitions(text)
-        return {"text": text}
+        out: dict[str, Any] = {"text": text}
+        # Pass through per-step logprobs when _forward captured them (i.e. caller
+        # passed output_scores=True). Lets eval harnesses compute confidence
+        # stats without re-running the model.
+        if "top1_logprob" in model_outputs:
+            out["top1_logprob"] = model_outputs["top1_logprob"]
+        if "top2_logprob" in model_outputs:
+            out["top2_logprob"] = model_outputs["top2_logprob"]
+        return out
 
 
 def _truncate_repetitions(text: str, min_repeats: int = 3) -> str:

@@ -20,66 +20,104 @@ model:
   projector_type: mlp
   projector_pool_stride: 4
   projector_hidden_dim: 1024
-  # Regularize the projector during joint training. 0.1 is the standard
-  # transformer FFN dropout rate. Applied between act and linear_2, so it
-  # perturbs the projection into LLM-embed space — what both the projector
-  # and the now-trainable decoder consume. Auto-disabled at eval via
-  # nn.Dropout.training.
-  projector_dropout: 0.1
+  # Projector dropout removed (was 0.1). Part of a broader regularization
+  # rollback for this recipe: weight_decay → 0.0, freeze_text_embed_tokens
+  # → false. The intent is a cleaner test of "does the unfrozen embedding +
+  # joint-trained projector + decoder stack actually saturate on this
+  # data?" without dropout masking the signal. label_smoothing=0.1
+  # (routed through liger fused CE) remains the only active regularizer.
+  # If end-of-run eval shows overfit signature (train CE diverging from
+  # eval CE faster than label-smoothing's natural offset of ~1.19),
+  # reintroduce at 0.05 — half the prior value, since the run is also
+  # half as long.
+  projector_dropout: 0.0
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
   text_model_id: Qwen/Qwen3-0.6B
-  # Label smoothing applied inside the LM's loss_function (consumed by liger's
-  # fused linear CE when apply_liger_kernel_to_qwen3() is active in
-  # scripts/train.py). ASRModel.forward zeros it on eval so eval/loss reports
-  # raw CE — comparable to the prior LS=0 loquacious_plus run. HF Trainer's
-  # label_smoothing_factor stays at 0 to avoid double-smoothing and to avoid
-  # the LabelSmoother's (B,T,V) fp32 log_softmax materialization (~15GB at
-  # B=50/V=152k on Qwen3-0.6B) that previously forced the batch size down
-  # from 50 to 32.
-  label_smoothing: 0.1
+  # Label smoothing off — completes the regularization rollback alongside
+  # projector_dropout: 0.0 and weight_decay: 0.0. This is a deliberate
+  # zero-regularizer recipe over a single epoch: the only remaining
+  # protections against overfit are the frozen encoder (635M params, ~50%
+  # of total), max_grad_norm: 1.0, and the cosine LR decay to 5% floor.
+  #
+  # Side effects to expect:
+  # - train_loss and eval_loss become directly comparable (both raw CE).
+  #   The prior recipe's ~1.19 train/eval gap from the LS uniform-target
+  #   penalty disappears. A healthy run should now show train_loss
+  #   slightly above eval_loss late in training (typical fine-tune); a
+  #   widening gap (train << eval) is the clearest overfit signature.
+  # - Removes the LS-induced confidence ceiling. The model can now put
+  #   probability ≫(1-α) on correct tokens. Net effect on argmax is
+  #   typically positive for ASR (sharper greedy decode), but it also
+  #   means the per-token confidence metric we just added is no longer
+  #   bounded by 1-α ≈ 0.9 — expect mean_top1_logprob to land closer to
+  #   0 (i.e., P(correct) → 1) for confident positions.
+  # - Removes the (B,T,V) fp32 log_softmax materialization risk that the
+  #   LabelSmoother path required, but liger fused CE already avoided
+  #   that — net no-op here, just keeping HF Trainer's
+  #   label_smoothing_factor at 0 (below) defensively.
+  label_smoothing: 0.0
 
 training:
-  hub_model_id: "mazesmazes/tiny-audio-next-multiasr"
+  hub_model_id: "mazesmazes/tiny-audio-next-thurs"
   group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
 
   # Joint training: projector trains from fresh init, decoder fine-tunes from
   # Qwen3-0.6B base weights. Encoder stays frozen via the default in asr_modeling.
   freeze_language_model: false
   freeze_projector: false
-  # Freeze the text-vocab embedding table during joint fine-tune. The published
-  # tiny-audio recipe (uniform 1e-4 across all decoder params, no WD, no
-  # label smoothing) drifted embed_tokens by 1.18× its base Frobenius norm —
-  # essentially rewriting the text-token→embedding mapping and (via Qwen3's
-  # tie_word_embeddings=True) the lm_head simultaneously. The mechanism is
-  # asymmetric: common tokens appear in every batch and get task gradients,
-  # rare tokens (CJK, niche Unicode, code syntax) never appear and get only
-  # the WD pull → base vocab gets destroyed. Freezing preserves the base
-  # mapping completely; the audio path is unaffected because audio embeddings
-  # come from the projector (scattered into inputs_embeds via masked_scatter),
-  # not from this table. Matches Baichuan-Audio's stage-2 policy.
-  freeze_text_embed_tokens: true
+  # Embedding table unfrozen. Tested against run ppbo0oqn (frozen baseline)
+  # which hit an eval-loss floor of ~0.458 at step 44k and could not push
+  # below it despite the cosine tail; the "frozen-embedding ceiling" was a
+  # candidate explanation. This run lets the embed table refine to test
+  # that hypothesis.
+  #
+  # KNOWN RISK: this re-enables the failure mode that motivated the freeze
+  # in the first place. Mechanism (observed in the published mazesmazes/
+  # tiny-audio recipe, which drifted embed_tokens by 1.18× base norm):
+  #   - Common tokens appear in batches → get task gradients (refinement).
+  #   - Rare tokens (CJK / Unicode tail / code syntax) never appear → get
+  #     only the WD=0.01 pull → embed rows shrink toward zero.
+  #   - tie_word_embeddings=True propagates the damage to lm_head, hurting
+  #     rare-vocab prediction at decode time.
+  # Two protections vs the prior bad outcome are still in place: the
+  # decoder LR is 50× lower (2e-5 vs 1e-4), reducing per-step update
+  # magnitude on common tokens; and weight_decay is 0.01 vs the prior 0.0,
+  # which is mostly a wash here (WD on never-updated tokens is exactly the
+  # corruption mechanism, so this doesn't help rare-token preservation).
+  # If rare-token drift dominates again at end of training, the next lever
+  # is to add embed_tokens to ASRTrainer's no-decay group (similar to the
+  # existing RMSNorm routing) — keeps the unfreeze for common tokens but
+  # zeroes the WD pull on the rare-token tail.
+  #
+  # Verification: at end of this run, compare `embed_tokens` drift vs base
+  # via scripts/debug/analyze_weights.py. Healthy: drift concentrated on
+  # common tokens, rare-Unicode token IDs (90k+) preserved. Unhealthy: max
+  # drift dominates mean by >100× (rare-token-drift signature).
+  freeze_text_embed_tokens: false
 
-  # Asymmetric LR for joint from-scratch training (50× gap):
+  # Asymmetric LR for joint from-scratch training (~33× gap):
   #   - Projector (fresh init): 1e-3. Needs the high LR to converge quickly
   #     through warmup; observed ||grad_proj|| starts at ~9 and stabilizes
-  #     around 0.4–0.6 once the bridge function is learned.
-  #   - Decoder (Qwen3-0.6B base): 2e-5. Prior choice was 1e-5 derived from
-  #     the loquacious_plus probe (scripts/debug/probe_stage1_trajectory.py
-  #     against zot1zdu9) where decoder/projector grad ratio widened from
-  #     ~9× to ~62× over training, suggesting a wider LR gap was needed.
-  #     But 1e-5 was *also* set partly to mitigate rare-token embedding
-  #     drift via Qwen3's tie_word_embeddings — with
-  #     freeze_text_embed_tokens=true (above) the tied embed/lm_head
-  #     drift channel is closed entirely, so the LR can move up without
-  #     reintroducing that failure mode. The remaining decoder params
-  #     (attn / mlp / RMSNorm) on run xxy2327u showed only 1–4% relative
-  #     drift at step 11,650 — small enough to suggest the decoder is
-  #     under-learning. 2e-5 doubles the per-step decoder update while
-  #     keeping the update ratio well inside the safe band. Tighten back
-  #     toward 1e-5 if attn/mlp drift accelerates past 8% by step ~20k.
+  #     around 0.4–0.6 once the bridge function is learned. Still actively
+  #     pushing (std growing through step 50k) at end of run ppbo0oqn —
+  #     keep peak unchanged.
+  #   - Decoder (Qwen3-0.6B base): 3e-5. Raised from 2e-5 to compensate
+  #     for two recipe shifts that reduce integrated LR:
+  #     (a) num_train_epochs: 2 → 1 halves total steps;
+  #     (b) min_lr_rate: 0.1 → 0.05 halves the cosine floor.
+  #     Combined integrated-LR is ~45–50% of the prior recipe. Run
+  #     ppbo0oqn at 2e-5 saturated attn-27 drift at ~13% by step 50k with
+  #     growth-rate halving every snapshot — projection at the new shorter
+  #     recipe at 2e-5 would land at 6–8%, slipping out of the 8–18%
+  #     "right zone." 3e-5 brings it back to mid-zone (10–13%). The prior
+  #     freeze-embed-protection rationale for keeping decoder LR low is
+  #     gone with freeze_text_embed_tokens: false above. max_grad_norm: 1.0
+  #     (below) provides adaptive damping: high-gradient steps get clipped
+  #     to update≈prior magnitude, low-gradient steps get the full LR
+  #     increase.
   learning_rate: 1e-3
-  decoder_learning_rate: 2e-5
+  decoder_learning_rate: 3e-5
 
   # Label smoothing is routed through model.label_smoothing (above) so it
   # rides liger's fused linear CE and is automatically disabled on eval.
@@ -90,22 +128,44 @@ training:
   # tensor (~15GB at B=50/V=152k) that capped batch size on the prior run.
   label_smoothing_factor: 0.0
 
-  # 0.01 (vs HF default 0.0) damps unbounded rare-token embedding drift under
-  # tie_word_embeddings=True. Previous tiny-audio run (WD=0) showed rare CJK/
-  # Arabic embedding tokens drifting ~3.1× while common English subwords moved
-  # ~0.25× — drift inversely proportional to token_frequency. Without WD,
-  # rare-token embeddings only receive "you're wrong" gradients and nothing
-  # pulls them back. 0.01 is LLaVA/Qwen-Audio/LLaMA standard.
+  # Weight decay removed entirely. Reasoning given the recipe now also has
+  # freeze_text_embed_tokens: false (above):
   #
-  # WD is correctly routed to non-norm params only. ASRTrainer.create_optimizer
-  # adds Qwen3RMSNorm + LlamaRMSNorm to the forbidden-layers set so RMSNorm
-  # gains land in the no-decay group (HF's default ALL_LAYERNORM_LAYERS only
-  # contains torch.nn.LayerNorm and would miss them silently).
+  # - For the embed table: WD=0.01 was originally added to "damp unbounded
+  #   rare-token drift," but the published mazesmazes/tiny-audio failure
+  #   mode (rare CJK / Unicode token drift) happened *with* WD=0 in that
+  #   run — the drift came from asymmetric "you're wrong" gradients on
+  #   rare tokens via tied lm_head, not from WD. Adding WD on top adds a
+  #   second downward pull on never-task-touched rows, compounding the
+  #   problem rather than fixing it. With WD=0, rare-token rows now have
+  #   neither task gradient nor WD pull — they stay near their pretrained
+  #   values, achieving "selective freeze on rare tokens" without code.
+  #
+  # - For linear weights (attn / mlp): WD=0.01 damping over 44.5k steps at
+  #   decoder_lr=3e-5 amounts to ~1.3% cumulative weight reduction —
+  #   modest. Removing it gives the decoder slightly more headroom to
+  #   adapt. label_smoothing=0.1 + max_grad_norm=1.0 are the other
+  #   regularizers in this recipe; LS in particular is a stronger
+  #   per-token regularizer than WD for ASR-fine-tune.
+  #
+  # - Matches the LLaVA-1.5 (WD=0) and LoRA-fine-tune (typically WD=0)
+  #   convention. Qwen-Audio uses WD=0.05 but on a longer training horizon
+  #   with different parameter masking.
+  #
+  # If end-of-run weight analysis shows runaway linear-weight growth
+  # (Xavier ratio >10× on decoder layers, vs the current 3–6× range),
+  # reintroduce WD=0.01 with embed_tokens explicitly routed to the
+  # no-decay group via ASRTrainer.create_optimizer.
+  #
+  # REVISED: wd=0.01 restored to address eval-train gap (~0.17 at step
+  # 28k of run 4j97atjp with wd=0). The rationale block above argued for
+  # wd=0 to avoid compounding rare-token drift via the WD pull on
+  # never-task-touched embed_tokens rows; if that drift signature
+  # re-emerges, route embed_tokens to ASRTrainer's no-decay group rather
+  # than reverting global WD.
   weight_decay: 0.01
-  # Projector overrides base WD to 0.0. Rare-token drift (the reason base WD
-  # exists) only affects the decoder's tied embedding matrix; pulling projector
-  # linear weights toward zero would just bias the projection magnitude away
-  # from whatever scale the LM actually wants.
+  # Now redundant (matches base WD=0.0) but kept explicit to document
+  # intent: projector weights should never be pulled toward zero.
   projector_weight_decay: 0.0
 
   # Warmup tuned from the prior run's (zot1zdu9, 5000-step warmup) early
@@ -127,35 +187,56 @@ training:
   # decoder update is 1e-5 × 87 ≈ 8.7e-4, small enough that warmup tail
   # protection is no longer load-bearing. 2000 steps is 2.4% of the
   # 85k-step run — in the standard 1–5% pretraining-warmup range.
-  warmup_steps: 2000
+  warmup_steps: 1000
 
   # Cosine-with-min-lr: peak LR while projector is actively learning, decay
-  # to 10% floor so late-stage tied-embedding rare-token refinement (which
-  # carries the dominant late-stage decoder gradient) stays productive.
-  # Plain cosine→0 would effectively halt that refinement in the final ~5%
-  # of training.
+  # to 5% floor so late-stage tied-embedding rare-token refinement stays
+  # productive while the back-half of training anneals more aggressively.
+  # Halved from the prior 0.1 floor to compensate for the shortened 1-epoch
+  # schedule (below): run ppbo0oqn hit eval-best at the epoch boundary
+  # (step 44k of 89k), with eval bouncing around 0.467 ± 0.005 after that
+  # while train kept descending — the classic overfit signature. A more
+  # aggressive cosine tail closes that gap by reducing the LR magnitude
+  # available for memorization at the same step count where the prior run
+  # plateaued. 0.05 still leaves a non-trivial LR (~5e-5 projector, ~1e-6
+  # decoder) for final refinement — far from a plain cosine→0 anneal.
   lr_scheduler_type: cosine_with_min_lr
   lr_scheduler_kwargs:
-    min_lr_rate: 0.1
+    min_lr_rate: 0.05
 
-  # Raised from production.yaml's 1.0 default. Empirically grounded against
-  # run xxy2327u (this recipe with max_grad_norm=1.0): post-warmup grad-norm
-  # distribution over 184 logged steps was median=1.18, p90=1.40, p95=1.50,
-  # p99=2.19, max=2.24 — so a 1.0 cap clipped 90% of post-warmup steps and
-  # scaled the median update down by ~15%. 2.5 sits comfortably above the
-  # observed p99 (covers routine variation with margin) while still catching
-  # genuine blow-up spikes (anything >2× the historical max would be
-  # noteworthy). Re-check on the next run: if grad_norm trends still sit
-  # well under 2.5 through epoch 1, the cap is doing nothing useful and
-  # could be raised further or removed.
-  max_grad_norm: 2.5
+  # Tightened from 2.5 → 1.0 alongside two recipe changes that add gradient
+  # risk: (a) decoder_learning_rate: 2e-5 → 3e-5 (above), and (b)
+  # freeze_text_embed_tokens: false (above), which adds ~150M trainable
+  # embed parameters as a new gradient source. Setting the cap at the
+  # median observed grad_norm gives adaptive damping rather than a flat LR
+  # bump: steps where grad_norm < 1 see the full LR=3e-5 update, steps
+  # where grad_norm > 1 get clipped to update magnitude ≈ the prior recipe.
+  # Run ppbo0oqn at 2.5 cap saw median grad_norm 0.91 (post-warmup) and 0%
+  # clipping; same gradient distribution against a 1.0 cap would clip the
+  # upper ~40% of steps, exactly the steps where the LR increase is most
+  # risky. If grad_norm trends well below 1.0 throughout the new run, the
+  # cap can be raised back to 2.5 in a follow-up; this is the conservative
+  # default while we're combining two LR-loosening changes.
+  max_grad_norm: 1.0
 
   seed: 43
-  auto_find_batch_size: false
+  auto_find_batch_size: true
   per_device_train_batch_size: 100
   per_device_eval_batch_size: 100
   gradient_accumulation_steps: 1
-  num_train_epochs: 2
+  # Single-epoch recipe. Run ppbo0oqn (2-epoch baseline) hit best eval/loss
+  # exactly at step 44k = end of epoch 1 = 0.4583; eval bounced around 0.467
+  # for all 6k+ steps after that while train continued descending smoothly
+  # (overfit signature on the second pass). The second epoch paid B200 time
+  # for ~0 eval improvement at best, mild regression at worst. One epoch
+  # matches where the recipe actually saturates on this data + recipe stack.
+  #
+  # Kept at 1 epoch under the new recipe: data mix grew (Peoples clean
+  # 311K → 1.5M, plus Emilia-YODAS 616h adds 228K), so 1 epoch over the
+  # larger mix already covers more total steps than the prior 1-epoch
+  # baseline. Re-evaluate going to 2 epochs only if eval/loss is still
+  # improving smoothly at end of this longer 1-epoch schedule.
+  num_train_epochs: 1
   save_steps: 2000
   eval_steps: 2000
 

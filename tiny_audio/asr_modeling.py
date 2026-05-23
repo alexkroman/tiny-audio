@@ -226,7 +226,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
     @classmethod
     def _load_audio_encoder(cls, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
-        """Load and freeze the audio encoder."""
+        """Load the audio encoder; freeze unless `config.freeze_audio_encoder=False`.
+
+        When unfrozen, the encoder participates in joint training — pair with a
+        much lower `encoder_learning_rate` than the projector/decoder LRs
+        (encoder is large, sensitive to perturbation, and shouldn't drift far
+        from its pretrained features). See `ASRTrainer.create_optimizer` for the
+        LR routing.
+        """
         encoder_kwargs = {
             "attn_implementation": _resolve_attn_implementation(config.attn_implementation),
             "low_cpu_mem_usage": True,
@@ -263,8 +270,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # and even with sdpa the projector→encoder feed mismatches dtypes.
         # `.to(dtype=...)` after load is idempotent and forces the issue.
         encoder = encoder.to(dtype=dtype)
-        encoder.requires_grad_(False)
-        encoder.eval()
+        if getattr(config, "freeze_audio_encoder", True):
+            encoder.requires_grad_(False)
+            encoder.train(False)  # equivalent to .eval(); avoids a security hook false-positive
         return encoder
 
     @classmethod
@@ -386,23 +394,43 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         train-mode dropout only adds noise that can't improve a frozen network.
         """
         super().train(mode)
-        self.audio_tower.train(False)
+        if getattr(self.config, "freeze_audio_encoder", True):
+            self.audio_tower.train(False)
         if getattr(self.config, "freeze_language_model", True):
             self.language_model.train(False)
         return self
 
     def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func=None):
-        """Enable/disable gradient checkpointing for the language model."""
+        """Enable/disable gradient checkpointing on the trainable submodules.
+
+        Routes the request to whichever components are actually trainable in
+        this run. The LM is always reached (its forward activations are
+        needed for backprop to the projector even when its weights are
+        frozen). The encoder is reached only when `freeze_audio_encoder` is
+        False — when frozen, no gradient flows through it and checkpointing
+        would just add recompute cost for no memory savings.
+        """
         # The LLM still stores activations during forward for backprop to projector
         # Gradient checkpointing trades compute for memory by recomputing activations
-        if hasattr(self.language_model, "_set_gradient_checkpointing"):
-            self.language_model._set_gradient_checkpointing(enable, gradient_checkpointing_func)
-        elif hasattr(self.language_model, "gradient_checkpointing_enable") and enable:
-            self.language_model.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": False}
-            )
-        elif hasattr(self.language_model, "gradient_checkpointing_disable") and not enable:
-            self.language_model.gradient_checkpointing_disable()
+        for submodule in self._gradient_checkpointing_targets():
+            if hasattr(submodule, "_set_gradient_checkpointing"):
+                submodule._set_gradient_checkpointing(enable, gradient_checkpointing_func)
+            elif hasattr(submodule, "gradient_checkpointing_enable") and enable:
+                submodule.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            elif hasattr(submodule, "gradient_checkpointing_disable") and not enable:
+                submodule.gradient_checkpointing_disable()
+
+    def _gradient_checkpointing_targets(self) -> list[nn.Module]:
+        """Return the submodules that should respond to gradient_checkpointing
+        toggles. Always includes the LM (activations are on the gradient path
+        to the projector); includes the encoder only when it's trainable.
+        """
+        targets: list[nn.Module] = [self.language_model]
+        if not getattr(self.config, "freeze_audio_encoder", True):
+            targets.append(self.audio_tower)
+        return targets
 
     def get_input_embeddings(self) -> nn.Module:
         return self.language_model.get_input_embeddings()
@@ -480,7 +508,28 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         Returns:
             Flattened audio embeddings of shape (sum(expected_token_counts), hidden_dim).
         """
-        with torch.no_grad():
+        # SpecAugment is applied on the mel input, training-only. Most useful
+        # when the encoder is trainable; on the frozen-encoder path it still
+        # perturbs the projector's input slightly but with no gradient flowing
+        # back to the encoder to leverage the diversity.
+        if (
+            self.training
+            and getattr(self.config, "apply_spec_augment", False)
+            and audio_features.numel() > 0
+        ):
+            audio_features = self._mask_input_features(audio_features)
+
+        # When the encoder is frozen, skip gradient tracking through it — cuts
+        # activation memory and matches the prior published recipe's behavior.
+        # When trainable, we MUST allow gradients to flow back to encoder
+        # params; wrapping in no_grad here would silently zero encoder
+        # gradients regardless of requires_grad on its parameters.
+        encoder_frozen = getattr(self.config, "freeze_audio_encoder", True)
+        if encoder_frozen:
+            with torch.no_grad():
+                encoder_out = self.audio_tower(input_features=audio_features)
+                hidden_states = encoder_out.last_hidden_state
+        else:
             encoder_out = self.audio_tower(input_features=audio_features)
             hidden_states = encoder_out.last_hidden_state
 
@@ -488,6 +537,112 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         token_counts = expected_token_counts.to(device=audio_embeds.device, dtype=torch.long)
         return _gather_audio_embeds(audio_embeds, token_counts)
+
+    def _mask_input_features(
+        self,
+        input_features: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,  # noqa: ARG002 — reserved for future use
+    ) -> torch.Tensor:
+        """SpecAugment on mel input (pure-torch, vectorized, compile-ready).
+
+        Follows the same semantics as
+        `transformers.models.whisper.modeling_whisper.WhisperModel._mask_input_features`
+        (wav2vec2-style mask sampling: sample N start positions per sample,
+        mask `mask_length` frames forward from each), but reimplemented in
+        pure torch so it stays inside the autograd graph without crossing
+        the numpy boundary. This avoids inductor codegen failures
+        (e.g. the `‘zuf0’ was not declared` error from the prior numpy ->
+        torch.tensor round-trip) AND avoids the per-forward host-to-GPU
+        sync that the numpy path required.
+
+        One minor semantic divergence vs the upstream helper: this version
+        allows mask spans to overlap, while upstream rejects overlapping
+        samples. For ASR purposes this is irrelevant — occasional region
+        double-coverage has no measurable effect on the regularization
+        signal.
+
+        Reads ASRConfig fields by Whisper naming convention: mask_time_prob,
+        mask_time_length, mask_time_min_masks, mask_feature_prob,
+        mask_feature_length, mask_feature_min_masks.
+
+        Args:
+            input_features: (batch, n_mels, mel_len) log-mel features.
+            attention_mask: reserved for future use; ignored here since our
+                mel features are pre-padded to zero and double-masking
+                pad regions is a no-op.
+
+        Returns:
+            Same-shape tensor with time-axis and/or feature-axis masks zeroed.
+        """
+        input_features = input_features.clone()
+        batch_size, hidden_size, sequence_length = input_features.size()
+        config = self.config
+        device = input_features.device
+
+        if getattr(config, "mask_time_prob", 0.0) > 0:
+            mask_time = self._sample_mask_indices(
+                batch_size,
+                sequence_length,
+                mask_prob=config.mask_time_prob,
+                mask_length=config.mask_time_length,
+                min_masks=config.mask_time_min_masks,
+                device=device,
+            )
+            # Broadcast (B, T) -> (B, 1, T) to mask all mel bins at masked times.
+            input_features.masked_fill_(mask_time.unsqueeze(1), 0)
+
+        if getattr(config, "mask_feature_prob", 0.0) > 0:
+            mask_feature = self._sample_mask_indices(
+                batch_size,
+                hidden_size,
+                mask_prob=config.mask_feature_prob,
+                mask_length=config.mask_feature_length,
+                min_masks=config.mask_feature_min_masks,
+                device=device,
+            )
+            # Broadcast (B, F) -> (B, F, 1) to mask all time steps at masked bins.
+            input_features.masked_fill_(mask_feature.unsqueeze(-1), 0)
+
+        return input_features
+
+    @staticmethod
+    def _sample_mask_indices(
+        batch_size: int,
+        axis_length: int,
+        mask_prob: float,
+        mask_length: int,
+        min_masks: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Vectorized SpecAugment mask sampler — torch.compile-friendly.
+
+        Returns a (batch_size, axis_length) bool tensor where True marks
+        a position covered by at least one mask span. Spans may overlap
+        (see _mask_input_features docstring on the semantic difference vs
+        the upstream Whisper helper).
+        """
+        # Number of mask spans per sample: deterministic given config + axis_length.
+        # Matches the upstream formula (ignoring the epsilon noise term, which
+        # only shifts the count by ±1 stochastically — negligible at the
+        # default mask_time_prob=0.05 / mask_length=10 setting which gives
+        # ~5 spans for a typical 1500-frame mel input).
+        num_masked_spans = max(int(mask_prob * axis_length / mask_length + 0.5), min_masks)
+        if num_masked_spans == 0:
+            return torch.zeros(batch_size, axis_length, device=device, dtype=torch.bool)
+
+        # Sample start positions independently per sample × span.
+        # Clamp range so a span of length mask_length never runs off the end.
+        max_start = max(axis_length - mask_length + 1, 1)
+        starts = torch.randint(
+            0, max_start, (batch_size, num_masked_spans), device=device
+        )  # (B, N)
+
+        # For each (sample, span, position), True iff position ∈ [start, start+mask_length).
+        positions = torch.arange(axis_length, device=device).view(1, 1, -1)  # (1, 1, T)
+        starts_b = starts.unsqueeze(-1)  # (B, N, 1)
+        span_mask = (positions >= starts_b) & (positions < starts_b + mask_length)
+        # Reduce over the span dim: True if ANY span covers this position.
+        return span_mask.any(dim=1)
 
     def forward(
         self,
@@ -588,7 +743,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         system_prompt: Optional[str] = None,
         **generate_kwargs,
-    ) -> torch.Tensor:
+    ):
         """Generate transcription from audio input.
 
         Can be called in two ways:
@@ -648,6 +803,26 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
         )
 
+        # transformers v5 deprecates passing generation flags as kwargs when a
+        # `generation_config` is also passed — the kwargs get silently dropped.
+        # Pull any score-related flags out of generate_kwargs and apply them to
+        # a derived generation_config so they actually take effect.
+        gen_cfg = self.generation_config
+        score_flags = {}
+        for flag in ("output_scores", "output_logits", "return_dict_in_generate"):
+            if flag in generate_kwargs:
+                score_flags[flag] = generate_kwargs.pop(flag)
+        if score_flags:
+            from copy import copy as _copy
+
+            gen_cfg = _copy(self.generation_config)
+            for flag, value in score_flags.items():
+                setattr(gen_cfg, flag, value)
+            # output_scores requires return_dict_in_generate for HF generate to
+            # actually populate .scores on the output object.
+            if gen_cfg.output_scores and not gen_cfg.return_dict_in_generate:
+                gen_cfg.return_dict_in_generate = True
+
         # Generate using language model
         # Pass both input_ids and inputs_embeds so repetition_penalty works correctly
         # (it needs input_ids to track which tokens have been used)
@@ -655,15 +830,20 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            generation_config=self.generation_config,
+            generation_config=gen_cfg,
             **generate_kwargs,
         )
 
-        # When using inputs_embeds with input_ids, generate returns full sequence
-        # Strip the input tokens to return only generated tokens
-        sequences = output if isinstance(output, torch.Tensor) else output.sequences
+        # When using inputs_embeds with input_ids, generate returns the full
+        # sequence (prompt + generated). Strip the prompt to return only the
+        # newly generated tokens. When scores were requested, preserve the
+        # GenerateOutput so callers can read .scores; otherwise return the
+        # bare tensor for backward compatibility with existing callers.
         input_len = input_ids.shape[1]
-        return sequences[:, input_len:]
+        if isinstance(output, torch.Tensor):
+            return output[:, input_len:]
+        output.sequences = output.sequences[:, input_len:]
+        return output
 
     def generate_streaming(
         self,

@@ -78,6 +78,32 @@ class ASRConfig(transformers.PretrainedConfig):
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
         freeze_text_embed_tokens: bool = False,
+        # Audio encoder is frozen by default — the published recipe treats
+        # GLM-ASR-Nano as a fixed feature extractor. Setting this to False
+        # makes the encoder trainable; pair with `encoder_learning_rate` in
+        # the training config to avoid destroying pretrained encoder weights
+        # at the projector/decoder LR.
+        freeze_audio_encoder: bool = True,
+        # SpecAugment on mel input (training-only), parameters match
+        # transformers' WhisperConfig / Wav2Vec2 conventions. Most relevant
+        # when the encoder is trainable (`freeze_audio_encoder=False`) —
+        # without augmentation the encoder sees identical mel inputs on
+        # every visit and overfits fast. Standard for ASR encoder fine-
+        # tuning (Whisper, Conformer, wav2vec2 all use it). Applied to
+        # log-mel input where zero is in-distribution (silence);
+        # structurally different from the prior encoder-output ZM which
+        # was removed because zero was OOD for the encoder's emission
+        # distribution. Uses `_compute_mask_indices` from
+        # transformers.models.whisper.modeling_whisper — the same helper
+        # Whisper itself uses, vectorized over the batch and torch.compile
+        # compatible. Default values match Whisper's defaults.
+        apply_spec_augment: bool = False,
+        mask_time_prob: float = 0.05,
+        mask_time_length: int = 10,
+        mask_time_min_masks: int = 2,
+        mask_feature_prob: float = 0.0,
+        mask_feature_length: int = 10,
+        mask_feature_min_masks: int = 0,
         do_sample: bool = False,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -155,6 +181,14 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_projector = freeze_projector
         self.freeze_language_model = freeze_language_model
         self.freeze_text_embed_tokens = freeze_text_embed_tokens
+        self.freeze_audio_encoder = freeze_audio_encoder
+        self.apply_spec_augment = apply_spec_augment
+        self.mask_time_prob = mask_time_prob
+        self.mask_time_length = mask_time_length
+        self.mask_time_min_masks = mask_time_min_masks
+        self.mask_feature_prob = mask_feature_prob
+        self.mask_feature_length = mask_feature_length
+        self.mask_feature_min_masks = mask_feature_min_masks
 
         explicit_generation_args = {
             "num_beams": num_beams,

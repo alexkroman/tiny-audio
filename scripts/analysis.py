@@ -443,6 +443,12 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
             wer = parsed.get("wer")
             if isinstance(wer, float):
                 ds_metrics["wer"] = wer
+            # Confidence stats (present only when the evaluator captured per-token
+            # logits — currently LocalEvaluator with a scores-capable pipeline).
+            for k in ("mean_top1_logprob", "mean_margin", "total_tokens"):
+                v = parsed.get(k)
+                if isinstance(v, (int, float)):
+                    ds_metrics[k] = v
 
         for sample in parse_results_file(results_file):
             gt_raw = sample["ground_truth"]
@@ -497,6 +503,24 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
 
     if all_latencies:
         metrics["avg_latency"] = sum(all_latencies) / len(all_latencies)
+
+    # Corpus-level confidence aggregates: token-weighted means across datasets
+    # whose metrics.txt carried per-token stats. Token-weighting matches the
+    # per-evaluator aggregation in base.Evaluator.compute_metrics.
+    weighted_lp = 0.0
+    weighted_mg = 0.0
+    corpus_tokens = 0
+    for ds_data in metrics["datasets"].values():
+        n = ds_data.get("total_tokens")
+        lp = ds_data.get("mean_top1_logprob")
+        mg = ds_data.get("mean_margin")
+        if isinstance(n, (int, float)) and isinstance(lp, float) and isinstance(mg, float):
+            weighted_lp += lp * n
+            weighted_mg += mg * n
+            corpus_tokens += int(n)
+    if corpus_tokens > 0:
+        metrics["corpus_mean_top1_logprob"] = weighted_lp / corpus_tokens
+        metrics["corpus_mean_margin"] = weighted_mg / corpus_tokens
 
     return metrics
 
@@ -643,6 +667,48 @@ def compare(
         wc_table.add_row(*row)
 
     console.print(wc_table)
+
+    # === Confidence Table ===
+    # Skip entirely when no model captured per-token logits (e.g. only API
+    # evaluators compared) — keeps the output clean for non-tiny-audio runs.
+    has_confidence = any(
+        m.get("corpus_mean_top1_logprob") is not None for m in model_metrics.values()
+    )
+    if has_confidence:
+        console.print("\n")
+        conf_table = Table(title="Confidence (mean top-1 logprob and top1-top2 margin per token)")
+        conf_table.add_column("Model", style="cyan")
+        conf_table.add_column("Corpus top1", justify="right", style="bold")
+        conf_table.add_column("Corpus margin", justify="right", style="bold")
+        for ds in ordered_datasets:
+            conf_table.add_column(DATASET_SHORT_NAMES.get(ds, ds), justify="right")
+
+        rows = []
+        for model, data in model_metrics.items():
+            display_name = data.get("display_name", model)
+            corpus_lp = data.get("corpus_mean_top1_logprob")
+            corpus_mg = data.get("corpus_mean_margin")
+            row = [
+                display_name,
+                f"{corpus_lp:.3f}" if isinstance(corpus_lp, float) else "-",
+                f"{corpus_mg:.3f}" if isinstance(corpus_mg, float) else "-",
+            ]
+            for ds in ordered_datasets:
+                ds_data = data["datasets"].get(ds, {})
+                lp = ds_data.get("mean_top1_logprob")
+                mg = ds_data.get("mean_margin")
+                if isinstance(lp, float) and isinstance(mg, float):
+                    # Format: "lp / mg" — both small negative numbers, fits in a cell.
+                    row.append(f"{lp:.2f}/{mg:.2f}")
+                else:
+                    row.append("-")
+            rows.append(row)
+
+        # Sort by corpus margin ascending — wider margin = more decisive model = better
+        for row in sorted(rows, key=lambda r: -_sort_key(r[2])):
+            conf_table.add_row(*row)
+
+        console.print(conf_table)
 
     # === Diarization Table ===
     has_diarization = any(m.get("diarization") for m in model_metrics.values())

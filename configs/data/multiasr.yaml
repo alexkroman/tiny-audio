@@ -28,16 +28,22 @@
 #   - VoxPopuli `en` (543hr / ~168K) — L2-European parliamentary speech.
 #     `raw_text` preserves case+punct; `normalized_text` is lowercase
 #     no-punct (LS-style) and is the wrong format for the Qwen3 decoder.
-# YODAS was evaluated and rejected for this revision: en000 is ~469 GB
-# (500 × 938 MB tarballs) for ~5,000hr / ~2.5M samples. The codebase
-# loads via load_dataset() in map mode (not streaming), so a
-# target_samples cap would not reduce download — the full shard
-# materializes to disk before sampling. Label quality is also weaker
-# than the other corpora (YouTube user-provided captions even on the
-# manual tier are not verbatim ASR-grade). Gigaspeech M's YouTube slice
-# already provides curated in-the-wild coverage at higher label quality
-# and ~22× smaller footprint; revisit YODAS only if a streaming-mode
-# data path lands or if Gigaspeech long-form eval gaps persist.
+# Raw YODAS (espnet/yodas) remains rejected: en000 is ~469 GB (500 ×
+# 938 MB tarballs) for ~5,000hr / ~2.5M samples; codebase loads via
+# load_dataset() in map mode (not streaming), so a target_samples cap
+# would not reduce download. Label quality is also weaker than the
+# other corpora (YouTube user-provided captions even on the manual
+# tier are not verbatim ASR-grade).
+# Emilia-YODAS 616h (MrDragonFox/EN_Emilia_Yodas_616h) is added below
+# as the way to get partial YODAS coverage without those problems: a
+# 228K-sample / 616hr / 108GB Parquet curation of the English portion
+# with audio segmented to single-speaker clips by the Emilia pipeline
+# and re-transcribed by ElevenLabs Scribe v1 — cleaner labels and ~4×
+# smaller footprint than raw en000. Caveat: Emilia's quality filters
+# select for single-speaker content, so this is YouTube monologue
+# register (vlogs, narration, presentations), not multi-speaker
+# conversational. See per-source comment below for sizing + format
+# rationale.
 # Peoples: `clean_sa` only (311K). Both `_sa` configs apply the
 # sentence-alignment filter on top of the corpus-level CER ≤ 20%
 # bound, so each segment's audio span matches its label span; the
@@ -62,18 +68,19 @@
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy medium        │ ~1,100,000│ ~1,067,000│   24.3% │
-# │ CommonVoice 17 en        │ ~1,100,000│   ~957,000│   21.8% │
-# │ Gigaspeech M             │  ~910,000 │   ~910,000│   20.7% │
-# │ SPGISpeech M             │   385,000 │   385,000 │    8.8% │
-# │ Peoples clean_sa         │   311,000 │   311,000 │    7.1% │
-# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    6.1% │
-# │ Switchboard              │   185,402 │  ~180,000 │    4.1% │
-# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    3.8% │
-# │ AMI IHM                  │   108,502 │   ~79,000 │    1.8% │
-# │ AMI SDM                  │   107,319 │   ~67,000 │    1.5% │
+# │ LibriHeavy medium        │ ~1,100,000│ ~1,067,000│   20.1% │
+# │ Peoples clean (cap 1M)   │ ~1,500,000│ 1,000,000 │   18.8% │
+# │ CommonVoice 17 en        │ ~1,100,000│   ~957,000│   18.0% │
+# │ Gigaspeech M             │  ~910,000 │   ~910,000│   17.2% │
+# │ SPGISpeech M             │   385,000 │   385,000 │    7.3% │
+# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    5.1% │
+# │ Emilia-YODAS 616h        │   228,265 │  ~228,000 │    4.3% │
+# │ Switchboard              │   185,402 │  ~180,000 │    3.4% │
+# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    3.1% │
+# │ AMI IHM                  │   108,502 │   ~79,000 │    1.5% │
+# │ AMI SDM                  │   107,319 │   ~67,000 │    1.3% │
 # └──────────────────────────┴           ┴           ┴         ┘
-# Total raw: ~4,643,200  →  Total effective: ~4,389,000 (-5.5%)
+# Total raw: ~6,060,500  →  Total effective: ~5,306,000 (-12.5%)
 #
 # Filter loss by source (measured 2026-05-15):
 # - CommonVoice down_votes filter (in scripts/train.py): drops ~13% of
@@ -145,22 +152,33 @@ datasets:
     train_splits: [train]
     eval_splits: []
 
-  # People's Speech `clean_sa` (311K train natural, CC-BY). Sentence-
-  # aligned subset of `clean` — same CER ≤ 20% upper bound on alignment
-  # quality, plus a per-segment sentence-boundary alignment filter.
-  # `dirty_sa` was dropped from the mix; clean_sa is the only Peoples
-  # train source. Peoples eval refs are human-transcribed (paid
-  # native-English transcribers, not auto-aligned), so the +6.27 eval
-  # gap is genuine model quality, not ref noise — the lever is
-  # acoustic exposure to the eval distribution, balanced against
-  # avoiding overfit to noisy auto-aligned training labels.
+  # People's Speech `clean` (~1.5M train natural, CC-BY). Full clean tier
+  # — CER ≤ 20% upper bound on alignment quality, but NOT sentence-aligned
+  # (the `_sa` filter is dropped). `dirty_sa` remains out of the mix;
+  # `clean` is the only Peoples train source. Peoples eval refs are
+  # human-transcribed (paid native-English transcribers, not auto-aligned),
+  # so the eval gap vs universal-3-pro is genuine model quality, not ref
+  # noise — the lever is acoustic exposure to the eval distribution.
+  #
+  # REVISED: stepped up from `clean_sa` (311K) to `clean` capped at 1M.
+  # Prior `clean` revision (uncapped at 1.5M) was rolled back to `clean_sa`
+  # because per-segment audio/text drift on what became the largest corpus
+  # poisoned the gradient. Revisiting alongside stage_1.yaml's wd: 0 → 0.01
+  # flip: the noisy-label sensitivity argument is the same as before, but
+  # the recipe now has some explicit label-noise damping (WD). 1M cap
+  # keeps Peoples well below the prior 1.5M dominance threshold (~19%
+  # mix share instead of ~26%) so it doesn't crowd out cross-corpus
+  # regularization. If train CE collapses while eval plateaus on the
+  # Peoples eval split (memorization of noisy clean rows), revert to
+  # clean_sa.
   - path: MLCommons/peoples_speech
-    name: clean_sa
+    name: clean
     audio_column: audio
     text_column: text
     task: transcribe
     train_splits: [train]
     eval_splits: []
+    target_samples: 1000000
 
   # People's Speech validation split — MLCommons ships dev/test as separate
   # configs (not splits inside clean_sa). Validation is human-transcribed
@@ -221,6 +239,49 @@ datasets:
     task: transcribe
     train_splits: []
     eval_splits: [validation]
+
+  # Emilia-YODAS 616h (MrDragonFox/EN_Emilia_Yodas_616h, 228,265 train /
+  # 616hr / 108GB across 215 Parquet shards, CC-BY-4.0). Community
+  # re-curation of the English portion of amphion/Emilia-Dataset, itself
+  # the cleaned-up version of espnet/yodas (YouTube). The Emilia pipeline
+  # applies speaker diarization, source separation, DNSMOS audio-quality
+  # filtering, and Whisper-medium auto-transcription; MrDragonFox then
+  # re-transcribed each segment with ElevenLabs Scribe v1 (`text_scribe`)
+  # and added Meta Audio-Aesthetics scores (CE/CU/PC/PQ). Two transcripts
+  # ship: `text_scribe` (verbatim, preserves "gotta") and `text_emilia`
+  # (Whisper-medium output, normalized). Using `text_scribe`: both are
+  # cased + punctuated, but Scribe is the newer model (~5% reported WER vs
+  # Whisper-medium's 8-12% on YouTube-style content) and matches the
+  # Qwen3 decoder's spoken-text register more faithfully. Estimated
+  # label-WER ceiling ~5-12% — cleaner than Peoples clean_sa (~8-15% via
+  # auto-alignment) but noisier than every human-transcribed source in
+  # the mix (SPGI/TEDLIUM/AMI/Switchboard).
+  #
+  # Unblocks the YODAS rejection from the header comment above: 108GB is
+  # ~4× smaller than raw en000 (469GB), Parquet shards stream per-segment
+  # rather than per-tarball, and double-pass auto-transcription replaces
+  # YouTube user captions.
+  #
+  # Caveat: Emilia's pipeline selects for single-speaker clean clips
+  # (TTS-oriented curation), so content here is YouTube *monologue* —
+  # vlogs, narration, presentations, news — not multi-speaker
+  # conversational. Switchboard + AMI remain the only true conversational
+  # sources. Value-add is YouTube-register accent diversity and modern
+  # informal speech, not turn-taking supervision.
+  #
+  # Quality fields (CE, CU, PC, PQ, dnsmos, phone_count) are dropped by
+  # the DataLoader column-pruning (only `audio` + `text` kept) but are
+  # available for follow-up filters if label noise becomes a problem
+  # (e.g. drop rows where Scribe and Emilia transcripts disagree above an
+  # edit-distance threshold, or filter on dnsmos > 3.0). Segment
+  # durations are 5-11s typical, all within the 30s Whisper window —
+  # DataCollator audio-length filter is a near-no-op here.
+  - path: MrDragonFox/EN_Emilia_Yodas_616h
+    audio_column: audio
+    text_column: text_scribe
+    task: transcribe
+    train_splits: [train]
+    eval_splits: []
 
   # SPGISpeech M — financial earnings calls. Natural cap ~385K (was
   # capped to 150K in the prior tilt to fund GS L expansion; uncapped
@@ -307,8 +368,15 @@ dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 # dataset in the mix contributes a balanced slice to during-training
 # eval. Prior `max_eval_samples: 2000` (global cap, applied post-concat)
 # was a misconfig — it silently dropped all eval splits after the first
-# ~2 (TEDLIUM 591 + head 1409 of Peoples val saturated the cap). At 250
-# per dataset across 9 eval splits we get ~2,250 total — comparable
-# total cost, but representative across TEDLIUM / Peoples / CV /
-# Gigaspeech dev / SPGI / VoxPopuli / Switchboard / AMI IHM / AMI SDM.
-max_eval_samples_per_dataset: 250
+# ~2 (TEDLIUM 591 + head 1409 of Peoples val saturated the cap).
+# Raised from 250 to 500 (~4,500 total across 9 eval splits): run ppbo0oqn
+# observed eval-loss stdev of 0.0045 across 8 late-stage eval points, with
+# late-stage improvements in the same 0.002–0.005 range. The signal was
+# at or below the noise floor — couldn't distinguish "real plateau" from
+# "noisy walk." Doubling samples cuts noise ~√2 to ~0.003, enough margin
+# to make individual eval bumps clearly real vs noise. Eval cycle wall-
+# clock grows ~2× (still small relative to the 30+ minutes between evals
+# at step_eval=2000 with batch=100). Datasets with small eval splits
+# (TEDLIUM 591, AMI ~500, Peoples val) are now near-uncapped; the bump
+# matters most for CV / Gigaspeech dev / SPGI where eval splits are huge.
+max_eval_samples_per_dataset: 500
