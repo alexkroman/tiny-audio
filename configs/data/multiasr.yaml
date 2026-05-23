@@ -68,19 +68,25 @@
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy medium        │ ~1,100,000│ ~1,067,000│   20.1% │
-# │ Peoples clean (cap 1M)   │ ~1,500,000│ 1,000,000 │   18.8% │
-# │ CommonVoice 17 en        │ ~1,100,000│   ~957,000│   18.0% │
-# │ Gigaspeech M             │  ~910,000 │   ~910,000│   17.2% │
-# │ SPGISpeech M             │   385,000 │   385,000 │    7.3% │
-# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    5.1% │
-# │ Emilia-YODAS 616h        │   228,265 │  ~228,000 │    4.3% │
-# │ Switchboard              │   185,402 │  ~180,000 │    3.4% │
-# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    3.1% │
-# │ AMI IHM                  │   108,502 │   ~79,000 │    1.5% │
-# │ AMI SDM                  │   107,319 │   ~67,000 │    1.3% │
+# │ LibriHeavy medium        │ ~1,100,000│ ~1,067,000│   19.2% │
+# │ Peoples clean (cap 1M)   │ ~1,500,000│ 1,000,000 │   17.9% │
+# │ CommonVoice 17 en        │ ~1,100,000│   ~957,000│   17.2% │
+# │ Gigaspeech M             │  ~910,000 │   ~910,000│   16.3% │
+# │ SPGISpeech M             │   385,000 │   385,000 │    6.9% │
+# │ WHAM (upsample to 265K)  │    25,000 │   265,000 │    4.8% │
+# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    4.8% │
+# │ Emilia-YODAS 616h        │   228,265 │  ~228,000 │    4.1% │
+# │ Switchboard              │   185,402 │  ~180,000 │    3.2% │
+# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    3.0% │
+# │ AMI IHM                  │   108,502 │   ~79,000 │    1.4% │
+# │ AMI SDM                  │   107,319 │   ~67,000 │    1.2% │
 # └──────────────────────────┴           ┴           ┴         ┘
-# Total raw: ~6,060,500  →  Total effective: ~5,306,000 (-12.5%)
+# Total raw: ~6,085,500  →  Total effective: ~5,571,000 (-8.5%)
+#
+# WHAM is the only entry where Effective > Raw: target_samples upsamples
+# the 25K natural noise clips ~10.6× to 265K to give the non-speech-
+# rejection objective enough gradient frequency. Every WHAM row trains
+# the model on an empty-string assistant turn via `text_override`.
 #
 # Filter loss by source (measured 2026-05-15):
 # - CommonVoice down_votes filter (in scripts/train.py): drops ~13% of
@@ -358,6 +364,38 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
+
+  # WHAM noise dataset (nguyenvulebinh/wham, 25,000 natural / ~4.7 GB).
+  # Pure background-noise audio recorded in cafes, restaurants, parks
+  # (DoloresParkCafe / PeetsCoffee / etc.) with no speech and no
+  # transcript field. Used here for non-speech-rejection training: every
+  # WHAM clip pairs with an empty assistant transcript via
+  # `text_override: ""`, teaching the model that non-speech audio →
+  # emit nothing. Addresses the classic Whisper-style hallucination
+  # failure mode where 30s of ambient cafe noise produces "Thanks for
+  # watching" or other high-prior continuations at inference.
+  #
+  # Upsampled to 265K via target_samples (~10.6× repetition over the
+  # 25K unique clips) — targets ~4.8% of the post-add mix share. Each
+  # unique clip thus appears 10-11× per epoch; gradient frequency is the
+  # value here, not per-clip diversity, since the goal is reinforcement
+  # of the "noise → empty" mapping rather than learning per-clip
+  # nuances. The 25K natural set already spans a wide range of indoor /
+  # outdoor noise contexts.
+  #
+  # text_override + the per-row `_allow_empty_label` marker injected by
+  # scripts/train.py:_prepare_split bypass the DataCollator's empty-
+  # label filter for these rows only — other datasets keep that filter
+  # (which protects against pure-annotation-marker rows, e.g. Gigaspeech
+  # <NOISE>-only segments). See DataCollator._extract_audio_arrays for
+  # the per-row check.
+  - path: nguyenvulebinh/wham
+    audio_column: audio
+    task: transcribe
+    train_splits: [train]
+    eval_splits: []
+    text_override: ""
+    target_samples: 265000
 
 # Audio processing
 sample_rate: 16000

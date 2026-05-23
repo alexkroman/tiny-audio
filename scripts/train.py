@@ -307,6 +307,20 @@ class DatasetLoader:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
 
+        # text_override: replace the text column with a constant string for
+        # every row in this source. Used for non-speech / silence-rejection
+        # datasets (e.g. WHAM noise) that ship audio without a transcript and
+        # should train the model to emit an explicit response (typically "")
+        # on non-speech input. Also flips `_allow_empty_label` so the
+        # DataCollator's empty-label filter doesn't drop these rows.
+        text_override = dataset_cfg.get("text_override")
+        if text_override is not None:
+            if "text" in ds.column_names:
+                ds = ds.remove_columns(["text"])
+            n = len(ds)
+            ds = ds.add_column("text", [text_override] * n)
+            ds = ds.add_column("_allow_empty_label", [True] * n)
+
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
         if self.multitask_enabled:
@@ -317,6 +331,9 @@ class DatasetLoader:
             keep_cols = {"audio", "text"}
         if self.needs_duration:
             keep_cols = keep_cols | {"duration"}
+        # Preserve the empty-label bypass marker so it reaches the collator.
+        if "_allow_empty_label" in ds.column_names:
+            keep_cols = keep_cols | {"_allow_empty_label"}
         extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
@@ -483,7 +500,14 @@ class DataCollator:
                     continue
                 if not np.isfinite(audio).all():
                     continue
-                if not _normalize_label(f.get("text") or ""):
+                # Empty-label filter normally drops rows whose entire text was
+                # an annotation marker (e.g. Gigaspeech <NOISE>-only segments).
+                # Bypass it for rows explicitly flagged via the dataset's
+                # `text_override` (non-speech-rejection sources like WHAM where
+                # an empty assistant turn is the intended training target).
+                if not f.get("_allow_empty_label", False) and not _normalize_label(
+                    f.get("text") or ""
+                ):
                     continue
                 duration_s = audio.size / self.sample_rate
                 if duration_s > self._MAX_AUDIO_SECONDS:
@@ -514,7 +538,12 @@ class DataCollator:
 
     def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
         """Build a single chat sample. Subclasses can override for task-specific prompts."""
-        text = _normalize_label(feature.get("text") or "")
+        raw_text = feature.get("text") or ""
+        # Skip normalization for explicit-text-override rows so the literal
+        # override (typically "" for non-speech-rejection) reaches the chat
+        # template unchanged. _normalize_label("") returns "" anyway, but the
+        # branch is the clearer invariant.
+        text = raw_text if feature.get("_allow_empty_label") else _normalize_label(raw_text)
         return self._make_messages(num_audio_tokens, random.choice(TRANSCRIBE_PROMPTS), text)
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
