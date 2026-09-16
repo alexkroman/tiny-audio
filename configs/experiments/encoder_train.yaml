@@ -42,7 +42,7 @@ model:
   projector_pool_stride: 4
   projector_hidden_dim: 1024
   projector_dropout: 0.0
-  audio_model_id: zai-org/GLM-ASR-Nano-2512
+  audio_model_id: openai/whisper-medium.en
   text_model_id: Qwen/Qwen3-0.6B
   # No label smoothing — decoder is frozen so LS-induced confidence
   # calibration on lm_head is moot. label_smoothing affects only the

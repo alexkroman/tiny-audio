@@ -251,6 +251,18 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # carry through postprocess.
         sequences = generate_output.sequences
         scores = generate_output.scores
+        # This pipeline is single-item: postprocess() also reduces to
+        # `tokens[0]`. Taking batch element 0 of each score tensor is
+        # therefore consistent with the text we return, but only while the
+        # batch really is one clip -- with batch_size > 1 every item would be
+        # annotated with sample 0's confidence and nothing downstream could
+        # tell. Fail loudly instead of returning a plausible wrong number.
+        if sequences.shape[0] > 1:
+            raise ValueError(
+                f"ASRPipeline received a batch of {sequences.shape[0]} but only "
+                "returns one transcript; per-item confidence would be wrong. "
+                "Call it with one clip per invocation."
+            )
         top1_logprobs: list[float] = []
         top2_logprobs: list[float] = []
         if scores:

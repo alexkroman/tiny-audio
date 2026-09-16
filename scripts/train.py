@@ -518,14 +518,14 @@ class DataCollator:
     # Whisper's feature extractor pads/truncates to a fixed 30s window. Audio
     # longer than this is silently truncated while the label is kept whole,
     # training the model to transcribe content it never sees. Drop those rows.
-    # Lowered from 30s to 20s to reduce batch-memory pressure: with
+    # Lowered from 30s to 19s to reduce batch-memory pressure: with
     # group_by_length disabled, a single long sample forces the whole batch
-    # to its length. 20s matches the production-norm cap for ASR fine-tunes
-    # and drops the long-form tail of TEDLIUM / Earnings22 / Peoples /
-    # VoxPopuli (roughly 3-8% of rows in those sources). In exchange, mel-
-    # spec peak memory drops 33% vs the 30s default, freeing headroom for
-    # auto_find_batch_size (observed batch=70 at max=30s → expected ~100+
-    # at max=20s for the same mix without WHAM).
+    # to its length. 19s sits just under the ~20s production-norm cap for
+    # ASR fine-tunes and drops the long-form tail of TEDLIUM / Earnings22 /
+    # Peoples / VoxPopuli (roughly 3-8% of rows in those sources). In
+    # exchange, mel-spec peak memory drops ~37% vs the 30s default, freeing
+    # headroom for auto_find_batch_size (observed batch=70 at max=30s →
+    # expected ~100+ at max=19s for the same mix without WHAM).
     _MAX_AUDIO_SECONDS = 19.0
     # Sub-0.8s clips are dominated by boundary-cut segments and isolated
     # backchannels ("yeah", "ok", "umhum") where the audio span and the

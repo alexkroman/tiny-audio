@@ -252,12 +252,32 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.generation_config.length_penalty = config.length_penalty
         self.generation_config.repetition_penalty = config.repetition_penalty
         self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
-        # Set EOS tokens, filtering out any that don't exist in the tokenizer
-        eos_candidates = [
-            self.tokenizer.convert_tokens_to_ids("<|im_end|>"),
-            self.tokenizer.convert_tokens_to_ids("<|endoftext|>"),
-        ]
-        self.generation_config.eos_token_id = [t for t in eos_candidates if t is not None]
+        # Set EOS tokens, filtering out any that don't exist in the tokenizer.
+        # `convert_tokens_to_ids` reports "not in vocab" inconsistently: Qwen-
+        # style tokenizers return None, while Gemma's returns unk_token_id.
+        # Filtering on None alone left Gemma with eos_token_id=[unk, unk], so
+        # generation never stopped and every sample ran to max_new_tokens.
+        #
+        # The membership test is a name round-trip, NOT `id == unk_token_id`:
+        # in GPT-2-lineage tokenizers (SmolLM2, Qwen) unk_token *is*
+        # "<|endoftext|>", so comparing ids would discard a legitimate stop
+        # token here while fixing Gemma. A token that fell back to unk comes
+        # back under unk's name; one that is really in the vocab comes back
+        # as itself.
+        eos_ids: list[int] = []
+        for token in ("<|im_end|>", "<|endoftext|>", "<end_of_turn>"):
+            token_id = self.tokenizer.convert_tokens_to_ids(token)
+            if token_id is None or self.tokenizer.convert_ids_to_tokens(token_id) != token:
+                continue
+            if token_id not in eos_ids:
+                eos_ids.append(token_id)
+        # The chat-template stop tokens above are additions, not replacements:
+        # the tokenizer's own EOS is always a valid stop and is the only one
+        # left for a decoder using none of those three templates.
+        tokenizer_eos = self.tokenizer.eos_token_id
+        if tokenizer_eos is not None and tokenizer_eos not in eos_ids:
+            eos_ids.append(tokenizer_eos)
+        self.generation_config.eos_token_id = eos_ids
         self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
         # Feature extractor for audio preprocessing
@@ -432,8 +452,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # `gemma4` to Gemma4ForConditionalGeneration, which is both wasteful
         # (a vision tower + audio tower this model never calls) and unusable
         # for inference. Convert it to the text-only causal LM.
+        #
+        # Gated on the model id, not on the `.model.language_model` layout:
+        # that layout is the generic transformers composite-model shape, shared
+        # by GLM-ASR and Llava/Qwen-Omni style checkpoints. Probing for it
+        # structurally would funnel those into _gemma_text_only, which imports
+        # transformers.models.gemma4 and transplants weights into a
+        # Gemma4ForCausalLM shell built from a foreign text_config. The
+        # hasattr check is kept as a guard so an already-text-only gemma-4
+        # checkpoint passes through untouched.
         gemma_inner = getattr(decoder, "model", None)
-        if gemma_inner is not None and hasattr(gemma_inner, "language_model"):
+        is_gemma4 = "gemma-4" in (config.text_model_id or "").lower()
+        if is_gemma4 and gemma_inner is not None and hasattr(gemma_inner, "language_model"):
             decoder = cls._gemma_text_only(decoder)
         # See _load_audio_encoder note: idempotent post-load cast to dodge the
         # FA2 "current dype is fp32" warning when from_pretrained's dtype kwarg
@@ -715,10 +745,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             tokenizer=self.tokenizer,
             projector=self.projector,
             encoder_conv_layers=self.config.encoder_conv_layers,
+            audio_token=self.audio_token,
         )
 
     def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
-        """Save trainable weights: projector, plus the language model when fine-tuned.
+        """Save trainable weights: projector, plus the encoder/LM when unfrozen.
+
+        Every module this returns is gated on the same freeze flag that decides
+        whether it trains, so a module that receives gradients is always
+        serialized. Getting that pairing wrong is silent: training runs to
+        completion, checkpoints save without error, and the updates are simply
+        absent when the checkpoint is reloaded.
 
         With LoRA attached, the language_model entries are flattened to plain
         (non-PEFT) HF naming so model.safetensors round-trips through
@@ -726,8 +763,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         these weights, and only then re-attaches PEFT. lora_*/adapter weights
         are skipped here; PEFT serializes them separately as
         adapter_model.safetensors via the save_pretrained path below.
+
+        Note this can't be derived from `requires_grad`: the LoRA branch below
+        deliberately re-saves frozen base-layer weights, and
+        `freeze_text_embed_tokens` freezes an embedding that must still
+        round-trip with the rest of the LM.
         """
         sd = {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
+        if not getattr(self.config, "freeze_audio_encoder", True):
+            sd.update({f"audio_tower.{k}": v for k, v in self.audio_tower.state_dict().items()})
         if not getattr(self.config, "freeze_language_model", True):
             lm = self.language_model
             if hasattr(lm, "peft_config"):
@@ -822,7 +866,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             and getattr(self.config, "apply_spec_augment", False)
             and audio_features.numel() > 0
         ):
-            audio_features = self._mask_input_features(audio_features)
+            audio_features = self._mask_input_features(audio_features, audio_attention_mask)
 
         # When the encoder is frozen, skip gradient tracking through it — cuts
         # activation memory and matches the prior published recipe's behavior.
@@ -862,7 +906,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def _mask_input_features(
         self,
         input_features: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,  # noqa: ARG002 — reserved for future use
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """SpecAugment on mel input (pure-torch, vectorized, compile-ready).
 
@@ -888,9 +932,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         Args:
             input_features: (batch, n_mels, mel_len) log-mel features.
-            attention_mask: reserved for future use; ignored here since our
-                mel features are pre-padded to zero and double-masking
-                pad regions is a no-op.
+            attention_mask: (batch, mel_len) mel-frame padding mask. Like
+                upstream, it confines time-axis span count and start
+                positions to each sample's unpadded length. Without it,
+                spans are drawn uniformly over the padded axis, so under
+                `padding="longest"` a 1s clip batched with a 19s clip gets
+                roughly 1/19 of its spans in real audio — short utterances
+                go effectively unaugmented while long ones take the full
+                dose. Whisper is unaffected either way (fixed 3000 frames);
+                the variable-length encoders are the ones that need it.
+                Pass None to treat the whole axis as valid.
 
         Returns:
             Same-shape tensor with time-axis and/or feature-axis masks zeroed.
@@ -910,6 +961,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             time_dim, feature_dim = 2, 1
         device = input_features.device
 
+        valid_lengths = None
+        if attention_mask is not None:
+            if attention_mask.shape[-1] != sequence_length:
+                raise ValueError(
+                    "SpecAugment attention_mask time axis "
+                    f"({attention_mask.shape[-1]}) does not match input_features "
+                    f"({sequence_length}). Masking against the wrong axis is silent, "
+                    "so this is raised rather than ignored."
+                )
+            valid_lengths = attention_mask.to(device).sum(dim=-1)
+
         if getattr(config, "mask_time_prob", 0.0) > 0:
             mask_time = self._sample_mask_indices(
                 batch_size,
@@ -918,6 +980,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 mask_length=config.mask_time_length,
                 min_masks=config.mask_time_min_masks,
                 device=device,
+                valid_lengths=valid_lengths,
             )
             # Broadcast (B, T) over the feature axis to mask all bins at
             # masked times: (B, 1, T) feature-major, (B, T, 1) time-major.
@@ -931,6 +994,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 mask_length=config.mask_feature_length,
                 min_masks=config.mask_feature_min_masks,
                 device=device,
+                valid_lengths=None,  # mel-bin axis is never padded
             )
             # Broadcast (B, F) over the time axis to mask all time steps at
             # masked bins: (B, F, 1) feature-major, (B, 1, F) time-major.
@@ -946,6 +1010,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         mask_length: int,
         min_masks: int,
         device: torch.device,
+        valid_lengths: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Vectorized SpecAugment mask sampler — torch.compile-friendly.
 
@@ -953,27 +1018,57 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         a position covered by at least one mask span. Spans may overlap
         (see _mask_input_features docstring on the semantic difference vs
         the upstream Whisper helper).
+
+        `valid_lengths` is a (batch_size,) tensor of unpadded lengths along
+        this axis; both the span count and the start positions are derived
+        per sample from it, so every span lands inside real content. Pass
+        None for an axis with no padding.
         """
-        # Number of mask spans per sample: deterministic given config + axis_length.
+        # Worst-case span count, from the full axis. Computed as a Python int
+        # from axis_length (an upper bound on any sample's valid length)
+        # rather than from valid_lengths.max(), which would need a .item()
+        # call and reintroduce the per-forward GPU->host sync this function
+        # was rewritten to avoid. Surplus spans are masked off per sample
+        # below, so over-allocating here is free apart from memory.
+        #
         # Matches the upstream formula (ignoring the epsilon noise term, which
         # only shifts the count by ±1 stochastically — negligible at the
         # default mask_time_prob=0.05 / mask_length=10 setting which gives
         # ~5 spans for a typical 1500-frame mel input).
-        num_masked_spans = max(int(mask_prob * axis_length / mask_length + 0.5), min_masks)
-        if num_masked_spans == 0:
+        max_spans = max(int(mask_prob * axis_length / mask_length + 0.5), min_masks)
+        if max_spans == 0:
             return torch.zeros(batch_size, axis_length, device=device, dtype=torch.bool)
 
-        # Sample start positions independently per sample × span.
-        # Clamp range so a span of length mask_length never runs off the end.
-        max_start = max(axis_length - mask_length + 1, 1)
-        starts = torch.randint(
-            0, max_start, (batch_size, num_masked_spans), device=device
-        )  # (B, N)
+        if valid_lengths is None:
+            lengths = torch.full((batch_size,), axis_length, device=device, dtype=torch.long)
+        else:
+            lengths = valid_lengths.to(device=device, dtype=torch.long).clamp(
+                min=1, max=axis_length
+            )
+
+        # Per-sample span count, so a short clip is not given a long clip's
+        # dose of masking. Bounded above by max_spans since lengths <= axis_length.
+        num_spans = torch.clamp(
+            (mask_prob * lengths.float() / mask_length + 0.5).long(), min=min_masks
+        )  # (B,)
+
+        # Sample start positions independently per sample × span, inside that
+        # sample's own valid range. Clamp so a span of length mask_length never
+        # starts past the end of short content. torch.rand is [0, 1), so the
+        # floor below never reaches max_start.
+        max_start = torch.clamp(lengths - mask_length + 1, min=1)  # (B,)
+        starts = (
+            torch.rand(batch_size, max_spans, device=device) * max_start.unsqueeze(1)
+        ).long()  # (B, N)
+
+        # Drop the spans a sample didn't earn (its num_spans < max_spans).
+        span_active = torch.arange(max_spans, device=device).unsqueeze(0) < num_spans.unsqueeze(1)
 
         # For each (sample, span, position), True iff position ∈ [start, start+mask_length).
         positions = torch.arange(axis_length, device=device).view(1, 1, -1)  # (1, 1, T)
         starts_b = starts.unsqueeze(-1)  # (B, N, 1)
         span_mask = (positions >= starts_b) & (positions < starts_b + mask_length)
+        span_mask &= span_active.unsqueeze(-1)
         # Reduce over the span dim: True if ANY span covers this position.
         return span_mask.any(dim=1)
 

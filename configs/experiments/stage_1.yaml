@@ -143,7 +143,7 @@ training:
   # shifts raise effective integrated LR significantly:
   #   (1) Mix grew Peoples 311K → 1M + Emilia-YODAS 228K + Earnings22 11K
   #       → ~50K steps per epoch vs OLD's 44K (+14% steps).
-  #   (2) WHAM removed and max_audio: 30s → 20s recover some headroom on
+  #   (2) WHAM removed and max_audio: 30s → 19s recover some headroom on
   #       step count but the net is still ~50K steps.
   #   (3) label_smoothing: 0.1 → 0.0 raises effective gradient on the
   #       correct-token row by ~10% (LS no longer scales it by 0.9×).

@@ -20,6 +20,12 @@ class ASRProcessor(ProcessorMixin):
     attributes = ["feature_extractor", "tokenizer"]
     feature_extractor_class = "AutoFeatureExtractor"
     tokenizer_class = "AutoTokenizer"
+    # Fallback only. The real value comes from `ASRConfig.audio_token`, which
+    # resolves to the decoder's native placeholder where it has one (Gemma 4's
+    # pretrained "<|audio|>") and to "<audio>" otherwise. Hardcoding the
+    # fallback here fails silently on a native-token decoder: "<audio>" was
+    # never added to that vocab, so it tokenizes into ordinary subwords and
+    # the prompt ends up with zero scatter positions for N audio embeddings.
     AUDIO_TOKEN = "<audio>"
     TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 
@@ -29,6 +35,7 @@ class ASRProcessor(ProcessorMixin):
         tokenizer,
         projector=None,
         encoder_conv_layers: Optional[list] = None,
+        audio_token: Optional[str] = None,
     ):
         """Initialize the ASR processor.
 
@@ -37,10 +44,14 @@ class ASRProcessor(ProcessorMixin):
             tokenizer: Text tokenizer for the language model
             projector: Audio projector module (for computing output lengths)
             encoder_conv_layers: Conv layer specs [(pad, kernel, stride), ...]
+            audio_token: Placeholder token scattered with audio embeddings.
+                Must match `ASRConfig.audio_token` / `ASRModel.audio_token`;
+                defaults to AUDIO_TOKEN.
         """
         self.feature_extractor = feature_extractor
         self.tokenizer = tokenizer
-        self.audio_token_id = tokenizer.convert_tokens_to_ids(self.AUDIO_TOKEN)
+        self.audio_token = audio_token or self.AUDIO_TOKEN
+        self.audio_token_id = tokenizer.convert_tokens_to_ids(self.audio_token)
         self.projector = projector
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
 
@@ -90,7 +101,7 @@ class ASRProcessor(ProcessorMixin):
 
         # Build prompt with audio token placeholders (instruction-free)
         if num_audio_tokens > 0:
-            user_content = self.AUDIO_TOKEN * num_audio_tokens
+            user_content = self.audio_token * num_audio_tokens
             if self.TRANSCRIBE_PROMPT:
                 user_content += " " + self.TRANSCRIBE_PROMPT
         else:

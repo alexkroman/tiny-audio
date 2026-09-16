@@ -588,3 +588,111 @@ class TestGemmaDecodeLoopPatch:
         _patch_gemma_decode_loop(stub)
         params = set(inspect.signature(stub.prepare_inputs_for_generation).parameters)
         assert "inputs_embeds" in params
+
+
+class TestEosTokenResolution:
+    """generation_config.eos_token_id must hold only real vocab entries."""
+
+    def test_excludes_tokens_absent_from_vocab(self, base_asr_model):
+        # SmolLM2 has no "<end_of_turn>"; convert_tokens_to_ids falls back to
+        # unk rather than returning None, which is how Gemma ended up with
+        # eos_token_id=[unk, unk] and never stopped generating.
+        tok = base_asr_model.tokenizer
+        for token_id in base_asr_model.generation_config.eos_token_id:
+            assert tok.convert_ids_to_tokens(token_id) != "<end_of_turn>"
+
+    def test_keeps_endoftext_even_though_it_is_also_unk(self, base_asr_model):
+        # SmolLM2's unk_token IS "<|endoftext|>", so filtering on
+        # `id == unk_token_id` would drop a legitimate stop token.
+        tok = base_asr_model.tokenizer
+        endoftext = tok.convert_tokens_to_ids("<|endoftext|>")
+        assert endoftext in base_asr_model.generation_config.eos_token_id
+
+    def test_includes_tokenizer_eos(self, base_asr_model):
+        assert (
+            base_asr_model.tokenizer.eos_token_id in base_asr_model.generation_config.eos_token_id
+        )
+
+    def test_is_non_empty(self, base_asr_model):
+        assert base_asr_model.generation_config.eos_token_id
+
+
+class TestStateDictTrainableModules:
+    """state_dict must serialize every module the freeze flags leave trainable."""
+
+    def test_frozen_encoder_is_not_saved(self, base_asr_model):
+        keys = base_asr_model.state_dict()
+        assert not any(k.startswith("audio_tower.") for k in keys)
+        assert any(k.startswith("projector.") for k in keys)
+
+    def test_unfrozen_encoder_is_saved(self):
+        from tiny_audio.asr_config import ASRConfig
+        from tiny_audio.asr_modeling import ASRModel
+
+        config = ASRConfig(
+            audio_model_id="openai/whisper-tiny",
+            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
+            projector_type="mlp",
+            model_dtype="float32",
+            attn_implementation="eager",
+            freeze_audio_encoder=False,
+        )
+        model = ASRModel(config)
+
+        keys = model.state_dict()
+        assert any(k.startswith("audio_tower.") for k in keys)
+
+        # The saved keys must be the ones load_state_dict expects, or the
+        # round-trip silently drops them under strict=False.
+        result = model.load_state_dict(keys, strict=False)
+        assert result.unexpected_keys == []
+
+    def test_encoder_keys_cover_trainable_encoder_params(self):
+        from tiny_audio.asr_config import ASRConfig
+        from tiny_audio.asr_modeling import ASRModel
+
+        config = ASRConfig(
+            audio_model_id="openai/whisper-tiny",
+            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
+            projector_type="mlp",
+            model_dtype="float32",
+            attn_implementation="eager",
+            freeze_audio_encoder=False,
+        )
+        model = ASRModel(config)
+
+        saved = {
+            k[len("audio_tower.") :] for k in model.state_dict() if k.startswith("audio_tower.")
+        }
+        trainable = {n for n, p in model.audio_tower.named_parameters() if p.requires_grad}
+        assert trainable, "encoder should be trainable when freeze_audio_encoder=False"
+        assert trainable <= saved
+
+    def test_encoder_updates_survive_save_reload(self, tmp_path):
+        """End-to-end: the checkpoint a training run writes must carry the encoder."""
+        import torch
+
+        from tiny_audio.asr_config import ASRConfig
+        from tiny_audio.asr_modeling import ASRModel
+
+        config = ASRConfig(
+            audio_model_id="openai/whisper-tiny",
+            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
+            projector_type="mlp",
+            model_dtype="float32",
+            attn_implementation="eager",
+            freeze_audio_encoder=False,
+        )
+        model = ASRModel(config)
+
+        # Stand in for what training would do to the encoder.
+        probe_name, probe = next(iter(model.audio_tower.named_parameters()))
+        with torch.no_grad():
+            probe.add_(1.0)
+        expected = probe.detach().clone()
+
+        model.save_pretrained(tmp_path)
+        reloaded = ASRModel.from_pretrained(str(tmp_path))
+
+        actual = dict(reloaded.audio_tower.named_parameters())[probe_name]
+        assert torch.allclose(actual, expected), "encoder updates lost on reload"

@@ -1,8 +1,11 @@
 # Multi-ASR dataset configuration
 #
 # Natural-cap mix: every dataset runs at its full natural train-split
-# size (no explicit target_samples cap on any source), with Gigaspeech
-# on the curated M tier rather than L. The prior revision's "tilt"
+# size, with Gigaspeech on the curated M tier rather than L. The one
+# exception is the Big-3 (LibriHeavy / CommonVoice 17 / Gigaspeech M),
+# each held to a 600K `target_samples` cap so no single-speaker read
+# corpus dominates the per-step gradient — see the mix table below.
+# The prior revision's "tilt"
 # (downcap Switchboard / AMI-SDM / SPGI to fund GS L expansion) was
 # rolled back after observing cross-eval regression: cutting exposure
 # on the "already-winning" evals removed cross-corpus regularization
@@ -205,11 +208,18 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: []
+    # Big-3 cap (see the mix table above). Read by
+    # scripts/train.py:_resample_to_target, which shuffles on self.seed
+    # before selecting so the cap is a representative sample rather than
+    # the first N rows — LibriHeavy ships ordered by chapter/speaker.
+    target_samples: 600000
 
-  # People's Speech `clean` (~1.5M train natural, CC-BY). Full clean tier
-  # — CER ≤ 20% upper bound on alignment quality, but NOT sentence-aligned
-  # (the `_sa` filter is dropped). `dirty_sa` remains out of the mix;
-  # `clean` is the only Peoples train source. Peoples eval refs are
+  # People's Speech `clean_sa` (~311K train natural, CC-BY). Sentence-
+  # aligned subset of the clean tier: CER ≤ 20% upper bound on alignment
+  # quality AND the `_sa` sentence-alignment filter applied. The wider
+  # `clean` (~1.5M) and `dirty_sa` tiers are both out of the mix (see the
+  # revert history below); `clean_sa` is the only Peoples train source.
+  # Peoples eval refs are
   # human-transcribed (paid native-English transcribers, not auto-aligned),
   # so the eval gap vs universal-3-pro is genuine model quality, not ref
   # noise — the lever is acoustic exposure to the eval distribution.
@@ -236,7 +246,7 @@ datasets:
   # (both ~25), so the volume bet wasn't paying off on the source
   # distribution anyway.
   - path: MLCommons/peoples_speech
-    name: clean
+    name: clean_sa
     audio_column: audio
     text_column: text
     task: transcribe
@@ -284,6 +294,10 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
+    # Big-3 cap. Applies to train_splits only, so the validation split
+    # stays whole. CV ships ordered by validation date — the shuffle in
+    # _resample_to_target is what keeps the cap from being a date slice.
+    target_samples: 600000
 
   # Gigaspeech M (official speechcolab repo). M tier is ~1,000hr / ~910K
   # segments — natural cap, no replay. Stepped back down from L
@@ -300,6 +314,9 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: []
+    # Big-3 cap. M's natural size (~910K) is closest to the cap of the
+    # three, so this trims the least.
+    target_samples: 600000
 
   # Gigaspeech dev split — official repo ships dev/test as separate configs
   # (same pattern as the fixie mirror). The `dev` config exposes its data

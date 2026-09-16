@@ -535,6 +535,22 @@ def _sort_key(value: str) -> float:
         return float("inf")
 
 
+def _sort_key_desc(value: str) -> tuple[int, float]:
+    """Descending-numeric sort key that still pushes missing values last.
+
+    `-_sort_key(value)` does not work for descending order: _sort_key maps the
+    "-" placeholder to +inf so it lands at the end of an *ascending* sort, and
+    negating that sends it to the front instead. The leading flag keeps
+    missing values last regardless of direction.
+    """
+    if value == "-":
+        return (1, 0.0)
+    try:
+        return (0, -float(value.rstrip("%")))
+    except ValueError:
+        return (1, 0.0)
+
+
 @app.command("compare")
 def compare(
     models: list[str] = typer.Argument(..., help="Model patterns to compare"),
@@ -704,8 +720,10 @@ def compare(
                     row.append("-")
             rows.append(row)
 
-        # Sort by corpus margin ascending — wider margin = more decisive model = better
-        for row in sorted(rows, key=lambda r: -_sort_key(r[2])):
+        # Sort by corpus margin descending — wider margin = more decisive
+        # model = better, so best-first here matches best-first in the
+        # ascending WER / latency tables above.
+        for row in sorted(rows, key=lambda r: _sort_key_desc(r[2])):
             conf_table.add_row(*row)
 
         console.print(conf_table)
