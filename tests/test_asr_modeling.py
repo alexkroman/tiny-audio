@@ -375,3 +375,175 @@ class TestProcessor:
         assert isinstance(proc, ASRProcessor)
         assert proc.feature_extractor is base_asr_model.feature_extractor
         assert proc.tokenizer is base_asr_model.tokenizer
+
+
+class TestGradientCheckpointing:
+    """ASRModel overrides `_set_gradient_checkpointing`, so its signature has to
+    stay compatible with whatever `PreTrainedModel.gradient_checkpointing_enable`
+    passes. transformers 5.16 added a keyword-only `every_n_layers` and the old
+    two-argument override raised TypeError only after the model and the dataset
+    had finished loading -- an expensive way to learn about a signature change.
+    These tests drive the real upstream entry point rather than calling the
+    override directly, so a future kwarg fails here instead of on a GPU."""
+
+    def test_enable_via_upstream_entry_point(self, base_asr_model):
+        base_asr_model.gradient_checkpointing_enable()
+        assert base_asr_model.language_model.is_gradient_checkpointing
+        base_asr_model.gradient_checkpointing_disable()
+        assert not base_asr_model.language_model.is_gradient_checkpointing
+
+    def test_enable_accepts_upstream_kwargs(self, base_asr_model):
+        # Mirrors the exact call transformers.Trainer makes.
+        base_asr_model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+            every_n_layers=1,
+        )
+        assert base_asr_model.language_model.is_gradient_checkpointing
+        base_asr_model.gradient_checkpointing_disable()
+
+    def test_signature_matches_upstream(self, base_asr_model):
+        import inspect
+
+        from transformers.modeling_utils import PreTrainedModel
+
+        upstream = inspect.signature(PreTrainedModel._set_gradient_checkpointing).parameters
+        ours = inspect.signature(base_asr_model._set_gradient_checkpointing).parameters
+        accepts_var_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in ours.values())
+        missing = [n for n in upstream if n != "self" and n not in ours]
+        assert accepts_var_kwargs or not missing, f"override missing kwargs: {missing}"
+
+    def test_does_not_expose_legacy_value_param(self, base_asr_model):
+        # Upstream treats a `value` parameter as the pre-4.35 format and routes
+        # to a different code path entirely, silently skipping our override.
+        import inspect
+
+        ours = inspect.signature(base_asr_model._set_gradient_checkpointing).parameters
+        assert "value" not in ours
+
+    def test_frozen_encoder_is_not_checkpointed(self, base_asr_model):
+        # Nothing backprops through a frozen encoder, so checkpointing it is
+        # pure recompute cost for zero memory saved.
+        targets = base_asr_model._gradient_checkpointing_targets()
+        assert base_asr_model.language_model in targets
+        assert base_asr_model.audio_tower not in targets
+
+
+class TestFlashAttentionHeadDimGuard:
+    """FlashAttention has kernels only for head_dim <= 256 and raises at the
+    first forward, not at load -- so without a config-time guard the failure
+    lands minutes into a run. Gemma 4 E2B is the motivating case: 7 of its 35
+    layers use head_dim=512."""
+
+    def test_reads_uniform_head_dim(self):
+        from tiny_audio.asr_modeling import _max_attention_head_dim
+
+        class Cfg:
+            head_dim = 128
+
+        assert _max_attention_head_dim(Cfg()) == 128
+
+    def test_takes_max_across_heterogeneous_layers(self):
+        from tiny_audio.asr_modeling import _max_attention_head_dim
+
+        class Layer:
+            def __init__(self, d):
+                self.head_dim = d
+
+        class Cfg:
+            per_layer_config = [Layer(256), Layer(512), Layer(256)]
+
+        assert _max_attention_head_dim(Cfg()) == 512
+
+    def test_per_layer_wins_over_ambiguous_global(self):
+        # Heterogeneous configs raise rather than return a number when the
+        # global attribute is read, so per_layer_config must be consulted first.
+        from tiny_audio.asr_modeling import _max_attention_head_dim
+
+        class Layer:
+            def __init__(self, d):
+                self.head_dim = d
+
+        class Cfg:
+            per_layer_config = [Layer(256), Layer(512)]
+
+            @property
+            def head_dim(self):
+                raise RuntimeError("ambiguous per-layer attribute")
+
+        assert _max_attention_head_dim(Cfg()) == 512
+
+    def test_unknown_head_dim_is_none(self):
+        # None means "cannot determine" and must not be treated as 0, which
+        # would wrongly leave FA2 enabled or wrongly disable it.
+        from tiny_audio.asr_modeling import _max_attention_head_dim
+
+        class Cfg:
+            pass
+
+        assert _max_attention_head_dim(Cfg()) is None
+
+    def test_guard_threshold_matches_flash_attention(self):
+        from tiny_audio.asr_modeling import FLASH_ATTENTION_MAX_HEAD_DIM
+
+        assert FLASH_ATTENTION_MAX_HEAD_DIM == 256
+
+
+class TestGemmaDecodeLoopPatch:
+    """Gemma 4's causal LM needs two things patched for audio generation to
+    work at all, and both failed in ways that only showed up at inference:
+    `per_layer_inputs` must be dropped after the first decode step, and the
+    wrapper must not hide `inputs_embeds` from signature introspection."""
+
+    @staticmethod
+    def _stub():
+        class Stub:
+            def prepare_inputs_for_generation(
+                self,
+                input_ids,
+                inputs_embeds=None,
+                per_layer_inputs=None,
+                is_first_iteration=False,
+                **kwargs,
+            ):
+                return {
+                    "input_ids": input_ids,
+                    "inputs_embeds": inputs_embeds,
+                    "per_layer_inputs": per_layer_inputs,
+                }
+
+        return Stub()
+
+    def test_keeps_per_layer_inputs_on_first_step(self):
+        from tiny_audio.asr_modeling import _patch_gemma_decode_loop
+
+        stub = self._stub()
+        _patch_gemma_decode_loop(stub)
+        out = stub.prepare_inputs_for_generation(
+            None, inputs_embeds="E", per_layer_inputs="PLE", is_first_iteration=True
+        )
+        assert out["per_layer_inputs"] == "PLE"
+
+    def test_drops_per_layer_inputs_on_later_steps(self):
+        # Step 2+ passes input_ids, and Gemma's forward raises if PLE comes
+        # along with it.
+        from tiny_audio.asr_modeling import _patch_gemma_decode_loop
+
+        stub = self._stub()
+        _patch_gemma_decode_loop(stub)
+        out = stub.prepare_inputs_for_generation(
+            [[1]], per_layer_inputs="PLE", is_first_iteration=False
+        )
+        assert "per_layer_inputs" not in out
+
+    def test_wrapper_preserves_inputs_embeds_in_signature(self):
+        # generation._prepare_model_inputs gates inputs_embeds support on this
+        # exact introspection; a bare *args wrapper makes generate() reject
+        # inputs_embeds, which is the only way audio reaches the decoder.
+        import inspect
+
+        from tiny_audio.asr_modeling import _patch_gemma_decode_loop
+
+        stub = self._stub()
+        _patch_gemma_decode_loop(stub)
+        params = set(inspect.signature(stub.prepare_inputs_for_generation).parameters)
+        assert "inputs_embeds" in params

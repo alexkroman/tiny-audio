@@ -30,7 +30,16 @@ model:
   # eval CE faster than label-smoothing's natural offset of ~1.19),
   # reintroduce at 0.05 — half the prior value, since the run is also
   # half as long.
-  projector_dropout: 0.0
+  #
+  # REVISED: projector_dropout restored to 0.1 after run 4j97atjp
+  # observed the predicted overfit signature: 0.167 train/eval gap that
+  # didn't close across the run's second half (eval plateaued ~step 36k
+  # while train continued descending). Literature analog: NEFTune-style
+  # noise on projector output is the closest published intervention
+  # (SpeechMapper reports dropout=0.1 helps; Disordered Speech LLM finds
+  # 0.05 optimal on audio embeddings). 0.1 picks the higher end since the
+  # mix also grew (Peoples 311K → 1M, +Emilia-YODAS 228K, +WHAM 265K).
+  projector_dropout: 0.1
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
   text_model_id: Qwen/Qwen3-0.6B
@@ -56,10 +65,22 @@ model:
   #   LabelSmoother path required, but liger fused CE already avoided
   #   that — net no-op here, just keeping HF Trainer's
   #   label_smoothing_factor at 0 (below) defensively.
+  #
+  # REVISED: label_smoothing turned off (0.1 → 0.0) after qmzim6ia/84w5zjhj
+  # showed LS=0.1 was net-negative under this architecture. Train/eval gap
+  # was structurally locked at ~0.16 regardless of LS (compare run
+  # 4j97atjp's 0.167 raw-CE gap vs qmzim's 0.162 LS-corrected gap — LS
+  # closed 0). Meanwhile WER regressed across most evals (AMI +8,
+  # ami-sdm +9, CV +1.5, etc.) with a textbook LS-induced loose-
+  # generation signature in eval outputs: 41% over-generation ratio,
+  # hallucinated word fusions ("threesight", "satahidi"), reduced
+  # empty-prediction rate. Net: LS was loosening generation without
+  # closing the gap it was supposed to address — paying cost, getting
+  # no benefit.
   label_smoothing: 0.0
 
 training:
-  hub_model_id: "mazesmazes/tiny-audio-next-thurs"
+  hub_model_id: "mazesmazes/tiny-audio-next-sat"
   group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
 
   # Joint training: projector trains from fresh init, decoder fine-tunes from
@@ -116,8 +137,25 @@ training:
   #     (below) provides adaptive damping: high-gradient steps get clipped
   #     to update≈prior magnitude, low-gradient steps get the full LR
   #     increase.
+  #
+  # REVISED: decoder_learning_rate 3e-5 → 2e-5. The 3e-5 rationale above
+  # was for the OLD recipe with ~44K steps + LS=0.1. Three subsequent
+  # shifts raise effective integrated LR significantly:
+  #   (1) Mix grew Peoples 311K → 1M + Emilia-YODAS 228K + Earnings22 11K
+  #       → ~50K steps per epoch vs OLD's 44K (+14% steps).
+  #   (2) WHAM removed and max_audio: 30s → 20s recover some headroom on
+  #       step count but the net is still ~50K steps.
+  #   (3) label_smoothing: 0.1 → 0.0 raises effective gradient on the
+  #       correct-token row by ~10% (LS no longer scales it by 0.9×).
+  # At 3e-5 over 50K steps with LS=0, integrated LR ≈ 0.788 vs OLD's
+  # 0.462 (1.71× OLD). Empirical: qmzim6ia at 3e-5 / LS=0.1 hit peak
+  # attn drift 11.67% at step 20K; 84w5zjhj at 2e-5 / LS=0.1 hit 8.47%
+  # at step 22K — confirms scaling. Projecting 3e-5 / LS=0 to step 50K
+  # lands peak drift at ~17–20% (at/over the 18% ceiling). At 2e-5,
+  # integrated LR = 0.525 (1.14× OLD) → projected drift ~13–14%, mid-
+  # zone with modest headroom for the bigger mix's added breadth.
   learning_rate: 1e-3
-  decoder_learning_rate: 3e-5
+  decoder_learning_rate: 2e-5
 
   # Label smoothing is routed through model.label_smoothing (above) so it
   # rides liger's fused linear CE and is automatically disabled on eval.
@@ -187,7 +225,7 @@ training:
   # decoder update is 1e-5 × 87 ≈ 8.7e-4, small enough that warmup tail
   # protection is no longer load-bearing. 2000 steps is 2.4% of the
   # 85k-step run — in the standard 1–5% pretraining-warmup range.
-  warmup_steps: 1000
+  warmup_steps: 2000
 
   # Cosine-with-min-lr: peak LR while projector is actively learning, decay
   # to 5% floor so late-stage tied-embedding rare-token refinement stays
@@ -219,8 +257,8 @@ training:
   # default while we're combining two LR-loosening changes.
   max_grad_norm: 1.0
 
-  seed: 43
-  auto_find_batch_size: true
+  seed: 44
+  auto_find_batch_size: false
   per_device_train_batch_size: 100
   per_device_eval_batch_size: 100
   gradient_accumulation_steps: 1

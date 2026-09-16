@@ -220,6 +220,23 @@ def install_dependencies(conn: Connection) -> None:
 set -eo pipefail
 
 export PATH="/root/.local/bin:$PATH"
+
+# RunPod images ship torch in system dist-packages alongside its nvidia-*
+# CUDA wheels. When the project pins a different torch version it installs
+# into --user and shadows the image copy, but the nvidia libs stay in the
+# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
+# `import torch` dies with ImportError. Observed on
+# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
+# broke the flash-attn build, whose metadata hook imports torch.
+NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
+# Spelled out with if/else on purpose: these scripts are built with Python
+# f-strings, so shell brace-expansion syntax would be parsed as an f-string
+# replacement field and raise NameError at build time.
+if [ -n "$LD_LIBRARY_PATH" ]; then
+  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
+else
+  export LD_LIBRARY_PATH="$NVLIBS"
+fi
 export PIP_ROOT_USER_ACTION=ignore
 export POETRY_VIRTUALENVS_CREATE=false
 export PIP_BREAK_SYSTEM_PACKAGES=1
@@ -236,6 +253,23 @@ python -c "import torch; assert torch.cuda.is_available()" || {
 }
 
 # Poetry tooling — only install what's missing
+# RunPod images ship torch in system dist-packages alongside its nvidia-*
+# CUDA wheels. When the project pins a different torch version it installs
+# into --user and shadows the image copy, but the nvidia libs stay in the
+# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
+# `import torch` dies with ImportError. Observed on
+# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
+# broke the flash-attn build, whose metadata hook imports torch.
+NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
+# Spelled out with if/else on purpose: these scripts are built with Python
+# f-strings, so shell brace-expansion syntax would be parsed as an f-string
+# replacement field and raise NameError at build time.
+if [ -n "$LD_LIBRARY_PATH" ]; then
+  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
+else
+  export LD_LIBRARY_PATH="$NVLIBS"
+fi
+
 command -v poetry >/dev/null 2>&1 || pip install --user poetry
 python -c "import poetry_plugin_export" 2>/dev/null || pip install --user poetry-plugin-export
 poetry config virtualenvs.create false
@@ -319,6 +353,63 @@ echo "Dependencies verified for $TA_PYTHON"
     print(f"Dependencies installed successfully! Full log: {log_path}")
 
 
+@app.command(name="plan")
+def plan(
+    experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
+    seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
+    gpu: str = typer.Option("NVIDIA H100 80GB HBM3", "--gpu"),
+    image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output"),
+    overrides: list[str] = typer.Argument(None, help="Extra Hydra overrides"),
+):
+    """Estimate GPU memory + disk for a config and emit a pod create command."""
+    from scripts.deploy.plan import plan_command
+
+    plan_command(
+        experiment=experiment,
+        seq_len=seq_len,
+        gpu=gpu,
+        image=image,
+        as_json=as_json,
+        overrides=overrides,
+    )
+
+
+@app.command(name="up")
+def up(
+    experiment: str = typer.Option("granite_gemma_smoke", "--experiment", "-e"),
+    seq_len: int = typer.Option(512, "--seq-len"),
+    name: str | None = typer.Option(None, "--name"),
+    image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
+    max_attempts: int = typer.Option(6, "--max-attempts"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    overrides: list[str] = typer.Argument(None),
+):
+    """Size a config, then create a pod on the first GPU type with capacity."""
+    from scripts.deploy.plan import provision_command
+
+    provision_command(
+        experiment=experiment,
+        seq_len=seq_len,
+        name=name,
+        image=image,
+        max_attempts=max_attempts,
+        dry_run=dry_run,
+        overrides=overrides,
+    )
+
+
+@app.command(name="wait")
+def wait(
+    pod_id: str = typer.Argument(..., help="Pod id from `ta runpod up`"),
+    timeout_s: int = typer.Option(900, "--timeout"),
+):
+    """Block until a pod exposes SSH, then print `<ip> <port>`."""
+    from scripts.deploy.plan import wait_command
+
+    wait_command(pod_id=pod_id, timeout_s=timeout_s)
+
+
 @app.command()
 def deploy(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
@@ -372,6 +463,23 @@ def build_training_script(
 ulimit -n 65536
 pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
+
+# RunPod images ship torch in system dist-packages alongside its nvidia-*
+# CUDA wheels. When the project pins a different torch version it installs
+# into --user and shadows the image copy, but the nvidia libs stay in the
+# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
+# `import torch` dies with ImportError. Observed on
+# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
+# broke the flash-attn build, whose metadata hook imports torch.
+NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
+# Spelled out with if/else on purpose: these scripts are built with Python
+# f-strings, so shell brace-expansion syntax would be parsed as an f-string
+# replacement field and raise NameError at build time.
+if [ -n "$LD_LIBRARY_PATH" ]; then
+  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
+else
+  export LD_LIBRARY_PATH="$NVLIBS"
+fi
 export TOKENIZERS_PARALLELISM=false
 export HF_DATASETS_AUDIO_DECODER="soundfile"
 export HF_HOME=/workspace/.cache/huggingface
@@ -545,6 +653,23 @@ def build_sift_script(
 ulimit -n 65536
 pip install hf_transfer --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
+
+# RunPod images ship torch in system dist-packages alongside its nvidia-*
+# CUDA wheels. When the project pins a different torch version it installs
+# into --user and shadows the image copy, but the nvidia libs stay in the
+# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
+# `import torch` dies with ImportError. Observed on
+# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
+# broke the flash-attn build, whose metadata hook imports torch.
+NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
+# Spelled out with if/else on purpose: these scripts are built with Python
+# f-strings, so shell brace-expansion syntax would be parsed as an f-string
+# replacement field and raise NameError at build time.
+if [ -n "$LD_LIBRARY_PATH" ]; then
+  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
+else
+  export LD_LIBRARY_PATH="$NVLIBS"
+fi
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
 export HF_HUB_ENABLE_HF_TRANSFER=1
@@ -672,6 +797,23 @@ def build_eval_script(
 ulimit -n 65536
 pip install hf_transfer modelscope --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
+
+# RunPod images ship torch in system dist-packages alongside its nvidia-*
+# CUDA wheels. When the project pins a different torch version it installs
+# into --user and shadows the image copy, but the nvidia libs stay in the
+# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
+# `import torch` dies with ImportError. Observed on
+# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
+# broke the flash-attn build, whose metadata hook imports torch.
+NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
+# Spelled out with if/else on purpose: these scripts are built with Python
+# f-strings, so shell brace-expansion syntax would be parsed as an f-string
+# replacement field and raise NameError at build time.
+if [ -n "$LD_LIBRARY_PATH" ]; then
+  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
+else
+  export LD_LIBRARY_PATH="$NVLIBS"
+fi
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
 export HF_HUB_ENABLE_HF_TRANSFER=1

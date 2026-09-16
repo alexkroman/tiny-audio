@@ -5,6 +5,43 @@ import transformers
 # Default conv layers for Whisper/GLM-ASR audio encoders: [(pad, kernel, stride), ...]
 DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
 
+# Granite Speech 5.0 TurboCTC. Its feature extractor already stacks mel frame
+# pairs (100 Hz -> 50 Hz, 320-dim output), so the `mel_length` handed to
+# compute_encoder_output_length is the 50 Hz frame count and only the encoder's
+# own 4x reduction remains. Granite subsamples with `t // 2` (floor, dropping a
+# trailing odd frame) in each of the two `subsample_layers`; two
+# (pad=0, kernel=2, stride=2) entries reproduce floor(L/2) exactly under the
+# generic formula below. Verified against the real encoder at 1/2/5/10/20s
+# (T_fe 50/100/250/500/1000 -> 12/25/62/125/250).
+# Full path: 100 Hz mel -> 2x FE stacking -> 4x encoder -> 12.5 Hz.
+GRANITE_ENCODER_CONV_LAYERS = [(0, 2, 2), (0, 2, 2)]
+
+# Encoders whose `input_features` are (batch, time, feature_dim) rather than
+# Whisper/GLM-ASR's (batch, n_mels, mel_len). Conformer-family checkpoints
+# (Granite Speech 5.0, Parakeet, Nemotron) are all time-major.
+_TIME_MAJOR_ENCODER_MARKERS = ("granite-speech", "parakeet", "nemotron")
+
+# Decoders that already ship a native audio-placeholder token. Reusing it is
+# strictly better than adding "<audio>" and resizing, above all when the
+# decoder is frozen: masked_scatter overwrites the placeholder's *input*
+# embedding, but Gemma4 also looks the token up in `embed_tokens_per_layer` to
+# build its per-layer embeddings (PLE), and that row is NOT overwritten. A
+# freshly added row would hand every audio position a random, permanently
+# untrainable PLE vector. Gemma's own "<|audio|>" row is pretrained for
+# exactly this placeholder role.
+_NATIVE_AUDIO_TOKENS = {"gemma-4": "<|audio|>"}
+
+
+def native_audio_token(text_model_id: Optional[str]) -> Optional[str]:
+    """Return the decoder's built-in audio placeholder token, if it has one."""
+    lowered = (text_model_id or "").lower()
+    return next((tok for key, tok in _NATIVE_AUDIO_TOKENS.items() if key in lowered), None)
+
+
+def is_time_major_encoder(audio_model_id: Optional[str]) -> bool:
+    """Whether `audio_model_id` expects (batch, time, feature) input_features."""
+    return any(m in (audio_model_id or "").lower() for m in _TIME_MAJOR_ENCODER_MARKERS)
+
 
 def compute_encoder_output_length(mel_length, conv_layers=None):
     """Apply encoder conv layer formulas to compute output length.
@@ -47,6 +84,40 @@ class ASRConfig(transformers.PretrainedConfig):
         # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
         encoder_conv_layers: Optional[list] = None,
         audio_sample_rate: int = 16000,
+        # Whether the encoder takes `input_features` as (batch, time, feature)
+        # instead of Whisper/GLM-ASR's (batch, n_mels, mel_len). Only
+        # SpecAugment unpacks all three dims, so this exists to keep
+        # `_mask_input_features` masking the time axis rather than the feature
+        # axis. Left as None it is auto-detected from `audio_model_id`, so a
+        # Granite/Parakeet swap can't silently mask the wrong axis.
+        audio_features_time_major: Optional[bool] = None,
+        # Whether to forward the mel padding mask into the audio encoder.
+        # This matters a lot for Granite: it uses block attention over fixed
+        # 128-frame blocks, so with `padding="longest"` batches the pad frames
+        # leak into real frames -- measured max abs difference on the VALID
+        # frames of a 1s clip padded alongside a 10s clip is 2.14.
+        #
+        # Auto-detected as True for the Conformer family and False for
+        # Whisper/GLM-ASR. The legacy path is deliberately left unchanged:
+        # GLM-ASR has been trained without an encoder mask for every run in
+        # this repo's history, and silently switching it would make new runs
+        # incomparable to those baselines. Flip it explicitly to test.
+        encoder_attention_mask: Optional[bool] = None,
+        # Placeholder token whose embeddings get replaced by projector output.
+        # Defaults to the decoder's native audio token when it has one (Gemma 4),
+        # otherwise "<audio>", which is added to the tokenizer and requires an
+        # embedding resize.
+        audio_token: Optional[str] = None,
+        # dtype for the projector alone. The fp32-master-weights argument only
+        # applies to parameters an optimizer actually updates, so pinning the
+        # whole stack to float32 to protect a 10M-param projector wastes 2
+        # bytes on every frozen parameter -- 10.4 GiB on a frozen Gemma 4 E2B
+        # (5.12B stored params; "E2B" counts *active* params, and the
+        # per-layer-embedding table alone is 2.35B). Set this to float32 while
+        # model_dtype stays bfloat16 to get master-weight precision where it
+        # matters at frozen-model memory cost. Defaults to model_dtype, so
+        # existing recipes are unchanged.
+        projector_dtype: Optional[str] = None,
         projector_pool_stride: int = 4,
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
@@ -147,6 +218,18 @@ class ASRConfig(transformers.PretrainedConfig):
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
+        self.audio_features_time_major = (
+            is_time_major_encoder(audio_model_id)
+            if audio_features_time_major is None
+            else audio_features_time_major
+        )
+        self.encoder_attention_mask = (
+            is_time_major_encoder(audio_model_id)
+            if encoder_attention_mask is None
+            else encoder_attention_mask
+        )
+        self.audio_token = audio_token or native_audio_token(text_model_id) or "<audio>"
+        self.projector_dtype = projector_dtype or model_dtype
         self.audio_sample_rate = audio_sample_rate
         self.projector_pool_stride = projector_pool_stride
         self.downsample_rate = downsample_rate

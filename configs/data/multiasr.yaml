@@ -34,16 +34,15 @@
 # would not reduce download. Label quality is also weaker than the
 # other corpora (YouTube user-provided captions even on the manual
 # tier are not verbatim ASR-grade).
-# Emilia-YODAS 616h (MrDragonFox/EN_Emilia_Yodas_616h) is added below
-# as the way to get partial YODAS coverage without those problems: a
-# 228K-sample / 616hr / 108GB Parquet curation of the English portion
-# with audio segmented to single-speaker clips by the Emilia pipeline
-# and re-transcribed by ElevenLabs Scribe v1 — cleaner labels and ~4×
-# smaller footprint than raw en000. Caveat: Emilia's quality filters
-# select for single-speaker content, so this is YouTube monologue
-# register (vlogs, narration, presentations), not multi-speaker
-# conversational. See per-source comment below for sizing + format
-# rationale.
+# Emilia-YODAS 616h (MrDragonFox/EN_Emilia_Yodas_616h) was tried as a
+# partial-YODAS path: a 228K-sample / 616hr / 108GB Parquet curation
+# of the English portion segmented to single-speaker clips by the
+# Emilia pipeline and re-transcribed by ElevenLabs Scribe v1. Removed
+# after net regression on clean-speech evals — label-WER ceiling
+# ~5-12% (Scribe v1) was noisier than every human-transcribed source
+# in the mix and the YouTube-monologue register didn't earn its 6.3%
+# mix share. If re-introducing later, filter by dnsmos > 3.0 + Scribe/
+# Emilia transcript agreement to suppress the label-noise tail.
 # Peoples: `clean_sa` only (311K). Both `_sa` configs apply the
 # sentence-alignment filter on top of the corpus-level CER ≤ 20%
 # bound, so each segment's audio span matches its label span; the
@@ -68,25 +67,74 @@
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy medium        │ ~1,100,000│ ~1,067,000│   19.2% │
-# │ Peoples clean (cap 1M)   │ ~1,500,000│ 1,000,000 │   17.9% │
-# │ CommonVoice 17 en        │ ~1,100,000│   ~957,000│   17.2% │
-# │ Gigaspeech M             │  ~910,000 │   ~910,000│   16.3% │
-# │ SPGISpeech M             │   385,000 │   385,000 │    6.9% │
-# │ WHAM (upsample to 265K)  │    25,000 │   265,000 │    4.8% │
-# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    4.8% │
-# │ Emilia-YODAS 616h        │   228,265 │  ~228,000 │    4.1% │
-# │ Switchboard              │   185,402 │  ~180,000 │    3.2% │
-# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    3.0% │
-# │ AMI IHM                  │   108,502 │   ~79,000 │    1.4% │
-# │ AMI SDM                  │   107,319 │   ~67,000 │    1.2% │
+# │ LibriHeavy med (cap 600K)│ ~1,067,000│   600,000 │   18.4% │
+# │ CommonVoice 17 en (600K) │ ~1,100,000│   600,000 │   18.4% │
+# │ Gigaspeech M (cap 600K)  │   ~910,000│   600,000 │   18.4% │
+# │ SPGISpeech M             │   385,000 │   385,000 │   11.8% │
+# │ Peoples clean_sa         │   311,000 │   311,000 │    9.5% │
+# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    8.2% │
+# │ Switchboard              │   185,402 │  ~180,000 │    5.5% │
+# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    5.0% │
+# │ AMI IHM                  │   108,502 │   ~79,000 │    2.4% │
+# │ AMI SDM                  │   107,319 │   ~67,000 │    2.1% │
+# │ Earnings22 train         │    11,450 │   ~11,000 │    0.3% │
 # └──────────────────────────┴           ┴           ┴         ┘
-# Total raw: ~6,085,500  →  Total effective: ~5,571,000 (-8.5%)
+# Total raw: ~4,620,623  →  Total effective: ~3,266,000 (-29.3%)
 #
-# WHAM is the only entry where Effective > Raw: target_samples upsamples
-# the 25K natural noise clips ~10.6× to 265K to give the non-speech-
-# rejection objective enough gradient frequency. Every WHAM row trains
-# the model on an empty-string assistant turn via `text_override`.
+# Big-3 (LibriHeavy + CV17 + GS) capped at 600K each with deterministic
+# shuffle (combined 55.2% mix share, down from 62% pre-cap). AMI
+# combined 4.5%, conversational total (Switchboard + AMI-IHM + AMI-SDM)
+# 10.0%.
+#
+# Big-3 (LibriHeavy + CV + GS) capped at 600K each to address structural
+# single-speaker dominance (was ~62% combined mix share, now 50.1%).
+# Raises AMI / Switchboard / VoxPopuli per-step gradient share without
+# upsampling them (which the natural-cap rationale documents as overfit-
+# prone for AMI). AMI combined goes 3.1% → 4.1%, Switchboard 3.8% → 5.0%.
+# Cost: ~1.7M rows of single-speaker data dropped — may modestly hurt
+# LS Clean / LS Other / CV / Gigaspeech per-eval WER, in exchange for
+# AMI / ami-sdm / Switchboard gradient share. Net direction unknown
+# until empirical eval.
+#
+# Rebalance after run n18 (Peoples clean 1M cap) showed continued
+# conversational-eval regression at step 22K (AMI 26.26, ami-sdm 74.94
+# — *worse* than n18 step 13K's 20.72 / 69.38). Diagnosis: even at 1M
+# cap, Peoples + LibriHeavy + CV + GS combined to ~80% single-speaker
+# presentational gradient share, drowning out AMI/CV.
+#
+# Single-variable rebalance vs n18:
+#   Peoples 1M `clean` (cap) → `clean_sa` (311K natural).
+#   Frees ~689K rows of gradient share that were going to noisy auto-
+#   aligned single-speaker content. Matches thurs's setting that
+#   produced AMI 17.54 / ami-sdm 43.23 at end of training.
+#
+# AMI IHM/SDM kept at natural cap (post-<0.8s-filter ~79K / ~67K, 3.1%
+# combined mix share). Prior 305K upsample target was documented to
+# produce 29% IHM WER from same-speaker replay (overfit, not data-
+# limited). IHM and SDM share identical transcripts per meeting
+# segment — only the mic placement differs — so upsampling is mostly
+# replay against fixed unique-text count and recapitulates the
+# replay-overfit failure mode.
+#
+# WHAM (nguyenvulebinh/wham) was tried multiple times for non-speech-
+# rejection training (5%, 2%, then 2.8% with random truncation to
+# [1, 18]s) and removed each time. The cleanest signal came from the
+# sat run where WHAM was in the mix and most non-conversational evals
+# regressed (CV +1.96, LS Other +0.83, Loquacious +0.87, VoxPopuli
+# +0.60). The 2.8% empty-transcript gradient share appears to bias the
+# model toward under-generation on low-volume / noisy speech segments.
+# If non-speech rejection becomes a deployment-need later, re-introduce
+# via inference-time silence/VAD heuristics rather than mix-share
+# gradient signal.
+#
+# The text_override + _allow_empty_label + random_truncate_seconds
+# plumbing in scripts/train.py (added for WHAM) is kept — generic
+# config fields, future-useful.
+#
+# Earnings22 uses `sanchit-gandhi/earnings22_robust_split` (pre-split:
+# train/validation/test). The `test` split is what the eval pipeline
+# scores against (scripts/eval/datasets.py); the `train` split included
+# here is disjoint and safe to train on.
 #
 # Filter loss by source (measured 2026-05-15):
 # - CommonVoice down_votes filter (in scripts/train.py): drops ~13% of
@@ -166,17 +214,27 @@ datasets:
   # so the eval gap vs universal-3-pro is genuine model quality, not ref
   # noise — the lever is acoustic exposure to the eval distribution.
   #
-  # REVISED: stepped up from `clean_sa` (311K) to `clean` capped at 1M.
-  # Prior `clean` revision (uncapped at 1.5M) was rolled back to `clean_sa`
-  # because per-segment audio/text drift on what became the largest corpus
-  # poisoned the gradient. Revisiting alongside stage_1.yaml's wd: 0 → 0.01
-  # flip: the noisy-label sensitivity argument is the same as before, but
-  # the recipe now has some explicit label-noise damping (WD). 1M cap
-  # keeps Peoples well below the prior 1.5M dominance threshold (~19%
-  # mix share instead of ~26%) so it doesn't crowd out cross-corpus
-  # regularization. If train CE collapses while eval plateaus on the
-  # Peoples eval split (memorization of noisy clean rows), revert to
-  # clean_sa.
+  # REVISED: stepped up from `clean_sa` (311K) → `clean` capped at 1M →
+  # full `clean` (~1.5M, no cap) → back to `clean` capped at 1M → back
+  # to `clean_sa` (311K natural). Run n18 (Peoples `clean` cap 1M)
+  # showed the same conversational regression pattern as 09in (Peoples
+  # `clean` 1.5M), just slower:
+  #   - AMI WER: n18 step 13K 20.72 → n18 step 22K 26.26 (+5.54 during
+  #     6K training steps)
+  #   - ami-sdm WER: n18 step 13K 69.38 → step 22K 74.94 (+5.56)
+  #   - CV WER: n18 step 13K 13.13 → step 22K 15.14 (+2.01)
+  # All three are multi-speaker / accent-diverse / hard distributions
+  # that were being out-voted by Peoples' dominant single-speaker
+  # gradient signal. Even at 1M cap (~19% mix share), Peoples still
+  # displaces AMI (1.3%) and CV (~18%) per-step gradient share enough
+  # to bias the decoder toward Peoples-register specialization.
+  # Reverting to `clean_sa` (311K, 5.8% share) — thurs's setting that
+  # produced AMI 17.54 / ami-sdm 43.23. Loses the upstream-volume bet
+  # (1M auto-aligned rows) for the per-row quality bet (sentence-aligned
+  # subset). thurs's WER on Peoples eval was 22.05; the noisier-clean
+  # tail did NOT improve Peoples WER in either cap-1M or uncapped runs
+  # (both ~25), so the volume bet wasn't paying off on the source
+  # distribution anyway.
   - path: MLCommons/peoples_speech
     name: clean
     audio_column: audio
@@ -184,7 +242,6 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: []
-    target_samples: 1000000
 
   # People's Speech validation split — MLCommons ships dev/test as separate
   # configs (not splits inside clean_sa). Validation is human-transcribed
@@ -206,11 +263,20 @@ datasets:
   # audio/transcript mismatches that Mozilla's standard `train` split
   # still admits (validated requires up_votes > down_votes, not
   # down_votes == 0). Drops ~13% of train rows (measured 2026-05-15 on
-  # a 200-sample stream — earlier estimate of ~2-5% was wrong). Natural
-  # cap; target_samples omitted to maximize CV exposure. CV is a +3.14
-  # eval gap vs universal-3-pro driven primarily by accent + device-
-  # diversity distribution shift, not reference noise — filtering helps
-  # but won't close it fully.
+  # a 200-sample stream — earlier estimate of ~2-5% was wrong). 600K
+  # cap with deterministic shuffle in scripts/train.py:
+  # _resample_to_target samples representatively from the pool.
+  #
+  # CV is a +3.14 eval gap vs universal-3-pro driven primarily by
+  # accent + device-diversity distribution shift, not reference noise.
+  # Brief swap to CV19 (fsicoli mirror) was reverted — CV19's train
+  # split is the same magnitude as CV17 (~1.1M), so the swap was mostly
+  # a contributor-distribution refresh worth ~0.3-0.5 WER, not a
+  # volume expansion. The fsicoli mirror is script-based with a 45GB
+  # first-time download that hung the train-loop loader; CV17's
+  # fixie-ai Parquet shards are smaller, faster, and battle-tested
+  # with this codebase. Worth revisiting only if the +0.3-0.5 WER
+  # delta becomes the deciding gap to u3pro.
   - path: fixie-ai/common_voice_17_0
     name: en
     audio_column: audio
@@ -246,49 +312,6 @@ datasets:
     train_splits: []
     eval_splits: [validation]
 
-  # Emilia-YODAS 616h (MrDragonFox/EN_Emilia_Yodas_616h, 228,265 train /
-  # 616hr / 108GB across 215 Parquet shards, CC-BY-4.0). Community
-  # re-curation of the English portion of amphion/Emilia-Dataset, itself
-  # the cleaned-up version of espnet/yodas (YouTube). The Emilia pipeline
-  # applies speaker diarization, source separation, DNSMOS audio-quality
-  # filtering, and Whisper-medium auto-transcription; MrDragonFox then
-  # re-transcribed each segment with ElevenLabs Scribe v1 (`text_scribe`)
-  # and added Meta Audio-Aesthetics scores (CE/CU/PC/PQ). Two transcripts
-  # ship: `text_scribe` (verbatim, preserves "gotta") and `text_emilia`
-  # (Whisper-medium output, normalized). Using `text_scribe`: both are
-  # cased + punctuated, but Scribe is the newer model (~5% reported WER vs
-  # Whisper-medium's 8-12% on YouTube-style content) and matches the
-  # Qwen3 decoder's spoken-text register more faithfully. Estimated
-  # label-WER ceiling ~5-12% — cleaner than Peoples clean_sa (~8-15% via
-  # auto-alignment) but noisier than every human-transcribed source in
-  # the mix (SPGI/TEDLIUM/AMI/Switchboard).
-  #
-  # Unblocks the YODAS rejection from the header comment above: 108GB is
-  # ~4× smaller than raw en000 (469GB), Parquet shards stream per-segment
-  # rather than per-tarball, and double-pass auto-transcription replaces
-  # YouTube user captions.
-  #
-  # Caveat: Emilia's pipeline selects for single-speaker clean clips
-  # (TTS-oriented curation), so content here is YouTube *monologue* —
-  # vlogs, narration, presentations, news — not multi-speaker
-  # conversational. Switchboard + AMI remain the only true conversational
-  # sources. Value-add is YouTube-register accent diversity and modern
-  # informal speech, not turn-taking supervision.
-  #
-  # Quality fields (CE, CU, PC, PQ, dnsmos, phone_count) are dropped by
-  # the DataLoader column-pruning (only `audio` + `text` kept) but are
-  # available for follow-up filters if label noise becomes a problem
-  # (e.g. drop rows where Scribe and Emilia transcripts disagree above an
-  # edit-distance threshold, or filter on dnsmos > 3.0). Segment
-  # durations are 5-11s typical, all within the 30s Whisper window —
-  # DataCollator audio-length filter is a near-no-op here.
-  - path: MrDragonFox/EN_Emilia_Yodas_616h
-    audio_column: audio
-    text_column: text_scribe
-    task: transcribe
-    train_splits: [train]
-    eval_splits: []
-
   # SPGISpeech M — financial earnings calls. Natural cap ~385K (was
   # capped to 150K in the prior tilt to fund GS L expansion; uncapped
   # here as part of the natural-cap reset). Kensho-employed
@@ -303,6 +326,38 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
+
+  # Earnings22 (sanchit-gandhi/earnings22_robust_split, 11,450 train /
+  # ~5GB / cased+punct). Earnings calls from 22 multinational companies
+  # spanning 5 dialect families — UK, US, Indian, Canadian, Australian
+  # English. Re-split by sanchit-gandhi into train/validation/test
+  # (~80/10/10) explicitly to enable clean training-vs-evaluation
+  # separation; the canonical Earnings22 ASR benchmark (used by
+  # distil-whisper, Whisper-AT, and our own scripts/eval/datasets.py)
+  # consumes the `test` split. Including the `train` split here is the
+  # correct way to take Earnings22 domain exposure without contaminating
+  # the eval signal — the rows are disjoint.
+  #
+  # Domain rationale: tiny-audio-next-thurs trails universal-3-pro by
+  # +3.93 WER on Earnings22 eval despite SPGISpeech M (also earnings)
+  # being in the mix at 385K. SPGI is studio-quality single-speaker
+  # quarterly reports; Earnings22 is multi-speaker accent-diverse Q&A
+  # over telephony — different acoustic + register profile. Direct
+  # exposure to the eval distribution (without contamination) targets
+  # this gap.
+  #
+  # Natural size only (~11K). Small mix share (~0.2%) but high-leverage
+  # for the Earnings22 eval gap specifically; cross-corpus regularization
+  # benefit on other evals is marginal at this volume. Each segment is
+  # 5-15s typical, well under the 30s Whisper window. text_column is
+  # `sentence` matching the eval pipeline's field for direct format
+  # parity.
+  - path: sanchit-gandhi/earnings22_robust_split
+    audio_column: audio
+    text_column: sentence
+    task: transcribe
+    train_splits: [train]
+    eval_splits: []
 
   # VoxPopuli `en` (facebook, natural ~168K / ~543hr). European Parliament
   # L2-accented English read by parliamentarians — restores the VP
@@ -334,12 +389,17 @@ datasets:
     train_splits: [train]
     eval_splits: [validation]
 
-  # AMI corpus IHM — close-talk meeting mic. Natural cap ~108,502
-  # (target_samples omitted). DataCollator's <0.8s filter drops ~27%
-  # of rows as isolated backchannels ("YEAH"/"HMM"/"OKAY") where the
-  # audio/transcript span doesn't align — effective contribution is
-  # ~79K. Prior 305K target was ~3x replay on the same speakers and
-  # almost certainly drove the 29% IHM eval (overfit, not data-limited).
+  # AMI corpus IHM — close-talk meeting mic. Natural cap ~108,502, post-
+  # <0.8s-filter effective ~79K (the filter drops backchannels like
+  # "YEAH"/"HMM"/"OKAY" where audio/transcript span doesn't align).
+  #
+  # NATURAL CAP (no target_samples). Prior 305K target was ~3× replay
+  # on the same speakers and produced 29% IHM eval — overfit signature,
+  # not data-limited. IHM and SDM also share identical transcripts per
+  # meeting segment (only the mic placement differs), so upsampling
+  # either one is mostly replay against fixed unique-text count.
+  # Natural cap is the right level — diversity is the constraint, not
+  # gradient frequency.
   - path: edinburghcstr/ami
     name: ihm
     audio_column: audio
@@ -349,14 +409,15 @@ datasets:
     eval_splits: [validation]
 
   # AMI corpus SDM — single distant mic (far-field). Natural cap
-  # ~107,319 (was capped to 40K in the prior tilt; uncapped here as
-  # part of the natural-cap reset). DataCollator's <0.8s filter drops
-  # ~30–37% of rows — the same backchannel pattern as IHM but more
-  # severe because SDM segmentation slices more aggressively — so
-  # effective contribution is ~67K. Shares hand-transcribed labels
-  # with IHM; supervision signal is identical at the text level, only
-  # the acoustics differ. Restores far-field / multi-talker / heavy-
-  # reverb exposure that the aug-off baseline can't synthesize.
+  # ~107,319, post-<0.8s-filter effective ~67K. Shares hand-transcribed
+  # labels with IHM; supervision signal is identical at the text level,
+  # only the acoustics differ.
+  #
+  # NATURAL CAP (no target_samples). Same reasoning as IHM above —
+  # upsampling SDM would mostly replay identical text labels against
+  # different acoustic frames; the projector benefits from the audio
+  # diversity but the decoder side caps at the natural unique-meeting-
+  # segment count.
   - path: edinburghcstr/ami
     name: sdm
     audio_column: audio
@@ -364,38 +425,6 @@ datasets:
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
-
-  # WHAM noise dataset (nguyenvulebinh/wham, 25,000 natural / ~4.7 GB).
-  # Pure background-noise audio recorded in cafes, restaurants, parks
-  # (DoloresParkCafe / PeetsCoffee / etc.) with no speech and no
-  # transcript field. Used here for non-speech-rejection training: every
-  # WHAM clip pairs with an empty assistant transcript via
-  # `text_override: ""`, teaching the model that non-speech audio →
-  # emit nothing. Addresses the classic Whisper-style hallucination
-  # failure mode where 30s of ambient cafe noise produces "Thanks for
-  # watching" or other high-prior continuations at inference.
-  #
-  # Upsampled to 265K via target_samples (~10.6× repetition over the
-  # 25K unique clips) — targets ~4.8% of the post-add mix share. Each
-  # unique clip thus appears 10-11× per epoch; gradient frequency is the
-  # value here, not per-clip diversity, since the goal is reinforcement
-  # of the "noise → empty" mapping rather than learning per-clip
-  # nuances. The 25K natural set already spans a wide range of indoor /
-  # outdoor noise contexts.
-  #
-  # text_override + the per-row `_allow_empty_label` marker injected by
-  # scripts/train.py:_prepare_split bypass the DataCollator's empty-
-  # label filter for these rows only — other datasets keep that filter
-  # (which protects against pure-annotation-marker rows, e.g. Gigaspeech
-  # <NOISE>-only segments). See DataCollator._extract_audio_arrays for
-  # the per-row check.
-  - path: nguyenvulebinh/wham
-    audio_column: audio
-    task: transcribe
-    train_splits: [train]
-    eval_splits: []
-    text_override: ""
-    target_samples: 265000
 
 # Audio processing
 sample_rate: 16000

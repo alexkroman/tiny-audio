@@ -321,6 +321,41 @@ class DatasetLoader:
             ds = ds.add_column("text", [text_override] * n)
             ds = ds.add_column("_allow_empty_label", [True] * n)
 
+        # force_lowercase: lowercase the entire text column before
+        # _normalize_label runs. Used for sources whose annotation convention
+        # uses ALL-CAPS within otherwise-lowercase text as a non-orthographic
+        # signal (e.g. Buckeye uses caps for prosodic stress: "and just
+        # STARTED picking a fight"). The mixed-case pattern defeats the
+        # _needs_truecase heuristic (which only recases pure mono-case
+        # sources), leaving the emphasis-caps to survive normalization and
+        # produce inconsistent training labels (~15% of Buckeye rows).
+        # Force-lowercasing first collapses these to clean zero-cap text,
+        # which then qualifies for truecase and produces uniformly cased
+        # output. WER scoring is unaffected (Whisper normalizer lowercases
+        # both sides); this fix is about training-label consistency.
+        if dataset_cfg.get("force_lowercase"):
+            ds = ds.map(
+                lambda b: {"text": [(t or "").lower() for t in b["text"]]},
+                batched=True,
+                num_proc=self.num_proc,
+            )
+
+        # random_truncate_seconds: [min, max] enables per-row random
+        # truncation in the DataCollator. Each row gets a fresh uniform
+        # [min, max] target duration each time it's pulled into a batch,
+        # with a random start offset within the original audio. Used for
+        # noise-rejection sources (WHAM) where the source audio is uniformly
+        # long (~30s) and we want effective length diversity in training so
+        # the model learns "any duration of noise → emit empty" rather than
+        # "30s noise → emit empty." Stored per-row so the DataCollator can
+        # apply it without knowing which dataset a row came from.
+        truncate_range = dataset_cfg.get("random_truncate_seconds")
+        if truncate_range is not None:
+            t_min, t_max = float(truncate_range[0]), float(truncate_range[1])
+            n = len(ds)
+            ds = ds.add_column("_random_truncate_min_s", [t_min] * n)
+            ds = ds.add_column("_random_truncate_max_s", [t_max] * n)
+
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
         if self.multitask_enabled:
@@ -334,6 +369,10 @@ class DatasetLoader:
         # Preserve the empty-label bypass marker so it reaches the collator.
         if "_allow_empty_label" in ds.column_names:
             keep_cols = keep_cols | {"_allow_empty_label"}
+        # Preserve the per-row random-truncation bounds so the collator can
+        # apply them at batch time.
+        if "_random_truncate_min_s" in ds.column_names:
+            keep_cols = keep_cols | {"_random_truncate_min_s", "_random_truncate_max_s"}
         extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
@@ -355,12 +394,22 @@ class DatasetLoader:
         return ds
 
     def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
-        """Cap (downsample) or repeat-pad (upsample) to ``target`` samples."""
+        """Cap (downsample) or repeat-pad (upsample) to ``target`` samples.
+
+        When downsampling, shuffle deterministically before subsetting so
+        the cap is a representative sample rather than the first N rows
+        in the dataset's natural order. Several HF datasets ship with
+        non-random ordering (LibriHeavy by chapter/speaker, CV by
+        validation date, etc.); taking `range(target)` directly would
+        introduce selection bias on top of the intended volume cap. Seed
+        pinned to `self.seed` for reproducibility across runs with the
+        same config.
+        """
         current = len(ds)
         if current == target:
             return ds
         if current > target:
-            return ds.select(range(target))
+            return ds.shuffle(seed=self.seed).select(range(target))
         repeats = (target // current) + 1
         indices = list(range(current)) * repeats
         return ds.select(indices[:target])
@@ -440,6 +489,7 @@ class DataCollator:
         system_prompt: str = None,
         projector: Any = None,
         encoder_conv_layers: list = None,
+        audio_token: str = "<audio>",
     ):
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
@@ -447,6 +497,9 @@ class DataCollator:
         self.system_prompt = system_prompt
         self.projector = projector
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
+        # Must match ASRModel.audio_token -- the collator emits this string and
+        # forward() locates the scatter positions by its token id.
+        self.audio_token = audio_token
         # Whisper's encoder requires a fixed 3000 mel frames; other encoders
         # (GLM-ASR) accept variable-length input, so only pad to longest.
         self._audio_padding = (
@@ -465,7 +518,15 @@ class DataCollator:
     # Whisper's feature extractor pads/truncates to a fixed 30s window. Audio
     # longer than this is silently truncated while the label is kept whole,
     # training the model to transcribe content it never sees. Drop those rows.
-    _MAX_AUDIO_SECONDS = 30.0
+    # Lowered from 30s to 20s to reduce batch-memory pressure: with
+    # group_by_length disabled, a single long sample forces the whole batch
+    # to its length. 20s matches the production-norm cap for ASR fine-tunes
+    # and drops the long-form tail of TEDLIUM / Earnings22 / Peoples /
+    # VoxPopuli (roughly 3-8% of rows in those sources). In exchange, mel-
+    # spec peak memory drops 33% vs the 30s default, freeing headroom for
+    # auto_find_batch_size (observed batch=70 at max=30s → expected ~100+
+    # at max=20s for the same mix without WHAM).
+    _MAX_AUDIO_SECONDS = 19.0
     # Sub-0.8s clips are dominated by boundary-cut segments and isolated
     # backchannels ("yeah", "ok", "umhum") where the audio span and the
     # reference transcript don't actually line up — eval-side analysis on
@@ -485,6 +546,22 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
+                # Per-row random truncation (set via the dataset config's
+                # `random_truncate_seconds: [min, max]`). Used for non-
+                # speech-rejection sources (WHAM) where source audio is
+                # uniformly long but training needs effective length
+                # diversity. Picks a fresh uniform [min, max] target each
+                # time the row enters a batch, with a random start offset
+                # within the original audio. No-op if the original audio is
+                # already shorter than the sampled target.
+                t_min = f.get("_random_truncate_min_s")
+                t_max = f.get("_random_truncate_max_s")
+                if t_min is not None and t_max is not None and audio.size > 0:
+                    target_s = random.uniform(float(t_min), float(t_max))
+                    target_n = int(target_s * self.sample_rate)
+                    if 0 < target_n < audio.size:
+                        start = random.randint(0, audio.size - target_n)
+                        audio = audio[start : start + target_n]
                 # Drop samples that would poison the gradient or break the
                 # encoder: empty / NaN audio, labels that normalize to empty
                 # (entire label was an annotation marker like <noise>), audio
@@ -547,7 +624,7 @@ class DataCollator:
         return self._make_messages(num_audio_tokens, random.choice(TRANSCRIBE_PROMPTS), text)
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
-        user_content = ("<audio>" * num_audio_tokens) + " " + prompt
+        user_content = (self.audio_token * num_audio_tokens) + " " + prompt
         messages = []
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
@@ -796,27 +873,49 @@ def main(cfg: DictConfig) -> None:
             wandb.run.summary["git_commit"] = git_commit
             wandb.run.summary["git_dirty"] = git_dirty
 
-    # Patch transformers.models.qwen3 with liger fused kernels before the LM
-    # class is instantiated. The big win is fused linear cross-entropy: instead
-    # of materializing the (B, T, V) fp32 log-softmax tensor that HF's standard
-    # CE / LabelSmoother path requires (~15GB at B=50, V=151k on Qwen3-0.6B),
-    # liger fuses lm_head @ hidden_states + softmax + CE into a single kernel
-    # with peak memory O(B·T·D). Label smoothing flows through this kernel via
-    # the loss_function's **kwargs path (see ASRModel.forward) — so set HF
-    # Trainer's label_smoothing_factor=0 in configs to bypass the LabelSmoother
-    # and rely on model.config.label_smoothing instead.
+    # Patch the decoder's transformers module with liger fused kernels before
+    # the LM class is instantiated. The big win is fused linear cross-entropy:
+    # instead of materializing the (B, T, V) fp32 log-softmax tensor that HF's
+    # standard CE / LabelSmoother path requires (~15GB at B=50, V=151k on
+    # Qwen3-0.6B), liger fuses lm_head @ hidden_states + softmax + CE into a
+    # single kernel with peak memory O(B·T·D). Label smoothing flows through
+    # this kernel via the loss_function's **kwargs path (see ASRModel.forward)
+    # — so set HF Trainer's label_smoothing_factor=0 in configs to bypass the
+    # LabelSmoother and rely on model.config.label_smoothing instead.
+    #
+    # The patcher is per-architecture, so it must track text_model_id. Getting
+    # this wrong is not a crash but an OOM: Gemma 4's vocab is 262,144, so an
+    # unfused (B, T, V) logits tensor is ~17GB at B=32/T=512 before the
+    # log_softmax copy. First match wins, so longer keys are listed first.
     if cfg.training.get("use_liger", True):
-        try:
-            from liger_kernel.transformers import apply_liger_kernel_to_qwen3
-
-            apply_liger_kernel_to_qwen3()
-        except (ImportError, AttributeError) as e:
+        liger_patchers = (
+            ("gemma-4", "apply_liger_kernel_to_gemma4"),
+            ("qwen3.5", "apply_liger_kernel_to_qwen3_5"),
+            ("qwen3", "apply_liger_kernel_to_qwen3"),
+        )
+        text_model_id = str(cfg.model.get("text_model_id", "")).lower()
+        patcher_name = next((fn for key, fn in liger_patchers if key in text_model_id), None)
+        if patcher_name is None:
             logging.warning(
-                "liger-kernel unavailable (%s) — falling back to stock Qwen3 kernels. "
-                "Install with `poetry install` on Linux and pin a version that exports "
-                "apply_liger_kernel_to_qwen3 (Liger >=0.5.5) to enable fused linear CE.",
-                e,
+                "No liger patcher mapped for text_model_id=%r — training with stock "
+                "kernels and unfused cross-entropy. Add an entry to liger_patchers "
+                "if this decoder has liger support.",
+                cfg.model.get("text_model_id"),
             )
+        else:
+            try:
+                import liger_kernel.transformers as liger
+
+                getattr(liger, patcher_name)()
+                logging.info("Applied liger kernels via %s()", patcher_name)
+            except (ImportError, AttributeError) as e:
+                logging.warning(
+                    "liger-kernel unavailable or missing %s (%s) — falling back to "
+                    "stock kernels. Install with `poetry install` on Linux and pin a "
+                    "version that exports it to enable fused linear CE.",
+                    patcher_name,
+                    e,
+                )
 
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_config_dict, dict), "model config must be a dict"
@@ -861,6 +960,7 @@ def main(cfg: DictConfig) -> None:
             sample_rate=cfg.data.sample_rate,
             projector=model.projector,
             encoder_conv_layers=model.config.encoder_conv_layers,
+            audio_token=model.audio_token,
         )
     else:
         data_collator = DataCollator(
@@ -870,6 +970,7 @@ def main(cfg: DictConfig) -> None:
             system_prompt=cfg.model.system_prompt,
             projector=model.projector,
             encoder_conv_layers=model.config.encoder_conv_layers,
+            audio_token=model.audio_token,
         )
 
     callbacks = []

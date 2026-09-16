@@ -1,4 +1,6 @@
+import functools
 import json
+import logging
 from pathlib import Path
 from threading import Thread
 from typing import Iterator, Optional, Union
@@ -7,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from transformers import (
+    AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -24,6 +27,34 @@ except ImportError:
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
+logger = logging.getLogger(__name__)
+
+# FlashAttention's kernels are compiled for head dimensions up to 256.
+FLASH_ATTENTION_MAX_HEAD_DIM = 256
+
+
+def _max_attention_head_dim(text_config) -> Optional[int]:
+    """Largest attention head dim across layers, or None if undeterminable.
+
+    Has to cope with heterogeneous configs: Gemma 4 varies head_dim per layer,
+    and reading `config.head_dim` on one of those raises
+    AmbiguousGlobalPerLayerAttributeError instead of returning a number, so the
+    per-layer list must be consulted explicitly.
+    """
+    per_layer = getattr(text_config, "per_layer_config", None)
+    dims: list = []
+    if per_layer:
+        dims = [getattr(layer, "head_dim", None) for layer in per_layer]
+    else:
+        try:
+            dims = [getattr(text_config, "head_dim", None)]
+        except Exception:
+            # Raised by the heterogeneity guard; treated as "unknown".
+            dims = []
+    usable = [d for d in dims if isinstance(d, int) and d > 0]
+    return max(usable) if usable else None
+
+
 def _resolve_attn_implementation(requested: Optional[str]) -> Optional[str]:
     """Coerce flash_attention_2 to sdpa when CUDA isn't available.
 
@@ -32,7 +63,22 @@ def _resolve_attn_implementation(requested: Optional[str]) -> Optional[str]:
     install + import cost for no win. Coerce here so a saved config that
     pins flash_attention_2 still loads on Mac / CPU-only Linux boxes.
     """
-    if requested == "flash_attention_2" and not torch.cuda.is_available():
+    if requested != "flash_attention_2":
+        return requested
+    if not torch.cuda.is_available():
+        return "sdpa"
+    # CUDA alone isn't enough -- the flash_attn package must actually be
+    # importable. It is a source build that routinely fails on RunPod images
+    # (its metadata hook imports torch, so any broken torch install takes it
+    # down with it). Without this check a CUDA box with no flash-attn raises
+    # at from_pretrained instead of quietly using sdpa, which is the same
+    # numerics at lower throughput.
+    from importlib.util import find_spec
+
+    if find_spec("flash_attn") is None:
+        logger.warning(
+            "flash_attention_2 requested but flash_attn is not installed; falling back to sdpa."
+        )
         return "sdpa"
     return requested
 
@@ -55,6 +101,40 @@ def _gather_audio_embeds(audio_embeds: torch.Tensor, token_counts: torch.Tensor)
     indices = torch.arange(max_len, device=audio_embeds.device).unsqueeze(0)
     mask = indices < token_counts.unsqueeze(1)
     return audio_embeds[mask]
+
+
+def _patch_gemma_decode_loop(model) -> None:
+    """Make a Gemma4ForCausalLM drop `per_layer_inputs` after the first step.
+
+    `Gemma4ForConditionalGeneration` does this itself; the causal LM does not.
+    Without it, step 2 of generation hands PLE to forward alongside
+    `input_ids` and raises "You cannot specify per_layer_inputs if input_ids is
+    provided". Dropping is semantically correct rather than a workaround: PLE
+    describes the prompt, and from step 2 on generation feeds a single freshly
+    sampled token whose PLE Gemma derives from that token's own id.
+
+    Patched on the instance because subclassing Gemma4ForCausalLM trips
+    transformers' experts-implementation check during __init__
+    ("does not support setting experts implementation").
+    """
+    inner_prepare = model.prepare_inputs_for_generation
+
+    # functools.wraps is load-bearing, not cosmetic. Generation's
+    # _prepare_model_inputs decides whether a model can accept `inputs_embeds`
+    # by testing for it in
+    # inspect.signature(prepare_inputs_for_generation).parameters. A bare
+    # *args/**kwargs wrapper hides the parameter, and generate() then refuses
+    # inputs_embeds with "doesn't have its forwarding implemented" -- fatal
+    # here, since audio only ever reaches the decoder as inputs_embeds.
+    # `wraps` sets __wrapped__, which inspect.signature follows.
+    @functools.wraps(inner_prepare)
+    def prepare_inputs_for_generation(*args, is_first_iteration: bool = False, **kwargs):
+        model_inputs = inner_prepare(*args, is_first_iteration=is_first_iteration, **kwargs)
+        if not is_first_iteration:
+            model_inputs.pop("per_layer_inputs", None)
+        return model_inputs
+
+    model.prepare_inputs_for_generation = prepare_inputs_for_generation
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -246,6 +326,26 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
             encoder = full_model.encoder
             del full_model
+        elif "granite-speech" in config.audio_model_id.lower():
+            # Granite Speech 5.0 TurboCTC is encoder-only (Conformer blocks +
+            # a 16k-BPE CTC head). GraniteSpeech5Encoder.from_pretrained pulls
+            # just the encoder out of the GraniteSpeech5ForCTC checkpoint and
+            # leaves the CTC head behind.
+            #
+            # Requires transformers >= 5.16 for the native `granite_speech5`
+            # architecture. There is no trust_remote_code fallback: the
+            # checkpoint ships modeling .py files but its config.json has no
+            # `auto_map`, so Auto* classes can't resolve them on older
+            # versions -- they fail with KeyError('granite_speech5_ctc').
+            from transformers import GraniteSpeech5Encoder
+
+            # Granite's block-attention implementation has no FA2 kernel and
+            # raises ValueError on attn_implementation="flash_attention_2".
+            # _resolve_attn_implementation only downgrades FA2 when CUDA is
+            # absent, so on a CUDA box the inherited default would hard-fail
+            # at load. Pin sdpa regardless of what the config asks for.
+            granite_kwargs = {**encoder_kwargs, "attn_implementation": "sdpa"}
+            encoder = GraniteSpeech5Encoder.from_pretrained(config.audio_model_id, **granite_kwargs)
         elif "glm" in config.audio_model_id.lower():
             # GLM-ASR models use audio_tower as the encoder
             # Requires transformers >= 5.x or installed from source
@@ -278,14 +378,44 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     @classmethod
     def _load_language_model(cls, config: ASRConfig, dtype: torch.dtype) -> PreTrainedModel:
         """Load and freeze the language model."""
+        attn_implementation = _resolve_attn_implementation(config.attn_implementation)
+
+        # FlashAttention only has kernels for head_dim <= 256, and it fails at
+        # the first forward rather than at load. Gemma 4 E2B trips this: 7 of
+        # its 35 layers use head_dim=512 (the other 28 use 256), so FA2 can
+        # never run this architecture regardless of flash-attn version. Detect
+        # it from the config and fall back instead of dying a step into
+        # training.
+        if attn_implementation == "flash_attention_2":
+            probe = AutoConfig.from_pretrained(config.text_model_id, trust_remote_code=True)
+            text_probe = probe.get_text_config() if hasattr(probe, "get_text_config") else probe
+            head_dim = _max_attention_head_dim(text_probe)
+            if head_dim is not None and head_dim > FLASH_ATTENTION_MAX_HEAD_DIM:
+                logger.warning(
+                    "%s has max head_dim=%d, above FlashAttention's limit of %d; "
+                    "using sdpa for the decoder.",
+                    config.text_model_id,
+                    head_dim,
+                    FLASH_ATTENTION_MAX_HEAD_DIM,
+                )
+                attn_implementation = "sdpa"
+
         decoder_kwargs = {
-            "attn_implementation": _resolve_attn_implementation(config.attn_implementation),
+            "attn_implementation": attn_implementation,
             "trust_remote_code": True,
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
+
+        # Gemma 4 checkpoints are natively multimodal: AutoModelForCausalLM maps
+        # `gemma4` to Gemma4ForConditionalGeneration, which is both wasteful
+        # (a vision tower + audio tower this model never calls) and unusable
+        # for inference. Convert it to the text-only causal LM.
+        gemma_inner = getattr(decoder, "model", None)
+        if gemma_inner is not None and hasattr(gemma_inner, "language_model"):
+            decoder = cls._gemma_text_only(decoder)
         # See _load_audio_encoder note: idempotent post-load cast to dodge the
         # FA2 "current dype is fp32" warning when from_pretrained's dtype kwarg
         # isn't fully propagated to every submodule.
@@ -295,6 +425,69 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             decoder.requires_grad_(False)
             decoder.train(False)
         return decoder
+
+    @staticmethod
+    def _gemma_text_only(loaded: PreTrainedModel) -> PreTrainedModel:
+        """Turn a loaded Gemma4ForConditionalGeneration into a text-only CausalLM.
+
+        Two independent problems force this transplant rather than just loading
+        the right class directly:
+
+        1. Only `Gemma4ForCausalLM` supports `inputs_embeds` in `.generate()`.
+           Its `prepare_inputs_for_generation` accepts the argument; the
+           multimodal wrapper's does not, so generation dies with "You passed
+           `inputs_embeds` to `.generate()`, but the model class
+           Gemma4ForConditionalGeneration doesn't have its forwarding
+           implemented." Audio reaches this decoder exclusively as
+           inputs_embeds, so the wrapper cannot do inference at all.
+
+        2. `Gemma4ForCausalLM.from_pretrained` cannot read the published
+           checkpoint. Its keys are `model.language_model.*` (the multimodal
+           layout) while the causal LM expects `model.*`, and gemma4 ships no
+           checkpoint conversion mapping. Critically it fails *silently*:
+           every tensor is reported MISSING and randomly initialized
+           (embedding std lands at initializer_range), producing a model that
+           trains without error and learns nothing.
+
+        So the wrapper is loaded for its correct key layout, then its text
+        model and lm_head are moved into a shell built on the meta device --
+        which allocates nothing, because every real parameter is transplanted.
+        Dropping the wrapper also frees the vision and audio towers: the
+        returned text-only model holds 4,628,569,344 parameters against the
+        checkpoint's 5,123,178,979, so ~494M are released.
+        """
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
+
+        text_config = loaded.config.get_text_config()
+        with torch.device("meta"):
+            shell = Gemma4ForCausalLM(text_config)
+
+        shell.model = loaded.model.language_model
+        shell.lm_head = loaded.lm_head
+        shell.generation_config = loaded.generation_config
+        shell.tie_weights()
+
+        # Gemma4ForCausalLM does not drop `per_layer_inputs` between decode
+        # steps, while the multimodal wrapper does. Without the drop, step 2
+        # of generation passes PLE alongside `input_ids` and forward raises
+        # "You cannot specify per_layer_inputs if input_ids is provided". The
+        # drop is semantically right, not a workaround: PLE describes the
+        # prompt, and from step 2 on generation feeds one freshly sampled
+        # token whose PLE Gemma derives itself from that token's id.
+        #
+        # Patched on the instance rather than via a subclass: subclassing
+        # Gemma4ForCausalLM trips transformers' experts-implementation check
+        # ("does not support setting experts implementation") during __init__.
+        _patch_gemma_decode_loop(shell)
+
+        stranded = [n for n, t in shell.named_parameters() if t.device.type == "meta"]
+        stranded += [n for n, t in shell.named_buffers() if t.device.type == "meta"]
+        if stranded:
+            raise RuntimeError(
+                "Gemma text-only conversion left parameters on the meta device "
+                f"(would silently produce garbage): {stranded[:5]}"
+            )
+        return shell
 
     def _create_projector(self, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
         """Create the trainable audio projector."""
@@ -309,6 +502,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         if config.llm_dim is None:
             dec_cfg = self.language_model.config
+            # Composite configs (Gemma 4) keep hidden_size on `text_config`;
+            # get_text_config() returns self for plain decoders like Qwen3.
+            if hasattr(dec_cfg, "get_text_config"):
+                dec_cfg = dec_cfg.get_text_config()
             config.llm_dim = getattr(dec_cfg, "hidden_size", None) or getattr(
                 dec_cfg, "d_model", None
             )
@@ -327,7 +524,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Move projector to same device as language model (important when using quantization)
         device = next(self.language_model.parameters()).device
-        return projector.to(device=device, dtype=dtype)
+        # The projector may run at a higher precision than the frozen stack --
+        # it is the only module with optimizer state, so it is the only one
+        # that needs master-weight precision. See ASRConfig.projector_dtype.
+        proj_name = getattr(config, "projector_dtype", None)
+        proj_dtype = getattr(torch, proj_name) if proj_name else dtype
+        self._projector_dtype = proj_dtype
+        return projector.to(device=device, dtype=proj_dtype)
 
     def _setup_lora(self, config: ASRConfig):
         """Apply LoRA adapters to the language model for Stage 2 fine-tuning."""
@@ -360,21 +563,29 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             elif self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Add audio token
-        existing_special = getattr(self.tokenizer, "additional_special_tokens", None) or []
-        if "<audio>" not in existing_special:
+        # Audio placeholder token. Prefer a token the tokenizer already knows
+        # (Gemma 4 ships "<|audio|>") so no embedding resize is needed at all.
+        # `unk_token_id` is the sentinel convert_tokens_to_ids returns for an
+        # unknown token, so it means "not in vocab" rather than a usable id.
+        self.audio_token = getattr(config, "audio_token", None) or "<audio>"
+        existing_id = self.tokenizer.convert_tokens_to_ids(self.audio_token)
+        already_in_vocab = existing_id is not None and existing_id != self.tokenizer.unk_token_id
+
+        if not already_in_vocab:
+            existing_special = getattr(self.tokenizer, "additional_special_tokens", None) or []
             self.tokenizer.add_special_tokens(
-                {"additional_special_tokens": existing_special + ["<audio>"]}
+                {"additional_special_tokens": existing_special + [self.audio_token]}
             )
-            # mean_resizing=True initializes the new <audio> row at the mean of
-            # existing rows so its scale matches the pretrained distribution. The
-            # input-side <audio> embedding is overwritten via masked_scatter and
-            # never seen by the LM, but with tied embeddings (Qwen3-0.6B) this
-            # same row is the lm_head column for predicting <audio>; a Gaussian
-            # draw at config.initializer_range was visible in early-step logits.
+            # mean_resizing=True initializes the new row at the mean of existing
+            # rows so its scale matches the pretrained distribution. The
+            # input-side embedding is overwritten via masked_scatter and never
+            # seen by the LM, but with tied embeddings (Qwen3-0.6B) this same
+            # row is the lm_head column for predicting the audio token; a
+            # Gaussian draw at config.initializer_range was visible in
+            # early-step logits.
             self.language_model.resize_token_embeddings(len(self.tokenizer), mean_resizing=True)
 
-        self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<audio>")
+        self.audio_token_id = self.tokenizer.convert_tokens_to_ids(self.audio_token)
         self.tokenizer.padding_side = "right"
 
         # Sync token IDs to configs
@@ -400,7 +611,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             self.language_model.train(False)
         return self
 
-    def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func=None):
+    def _set_gradient_checkpointing(
+        self,
+        enable: bool = True,
+        gradient_checkpointing_func=None,
+        every_n_layers: int = 1,
+        **kwargs,
+    ):
         """Enable/disable gradient checkpointing on the trainable submodules.
 
         Routes the request to whichever components are actually trainable in
@@ -409,12 +626,35 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         frozen). The encoder is reached only when `freeze_audio_encoder` is
         False — when frozen, no gradient flows through it and checkpointing
         would just add recompute cost for no memory savings.
+
+        The signature must track `PreTrainedModel.gradient_checkpointing_enable`,
+        which calls this with keyword arguments. transformers 5.16 added
+        `every_n_layers`, and because it is passed by keyword the previous
+        two-argument override raised TypeError *after* the model and dataset
+        had loaded. `**kwargs` absorbs future additions so an upgrade
+        degrades to "new option ignored" instead of a crash, and each kwarg is
+        filtered against the target's own signature before being forwarded so
+        submodules on older signatures still work.
+
+        One name is load-bearing: `value` must never become a parameter here.
+        Upstream sniffs for it to detect the pre-4.35 checkpointing format and
+        would silently take the legacy `self.apply(...)` path instead.
         """
-        # The LLM still stores activations during forward for backprop to projector
-        # Gradient checkpointing trades compute for memory by recomputing activations
+        import inspect
+
+        forwardable = dict(kwargs)
+        forwardable["every_n_layers"] = every_n_layers
+        if gradient_checkpointing_func is not None:
+            forwardable["gradient_checkpointing_func"] = gradient_checkpointing_func
+
+        # The LLM still stores activations during forward for backprop to projector.
+        # Gradient checkpointing trades compute for memory by recomputing activations.
         for submodule in self._gradient_checkpointing_targets():
-            if hasattr(submodule, "_set_gradient_checkpointing"):
-                submodule._set_gradient_checkpointing(enable, gradient_checkpointing_func)
+            setter = getattr(submodule, "_set_gradient_checkpointing", None)
+            if setter is not None:
+                accepted = inspect.signature(setter).parameters
+                passthrough = {k: v for k, v in forwardable.items() if k in accepted}
+                setter(enable=enable, **passthrough)
             elif hasattr(submodule, "gradient_checkpointing_enable") and enable:
                 submodule.gradient_checkpointing_enable(
                     gradient_checkpointing_kwargs={"use_reentrant": False}
@@ -484,6 +724,49 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 sd.update({f"language_model.{k}": v for k, v in lm.state_dict().items()})
         return sd
 
+    def _ple_text_model(self):
+        """Locate the submodule owning `get_per_layer_inputs`, or None.
+
+        Only Gemma 4 style decoders have one. The attribute sits on
+        Gemma4TextModel, which is `language_model.model.language_model` for the
+        multimodal checkpoint and `language_model.model` for a text-only one.
+        """
+        candidates = (
+            getattr(getattr(self.language_model, "model", None), "language_model", None),
+            getattr(self.language_model, "model", None),
+            self.language_model,
+        )
+        for candidate in candidates:
+            if candidate is not None and hasattr(candidate, "get_per_layer_inputs"):
+                return candidate
+        return None
+
+    def _per_layer_kwargs(self, input_ids: Optional[torch.Tensor]) -> dict:
+        """Precompute Gemma 4 per-layer embeddings (PLE) from clean `input_ids`.
+
+        Gemma 4 builds a token-identity PLE component by looking `input_ids` up
+        in `embed_tokens_per_layer`. It must be computed *before* masked_scatter
+        overwrites the audio positions, because Gemma's `inputs_embeds`-only
+        path tries to recover ids by reversing the main embedding -- an exact
+        row match against `embed_tokens.weight * sqrt(hidden_size)`. Projector
+        output matches no row, so that path raises RuntimeError (and would be
+        an O(B*T*vocab*hidden) comparison even if it matched).
+
+        Computing it here keeps every text token's PLE row intact and leaves
+        audio positions on the audio placeholder's own row, which is exactly
+        what Gemma does natively for image/audio placeholder tokens.
+
+        Returns {} for decoders without PLE, so callers can splat it blindly.
+        """
+        if input_ids is None:
+            return {}
+        text_model = self._ple_text_model()
+        if text_model is None:
+            return {}
+        if not getattr(text_model.config, "hidden_size_per_layer_input", None):
+            return {}
+        return {"per_layer_inputs": text_model.get_per_layer_inputs(input_ids, None)}
+
     def _compute_encoder_output_lengths(
         self,
         audio_attention_mask: torch.Tensor,
@@ -498,12 +781,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         audio_features: torch.Tensor,
         expected_token_counts: torch.Tensor,
+        audio_attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Encode audio features and return flattened embeddings matching expected_token_counts.
 
         Args:
             audio_features: Mel spectrogram features (batch, n_mels, mel_len)
             expected_token_counts: Per-sample audio token counts as int64 tensor (batch,).
+            audio_attention_mask: Mel-frame padding mask, forwarded to the
+                encoder when `config.encoder_attention_mask` is set.
 
         Returns:
             Flattened audio embeddings of shape (sum(expected_token_counts), hidden_dim).
@@ -524,15 +810,31 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # When trainable, we MUST allow gradients to flow back to encoder
         # params; wrapping in no_grad here would silently zero encoder
         # gradients regardless of requires_grad on its parameters.
+        # Conformer encoders (Granite) must see the padding mask -- their block
+        # attention otherwise mixes pad frames into real ones. Gated on
+        # `encoder_attention_mask` so the Whisper/GLM path stays byte-identical
+        # to prior runs; see ASRConfig for the measured impact.
+        tower_kwargs = {"input_features": audio_features}
+        if audio_attention_mask is not None and getattr(
+            self.config, "encoder_attention_mask", False
+        ):
+            tower_kwargs["attention_mask"] = audio_attention_mask.to(audio_features.device)
+
         encoder_frozen = getattr(self.config, "freeze_audio_encoder", True)
         if encoder_frozen:
             with torch.no_grad():
-                encoder_out = self.audio_tower(input_features=audio_features)
+                encoder_out = self.audio_tower(**tower_kwargs)
                 hidden_states = encoder_out.last_hidden_state
         else:
-            encoder_out = self.audio_tower(input_features=audio_features)
+            encoder_out = self.audio_tower(**tower_kwargs)
             hidden_states = encoder_out.last_hidden_state
 
+        # The encoder may be bf16 while the projector holds fp32 master
+        # weights, so align explicitly rather than relying on autocast being
+        # active -- eval and MPS paths run outside it.
+        proj_dtype = getattr(self, "_projector_dtype", None)
+        if proj_dtype is not None and hidden_states.dtype != proj_dtype:
+            hidden_states = hidden_states.to(proj_dtype)
         audio_embeds = self.projector(hidden_states)
 
         token_counts = expected_token_counts.to(device=audio_embeds.device, dtype=torch.long)
@@ -575,8 +877,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             Same-shape tensor with time-axis and/or feature-axis masks zeroed.
         """
         input_features = input_features.clone()
-        batch_size, hidden_size, sequence_length = input_features.size()
         config = self.config
+        # Whisper/GLM-ASR hand us (batch, n_mels, mel_len); Conformer encoders
+        # (Granite, Parakeet, Nemotron) hand us (batch, time, feature_dim).
+        # Masking the wrong axis is silent -- it still runs and still zeroes
+        # cells -- so the axis order is read from config rather than guessed.
+        time_major = getattr(config, "audio_features_time_major", False)
+        if time_major:
+            batch_size, sequence_length, hidden_size = input_features.size()
+            time_dim, feature_dim = 1, 2
+        else:
+            batch_size, hidden_size, sequence_length = input_features.size()
+            time_dim, feature_dim = 2, 1
         device = input_features.device
 
         if getattr(config, "mask_time_prob", 0.0) > 0:
@@ -588,8 +900,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 min_masks=config.mask_time_min_masks,
                 device=device,
             )
-            # Broadcast (B, T) -> (B, 1, T) to mask all mel bins at masked times.
-            input_features.masked_fill_(mask_time.unsqueeze(1), 0)
+            # Broadcast (B, T) over the feature axis to mask all bins at
+            # masked times: (B, 1, T) feature-major, (B, T, 1) time-major.
+            input_features.masked_fill_(mask_time.unsqueeze(feature_dim), 0)
 
         if getattr(config, "mask_feature_prob", 0.0) > 0:
             mask_feature = self._sample_mask_indices(
@@ -600,8 +913,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 min_masks=config.mask_feature_min_masks,
                 device=device,
             )
-            # Broadcast (B, F) -> (B, F, 1) to mask all time steps at masked bins.
-            input_features.masked_fill_(mask_feature.unsqueeze(-1), 0)
+            # Broadcast (B, F) over the time axis to mask all time steps at
+            # masked bins: (B, F, 1) feature-major, (B, 1, F) time-major.
+            input_features.masked_fill_(mask_feature.unsqueeze(time_dim), 0)
 
         return input_features
 
@@ -663,6 +977,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if inputs_embeds is None:
             inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
+        # Gemma 4 PLE: derived from input_ids, so it must be captured before the
+        # masked_scatter below replaces the audio rows. No-op ({}) elsewhere.
+        ple_kwargs = self._per_layer_kwargs(input_ids)
+
         if input_features is not None and input_ids is not None:
             is_audio_token = input_ids == self.audio_token_id
             if audio_token_counts is None:
@@ -672,7 +990,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     device=input_ids.device, dtype=torch.long
                 )
 
-            audio_embeds = self._encode_audio(input_features, audio_token_counts)
+            audio_embeds = self._encode_audio(
+                input_features, audio_token_counts, audio_attention_mask
+            )
 
             audio_token_mask = is_audio_token.unsqueeze(-1)
             inputs_embeds = inputs_embeds.masked_scatter(
@@ -697,6 +1017,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             labels=labels,
             use_cache=use_cache,
             cache_position=cache_position,
+            **ple_kwargs,
             **kwargs,
         )
 
@@ -761,12 +1082,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Encode audio -> flattened embeddings (no per-sample host sync)
         encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
         token_counts = self.projector.get_output_length(encoder_lengths).to(torch.long)
-        audio_embeds = self._encode_audio(input_features, token_counts)
+        audio_embeds = self._encode_audio(input_features, token_counts, audio_attention_mask)
 
         # If input_ids not provided, build prompt with correct number of audio tokens
         if input_ids is None:
             num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
-            audio_placeholder = "<audio>" * num_audio_tokens
+            audio_placeholder = self.audio_token * num_audio_tokens
 
             system_prompt = system_prompt or self.system_prompt
 
@@ -823,26 +1144,39 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if gen_cfg.output_scores and not gen_cfg.return_dict_in_generate:
                 gen_cfg.return_dict_in_generate = True
 
-        # Generate using language model
-        # Pass both input_ids and inputs_embeds so repetition_penalty works correctly
-        # (it needs input_ids to track which tokens have been used)
+        # Generate using language model.
+        #
+        # Default path passes both input_ids and inputs_embeds so
+        # repetition_penalty works correctly (it needs input_ids to track which
+        # tokens have been used). Gemma 4 forbids that combination outright --
+        # "You must specify exactly one of input_ids or inputs_embeds" -- so
+        # there we pass embeds plus the PLE precomputed from the clean prompt
+        # ids. Gemma's prepare_inputs_for_generation drops per_layer_inputs
+        # after the first step, so it is correct to hand it to generate().
+        ple_kwargs = self._per_layer_kwargs(input_ids)
+        lm_inputs = (
+            {"inputs_embeds": inputs_embeds, **ple_kwargs}
+            if ple_kwargs
+            else {"input_ids": input_ids, "inputs_embeds": inputs_embeds}
+        )
         output = self.language_model.generate(
-            input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
+            **lm_inputs,
             attention_mask=attention_mask,
             generation_config=gen_cfg,
             **generate_kwargs,
         )
 
-        # When using inputs_embeds with input_ids, generate returns the full
-        # sequence (prompt + generated). Strip the prompt to return only the
-        # newly generated tokens. When scores were requested, preserve the
-        # GenerateOutput so callers can read .scores; otherwise return the
-        # bare tensor for backward compatibility with existing callers.
-        input_len = input_ids.shape[1]
+        # With input_ids AND inputs_embeds, generate returns the full sequence
+        # (prompt + generated), so the prompt must be stripped. With
+        # inputs_embeds alone it already returns only the new tokens, so
+        # stripping would eat real output -- hence prompt_len = 0 there.
+        # When scores were requested, preserve the GenerateOutput so callers
+        # can read .scores; otherwise return the bare tensor for backward
+        # compatibility with existing callers.
+        prompt_len = 0 if ple_kwargs else input_ids.shape[1]
         if isinstance(output, torch.Tensor):
-            return output[:, input_len:]
-        output.sequences = output.sequences[:, input_len:]
+            return output[:, prompt_len:]
+        output.sequences = output.sequences[:, prompt_len:]
         return output
 
     def generate_streaming(
@@ -872,11 +1206,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Encode audio -> flattened embeddings (no per-sample host sync)
         encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
         token_counts = self.projector.get_output_length(encoder_lengths).to(torch.long)
-        audio_embeds = self._encode_audio(input_features, token_counts)
+        audio_embeds = self._encode_audio(input_features, token_counts, audio_attention_mask)
 
         # Build prompt with correct number of audio tokens
         num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
-        audio_placeholder = "<audio>" * num_audio_tokens
+        audio_placeholder = self.audio_token * num_audio_tokens
 
         system_prompt = system_prompt or self.system_prompt
 
@@ -926,6 +1260,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             "attention_mask": attention_mask,
             "generation_config": self.generation_config,
             "streamer": streamer,
+            # Gemma 4 needs PLE precomputed from the prompt ids; {} elsewhere.
+            **self._per_layer_kwargs(input_ids),
             **generate_kwargs,
         }
 
@@ -973,9 +1309,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         save_dir = Path(save_directory)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # Update config with actual vocab size
-        self.config.vocab_size = self.language_model.config.vocab_size
-        self.config.text_config.vocab_size = self.language_model.config.vocab_size
+        # Update config with actual vocab size. Composite decoder configs
+        # (Gemma 4 is multimodal, so Gemma4Config holds text/vision/audio
+        # sub-configs) have no top-level `vocab_size` -- reading it raises
+        # AttributeError, which used to surface only at the first checkpoint
+        # save, i.e. after the run had already spent real training time.
+        lm_config = self.language_model.config
+        if hasattr(lm_config, "get_text_config"):
+            lm_config = lm_config.get_text_config()
+        vocab_size = getattr(lm_config, "vocab_size", None)
+        if vocab_size is not None:
+            self.config.vocab_size = vocab_size
+            self.config.text_config.vocab_size = vocab_size
 
         if hasattr(self.audio_tower.config, "num_mel_bins"):
             self.config.audio_config.num_mel_bins = self.audio_tower.config.num_mel_bins

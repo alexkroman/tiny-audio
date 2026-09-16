@@ -1,0 +1,137 @@
+# @package _global_
+# Projector-only training against a frozen Conformer encoder and a frozen
+# Gemma 4 decoder:
+#   ibm-granite/granite-speech-5.0-470m-turboctc (frozen)
+#     -> MLP projector (fresh init, the ONLY trainable module)
+#     -> google/gemma-4-E2B-it (frozen)
+#
+# This is a LLaVA-style setup, unlike stage_1.yaml's joint fine-tune. The
+# decoder is never updated, so we are renting Gemma's text priors rather than
+# reshaping them. Two consequences worth holding onto when reading eval:
+#   - Every drift/LR number in stage_1.yaml is irrelevant here. There are no
+#     decoder gradients, no embed_tokens drift channel, and no rare-token
+#     corruption risk, so the whole regularization argument in that file
+#     doesn't transfer.
+#   - The projector carries the entire adaptation burden, bridging a 1024-dim
+#     Granite output into a 1536-dim frozen Gemma embedding space. It is
+#     sized up accordingly (projector_hidden_dim below).
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=granite_gemma
+
+defaults:
+  - override /data: multiasr
+
+model:
+  # Granite Speech 5.0 TurboCTC: encoder-only Conformer (472.9M params, 16
+  # blocks, d=1024), Apache-2.0, 5.00% aggregate WER on the Open ASR public
+  # test sets. Trained on ~60k hours that overlap this repo's mix almost
+  # exactly (CommonVoice-17, MLS, LibriSpeech, VoxPopuli, YODAS, AMI,
+  # Earnings-22), which is why it was picked over Parakeet/Qwen3-ASR.
+  # Needs transformers >= 5.16 for the native `granite_speech5` architecture.
+  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc
+  # Gemma 4 E2B-it. The `-it` variant is required, not preferred: the base
+  # `google/gemma-4-E2B` ships no chat_template and DataCollatorForChatML
+  # needs one. hidden_size is 1536 (NOT 2048 as some write-ups claim).
+  text_model_id: google/gemma-4-E2B-it
+  system_prompt: ""
+  projector_type: mlp
+
+  # Granite's feature extractor stacks mel pairs (100 Hz -> 50 Hz, 320-dim),
+  # then the encoder subsamples 4x, so encoder output is already 12.5 Hz --
+  # identical to the GLM recipe's 50 Hz / pool_stride=4. Frame stacking in the
+  # projector is therefore redundant and pool_stride must be 1; leaving it at
+  # 4 would crush the sequence to 3.1 Hz and starve the decoder.
+  projector_pool_stride: 1
+  # Matches Granite's two floor(L/2) subsample_layers. Verified against the
+  # real encoder at 1/2/5/10/20s. See GRANITE_ENCODER_CONV_LAYERS.
+  encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
+
+  # With pool_stride=1 the projector's input is 1024 (not 1280*4=5120), so the
+  # old hidden_dim=1024 would leave only ~2.6M trainable params for the sole
+  # trainable module in the run. 4096 restores a ~10.5M budget
+  # (1024*4096 + 4096*1536), close to the ~12M the joint recipe had, and the
+  # widening is cheap because nothing else trains.
+  projector_hidden_dim: 4096
+  # Kept from stage_1: the run is still one epoch over ~3.3M rows, and the
+  # projector is now the only thing that can overfit.
+  projector_dropout: 0.1
+
+  # Split precision. The fp32-master-weights argument applies only to
+  # parameters an optimizer updates, and here that is the 10.5M projector
+  # alone -- so the projector gets float32 while the 5.6B of frozen encoder +
+  # decoder sit in bfloat16. Holding everything in fp32 cost 20.9 GiB of
+  # weights vs 10.4 GiB, buying precision for nothing on 99.8% of the
+  # parameters.
+  #
+  # Worth stating plainly because the name misleads: Gemma 4 "E2B" stores
+  # 5.12B parameters. The 2B is *active* params; the per-layer-embedding
+  # table alone is 262144 x 35 x 256 = 2.35B, and we do not offload it.
+  model_dtype: bfloat16
+  projector_dtype: float32
+
+  # Off, matching stage_1's finding that LS was net-negative on this stack.
+  # Also note Gemma 4's vocab is 262,144, so the unfused LabelSmoother path
+  # would be ruinous; smoothing rides liger's fused CE when enabled at all.
+  label_smoothing: 0.0
+
+  max_new_tokens: 256
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-granite-gemma"
+  group_by_length: false
+
+  # The whole point of this experiment: projector-only.
+  freeze_language_model: true
+  freeze_projector: false
+  # Redundant while the LM is frozen (requires_grad_(False) already covers the
+  # embedding table) but kept explicit so flipping freeze_language_model later
+  # doesn't silently open the tied-embedding drift channel stage_1 documents.
+  freeze_text_embed_tokens: true
+
+  # Single trainable module, so a single LR. decoder_learning_rate is
+  # deliberately unset -- there are no decoder parameter groups to route to.
+  learning_rate: 1e-3
+
+  # No trainable decoder means the rare-token-drift argument for WD is moot,
+  # and projector_weight_decay was always 0: pulling projector weights toward
+  # zero just biases the projection magnitude away from the scale the frozen
+  # LM expects. So: no weight decay anywhere in this run.
+  weight_decay: 0.0
+  projector_weight_decay: 0.0
+  label_smoothing_factor: 0.0
+
+  warmup_steps: 2000
+  lr_scheduler_type: cosine_with_min_lr
+  lr_scheduler_kwargs:
+    min_lr_rate: 0.05
+
+  # UNCALIBRATED for this stack. stage_1's 1.0 was fitted to joint training
+  # with an unfrozen embedding table; projector-only gradients have a
+  # different scale entirely (prior notes put fresh-projector ||grad|| near 9
+  # at step 0, settling to 0.4-0.6). 2.5 is production.yaml's value and is
+  # meant as a loose safety net, not a tuned figure -- read grad_norm from the
+  # first ~500 steps and tighten toward the observed median.
+  max_grad_norm: 2.5
+
+  seed: 44
+  auto_find_batch_size: false
+  # Also UNCALIBRATED. stage_1's 100 was sized for a 0.6B trainable decoder;
+  # here the decoder is 8x larger but frozen, so there is no optimizer state
+  # for it and activation memory across 35 layers dominates instead. Start
+  # conservative and raise once the first run's memory profile is known;
+  # accumulation keeps the effective batch near stage_1's 100.
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 3
+
+  num_train_epochs: 1
+  save_steps: 2000
+  eval_steps: 2000
+
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 8
+
+  # Same reason as stage_1: inductor's decompose_triton_kernel_wrapper_functional
+  # pass asserts on liger's wrapped triton kernels.
+  torch_compile: false
