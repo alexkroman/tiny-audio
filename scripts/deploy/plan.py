@@ -19,7 +19,6 @@ number can be argued with rather than trusted blindly.
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass, field
 
 import typer
@@ -293,9 +292,6 @@ def _fmt(n: float) -> str:
     return f"{n:,.2f} GiB"
 
 
-app = typer.Typer()
-
-
 def plan_command(
     experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
     seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
@@ -373,10 +369,6 @@ def plan_command(
         "  is the usual way this fails at 95% of a weights pull.\n"
     )
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(typer.run(plan_command))
 
 
 def _available_gpus(min_vram_gib: float) -> list[tuple[int, str]]:

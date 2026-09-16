@@ -8,6 +8,7 @@
 # than per-line.
 
 import contextlib
+import functools
 import logging
 import os
 import random
@@ -191,6 +192,10 @@ def _needs_truecase(text: str) -> bool:
     return upper_count == 0
 
 
+# Pure function of its input, and the collator normalizes each row twice: once
+# to test for an empty label and once to build the sample. Cache sized well
+# above the largest training batch so the second call is always a hit.
+@functools.lru_cache(maxsize=4096)
 def _normalize_label(raw_text: str) -> str:
     """Canonicalize a training transcript label to cased+punct form.
 

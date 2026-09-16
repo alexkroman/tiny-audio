@@ -2,7 +2,6 @@
 
 import os
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -25,6 +24,7 @@ from scripts.eval.evaluators import (
     AssemblyAIDiarizationEvaluator,
     AssemblyAIEvaluator,
     AssemblyAIMMAUEvaluator,
+    AssemblyAIModel,
     AssemblyAIStreamingEvaluator,
     ClassificationEvaluator,
     ClassificationResult,
@@ -47,14 +47,6 @@ from scripts.eval.evaluators import (
 
 app = typer.Typer(help="Evaluate ASR models on standard datasets")
 console = Console()
-
-
-class AssemblyAIModel(str, Enum):
-    """AssemblyAI model options."""
-
-    best = "best"
-    universal = "universal"
-    universal_3_pro = "universal-3-pro"
 
 
 # Valid dataset choices
@@ -550,7 +542,7 @@ def main(
             dataset = load_eval_dataset(dataset_name, actual_split, config, decode_audio=False)
             if model == "assemblyai":
                 api_key = _require_api_key("ASSEMBLYAI_API_KEY")
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = assemblyai_model.value
                 evaluator = AssemblyAIDiarizationEvaluator(
                     api_key=api_key,
                     model=assemblyai_model.value,
@@ -610,7 +602,7 @@ def main(
 
             if model == "assemblyai":
                 api_key = _require_api_key("ASSEMBLYAI_API_KEY")
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = assemblyai_model.value
                 evaluator = AssemblyAIAlignmentEvaluator(
                     api_key=api_key,
                     model=assemblyai_model.value,
@@ -666,7 +658,7 @@ def main(
 
             if model == "assemblyai":
                 api_key = _require_api_key("ASSEMBLYAI_API_KEY")
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = assemblyai_model.value
                 evaluator = AssemblyAIMMAUEvaluator(
                     api_key=api_key,
                     model=assemblyai_model.value,
@@ -753,7 +745,7 @@ def main(
                     num_workers=num_workers,
                 )
             else:
-                model_id = assemblyai_model.value.replace("_", "-")
+                model_id = assemblyai_model.value
                 evaluator = AssemblyAIEvaluator(
                     api_key=api_key,
                     model=assemblyai_model.value,

@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 import torch
 
@@ -140,8 +141,6 @@ class LocalStreamingEvaluator(Evaluator):
         print_generation_config(self.model, model_path)
 
     def transcribe(self, audio) -> tuple[str, float]:
-        import threading
-
         from transformers import TextIteratorStreamer
 
         # Extract audio array
@@ -334,9 +333,6 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         raise last_err  # unreachable; appeases type checker
 
     def _prepare_pcm(self, audio) -> bytes:
-        import numpy as np
-        import soundfile as sf
-
         if isinstance(audio, dict) and "array" in audio:
             audio_array = audio["array"]
             sample_rate = audio.get("sampling_rate", 16000)
@@ -358,8 +354,6 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         return audio_array
 
     def _run_session(self, pcm_data: bytes) -> tuple[str, float]:
-        import threading
-
         from assemblyai.streaming.v3 import (
             SpeechModel,
             StreamingClient,

@@ -441,27 +441,14 @@ def deploy(
     print(f"To connect: ssh -i ~/.ssh/id_ed25519 -p {port} root@{host}")
 
 
-def build_training_script(
-    experiment: str,
-    hf_token: str,
-    wandb_run_id: str | None,
-    wandb_resume: str | None,
-    extra_args: list[str],
-) -> str:
-    """Generate the training script content."""
-    wandb_exports = ""
-    if wandb_run_id:
-        wandb_exports += f'export WANDB_RUN_ID="{wandb_run_id}"\n'
-    if wandb_resume:
-        wandb_exports += f'export WANDB_RESUME="{wandb_resume}"\n'
-
-    extra_args_str = " ".join(extra_args) if extra_args else ""
-
-    return f"""#!/bin/bash
+# Every remote script shares this header: the fd limit, the hf_transfer install,
+# the nvidia-lib LD_LIBRARY_PATH repair, and the HF cache/token exports. It lived
+# inline in all three builders below and had already drifted between them.
+_SCRIPT_PREAMBLE = """#!/bin/bash
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-pip install hf_transfer --quiet --root-user-action=ignore
+pip install {pip_packages} --quiet --root-user-action=ignore
 export PATH="/root/.local/bin:$PATH"
 
 # RunPod images ship torch in system dist-packages alongside its nvidia-*
@@ -480,42 +467,90 @@ if [ -n "$LD_LIBRARY_PATH" ]; then
 else
   export LD_LIBRARY_PATH="$NVLIBS"
 fi
-export TOKENIZERS_PARALLELISM=false
-export HF_DATASETS_AUDIO_DECODER="soundfile"
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
 export HF_HUB_ENABLE_HF_TRANSFER=1
 export HF_TOKEN="{hf_token}"
-{wandb_exports}
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
-export TORCH_CUDNN_BENCHMARK=1
-# Keep the inductor + triton caches on local NVMe (/root/.cache/...), not on
-# the NFS-backed /workspace volume. /workspace previously caused ESTALE
-# (Errno 116, "Stale file handle") crashes inside Inductor's compile-worker
-# pool when the underlying NFS handle expired mid-write — typical for any
-# parallel-write workload on a networked FS. The cost of putting these on
-# local NVMe is one cold-cache compile per pod boot (seconds–minutes);
-# the cost of ESTALE is a dead training job.
-export TORCHINDUCTOR_CACHE_DIR=/root/.cache/torch_inductor
-export TRITON_CACHE_DIR=/root/.cache/triton
-export TORCHINDUCTOR_FX_GRAPH_CACHE=1
-export TORCH_DYNAMO_ALLOW_UNSPEC_INT_ON_NN_MODULE=1
-export TORCH_CUDA_GRAPHS_ENABLED=0
+"""
 
-cd /workspace
-python -m scripts.train +experiments={experiment} {extra_args_str}
+
+def _script_preamble(hf_token: str, *, pip_packages: str = "hf_transfer", extras: str = "") -> str:
+    """Shared shell header for the remote train/sift/eval scripts.
+
+    Args:
+        hf_token: Value exported as HF_TOKEN.
+        pip_packages: Packages installed before the run.
+        extras: Extra `export` lines appended to the header.
+    """
+    preamble = _SCRIPT_PREAMBLE.format(pip_packages=pip_packages, hf_token=hf_token)
+    return preamble + extras
+
+
+def _script_epilogue(label: str, finished: str) -> str:
+    """Shared tail: report the exit code, then idle so tmux stays inspectable.
+
+    Args:
+        label: Name used in the success/failure banners.
+        finished: Name used in the closing message.
+    """
+    return f"""
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
-    echo "===== Training Completed Successfully ====="
+    echo "===== {label} Completed Successfully ====="
 else
-    echo "===== Training Failed with exit code: $EXIT_CODE ====="
+    echo "===== {label} Failed with exit code: $EXIT_CODE ====="
 fi
 
-echo "Training script finished. Session will remain active for inspection."
+echo "{finished} finished. Session will remain active for inspection."
 sleep infinity
 """
+
+
+def build_training_script(
+    experiment: str,
+    hf_token: str,
+    wandb_run_id: str | None,
+    wandb_resume: str | None,
+    extra_args: list[str],
+) -> str:
+    """Generate the training script content."""
+    wandb_exports = ""
+    if wandb_run_id:
+        wandb_exports += f'export WANDB_RUN_ID="{wandb_run_id}"\n'
+    if wandb_resume:
+        wandb_exports += f'export WANDB_RESUME="{wandb_resume}"\n'
+
+    extra_args_str = " ".join(extra_args) if extra_args else ""
+
+    extra_exports = (
+        "export TOKENIZERS_PARALLELISM=false\n"
+        'export HF_DATASETS_AUDIO_DECODER="soundfile"\n'
+        f"{wandb_exports}"
+        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+        "export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1\n"
+        "export TORCH_CUDNN_BENCHMARK=1\n"
+        # Keep the inductor + triton caches on local NVMe (/root/.cache/...), not
+        # on the NFS-backed /workspace volume. /workspace previously caused ESTALE
+        # (Errno 116, "Stale file handle") crashes inside Inductor's compile-worker
+        # pool when the underlying NFS handle expired mid-write -- typical for any
+        # parallel-write workload on a networked FS. The cost of putting these on
+        # local NVMe is one cold-cache compile per pod boot (seconds-minutes);
+        # the cost of ESTALE is a dead training job.
+        "export TORCHINDUCTOR_CACHE_DIR=/root/.cache/torch_inductor\n"
+        "export TRITON_CACHE_DIR=/root/.cache/triton\n"
+        "export TORCHINDUCTOR_FX_GRAPH_CACHE=1\n"
+        "export TORCH_DYNAMO_ALLOW_UNSPEC_INT_ON_NN_MODULE=1\n"
+        "export TORCH_CUDA_GRAPHS_ENABLED=0\n"
+    )
+    body = f"""
+cd /workspace
+python -m scripts.train +experiments={experiment} {extra_args_str}"""
+    return (
+        _script_preamble(hf_token, extras=extra_exports)
+        + body
+        + _script_epilogue("Training", "Training script")
+    )
 
 
 def _remote_free_gib(conn: Connection, path: str = "/workspace") -> float | None:
@@ -703,40 +738,14 @@ def build_sift_script(
     compile_arg = "--compile" if use_compile else ""
     datasets_arg = f"--datasets {' '.join(datasets)}" if datasets else ""
 
-    return f"""#!/bin/bash
-# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
-
-ulimit -n 65536
-pip install hf_transfer --quiet --root-user-action=ignore
-export PATH="/root/.local/bin:$PATH"
-
-# RunPod images ship torch in system dist-packages alongside its nvidia-*
-# CUDA wheels. When the project pins a different torch version it installs
-# into --user and shadows the image copy, but the nvidia libs stay in the
-# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
-# `import torch` dies with ImportError. Observed on
-# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
-# broke the flash-attn build, whose metadata hook imports torch.
-NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
-# Spelled out with if/else on purpose: these scripts are built with Python
-# f-strings, so shell brace-expansion syntax would be parsed as an f-string
-# replacement field and raise NameError at build time.
-if [ -n "$LD_LIBRARY_PATH" ]; then
-  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
-else
-  export LD_LIBRARY_PATH="$NVLIBS"
-fi
-export HF_HOME=/workspace/.cache/huggingface
-export HF_DATASETS_CACHE=/workspace/datasets
-export HF_HUB_ENABLE_HF_TRANSFER=1
-export HF_TOKEN="{hf_token}"
-
-# A40 GPU optimizations (48GB VRAM)
-export CUDA_VISIBLE_DEVICES=0
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
-export TORCH_CUDNN_BENCHMARK=1
-
+    extra_exports = (
+        "\n# A40 GPU optimizations (48GB VRAM)\n"
+        "export CUDA_VISIBLE_DEVICES=0\n"
+        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+        "export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1\n"
+        "export TORCH_CUDNN_BENCHMARK=1\n"
+    )
+    body = f"""
 cd /workspace
 
 python -m scripts.generate_sift_dataset \\
@@ -745,18 +754,12 @@ python -m scripts.generate_sift_dataset \\
     {compile_arg} \\
     {max_samples_arg} \\
     {datasets_arg}
-
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "===== SIFT Dataset Generation Completed Successfully ====="
-else
-    echo "===== SIFT Dataset Generation Failed with exit code: $EXIT_CODE ====="
-fi
-
-echo "Script finished. Session will remain active for inspection."
-sleep infinity
 """
+    return (
+        _script_preamble(hf_token, extras=extra_exports)
+        + body
+        + _script_epilogue("SIFT Dataset Generation", "Script")
+    )
 
 
 @app.command()
@@ -847,39 +850,13 @@ def build_eval_script(
     if assemblyai_api_key:
         assemblyai_export = f'export ASSEMBLYAI_API_KEY="{assemblyai_api_key}"'
 
-    return f"""#!/bin/bash
-# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
-
-ulimit -n 65536
-pip install hf_transfer modelscope --quiet --root-user-action=ignore
-export PATH="/root/.local/bin:$PATH"
-
-# RunPod images ship torch in system dist-packages alongside its nvidia-*
-# CUDA wheels. When the project pins a different torch version it installs
-# into --user and shadows the image copy, but the nvidia libs stay in the
-# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
-# `import torch` dies with ImportError. Observed on
-# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
-# broke the flash-attn build, whose metadata hook imports torch.
-NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
-# Spelled out with if/else on purpose: these scripts are built with Python
-# f-strings, so shell brace-expansion syntax would be parsed as an f-string
-# replacement field and raise NameError at build time.
-if [ -n "$LD_LIBRARY_PATH" ]; then
-  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
-else
-  export LD_LIBRARY_PATH="$NVLIBS"
-fi
-export HF_HOME=/workspace/.cache/huggingface
-export HF_DATASETS_CACHE=/workspace/datasets
-export HF_HUB_ENABLE_HF_TRANSFER=1
-export HF_TOKEN="{hf_token}"
-{assemblyai_export}
-
-# GPU optimizations
-export CUDA_VISIBLE_DEVICES=0
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
+    extra_exports = (
+        f"{assemblyai_export}\n"
+        "\n# GPU optimizations\n"
+        "export CUDA_VISIBLE_DEVICES=0\n"
+        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+    )
+    body = f"""
 cd /workspace
 
 python -m scripts.eval.cli \\
@@ -891,18 +868,12 @@ python -m scripts.eval.cli \\
     {streaming_arg} \\
     --output-dir /workspace/outputs \\
     {extra_args_str}
-
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "===== Evaluation Completed Successfully ====="
-else
-    echo "===== Evaluation Failed with exit code: $EXIT_CODE ====="
-fi
-
-echo "Eval script finished. Session will remain active for inspection."
-sleep infinity
 """
+    return (
+        _script_preamble(hf_token, pip_packages="hf_transfer modelscope", extras=extra_exports)
+        + body
+        + _script_epilogue("Evaluation", "Eval script")
+    )
 
 
 @app.command()

@@ -156,13 +156,12 @@ class TestDeepgramAlignmentEvaluator:
         assert evaluator.text_field == "transcript"
         assert evaluator.words_field == "word_timestamps"
 
-    @pytest.mark.parametrize("num_workers", [1, 4])
-    def test_init_num_workers(self, mock_deepgram, num_workers):
-        """Test that num_workers is configurable."""
+    def test_init_verbose(self, mock_deepgram):
+        """Test that verbose is configurable."""
         from scripts.eval.evaluators.alignment import DeepgramAlignmentEvaluator
 
-        evaluator = DeepgramAlignmentEvaluator(api_key="test-key", num_workers=num_workers)
-        assert evaluator.num_workers == num_workers
+        assert DeepgramAlignmentEvaluator(api_key="test-key").verbose is False
+        assert DeepgramAlignmentEvaluator(api_key="test-key", verbose=True).verbose is True
 
     def test_transcribe_with_timestamps_returns_words(self, evaluator, mocker):
         """Test that transcribe_with_timestamps returns word timestamps."""

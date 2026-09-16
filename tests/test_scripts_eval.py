@@ -154,7 +154,6 @@ class TestAlignmentResult:
             ref_ends=[0.5, 1.0, 1.5],
             num_aligned_words=3,
             num_ref_words=3,
-            num_pred_words=3,
             time=1.0,
             reference_text="hello there friend",
             predicted_text="hello there friend",

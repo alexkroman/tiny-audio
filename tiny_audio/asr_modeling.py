@@ -206,18 +206,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                         **cache_kwargs,
                     )
                 else:
-                    # No saved adapters - initialize fresh LLM LoRA for training
-                    from peft import LoraConfig, get_peft_model
-
-                    lora_config = LoraConfig(
-                        r=config.lora_rank,
-                        lora_alpha=config.lora_alpha,
-                        target_modules=config.lora_target_modules,
-                        lora_dropout=config.lora_dropout,
-                        bias="none",
-                        task_type="CAUSAL_LM",
-                    )
-                    model.language_model = get_peft_model(model.language_model, lora_config)
+                    # No saved adapters - initialize fresh LLM LoRA for training.
+                    # __init__ skips _setup_lora while loading, so call it here.
+                    model._setup_lora(config)
 
             return model
         finally:
@@ -1169,27 +1160,27 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         encoder_output_len = int(encoder_lengths.max().item())
         return int(self.projector.get_output_length(encoder_output_len))
 
-    @torch.no_grad()
-    def generate(
+    def _prepare_audio_inputs(
         self,
-        input_ids: Optional[torch.Tensor] = None,
-        input_features: Optional[torch.Tensor] = None,
-        audio_attention_mask: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        input_features: torch.Tensor,
+        audio_attention_mask: torch.Tensor,
         system_prompt: Optional[str] = None,
-        **generate_kwargs,
-    ):
-        """Generate transcription from audio input.
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        """Encode audio and splice it into the decoder's input embeddings.
 
-        Can be called in two ways:
-        1. With input_ids containing <audio> tokens (from processor)
-        2. With just audio, and we build the prompt internally
+        Builds the chat prompt when `input_ids` is not supplied. The number of
+        `<audio>` placeholders must match the projector's output length exactly
+        -- `masked_scatter` relies on it -- so the prompt and the embeddings are
+        both derived from `audio_attention_mask` here instead of in each caller.
+
+        Returns:
+            Tuple of (input_ids, attention_mask, inputs_embeds). The mask is
+            built here only when the prompt is; a caller that supplies
+            `input_ids` gets its own `attention_mask` back untouched, including
+            None.
         """
-        if input_features is None:
-            raise ValueError("input_features required for generation")
-        if audio_attention_mask is None:
-            raise ValueError("audio_attention_mask required for generation")
-
         device = input_features.device
         batch_size = input_features.shape[0]
 
@@ -1236,6 +1227,36 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         inputs_embeds = inputs_embeds.masked_scatter(
             audio_token_mask.to(inputs_embeds.device),
             audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
+        )
+        return input_ids, attention_mask, inputs_embeds
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        input_features: Optional[torch.Tensor] = None,
+        audio_attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        system_prompt: Optional[str] = None,
+        **generate_kwargs,
+    ):
+        """Generate transcription from audio input.
+
+        Can be called in two ways:
+        1. With input_ids containing <audio> tokens (from processor)
+        2. With just audio, and we build the prompt internally
+        """
+        if input_features is None:
+            raise ValueError("input_features required for generation")
+        if audio_attention_mask is None:
+            raise ValueError("audio_attention_mask required for generation")
+
+        input_ids, attention_mask, inputs_embeds = self._prepare_audio_inputs(
+            input_features,
+            audio_attention_mask,
+            system_prompt=system_prompt,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
         )
 
         # transformers v5 deprecates passing generation flags as kwargs when a
@@ -1287,7 +1308,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # When scores were requested, preserve the GenerateOutput so callers
         # can read .scores; otherwise return the bare tensor for backward
         # compatibility with existing callers.
-        prompt_len = 0 if ple_kwargs else input_ids.shape[1]
+        prompt_len = input_ids.shape[1] if "input_ids" in lm_inputs else 0
         if isinstance(output, torch.Tensor):
             return output[:, prompt_len:]
         output.sequences = output.sequences[:, prompt_len:]
@@ -1314,51 +1335,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         Yields:
             Partial transcript text as each token is generated
         """
-        device = input_features.device
-        batch_size = input_features.shape[0]
-
-        # Encode audio -> flattened embeddings (no per-sample host sync)
-        encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
-        token_counts = self.projector.get_output_length(encoder_lengths).to(torch.long)
-        audio_embeds = self._encode_audio(input_features, token_counts, audio_attention_mask)
-
-        # Build prompt with correct number of audio tokens
-        num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
-        audio_placeholder = self.audio_token * num_audio_tokens
-
-        system_prompt = system_prompt or self.system_prompt
-
-        messages: list[dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        # Audio tokens only (instruction-free)
-        user_content = audio_placeholder
-        if self.TRANSCRIBE_PROMPT:
-            user_content += " " + self.TRANSCRIBE_PROMPT
-        messages.append({"role": "user", "content": user_content})
-
-        chat_result = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
-        )
-        input_ids = chat_result.input_ids.to(device)
-
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-        if input_ids.shape[0] == 1 and batch_size > 1:
-            input_ids = input_ids.expand(batch_size, -1)
-
-        attention_mask = torch.ones_like(input_ids)
-
-        # Get text embeddings and replace audio tokens with audio embeddings
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-        audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
-        inputs_embeds = inputs_embeds.masked_scatter(
-            audio_token_mask.to(inputs_embeds.device),
-            audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
+        input_ids, attention_mask, inputs_embeds = self._prepare_audio_inputs(
+            input_features, audio_attention_mask, system_prompt=system_prompt
         )
 
         # Setup streamer for token-by-token output

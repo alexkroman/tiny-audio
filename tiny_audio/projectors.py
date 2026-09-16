@@ -56,8 +56,7 @@ class MLPAudioProjector(nn.Module):
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length (matches GLM-ASR)."""
-        # GLM-ASR formula: (L - merge_factor) // merge_factor + 1
-        return (input_length - self.k) // self.k + 1
+        return _frame_stack_length(input_length, self.k)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Project audio features to LLM embedding space.
@@ -82,14 +81,19 @@ class MLPAudioProjector(nn.Module):
 # =============================================================================
 
 
-def _frame_stack(x: torch.Tensor, k: int) -> torch.Tensor:
-    """Stack k adjacent frames along the feature dim.
+def _frame_stack_length(length, k: int):
+    """Frames left after stacking k adjacent frames (GLM-ASR's rule).
 
-    Truncates trailing frames that don't fill a complete k-frame window,
-    matching GLM-ASR's `(seq_len - k) // k + 1` formula.
+    Trailing frames that don't fill a complete k-frame window are dropped.
+    Works for Python ints and torch tensors alike.
     """
+    return (length - k) // k + 1
+
+
+def _frame_stack(x: torch.Tensor, k: int) -> torch.Tensor:
+    """Stack k adjacent frames along the feature dim."""
     batch, seq, dim = x.shape
-    out_len = (seq - k) // k + 1
+    out_len = _frame_stack_length(seq, k)
     return x[:, : out_len * k, :].reshape(batch, out_len, dim * k)
 
 
@@ -258,7 +262,7 @@ class MoEAudioProjector(nn.Module):
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length (matches MLP projector)."""
-        return (input_length - self.k) // self.k + 1
+        return _frame_stack_length(input_length, self.k)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Project audio features using shared + sparse MoE.

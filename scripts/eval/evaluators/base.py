@@ -1,6 +1,7 @@
 """Base evaluator classes and shared utilities."""
 
 import os
+from enum import Enum
 
 import attrs
 import jiwer
@@ -11,8 +12,17 @@ from scripts.eval.audio import TextNormalizer
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
 
-# AssemblyAI model options
-ASSEMBLYAI_MODELS = {"best", "universal", "universal-3-pro"}
+
+class AssemblyAIModel(str, Enum):
+    """AssemblyAI model options."""
+
+    best = "best"
+    universal = "universal"
+    universal_3_pro = "universal-3-pro"
+
+
+# Valid `model` values accepted by setup_assemblyai; the enum is the source.
+ASSEMBLYAI_MODELS = {m.value for m in AssemblyAIModel}
 
 
 def setup_assemblyai(
@@ -79,7 +89,6 @@ class AlignmentResult:
     ref_ends: list[float]
     num_aligned_words: int
     num_ref_words: int
-    num_pred_words: int
     time: float
     reference_text: str
     predicted_text: str

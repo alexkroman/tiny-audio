@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Analysis tools for ASR evaluation results."""
 
+import functools
 import json
 import re
 from collections import defaultdict
@@ -39,6 +40,7 @@ def extract_dataset_name(dir_name: str) -> str:
 extract_model_name = _extract_model_from_dir
 
 
+@functools.lru_cache(maxsize=65536)
 def normalize_text(text: str) -> str:
     """Normalize text for comparison."""
     text = text.lower()
@@ -320,26 +322,6 @@ def extract_entities(
     console.print(f"Saved to [bold]{keywords_path}[/bold]")
 
 
-# Canonical dataset order for comparison tables
-DATASET_ORDER = [
-    "earnings22",
-    "peoples",
-    "ami",
-    "gigaspeech",
-    "commonvoice",
-    "voxpopuli",
-    "loquacious",
-    "librispeech-other",
-    "tedlium",
-    "librispeech",
-    "english-dialects-irish",
-    "english-dialects-scottish",
-    "english-dialects-welsh",
-    "english-dialects-northern",
-    "edacc",
-    "switchboard",
-]
-
 # Datasets to exclude from comparison tables
 EXCLUDED_DATASETS = {"classification", "expresso"}
 
@@ -362,6 +344,9 @@ DATASET_SHORT_NAMES = {
     "edacc": "EDACC",
     "switchboard": "Switchboard",
 }
+
+# Canonical dataset order for comparison tables (display order above)
+DATASET_ORDER = list(DATASET_SHORT_NAMES)
 
 
 def parse_metrics_file(metrics_file: Path) -> dict:

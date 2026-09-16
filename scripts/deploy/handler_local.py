@@ -8,13 +8,6 @@ from pathlib import Path
 
 import typer
 
-try:
-    from tiny_audio.handler import EndpointHandler
-except ImportError as e:
-    print(f"Failed to import handler: {e}")
-    print("   Make sure tiny_audio package is installed")
-    sys.exit(1)
-
 app = typer.Typer(help="Test HuggingFace inference endpoint handler locally")
 
 
@@ -99,6 +92,16 @@ def test(
     ),
 ):
     """Test the EndpointHandler with various configurations."""
+    # Imported here, not at module scope: it pulls in transformers + torch
+    # (~2.8s), which every other `ta dev` command would otherwise pay because
+    # scripts/dev.py imports this module to register the command.
+    try:
+        from tiny_audio.handler import EndpointHandler
+    except ImportError as e:
+        print(f"Failed to import handler: {e}")
+        print("   Make sure tiny_audio package is installed")
+        sys.exit(1)
+
     model_path = model or "mazesmazes/tiny-audio"
     if model is None:
         typer.echo(f"No model specified, using default: {model_path}")
