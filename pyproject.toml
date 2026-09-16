@@ -16,12 +16,11 @@ classifiers = [
     "Intended Audience :: Education",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.12,<3.13"
 # Poetry fills deps in from [tool.poetry.dependencies] below. A static
 # `dependencies = [...]` here would override that list (PEP 621 takes
 # precedence over Poetry's section when both exist); leave it dynamic.
@@ -51,10 +50,12 @@ url = "https://download.pytorch.org/whl/cu128"
 priority = "supplemental"
 
 [tool.poetry.dependencies]
-python = ">=3.10,<3.13"
+python = ">=3.12,<3.13"
 # torch - Poetry will pull from pytorch-cu128 source on Linux when available.
-# Pinned to 2.8.x to match the runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
-# image so deploys don't need to swap out the base image's torch.
+# Pinned to 2.8.x for the local/CI env. NOTE: the default deploy image is now
+# runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404 (torch 2.9.1 on python3.12);
+# scripts/deploy/runpod.py strips `torch==` from the exported requirements, so
+# the pod keeps the image's torch and this pin only governs local installs.
 torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
@@ -90,6 +91,13 @@ speechbrain = {git = "https://github.com/speechbrain/speechbrain.git"}
 pytz = "*"
 truecase = ">=0.0.14"  # Statistical re-casing for ASR label normalization
 ftfy = ">=6.0"  # Unicode cleanup (mojibake, smart quotes) + NFKC before normalize
+# nltk 3.10 tokenizes a leading apostrophe as its own token ("'em" -> "'", "em"),
+# and truecase's TreebankWordDetokenizer re-glues that bare "'" onto the PREVIOUS
+# word. Training labels from mono-case corpora then come out as "get' em" and
+# "in' 99" instead of "get 'em" / "in '99" (tests/test_label_normalization.py).
+# Transitive via truecase (unbounded) and pipecat-ai (>=3.9.1,<4); pinned here
+# because nothing in this repo needs 3.10. Revisit if truecase gains a fix.
+nltk = "<3.10"
 
 [project.optional-dependencies]
 local = ["pyaudio>=0.2.14"]
@@ -135,7 +143,7 @@ multi_line_output = 3
 include_trailing_comma = true
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 warn_return_any = false
 warn_unused_configs = true
 disallow_untyped_defs = false

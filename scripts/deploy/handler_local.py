@@ -33,16 +33,19 @@ def find_latest_model(base_dir: str = "outputs") -> str | None:
 
 def find_test_audio() -> str | None:
     """Find a test audio file in the project."""
-    test_paths = [
-        ".venv/lib/python3.11/site-packages/gradio/test_data/test_audio.wav",
-        ".venv/lib/python3.11/site-packages/gradio/media_assets/audio/cantina.wav",
-        "demo/sample.wav",
-        "tests/test_audio.wav",
-    ]
-
     base_dir = Path(__file__).parent.parent.parent
 
-    for test_path in test_paths:
+    # Gradio ships sample audio; glob the python version out of the path so
+    # this keeps working across interpreter upgrades (was hardcoded to 3.11).
+    for pattern in (
+        ".venv/lib/python3.*/site-packages/gradio/test_data/test_audio.wav",
+        ".venv/lib/python3.*/site-packages/gradio/media_assets/audio/cantina.wav",
+    ):
+        match = next(iter(sorted(base_dir.glob(pattern))), None)
+        if match:
+            return str(match)
+
+    for test_path in ("demo/sample.wav", "tests/test_audio.wav"):
         full_path = base_dir / test_path
         if full_path.exists():
             return str(full_path)
