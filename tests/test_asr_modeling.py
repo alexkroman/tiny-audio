@@ -134,23 +134,40 @@ class TestLoadAudioEncoder:
     def test_audio_encoder_in_eval_mode(self, base_asr_model):
         assert base_asr_model.audio_tower.training is False
 
-    def test_glm_branch_uses_audio_tower(self, monkeypatch):
-        """Verify GLM dispatch path without downloading the real GLM model."""
+    @pytest.mark.parametrize("layout", ["nested", "flat"])
+    def test_glm_branch_uses_audio_tower(self, monkeypatch, layout):
+        """Verify GLM dispatch path without downloading the real GLM model.
+
+        Both submodule layouts must work. transformers 5.x makes
+        GlmAsrForConditionalGeneration a wrapper holding a GlmAsrModel at
+        `.model`, and that inner model owns audio_tower; older versions hung
+        audio_tower off the top-level model.
+        """
         from unittest.mock import MagicMock
 
         from tiny_audio.asr_modeling import ASRModel
 
-        # Mock AutoModelForSeq2SeqLM.from_pretrained to return a mock with audio_tower
-        mock_full = MagicMock()
-        mock_full.audio_tower = MagicMock(spec=torch.nn.Module)
-        mock_full.audio_tower.requires_grad_ = MagicMock()
-        mock_full.audio_tower.train = MagicMock()
+        tower = MagicMock(spec=torch.nn.Module)
+        tower.requires_grad_ = MagicMock()
+        tower.train = MagicMock()
         # _load_audio_encoder applies an idempotent dtype cast post-load
         # (`encoder = encoder.to(dtype=dtype)`), so the returned encoder is
-        # whatever audio_tower.to() yields. Pin .to() to return audio_tower
+        # whatever audio_tower.to() yields. Pin .to() to return the tower
         # itself so the identity assertion below still describes the
         # logical "encoder == the mocked audio_tower".
-        mock_full.audio_tower.to = MagicMock(return_value=mock_full.audio_tower)
+        tower.to = MagicMock(return_value=tower)
+
+        # Mock AutoModelForSeq2SeqLM.from_pretrained to return a mock whose
+        # audio_tower sits at the layout under test.
+        mock_full = MagicMock()
+        if layout == "nested":
+            mock_full.model.audio_tower = tower
+        else:
+            mock_full.audio_tower = tower
+            # A bare MagicMock would auto-create `.model.audio_tower`, so the
+            # nested branch would always win and the flat path would never be
+            # exercised. Delete `.model` to make attribute access raise.
+            del mock_full.model
 
         with monkeypatch.context() as m:
             mock_loader = MagicMock(return_value=mock_full)
@@ -165,11 +182,35 @@ class TestLoadAudioEncoder:
 
             # Should have called the GLM loader, not WhisperModel
             mock_loader.assert_called_once()
-            assert encoder is mock_full.audio_tower
-            mock_full.audio_tower.to.assert_called_once_with(dtype=torch.float32)
-            mock_full.audio_tower.requires_grad_.assert_called_with(False)
+            assert encoder is tower
+            tower.to.assert_called_once_with(dtype=torch.float32)
+            tower.requires_grad_.assert_called_with(False)
             # Frozen encoder gets switched to inference mode via `.train(False)`.
-            mock_full.audio_tower.train.assert_called_once_with(False)
+            tower.train.assert_called_once_with(False)
+
+    def test_glm_branch_raises_when_audio_tower_missing(self, monkeypatch):
+        """A future layout change should fail loudly, not hand back a stub."""
+        from unittest.mock import MagicMock
+
+        from tiny_audio.asr_modeling import ASRModel
+
+        mock_full = MagicMock()
+        del mock_full.model
+        del mock_full.audio_tower
+
+        with monkeypatch.context() as m:
+            m.setattr(
+                "transformers.AutoModelForSeq2SeqLM.from_pretrained",
+                MagicMock(return_value=mock_full),
+            )
+
+            cfg = MagicMock()
+            cfg.audio_model_id = "zai-org/GLM-ASR-something"
+            cfg.attn_implementation = "eager"
+            cfg.freeze_audio_encoder = True
+
+            with pytest.raises(AttributeError, match="audio_tower"):
+                ASRModel._load_audio_encoder(cfg, torch.float32)
 
 
 class TestLoadLanguageModel:

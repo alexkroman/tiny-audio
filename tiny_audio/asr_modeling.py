@@ -347,18 +347,37 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             granite_kwargs = {**encoder_kwargs, "attn_implementation": "sdpa"}
             encoder = GraniteSpeech5Encoder.from_pretrained(config.audio_model_id, **granite_kwargs)
         elif "glm" in config.audio_model_id.lower():
-            # GLM-ASR models use audio_tower as the encoder
-            # Requires transformers >= 5.x or installed from source
+            # GLM-ASR stores its encoder at audio_tower (GlmAsrEncoder), but
+            # which object owns that attribute depends on the transformers
+            # version. Under the 5.x composite-model layout,
+            # GlmAsrForConditionalGeneration is a thin wrapper holding a
+            # GlmAsrModel at `.model`, and it is GlmAsrModel that owns
+            # audio_tower / language_model / multi_modal_projector. Older
+            # flat checkpoints hung them off the top-level model. Resolve the
+            # owner instead of assuming, so neither layout AttributeErrors
+            # at load.
             from transformers import AutoModelForSeq2SeqLM
+            from transformers import __version__ as transformers_version
 
             full_model = AutoModelForSeq2SeqLM.from_pretrained(
                 config.audio_model_id, trust_remote_code=True, **encoder_kwargs
             )
-            # GLM stores encoder at audio_tower (GlmAsrEncoder)
-            encoder = full_model.audio_tower
-            # Clear references to free VRAM from the LLM decoder
-            full_model.language_model = None
-            full_model.multi_modal_projector = None
+            inner = getattr(full_model, "model", None)
+            holder = inner if hasattr(inner, "audio_tower") else full_model
+            if not hasattr(holder, "audio_tower"):
+                raise AttributeError(
+                    f"{type(full_model).__name__} exposes no audio_tower at "
+                    "`.audio_tower` or `.model.audio_tower`; GLM-ASR encoder "
+                    f"extraction needs updating for transformers "
+                    f"{transformers_version}."
+                )
+            encoder = holder.audio_tower
+            # Drop the LLM decoder and projector to free their VRAM. These must
+            # go through the same owner as audio_tower: assigning None to a name
+            # that is not a registered submodule on that object silently creates
+            # a plain attribute and frees nothing.
+            holder.language_model = None
+            holder.multi_modal_projector = None
             del full_model
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)

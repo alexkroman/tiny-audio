@@ -33,6 +33,14 @@ OPTIMIZER_STATES = 2
 OVERHEAD_FACTOR = 1.25
 # Rough size of the installed python env + apt packages on the pod.
 ENV_DISK_GIB = 12.0
+# datasets keeps two persistent copies of every source, and neither is cleaned
+# up during the run: the Hub download lands as parquet in the hub cache under
+# HF_HOME, and load_dataset() then writes its own Arrow tables under
+# data.dataset_cache_dir. Measured on hf-internal-testing/librispeech_asr_dummy
+# (datasets 4.x): 8.99 MB of parquet in the hub cache plus 9.46 MB of Arrow in
+# the cache_dir, i.e. 2.05x the download size. Charging the download once is
+# how a correctly-sized pod still dies with ENOSPC halfway through prep.
+DATASET_DISK_FACTOR = 2.05
 
 
 @dataclass
@@ -247,14 +255,37 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             f"{logits / GIB:.1f} GiB at batch={batch}, seq={seq_len}."
         )
 
-    download = sum(c.download_bytes for c in plan.components) + plan.dataset_bytes
+    # A checkpoint is model.safetensors + optimizer.pt, and both scale with the
+    # whole *trainable* stack rather than the projector: ASRModel.state_dict
+    # serializes the language model too whenever freeze_language_model is false
+    # (stage_1), and HF Trainer always writes AdamW's two states per trainable
+    # param. save_total_limit copies sit on disk simultaneously, so retention
+    # multiplies -- charging one projector-sized checkpoint understated a joint
+    # fine-tune by ~500x.
+    keep = max(int(train.get("save_total_limit", 1) or 1), 1)
+    ckpt_each = trainable_params * trainable_bytes_per * (1 + OPTIMIZER_STATES)
+    ckpt_bytes = ckpt_each * keep
+
+    weights_bytes = sum(c.download_bytes for c in plan.components)
+    datasets_bytes = plan.dataset_bytes * DATASET_DISK_FACTOR
+    total = weights_bytes + datasets_bytes + ckpt_bytes
     plan.disk = {
-        "model weights": sum(c.download_bytes for c in plan.components) / GIB,
-        "datasets": plan.dataset_bytes / GIB,
+        "model weights": weights_bytes / GIB,
+        f"datasets (parquet+arrow x{DATASET_DISK_FACTOR})": datasets_bytes / GIB,
         "python env + apt": ENV_DISK_GIB,
-        "checkpoints (projector only)": (proj_params * 4 * 3) / GIB,
-        "recommended": download / GIB + ENV_DISK_GIB + (proj_params * 4 * 3) / GIB,
+        f"checkpoints ({keep} kept x {_fmt(ckpt_each / GIB)})": ckpt_bytes / GIB,
+        "recommended": total / GIB + ENV_DISK_GIB,
     }
+
+    # RunPod container disks are provisioned from the host's local storage and
+    # large requests are a common cause of "no instances available"; past ~1 TiB
+    # a network volume is the realistic way to satisfy /workspace.
+    if plan.disk["recommended"] > 1024:
+        plan.warnings.append(
+            f"{plan.disk['recommended'] / 1024:.1f} TiB of /workspace is a lot to ask of a "
+            "container disk. Attach a network volume (--network-volume-id) or cut the "
+            "dataset mix; `datasets` needs room for parquet AND arrow at once."
+        )
     return plan
 
 
@@ -316,10 +347,10 @@ def plan_command(
 
     print("\n--- GPU memory ---")
     for k, v in plan.vram.items():
-        print(f"  {k:<28} {_fmt(v)}")
+        print(f"  {k:<38} {_fmt(v)}")
     print("\n--- Disk ---")
     for k, v in plan.disk.items():
-        print(f"  {k:<28} {_fmt(v)}")
+        print(f"  {k:<38} {_fmt(v)}")
 
     for w in plan.warnings:
         print(f"\n  ! {w}")
@@ -373,7 +404,7 @@ def _available_gpus(min_vram_gib: float) -> list[tuple[int, str]]:
 
 
 def provision_command(
-    experiment: str = typer.Option("granite_gemma_smoke", "--experiment", "-e"),
+    experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
     seq_len: int = typer.Option(512, "--seq-len"),
     name: str | None = typer.Option(
         None, "--name", help="Pod name (default tiny-audio-<experiment>)"
@@ -402,6 +433,11 @@ def provision_command(
     candidates = _available_gpus(vram)
 
     print(f"\n{experiment}: needs >= {vram:.1f} GiB VRAM, {disk} GB disk")
+    # Surface the same warnings `plan` prints -- the network-volume one in
+    # particular explains a container-disk request that RunPod will refuse to
+    # fill, which otherwise reads as plain "no capacity" on every GPU type.
+    for w in plan.warnings:
+        print(f"  ! {w}")
     if not candidates:
         print("No listed GPU type has enough VRAM. Reduce batch size or enable")
         print("gradient_checkpointing, then re-run.")

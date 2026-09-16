@@ -377,7 +377,7 @@ def plan(
 
 @app.command(name="up")
 def up(
-    experiment: str = typer.Option("granite_gemma_smoke", "--experiment", "-e"),
+    experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
     seq_len: int = typer.Option(512, "--seq-len"),
     name: str | None = typer.Option(None, "--name"),
     image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
@@ -518,16 +518,69 @@ sleep infinity
 """
 
 
+def _remote_free_gib(conn: Connection, path: str = "/workspace") -> float | None:
+    """Free space on the filesystem backing `path`, in GiB (None if unreadable)."""
+    result = conn.run(f"df -Pk {path} | tail -1", hide=True, warn=True)
+    if not result.ok:
+        return None
+    fields = result.stdout.split()
+    try:
+        # `df -Pk` reports 1K blocks; the 4th field is Available.
+        return int(fields[3]) / (1024**2)
+    except (IndexError, ValueError):
+        return None
+
+
+def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) -> None:
+    """Refuse to start a run that /workspace cannot physically hold.
+
+    ENOSPC does not surface at launch. It surfaces hours later as an xet
+    "File reconstruction error: No space left on device" partway through
+    dataset prep, after the pod has been billed for the whole time. The plan
+    already knows what a recipe needs and `df` knows what the pod has, so
+    there is no reason to find out the expensive way. The usual trigger is a
+    pod sized for one experiment then handed a different one to train --
+    `up` and `train` share a default, but either can be pointed elsewhere
+    with -e.
+    """
+    from scripts.deploy.plan import build_plan
+
+    free = _remote_free_gib(conn)
+    if free is None:
+        print("Could not read `df /workspace`; skipping the disk preflight.")
+        return
+    try:
+        need = build_plan(experiment, overrides, 512).disk["recommended"]
+    except Exception as exc:  # unresolvable config, gated repo, Hub outage
+        print(f"Disk preflight skipped ({type(exc).__name__}: {exc}).")
+        return
+
+    print(f"/workspace has {free:,.0f} GiB free; {experiment} needs ~{need:,.0f} GiB.")
+    if free < need:
+        print(
+            f"\nNot enough disk -- short by {need - free:,.0f} GiB. `datasets` holds the\n"
+            "downloaded parquet and its generated arrow tables at the same time, so this\n"
+            "run would die with ENOSPC mid-prep. Provision a bigger pod (see\n"
+            f"`ta runpod plan -e {experiment}`) or pass --skip-disk-check to override."
+        )
+        raise typer.Exit(1)
+
+
 @app.command()
 def train(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
     port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
-    experiment: str = typer.Option("mlp", "--experiment", "-e", help="Experiment config to run"),
+    experiment: str = typer.Option(
+        "granite_gemma", "--experiment", "-e", help="Experiment config to run"
+    ),
     session_name: str | None = typer.Option(
         None, "--session-name", "-s", help="Custom tmux session name"
     ),
     no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
     force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+    skip_disk_check: bool = typer.Option(
+        False, "--skip-disk-check", help="Start even if /workspace looks too small"
+    ),
     wandb_run_id: str | None = typer.Option(None, "--wandb-run-id", help="W&B run ID to resume"),
     wandb_resume: Annotated[
         str | None,
@@ -543,6 +596,9 @@ def train(
 
     if not test_connection(conn):
         sys.exit(1)
+
+    if not skip_disk_check:
+        _check_remote_disk(conn, experiment, list(extra_args or []))
 
     if session_name is None:
         session_name = _auto_session_name(f"train_{experiment}")

@@ -20,7 +20,13 @@
 #   poetry run python scripts/train.py +experiments=granite_gemma
 
 defaults:
-  - override /data: multiasr
+  # Single-source Loquacious `medium` (2,500h / 1.07M rows) rather than the
+  # multiasr mix. ~233 GB of parquet vs multiasr's ~1.2 TiB, which is the
+  # difference between a provisionable container disk and a pod that dies
+  # mid-download. Note the label format caveat in that file: Loquacious
+  # transcripts are ALL-CAPS/no-punct, so this run's labels are
+  # cased-but-unpunctuated after truecase.
+  - override /data: loquacious_medium
 
 model:
   # Granite Speech 5.0 TurboCTC: encoder-only Conformer (472.9M params, 16
@@ -53,8 +59,10 @@ model:
   # (1024*4096 + 4096*1536), close to the ~12M the joint recipe had, and the
   # widening is cheap because nothing else trains.
   projector_hidden_dim: 4096
-  # Kept from stage_1: the run is still one epoch over ~3.3M rows, and the
-  # projector is now the only thing that can overfit.
+  # Kept from stage_1. Note the epoch is now ~1.07M rows (Loquacious medium)
+  # rather than the ~3.3M of the multiasr mix, so there is roughly a third as
+  # much data for the one module that can overfit -- if anything this argues
+  # for keeping dropout rather than dropping it.
   projector_dropout: 0.1
 
   # Split precision. The fp32-master-weights argument applies only to
