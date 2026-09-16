@@ -441,15 +441,14 @@ def deploy(
     print(f"To connect: ssh -i ~/.ssh/id_ed25519 -p {port} root@{host}")
 
 
-# Every remote script shares this header: the fd limit, the hf_transfer install,
-# the nvidia-lib LD_LIBRARY_PATH repair, and the HF cache/token exports. It lived
-# inline in all three builders below and had already drifted between them.
+# Every remote script shares this header: the fd limit, the nvidia-lib
+# LD_LIBRARY_PATH repair, and the HF cache/token exports. It lived inline in all
+# three builders below and had already drifted between them.
 _SCRIPT_PREAMBLE = """#!/bin/bash
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
-pip install {pip_packages} --quiet --root-user-action=ignore
-export PATH="/root/.local/bin:$PATH"
+{pip_install}export PATH="/root/.local/bin:$PATH"
 
 # RunPod images ship torch in system dist-packages alongside its nvidia-*
 # CUDA wheels. When the project pins a different torch version it installs
@@ -469,20 +468,25 @@ else
 fi
 export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
-export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_XET_HIGH_PERFORMANCE=1
 export HF_TOKEN="{hf_token}"
 """
 
 
-def _script_preamble(hf_token: str, *, pip_packages: str = "hf_transfer", extras: str = "") -> str:
+def _script_preamble(hf_token: str, *, pip_packages: str = "", extras: str = "") -> str:
     """Shared shell header for the remote train/sift/eval scripts.
 
     Args:
         hf_token: Value exported as HF_TOKEN.
-        pip_packages: Packages installed before the run.
+        pip_packages: Extra packages to install before the run; the pip line is
+            omitted entirely when empty. Used to carry `hf_transfer`, which
+            huggingface_hub no longer uses.
         extras: Extra `export` lines appended to the header.
     """
-    preamble = _SCRIPT_PREAMBLE.format(pip_packages=pip_packages, hf_token=hf_token)
+    pip_install = (
+        f"pip install {pip_packages} --quiet --root-user-action=ignore\n" if pip_packages else ""
+    )
+    preamble = _SCRIPT_PREAMBLE.format(pip_install=pip_install, hf_token=hf_token)
     return preamble + extras
 
 
@@ -566,6 +570,32 @@ def _remote_free_gib(conn: Connection, path: str = "/workspace") -> float | None
         return None
 
 
+# Where a run materializes its bulk: the dataset cache (parquet + generated
+# arrow) and the Hub cache (model weights). Both are exported by
+# _script_preamble, so they are the same paths the training script will use.
+_REMOTE_CACHE_DIRS = ("/workspace/datasets", "/workspace/.cache/huggingface")
+
+
+def _remote_used_gib(conn: Connection, paths: tuple[str, ...]) -> float:
+    """GiB already materialized under `paths` on the pod (0 if unreadable).
+
+    `du` walks metadata, and /workspace is often a network volume holding a
+    few hundred thousand parquet shards, so each call is bounded by `timeout`
+    rather than allowed to stall the preflight. An unreadable or missing path
+    contributes 0, which just makes the check conservative again.
+    """
+    total_kb = 0
+    for path in paths:
+        result = conn.run(f"timeout 60 du -sk {path} 2>/dev/null | tail -1", hide=True, warn=True)
+        if not result.ok or not result.stdout.strip():
+            continue
+        try:
+            total_kb += int(result.stdout.split()[0])
+        except (IndexError, ValueError):
+            continue
+    return total_kb / (1024**2)
+
+
 def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) -> None:
     """Refuse to start a run that /workspace cannot physically hold.
 
@@ -590,13 +620,24 @@ def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) 
         print(f"Disk preflight skipped ({type(exc).__name__}: {exc}).")
         return
 
-    print(f"/workspace has {free:,.0f} GiB free; {experiment} needs ~{need:,.0f} GiB.")
-    if free < need:
+    # `need` is the size of a run starting from an empty pod. Re-running an
+    # experiment on a pod that already holds its dataset would double-count:
+    # the bytes are simultaneously "required" and already subtracted from
+    # `free`. Compare against what is still left to write instead.
+    cached = _remote_used_gib(conn, _REMOTE_CACHE_DIRS)
+    remaining = max(need - cached, 0.0)
+    print(
+        f"/workspace has {free:,.0f} GiB free; {experiment} needs ~{need:,.0f} GiB total, "
+        f"~{cached:,.0f} GiB already cached -> ~{remaining:,.0f} GiB still to write."
+    )
+    if free < remaining:
         print(
-            f"\nNot enough disk -- short by {need - free:,.0f} GiB. `datasets` holds the\n"
-            "downloaded parquet and its generated arrow tables at the same time, so this\n"
-            "run would die with ENOSPC mid-prep. Provision a bigger pod (see\n"
-            f"`ta runpod plan -e {experiment}`) or pass --skip-disk-check to override."
+            f"\nNot enough disk -- short by {remaining - free:,.0f} GiB. `datasets` holds\n"
+            "the downloaded parquet and its generated arrow tables at the same time, and\n"
+            "checkpoints scale with the trainable stack, so this run would die with\n"
+            "ENOSPC mid-prep. Levers, cheapest first: lower `save_total_limit`, provision\n"
+            f"a bigger pod (see `ta runpod plan -e {experiment}`), or pass\n"
+            "--skip-disk-check to override."
         )
         raise typer.Exit(1)
 
@@ -870,7 +911,7 @@ python -m scripts.eval.cli \\
     {extra_args_str}
 """
     return (
-        _script_preamble(hf_token, pip_packages="hf_transfer modelscope", extras=extra_exports)
+        _script_preamble(hf_token, pip_packages="modelscope", extras=extra_exports)
         + body
         + _script_epilogue("Evaluation", "Eval script")
     )

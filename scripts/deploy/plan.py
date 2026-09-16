@@ -73,6 +73,28 @@ def _safetensors_params(repo_id: str) -> tuple[int, str]:
     return total, dominant
 
 
+def _vocab_table_params(text_cfg) -> dict[str, int]:
+    """Per-token lookup-table sizes for a decoder, computed from its config.
+
+    These can be frozen independently of the rest of the decoder
+    (`freeze_text_embed_tokens` / `freeze_text_per_layer_embeddings`), and on
+    Gemma 4 they are the majority of the checkpoint -- so counting them as
+    trainable overstates AdamW state badly. Empty entries are omitted, so
+    decoders without a per-layer table simply don't report one.
+    """
+    tables: dict[str, int] = {}
+    vocab = int(getattr(text_cfg, "vocab_size", 0) or 0)
+    hidden = int(getattr(text_cfg, "hidden_size", 0) or 0)
+    if vocab and hidden:
+        tables["embed_tokens"] = vocab * hidden
+    ple_vocab = int(getattr(text_cfg, "vocab_size_per_layer_input", 0) or 0)
+    ple_hidden = int(getattr(text_cfg, "hidden_size_per_layer_input", 0) or 0)
+    layers = int(getattr(text_cfg, "num_hidden_layers", 0) or 0)
+    if ple_vocab and ple_hidden and layers:
+        tables["embed_tokens_per_layer"] = ple_vocab * layers * ple_hidden
+    return tables
+
+
 def _repo_weight_bytes(repo_id: str, repo_type: str = "model", name: str | None = None) -> int:
     """Total bytes the Hub will hand us for a repo, optionally one config only.
 
@@ -143,15 +165,40 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     dec_trainable = not train.get("freeze_language_model", True)
     dec_cfg = AutoConfig.from_pretrained(text_id)
     text_cfg = dec_cfg.get_text_config() if hasattr(dec_cfg, "get_text_config") else dec_cfg
+    # Split the frozen vocabulary tables out of the trainable decoder. Both
+    # freeze flags act on individual tensors inside the language model, so a
+    # single all-or-nothing `trainable` on one component would charge AdamW
+    # state for 2.75B parameters that never see the optimizer on this recipe.
+    frozen_tables: dict[str, int] = {}
+    if dec_trainable:
+        tables = _vocab_table_params(text_cfg)
+        for flag, key in (
+            ("freeze_text_embed_tokens", "embed_tokens"),
+            ("freeze_text_per_layer_embeddings", "embed_tokens_per_layer"),
+        ):
+            if train.get(flag, False) and tables.get(key):
+                frozen_tables[key] = tables[key]
+    frozen_table_params = sum(frozen_tables.values())
+
     plan.components.append(
         Component(
             f"decoder ({text_id})",
-            dec_params,
+            dec_params - frozen_table_params,
             _repo_weight_bytes(text_id),
             dec_trainable,
             f"checkpoint {dec_dtype}",
         )
     )
+    if frozen_table_params:
+        plan.components.append(
+            Component(
+                f"  frozen tables ({', '.join(frozen_tables)})",
+                frozen_table_params,
+                0,  # already charged by the decoder's repo download above
+                False,
+                "no optimizer state",
+            )
+        )
 
     # ---- projector ---------------------------------------------------------
     enc_cfg = AutoConfig.from_pretrained(audio_id)
@@ -242,6 +289,19 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # decoder, so every decoder layer's activations are retained even though
     # the decoder itself is frozen. Freezing saves optimizer state, not
     # activation memory -- a common and expensive surprise.
+    # Two known over-counts, both harmless while the decoder was frozen (the
+    # projector was the only trainable module) and both material once it is not.
+    # Stated rather than corrected: erring high is the safe direction for pod
+    # sizing, but a silently inflated figure invites renting the wrong GPU.
+    if dec_trainable:
+        plan.warnings.append(
+            "Trainable-parameter count is an upper bound: it includes any "
+            "multimodal tower in the checkpoint that ASRModel discards "
+            "(~476M on gemma-4-E2B-it), and charges trainable weights and "
+            "gradients at projector_dtype even though the decoder trains at "
+            "model_dtype. Expect real usage below the figure above."
+        )
+
     if not dec_trainable and trainable_params and not ckpt:
         plan.warnings.append(
             "Decoder is frozen but the projector feeds its input, so activations "

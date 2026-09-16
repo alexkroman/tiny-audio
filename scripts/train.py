@@ -725,17 +725,22 @@ class ASRTrainer(Trainer):
         if self.optimizer is not None or not overrides:
             return super().create_optimizer()
 
-        from transformers.models.llama.modeling_llama import LlamaRMSNorm
-        from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
         from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
         from transformers.trainer_pt_utils import get_parameter_names
 
-        # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm. Qwen3 / Llama
-        # use RMSNorm subclasses, so without these their gain weights silently
-        # land in the decay group and get pulled toward zero — destabilizing
-        # the residual-stream scale the projector's _NORM_INIT was tuned to.
+        # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm, but every
+        # decoder here normalizes with an RMSNorm subclass instead, whose gain
+        # weights would silently land in the decay group and be pulled toward
+        # zero — destabilizing the residual-stream scale the projector's
+        # _NORM_INIT was tuned to. This used to be a two-entry allowlist
+        # (Qwen3RMSNorm, LlamaRMSNorm), which quietly excluded every other
+        # family — an unfrozen Gemma 4 E2B would have decayed all 247 of its
+        # Gemma4RMSNorm gain tensors across 9 distinct sites. Match
+        # structurally on the class name so a new decoder is covered on
+        # arrival rather than needing an import added here.
         opt_model = self.model
-        forbidden = list(ALL_LAYERNORM_LAYERS) + [Qwen3RMSNorm, LlamaRMSNorm]
+        norm_modules = [type(m) for m in opt_model.modules() if type(m).__name__.endswith("Norm")]
+        forbidden = list(ALL_LAYERNORM_LAYERS) + norm_modules
         decay_parameters = set(get_parameter_names(opt_model, forbidden))
         decay_parameters = {n for n in decay_parameters if "bias" not in n}
 
@@ -846,6 +851,7 @@ TRAINING_MODEL_PARAMS = [
     "freeze_projector",
     "freeze_language_model",
     "freeze_text_embed_tokens",
+    "freeze_text_per_layer_embeddings",
     "freeze_audio_encoder",
 ]
 

@@ -299,6 +299,20 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if getattr(config, "freeze_text_embed_tokens", False):
             self.language_model.get_input_embeddings().weight.requires_grad_(False)
 
+        # Freeze Gemma 4's per-layer embedding table. This is a separate
+        # vocabulary lookup from embed_tokens (see ASRConfig for why it is
+        # worth its own flag), so `freeze_text_embed_tokens` does not reach it.
+        if getattr(config, "freeze_text_per_layer_embeddings", False):
+            table = self._per_layer_embedding_table()
+            if table is None:
+                logging.warning(
+                    "freeze_text_per_layer_embeddings=True but %s has no per-layer "
+                    "embedding table — ignoring. Only Gemma 4 style decoders have one.",
+                    config.text_model_id,
+                )
+            else:
+                table.weight.requires_grad_(False)
+
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
@@ -794,6 +808,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if candidate is not None and hasattr(candidate, "get_per_layer_inputs"):
                 return candidate
         return None
+
+    def _per_layer_embedding_table(self) -> Optional[nn.Module]:
+        """Gemma 4's `embed_tokens_per_layer` lookup table, or None.
+
+        It hangs off the same submodule as `get_per_layer_inputs`, so reuse
+        that walk instead of guessing the decoder's layout a second time.
+        """
+        ple_model = self._ple_text_model()
+        if ple_model is None:
+            return None
+        return getattr(ple_model, "embed_tokens_per_layer", None)
 
     def _per_layer_kwargs(self, input_ids: Optional[torch.Tensor]) -> dict:
         """Precompute Gemma 4 per-layer embeddings (PLE) from clean `input_ids`.

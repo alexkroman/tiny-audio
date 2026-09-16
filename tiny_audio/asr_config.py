@@ -149,6 +149,20 @@ class ASRConfig(transformers.PretrainedConfig):
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
         freeze_text_embed_tokens: bool = False,
+        # Gemma 4 keeps a SECOND vocabulary table, `embed_tokens_per_layer`
+        # (262144 x 8960 = 2.35B params -- roughly half the whole decoder),
+        # read once per token per layer. `freeze_text_embed_tokens` does not
+        # cover it: that flag only touches `get_input_embeddings()`. Freezing
+        # this one matters for two independent reasons:
+        #   - Memory. Unfrozen it alone carries ~9.4 GiB of fp32 AdamW moments
+        #     plus 4.4 GiB of bf16 grads, which is what makes a full E2B
+        #     fine-tune not fit where a layers-only one does.
+        #   - Rare-token drift. It is a per-token lookup, so the same argument
+        #     that motivates freezing embed_tokens applies: tokens absent from
+        #     the ASR label distribution get no task gradient and only the
+        #     weight-decay pull, shrinking their rows toward zero.
+        # No-op on decoders without a per-layer table (Qwen3, Llama, ...).
+        freeze_text_per_layer_embeddings: bool = False,
         # Audio encoder is frozen by default — the published recipe treats
         # GLM-ASR-Nano as a fixed feature extractor. Setting this to False
         # makes the encoder trainable; pair with `encoder_learning_rate` in
@@ -264,6 +278,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_projector = freeze_projector
         self.freeze_language_model = freeze_language_model
         self.freeze_text_embed_tokens = freeze_text_embed_tokens
+        self.freeze_text_per_layer_embeddings = freeze_text_per_layer_embeddings
         self.freeze_audio_encoder = freeze_audio_encoder
         self.apply_spec_augment = apply_spec_augment
         self.mask_time_prob = mask_time_prob
