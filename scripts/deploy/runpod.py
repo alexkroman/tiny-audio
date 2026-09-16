@@ -479,8 +479,8 @@ def _script_preamble(hf_token: str, *, pip_packages: str = "", extras: str = "")
     Args:
         hf_token: Value exported as HF_TOKEN.
         pip_packages: Extra packages to install before the run; the pip line is
-            omitted entirely when empty. Used to carry `hf_transfer`, which
-            huggingface_hub no longer uses.
+            omitted entirely when empty. Only the eval script needs one
+            (modelscope) now that Xet has replaced hf_transfer.
         extras: Extra `export` lines appended to the header.
     """
     pip_install = (
