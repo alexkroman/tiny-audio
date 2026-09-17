@@ -250,3 +250,87 @@ class TestEvaluatorBase:
 
         with pytest.raises(NotImplementedError):
             evaluator.transcribe(None)
+
+
+class TestResolveLocalRuntime:
+    """Tests for _resolve_local_runtime, the local-model device/dtype policy.
+
+    The regression these guard is silent: the wrong answer here costs 2x memory
+    bandwidth on every decoded token and reports nothing, because fp32 is a
+    perfectly valid dtype to run in.
+    """
+
+    @staticmethod
+    def _resolver():
+        from scripts.eval.evaluators.asr import _resolve_local_runtime
+
+        return _resolve_local_runtime
+
+    def test_cuda_prefers_bfloat16(self, monkeypatch):
+        import torch
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        assert self._resolver()() == (0, "bfloat16")
+
+    def test_mps_uses_bfloat16_not_float16(self, monkeypatch):
+        """bf16, not fp16.
+
+        Measured equal in speed on torch 2.8 / Metal, so fp16 buys nothing
+        while giving up the exponent range -- and both submodels of this stack
+        are pretrained in bf16.
+        """
+        import torch
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+        assert self._resolver()() == ("mps", "bfloat16")
+
+    def test_cpu_stays_float32(self, monkeypatch):
+        import torch
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+        assert self._resolver()() == (-1, "float32")
+
+    def test_returns_dtype_as_string_not_torch_dtype(self, monkeypatch):
+        """Must be the string ASRConfig.model_dtype wants, not a torch.dtype.
+
+        getattr(torch, config.model_dtype) in ASRModel.__init__ would raise on a
+        torch.dtype instance, so this is the contract that makes the override
+        land at all.
+        """
+        import torch
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+        _, dtype = self._resolver()()
+        assert isinstance(dtype, str)
+        assert getattr(torch, dtype) is torch.bfloat16
+
+
+class TestModelDtypeIsTheWorkingOverride:
+    """Pins WHY the fix routes dtype through model_kwargs instead of `dtype=`.
+
+    ASRModel.__init__ reads `getattr(torch, config.model_dtype)` and then casts
+    both submodules explicitly after load, so a `dtype=` kwarg on
+    pipeline()/from_pretrained() is silently overwritten by the saved config.
+    That is what left `ta eval` running granite-qwen's fp32 training weights at
+    inference. If a future refactor makes `dtype=` authoritative, the first
+    assertion here flips and this comment stops being true.
+    """
+
+    def test_dtype_kwarg_does_not_change_model_dtype(self, tmp_path):
+        import torch
+
+        from tiny_audio.asr_config import ASRConfig
+
+        ASRConfig(model_dtype="float32").save_pretrained(tmp_path)
+        cfg = ASRConfig.from_pretrained(tmp_path, dtype=torch.bfloat16)
+        assert cfg.model_dtype == "float32"
+
+    def test_model_dtype_kwarg_does_change_it(self, tmp_path):
+        from tiny_audio.asr_config import ASRConfig
+
+        ASRConfig(model_dtype="float32").save_pretrained(tmp_path)
+        cfg = ASRConfig.from_pretrained(tmp_path, model_dtype="bfloat16")
+        assert cfg.model_dtype == "bfloat16"

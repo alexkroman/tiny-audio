@@ -54,6 +54,56 @@ def print_generation_config(model, model_path: str):
     )
 
 
+def _resolve_local_runtime() -> tuple[int | str, str]:
+    """Pick the device and weight dtype for a locally loaded ASRModel pipeline.
+
+    Returns `(device, model_dtype)` where model_dtype is the STRING name
+    `ASRConfig.model_dtype` expects, not a `torch.dtype`. That distinction is
+    the whole point of this function.
+
+    `pipeline(dtype=...)` and `from_pretrained(dtype=...)` do nothing to this
+    model class. ASRModel.__init__ does `target_dtype = getattr(torch,
+    config.model_dtype)` and then casts both submodules with an explicit
+    `.to(dtype=...)` after load (deliberately -- see the comment in
+    _load_audio_encoder about loader paths honoring `dtype=` inconsistently),
+    so a dtype kwarg is silently overwritten by the saved config. Verified
+    against the published granite-qwen config: `dtype=torch.float16` leaves
+    `model_dtype` at "float32", while `model_dtype="float16"` takes. Routing it
+    through model_kwargs is the only path that lands.
+
+    Why it matters: granite-qwen's config.json carries `model_dtype: float32`,
+    which is load-bearing for TRAINING only -- fp32 master weights exist so
+    AdamW's 2e-5 decoder step doesn't round away under bf16's ULP (see
+    configs/experiments/granite_qwen.yaml). Inference has no optimizer, so it
+    was holding 2.27B params in fp32 and reading 9.1 GB of weights per decoded
+    token instead of 4.5 GB, on a decode loop that is entirely
+    memory-bandwidth bound.
+
+    bfloat16 rather than float16 on MPS. Measured on torch 2.8 / Metal, the
+    two are the same speed (0.78 vs 0.79 ms/iter on a LayerNorm + 2048x6144
+    matmul + SiLU), so fp16 buys nothing -- while costing the exponent range
+    that matters here, since fp16 tops out at 65504 and both the Granite
+    encoder and Qwen3.5 were pretrained in bf16. Equal speed, strictly more
+    headroom.
+
+    CPU stays fp32: reduced precision there is emulated rather than
+    accelerated without AMX, so it is a slowdown, not a win.
+
+    attn_implementation is deliberately NOT set. ASRModel routes whatever the
+    config asks for through _resolve_attn_implementation, which already coerces
+    FA2 -> sdpa off CUDA and anything -> eager on MPS (Metal's sdpa kernel
+    returns wrong results for cached single-token decode against a
+    sliding-window mask). Passing it here would be a second, silently diverging
+    copy of that policy -- which is what it had become: the streaming evaluator
+    asked for "sdpa" on MPS and got eager anyway.
+    """
+    if torch.cuda.is_available():
+        return 0, "bfloat16"
+    if torch.backends.mps.is_available():
+        return "mps", "bfloat16"
+    return -1, "float32"
+
+
 class LocalEvaluator(Evaluator):
     """Evaluator for local models."""
 
@@ -61,12 +111,16 @@ class LocalEvaluator(Evaluator):
         super().__init__(**kwargs)
         from transformers import pipeline
 
+        device, model_dtype = _resolve_local_runtime()
         self.pipe = pipeline(
             "automatic-speech-recognition",
             model=model_path,
             trust_remote_code=True,
+            device=device,
+            model_kwargs={"model_dtype": model_dtype},
         )
         self.user_prompt = user_prompt
+        console.print(f"[dim]Using device: {device}, model_dtype: {model_dtype}[/dim]")
 
         print_generation_config(self.pipe.model, model_path)
 
@@ -103,35 +157,19 @@ class LocalStreamingEvaluator(Evaluator):
         super().__init__(**kwargs)
         from transformers import pipeline
 
-        # Determine best device, dtype, and attention implementation.
-        # flash_attention_2 is CUDA-only; on MPS/CPU it silently falls back to
-        # a slower path, so force sdpa to get the real Metal/CPU kernels.
-        if torch.cuda.is_available():
-            device = 0
-            dtype = torch.bfloat16
-            attn_impl = "flash_attention_2"
-        elif torch.backends.mps.is_available():
-            device = "mps"
-            dtype = torch.float16
-            attn_impl = "sdpa"
-        else:
-            device = -1
-            dtype = torch.float32
-            attn_impl = "sdpa"
-
+        device, model_dtype = _resolve_local_runtime()
         self.pipe = pipeline(
             "automatic-speech-recognition",
             model=model_path,
             trust_remote_code=True,
             device=device,
-            torch_dtype=dtype,
-            model_kwargs={"attn_implementation": attn_impl},
+            model_kwargs={"model_dtype": model_dtype},
         )
         self.model = self.pipe.model
         self.model.eval()
         self.processor = self.model.get_processor()
         self.user_prompt = user_prompt
-        console.print(f"[dim]Using device: {device}, dtype: {dtype}, attn: {attn_impl}[/dim]")
+        console.print(f"[dim]Using device: {device}, model_dtype: {model_dtype}[/dim]")
 
         # Track timing stats
         self.ttfb_times: list[float] = []
