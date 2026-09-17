@@ -41,6 +41,24 @@ model:
   system_prompt: ""
   projector_type: mlp
 
+  # sdpa, overriding ASRConfig's flash_attention_2 default. FA2 earns that
+  # default on a dense decoder like stage_1's Qwen3-0.6B, but Qwen3.5 is hybrid
+  # and the arithmetic does not carry over: only 6 of 24 layers are
+  # full_attention, and at this recipe's sequence length (237 audio tokens for
+  # 19s plus prompt and transcript, so T ~ 320) the QK^T + AV work FA2
+  # optimizes is 0.7% of decoder FLOPs against 78% in the MLP. Even at T=4096
+  # it is 8%. Doubling 0.7% is not worth a dependency.
+  #
+  # Two things it buys instead. The decoder holds float32 master weights (see
+  # model_dtype below), and transformers' load-time check reads config.dtype,
+  # so FA2 logs "only supports torch.float16 and torch.bfloat16 dtypes" on
+  # every run -- harmless, since bf16 autocast feeds it bf16 and
+  # get_target_dtype casts anything that slips through, but permanent noise in
+  # the logs. It also drops this experiment's reliance on the flash-attn source
+  # build, which the repo already documents as routinely failing on RunPod
+  # images.
+  attn_implementation: sdpa
+
   # Granite's feature extractor stacks mel pairs (100 Hz -> 50 Hz, 320-dim) and
   # the encoder subsamples 4x, so encoder output is already 12.5 Hz. Frame
   # stacking would be redundant and pool_stride must stay 1; at 4 the sequence
