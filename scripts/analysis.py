@@ -342,7 +342,6 @@ DATASET_SHORT_NAMES = {
     "english-dialects-welsh": "Welsh",
     "english-dialects-northern": "Northern",
     "edacc": "EDACC",
-    "switchboard": "Switchboard",
 }
 
 # Canonical dataset order for comparison tables (display order above)

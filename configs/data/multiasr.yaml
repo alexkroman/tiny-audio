@@ -70,24 +70,42 @@
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy med (cap 600K)│ ~1,067,000│   600,000 │   18.4% │
-# │ CommonVoice 17 en (600K) │ ~1,100,000│   600,000 │   18.4% │
-# │ Gigaspeech M (cap 600K)  │   ~910,000│   600,000 │   18.4% │
-# │ SPGISpeech M             │   385,000 │   385,000 │   11.8% │
-# │ Peoples clean_sa         │   311,000 │   311,000 │    9.5% │
-# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    8.2% │
-# │ Switchboard              │   185,402 │  ~180,000 │    5.5% │
-# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    5.0% │
-# │ AMI IHM                  │   108,502 │   ~79,000 │    2.4% │
-# │ AMI SDM                  │   107,319 │   ~67,000 │    2.1% │
-# │ Earnings22 train         │    11,450 │   ~11,000 │    0.3% │
+# │ LibriHeavy med (cap 600K)│ ~1,067,000│   600,000 │   19.4% │
+# │ CommonVoice 17 en (600K) │ ~1,100,000│   600,000 │   19.4% │
+# │ Gigaspeech M (cap 600K)  │   ~910,000│   600,000 │   19.4% │
+# │ SPGISpeech M             │   385,000 │   385,000 │   12.5% │
+# │ Peoples clean_sa         │   311,000 │   311,000 │   10.1% │
+# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    8.7% │
+# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    5.3% │
+# │ AMI IHM                  │   108,502 │   ~79,000 │    2.6% │
+# │ AMI SDM                  │   107,319 │   ~67,000 │    2.2% │
+# │ Earnings22 train         │    11,450 │   ~11,000 │    0.4% │
 # └──────────────────────────┴           ┴           ┴         ┘
-# Total raw: ~4,620,623  →  Total effective: ~3,266,000 (-29.3%)
+# Total raw: ~4,436,271  →  Total effective: ~3,086,000 (-30.4%)
+#
+# SWITCHBOARD REMOVED (2026-09-17). `hhoangphuoc/switchboard` returns 404 /
+# RepositoryNotFoundError -- the repo is gone from the Hub, which is the
+# normal fate of a public Switchboard mirror since the corpus is LDC-licensed
+# (LDC97S62). It was 185,402 raw / ~180,000 effective / 5.5% of the prior mix
+# and the only telephony-band source here, so this is a real coverage loss,
+# not a cleanup: the mix now has no 8 kHz narrowband speech at all, and the
+# conversational share drops from 10.0% to AMI's 4.7%. Prior notes in this
+# file record that cutting Switchboard exposure regressed cross-eval
+# performance even on non-Switchboard evals, so expect that again.
+#
+# No drop-in replacement exists today. A Hub search turned up one real audio
+# mirror, `dys-asr/switchboard-sr8000` (~100K-1M rows, 42 parquet shards,
+# 8 kHz so the loader's Audio(sampling_rate=16000) cast would resample it),
+# but it is gated=manual and needs an access request. Re-add it there if the
+# telephony gap shows up in eval; the entries removed alongside this one are
+# in scripts/eval/datasets.py, scripts/analysis.py and
+# scripts/debug/inspect_datasets.py.
 #
 # Big-3 (LibriHeavy + CV17 + GS) capped at 600K each with deterministic
-# shuffle (combined 55.2% mix share, down from 62% pre-cap). AMI
-# combined 4.5%, conversational total (Switchboard + AMI-IHM + AMI-SDM)
-# 10.0%.
+# shuffle (combined 58.3% mix share after the Switchboard removal, up
+# from 55.2% purely because the denominator shrank). AMI combined 4.7%,
+# which is now the entire conversational share (was 10.0% with
+# Switchboard).
 #
 # Big-3 (LibriHeavy + CV + GS) capped at 600K each to address structural
 # single-speaker dominance (was ~62% combined mix share, now 50.1%).
@@ -389,19 +407,6 @@ datasets:
     name: en
     audio_column: audio
     text_column: raw_text
-    task: transcribe
-    train_splits: [train]
-    eval_splits: [validation]
-
-  # Switchboard — conversational telephone speech. Natural cap ~185K
-  # (was capped to 75K in the prior tilt; uncapped here as part of the
-  # natural-cap reset). Telephony-band + multi-talker disfluency
-  # supervision that nothing else in the mix provides; cross-eval
-  # regression on the capped run suggests removing this exposure was
-  # net-negative even on non-SW evals.
-  - path: hhoangphuoc/switchboard
-    audio_column: audio
-    text_column: transcript
     task: transcribe
     train_splits: [train]
     eval_splits: [validation]
