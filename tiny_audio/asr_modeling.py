@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import math
 from pathlib import Path
 from threading import Thread
 from typing import Iterator, Optional, Union
@@ -32,6 +33,108 @@ logger = logging.getLogger(__name__)
 # FlashAttention's kernels are compiled for head dimensions up to 256.
 FLASH_ATTENTION_MAX_HEAD_DIM = 256
 
+# PyTorch's Metal kernels index tensor storage with 32-bit offsets, so a gather
+# into a tensor holding more than INT32_MAX elements wraps around and silently
+# returns the wrong rows -- no error, no warning, just corrupt values.
+MPS_MAX_TENSOR_ELEMENTS = 2**31 - 1
+
+
+def mps_unsafe_parameters(model: nn.Module) -> list[tuple[str, int]]:
+    """Parameters too large for MPS to index correctly, as (name, numel) pairs.
+
+    Gemma 4 E2B trips this on `embed_tokens_per_layer`: its per-layer embedding
+    table is 262144 x (35*256) = 2,348,810,240 elements, 201M past INT32_MAX.
+    On MPS the lookup returns garbage, which Gemma then adds into all 35 layers
+    at every position. The failure is entirely silent -- the model loads, runs,
+    and emits fluent, confident, wrong transcripts. Measured on this stack:
+    teacher-forced loss 0.14 on CPU versus 3.80 on MPS from identical weights.
+
+    Returns an empty list for models that are safe, so callers can treat a
+    non-empty result as "this model needs `chunk_oversized_embeddings`".
+    """
+    return [
+        (name, param.numel())
+        for name, param in model.named_parameters()
+        if param.numel() > MPS_MAX_TENSOR_ELEMENTS
+    ]
+
+
+class ChunkedEmbedding(nn.Module):
+    """Drop-in `nn.Embedding` that splits its table to stay within 32-bit indexing.
+
+    The overflow lives in the kernel's arithmetic over the weight's *storage*,
+    so slicing is not enough -- views share that storage and stay broken. Each
+    chunk therefore has to be its own contiguous allocation. Gathering per
+    chunk and concatenating on the feature axis reproduces the full gather
+    exactly: verified bit-identical to CPU on MPS, where the single-tensor
+    lookup was off by up to 3.16.
+
+    Wraps rather than replaces the semantics of `Gemma4TextScaledWordEmbedding`,
+    whose forward multiplies the lookup by `embed_scale` -- dropping that would
+    shrink every per-layer embedding by sqrt(hidden_size_per_layer_input).
+    """
+
+    def __init__(self, embedding: nn.Embedding) -> None:
+        super().__init__()
+        self.num_embeddings = embedding.num_embeddings
+        self.embedding_dim = embedding.embedding_dim
+        self.padding_idx = embedding.padding_idx
+        # Gemma 4's scaled embedding carries this; a plain nn.Embedding does not.
+        self.embed_scale = getattr(embedding, "embed_scale", None)
+
+        num_chunks = math.ceil(embedding.weight.numel() / MPS_MAX_TENSOR_ELEMENTS)
+        device = embedding.weight.device
+        # Chunk from a CPU copy: carving contiguous pieces out of an
+        # already-oversized MPS tensor would run the same overflowing kernel
+        # this class exists to avoid.
+        source = embedding.weight.detach().cpu()
+        self.chunks = nn.ParameterList(
+            [
+                nn.Parameter(
+                    chunk.contiguous().to(device), requires_grad=embedding.weight.requires_grad
+                )
+                for chunk in torch.chunk(source, num_chunks, dim=1)
+            ]
+        )
+        del source
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        out = torch.cat([F.embedding(input_ids, chunk) for chunk in self.chunks], dim=-1)
+        if self.embed_scale is not None:
+            out = out * self.embed_scale.to(out.dtype)
+        return out
+
+    @property
+    def weight(self) -> torch.Tensor:
+        """Reassembled table, for callers that introspect `.weight`.
+
+        Materializes the full tensor, so this is a debugging/serialization
+        convenience rather than something to call on a hot path.
+        """
+        return torch.cat(list(self.chunks), dim=1)
+
+    def extra_repr(self) -> str:
+        return (
+            f"{self.num_embeddings}, {self.embedding_dim}, "
+            f"chunks={len(self.chunks)} (MPS int32-indexing workaround)"
+        )
+
+
+def chunk_oversized_embeddings(root: nn.Module) -> list[str]:
+    """Replace every embedding MPS cannot index with a `ChunkedEmbedding`.
+
+    Returns the qualified names that were replaced, empty when nothing needed
+    it. Idempotent: `ChunkedEmbedding` is not an `nn.Embedding`, so a second
+    pass finds nothing.
+    """
+    replaced: list[str] = []
+    for module_name, module in list(root.named_modules()):
+        for child_name, child in list(module.named_children()):
+            if isinstance(child, nn.Embedding) and child.weight.numel() > MPS_MAX_TENSOR_ELEMENTS:
+                setattr(module, child_name, ChunkedEmbedding(child))
+                replaced.append(f"{module_name}.{child_name}" if module_name else child_name)
+    return replaced
+
 
 def _max_attention_head_dim(text_config) -> Optional[int]:
     """Largest attention head dim across layers, or None if undeterminable.
@@ -56,13 +159,23 @@ def _max_attention_head_dim(text_config) -> Optional[int]:
 
 
 def _resolve_attn_implementation(requested: Optional[str]) -> Optional[str]:
-    """Coerce flash_attention_2 to sdpa when CUDA isn't available.
+    """Coerce flash_attention_2 to sdpa when CUDA isn't available, and avoid sdpa on MPS.
 
     FA2 is CUDA-only. On MPS/CPU, requesting it either errors at load or
     silently falls back to a slower path; either way the user pays the FA2
     install + import cost for no win. Coerce here so a saved config that
     pins flash_attention_2 still loads on Mac / CPU-only Linux boxes.
+
+    MPS goes further and needs eager. PyTorch's Metal sdpa kernel returns wrong
+    results for cached single-token decode against a sliding-window mask, which
+    is exactly Gemma 4's layout (`sliding_window=512`, four sliding layers per
+    full-attention layer). A full-sequence forward is fine, so the damage shows
+    up only during generation: greedy decode with no cache transcribed
+    correctly while the identical cached decode produced "Mr. and a". Eager is
+    correct there and, at this model size, no slower in practice.
     """
+    if torch.backends.mps.is_available() and requested in (None, "sdpa", "flash_attention_2"):
+        return "eager"
     if requested != "flash_attention_2":
         return requested
     if not torch.cuda.is_available():
@@ -255,7 +368,26 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # token here while fixing Gemma. A token that fell back to unk comes
         # back under unk's name; one that is really in the vocab comes back
         # as itself.
+        #
+        # The name list alone is not enough, and silently produced garbage on
+        # Gemma 4: that template dropped Gemma 2/3's "<end_of_turn>" for a new
+        # "<|turn>role\n ... <turn|>\n" scheme, so all three probes missed and
+        # eos collapsed to the bare "<eos>" -- a token the template never
+        # emits. Training taught the model to close its turn with "<turn|>"
+        # (id 106) and generation then ignored it, running every sample to
+        # max_new_tokens and burying the transcript under 250 copies of
+        # "<turn|>" that `skip_special_tokens` silently swallowed.
+        #
+        # So derive the real terminator from the template instead of guessing
+        # its name: render an assistant turn holding a sentinel and take the
+        # first token that follows it. That token is the turn closer by
+        # construction, for any decoder, including ones released after this
+        # code was written. The name probes stay as a fallback for tokenizers
+        # whose template renders no trailing special token.
         eos_ids: list[int] = []
+        derived = self._derive_turn_end_token_id()
+        if derived is not None:
+            eos_ids.append(derived)
         for token in ("<|im_end|>", "<|endoftext|>", "<end_of_turn>"):
             token_id = self.tokenizer.convert_tokens_to_ids(token)
             if token_id is None or self.tokenizer.convert_ids_to_tokens(token_id) != token:
@@ -648,6 +780,74 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 cfg.pad_token_id = self.tokenizer.pad_token_id
                 cfg.eos_token_id = self.tokenizer.eos_token_id
                 cfg.bos_token_id = self.tokenizer.bos_token_id
+
+    def _derive_turn_end_token_id(self) -> Optional[int]:
+        """Return the token id the chat template uses to close an assistant turn.
+
+        Renders a throwaway assistant turn whose content is a sentinel, then
+        takes the first token after it. Whatever the template appends there is
+        the turn terminator by construction -- "<turn|>" on Gemma 4,
+        "<|im_end|>" on Qwen/SmolLM2 -- so this stays correct for decoders
+        whose template names nobody has hardcoded yet.
+
+        Returns None when the template is missing, the sentinel survives
+        rendering (some templates strip or transform content), or the trailing
+        token is ordinary text rather than a special token -- callers fall back
+        to the hardcoded name probes.
+        """
+        # Invisible separators keep the sentinel out of any word-level
+        # trim/strip the template applies to assistant content.
+        sentinel = "⁣turnendprobe⁣"
+        try:
+            rendered = self.tokenizer.apply_chat_template(
+                [
+                    {"role": "user", "content": "x"},
+                    {"role": "assistant", "content": sentinel},
+                ],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+        except Exception:  # noqa: BLE001 - any template failure means "no answer"
+            return None
+        if not isinstance(rendered, str) or sentinel not in rendered:
+            return None
+        tail_ids = self.tokenizer(rendered.split(sentinel)[-1], add_special_tokens=False)[
+            "input_ids"
+        ]
+        if not tail_ids:
+            return None
+        # Require a special token: a template that ends the turn with plain
+        # text has no stop token to find, and adopting a text token as EOS
+        # would truncate real transcripts.
+        first = tail_ids[0]
+        return first if first in set(self.tokenizer.all_special_ids) else None
+
+    def _apply(self, *args, **kwargs):
+        """Repair MPS-unsafe embeddings whenever the model lands on MPS.
+
+        Device placement happens after construction -- `pipeline` builds the
+        model, then moves it -- so the check belongs on the move, not in
+        __init__. `_apply` is the single funnel every relocation goes through
+        (`.to()`, `.cuda()`, `.mps()`, dtype casts), which keeps this off the
+        many individual entry points.
+
+        Without it, Gemma 4 E2B on MPS reads the wrong rows out of its 2.35B-
+        element per-layer embedding table and transcribes confident nonsense at
+        full speed. Chunking keeps the model on the GPU -- falling back to CPU
+        would be correct but costs roughly an order of magnitude in latency.
+        """
+        module = super()._apply(*args, **kwargs)
+        try:
+            on_mps = any(p.device.type == "mps" for p in module.parameters())
+        except StopIteration:  # pragma: no cover - parameterless model
+            return module
+        if on_mps and (replaced := chunk_oversized_embeddings(module)):
+            logger.warning(
+                "MPS cannot index %s with 32-bit offsets; split into chunks to "
+                "keep the lookup correct on GPU.",
+                ", ".join(replaced),
+            )
+        return module
 
     def train(self, mode: bool = True):
         """Set train/eval mode, but keep frozen submodules out of train mode.
@@ -1138,6 +1338,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Zeroed on eval so eval/loss is raw CE and comparable to LS=0 runs.
         if labels is not None and self.training and self.config.label_smoothing > 0:
             kwargs.setdefault("label_smoothing", self.config.label_smoothing)
+
+        # Ask for the dataclass output explicitly. Every consumer below and in
+        # generate() reads `outputs.loss` / `outputs.logits` by attribute, so
+        # this only makes an existing assumption visible -- but it also keeps
+        # liger off a deprecated path. Its patched forwards do
+        # `return_dict = kwargs.pop("return_dict", None)` and fall back to
+        # `self.config.use_return_dict` when that is None, which in
+        # transformers 5.x logs "`use_return_dict` is deprecated! Use
+        # `return_dict` instead!". Supplying the value means the fallback never
+        # runs.
+        kwargs.setdefault("return_dict", True)
 
         outputs = self.language_model(
             attention_mask=attention_mask,

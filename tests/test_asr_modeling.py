@@ -616,6 +616,57 @@ class TestEosTokenResolution:
     def test_is_non_empty(self, base_asr_model):
         assert base_asr_model.generation_config.eos_token_id
 
+    def test_includes_the_templates_own_turn_terminator(self, base_asr_model):
+        """The token the chat template appends after assistant content must stop generation.
+
+        This is the invariant the hardcoded name list silently violated on
+        Gemma 4, whose template closes turns with "<turn|>" rather than
+        "<end_of_turn>". Training supervises that token as the end of the
+        transcript, so omitting it from eos_token_id let every sample run to
+        max_new_tokens and buried the transcript under repeats of it.
+        """
+        tok = base_asr_model.tokenizer
+        sentinel = "⁣turnendprobe⁣"
+        rendered = tok.apply_chat_template(
+            [
+                {"role": "user", "content": "x"},
+                {"role": "assistant", "content": sentinel},
+            ],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        tail_ids = tok(rendered.split(sentinel)[-1], add_special_tokens=False)["input_ids"]
+        assert tail_ids, "template appends nothing after assistant content"
+        assert tail_ids[0] in base_asr_model.generation_config.eos_token_id
+
+    def test_derives_a_terminator_the_name_probes_do_not_know(self, base_asr_model, monkeypatch):
+        """Derivation must find a turn terminator absent from the hardcoded names.
+
+        Stands in for Gemma 4's "<turn|>": a real vocab entry that none of
+        "<|im_end|>" / "<|endoftext|>" / "<end_of_turn>" would have matched.
+        """
+        tok = base_asr_model.tokenizer
+        marker = "<|im_start|>"
+        monkeypatch.setattr(
+            tok,
+            "chat_template",
+            "{% for m in messages %}{{ m['content'] }}" + marker + "{% endfor %}",
+        )
+        assert base_asr_model._derive_turn_end_token_id() == tok.convert_tokens_to_ids(marker)
+
+    def test_derivation_ignores_a_plain_text_terminator(self, base_asr_model, monkeypatch):
+        """A template ending on ordinary text yields no stop token.
+
+        Adopting a text token as EOS would truncate real transcripts, so the
+        derivation must decline and leave the fallbacks in charge.
+        """
+        monkeypatch.setattr(
+            base_asr_model.tokenizer,
+            "chat_template",
+            "{% for m in messages %}{{ m['content'] }} END OF REPLY{% endfor %}",
+        )
+        assert base_asr_model._derive_turn_end_token_id() is None
+
 
 class TestStateDictTrainableModules:
     """state_dict must serialize every module the freeze flags leave trainable."""
@@ -812,3 +863,193 @@ class TestFreezePerLayerEmbeddings:
         assert config.freeze_text_per_layer_embeddings is True
         assert ASRConfig().freeze_text_per_layer_embeddings is False
         assert ASRConfig.from_dict(config.to_dict()).freeze_text_per_layer_embeddings is True
+
+
+class TestMpsUnsafeParameters:
+    """MPS indexes tensor storage with 32-bit offsets.
+
+    A gather into a parameter holding more than INT32_MAX elements wraps around
+    and returns the wrong rows with no error. Gemma 4 E2B's 2.35B-element
+    per-layer embedding table hits this, and the only symptom is fluent, wrong
+    output -- so the oversize has to be detected, never inferred from results.
+    """
+
+    def test_flags_a_parameter_past_int32(self):
+        import torch
+
+        from tiny_audio.asr_modeling import MPS_MAX_TENSOR_ELEMENTS, mps_unsafe_parameters
+
+        # `meta` gives a parameter with real shape metadata and no allocation,
+        # so the test states the 2GB+ case without needing 2GB+.
+        module = torch.nn.Module()
+        module.big = torch.nn.Parameter(
+            torch.empty(MPS_MAX_TENSOR_ELEMENTS + 1, device="meta"), requires_grad=False
+        )
+        flagged = mps_unsafe_parameters(module)
+        assert [name for name, _ in flagged] == ["big"]
+        assert flagged[0][1] > MPS_MAX_TENSOR_ELEMENTS
+
+    def test_passes_a_parameter_at_the_limit(self):
+        import torch
+
+        from tiny_audio.asr_modeling import MPS_MAX_TENSOR_ELEMENTS, mps_unsafe_parameters
+
+        module = torch.nn.Module()
+        module.ok = torch.nn.Parameter(
+            torch.empty(MPS_MAX_TENSOR_ELEMENTS, device="meta"), requires_grad=False
+        )
+        assert mps_unsafe_parameters(module) == []
+
+    def test_ordinary_model_is_safe(self, base_asr_model):
+        from tiny_audio.asr_modeling import mps_unsafe_parameters
+
+        assert mps_unsafe_parameters(base_asr_model) == []
+
+
+class TestChunkedEmbedding:
+    """Splitting an oversized table must not change what it returns.
+
+    The MPS fix is a workaround, so the bar is exactness: chunked lookup has to
+    equal the single-tensor lookup element for element on every backend, or it
+    trades a loud bug for a quiet one.
+    """
+
+    def _forced(self, monkeypatch, limit):
+        """Lower the element cap so a test-sized table counts as oversized."""
+        import tiny_audio.asr_modeling as mod
+
+        monkeypatch.setattr(mod, "MPS_MAX_TENSOR_ELEMENTS", limit)
+        return mod
+
+    def test_matches_the_unchunked_lookup(self, monkeypatch):
+        import torch
+
+        mod = self._forced(monkeypatch, 64)
+        torch.manual_seed(0)
+        emb = torch.nn.Embedding(50, 8)
+        ids = torch.tensor([[0, 7, 49, 23]])
+        expected = emb(ids)
+
+        chunked = mod.ChunkedEmbedding(emb)
+        assert len(chunked.chunks) > 1, "table should have been split"
+        assert torch.equal(chunked(ids), expected)
+
+    def test_preserves_the_gemma_embed_scale(self, monkeypatch):
+        import torch
+
+        mod = self._forced(monkeypatch, 64)
+        torch.manual_seed(0)
+        emb = torch.nn.Embedding(50, 8)
+        # Gemma4TextScaledWordEmbedding multiplies the lookup by embed_scale;
+        # dropping it would shrink every per-layer embedding by sqrt(dim).
+        emb.embed_scale = torch.tensor(16.0)
+        ids = torch.tensor([[1, 2, 3]])
+        expected = torch.nn.functional.embedding(ids, emb.weight) * 16.0
+        assert torch.equal(mod.ChunkedEmbedding(emb)(ids), expected)
+
+    def test_chunk_oversized_embeddings_reports_and_is_idempotent(self, monkeypatch):
+        import torch
+
+        mod = self._forced(monkeypatch, 64)
+        root = torch.nn.Module()
+        root.inner = torch.nn.Module()
+        root.inner.table = torch.nn.Embedding(50, 8)
+
+        assert mod.chunk_oversized_embeddings(root) == ["inner.table"]
+        assert isinstance(root.inner.table, mod.ChunkedEmbedding)
+        # Second pass finds nothing: ChunkedEmbedding is not an nn.Embedding.
+        assert mod.chunk_oversized_embeddings(root) == []
+
+    def test_leaves_small_tables_alone(self):
+        import torch
+
+        from tiny_audio.asr_modeling import chunk_oversized_embeddings
+
+        root = torch.nn.Module()
+        root.table = torch.nn.Embedding(10, 4)
+        assert chunk_oversized_embeddings(root) == []
+        assert isinstance(root.table, torch.nn.Embedding)
+
+
+class TestAttnImplementationOnMps:
+    """MPS sdpa miscomputes cached single-token decode against a sliding-window mask.
+
+    Gemma 4 is exactly that layout, and a full-sequence forward hides it -- only
+    generation is wrong. Eager is the correct kernel there.
+    """
+
+    def test_prefers_eager_when_mps_is_available(self, monkeypatch):
+        import torch
+
+        from tiny_audio.asr_modeling import _resolve_attn_implementation
+
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+        for requested in (None, "sdpa", "flash_attention_2"):
+            assert _resolve_attn_implementation(requested) == "eager"
+
+    def test_respects_an_explicit_eager_request(self, monkeypatch):
+        import torch
+
+        from tiny_audio.asr_modeling import _resolve_attn_implementation
+
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+        assert _resolve_attn_implementation("eager") == "eager"
+
+    def test_leaves_non_mps_resolution_unchanged(self, monkeypatch):
+        import torch
+
+        from tiny_audio.asr_modeling import _resolve_attn_implementation
+
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        assert _resolve_attn_implementation("sdpa") == "sdpa"
+        assert _resolve_attn_implementation("flash_attention_2") == "sdpa"
+
+
+class TestForwardPassesReturnDict:
+    """forward() must hand the decoder an explicit `return_dict`.
+
+    liger's patched forwards do `kwargs.pop("return_dict", None)` and fall back
+    to `self.config.use_return_dict` when it is absent, which transformers 5.x
+    has deprecated and warns about on every patched run. Supplying the value
+    keeps that fallback from running, and every consumer here already reads the
+    output by attribute, so True is the only correct value.
+    """
+
+    def test_return_dict_true_reaches_the_language_model(self, base_asr_model):
+        import torch
+
+        seen = {}
+        real = base_asr_model.language_model
+
+        class Spy(torch.nn.Module):
+            def forward(self, *args, **kwargs):
+                seen.update(kwargs)
+                return real(*args, **kwargs)
+
+            def __getattr__(self, name):
+                try:
+                    return super().__getattr__(name)
+                except AttributeError:
+                    return getattr(real, name)
+
+        spy = Spy()
+        ids = base_asr_model.tokenizer("hi <audio> there", return_tensors="pt").input_ids
+        base_asr_model.language_model = spy
+        try:
+            base_asr_model(
+                input_ids=ids,
+                input_features=torch.randn(1, 80, 3000),
+                audio_attention_mask=torch.ones(1, 3000),
+            )
+        finally:
+            base_asr_model.language_model = real
+
+        assert seen.get("return_dict") is True
+
+    def test_caller_can_override_return_dict(self, base_asr_model):
+        """setdefault, not a hard set -- an explicit caller value must win."""
+        import inspect
+
+        src = inspect.getsource(type(base_asr_model).forward)
+        assert 'kwargs.setdefault("return_dict", True)' in src
