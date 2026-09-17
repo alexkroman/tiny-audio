@@ -947,7 +947,13 @@ def main(cfg: DictConfig) -> None:
     else:
         model = ASRModel(asr_config)
 
-    model.config.use_cache = False
+    # Disable the KV cache for training on the decoder's own config, NOT on the
+    # ASRConfig. ASRConfig.use_cache is an inference setting: __init__ copies it
+    # into generation_config, and save_pretrained serializes it, so writing
+    # False here baked `use_cache: false` into every checkpoint and every model
+    # pushed to the Hub. Generation then ran without a cache, re-encoding the
+    # whole prompt at each step -- quadratic decode on the reload path.
+    model.language_model.config.use_cache = False
 
     if hub_model_id := cfg.training.get("hub_model_id"):
         model.config.pretrained_model_path = hub_model_id
