@@ -95,3 +95,46 @@ class TestGroupByLengthDisabled:
         ds = _prepare(loader, cfg, fake)
 
         assert "duration" not in ds.column_names
+
+
+class TestTextCaseColumn:
+    """`text_case` declares a source's casing policy for _normalize_label.
+
+    It has to survive _prepare_split's column pruning to reach the collator —
+    the same plumbing as `_allow_empty_label`.
+    """
+
+    @pytest.mark.parametrize("policy", ["mono", "cased"])
+    def test_policy_is_attached_to_every_row(self, policy):
+        fake = _fake_dataset(audio_seconds=1.0, text="hi")
+        cfg = {
+            "path": "fake/dataset",
+            "audio_column": "audio",
+            "text_column": "text",
+            "text_case": policy,
+        }
+        ds = _prepare(DatasetLoader(_make_cfg([cfg], group_by_length=False)), cfg, fake)
+
+        assert "_text_case" in ds.column_names, "pruned before reaching the collator"
+        assert ds[0]["_text_case"] == policy
+
+    def test_column_absent_when_undeclared(self):
+        """Sources with no policy keep the legacy per-row heuristic."""
+        fake = _fake_dataset(audio_seconds=1.0, text="hi")
+        cfg = {"path": "fake/dataset", "audio_column": "audio", "text_column": "text"}
+        ds = _prepare(DatasetLoader(_make_cfg([cfg], group_by_length=False)), cfg, fake)
+
+        assert "_text_case" not in ds.column_names
+
+    def test_unknown_policy_fails_loudly(self):
+        """A typo must not silently fall back to the heuristic it overrides."""
+        fake = _fake_dataset(audio_seconds=1.0, text="hi")
+        cfg = {
+            "path": "fake/dataset",
+            "audio_column": "audio",
+            "text_column": "text",
+            "text_case": "Cased",
+        }
+        loader = DatasetLoader(_make_cfg([cfg], group_by_length=False))
+        with pytest.raises(ValueError, match="text_case must be"):
+            _prepare(loader, cfg, fake)

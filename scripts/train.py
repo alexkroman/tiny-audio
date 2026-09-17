@@ -131,15 +131,41 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # sources skip truecase and don't need this cleanup).
 _SPACE_BEFORE_SENT_PUNCT_RE = re.compile(r"\s+([.,!?])")
 _SENT_START_LOWERCASE_RE = re.compile(r"([.!?])\s+([a-z])")
+# A period that closes a run of spelled-out letters is not a sentence boundary.
+# AMI writes acronyms inline as "S. S. H." / "X. M. L.", and AMI has no real
+# sentence punctuation at all, so capitalizing after one is always wrong there
+# (measured: 13 of 300 rows contain a period, and all 13 are spelled letters).
+# Matched against the text preceding the period, so it fires on the SECOND and
+# later members of a run — the discriminator against Gigaspeech's tag-derived
+# boundaries, which look like "e t. the video game." where the letter before
+# the period carries no period of its own.
+_SPELLED_LETTER_RUN_RE = re.compile(r"\b[A-Za-z]\.\s+[A-Za-z]$")
 _EM_DASH_RE = re.compile(r"\s*--\s*")
 _GONNA_ARTIFACT_RE = re.compile(r"\bgonNA\b")
 _WANNA_ARTIFACT_RE = re.compile(r"\bwanNA\b")
 _GOTTA_ARTIFACT_RE = re.compile(r"\bgotTA\b")
 
 
+def _capitalize_sentence_starts(text: str) -> str:
+    """Uppercase the first letter after sentence-final punctuation.
+
+    Truecase fails to capitalize the next sentence after a mid-string period
+    ("E T. the Video game." instead of "E T. The Video game."), so this fixes
+    it up — except after a spelled-letter run, where the period is part of an
+    acronym rather than a boundary.
+    """
+
+    def repl(match: re.Match) -> str:
+        if _SPELLED_LETTER_RUN_RE.search(text[: match.start()]):
+            return match.group(0)
+        return f"{match.group(1)} {match.group(2).upper()}"
+
+    return _SENT_START_LOWERCASE_RE.sub(repl, text)
+
+
 def _post_truecase_cleanup(text: str) -> str:
     text = _SPACE_BEFORE_SENT_PUNCT_RE.sub(r"\1", text)
-    text = _SENT_START_LOWERCASE_RE.sub(lambda m: f"{m.group(1)} {m.group(2).upper()}", text)
+    text = _capitalize_sentence_starts(text)
     text = _EM_DASH_RE.sub(" -- ", text)
     text = _GONNA_ARTIFACT_RE.sub("gonna", text)
     text = _WANNA_ARTIFACT_RE.sub("wanna", text)
@@ -172,16 +198,40 @@ if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         nltk.download("punkt", quiet=True)
 
 
+# Per-source casing policy, set via a dataset config's `text_case` field and
+# carried to the collator on the `_text_case` column. Declaring it beats the
+# per-row heuristic below because the answer is a property of the SOURCE, not
+# of the row — see _needs_truecase's own docstring, which names the sources it
+# is trying to re-derive from characters.
+TEXT_CASE_MONO = "mono"  # ALL-CAPS or zero-cap source; recase it
+TEXT_CASE_CASED = "cased"  # ships case + proper nouns; never touch
+# Below this many letters the statistical truecaser has too little context to
+# be reliable — it promotes backchannels to proper nouns. Short mono-case text
+# gets a deterministic recase instead.
+_MIN_TRUECASE_LETTERS = 5
+
+
 def _needs_truecase(text: str) -> bool:
-    """Apply truecase only to mono-case text. Already-cased sources
-    (LibriHeavy text_original, CV, VoxPopuli raw_text, SPGISpeech) carry
-    proper-noun casing that the statistical truecaser would damage
-    (e.g. "McClarnon" -> "Mcclarnon"). Heuristic: text with any internal
-    capitalization beyond what truecase would produce is already cased.
+    """Heuristic fallback for sources with no declared `text_case`.
+
+    Apply truecase only to mono-case text. Already-cased sources (LibriHeavy
+    text_original, CV, VoxPopuli raw_text, SPGISpeech) carry proper-noun
+    casing that the statistical truecaser would damage (e.g. "McClarnon" ->
+    "Mcclarnon"). Heuristic: text with any internal capitalization beyond what
+    truecase would produce is already cased.
+
+    Prefer declaring `text_case` on the dataset. This heuristic misclassifies
+    in both directions and cannot do better from a single row: a lowercase
+    FRAGMENT of a cased source (SPGISpeech's sliding window emits these for
+    13% of rows) is character-identical to a row from a genuinely uncased
+    source, and punctuation does not separate them either.
     """
     letters = [c for c in text if c.isalpha()]
-    if len(letters) < 5:
-        # Too short to recase meaningfully ("yeah", "OH"). Leave alone.
+    if len(letters) < _MIN_TRUECASE_LETTERS:
+        # Too short to recase meaningfully ("yeah", "OH"). Leave alone. Note
+        # this is only safe when the source is already cased; a declared
+        # `mono` source routes to _recase_monocase_text instead, which handles
+        # short text deterministically rather than passing it through.
         return False
     upper_count = sum(c.isupper() for c in letters)
     upper_frac = upper_count / len(letters)
@@ -192,11 +242,34 @@ def _needs_truecase(text: str) -> bool:
     return upper_count == 0
 
 
+def _capitalize_first_letter(text: str) -> str:
+    for i, char in enumerate(text):
+        if char.isalpha():
+            return f"{text[:i]}{char.upper()}{text[i + 1 :]}"
+    return text
+
+
+def _recase_monocase_text(text: str) -> str:
+    """Recase a row from a source declared `text_case: mono`.
+
+    Long text goes to the statistical truecaser. Short text does not: the
+    truecaser needs context, and without it the old code simply passed the row
+    through unchanged — which on an ALL-CAPS source means shipping "YEAH" /
+    "OKAY" / "HMM" as training labels. Measured at 21% of AMI rows. A
+    deterministic lowercase-then-capitalize is all these actually need and it
+    cannot invent proper nouns.
+    """
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) >= _MIN_TRUECASE_LETTERS:
+        return _post_truecase_cleanup(truecase.get_true_case(text))
+    return _capitalize_first_letter(text.lower())
+
+
 # Pure function of its input, and the collator normalizes each row twice: once
 # to test for an empty label and once to build the sample. Cache sized well
 # above the largest training batch so the second call is always a hit.
 @functools.lru_cache(maxsize=4096)
-def _normalize_label(raw_text: str) -> str:
+def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
     """Canonicalize a training transcript label to cased+punct form.
 
     Pipeline (in order):
@@ -219,10 +292,14 @@ def _normalize_label(raw_text: str) -> str:
     4. Canonicalize percent — mirrors scripts/analysis.py:normalize_text
        so the train-time label matches eval-time WER canonicalization.
     5. Collapse whitespace.
-    6. Apply truecase only to mono-case text (see _needs_truecase). This
-       lifts ALL-CAPS sources (Gigaspeech, AMI) and zero-cap sources
-       (TEDLIUM, Peoples, Switchboard) to proper-cased form without
-       damaging already-cased sources (LibriHeavy, CV, SPGI, VoxPopuli).
+    6. Recase according to `text_case`, the source's declared casing policy
+       (set per dataset in the data config, carried on the `_text_case`
+       column). `mono` lifts ALL-CAPS sources (Gigaspeech, AMI) and zero-cap
+       sources (TEDLIUM, Peoples, Switchboard) to proper-cased form; `cased`
+       leaves already-cased sources (LibriHeavy, CV, SPGI, VoxPopuli)
+       untouched. When a source declares nothing, fall back to the per-row
+       _needs_truecase heuristic — which is what every source used to get,
+       and which misclassifies lowercase fragments of cased sources.
 
     Output target format is cased text with punctuation where available —
     aligning the dominant training label distribution to the Qwen3
@@ -244,6 +321,10 @@ def _normalize_label(raw_text: str) -> str:
     text = _WHITESPACE_RE.sub(" ", text).strip()
     if not text:
         return ""
+    if text_case == TEXT_CASE_CASED:
+        return text
+    if text_case == TEXT_CASE_MONO:
+        return _recase_monocase_text(text)
     if _needs_truecase(text):
         text = truecase.get_true_case(text)
         text = _post_truecase_cleanup(text)
@@ -345,6 +426,20 @@ class DatasetLoader:
                 num_proc=self.num_proc,
             )
 
+        # text_case: declares whether this source's transcripts already carry
+        # case ("cased") or arrive mono-case and need recasing ("mono").
+        # Stored per row, like _allow_empty_label, so _normalize_label does not
+        # have to re-derive a source property from a single row's characters.
+        # Omit it to keep the legacy per-row heuristic.
+        text_case = dataset_cfg.get("text_case")
+        if text_case is not None:
+            if text_case not in (TEXT_CASE_MONO, TEXT_CASE_CASED):
+                raise ValueError(
+                    f"text_case must be {TEXT_CASE_MONO!r} or {TEXT_CASE_CASED!r}, "
+                    f"got {text_case!r} for {dataset_path}"
+                )
+            ds = ds.add_column("_text_case", [text_case] * len(ds))
+
         # random_truncate_seconds: [min, max] enables per-row random
         # truncation in the DataCollator. Each row gets a fresh uniform
         # [min, max] target duration each time it's pulled into a batch,
@@ -374,6 +469,9 @@ class DatasetLoader:
         # Preserve the empty-label bypass marker so it reaches the collator.
         if "_allow_empty_label" in ds.column_names:
             keep_cols = keep_cols | {"_allow_empty_label"}
+        # Preserve the declared casing policy so _normalize_label can use it.
+        if "_text_case" in ds.column_names:
+            keep_cols = keep_cols | {"_text_case"}
         # Preserve the per-row random-truncation bounds so the collator can
         # apply them at batch time.
         if "_random_truncate_min_s" in ds.column_names:
@@ -588,7 +686,7 @@ class DataCollator:
                 # `text_override` (non-speech-rejection sources like WHAM where
                 # an empty assistant turn is the intended training target).
                 if not f.get("_allow_empty_label", False) and not _normalize_label(
-                    f.get("text") or ""
+                    f.get("text") or "", f.get("_text_case")
                 ):
                     continue
                 duration_s = audio.size / self.sample_rate
@@ -625,7 +723,11 @@ class DataCollator:
         # override (typically "" for non-speech-rejection) reaches the chat
         # template unchanged. _normalize_label("") returns "" anyway, but the
         # branch is the clearer invariant.
-        text = raw_text if feature.get("_allow_empty_label") else _normalize_label(raw_text)
+        text = (
+            raw_text
+            if feature.get("_allow_empty_label")
+            else _normalize_label(raw_text, feature.get("_text_case"))
+        )
         return self._make_messages(num_audio_tokens, random.choice(TRANSCRIBE_PROMPTS), text)
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:

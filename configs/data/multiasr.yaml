@@ -196,6 +196,8 @@ datasets:
     audio_column: audio
     text_column: text
     task: transcribe
+    # Lowercase, no punctuation.
+    text_case: mono
     train_splits: [train]
     eval_splits: [validation]
     # natural cap ~268K samples (~452hr); LIUM/tedlium no longer on Hub
@@ -224,6 +226,8 @@ datasets:
     audio_column: audio
     text_column: text_original
     task: transcribe
+    # `text_original` preserves the book's case + punctuation.
+    text_case: cased
     train_splits: [train]
     eval_splits: []
     # Big-3 cap (see the mix table above). Read by
@@ -268,6 +272,8 @@ datasets:
     audio_column: audio
     text_column: text
     task: transcribe
+    # Lowercase, no punctuation.
+    text_case: mono
     train_splits: [train]
     eval_splits: []
 
@@ -282,6 +288,8 @@ datasets:
     audio_column: audio
     text_column: text
     task: transcribe
+    # Lowercase, no punctuation.
+    text_case: mono
     train_splits: []
     eval_splits: [validation]
 
@@ -310,6 +318,8 @@ datasets:
     audio_column: audio
     text_column: sentence
     task: transcribe
+    # `sentence` is the written prompt the contributor read aloud.
+    text_case: cased
     train_splits: [train]
     eval_splits: [validation]
     # Big-3 cap. Applies to train_splits only, so the validation split
@@ -330,6 +340,8 @@ datasets:
     audio_column: audio
     text_column: text
     task: transcribe
+    # ALL-CAPS; punctuation arrives as <COMMA>/<PERIOD> tags.
+    text_case: mono
     train_splits: [train]
     eval_splits: []
     # Big-3 cap. M's natural size (~910K) is closest to the cap of the
@@ -344,6 +356,8 @@ datasets:
     audio_column: audio
     text_column: text
     task: transcribe
+    # ALL-CAPS; punctuation arrives as <COMMA>/<PERIOD> tags.
+    text_case: mono
     train_splits: []
     eval_splits: [validation]
 
@@ -359,6 +373,10 @@ datasets:
     audio_column: audio
     text_column: transcript
     task: transcribe
+    # Kensho transcribers, cased+punct. 13% of rows are lowercase
+    # sliding-window fragments that the heuristic truecased, injecting
+    # proper nouns (permissions -> Permissions, website -> Website).
+    text_case: cased
     train_splits: [train]
     eval_splits: [validation]
 
@@ -391,6 +409,8 @@ datasets:
     audio_column: audio
     text_column: sentence
     task: transcribe
+    # Cased+punct. Fragment rows with no capital would fool the heuristic.
+    text_case: cased
     train_splits: [train]
     eval_splits: []
 
@@ -408,6 +428,8 @@ datasets:
     audio_column: audio
     text_column: raw_text
     task: transcribe
+    # `raw_text` follows the parliamentary record (case + punct).
+    text_case: cased
     train_splits: [train]
     eval_splits: [validation]
 
@@ -427,6 +449,8 @@ datasets:
     audio_column: audio
     text_column: text
     task: transcribe
+    # ALL-CAPS, no punct. 21% of rows are under the truecase floor.
+    text_case: mono
     train_splits: [train]
     eval_splits: [validation]
 
@@ -445,6 +469,8 @@ datasets:
     audio_column: audio
     text_column: text
     task: transcribe
+    # ALL-CAPS, no punct. 21% of rows are under the truecase floor.
+    text_case: mono
     train_splits: [train]
     eval_splits: [validation]
 
