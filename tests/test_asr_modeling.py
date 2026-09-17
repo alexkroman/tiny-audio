@@ -1053,3 +1053,36 @@ class TestForwardPassesReturnDict:
 
         src = inspect.getsource(type(base_asr_model).forward)
         assert 'kwargs.setdefault("return_dict", True)' in src
+
+
+class TestVocabPadding:
+    """The embedding table must stay tensor-core aligned after the audio token.
+
+    Qwen ships tables already padded to a multiple of 128 and leaves the spare
+    rows unaddressable (248,320 allocated vs 248,077 addressable on Qwen3.5-2B).
+    Resizing to len(tokenizer) alone shrinks past that padding onto a dimension
+    that is not even a multiple of 8, which lands the model's largest GEMM --
+    lm_head at V~248k -- on an unaligned shape.
+    """
+
+    def test_embedding_rows_are_aligned(self, base_asr_model):
+        from tiny_audio.asr_modeling import VOCAB_PAD_MULTIPLE
+
+        rows = base_asr_model.language_model.get_input_embeddings().weight.shape[0]
+        assert rows % VOCAB_PAD_MULTIPLE == 0
+
+    def test_table_still_covers_every_token(self, base_asr_model):
+        """Padding must grow the table, never truncate below the tokenizer."""
+        rows = base_asr_model.language_model.get_input_embeddings().weight.shape[0]
+        assert rows >= len(base_asr_model.tokenizer)
+        assert base_asr_model.audio_token_id < rows
+
+    def test_output_head_and_config_agree(self, base_asr_model):
+        """lm_head and config.vocab_size must track the padded size.
+
+        They are read independently at generate time and by save_pretrained, so
+        a mismatch surfaces as a shape error at checkpoint save rather than here.
+        """
+        rows = base_asr_model.language_model.get_input_embeddings().weight.shape[0]
+        assert base_asr_model.language_model.get_output_embeddings().weight.shape[0] == rows
+        assert base_asr_model.language_model.config.vocab_size == rows

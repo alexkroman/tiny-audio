@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 # FlashAttention's kernels are compiled for head dimensions up to 256.
 FLASH_ATTENTION_MAX_HEAD_DIM = 256
 
+# Vocab dimension the embedding table is padded to after adding the audio
+# token. 128 is what transformers' own `pad_to_multiple_of` docs recommend for
+# tensor cores on sm_75+ and is what Qwen already pads its published tables to.
+VOCAB_PAD_MULTIPLE = 128
+
 # PyTorch's Metal kernels index tensor storage with 32-bit offsets, so a gather
 # into a tensor holding more than INT32_MAX elements wraps around and silently
 # returns the wrong rows -- no error, no warning, just corrupt values.
@@ -769,7 +774,33 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # row is the lm_head column for predicting the audio token; a
             # Gaussian draw at config.initializer_range was visible in
             # early-step logits.
-            self.language_model.resize_token_embeddings(len(self.tokenizer), mean_resizing=True)
+            #
+            # pad_to_multiple_of keeps the lm_head GEMM on a tensor-core-
+            # friendly vocab dimension, which resizing to len(tokenizer) alone
+            # destroys. Qwen ships a table already padded to a multiple of 128
+            # and leaves the spare rows unaddressable -- 248,320 allocated
+            # against 248,077 addressable on Qwen3.5-2B, 151,936 against
+            # 151,669 on Qwen3-0.6B. Resizing to len(tokenizer)+1 shrinks past
+            # that padding and lands on 248,078 / 151,670, neither of which is
+            # even a multiple of 8. Confirmed in a shipped checkpoint:
+            # tiny-audio-next-sat stores embed_tokens as (151670, 1024) against
+            # the base model's (151936, 1024), so every Qwen run so far has done
+            # the model's largest matmul on an unaligned vocab.
+            #
+            # The pad rows are mean-initialized like any new row and are tied
+            # into lm_head, but the tokenizer cannot emit their ids and no label
+            # contains them, so they only ever receive the softmax's negative
+            # evidence. The base checkpoints already carry such rows.
+            #
+            # Note this changes the saved embedding shape, so a checkpoint
+            # written before this (with freeze_language_model=False, which is
+            # what puts language_model.* in the state dict) will not reload:
+            # load_state_dict raises on a size mismatch even with strict=False.
+            self.language_model.resize_token_embeddings(
+                len(self.tokenizer),
+                pad_to_multiple_of=VOCAB_PAD_MULTIPLE,
+                mean_resizing=True,
+            )
 
         self.audio_token_id = self.tokenizer.convert_tokens_to_ids(self.audio_token)
         self.tokenizer.padding_side = "right"
