@@ -62,6 +62,8 @@ DATASETS = [
     ("speechcolab/gigaspeech", "dev", "validation", "text", "audio", "Gigaspeech dev"),
     ("kensho/spgispeech", "M", "train", "transcript", "audio", "SPGISpeech M"),
     ("facebook/voxpopuli", "en", "train", "raw_text", "audio", "VoxPopuli en"),
+    # Gated (manual). 403s with GatedRepoError until access is granted.
+    ("dys-asr/switchboard-sr8000", None, "train", "text", "audio", "Switchboard"),
     ("edinburghcstr/ami", "ihm", "train", "text", "audio", "AMI IHM"),
     ("edinburghcstr/ami", "sdm", "train", "text", "audio", "AMI SDM"),
 ]
