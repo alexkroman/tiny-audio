@@ -529,6 +529,13 @@ export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
 export HF_XET_HIGH_PERFORMANCE=1
 export HF_TOKEN="{hf_token}"
+# TileLang JIT-compiles fla's gated delta-rule kernels on first use (~8s each,
+# a handful of them -- sequence length is marked dynamic in the kernel, so this
+# is bounded warmup rather than per-step recompilation). Its cache defaults to
+# ~/.tilelang/cache, i.e. /root, which is ephemeral container storage: every
+# fresh pod would recompile from scratch. Point it at the persistent volume for
+# the same reason HF_HOME is redirected above.
+export TILELANG_CACHE_DIR=/workspace/.cache/tilelang
 """
 
 
