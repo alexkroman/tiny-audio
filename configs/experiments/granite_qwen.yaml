@@ -266,11 +266,11 @@ training:
   # (B,T,V) fp32 log_softmax.
   label_smoothing_factor: 0.0
 
-  # 2.0% of the run. multiasr delivers ~3,344,000 rows to the sampler (the
+  # 2.1% of the run. multiasr delivers ~3,159,000 rows to the sampler (the
   # sampler sees raw rows -- the collator's duration and empty-label filters
   # run at collate time, downstream of it), so at effective batch 96 with
-  # dataloader_drop_last this is floor(3344271/32) = 104,508 micro-batches / 3
-  # = ~34,836 optimizer steps.
+  # dataloader_drop_last this is floor(3159271/32) = 98,727 micro-batches / 3
+  # = ~32,909 optimizer steps.
   #
   # Was 2000, which is the value stage_1 justified as "2.4% of the 85k-step
   # run." That justification does not survive a shorter schedule, and the
@@ -371,7 +371,7 @@ training:
   #      per layer, and buys far more room than the effective batch can use,
   #      since 96 is pinned.
   #   3. per_device 24 x 4 -- last resort. Same effective batch, but 33% more
-  #      micro-batches for the same 34,836 optimizer steps.
+  #      micro-batches for the same 32,909 optimizer steps.
   per_device_train_batch_size: 32
   # Eval runs under prediction_loss_only (no compute_metrics is passed, so
   # Trainer infers it) and therefore under no_grad: no layer activations are
@@ -384,7 +384,7 @@ training:
   gradient_accumulation_steps: 3
 
   num_train_epochs: 1
-  # ~34,836 steps, so 17 evals / 17 saves against save_total_limit: 5. The
+  # ~32,909 steps, so 16 evals / 16 saves against save_total_limit: 5. The
   # eval-resolution problem the 11k-step Loquacious plan had (5 evals total)
   # does not arise at this schedule length.
   save_steps: 2000
@@ -413,7 +413,7 @@ training:
   #   `causal_conv1d_fn` / `causal_conv1d_update` ...
   #     because `causal_conv1d` is not installed
   # Numerics are unaffected -- transformers calls the fallbacks "correct but
-  # much slower" -- so this costs wall-clock, not quality. At ~34,836 steps
+  # much slower" -- so this costs wall-clock, not quality. At ~32,909 steps
   # that is worth checking before launch rather than after.
   #
   # flash-linear-attention is now a regular linux dependency, so `poetry

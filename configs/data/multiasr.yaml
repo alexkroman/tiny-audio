@@ -70,55 +70,70 @@
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy med (cap 600K)│ ~1,067,000│   600,000 │   18.4% │
-# │ CommonVoice 17 en (600K) │ ~1,100,000│   600,000 │   18.4% │
-# │ Gigaspeech M (cap 600K)  │   ~910,000│   600,000 │   18.4% │
-# │ SPGISpeech M             │   385,000 │   385,000 │   11.8% │
-# │ Peoples clean_sa         │   311,000 │   311,000 │    9.5% │
-# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    8.2% │
-# │ Switchboard (cap 185K)   │   264,333 │  ~180,000 │    5.5% │
-# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    5.1% │
-# │ AMI IHM                  │   108,502 │   ~79,000 │    2.4% │
-# │ AMI SDM                  │   107,319 │   ~67,000 │    2.1% │
-# │ Earnings22 train         │    11,450 │   ~11,000 │    0.3% │
+# │ LibriHeavy med (cap 600K)│ ~1,067,000│   600,000 │   19.4% │
+# │ CommonVoice 17 en (600K) │ ~1,100,000│   600,000 │   19.4% │
+# │ Gigaspeech M (cap 600K)  │   ~910,000│   600,000 │   19.4% │
+# │ SPGISpeech M             │   385,000 │   385,000 │   12.5% │
+# │ Peoples clean_sa         │   311,000 │   311,000 │   10.1% │
+# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    8.7% │
+# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    5.3% │
+# │ AMI IHM                  │   108,502 │   ~79,000 │    2.6% │
+# │ AMI SDM                  │   107,319 │   ~67,000 │    2.2% │
+# │ Earnings22 train         │    11,450 │   ~11,000 │    0.4% │
 # └──────────────────────────┴           ┴           ┴         ┘
-# Total raw: ~4,700,604  →  Total effective: ~3,266,000 (-30.5%)
+# Total raw: ~4,436,271  →  Total effective: ~3,086,000 (-30.4%)
 #
-# SWITCHBOARD REPOINTED (2026-09-17). `hhoangphuoc/switchboard` began
-# returning 404 / RepositoryNotFoundError -- the normal fate of a public
-# Switchboard mirror, since the corpus is LDC-licensed (LDC97S62) and
-# redistribution is not. Repointed to `dys-asr/switchboard-sr8000`, which is
-# the same corpus, better packaged, and larger:
-#   - 264,333 rows against the dead mirror's 185,402, 42 parquet shards,
-#     15.5 GB download.
-#   - 8 kHz native. The loader's Audio(sampling_rate=16000) cast upsamples it,
-#     which leaves band-limited audio in a 16 kHz container -- exactly what
-#     the encoder sees on real telephony at inference, so this is the point
-#     rather than a defect.
-#   - Ships a `duration` column, which NO other source in this mix has. That
-#     is the blocker on group_by_length (see the note in the experiment
-#     configs): _ensure_duration's full-decode map exists only because
-#     durations are missing. Not enough on its own -- the sampler needs every
-#     source to have one -- but it is the first.
+# SWITCHBOARD REMOVED (2026-09-17). `hhoangphuoc/switchboard` returns 404 /
+# RepositoryNotFoundError -- the repo is gone from the Hub, which is the
+# normal fate of a public Switchboard mirror since the corpus is LDC-licensed
+# (LDC97S62) and redistribution is not. It was 185,402 raw / ~180,000
+# effective / 5.5% of the prior mix and the only telephony-band source here,
+# so this is a real coverage loss, not a cleanup: the mix now has no 8 kHz
+# narrowband speech at all, and the conversational share drops from 10.0% to
+# AMI's 4.7%. Prior notes in this file record that merely *capping*
+# Switchboard exposure regressed cross-eval performance even on
+# non-Switchboard evals, so expect that again, larger.
 #
-# !! GATED: gated=manual. Access must be requested at
-# !! huggingface.co/datasets/dys-asr/switchboard-sr8000 and granted BEFORE a
-# !! run using this mix will start. Verified 2026-09-17: repo metadata and
-# !! README are readable unauthenticated, but data files 403 with
-# !! GatedRepoError, so the failure arrives at load_dataset() rather than at
-# !! config parse. The same org gates fisher-sr8000 and eval2000-sr8000, so
-# !! request those in the same pass if the telephony work continues.
+# A replacement exists and is NOT WIRED IN because it is gated and access has
+# not been granted. Recording the survey so it does not have to be redone:
 #
-# Capped at 185,000 rather than run at its natural 264,333. The cap restores
-# the 5.5% mix share Switchboard held when this mix was last validated,
-# instead of letting a freshly-swapped source arrive at 7.9% untested. Drop
-# `target_samples` to uncap if eval still shows a telephony gap. Note the cap
-# does NOT reduce the 15.5 GB download -- the loader uses load_dataset() in
-# map mode, same caveat as the YODAS note above.
+#   dys-asr/switchboard-sr8000 -- the same corpus, better packaged and larger
+#   than the dead mirror. 264,333 rows against 185,402, 42 parquet shards,
+#   15.5 GB. 8 kHz native, which is the point rather than a defect: the
+#   loader's Audio(sampling_rate=16000) cast upsamples it and leaves
+#   band-limited audio in a 16 kHz container, which is what the encoder sees
+#   on real telephony at inference. It also ships a `duration` column, which
+#   no source in this mix currently has -- relevant to group_by_length, whose
+#   blocker is precisely that durations are missing and _ensure_duration has
+#   to full-decode to recover them.
+#
+#   Verified 2026-09-17: gated=manual. Repo metadata and README read fine
+#   unauthenticated, but data files 403 with GatedRepoError, so adding the
+#   entry produces a config that parses cleanly and then dies inside
+#   load_dataset(). That is why it is a note instead of an entry.
+#
+#   To wire it up once access lands: add an entry with text_column `text`,
+#   text_case `mono` (inferred from the LDC97S62 lowercase/no-punct
+#   convention -- UNVERIFIED, confirm with `ta debug inspect-datasets`,
+#   because if the mirror ships cased text then `mono` pushes it through
+#   truecase and flattens proper nouns), train_splits [train], eval_splits []
+#   since only a train split exists, and target_samples 185000 to restore the
+#   5.5% share this mix was last validated at rather than let it arrive at
+#   7.9%. Note a cap does not reduce the 15.5 GB download -- load_dataset()
+#   runs in map mode, same caveat as the YODAS note above. Every per-source
+#   percentage in the table above moves when it returns.
+#
+#   Same org, also gated, also worth having: fisher-sr8000 (1,114,202 rows of
+#   conversational telephone speech, 59.2 GB -- 4x Switchboard) and
+#   eval2000-sr8000 (Hub5'00, 4,742 rows, 0.2 GB, a `test` split, which is
+#   the canonical telephony benchmark and would belong in
+#   scripts/eval/datasets.py rather than here).
 #
 # Big-3 (LibriHeavy + CV17 + GS) capped at 600K each with deterministic
-# shuffle (combined 55.1% mix share). AMI combined 4.5%; conversational total
-# (Switchboard + AMI-IHM + AMI-SDM) back to 10.0%.
+# shuffle (combined 58.3% mix share after the Switchboard removal, up
+# from 55.2% purely because the denominator shrank). AMI combined 4.7%,
+# which is now the entire conversational share (was 10.0% with
+# Switchboard).
 #
 # Big-3 (LibriHeavy + CV + GS) capped at 600K each to address structural
 # single-speaker dominance (was ~62% combined mix share, now 50.1%).
@@ -445,35 +460,6 @@ datasets:
     text_case: cased
     train_splits: [train]
     eval_splits: [validation]
-
-  # Switchboard-1 -- conversational telephone speech, the only 8 kHz
-  # narrowband and (with AMI) the only spontaneous multi-talker disfluency
-  # supervision in this mix. Prior notes here record that merely *capping*
-  # Switchboard exposure regressed cross-eval performance even on
-  # non-Switchboard evals, which is why it is worth a gated dependency.
-  # GATED -- see the SWITCHBOARD REPOINTED block above before launching.
-  - path: dys-asr/switchboard-sr8000
-    audio_column: audio
-    text_column: text
-    task: transcribe
-    # Lowercase, no punctuation, per the LDC97S62 transcription convention;
-    # the corpus's [laughter] / [noise] / [silence] markers are stripped by
-    # _TEDLIUM_BRACKET_RE before truecase runs, and a row that was nothing but
-    # a marker normalizes to "" and is dropped by the collator.
-    #
-    # UNVERIFIED against rows: the repo is gated and access is not granted, so
-    # this is inferred from the corpus convention rather than sampled. Confirm
-    # with `ta debug inspect-datasets` on first access -- if the mirror ships
-    # cased or punctuated text, `mono` would send it through truecase and
-    # flatten proper nouns (the McClarnon -> Mcclarnon failure).
-    text_case: mono
-    train_splits: [train]
-    # Only a `train` split exists in this repo. The matching eval set is the
-    # same org's eval2000-sr8000 (Hub5'00, 4,742 rows) -- also gated, and not
-    # wired into scripts/eval/datasets.py yet.
-    eval_splits: []
-    # Hold the 5.5% share this mix was validated at; see the note above.
-    target_samples: 185000
 
   # AMI corpus IHM — close-talk meeting mic. Natural cap ~108,502, post-
   # <0.8s-filter effective ~79K (the filter drops backchannels like
