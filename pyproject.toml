@@ -81,6 +81,10 @@ pyannote-core = ">=6.0.0"  # For DER metric calculation
 pyannote-metrics = ">=4.0.0"  # For DER metric calculation
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 liger-kernel = {version = ">=0.5.0", markers = "sys_platform == 'linux'"}
+# NOTE: the Qwen3.5 linear-attention fast path (flash-linear-attention +
+# tilelang + causal-conv1d) is deliberately NOT a main dependency -- see the
+# `hybrid-kernels` group below for why installing it unconditionally can turn a
+# slow run into a crashed one.
 pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
 fabric = ">=3.0.0"
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
@@ -129,6 +133,38 @@ optional = true
 
 [tool.poetry.group.pipecat.dependencies]
 pipecat-ai = {extras = ["silero", "openai"], version = ">=0.0.40"}
+
+# Optional fast path for Qwen3.5's hybrid linear-attention layers (three of
+# every four). Without these, transformers logs `causal_conv1d_fn` and
+# `chunk_gated_delta_rule` falling back to reference implementations --
+# correct, just slower.
+#
+# Optional, not main, for two separate reasons:
+#
+#   - causal-conv1d publishes an sdist only, so it compiles against nvcc and
+#     fails on any image without the CUDA toolkit. Same failure mode this repo
+#     already documents for flash_attn in _resolve_attn_implementation.
+#   - flash-linear-attention is worse than useless when half-installed. On
+#     Hopper with Triton >=3.4.0 and <3.7.1 its Triton kernel for gated
+#     chunk_bwd_dqkwg is known-wrong (fla-org/flash-linear-attention#640), so
+#     fla *raises* rather than compute bad gradients. Its TileLang backend is
+#     auto-enabled on exactly that combination, but only if the `tilelang`
+#     package and a usable nvcc are both present -- otherwise dispatch falls
+#     through to the Triton path and training dies at the first backward.
+#     Installing fla without tilelang therefore converts a slow run into a
+#     crashed one, which is why it must never be an unconditional dependency.
+#     scripts/deploy/runpod.py installs the pair and verifies the combination,
+#     removing fla if the gated path would raise.
+#
+# Opt in on a pod that has nvcc:
+#   poetry install --with hybrid-kernels
+[tool.poetry.group.hybrid-kernels]
+optional = true
+
+[tool.poetry.group.hybrid-kernels.dependencies]
+causal-conv1d = {version = ">=1.4.0", markers = "sys_platform == 'linux'"}
+flash-linear-attention = {version = ">=0.5.0", markers = "sys_platform == 'linux'"}
+tilelang = {version = ">=0.1.9", markers = "sys_platform == 'linux'"}
 
 [tool.black]
 line-length = 100

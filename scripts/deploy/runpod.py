@@ -294,6 +294,65 @@ pip install --user -e . --no-deps
 # falls back to sdpa with a warning.
 pip install --user flash-attn --no-build-isolation --quiet
 
+# causal-conv1d is the CUDA kernel for the depthwise causal conv inside
+# Qwen3.5's linear-attention layers (three of every four layers). Without it
+# transformers logs `causal_conv1d_fn` / `causal_conv1d_update` falling back to
+# a reference implementation it calls "correct but much slower".
+#
+# Installed here rather than as a project dependency for two reasons. It only
+# publishes an sdist, so it compiles against nvcc and torch at install time and
+# needs --no-build-isolation for the same reason flash-attn above does. And the
+# `poetry export --only main` line further up would skip an optional group
+# anyway — the pyproject `hybrid-kernels` group exists for local pods, but the
+# bootstrap path is this script.
+#
+# Non-fatal: the fallback is numerically correct, so an image without nvcc
+# should train slower rather than fail to deploy.
+#
+# ninja/packaging are declared build deps of the sdist, and --no-build-isolation
+# means pip will not fetch them itself — without ninja the compile silently
+# drops to a single-threaded path that takes far longer.
+pip install --user ninja packaging --quiet
+pip install --user causal-conv1d --no-build-isolation --quiet \
+  || echo "WARN: causal-conv1d build failed; Qwen3.5 conv falls back to the slower reference path"
+
+# flash-linear-attention is the fast path for the gated delta rule in those
+# same layers, but it is only safe when paired with tilelang. On Hopper with
+# Triton >=3.4.0 and <3.7.1 fla's Triton kernel for gated chunk_bwd_dqkwg is
+# known-wrong (fla-org#640), so fla raises instead of producing bad gradients.
+# Its TileLang backend is auto-enabled on exactly that combination but needs
+# both the tilelang package and a usable nvcc; without them dispatch falls
+# through to the Triton path and training dies at the first backward.
+#
+# So: install tilelang first (prebuilt manylinux wheel, no compile), then fla,
+# then ask fla's own predicates whether the gated path would raise. If it
+# would, remove fla so transformers uses its reference kernels -- slower, but
+# correct and it actually runs. Verifying here means a bad combination fails at
+# deploy time instead of twenty minutes into training.
+pip install --user tilelang --quiet || echo "WARN: tilelang install failed"
+pip install --user flash-linear-attention --quiet || echo "WARN: flash-linear-attention install failed"
+python - <<'FLA_CHECK' || pip uninstall -y flash-linear-attention fla-core >/dev/null 2>&1
+import sys
+try:
+    from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, TRITON_ABOVE_3_7_1
+    from fla.ops.common.backends.tilelang import TileLangBackend
+except Exception as e:
+    print(f"fla not importable ({type(e).__name__}); nothing to verify")
+    sys.exit(0)
+broken_triton = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 and not TRITON_ABOVE_3_7_1
+if not broken_triton:
+    print("fla: Triton gated path OK on this GPU/Triton combination")
+    sys.exit(0)
+if TileLangBackend.is_available() and TileLangBackend.is_enabled():
+    print("fla: Hopper + broken Triton, but TileLang backend is active")
+    sys.exit(0)
+print(
+    "fla: Hopper with Triton in the broken range and no usable TileLang backend "
+    "-- removing flash-linear-attention so training uses the reference kernels"
+)
+sys.exit(1)
+FLA_CHECK
+
 # liger-kernel provides the fused linear cross-entropy used by
 # apply_liger_kernel_to_qwen3() in scripts/train.py. poetry export already
 # pulls it on linux, but reinstall defensively in case the editable
