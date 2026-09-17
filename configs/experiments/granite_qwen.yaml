@@ -129,31 +129,40 @@ training:
   # The encoder stays frozen via the default in asr_modeling.
   freeze_language_model: false
   freeze_projector: false
-  # Frozen, which is where this recipe deliberately departs from stage_1.
-  # stage_1 unfroze the embedding table as an experiment against a 151k-vocab
-  # Qwen3-0.6B and documented the known risk: with tie_word_embeddings=True,
-  # tokens that never appear in a batch receive only the weight-decay pull, so
-  # their rows shrink toward zero and take the lm_head column with them.
-  # Qwen3.5-2B makes that worse on both axes -- the vocab is 248,320, and
-  # Loquacious is English-only, so the CJK/Unicode tail gets zero task gradient
-  # for the entire run. Start frozen; if eval plateaus and weight analysis
-  # shows no rare-token drift headroom being wasted, this is the first knob to
-  # flip.
+  # Unfrozen, matching stage_1 and every decoder-training run this repo has
+  # shipped (tiny-audio, -next-sat, -next-thurs all ran with it False).
   #
-  # Two consequences to hold onto, because tie_word_embeddings=True here:
+  # An earlier draft of this file froze it, reasoning from stage_1's KNOWN RISK
+  # block: with tie_word_embeddings=True, tokens absent from every batch get
+  # only the weight-decay pull, so their rows shrink toward zero and drag the
+  # tied lm_head column with them. Measuring the shipped checkpoint retired
+  # that concern. embed_tokens in tiny-audio-next-sat against base Qwen3-0.6B:
   #
-  #   - Freezing the input table also freezes lm_head, since one tensor backs
-  #     both. So this run fine-tunes every decoder parameter EXCEPT the
-  #     embedding and the output projection. That is deliberate and matches
-  #     Baichuan-Audio's stage-2 policy, but it is a real constraint on a joint
-  #     fine-tune and the main reason to revisit this flag first.
-  #   - It also pins the "<audio>" row added by _init_tokenizer. Qwen3.5 ships
-  #     image/video tokens but no audio placeholder, so the token is appended
-  #     and the embeddings resized 248,077 -> 248,078. That row is never read
-  #     (the projector's output is scattered over those positions), and
-  #     freezing it just means the model never learns to emit "<audio>"
-  #     itself, which is what we want.
-  freeze_text_embed_tokens: true
+  #   token ids      0-1k    1k-10k   50k-90k   130k-152k
+  #   rel drift      0.090    0.091     0.067      0.029
+  #   norm ratio     0.986    0.987     0.989      0.994
+  #   max/mean drift 12.2x  (the documented unhealthy signature is >100x)
+  #
+  # Drift concentrates on COMMON tokens and the rare tail is the best
+  # preserved -- the healthy pattern, not the corruption one. The rare-band
+  # shrink of 0.65% is just decoupled weight decay: lr*wd*steps =
+  # 2e-5*0.01*44000 = 0.88% predicted. For this run's 11,189 steps the same
+  # arithmetic gives 0.22%, so the exposure here is smaller still.
+  #
+  # Freezing is not the free choice it looks like, either. One tensor backs
+  # both the input table and lm_head, so freezing it would also freeze the
+  # output projection -- a joint fine-tune that cannot adapt its output
+  # distribution at all. Costs ~5.7 GB (508.6M params of fp32 grad + Adam
+  # state), which the observed headroom covers.
+  #
+  # Side effect worth knowing: this also unfreezes the "<audio>" row added by
+  # _init_tokenizer, since Qwen3.5 ships image/video tokens but no audio
+  # placeholder (vocab resized 248,077 -> 248,078). The row is never read --
+  # the projector's output is scattered over those positions -- so the only
+  # consequence is that the tied lm_head column for "<audio>" can now move.
+  # Labels never contain it, so it receives only negative evidence and should
+  # drift away from ever being predicted.
+  freeze_text_embed_tokens: false
 
   # Asymmetric LR, same split as stage_1:
   #   - Projector (fresh init): 1e-3. It has to learn the whole bridge function
