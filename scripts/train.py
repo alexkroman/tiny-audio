@@ -714,6 +714,9 @@ class ASRTrainer(Trainer):
         The encoder LR override is only meaningful when
         `config.freeze_audio_encoder=False` — frozen encoder parameters have
         `requires_grad=False` and never enter the optimizer regardless.
+
+        The no-decay set is wider than HF's: biases, every `*Norm` gain, and
+        all `nn.Embedding` tables (see the inline notes for why each).
         """
         overrides = (
             self.decoder_learning_rate is not None
@@ -744,6 +747,31 @@ class ASRTrainer(Trainer):
         decay_parameters = set(get_parameter_names(opt_model, forbidden))
         decay_parameters = {n for n in decay_parameters if "bias" not in n}
 
+        # Embedding tables are excluded from weight decay on top of the norm
+        # exclusion above. Under narrow ASR fine-tuning most of a 248k-row
+        # vocab never appears in any batch, so those rows receive no task
+        # gradient and WD is the *only* force acting on them: they shrink
+        # monotonically toward zero. With tie_word_embeddings=True that same
+        # tensor backs lm_head, so the damage lands on the output projection
+        # and degrades rare-token prediction at decode time. (This is a
+        # fine-tuning-regime argument, not a universal one — under pretraining
+        # every token is seen and decaying embeddings is the usual choice.)
+        #
+        # Matched by tensor identity rather than by name. Tying means
+        # lm_head.weight IS embed_tokens.weight, and get_parameter_names walks
+        # the module tree so it yields BOTH names, while named_parameters()
+        # below deduplicates and yields only whichever the traversal reaches
+        # first. A name-based exclusion would therefore work on Qwen (where
+        # model.embed_tokens precedes lm_head) and silently fail on any
+        # architecture that registers its output head first. Identity holds
+        # regardless of which name wins.
+        no_decay_param_ids = {
+            id(p)
+            for module in opt_model.modules()
+            if isinstance(module, torch.nn.Embedding)
+            for p in module.parameters(recurse=False)
+        }
+
         # Three-way component split. Names are checked against fixed prefixes
         # so the routing matches the freeze flags exactly: `audio_tower.*`,
         # `language_model.*`, and everything else (projector + auxiliary).
@@ -764,7 +792,7 @@ class ASRTrainer(Trainer):
                 component = "decoder"
             else:
                 component = "other"
-            decay = name in decay_parameters
+            decay = name in decay_parameters and id(param) not in no_decay_param_ids
             groups[(component, decay)].append(param)
 
         base_wd = self.args.weight_decay
