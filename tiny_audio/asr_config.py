@@ -78,8 +78,32 @@ class ASRConfig(transformers.PretrainedConfig):
         model_dtype: str = "bfloat16",
         num_beams: Optional[int] = None,
         system_prompt: str = "You are a helpful assistant.",
+        # Instruction appended after the audio placeholders at inference. Must
+        # match the prompt the desired output convention was TRAINED under --
+        # when a run splits prompts by whether a source is punctuated (see
+        # `text_punct` in the data configs), inference has to pick the half it
+        # actually wants, which for a formatted-text eval is the punctuated one.
+        # None keeps ASRModel.TRANSCRIBE_PROMPT's class default.
+        transcribe_prompt: Optional[str] = None,
         encoder_dim: Optional[int] = None,
         llm_dim: Optional[int] = None,
+        # Intermediate encoder layers to concatenate (channel-wise) with the
+        # final layer before the projector. None or [] = final layer only.
+        #
+        # This is the entire architectural delta IBM shipped in
+        # granite_speech_plus over 4.1 (`cat_hidden_layers`), and the shipped
+        # 4.1-2b-plus checkpoint uses [3] on a 16-layer encoder. The rationale
+        # is specific to CTC-trained encoders: Granite's final layer feeds a
+        # Linear(1024, 16384) CTC head and is a near-one-hot posterior
+        # (measured median max-prob 0.9998, 69% blank), so it has discarded
+        # acoustic detail an LLM could use for punctuation and casing. An
+        # intermediate layer measured cos=0.044 against the final one, i.e.
+        # close to orthogonal -- genuinely complementary information.
+        #
+        # Indices are into `output_hidden_states`, where [0] is the embedding
+        # output and [i] is the output of layer i-1. `encoder_dim` is widened
+        # automatically by (len(encoder_cat_layers) + 1).
+        encoder_cat_layers: Optional[list] = None,
         # Encoder conv layers: list of (padding, kernel_size, stride) tuples
         # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
         encoder_conv_layers: Optional[list] = None,
@@ -122,7 +146,25 @@ class ASRConfig(transformers.PretrainedConfig):
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
         projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
-        projector_dropout: float = 0.0,
+        # Target RMS for the projector's output, i.e. the magnitude at which
+        # audio tokens enter the decoder's residual stream. "auto" measures the
+        # decoder's own `embed_tokens` RMS at construction; a float sets it
+        # directly; None leaves PyTorch's default init alone.
+        #
+        # This is a property of the DECODER, not the projector. Qwen/Llama/
+        # Mistral embed plainly, so their tokens sit near 0.015. Gemma-family
+        # decoders multiply embeddings by sqrt(hidden_size), so theirs sit near
+        # 1.0 -- a ~67x difference. Hardcoding either number breaks the other,
+        # hence "auto".
+        #
+        # Why it matters: the decoder is pre-norm, so every sublayer reads a
+        # normalized copy and the loss is nearly blind to prefix magnitude. But
+        # the residual stream is NOT normalized, so audio tokens entering at
+        # 13x the text scale make each sublayer's contribution at those
+        # positions 13x smaller in relative terms -- the prefix passes through
+        # all layers close to unchanged. Measured at init on granite_qwen
+        # before this landed: projector out 0.198 vs embed_tokens 0.0150.
+        projector_output_rms: Optional[float | str] = "auto",
         # Label smoothing applied inside the LM's loss function (not HF Trainer's
         # LabelSmoother). Train-only — ASRModel.forward zeros it on eval. Routing
         # smoothing through the loss_function flows through liger's fused linear
@@ -232,6 +274,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
+        self.encoder_cat_layers = list(encoder_cat_layers) if encoder_cat_layers else []
         self.audio_features_time_major = (
             is_time_major_encoder(audio_model_id)
             if audio_features_time_major is None
@@ -249,7 +292,8 @@ class ASRConfig(transformers.PretrainedConfig):
         self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
-        self.projector_dropout = projector_dropout
+        self.projector_output_rms = projector_output_rms
+        self.transcribe_prompt = transcribe_prompt
         self.label_smoothing = label_smoothing
         # MoE-specific configuration
         self.num_experts = num_experts

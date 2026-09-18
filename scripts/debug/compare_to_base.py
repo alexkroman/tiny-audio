@@ -13,10 +13,12 @@ from rich.console import Console
 from rich.table import Table
 from safetensors.torch import load_file
 
+from scripts.debug.analyze_weights import load_base_weights
+from scripts.debug.base_keys import base_key_candidates, resolve_base_key
+
 app = typer.Typer(help="Compare fine-tuned weights against base-model weights")
 console = Console()
 
-TRAINED_LM_PREFIX = "language_model."
 
 COMPONENT_PATTERNS: dict[str, re.Pattern[str]] = {
     "embed_tokens": re.compile(r"\.embed_tokens\."),
@@ -26,12 +28,23 @@ COMPONENT_PATTERNS: dict[str, re.Pattern[str]] = {
     "self_attn.o_proj": re.compile(r"\.self_attn\.o_proj\."),
     "self_attn.q_norm": re.compile(r"\.self_attn\.q_norm\."),
     "self_attn.k_norm": re.compile(r"\.self_attn\.k_norm\."),
+    # Qwen3.5's linear-attention block. Without these its 18 hybrid layers --
+    # 379M params, the largest single group -- collapse into "other".
+    "linear_attn.in_proj_qkv": re.compile(r"\.linear_attn\.in_proj_qkv\."),
+    "linear_attn.in_proj_z": re.compile(r"\.linear_attn\.in_proj_z\."),
+    "linear_attn.in_proj_ab": re.compile(r"\.linear_attn\.in_proj_[ab]\."),
+    "linear_attn.out_proj": re.compile(r"\.linear_attn\.out_proj\."),
+    "linear_attn.conv1d": re.compile(r"\.linear_attn\.conv1d\."),
+    "linear_attn.norm": re.compile(r"\.linear_attn\.norm\."),
+    "linear_attn.ssm": re.compile(r"\.linear_attn\.(?:A_log|dt_bias)"),
     "mlp.gate_proj": re.compile(r"\.mlp\.gate_proj\."),
     "mlp.up_proj": re.compile(r"\.mlp\.up_proj\."),
     "mlp.down_proj": re.compile(r"\.mlp\.down_proj\."),
     "input_layernorm": re.compile(r"\.input_layernorm\."),
     "post_attention_layernorm": re.compile(r"\.post_attention_layernorm\."),
-    "model.norm": re.compile(r"^model\.norm\."),
+    # Optional `language_model.` segment: multimodal bases (Qwen3.5-2B) nest
+    # the final norm one level deeper than plain CausalLM bases.
+    "model.norm": re.compile(r"^model\.(?:language_model\.)?norm\."),
     "lm_head": re.compile(r"^lm_head\."),
 }
 
@@ -55,13 +68,6 @@ def classify_component(base_key: str) -> str:
 def layer_index(base_key: str) -> int | None:
     match = LAYER_INDEX_RE.search(base_key)
     return int(match.group(1)) if match else None
-
-
-def map_trained_to_base(trained_key: str) -> str | None:
-    """Strip `language_model.` prefix; return None if the key isn't an LM tensor."""
-    if not trained_key.startswith(TRAINED_LM_PREFIX):
-        return None
-    return trained_key[len(TRAINED_LM_PREFIX) :]
 
 
 def compare_tensors(trained: torch.Tensor, base: torch.Tensor) -> dict:
@@ -114,23 +120,30 @@ def compare_to_base(
 
     try:
         trained_path = hf_hub_download(repo_id=trained_id, filename="model.safetensors")
-        base_path = hf_hub_download(repo_id=base_id, filename="model.safetensors")
     except Exception as e:
         console.print(f"[red]Error downloading weights: {e}[/red]")
         return False
 
     trained_weights = load_file(trained_path)
-    base_weights = load_file(base_path)
+    # Shared with analyze-weights for its single-file -> sharded-index fallback.
+    # Requesting a bare `model.safetensors` fails outright on bases that ship
+    # shards, which is how Qwen3.5-2B is published.
+    base_weights = load_base_weights(base_id)
+    if not base_weights:
+        return False
 
     matched: dict[str, dict] = {}
     unmatched_trained: list[str] = []
     unmatched_base: set[str] = set(base_weights.keys())
 
     for tk in trained_weights:
-        bk = map_trained_to_base(tk)
-        if bk is None:
+        # Empty candidates = not a decoder tensor (projector, etc.) and not
+        # expected in the base. Candidates that all miss = a decoder tensor the
+        # base genuinely lacks, which is worth reporting.
+        if not base_key_candidates(tk):
             continue
-        if bk not in base_weights:
+        bk = resolve_base_key(tk, base_weights)
+        if bk is None:
             unmatched_trained.append(tk)
             continue
         t_tensor = trained_weights[tk]
@@ -238,11 +251,22 @@ def compare_to_base(
             if li is None:
                 continue
             comp = classify_component(bk)
-            if comp.startswith("self_attn"):
+            # `linear_attn` belongs in `attn`: on a hybrid decoder like Qwen3.5
+            # it IS the attention mechanism for 18 of 24 layers. Without it
+            # those layers fall to `other`, which this table never prints --
+            # 379.1M params, the single largest group, silently rendered as
+            # "—". Same failure class the component table above already fixed.
+            #
+            # Order matters and matches `analyze_weights._decoder_module`:
+            # attention is tested before norm, so `self_attn.q_norm` and
+            # `linear_attn.norm` group with attention while the standalone
+            # `input_layernorm` / `post_attention_layernorm` still land in
+            # `norm`. Keeping the two scripts consistent is the point.
+            if comp.startswith("self_attn") or comp.startswith("linear_attn"):
                 bucket = "attn"
             elif comp.startswith("mlp"):
                 bucket = "mlp"
-            elif "layernorm" in comp or comp.endswith("_norm"):
+            elif "layernorm" in comp or "norm" in comp:
                 bucket = "norm"
             else:
                 bucket = "other"

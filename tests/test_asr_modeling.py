@@ -1086,3 +1086,50 @@ class TestVocabPadding:
         rows = base_asr_model.language_model.get_input_embeddings().weight.shape[0]
         assert base_asr_model.language_model.get_output_embeddings().weight.shape[0] == rows
         assert base_asr_model.language_model.config.vocab_size == rows
+
+
+class TestAssertProjectorLoaded:
+    """Tests for the projector key guard on from_pretrained."""
+
+    @staticmethod
+    def _keys(missing=(), unexpected=()):
+        from torch.nn.modules.module import _IncompatibleKeys
+
+        return _IncompatibleKeys(list(missing), list(unexpected))
+
+    def test_accepts_frozen_module_keys(self):
+        """Encoder/decoder keys are never saved, so their absence is expected."""
+        from tiny_audio.asr_modeling import _assert_projector_loaded
+
+        _assert_projector_loaded(
+            self._keys(
+                missing=["audio_tower.encoder.layers.0.weight", "language_model.norm.weight"]
+            ),
+            "mlp",
+        )
+
+    def test_raises_on_missing_projector_key(self):
+        """A projector left at random init must not load silently."""
+        from tiny_audio.asr_modeling import _assert_projector_loaded
+
+        with pytest.raises(RuntimeError, match="projector.linear_1.weight"):
+            _assert_projector_loaded(self._keys(missing=["projector.linear_1.weight"]), "mlp")
+
+    def test_raises_on_unexpected_projector_key(self):
+        from tiny_audio.asr_modeling import _assert_projector_loaded
+
+        with pytest.raises(RuntimeError, match="projector.stale.weight"):
+            _assert_projector_loaded(self._keys(unexpected=["projector.stale.weight"]), "mlp")
+
+    def test_legacy_layout_gets_an_actionable_hint(self):
+        """norm_2 in the checkpoint means it predates the layout change."""
+        from tiny_audio.asr_modeling import _assert_projector_loaded
+
+        with pytest.raises(RuntimeError, match="predates the MLP projector layout change"):
+            _assert_projector_loaded(
+                self._keys(
+                    missing=["projector.input_norm.weight"],
+                    unexpected=["projector.norm.weight", "projector.norm_2.weight"],
+                ),
+                "mlp",
+            )

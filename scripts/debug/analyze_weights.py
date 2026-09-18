@@ -14,6 +14,8 @@ from rich.console import Console
 from rich.table import Table
 from safetensors.torch import load_file
 
+from scripts.debug.base_keys import resolve_base_tensor
+
 app = typer.Typer(help="Analyze model weights for training health")
 console = Console()
 
@@ -69,11 +71,6 @@ def _extract_layer_idx(name: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _strip_lm_prefix(name: str) -> str:
-    """Map a tiny-audio decoder tensor name to its base-LM name."""
-    return name.removeprefix("language_model.")
-
-
 def load_base_weights(text_model_id: str) -> dict[str, torch.Tensor] | None:
     """Download and load base LM weights for delta-from-base analysis.
 
@@ -110,7 +107,17 @@ def _decoder_module(name: str) -> str:
         return "embed"
     if "lm_head" in nl:
         return "lm_head"
-    if "self_attn" in nl or any(x in nl for x in [".q_proj.", ".k_proj.", ".v_proj.", ".o_proj."]):
+    # `linear_attn` is Qwen3.5's hybrid linear-attention block, which holds 18
+    # of its 24 layers. Without it those layers fall through to the "norm"/
+    # "other" buckets and the drift table reports 0.0000 attention drift for
+    # three quarters of the decoder. Checked before the "norm" branch so
+    # `linear_attn.norm` groups with attention, matching how `self_attn.q_norm`
+    # already does.
+    if (
+        "self_attn" in nl
+        or "linear_attn" in nl
+        or any(x in nl for x in [".q_proj.", ".k_proj.", ".v_proj.", ".o_proj."])
+    ):
         return "attn"
     if ".mlp." in nl or any(x in nl for x in [".gate_proj.", ".up_proj.", ".down_proj."]):
         return "mlp"
@@ -374,11 +381,43 @@ def print_tensor_analysis(stats: dict, verbose: bool = False):
                 )
 
 
+def gain_offset(name: str, text_model_id: str | None) -> float:
+    """Offset converting a stored RMSNorm weight into its EFFECTIVE GAIN.
+
+    Two conventions coexist inside a single Qwen3.5 decoder, verified in
+    transformers source:
+
+      Qwen3_5RMSNorm       weight init zeros, forward `output * (1.0 + weight)`
+                           -> gain = 1 + w, so offset 1.0
+      Qwen3_5RMSNormGated  weight init ones,  forward `weight * hidden_states`
+                           -> gain = w,     so offset 0.0
+
+    Llama / Qwen3 / most families are ones-init throughout (`self.weight *
+    hidden_states`), so offset 0.0. Qwen3.5 is the one that mixes them:
+    everything except `linear_attn.norm` is zero-centered.
+
+    This matters for any relative-drift metric. Dividing ||Δ|| by ||w|| on a
+    zero-centered tensor divides by the DEVIATION norm instead of the gain
+    norm, which over-reports drift substantially and, fed to a hardcoded
+    threshold ladder, fires early.
+
+    Returns 0.0 for anything that is not a norm gain, so callers that run over
+    mixed groups (linear weights and norms together) can apply it blindly.
+    """
+    if "norm" not in name.lower():
+        return 0.0
+    if not text_model_id or "qwen3.5" not in text_model_id.lower():
+        return 0.0
+    # The gated delta-net gain is the one ones-init tensor in Qwen3.5.
+    return 0.0 if "linear_attn.norm" in name else 1.0
+
+
 def print_decoder_summary(
     weights: dict[str, torch.Tensor],
     all_stats: list[dict],
     base_weights: dict[str, torch.Tensor] | None = None,
     top_k: int = 10,
+    text_model_id: str | None = None,
 ) -> dict:
     """Decoder-specific aggregate view.
 
@@ -430,21 +469,25 @@ def print_decoder_summary(
                 def rel_drift(group: list[dict]) -> float:
                     total_d, total_b = 0.0, 0.0
                     for s in group:
-                        base = base_weights.get(_strip_lm_prefix(s["name"]))
+                        base = resolve_base_tensor(s["name"], base_weights)
                         if base is None:
                             continue
                         cur = weights[s["name"]].float()
                         b = base.float()
                         if cur.shape != b.shape:
                             continue
+                        # Denominator is the effective gain for norm tensors --
+                        # a no-op (identity 0.0) for linear weights. See
+                        # gain_offset().
+                        gain_b = b + gain_offset(s["name"], text_model_id)
                         total_d += float((cur - b).pow(2).sum().item())
-                        total_b += float(b.pow(2).sum().item())
+                        total_b += float(gain_b.pow(2).sum().item())
                     return (total_d / total_b) ** 0.5 if total_b > 0 else 0.0
 
                 def max_channel_delta(group: list[dict]) -> float:
                     m = 0.0
                     for s in group:
-                        base = base_weights.get(_strip_lm_prefix(s["name"]))
+                        base = resolve_base_tensor(s["name"], base_weights)
                         if base is None:
                             continue
                         cur = weights[s["name"]].float()
@@ -492,11 +535,8 @@ def print_decoder_summary(
             "EMBED_TOKENS" + (" DRIFT FROM BASE" if base_weights else " ROW-NORM DISTRIBUTION")
         )
         embed = weights[embed_stats["name"]].float()
-        base_embed = (
-            base_weights.get(_strip_lm_prefix(embed_stats["name"])).float()
-            if base_weights and _strip_lm_prefix(embed_stats["name"]) in base_weights
-            else None
-        )
+        base_embed_tensor = resolve_base_tensor(embed_stats["name"], base_weights)
+        base_embed = None if base_embed_tensor is None else base_embed_tensor.float()
 
         if base_embed is not None:
             # Vocab sizes commonly differ between base and fine-tuned: the
@@ -584,15 +624,22 @@ def print_decoder_summary(
             deltas: list[float] = []
             max_layer = (None, 0.0)
             for s in norm_stats:
-                base = base_weights.get(_strip_lm_prefix(s["name"]))
+                base = resolve_base_tensor(s["name"], base_weights)
                 if base is None:
                     continue
                 cur = weights[s["name"]].float()
                 b = base.float()
                 if cur.shape != b.shape:
                     continue
+                # Measure against the EFFECTIVE GAIN, not the stored weight.
+                # On a zero-centered RMSNorm the stored tensor is the deviation
+                # from identity, so ||b|| is not the gain magnitude; see
+                # gain_offset(). The numerator is unaffected either way,
+                # since (id+cur) - (id+b) == cur - b.
+                offset = gain_offset(s["name"], text_model_id)
+                gain_b = b + offset
                 d = float((cur - b).pow(2).sum().sqrt().item())
-                rel = d / float(b.pow(2).sum().sqrt().clamp(min=1e-6).item())
+                rel = d / float(gain_b.pow(2).sum().sqrt().clamp(min=1e-6).item())
                 deltas.append(rel)
                 if rel > max_layer[1]:
                     max_layer = (s["name"], rel)
@@ -629,16 +676,31 @@ def print_decoder_summary(
                         "linear-weight drift."
                     )
         else:
-            # Fallback: report absolute stats (uncalibrated against base).
-            means = [s["mean"] for s in norm_stats]
-            stds = [s["std"] for s in norm_stats]
-            avg_mean = sum(means) / len(means)
+            # Fallback: absolute stats, uncalibrated against base.
+            #
+            # Split by convention rather than averaged. One mean over both is
+            # not a gain: on Qwen3.5 the zero-centered text norms sit near
+            # 0.28 (true gain 1.28) while the gated ones sit near 0.91, so a
+            # combined average is a number with no interpretation.
+            by_conv: dict[float, list[dict]] = {0.0: [], 1.0: []}
+            for s in norm_stats:
+                by_conv[gain_offset(s["name"], text_model_id)].append(s)
+
             console.print(f"  Number of norm tensors: {len(norm_stats)}")
-            console.print(
-                f"  Per-tensor mean (gain):  avg={avg_mean:.4f}, "
-                f"range=[{min(means):.4f}, {max(means):.4f}]"
-            )
-            console.print(f"  Per-tensor std:          avg={sum(stds) / len(stds):.4f}")
+            for offset, label in ((1.0, "zero-centered (1 + w)"), (0.0, "ones-init (w)")):
+                group = by_conv[offset]
+                if not group:
+                    continue
+                gains = [s["mean"] + offset for s in group]
+                stds = [s["std"] for s in group]
+                gain_avg = sum(gains) / len(gains)
+                std_avg = sum(stds) / len(stds)
+                console.print(
+                    f"  {label:<24} n={len(group):<3} "
+                    f"effective gain avg={gain_avg:.4f}, "
+                    f"range=[{min(gains):.4f}, {max(gains):.4f}], "
+                    f"std avg={std_avg:.4f}"
+                )
             console.print(
                 "\n  [dim]Note: absolute norm gains reflect base-LM pretraining "
                 "as much as fine-tuning. Pass --compare-base for delta analysis.[/dim]"
@@ -771,7 +833,12 @@ def analyze_weights(
                     f"\n[dim]Loading base weights from {text_model_id} for delta analysis...[/dim]"
                 )
                 base_weights = load_base_weights(text_model_id)
-        print_decoder_summary(weights, all_stats, base_weights=base_weights)
+        print_decoder_summary(
+            weights,
+            all_stats,
+            base_weights=base_weights,
+            text_model_id=config.get("text_model_id"),
+        )
 
     _section("OVERALL TRAINING HEALTH SUMMARY")
 
@@ -781,6 +848,42 @@ def analyze_weights(
     total_params_analyzed = sum(s["numel"] for s in all_stats)
     total_dead_neurons = sum(s.get("dead_rows", 0) + s.get("dead_cols", 0) for s in all_stats)
 
+    # Split dead units into inherited (already dead in the base checkpoint) and
+    # acquired (killed by this run). Only the second kind is a training issue.
+    #
+    # Qwen3.5-2B ships 14 dead rows in layers.0.linear_attn.in_proj_qkv: 7
+    # channels whose Q and K halves both hold denormals (~1.2e-37, so the fp32
+    # norm underflows to 0). They cannot recover -- each half's gradient is
+    # proportional to the other, so it underflows too, and over 18.5k steps
+    # they moved by 3e-40. Counting those against the run made the verdict read
+    # "Issues detected" on every single checkpoint.
+    inherited_dead, acquired_dead, acquired_where = 0, 0, []
+    if base_weights:
+        for s in all_stats:
+            if not (s.get("dead_rows", 0) or s.get("dead_cols", 0)):
+                continue
+            cur = weights.get(s["name"])
+            base = resolve_base_tensor(s["name"], base_weights)
+            if cur is None or cur.dim() != 2:
+                continue
+            t = cur.float()
+            t_dead = {("r", i) for i in (t.norm(dim=1) < 1e-5).nonzero().flatten().tolist()} | {
+                ("c", i) for i in (t.norm(dim=0) < 1e-5).nonzero().flatten().tolist()
+            }
+            if base is None or base.shape != cur.shape:
+                acquired_dead += len(t_dead)
+                acquired_where.append((s["name"], len(t_dead), "base tensor unavailable"))
+                continue
+            b = base.float()
+            b_dead = {("r", i) for i in (b.norm(dim=1) < 1e-5).nonzero().flatten().tolist()} | {
+                ("c", i) for i in (b.norm(dim=0) < 1e-5).nonzero().flatten().tolist()
+            }
+            inherited_dead += len(t_dead & b_dead)
+            new = t_dead - b_dead
+            if new:
+                acquired_dead += len(new)
+                acquired_where.append((s["name"], len(new), "killed during training"))
+
     console.print(f"\n  📦 Analyzed {len(all_stats)} tensors, {total_params_analyzed:,} parameters")
 
     console.print("\n  🔬 Numerical Stability:")
@@ -789,9 +892,23 @@ def analyze_weights(
     console.print(
         f"     Exact zeros: {total_zeros} ({100 * total_zeros / total_params_analyzed:.4f}%)"
     )
-    console.print(
-        f"     Dead neurons: {total_dead_neurons} {'❌' if total_dead_neurons > 0 else '✅'}"
-    )
+    if base_weights and total_dead_neurons:
+        mark = "❌" if acquired_dead > 0 else "✅"
+        console.print(
+            f"     Dead neurons: {total_dead_neurons} "
+            f"({inherited_dead} inherited from base, {acquired_dead} acquired) {mark}"
+        )
+        for name, n, why in acquired_where:
+            console.print(f"       ⚠️  {n} in {name} ({why})")
+    else:
+        console.print(
+            f"     Dead neurons: {total_dead_neurons} {'❌' if total_dead_neurons > 0 else '✅'}"
+            + (
+                "  [dim](pass --compare-base to separate inherited)[/dim]"
+                if total_dead_neurons
+                else ""
+            )
+        )
 
     # Per-tensor listing is useful for projector (4 tensors) but unreadable
     # for decoder (311 tensors); decoder mode prints per-layer aggregates via
@@ -871,8 +988,14 @@ def analyze_weights(
         issues.append("Inf values detected")
     if 100 * total_zeros / total_params_analyzed > 10:
         issues.append("High percentage of zero weights")
-    if total_dead_neurons > 0:
-        issues.append(f"{total_dead_neurons} dead neurons detected")
+    # Only units this run killed count as an issue; inherited ones are a
+    # property of the base checkpoint. Without a base to compare against we
+    # cannot tell them apart, so fall back to flagging the total.
+    if base_weights:
+        if acquired_dead > 0:
+            issues.append(f"{acquired_dead} dead neurons acquired during training")
+    elif total_dead_neurons > 0:
+        issues.append(f"{total_dead_neurons} dead neurons detected (no base for comparison)")
 
     console.print(f"\n  {'─' * 60}")
     if not issues:

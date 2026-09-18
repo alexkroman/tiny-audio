@@ -12,7 +12,11 @@ def parse_results_file(results_path: Path) -> list[dict]:
         results_path: Path to a results.txt file from evaluation.
 
     Returns:
-        List of dicts with keys: sample_num, ground_truth, prediction, wer, word_count
+        List of dicts with keys: sample_num, ground_truth, prediction, wer,
+        word_count, ground_truth_raw, prediction_raw. The `_raw` values are the
+        un-normalized transcripts; they are `None` for runs written before
+        those lines existed, so formatting metrics must skip such samples
+        rather than silently score normalized text.
     """
     samples = []
     content = results_path.read_text()
@@ -20,8 +24,10 @@ def parse_results_file(results_path: Path) -> list[dict]:
 
     for block in blocks:
         sample_match = re.search(r"Sample (\d+) - WER: ([\d.]+)%", block)
-        gt_match = re.search(r"Ground Truth: (.+?)(?:\n|$)", block)
-        pred_match = re.search(r"Prediction:\s*(.+?)(?:\n|$)", block)
+        gt_match = re.search(r"^Ground Truth: (.+?)$", block, re.MULTILINE)
+        pred_match = re.search(r"^Prediction:[ \t]*(.+?)$", block, re.MULTILINE)
+        gt_raw_match = re.search(r"^Ground Truth Raw: (.+?)$", block, re.MULTILINE)
+        pred_raw_match = re.search(r"^Prediction Raw:[ \t]*(.+?)$", block, re.MULTILINE)
 
         if sample_match and gt_match and pred_match:
             wer = float(sample_match.group(2))
@@ -36,6 +42,8 @@ def parse_results_file(results_path: Path) -> list[dict]:
                     "prediction": prediction,
                     "wer": wer,
                     "word_count": word_count,
+                    "ground_truth_raw": (gt_raw_match.group(1).strip() if gt_raw_match else None),
+                    "prediction_raw": (pred_raw_match.group(1).strip() if pred_raw_match else None),
                 }
             )
 

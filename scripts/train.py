@@ -10,6 +10,7 @@
 import contextlib
 import functools
 import logging
+import math
 import os
 import random
 import re
@@ -52,6 +53,19 @@ from tiny_audio.asr_config import (
 from tiny_audio.asr_modeling import ASRModel
 
 TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
+# Used for sources whose transcripts natively carry punctuation, selected per
+# row via the `text_punct` dataset field. Granite Speech 4.1 documents exactly
+# this mechanism -- its model card says punctuation and truecasing are chosen
+# "with a simple prompt change", and its usage example is literally
+# "<|audio|>transcribe the speech with proper punctuation and capitalization."
+# Qwen3-ASR does the equivalent through a system turn plus an assistant prefill.
+#
+# Without the split, the ~25% of multiasr that is truecased-but-unpunctuated
+# (TEDLIUM, Peoples, AMI, Switchboard) trains the model to SUPPRESS punctuation
+# under the same prompt the punctuated ~75% uses to produce it. Identical
+# conditioning, contradictory targets: the model can only learn a hedge, and
+# every dropped mark scores as an error against punctuated references.
+TRANSCRIBE_PROMPTS_PUNCT = ["Transcribe the speech with proper punctuation and capitalization"]
 DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
 
 # Gigaspeech ships inline punctuation as angle-bracket tags so we restore
@@ -440,6 +454,19 @@ class DatasetLoader:
                 )
             ds = ds.add_column("_text_case", [text_case] * len(ds))
 
+        # text_punct: declares whether this source's transcripts carry
+        # punctuation. Deliberately separate from text_case -- they are not the
+        # same axis, and conflating them gets Gigaspeech wrong, which is
+        # ALL-CAPS (text_case: mono) yet natively punctuated. Omit it and the
+        # row gets the plain prompt, i.e. today's behaviour.
+        text_punct = dataset_cfg.get("text_punct")
+        if text_punct is not None:
+            if not isinstance(text_punct, bool):
+                raise ValueError(
+                    f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
+                )
+            ds = ds.add_column("_text_punct", [text_punct] * len(ds))
+
         # random_truncate_seconds: [min, max] enables per-row random
         # truncation in the DataCollator. Each row gets a fresh uniform
         # [min, max] target duration each time it's pulled into a batch,
@@ -472,6 +499,10 @@ class DatasetLoader:
         # Preserve the declared casing policy so _normalize_label can use it.
         if "_text_case" in ds.column_names:
             keep_cols = keep_cols | {"_text_case"}
+        # Preserve the declared punctuation policy so _build_sample can pick
+        # the matching prompt.
+        if "_text_punct" in ds.column_names:
+            keep_cols = keep_cols | {"_text_punct"}
         # Preserve the per-row random-truncation bounds so the collator can
         # apply them at batch time.
         if "_random_truncate_min_s" in ds.column_names:
@@ -728,7 +759,11 @@ class DataCollator:
             if feature.get("_allow_empty_label")
             else _normalize_label(raw_text, feature.get("_text_case"))
         )
-        return self._make_messages(num_audio_tokens, random.choice(TRANSCRIBE_PROMPTS), text)
+        # Prompt carries the label convention, so the punctuated and
+        # unpunctuated halves of the mix stop competing for the same
+        # conditioning. Undeclared sources keep the plain prompt.
+        prompts = TRANSCRIBE_PROMPTS_PUNCT if feature.get("_text_punct") else TRANSCRIBE_PROMPTS
+        return self._make_messages(num_audio_tokens, random.choice(prompts), text)
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
         user_content = (self.audio_token * num_audio_tokens) + " " + prompt
@@ -843,11 +878,31 @@ class ASRTrainer(Trainer):
         # Gemma4RMSNorm gain tensors across 9 distinct sites. Match
         # structurally on the class name so a new decoder is covered on
         # arrival rather than needing an import added here.
+        #
+        # Substring, not endswith: Qwen3.5's gated-delta-net layers normalize
+        # with `Qwen3_5RMSNormGated`, which does NOT end in "Norm" and so
+        # escaped an endswith() match entirely — putting all 18
+        # `linear_attn.norm.weight` gains (ones-init, so decay pulls them
+        # toward zero) into the decay group, the exact failure this block
+        # exists to prevent.
         opt_model = self.model
-        norm_modules = [type(m) for m in opt_model.modules() if type(m).__name__.endswith("Norm")]
+        norm_modules = [type(m) for m in opt_model.modules() if "Norm" in type(m).__name__]
         forbidden = list(ALL_LAYERNORM_LAYERS) + norm_modules
         decay_parameters = set(get_parameter_names(opt_model, forbidden))
         decay_parameters = {n for n in decay_parameters if "bias" not in n}
+
+        # State-space / gated-delta-rule tensors are excluded by convention in
+        # every Mamba-family recipe: `A_log` sets each head's memory horizon
+        # (decaying it homogenizes the decay spectrum toward A=1) and
+        # `conv1d.weight` is the short causal convolution that carries local
+        # token order — which matters more than usual here, since Qwen3.5 is
+        # 75% NoPE and 18 of 24 layers have no RoPE at all. `dt_bias` and `D`
+        # are already caught by the "bias" filter and the norm match, but are
+        # listed for completeness.
+        ssm_no_decay = ("A_log", "conv1d.weight", "dt_bias", ".D")
+        decay_parameters = {
+            n for n in decay_parameters if not any(tag in n for tag in ssm_no_decay)
+        }
 
         # Embedding tables are excluded from weight decay on top of the norm
         # exclusion above. Under narrow ASR fine-tuning most of a 248k-row
@@ -907,19 +962,200 @@ class ASRTrainer(Trainer):
         enc_lr = self.encoder_learning_rate if self.encoder_learning_rate is not None else base_lr
         enc_wd = self.encoder_weight_decay if self.encoder_weight_decay is not None else base_wd
 
+        # `name` is carried purely so `_trust_ratios` can attribute each group;
+        # torch ignores keys it does not recognize in a param group.
         optimizer_grouped_parameters = [
-            {"params": groups[("other", True)], "weight_decay": proj_wd, "lr": base_lr},
-            {"params": groups[("other", False)], "weight_decay": 0.0, "lr": base_lr},
-            {"params": groups[("decoder", True)], "weight_decay": dec_wd, "lr": dec_lr},
-            {"params": groups[("decoder", False)], "weight_decay": 0.0, "lr": dec_lr},
-            {"params": groups[("encoder", True)], "weight_decay": enc_wd, "lr": enc_lr},
-            {"params": groups[("encoder", False)], "weight_decay": 0.0, "lr": enc_lr},
+            {
+                "name": "projector",
+                "params": groups[("other", True)],
+                "weight_decay": proj_wd,
+                "lr": base_lr,
+            },
+            {
+                "name": "projector",
+                "params": groups[("other", False)],
+                "weight_decay": 0.0,
+                "lr": base_lr,
+            },
+            {
+                "name": "decoder",
+                "params": groups[("decoder", True)],
+                "weight_decay": dec_wd,
+                "lr": dec_lr,
+            },
+            {
+                "name": "decoder",
+                "params": groups[("decoder", False)],
+                "weight_decay": 0.0,
+                "lr": dec_lr,
+            },
+            {
+                "name": "encoder",
+                "params": groups[("encoder", True)],
+                "weight_decay": enc_wd,
+                "lr": enc_lr,
+            },
+            {
+                "name": "encoder",
+                "params": groups[("encoder", False)],
+                "weight_decay": 0.0,
+                "lr": enc_lr,
+            },
         ]
         optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
 
         optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args, opt_model)
         self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
+
+    def _clip_grad_norm(self, model):
+        """Clip exactly as the base Trainer does, but log per-group norms first.
+
+        Global-norm clipping scales every parameter by one factor
+        `min(1, max_grad_norm / ||g||_global)`. With a fresh projector at
+        ||grad|| ~= 9 alongside a decoder at ~1.2, the projector dominates that
+        global norm and any clip scales the decoder's update down with it.
+        Nothing in this repo logged the two groups separately, so that concern
+        could never be checked against a number — HF reports one scalar, which
+        by construction cannot separate them.
+
+        Instrumentation only: the clipping below is byte-identical to the base
+        implementation, and `_get_grad_norm` still receives the global pre-clip
+        norm so `grad_norm` stays comparable across runs. Split the clip only
+        if these logs show projector >> decoder persistently past warmup —
+        per-group clipping makes the combined update no longer a scalar
+        multiple of the true gradient, which every comparable published recipe
+        avoids.
+
+        `on_pre_optimizer_step` cannot do this: Trainer fires it after
+        `_clip_grad_norm`, so a callback only ever sees post-clip gradients.
+        """
+        if self.state.global_step % max(1, self.args.logging_steps) == 0:
+            groups: dict[str, list] = {"projector": [], "decoder": [], "encoder": []}
+            for name, param in model.named_parameters():
+                if param.grad is None:
+                    continue
+                clean = name.removeprefix("_orig_mod.").removeprefix("module.")
+                if clean.startswith("audio_tower."):
+                    groups["encoder"].append(param.grad)
+                elif clean.startswith("language_model."):
+                    groups["decoder"].append(param.grad)
+                else:
+                    groups["projector"].append(param.grad)
+
+            metrics = {}
+            for group, grads in groups.items():
+                if grads:
+                    stacked = torch.stack([g.detach().float().norm(2) for g in grads])
+                    metrics[f"grad_norm/{group}"] = stacked.norm(2).item()
+            if metrics:
+                total = math.sqrt(sum(v * v for v in metrics.values()))
+                if self.args.max_grad_norm > 0 and total > 0:
+                    metrics["grad_norm/clip_factor"] = min(1.0, self.args.max_grad_norm / total)
+                metrics.update(self._trust_ratios())
+                metrics.update(self._projector_output_rms())
+                self.log(metrics)
+
+        return super()._clip_grad_norm(model)
+
+    def _trust_ratios(self) -> dict:
+        """Per-group ||update|| / ||w||, the scale-free "is this LR sane" metric.
+
+        Grad-norm ratios cannot answer that question: ||g|| = r * sqrt(N), so
+        they are dominated by parameter count (the decoder has 109x the
+        projector's params, so its norm is ~10x larger at equal per-parameter
+        gradient). AdamW also divides gradient magnitude out entirely -- the
+        step is lr * m_hat/(sqrt(v_hat)+eps), i.e. ~lr per parameter regardless
+        of ||g||. What actually governs learning is the step relative to the
+        weight, and the healthy fine-tuning band is roughly 1e-3 to 1e-2.
+
+        Read from the optimizer's own Adam state, so this reflects the update
+        actually applied on the previous step rather than a theoretical bound.
+        """
+        opt = self.optimizer
+        if opt is None or not getattr(opt, "param_groups", None):
+            return {}
+
+        totals: dict[str, list[float]] = {}
+        for pg in opt.param_groups:
+            name = pg.get("name") or pg.get("component") or "other"
+            lr, eps = pg.get("lr", 0.0), pg.get("eps", 1e-8)
+            b1, b2 = pg.get("betas", (0.9, 0.999))
+            upd_sq = w_sq = 0.0
+            for p in pg["params"]:
+                st = opt.state.get(p)
+                if not st or "exp_avg" not in st:
+                    continue
+                t = int(
+                    st.get("step", 0)
+                    if not torch.is_tensor(st.get("step", 0))
+                    else st["step"].item()
+                )
+                if t < 1:
+                    continue
+                m = st["exp_avg"].float() / (1 - b1**t)
+                v = st["exp_avg_sq"].float() / (1 - b2**t)
+                upd_sq += (lr * m / (v.sqrt() + eps)).pow(2).sum().item()
+                w_sq += p.detach().float().pow(2).sum().item()
+            if w_sq > 0:
+                totals.setdefault(name, [0.0, 0.0])
+                totals[name][0] += upd_sq
+                totals[name][1] += w_sq
+
+        return {
+            f"trust_ratio/{name}": math.sqrt(u) / math.sqrt(w)
+            for name, (u, w) in totals.items()
+            if w > 0
+        }
+
+    def _projector_output_rms(self) -> dict:
+        """Projector output RMS against the decoder's embedding RMS.
+
+        The whole point of `projector_output_rms` is that audio tokens should
+        enter the residual stream at the same magnitude as text tokens. Nothing
+        else in the run reports whether that holds once training starts moving
+        the weights, and the repo has already measured one small-init attempt
+        drifting back up by ~35x. This is the number that says whether it stuck.
+        """
+        model = self.model
+        projector = getattr(model, "projector", None)
+        if projector is None or not hasattr(projector, "linear_1"):
+            return {}
+        try:
+            was_training = projector.training
+            projector.eval()
+            with torch.no_grad():
+                k = getattr(projector, "k", 1)
+                enc_dim = projector.linear_1.in_features // k
+                w = projector.linear_2.weight
+                probe = torch.randn(1, 64 * k, enc_dim, dtype=w.dtype, device=w.device)
+                out_rms = projector(probe).float().pow(2).mean().sqrt().item()
+                emb = model.language_model.get_input_embeddings().weight
+                emb_rms = emb.detach().float().pow(2).mean().sqrt().item()
+        except Exception:  # diagnostics must never take the run down
+            return {}
+        finally:
+            projector.train(was_training)
+
+        metrics = {"projector/output_rms": out_rms}
+        if emb_rms > 0:
+            metrics["projector/output_rms_over_embed"] = out_rms / emb_rms
+
+        # dL/d(log c) for a hypothetical output-scale multiplier c, accumulated
+        # by the projector's backward hook. This is the metric that decides
+        # whether the observed drift toward ~47x embed RMS is the loss pursuing
+        # a larger injection magnitude (persistently negative) or just Adam
+        # dragging the scale along as the weights grow (hovering near zero).
+        # Drained here so it does not accumulate across logging intervals.
+        # Averaged over the micro-batches accumulated since the last drain, so
+        # the value does not scale with logging_steps or grad accumulation.
+        scale_grad = getattr(projector, "scale_grad", None)
+        count = getattr(projector, "scale_grad_count", 0)
+        if scale_grad is not None and count:
+            metrics["projector/dloss_dlogscale"] = float(scale_grad.detach().item()) / count
+            projector.scale_grad = None
+            projector.scale_grad_count = 0
+        return metrics
 
 
 class PushToHubCallback(TrainerCallback):

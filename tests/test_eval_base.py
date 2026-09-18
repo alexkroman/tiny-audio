@@ -263,7 +263,8 @@ class TestAssemblyAIModels:
         assert "best" in ASSEMBLYAI_MODELS
         assert "universal" in ASSEMBLYAI_MODELS
         assert "universal-3-pro" in ASSEMBLYAI_MODELS
+        assert "universal-3-5-pro" in ASSEMBLYAI_MODELS
 
     def test_model_count(self):
         """Test number of available models."""
-        assert len(ASSEMBLYAI_MODELS) == 3
+        assert len(ASSEMBLYAI_MODELS) == 4

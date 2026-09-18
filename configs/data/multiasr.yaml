@@ -226,6 +226,7 @@ datasets:
     task: transcribe
     # Lowercase, no punctuation.
     text_case: mono
+    text_punct: false
     train_splits: [train]
     eval_splits: [validation]
     # natural cap ~268K samples (~452hr); LIUM/tedlium no longer on Hub
@@ -256,6 +257,7 @@ datasets:
     task: transcribe
     # `text_original` preserves the book's case + punctuation.
     text_case: cased
+    text_punct: true
     train_splits: [train]
     eval_splits: []
     # Big-3 cap (see the mix table above). Read by
@@ -302,6 +304,7 @@ datasets:
     task: transcribe
     # Lowercase, no punctuation.
     text_case: mono
+    text_punct: false
     train_splits: [train]
     eval_splits: []
 
@@ -318,6 +321,7 @@ datasets:
     task: transcribe
     # Lowercase, no punctuation.
     text_case: mono
+    text_punct: false
     train_splits: []
     eval_splits: [validation]
 
@@ -348,6 +352,7 @@ datasets:
     task: transcribe
     # `sentence` is the written prompt the contributor read aloud.
     text_case: cased
+    text_punct: true
     train_splits: [train]
     eval_splits: [validation]
     # Big-3 cap. Applies to train_splits only, so the validation split
@@ -370,6 +375,7 @@ datasets:
     task: transcribe
     # ALL-CAPS; punctuation arrives as <COMMA>/<PERIOD> tags.
     text_case: mono
+    text_punct: true
     train_splits: [train]
     eval_splits: []
     # Big-3 cap. M's natural size (~910K) is closest to the cap of the
@@ -386,6 +392,7 @@ datasets:
     task: transcribe
     # ALL-CAPS; punctuation arrives as <COMMA>/<PERIOD> tags.
     text_case: mono
+    text_punct: true
     train_splits: []
     eval_splits: [validation]
 
@@ -405,6 +412,7 @@ datasets:
     # sliding-window fragments that the heuristic truecased, injecting
     # proper nouns (permissions -> Permissions, website -> Website).
     text_case: cased
+    text_punct: true
     train_splits: [train]
     eval_splits: [validation]
 
@@ -439,6 +447,7 @@ datasets:
     task: transcribe
     # Cased+punct. Fragment rows with no capital would fool the heuristic.
     text_case: cased
+    text_punct: true
     train_splits: [train]
     eval_splits: []
 
@@ -458,6 +467,7 @@ datasets:
     task: transcribe
     # `raw_text` follows the parliamentary record (case + punct).
     text_case: cased
+    text_punct: true
     train_splits: [train]
     eval_splits: [validation]
 
@@ -479,6 +489,7 @@ datasets:
     task: transcribe
     # ALL-CAPS, no punct. 21% of rows are under the truecase floor.
     text_case: mono
+    text_punct: false
     train_splits: [train]
     eval_splits: [validation]
 
@@ -499,6 +510,7 @@ datasets:
     task: transcribe
     # ALL-CAPS, no punct. 21% of rows are under the truecase floor.
     text_case: mono
+    text_punct: false
     train_splits: [train]
     eval_splits: [validation]
 

@@ -11,6 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from scripts.itn import ITN_CLASSES, merge_scores, score_sample
 from scripts.utils import _extract_model_from_dir, find_model_dirs, parse_results_file
 
 app = typer.Typer(help="Analysis tools for ASR evaluation results")
@@ -64,30 +65,6 @@ def entity_in_text(entity_text: str, text: str) -> bool:
             if text_words[i : i + len(entity_words)] == entity_words:
                 return True
     return False
-
-
-# Entity types that should be checked for ITN (Inverse Text Normalization)
-ITN_ENTITY_TYPES = {"CARDINAL", "DATE", "TIME", "MONEY", "PERCENT", "ORDINAL", "QUANTITY"}
-
-
-def entity_itn_correct(entity_text: str, text: str) -> bool:
-    """Check if entity appears with correct formatting (ITN accuracy).
-
-    This is stricter than entity_in_text - checks for exact formatted match.
-    Example: "$25" should appear as "$25", not "twenty five dollars".
-    """
-    # Case-insensitive but format-preserving check
-    entity_lower = entity_text.lower()
-    text_lower = text.lower()
-
-    # Direct substring match (preserves formatting like $, %, :, etc.)
-    if entity_lower in text_lower:
-        return True
-
-    # Check with minor punctuation variations (e.g., "3:00" vs "3.00")
-    entity_normalized = entity_lower.replace(":", ".").replace(",", "")
-    text_normalized = text_lower.replace(":", ".").replace(",", "")
-    return entity_normalized in text_normalized
 
 
 @app.command("high-wer")
@@ -379,7 +356,9 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
         "alignment": None,
         "mcq": {},
         "entity_errors": defaultdict(lambda: {"found": 0, "total": 0}),
-        "itn_errors": defaultdict(lambda: {"correct": 0, "total": 0}),
+        # Pattern-based ITN, scored on the raw (un-normalized) pair only.
+        "itn": {},
+        "itn_raw_samples": 0,
     }
 
     all_refs = []
@@ -437,6 +416,12 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
         for sample in parse_results_file(results_file):
             gt_raw = sample["ground_truth"]
             pred_raw = sample["prediction"]
+
+            gt_unnorm = sample.get("ground_truth_raw")
+            pred_unnorm = sample.get("prediction_raw")
+            if gt_unnorm is not None and pred_unnorm is not None:
+                metrics["itn_raw_samples"] += 1
+                merge_scores(metrics["itn"], score_sample(gt_unnorm, pred_unnorm))
             ref = normalize_text(gt_raw)
             pred = normalize_text(pred_raw)
 
@@ -457,11 +442,6 @@ def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[s
                         metrics["entity_errors"][entity_type]["total"] += 1
                         if entity_in_text(entity_text, pred_raw):
                             metrics["entity_errors"][entity_type]["found"] += 1
-
-                        if entity_type in ITN_ENTITY_TYPES:
-                            metrics["itn_errors"][entity_type]["total"] += 1
-                            if entity_itn_correct(entity_text, pred_raw):
-                                metrics["itn_errors"][entity_type]["correct"] += 1
 
         if ds_metrics["refs"]:
             output = jiwer.process_words(ds_metrics["refs"], ds_metrics["preds"])
@@ -863,49 +843,64 @@ def compare(
 
         console.print(entity_table)
 
-    # === ITN Formatting Errors Table ===
-    all_itn_types = set()
-    for m in model_metrics.values():
-        all_itn_types.update(m["itn_errors"].keys())
+    # === ITN Formatting Table (raw text, pattern-based) ===
+    # Only runs written after raw-transcript persistence landed contribute here;
+    # older runs have no un-normalized text and are reported as missing rather
+    # than scored against normalized text, which carries no formatting signal.
+    scored = {m: d for m, d in model_metrics.items() if d.get("itn_raw_samples")}
+    skipped = [m for m, d in model_metrics.items() if not d.get("itn_raw_samples")]
 
-    if all_itn_types:
-        itn_type_order = ["CARDINAL", "DATE", "TIME", "MONEY", "PERCENT", "ORDINAL", "QUANTITY"]
-        ordered_itn_types = [t for t in itn_type_order if t in all_itn_types]
-        ordered_itn_types += [t for t in sorted(all_itn_types) if t not in itn_type_order]
+    if scored:
+        class_order = [name for name, _ in ITN_CLASSES]
+        present = {c for d in scored.values() for c, st in d["itn"].items() if st["total"]}
+        ordered = [c for c in class_order if c in present]
 
         console.print("\n")
-        itn_table = Table(title="ITN Formatting Errors")
+        itn_table = Table(
+            title="ITN Formatting (% of reference spans reproduced exactly, raw text)"
+        )
         itn_table.add_column("Model", style="cyan")
-        itn_table.add_column("Average", justify="right", style="bold")
-        for itype in ordered_itn_types:
-            itn_table.add_column(itype, justify="right")
+        itn_table.add_column("Exact", justify="right", style="bold")
+        itn_table.add_column("Fmt-only err", justify="right")
+        itn_table.add_column("n", justify="right", style="dim")
+        for cls in ordered:
+            itn_table.add_column(cls, justify="right")
 
         rows = []
-        for model, data in model_metrics.items():
+        for model, data in scored.items():
             display_name = data.get("display_name", model)
-            row = [display_name]
-            # Calculate average ITN error rate
-            total_correct = sum(e["correct"] for e in data["itn_errors"].values())
-            total_itn = sum(e["total"] for e in data["itn_errors"].values())
-            if total_itn > 0:
-                avg_itn_err = (total_itn - total_correct) / total_itn * 100
-                row.append(f"{avg_itn_err:.2f}%")
-            else:
-                row.append("-")
-
-            for itype in ordered_itn_types:
-                stats = data["itn_errors"].get(itype, {"correct": 0, "total": 0})
-                if stats["total"] > 0:
-                    err = (stats["total"] - stats["correct"]) / stats["total"] * 100
-                    row.append(f"{err:.2f}%")
-                else:
-                    row.append("-")
+            stats = data["itn"]
+            total = sum(v["total"] for v in stats.values())
+            exact = sum(v["exact"] for v in stats.values())
+            loose = sum(v["loose"] for v in stats.values())
+            row = [
+                display_name,
+                f"{100 * exact / total:.2f}%" if total else "-",
+                f"{100 * (loose - exact) / total:.2f}%" if total else "-",
+                str(total),
+            ]
+            for cls in ordered:
+                v = stats.get(cls, {"total": 0, "exact": 0})
+                row.append(f"{100 * v['exact'] / v['total']:.1f}%" if v["total"] else "-")
             rows.append(row)
 
-        for row in sorted(rows, key=lambda r: _sort_key(r[1])):
+        # Higher Exact% is better, so sort descending -- via _sort_key_desc, which
+        # keeps "-" rows last (plain reverse=True would float them to the top).
+        for row in sorted(rows, key=lambda r: _sort_key_desc(r[1])):
             itn_table.add_row(*row)
 
         console.print(itn_table)
+        console.print(
+            "[dim]Exact = value and formatting both reproduced. "
+            "Fmt-only err = value present, formatting differs (e.g. '1250' for '1,250'). "
+            "The remainder is recognition error.[/dim]"
+        )
+
+    if skipped:
+        console.print(
+            f"\n[dim]No raw transcripts for ITN scoring: {', '.join(sorted(skipped))} "
+            "(re-run `ta eval` to capture them).[/dim]"
+        )
 
 
 if __name__ == "__main__":

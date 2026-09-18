@@ -108,25 +108,40 @@ model:
   # 12.6M is 0.9% of this run's 1.386B trainable budget, not the whole of it
   # the way it is under granite_gemma's projector-only recipe.
   projector_hidden_dim: 4096
-  # 0.05, halved from stage_1's 0.1. That value was set to close a measured
-  # 0.167 train/eval gap on a joint recipe whose trainable surface was a 0.6B
-  # decoder plus a ~150M embedding table, over two passes of its mix. This run
-  # is also joint, so the overfit mechanism is live rather than structurally
-  # absent -- but it differs on both axes that set the 0.1: the trainable
-  # decoder here is 1.37B against 0.6B (more capacity, but embed_tokens is
-  # frozen so the memorization-prone table is out of reach), and it is ONE
-  # epoch over multiasr's ~3.16M rows, so no example is seen twice.
+  # No projector dropout. It was 0.05 here and 0.1 before that, on the theory
+  # that it was mild regularization on the one module both halves of the stack
+  # touch. It was not mild: elementwise dropout at rate p injects
+  # sqrt(p/(1-p)) relative RMS noise, so 0.05 was 22.9% relative noise on every
+  # audio token and 0.1 was 33% -- well past the 5-15% band NEFTune-style
+  # embedding noise uses, on the one path from encoder to decoder, with a
+  # frozen encoder that cannot adapt to it. No audio or vision projector in
+  # transformers 5.x carries any. See projectors.py's docstring.
   #
-  # Single-epoch exposure is the load-bearing half of that. 0.05 splits the
-  # difference: enough regularization on the one tensor both halves of the
-  # stack touch, without spending projector capacity against a gap a
-  # single-pass run may never open.
+  # Watch train vs eval CE as before: with label_smoothing=0.0 both are raw CE
+  # and directly comparable, and train sitting slightly above eval is the
+  # healthy fine-tune signature.
+
+  # Land audio tokens at the decoder's own token-embedding RMS. "auto" measures
+  # it from embed_tokens at construction (0.0150 for Qwen3.5-2B) rather than
+  # hardcoding, because the right target differs ~67x across decoder families:
+  # Gemma multiplies embeddings by sqrt(hidden_size) and sits near 1.0, Qwen
+  # embeds plainly. This file's own granite_gemma sibling would need the other
+  # number.
   #
-  # Watch train vs eval CE: with label_smoothing=0.0 both are raw CE and
-  # directly comparable. Train sitting slightly above eval is the healthy
-  # fine-tune signature; train pulling below eval is the signal to go back
-  # toward 0.1.
-  projector_dropout: 0.05
+  # Needed because removing the projector's trailing norm handed the output
+  # scale to linear_2 without setting it: measured at init, the projector emits
+  # RMS 0.198 against embed_tokens' 0.0150, i.e. 13x hot. The loss barely sees
+  # that (pre-norm decoder), but the residual stream is NOT normalized, so a
+  # 13x-hot prefix makes every sublayer's write at those 237 audio positions
+  # 13x smaller in relative terms and the audio passes through the stack nearly
+  # uncomputed-on.
+  projector_output_rms: auto
+
+  # Match the prompt the punctuated majority of multiasr trains under (see
+  # `text_punct` in configs/data/multiasr.yaml). Without this, training splits
+  # the prompt by source and inference would still ask for the unpunctuated
+  # convention -- worse than not splitting at all.
+  transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
 
   # fp32 master weights, as config.yaml and stage_1 use for a trainable
   # decoder, and NOT the bfloat16 granite_gemma gets away with. This is
@@ -207,15 +222,42 @@ training:
   freeze_language_model: false
   freeze_projector: false
   # Load-bearing, not belt-and-braces. Qwen3.5 has tie_word_embeddings=True,
-  # so embed_tokens and lm_head are the same 0.5086B tensor; without this,
-  # common-token gradients arriving through lm_head rewrite the embedding
-  # table while rare rows (CJK, niche Unicode, code syntax) get only the
-  # weight-decay pull and drift uncontrolled. This is the drift channel
-  # stage_1 documents, and freezing it is what lets decoder_learning_rate sit
-  # at 2e-5 instead of the 1e-5 earlier probes derived. Audio embeddings reach
-  # the LM through the projector via masked_scatter, so freezing the text
-  # vocabulary does not touch the audio path. It also takes 0.5086B out of the
-  # gradient and Adam-state budget: 6.1 GiB of the fp32 accounting above.
+  # so embed_tokens and lm_head are the same 0.5086B tensor.
+  #
+  # The mechanism is NOT weight decay -- an earlier version of this comment
+  # said rare rows "get only the weight-decay pull", and that force does not
+  # exist: create_optimizer excludes every nn.Embedding from decay by tensor
+  # identity (scripts/train.py, the no_decay_param_ids set). The real channel
+  # is the output path, and it is a TASK gradient. Measured on a tied model
+  # with an ASR-shaped batch:
+  #   - lm_head touches 100% of vocabulary rows every step; the input lookup
+  #     touches 0.12%. The output path is 74% of ||G||^2.
+  #   - For rows absent from the label distribution that gradient is
+  #     near-deterministic negative evidence: 99.98% of unseen rows have
+  #     <grad, w> > 0, i.e. the step shrinks them, every step.
+  #   - AdamW then erases the magnitude difference. |m|/sqrt(v) measures 0.98
+  #     on unseen rows against 0.58 on seen ones -- the unseen signal is MORE
+  #     consistent, so it earns a near-full-LR step.
+  #   - Net at lr 2e-5 with wd already 0: unseen rows drift 0.441% per 300
+  #     steps, marginally FASTER than the rows actually being trained.
+  # That tail is rare English subwords, proper nouns and numerals as much as
+  # CJK -- the entity-error surface `ta analysis entity-errors` measures.
+  #
+  # Do not "fix" this by untying to free lm_head. That is backwards: the input
+  # table was never at risk, and untying re-opens the exact channel this flag
+  # closes while duplicating a 0.5086B tensor (+8.53 GiB, ~93% of the card).
+  # IBM's Granite Speech is not a counterexample either -- 4.1-2b untied, but
+  # 4.1-2b-plus went back to tied; the thing they did consistently was drop
+  # the LoRA adapter, not untie.
+  #
+  # Freezing is what lets decoder_learning_rate sit at 2e-5 instead of the
+  # 1e-5 earlier probes derived, and the argument is stronger than it looked:
+  # the drift is task-driven, so no weight_decay setting can tune it away.
+  # Audio embeddings reach the LM through the projector via masked_scatter, so
+  # freezing the text vocabulary does not touch the audio path. It also takes
+  # 0.5086B out of the gradient and Adam-state budget: 5.68 GiB of the fp32
+  # accounting above (0.5086e9 * 12 B = 6.10 GB = 5.68 GiB; the old "6.1 GiB"
+  # was GB mislabelled as GiB).
   freeze_text_embed_tokens: true
 
   # Two param groups at a 50x gap, as in production.yaml. 1e-3 is the value
@@ -255,10 +297,27 @@ training:
   # nn.Embedding tables. So RMSNorm gains and the (frozen anyway) embedding
   # land in the no-decay group and only attn/mlp projections are decayed.
   weight_decay: 0.01
-  # Still 0 for the projector, and for a reason unrelated to the decoder:
-  # pulling projector weights toward zero biases the projection magnitude away
-  # from whatever scale the LM's first layer actually wants to consume.
-  projector_weight_decay: 0.0
+  # 0.01 on the projector too, reversing the earlier 0.0. The old rationale --
+  # "pulling projector weights toward zero biases the projection magnitude away
+  # from whatever scale the LM's first layer actually wants to consume" --
+  # assumes the LM's first layer wants a particular input scale. It does not:
+  # Qwen3.5 is pre-norm, so every sublayer reads an RMSNorm'd copy and the
+  # first layer is scale-invariant per token (q/k are additionally QK-normed).
+  #
+  # Meanwhile the arithmetic says this is the only group where weight decay
+  # does anything at all. Decoupled AdamW shrinks by
+  # exp(-steps * lr * mean_lr_factor * wd); over 32,909 steps with
+  # cosine_with_min_lr (mean LR factor ~0.525):
+  #     decoder   @ lr 2e-5 -> exp(-0.0035) = 0.9966   0.34% over the whole run
+  #     projector @ lr 1e-3 -> exp(-0.173)  = 0.8413   15.9%
+  # So `weight_decay: 0.01` above is numerically inert and this one is a real
+  # brake -- on precisely the group whose unbounded norm growth is measured in
+  # projectors.py's docstring (||linear_1|| 92.6 -> 160.7, ||linear_2|| 86.2 ->
+  # 169.6 between steps 4k and 12k).
+  #
+  # Pairs with projector_output_rms below: that sets the output scale at init,
+  # this is what keeps it there.
+  projector_weight_decay: 0.01
 
   # Smoothing rides model.label_smoothing (liger fused CE) when enabled at
   # all. Trainer's own factor stays 0 so it never pops labels and applies a

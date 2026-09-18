@@ -31,6 +31,12 @@ model:
   # reintroduce at 0.05 — half the prior value, since the run is also
   # half as long.
   #
+  # SUPERSEDED: projector dropout has been removed from MLPAudioProjector
+  # entirely, so the knob discussed below no longer exists. Kept as the record
+  # of what run 4j97atjp measured. The reason it went: dropout at rate p is
+  # sqrt(p/(1-p)) relative RMS noise, so the 0.1 chosen here was 33% noise on
+  # every audio token, not the mild FFN-style regularizer it reads as.
+  #
   # REVISED: projector_dropout restored to 0.1 after run 4j97atjp
   # observed the predicted overfit signature: 0.167 train/eval gap that
   # didn't close across the run's second half (eval plateaued ~step 36k
@@ -39,7 +45,6 @@ model:
   # (SpeechMapper reports dropout=0.1 helps; Disordered Speech LLM finds
   # 0.05 optimal on audio embeddings). 0.1 picks the higher end since the
   # mix also grew (Peoples 311K → 1M, +Emilia-YODAS 228K, +WHAM 265K).
-  projector_dropout: 0.1
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
   text_model_id: Qwen/Qwen3-0.6B

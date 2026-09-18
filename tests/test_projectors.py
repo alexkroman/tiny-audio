@@ -76,6 +76,44 @@ class TestMLPAudioProjector:
             expected_len = projector.get_output_length(seq_len)
             assert out.shape[1] == expected_len
 
+    def test_parameter_layout(self, projector):
+        """Norm on the stacked input, biased linears, nothing after linear_2."""
+        assert set(dict(projector.named_parameters())) == {
+            "input_norm.weight",
+            "linear_1.weight",
+            "linear_1.bias",
+            "linear_2.weight",
+            "linear_2.bias",
+        }
+
+    def test_input_norm_sized_for_stacked_frames(self, projector):
+        """input_norm runs after frame stacking, so it spans encoder_dim * k."""
+        assert projector.input_norm.weight.shape == (256 * 4,)
+
+    def test_output_scale_is_observable(self, projector):
+        """Scaling linear_2 must scale the output.
+
+        This is the property a trailing RMSNorm destroyed: it renormalized
+        linear_2's output, so the loss could not see that weight's magnitude
+        and the magnitude inflated freely. Biases are zeroed here so the
+        relationship is exactly proportional.
+        """
+        with torch.no_grad():
+            projector.linear_1.bias.zero_()
+            projector.linear_2.bias.zero_()
+        projector.eval()
+        x = torch.randn(2, 100, 256)
+        before = projector(x)
+        with torch.no_grad():
+            projector.linear_2.weight.mul_(3.0)
+        assert torch.allclose(projector(x), before * 3.0, atol=1e-5)
+
+    def test_input_scale_is_normalized_away(self, projector):
+        """input_norm makes the projection invariant to encoder output scale."""
+        projector.eval()
+        x = torch.randn(2, 100, 256)
+        assert torch.allclose(projector(x * 7.0), projector(x), atol=1e-4)
+
 
 # =============================================================================
 # MOSA Projector Tests
