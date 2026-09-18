@@ -79,7 +79,8 @@ poetry run ta analysis high-wer your-model --threshold 30
 # Compare models
 poetry run ta analysis compare model1 model2
 
-# Find entity errors
+# Find entity errors (extract-entities builds the index it reads)
+poetry run ta analysis extract-entities
 poetry run ta analysis entity-errors your-model
 
 # Debug model health

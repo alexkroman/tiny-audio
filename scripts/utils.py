@@ -72,6 +72,8 @@ def find_model_dirs(
     Args:
         outputs_dir: Base directory containing evaluation outputs.
         model_pattern: Pattern to match model name exactly (not substring).
+            Empty matches every model, which is what `extract-entities`
+            documents its empty default to mean.
         exclude: List of patterns to exclude from matching.
         latest: If True, only return the most recent run per dataset.
 
@@ -84,7 +86,7 @@ def find_model_dirs(
         if not d.is_dir():
             continue
         model_name = _extract_model_from_dir(d.name)
-        if model_name.lower() == model_pattern.lower() and not any(
+        if (not model_pattern or model_name.lower() == model_pattern.lower()) and not any(
             ex.lower() in d.name.lower() for ex in exclude
         ):
             dirs.append(d)
