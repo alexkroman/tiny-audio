@@ -1659,6 +1659,21 @@ websockets = ">=13.0"
 pyaudio = ["pyaudio (>=0.2.14)"]
 
 [[package]]
+name = "en_core_web_sm"
+version = "3.8.0"
+description = "English pipeline optimized for CPU. Components: tok2vec, tagger, parser, senter, ner, attribute_ruler, lemmatizer."
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "en_core_web_sm-3.8.0-py3-none-any.whl", hash = "sha256:1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85"},
+]
+
+[package.source]
+type = "url"
+url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+
+[[package]]
 name = "fabric"
 version = "3.2.3"
 description = "High level SSH command execution"
@@ -3747,7 +3762,7 @@ files = [
     {file = "nvidia_cublas_cu12-12.8.4.1-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:8ac4e771d5a348c551b2a426eda6193c19aa630236b418086020df5ba9667142"},
     {file = "nvidia_cublas_cu12-12.8.4.1-py3-none-win_amd64.whl", hash = "sha256:47e9b82132fa8d2b4944e708049229601448aaad7e6f296f630f2d1a32de35af"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [[package]]
 name = "nvidia-cuda-cupti-cu12"
@@ -3761,7 +3776,7 @@ files = [
     {file = "nvidia_cuda_cupti_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ea0cb07ebda26bb9b29ba82cda34849e73c166c18162d3913575b0c9db9a6182"},
     {file = "nvidia_cuda_cupti_cu12-12.8.90-py3-none-win_amd64.whl", hash = "sha256:bb479dcdf7e6d4f8b0b01b115260399bf34154a1a2e9fe11c85c517d87efd98e"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [[package]]
 name = "nvidia-cuda-nvrtc-cu12"
@@ -3775,7 +3790,7 @@ files = [
     {file = "nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:fc1fec1e1637854b4c0a65fb9a8346b51dd9ee69e61ebaccc82058441f15bce8"},
     {file = "nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-win_amd64.whl", hash = "sha256:7a4b6b2904850fe78e0bd179c4b655c404d4bb799ef03ddc60804247099ae909"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [[package]]
 name = "nvidia-cuda-runtime-cu12"
@@ -3789,7 +3804,7 @@ files = [
     {file = "nvidia_cuda_runtime_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:adade8dcbd0edf427b7204d480d6066d33902cab2a4707dcfc48a2d0fd44ab90"},
     {file = "nvidia_cuda_runtime_cu12-12.8.90-py3-none-win_amd64.whl", hash = "sha256:c0c6027f01505bfed6c3b21ec546f69c687689aad5f1a377554bc6ca4aa993a8"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [[package]]
 name = "nvidia-cudnn-cu12"
@@ -3803,7 +3818,7 @@ files = [
     {file = "nvidia_cudnn_cu12-9.10.2.21-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:949452be657fa16687d0930933f032835951ef0892b37d2d53824d1a84dc97a8"},
     {file = "nvidia_cudnn_cu12-9.10.2.21-py3-none-win_amd64.whl", hash = "sha256:c6288de7d63e6cf62988f0923f96dc339cea362decb1bf5b3141883392a7d65e"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [package.dependencies]
 nvidia-cublas-cu12 = "*"
@@ -3820,7 +3835,7 @@ files = [
     {file = "nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:4d2dd21ec0b88cf61b62e6b43564355e5222e4a3fb394cac0db101f2dd0d4f74"},
     {file = "nvidia_cufft_cu12-11.3.3.83-py3-none-win_amd64.whl", hash = "sha256:7a64a98ef2a7c47f905aaf8931b69a3a43f27c55530c698bb2ed7c75c0b42cb7"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [package.dependencies]
 nvidia-nvjitlink-cu12 = "*"
@@ -3836,7 +3851,7 @@ files = [
     {file = "nvidia_cufile_cu12-1.13.1.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:1d069003be650e131b21c932ec3d8969c1715379251f8d23a1860554b1cb24fc"},
     {file = "nvidia_cufile_cu12-1.13.1.3-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:4beb6d4cce47c1a0f1013d72e02b0994730359e17801d395bdcbf20cfb3bb00a"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [[package]]
 name = "nvidia-curand-cu12"
@@ -3850,7 +3865,7 @@ files = [
     {file = "nvidia_curand_cu12-10.3.9.90-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:b32331d4f4df5d6eefa0554c565b626c7216f87a06a4f56fab27c3b68a830ec9"},
     {file = "nvidia_curand_cu12-10.3.9.90-py3-none-win_amd64.whl", hash = "sha256:f149a8ca457277da854f89cf282d6ef43176861926c7ac85b2a0fbd237c587ec"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [[package]]
 name = "nvidia-cusolver-cu12"
@@ -3864,7 +3879,7 @@ files = [
     {file = "nvidia_cusolver_cu12-11.7.3.90-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:4376c11ad263152bd50ea295c05370360776f8c3427b30991df774f9fb26c450"},
     {file = "nvidia_cusolver_cu12-11.7.3.90-py3-none-win_amd64.whl", hash = "sha256:4a550db115fcabc4d495eb7d39ac8b58d4ab5d8e63274d3754df1c0ad6a22d34"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [package.dependencies]
 nvidia-cublas-cu12 = "*"
@@ -3883,7 +3898,7 @@ files = [
     {file = "nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:1ec05d76bbbd8b61b06a80e1eaf8cf4959c3d4ce8e711b65ebd0443bb0ebb13b"},
     {file = "nvidia_cusparse_cu12-12.5.8.93-py3-none-win_amd64.whl", hash = "sha256:9a33604331cb2cac199f2e7f5104dfbb8a5a898c367a53dfda9ff2acb6b6b4dd"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [package.dependencies]
 nvidia-nvjitlink-cu12 = "*"
@@ -3900,7 +3915,7 @@ files = [
     {file = "nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl", hash = "sha256:f1bb701d6b930d5a7cea44c19ceb973311500847f81b634d802b7b539dc55623"},
     {file = "nvidia_cusparselt_cu12-0.7.1-py3-none-win_amd64.whl", hash = "sha256:f67fbb5831940ec829c9117b7f33807db9f9678dc2a617fbe781cac17b4e1075"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [[package]]
 name = "nvidia-nccl-cu12"
@@ -3913,7 +3928,7 @@ files = [
     {file = "nvidia_nccl_cu12-2.27.3-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9ddf1a245abc36c550870f26d537a9b6087fb2e2e3d6e0ef03374c6fd19d984f"},
     {file = "nvidia_nccl_cu12-2.27.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:adf27ccf4238253e0b826bce3ff5fa532d65fc42322c8bfdfaf28024c0fbe039"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [[package]]
 name = "nvidia-nvjitlink-cu12"
@@ -3927,7 +3942,7 @@ files = [
     {file = "nvidia_nvjitlink_cu12-12.8.93-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:adccd7161ace7261e01bb91e44e88da350895c270d23f744f0820c818b7229e7"},
     {file = "nvidia_nvjitlink_cu12-12.8.93-py3-none-win_amd64.whl", hash = "sha256:bd93fbeeee850917903583587f4fc3a4eafa022e34572251368238ab5e6bd67f"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [[package]]
 name = "nvidia-nvtx-cu12"
@@ -3941,7 +3956,7 @@ files = [
     {file = "nvidia_nvtx_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:5b17e2001cc0d751a5bc2c6ec6d26ad95913324a4adb86788c944f8ce9ba441f"},
     {file = "nvidia_nvtx_cu12-12.8.90-py3-none-win_amd64.whl", hash = "sha256:619c8304aedc69f02ea82dd244541a83c3d9d40993381b3b590f1adaed3db41e"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [[package]]
 name = "omegaconf"
@@ -7394,7 +7409,7 @@ files = [
     {file = "triton-3.4.0-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7936b18a3499ed62059414d7df563e6c163c5e16c3773678a3ee3d417865035d"},
     {file = "triton-3.4.0-cp39-cp39-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:98e5c1442eaeabae2e2452ae765801bd53cd4ce873cab0d1bdd59a32ab2d9397"},
 ]
-markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\" or sys_platform == \"linux\"", hybrid-kernels = "platform_system == \"Linux\" and platform_machine == \"x86_64\" and sys_platform == \"linux\""}
+markers = {main = "platform_system == \"Linux\" and platform_machine == \"x86_64\" or sys_platform == \"linux\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Linux\" and platform_machine == \"x86_64\""}
 
 [package.dependencies]
 setuptools = ">=40.8.0"
@@ -8272,4 +8287,4 @@ local = ["pyaudio"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.13"
-content-hash = "836d76576d23b9a9b879f02312cb1197a1abf20558890180d9b9cc7e462d0382"
+content-hash = "f803f95d5819f617299231ea0d6426f894b8e4f90d0951244670ed9855bf1f43"

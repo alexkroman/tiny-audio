@@ -89,6 +89,12 @@ pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
 fabric = ">=3.0.0"
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
 spacy = "^3.8.11"
+# spaCy ships the library on PyPI but not its pipelines, so `spacy` alone
+# resolves fine and `spacy.load("en_core_web_sm")` still raises E050 (the NER
+# model behind `ta analysis extract-entities`). `python -m spacy download` fixes
+# one machine and nothing else; the release wheel keeps it in the lock file.
+# Model minor must track spacy's -- en_core_web_sm 3.8.0 requires spacy <3.9.
+en-core-web-sm = {url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"}
 ten-vad = ">=1.0.6"
 speechbrain = {git = "https://github.com/speechbrain/speechbrain.git"}
 pytz = "*"
