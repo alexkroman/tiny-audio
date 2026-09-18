@@ -221,6 +221,52 @@ def _gather_audio_embeds(audio_embeds: torch.Tensor, token_counts: torch.Tensor)
     return audio_embeds[mask]
 
 
+def _assert_audio_token_counts(
+    audio_embeds: torch.Tensor,
+    token_counts: torch.Tensor,
+    projector,
+    encoder_valid_lengths: Optional[torch.Tensor] = None,
+) -> None:
+    """Check, per sample, that the projector produced the tokens the prompt expects.
+
+    This must run BEFORE ``_gather_audio_embeds``, which reconciles any
+    disagreement by zero-padding a shortfall and truncating an excess. A check
+    placed after it can never fire. That reconciliation is also why a mismatch
+    is silent rather than loud today: the decoder receives zero vectors in
+    place of audio, or the tail of a long utterance is dropped, and
+    ``masked_scatter`` is satisfied either way.
+
+    Per-sample rather than the batch total that ``get_placeholder_mask`` checks
+    across transformers, because our failure mode is self-cancelling -- one row
+    zero-padded by k and another truncated by k leaves the sum unchanged.
+
+    ``encoder_valid_lengths`` comes from the encoder's own downsampled validity
+    mask when it returns one (Granite does), making this a genuine cross-check
+    against ``compute_encoder_output_length``, which reimplements the same
+    arithmetic from ``config.encoder_conv_layers``.
+    """
+    if encoder_valid_lengths is not None:
+        actual = projector.get_output_length(encoder_valid_lengths)
+        actual = torch.as_tensor(actual, device=token_counts.device).to(torch.long).reshape(-1)
+        if actual.shape == token_counts.shape and not torch.equal(actual, token_counts):
+            rows = (actual != token_counts).nonzero().flatten()[:8].tolist()
+            raise ValueError(
+                "Audio token count mismatch between prompt and projector. Rows "
+                f"{rows}: prompt expects {token_counts[rows].tolist()}, encoder+projector "
+                f"produced {actual[rows].tolist()}. A wrong `encoder_conv_layers` for this "
+                "encoder is the usual cause."
+            )
+
+    available = audio_embeds.shape[1]
+    needed = int(token_counts.max().item()) if token_counts.numel() else 0
+    if needed > available:
+        raise ValueError(
+            f"Projector produced {available} audio frames but the prompt expects up to "
+            f"{needed}. Without this check `_gather_audio_embeds` would zero-pad the "
+            "deficit, silently feeding the decoder zero vectors in place of audio."
+        )
+
+
 def _patch_gemma_decode_loop(model) -> None:
     """Make a Gemma4ForCausalLM drop `per_layer_inputs` after the first step.
 
@@ -253,6 +299,56 @@ def _patch_gemma_decode_loop(model) -> None:
         return model_inputs
 
     model.prepare_inputs_for_generation = prepare_inputs_for_generation
+
+
+def _assert_projector_loaded(incompatible_keys, projector_type: str) -> None:
+    """Fail loudly when a checkpoint's projector doesn't match the built one.
+
+    `save_pretrained` serializes `projector.*` (plus the language model when
+    it is trainable) and nothing else, so every `projector.*` key should
+    round-trip exactly. Encoder keys -- and decoder keys on projector-only
+    runs -- are legitimately absent because they are frozen and never saved,
+    which is why the load itself runs with `strict=False`.
+
+    That tolerance is dangerous for the projector specifically: it is the one
+    component with no pretrained fallback, so a silent key mismatch leaves it
+    at its random init and the model loads, generates, and scores like a model
+    that was never trained. Checking only the `projector.` prefix keeps the
+    frozen-module tolerance while making that failure impossible.
+    """
+    missing = sorted(k for k in incompatible_keys.missing_keys if k.startswith("projector."))
+    unexpected = sorted(k for k in incompatible_keys.unexpected_keys if k.startswith("projector."))
+    if not missing and not unexpected:
+        return
+
+    detail = []
+    if missing:
+        detail.append(f"missing from the checkpoint: {missing}")
+    if unexpected:
+        detail.append(f"present in the checkpoint but not in the model: {unexpected}")
+
+    hint = ""
+    if missing == ["projector.output_scale"] and not unexpected:
+        hint = (
+            "\n\nOnly `projector.output_scale` is missing, so this checkpoint predates "
+            "the fixed output-scale buffer. Its projector was trained without one and "
+            "is not equivalent to a scale-1.0 projector, so it has to be retrained."
+        )
+    elif any(k.startswith("projector.norm_2.") for k in unexpected):
+        hint = (
+            "\n\nThis checkpoint predates the MLP projector layout change. It was "
+            "saved as linear_1 -> norm -> act -> linear_2 -> norm_2; the current "
+            "layout is input_norm -> linear_1 -> act -> linear_2. The weights are "
+            "not interchangeable (the old linears were trained scale-invariant "
+            "behind their norms), so the projector has to be retrained -- or "
+            "install a tiny-audio revision from before the change to load this "
+            "checkpoint as-is."
+        )
+
+    raise RuntimeError(
+        f"Projector weights do not match the configured projector "
+        f"(projector_type={projector_type!r}): " + "; ".join(detail) + hint
+    )
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -301,7 +397,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
             if model_file is not None:
                 state_dict = load_file(model_file)
-                model.load_state_dict(state_dict, strict=False)
+                incompatible = model.load_state_dict(state_dict, strict=False)
+                _assert_projector_loaded(incompatible, getattr(config, "projector_type", "?"))
 
             # Load LoRA adapters if use_lora is enabled
             if getattr(config, "use_lora", False):
@@ -336,6 +433,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         super().__init__(config)
 
         self.system_prompt = config.system_prompt
+        # Shadows the class attribute when the config names one, so a run that
+        # trained under a specific instruction decodes under the same one.
+        if getattr(config, "transcribe_prompt", None) is not None:
+            self.TRANSCRIBE_PROMPT = config.transcribe_prompt
         target_dtype = getattr(torch, config.model_dtype)
 
         # Audio encoder (frozen)
@@ -691,6 +792,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if config.encoder_dim is None:
                 raise ValueError("Could not auto-detect encoder_dim. Please specify in config.")
 
+            # Concatenating intermediate layers widens what the projector sees.
+            # Applied only on auto-detect so an explicit encoder_dim in a config
+            # is taken at face value.
+            n_extra = len(getattr(config, "encoder_cat_layers", []) or [])
+            if n_extra:
+                config.encoder_dim *= n_extra + 1
+
         if config.llm_dim is None:
             dec_cfg = self.language_model.config
             # Composite configs (Gemma 4) keep hidden_size on `text_config`;
@@ -702,6 +810,40 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
             if config.llm_dim is None:
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
+
+        # "auto" -> the decoder's own token-embedding RMS. Resolved here rather
+        # than in the projector because only the model can see embed_tokens,
+        # and the right target differs ~67x between plainly-embedded decoders
+        # (Qwen/Llama, ~0.015) and Gemma-family ones that scale embeddings by
+        # sqrt(hidden_size) (~1.0).
+        if getattr(config, "projector_output_rms", None) == "auto":
+            embed = self.language_model.get_input_embeddings()
+            weight = getattr(embed, "weight", None)
+            if weight is None:
+                config.projector_output_rms = None
+            else:
+                # The target is the EFFECTIVE magnitude a text token enters the
+                # residual stream with, not the raw table's RMS. Gemma-family
+                # decoders embed through a ScaledWordEmbedding whose forward is
+                # `super().forward(ids) * embed_scale` with
+                # `embed_scale = hidden_size ** 0.5`, so reading the table alone
+                # understates them by ~50x and would target a scale the decoder
+                # never sees. Qwen/Llama embed plainly and have no such factor.
+                scale = getattr(embed, "embed_scale", None)
+                if scale is None:
+                    scale = getattr(embed, "scalar_embed_scale", 1.0)
+                scale = float(scale.item() if torch.is_tensor(scale) else scale)
+                with torch.no_grad():
+                    raw_rms = float(weight.detach().float().pow(2).mean().sqrt().item())
+                config.projector_output_rms = raw_rms * scale
+                logger.info(
+                    "projector_output_rms auto-resolved to %.6f from %s embed_tokens "
+                    "(table RMS %.6f x embed_scale %.4f)",
+                    config.projector_output_rms,
+                    config.text_model_id,
+                    raw_rms,
+                    scale,
+                )
 
         # Select projector type based on config
         projector_type = getattr(config, "projector_type", "mlp")
@@ -1087,6 +1229,35 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             self.config.encoder_conv_layers,
         )
 
+    def _select_encoder_features(self, encoder_out, cat_layers: list) -> torch.Tensor:
+        """Final encoder layer, optionally concatenated with intermediate layers.
+
+        Channel-wise concat, matching granite_speech_plus's `cat_hidden_layers`
+        (`torch.cat([*exported, final], dim=-1)`). Concatenated raw, as IBM
+        does: the layers have quite different scales (measured RMS ~3.1 at
+        layer 3 vs ~0.63 at the final layer, since each block's `norm_out`
+        carries its own learned gain), but the projector's `input_norm` has a
+        per-channel learnable gain and can rebalance the halves.
+        """
+        final = encoder_out.last_hidden_state
+        if not cat_layers:
+            return final
+
+        hidden = getattr(encoder_out, "hidden_states", None)
+        if not hidden:
+            raise ValueError(
+                f"encoder_cat_layers={cat_layers} was requested but "
+                f"{type(self.audio_tower).__name__} returned no hidden_states."
+            )
+        try:
+            extra = [hidden[i] for i in cat_layers]
+        except IndexError as exc:
+            raise ValueError(
+                f"encoder_cat_layers={cat_layers} out of range: the encoder "
+                f"exposes {len(hidden)} hidden states (0..{len(hidden) - 1})."
+            ) from exc
+        return torch.cat([*extra, final], dim=-1)
+
     def _encode_audio(
         self,
         audio_features: torch.Tensor,
@@ -1130,14 +1301,27 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         ):
             tower_kwargs["attention_mask"] = audio_attention_mask.to(audio_features.device)
 
+        cat_layers = getattr(self.config, "encoder_cat_layers", []) or []
+        if cat_layers:
+            tower_kwargs["output_hidden_states"] = True
+
         encoder_frozen = getattr(self.config, "freeze_audio_encoder", True)
         if encoder_frozen:
             with torch.no_grad():
                 encoder_out = self.audio_tower(**tower_kwargs)
-                hidden_states = encoder_out.last_hidden_state
+                hidden_states = self._select_encoder_features(encoder_out, cat_layers)
         else:
             encoder_out = self.audio_tower(**tower_kwargs)
-            hidden_states = encoder_out.last_hidden_state
+            hidden_states = self._select_encoder_features(encoder_out, cat_layers)
+
+        # Conformer encoders (Granite) return their own validity mask, halved
+        # alongside each subsampling block. That is the encoder's arithmetic
+        # rather than our reimplementation of it, so it is the right ground
+        # truth for the token-count check below.
+        encoder_mask = getattr(encoder_out, "attention_mask", None)
+        encoder_valid_lengths = (
+            encoder_mask.sum(dim=-1).to(torch.long) if encoder_mask is not None else None
+        )
 
         # The encoder may be bf16 while the projector holds fp32 master
         # weights, so align explicitly rather than relying on autocast being
@@ -1148,6 +1332,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         audio_embeds = self.projector(hidden_states)
 
         token_counts = expected_token_counts.to(device=audio_embeds.device, dtype=torch.long)
+        _assert_audio_token_counts(
+            audio_embeds, token_counts, self.projector, encoder_valid_lengths
+        )
         return _gather_audio_embeds(audio_embeds, token_counts)
 
     def _mask_input_features(
@@ -1417,15 +1604,64 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         audio_attention_mask: torch.Tensor,
     ) -> int:
-        """Calculate number of audio tokens based on actual audio length.
+        """Audio token count for the LONGEST sample in the batch.
 
-        Uses attention mask to get real audio length, then computes:
-        mel_frames -> encoder_frames (via conv formulas) -> projector output tokens
+        mel_frames -> encoder_frames (via conv formulas) -> projector tokens.
+
+        Do not build a shared prompt from this. Every row shorter than the
+        batch max needs fewer placeholders than this returns; see
+        `_prepare_audio_inputs`, which renders one prompt per sample.
         """
         encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
-        # Use max length for batch (all samples should have same token count for generation)
         encoder_output_len = int(encoder_lengths.max().item())
         return int(self.projector.get_output_length(encoder_output_len))
+
+    def _render_audio_prompt(
+        self,
+        num_audio_tokens: int,
+        system_prompt: Optional[str],
+    ) -> torch.Tensor:
+        """Tokenize one chat prompt carrying exactly `num_audio_tokens` placeholders."""
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        # Audio tokens only (instruction-free) unless a transcribe prompt is set
+        user_content = self.audio_token * num_audio_tokens
+        if self.TRANSCRIBE_PROMPT:
+            user_content += " " + self.TRANSCRIBE_PROMPT
+        messages.append({"role": "user", "content": user_content})
+
+        chat_result = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
+        )
+        ids = chat_result.input_ids
+        return (ids[0] if ids.dim() > 1 else ids).to(torch.long)
+
+    def _left_pad_prompt_rows(
+        self,
+        rows: list[torch.Tensor],
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Stack per-sample prompt rows into a left-padded batch.
+
+        Left, not right: these feed `generate`, and right padding would sit
+        between the prompt and the first generated token. Pad positions never
+        collide with `audio_token_id`, so the masked_scatter below is unaffected.
+        """
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id or 0
+        max_len = max(row.shape[0] for row in rows)
+        input_ids = torch.full((len(rows), max_len), int(pad_id), dtype=torch.long)
+        attention_mask = torch.zeros((len(rows), max_len), dtype=torch.long)
+        for i, row in enumerate(rows):
+            input_ids[i, max_len - row.shape[0] :] = row
+            attention_mask[i, max_len - row.shape[0] :] = 1
+        return input_ids.to(device), attention_mask.to(device)
 
     def _prepare_audio_inputs(
         self,
@@ -1449,44 +1685,22 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             None.
         """
         device = input_features.device
-        batch_size = input_features.shape[0]
 
         # Encode audio -> flattened embeddings (no per-sample host sync)
         encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
         token_counts = self.projector.get_output_length(encoder_lengths).to(torch.long)
         audio_embeds = self._encode_audio(input_features, token_counts, audio_attention_mask)
 
-        # If input_ids not provided, build prompt with correct number of audio tokens
+        # If input_ids not provided, build one prompt PER SAMPLE. A single
+        # prompt sized to the batch max and expanded across rows -- which this
+        # used to do -- gives every shorter row more `<audio>` placeholders
+        # than the projector produced for it, and `_gather_audio_embeds` then
+        # zero-fills the difference. Silent, and it scales with how ragged the
+        # batch is, so batch-1 eval never sees it.
         if input_ids is None:
-            num_audio_tokens = self._get_num_audio_tokens(audio_attention_mask)
-            audio_placeholder = self.audio_token * num_audio_tokens
-
             system_prompt = system_prompt or self.system_prompt
-
-            messages: list[dict[str, str]] = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            # Audio tokens only (instruction-free)
-            user_content = audio_placeholder
-            if self.TRANSCRIBE_PROMPT:
-                user_content += " " + self.TRANSCRIBE_PROMPT
-            messages.append({"role": "user", "content": user_content})
-
-            chat_result = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
-            )
-            input_ids = chat_result.input_ids.to(device)
-
-            if input_ids.dim() == 1:
-                input_ids = input_ids.unsqueeze(0)
-            if input_ids.shape[0] == 1 and batch_size > 1:
-                input_ids = input_ids.expand(batch_size, -1)
-
-            attention_mask = torch.ones_like(input_ids)
+            rows = [self._render_audio_prompt(int(n), system_prompt) for n in token_counts.tolist()]
+            input_ids, attention_mask = self._left_pad_prompt_rows(rows, device)
 
         # Get text embeddings and replace audio tokens with audio embeddings
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)

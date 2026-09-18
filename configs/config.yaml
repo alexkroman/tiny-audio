@@ -25,13 +25,6 @@ model:
   # Projector settings
   projector_pool_stride: 4
   projector_hidden_dim: 1024
-  # Regularize the projector during joint training. 0.1 is the standard
-  # transformer FFN dropout rate. Applied between act and linear_2, so it
-  # perturbs the projection into LLM-embed space — what both the projector
-  # and the trainable decoder consume. Auto-disabled at eval via
-  # nn.Dropout.training.
-  projector_dropout: 0.1
-
   # Label smoothing applied inside the LM's loss_function (consumed by liger's
   # fused linear CE when apply_liger_kernel_to_qwen3() is active in
   # scripts/train.py). ASRModel.forward zeros it on eval so eval/loss reports

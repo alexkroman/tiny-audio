@@ -63,7 +63,6 @@ model:
   # rather than the ~3.3M of the multiasr mix, so there is roughly a third as
   # much data for the one module that can overfit -- if anything this argues
   # for keeping dropout rather than dropping it.
-  projector_dropout: 0.1
 
   # Split precision. The fp32-master-weights argument applies only to
   # parameters an optimizer updates, and here that is the 10.5M projector
