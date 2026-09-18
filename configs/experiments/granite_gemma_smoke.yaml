@@ -1,0 +1,43 @@
+# @package _global_
+# 50-step GPU smoke test for the granite_gemma recipe.
+#
+# Purpose is to exercise the code paths that cannot be tested on a Mac --
+# the liger gemma4 patcher, flash_attention_2, adamw_torch_fused, bf16
+# autocast, and the save/push path -- on the 73-sample librispeech dummy set
+# rather than the 1.2 TB multiasr mix. Inherits everything else from
+# granite_gemma so what runs here is the real recipe's plumbing.
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=granite_gemma_smoke
+
+defaults:
+  - granite_gemma
+  - override /data: librispeech_dummy
+
+data:
+  num_proc: 1
+
+training:
+  max_steps: 50
+  logging_steps: 5
+  warmup_steps: 5          # 2000 would leave LR at ~0 for the whole run
+  save_steps: 25
+  eval_steps: 25
+
+  # 73 samples, so keep the batch small enough to form real steps rather than
+  # replaying one batch 50 times. Also caps activation memory, which dominates
+  # this recipe (see `ta runpod plan`).
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 1
+  # Gradients must cross all 35 frozen decoder layers to reach the projector,
+  # so activations are the binding constraint even with everything frozen.
+  gradient_checkpointing: true
+
+  # Push so the artifact can be inspected on the Hub.
+  push_to_hub: true
+  hub_model_id: "mazesmazes/tiny-audio-granite-gemma-smoke"
+  save_strategy: steps
+  # No W&B key on a throwaway pod.
+  report_to: "none"
+  output_dir: ./outputs/granite_gemma_smoke

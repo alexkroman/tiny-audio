@@ -1,0 +1,165 @@
+# @package _global_
+# Encoder + projector training (decoder frozen).
+#
+# Architecture:
+#   Whisper-Medium.en encoder (TRAINABLE, ~308M params, English-only) +
+#   MLP projector (fresh init, trainable) +
+#   Qwen3-0.6B decoder (FROZEN)
+#
+# This is the Freeze-Omni-style ASR recipe (matched to the project's existing
+# S2S philosophy: keep the LLM frozen, train the audio side). Sibling to
+# stage_1.yaml which makes the opposite bet (frozen encoder, trainable LLM).
+# Use this experiment to test whether pushing the audio-conditioning work
+# into a jointly-trained encoder + projector beats joint LLM fine-tuning at
+# this scale of data.
+#
+# Encoder choice rationale (swapped from GLM-ASR-Nano-2512 → whisper-medium.en):
+#   - Smaller (308M vs 635M) — frees ~9GB activation+optimizer memory,
+#     letting batch=100 fit without gradient_checkpointing pressure.
+#     ~2× faster encoder forward, ~1.5× faster end-to-end training.
+#   - English-only variant matches our multiasr mix exactly (no wasted
+#     multilingual capacity from openai/whisper-medium).
+#   - Better zero-shot English ASR baseline (~5–6.5% CV WER vs ~6–8%
+#     estimated for GLM-ASR-Nano) — stronger starting point.
+#   - Standard architecture: no `trust_remote_code` needed, universal
+#     MLX/CoreML/Swift-bundle support for downstream deployment.
+#   - 80 mel bins (vs GLM-ASR-Nano's 128) — `AutoFeatureExtractor` handles
+#     the change automatically; projector input dim auto-derived from
+#     audio_config.hidden_size (1024 instead of 1280), shrinking the
+#     projector from 6.3M → ~5M params.
+#
+# Trainable param count: ~313M (308M encoder + ~5M projector). About half
+# of stage_1's ~602M trainable — substantially lighter optimizer state.
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=encoder_train
+
+defaults:
+  - override /data: multiasr
+
+model:
+  projector_type: mlp
+  projector_pool_stride: 4
+  projector_hidden_dim: 1024
+  projector_dropout: 0.0
+  audio_model_id: openai/whisper-medium.en
+  text_model_id: Qwen/Qwen3-0.6B
+  # No label smoothing — decoder is frozen so LS-induced confidence
+  # calibration on lm_head is moot. label_smoothing affects only the
+  # CE loss against frozen lm_head outputs, which routes gradients
+  # backward through the trainable encoder + projector; LS=0 lets the
+  # gradient match raw CE without the LS uniform-target offset.
+  label_smoothing: 0.0
+
+  # SpecAugment on mel input — high-leverage now that the encoder is
+  # trainable. Without it the encoder sees identical waveforms every
+  # epoch and overfits. Implementation reuses
+  # `transformers.models.whisper.modeling_whisper._compute_mask_indices`
+  # via ASRModel._mask_input_features, applied training-only. Defaults
+  # match Whisper's config: time mask 10 frames at prob 0.05 (min 2
+  # masks); feature mask disabled by default (Whisper's default too —
+  # frequency masking helps less than time masking for ASR).
+  apply_spec_augment: true
+  mask_time_prob: 0.05
+  mask_time_length: 10
+  mask_time_min_masks: 2
+  mask_feature_prob: 0.0
+  mask_feature_length: 10
+  mask_feature_min_masks: 0
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-next-encoder"
+  group_by_length: false
+
+  # Freeze configuration — the defining choice of this recipe:
+  #   - audio encoder: UNFROZEN (the bet of this experiment)
+  #   - projector: trainable (fresh init, bridges encoder → LLM embed space)
+  #   - language model: FROZEN (Freeze-Omni philosophy — preserve LLM
+  #     capability entirely, push all audio-conditioning into the
+  #     audio-side stack)
+  # Note: freeze_text_embed_tokens is moot here because the entire
+  # language_model is frozen — its embed_tokens are frozen by inclusion.
+  freeze_audio_encoder: false
+  freeze_language_model: true
+  freeze_projector: false
+
+  # Asymmetric LR (~10× gap):
+  #   - Projector (fresh init): 1e-3. Same rationale as stage_1 — fresh
+  #     MLP needs high LR to converge through warmup.
+  #   - Encoder (pretrained whisper-medium.en): 1e-4. Matches Freeze-Omni's
+  #     Stage 1.2 LR (the "connect pretrained encoder to frozen LLM" stage,
+  #     which is the closest direct analog of this recipe). Per the paper:
+  #     "The learning rates used in the three stages of the modeling of
+  #     speech input are 2e-4, 1e-4, and 6e-4 respectively" — Stage 1.2
+  #     is the middle value.
+  #
+  #   Whisper-Medium-specific notes:
+  #     - Pretraining is fully transparent (OpenAI's 438K-hour English
+  #       subset). Unlike the GLM-ASR-Nano case, we know exactly what
+  #       this encoder has seen, so the "applying 1e-4 to an opaquely-
+  #       pretrained encoder" caveat doesn't bite here.
+  #     - LLaMA-Omni's Stage 1 fine-tunes Whisper-Large-V3 with peak
+  #       LR=2e-5 (joint with the LLM). Their projector is a 2-layer
+  #       MLP very close to ours. We use a higher 1e-4 because we're NOT
+  #       joint-training the LLM (their 2e-5 had to be conservative
+  #       precisely BECAUSE they were also updating the 8B LLM); without
+  #       that constraint, the encoder can take larger steps.
+  #     - Freeze-Omni's 1e-4 used a uniform LR across encoder+adapter;
+  #       we use asymmetric LRs because our projector is fresh-init MLP
+  #       from-scratch, while their adapter was partially pretrained.
+  #
+  #   max_grad_norm=1.0 (below) is the safety net. If grad_norm spikes
+  #   consistently >3 in the first ~2000 steps, drop back to 5e-5.
+  #   - Decoder: N/A (frozen) — its params don't enter the optimizer.
+  learning_rate: 1e-3
+  encoder_learning_rate: 1e-4
+
+  label_smoothing_factor: 0.0
+
+  # Weight decay zero across all components. Encoder is pretrained and we
+  # want it to drift toward audio-task-specific features, not toward zero.
+  # Same reasoning as stage_1 for projector.
+  weight_decay: 0.0
+  projector_weight_decay: 0.0
+  encoder_weight_decay: 0.0
+
+  warmup_steps: 2000
+
+  # Cosine_with_min_lr matching stage_1's shorter-run config — 1 epoch,
+  # 5% floor for late-stage refinement of the encoder.
+  lr_scheduler_type: cosine_with_min_lr
+  lr_scheduler_kwargs:
+    min_lr_rate: 0.05
+
+  # Tighter clip — encoder gradients are new (this run's first time
+  # backpropping through encoder params) and can spike at warmup. 1.0
+  # cap is conservative; raise after observing the actual distribution.
+  max_grad_norm: 1.0
+
+  seed: 43
+  auto_find_batch_size: true
+  per_device_train_batch_size: 69
+  per_device_eval_batch_size: 69
+  gradient_accumulation_steps: 1
+  num_train_epochs: 1
+  save_steps: 2000
+  eval_steps: 2000
+
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 8
+
+  # Kept enabled for safety on first launch, but probably not strictly
+  # needed now: with whisper-medium.en (24 trainable encoder layers,
+  # hidden=1024) the activation footprint is ~7.4GB vs ~12GB for the prior
+  # GLM-ASR-Nano-2512 (32 layers, hidden=1280), and the Adam state for the
+  # smaller encoder drops from ~7.6GB to ~3.7GB — total memory savings
+  # roughly 9GB at batch=100. The earlier OOM (~91GB / 95GB) had ~4GB of
+  # headroom; with 9GB freed by the encoder swap, batch=100 should fit
+  # without GC. Wired in asr_modeling.py:`_set_gradient_checkpointing`,
+  # which routes the toggle to both the LM (always — on the grad path to
+  # the projector) and the encoder (only when freeze_audio_encoder=False,
+  # as it is here). After confirming first-launch stability, flip this to
+  # false to recover the ~30% wall-clock GC costs.
+  gradient_checkpointing: true
+
+  torch_compile: true

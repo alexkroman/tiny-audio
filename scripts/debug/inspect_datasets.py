@@ -62,7 +62,6 @@ DATASETS = [
     ("speechcolab/gigaspeech", "dev", "validation", "text", "audio", "Gigaspeech dev"),
     ("kensho/spgispeech", "M", "train", "transcript", "audio", "SPGISpeech M"),
     ("facebook/voxpopuli", "en", "train", "raw_text", "audio", "VoxPopuli en"),
-    ("hhoangphuoc/switchboard", None, "train", "transcript", "audio", "Switchboard"),
     ("edinburghcstr/ami", "ihm", "train", "text", "audio", "AMI IHM"),
     ("edinburghcstr/ami", "sdm", "train", "text", "audio", "AMI SDM"),
 ]

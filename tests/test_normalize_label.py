@@ -12,7 +12,12 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.train import _needs_truecase, _normalize_label
+from scripts.train import (
+    TEXT_CASE_CASED,
+    TEXT_CASE_MONO,
+    _needs_truecase,
+    _normalize_label,
+)
 
 
 class TestGigaspeechPunctTags:
@@ -192,3 +197,104 @@ class TestEdgeCases:
 
     def test_only_brackets_becomes_empty(self):
         assert _normalize_label("[ stage direction ]") == ""
+
+
+class TestDeclaredTextCase:
+    """Per-source casing policy (`text_case`) overrides the per-row heuristic.
+
+    The heuristic cannot classify a single row correctly, because a lowercase
+    FRAGMENT of an already-cased source is character-identical to a row from a
+    genuinely uncased source. Measured on 300 real rows per source: it
+    truecased 13% of SPGISpeech (injecting proper nouns) and left 21% of AMI
+    as ALL-CAPS.
+    """
+
+    # Real SPGISpeech rows that the heuristic misclassifies as mono-case:
+    # sliding-window fragments that happen to contain no capital letter.
+    SPGI_FRAGMENTS = [
+        (
+            "with which we will work and be able to clear out all the various "
+            "permissions as we move to finalize the bankable feasibility study"
+        ),
+        (
+            "and we stay committed to maintaining sustainable profitability and "
+            "building value for all stakeholders."
+        ),
+        "and not just click on a website because clearly, what's good for everyone is",
+    ]
+
+    @pytest.mark.parametrize("text", SPGI_FRAGMENTS)
+    def test_cased_source_fragments_are_left_alone(self, text):
+        assert _normalize_label(text, TEXT_CASE_CASED) == text
+
+    @pytest.mark.parametrize("text", SPGI_FRAGMENTS)
+    def test_heuristic_would_have_corrupted_these(self, text):
+        """Guard: pins the bug the declaration exists to prevent.
+
+        If the heuristic ever stops misfiring here, the parametrized cases
+        above are no longer exercising anything and should be revisited.
+        """
+        assert _normalize_label(text, None) != text
+
+    def test_truecase_invents_proper_nouns_on_fragments(self):
+        """The concrete damage: ordinary common nouns promoted to proper."""
+        text = (
+            "with which we will work and be able to clear out all the various "
+            "permissions as we move to finalize the bankable feasibility study"
+        )
+        heuristic = _normalize_label(text, None)
+        assert "Permissions" in heuristic and "Bankable" in heuristic
+        assert _normalize_label(text, TEXT_CASE_CASED) == text
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("YEAH", "Yeah"), ("OKAY", "Okay"), ("HMM", "Hmm"), ("NO", "No"), ("IT'S", "It's")],
+    )
+    def test_short_monocase_rows_are_recased(self, raw, expected):
+        """Real AMI rows: 21% fall under the truecase floor and used to pass
+        through verbatim, shipping ALL-CAPS training labels."""
+        assert _normalize_label(raw, TEXT_CASE_MONO) == expected
+
+    def test_short_rows_bypass_the_statistical_truecaser(self):
+        """Deterministic recase, so a backchannel cannot become a proper noun."""
+        assert _normalize_label("SO UH", TEXT_CASE_MONO) == "So uh"
+
+    def test_long_monocase_rows_still_truecase(self):
+        result = _normalize_label("THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG", TEXT_CASE_MONO)
+        assert result[0].isupper()
+        assert any(c.islower() for c in result)
+
+    def test_unset_policy_preserves_legacy_behavior(self):
+        for text in ["YEAH", "the quick brown fox jumps over the lazy dog", "Already Cased Text."]:
+            assert _normalize_label(text, None) == _normalize_label(text)
+
+
+class TestSpelledLetterRuns:
+    """A period closing a run of spelled-out letters is not a sentence start.
+
+    AMI writes acronyms inline ("S. S. H.") and carries no real sentence
+    punctuation, so every period in it is part of an acronym.
+    """
+
+    def test_acronym_run_does_not_capitalize_next_word(self):
+        result = _normalize_label(
+            "IF YOU IF YOU S. S. H. AND THEY HAVE THIS BIG WARNING ABOUT DOING NOTHING",
+            TEXT_CASE_MONO,
+        )
+        assert "S. S. H. and" in result, result
+        assert "S. S. H. And" not in result
+
+    def test_real_sentence_boundary_still_capitalizes(self):
+        """Gigaspeech's tag-derived boundaries must keep working."""
+        result = _normalize_label("six tomatoes. the next thing we tried", TEXT_CASE_MONO)
+        assert "tomatoes. The" in result, result
+
+    def test_single_letter_without_a_run_still_capitalizes(self):
+        """'e t. the video game' — the letter before the period carries no
+        period of its own, so this is a boundary, not an acronym run.
+
+        Truecase also lifts the bare letters, so the assertion is on the
+        boundary itself rather than on the preceding token's case.
+        """
+        result = _normalize_label("e t. the video game", TEXT_CASE_MONO)
+        assert ". The" in result, result

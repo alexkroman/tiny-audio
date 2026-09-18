@@ -231,3 +231,63 @@ class TestProcessorAudioTokenCount:
         # Encoder output: 80 -> conv1 -> 80 -> conv2 -> 40
         # Projector: 40 -> 40 // 4 = 10
         assert audio_tokens == 10
+
+
+class TestProcessorAudioToken:
+    """The placeholder token must come from the config, not a hardcoded default."""
+
+    def test_defaults_to_class_constant(
+        self, mock_feature_extractor, mock_tokenizer, mock_projector
+    ):
+        from tiny_audio.asr_processing import ASRProcessor
+
+        processor = ASRProcessor(mock_feature_extractor, mock_tokenizer, mock_projector)
+
+        assert processor.audio_token == ASRProcessor.AUDIO_TOKEN
+
+    def test_accepts_native_decoder_token(
+        self, mock_feature_extractor, mock_tokenizer, mock_projector
+    ):
+        """Gemma 4's placeholder is its own pretrained "<|audio|>", not "<audio>"."""
+        from tiny_audio.asr_processing import ASRProcessor
+
+        processor = ASRProcessor(
+            mock_feature_extractor,
+            mock_tokenizer,
+            mock_projector,
+            audio_token="<|audio|>",
+        )
+
+        assert processor.audio_token == "<|audio|>"
+        mock_tokenizer.convert_tokens_to_ids.assert_called_with("<|audio|>")
+
+    def test_prompt_uses_configured_token(
+        self, mock_feature_extractor, mock_tokenizer, mock_projector
+    ):
+        """The prompt must repeat the configured token, or masked_scatter mismatches."""
+        import torch
+
+        from tiny_audio.asr_processing import ASRProcessor
+
+        mock_projector.get_output_length.return_value = 3
+        mock_tokenizer.apply_chat_template.return_value = torch.tensor([[1, 2, 3]])
+
+        processor = ASRProcessor(
+            mock_feature_extractor,
+            mock_tokenizer,
+            mock_projector,
+            audio_token="<|audio|>",
+        )
+        processor(audio=[0.0] * 16000)
+
+        messages = mock_tokenizer.apply_chat_template.call_args[0][0]
+        user_content = next(m["content"] for m in messages if m["role"] == "user")
+        assert user_content.startswith("<|audio|>" * 3)
+        assert "<audio>" not in user_content
+
+    def test_model_processor_inherits_config_token(self, base_asr_model):
+        """ASRModel.get_processor must forward its resolved audio_token."""
+        processor = base_asr_model.get_processor()
+
+        assert processor.audio_token == base_asr_model.audio_token
+        assert processor.audio_token_id == base_asr_model.audio_token_id

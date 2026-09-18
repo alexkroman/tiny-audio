@@ -1,0 +1,422 @@
+# @package _global_
+# Joint training of a fresh projector and the Qwen decoder against a frozen
+# Conformer encoder:
+#   ibm-granite/granite-speech-5.0-470m-turboctc (frozen)
+#     -> MLP projector (fresh init, 12.6M, lr 1e-3)
+#     -> Qwen/Qwen3.5-2B (trainable except embed_tokens, lr 2e-5)
+#
+# This follows stage_1 / production.yaml's single-stage joint recipe rather
+# than the LLaVA-style projector-only setup granite_gemma uses. The decoder is
+# reshaped rather than rented: 1.3732B of its 1.8818B params take gradients
+# (the 0.5086B tied embedding table is frozen -- see
+# freeze_text_embed_tokens). Consequences worth holding onto when reading this
+# file and its eval:
+#   - stage_1.yaml's drift and decoder-LR reasoning IS in scope here. There
+#     are decoder gradients and a 50x LR gap between the two param groups, so
+#     its regularization argument is retuned rather than moot.
+#   - The projector no longer carries the entire adaptation burden; it bridges
+#     Granite's 1024-dim output into Qwen's 2048-dim space while the decoder
+#     meets it halfway.
+#   - Activation memory is unchanged by the freeze policy either way.
+#     Gradients have to cross all 24 decoder layers to reach the projector at
+#     the decoder's *input* regardless, so freezing the decoder would buy
+#     optimizer state, not activations. That is the whole VRAM story below.
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=granite_qwen
+
+defaults:
+  # multiasr rather than loquacious_medium. The joint revision of this file
+  # used Loquacious `medium` for its disk budget (233 GB vs ~1.2 TiB), but
+  # Loquacious transcripts are ALL-CAPS/no-punct and nothing in the label
+  # pipeline restores punctuation -- `_normalize_label` lifts case via
+  # truecase and stops there. That makes 100% of the training targets
+  # cased-but-unpunctuated, which trains the decoder to suppress exactly the
+  # formatting that is the reason to put an LLM behind the encoder at all.
+  # Granite's own CTC head already scores 5.00% aggregate on Open ASR
+  # without one.
+  #
+  # multiasr is ~75% natively cased+punct (LibriHeavy `text_original`,
+  # CommonVoice, Gigaspeech, SPGISpeech, VoxPopuli `raw_text`, Earnings22);
+  # the normalized minority (TEDLIUM / Peoples / Switchboard / AMI) gets
+  # truecased and stays unpunctuated, but at a minority share the dominant
+  # punctuated signal absorbs it. It is also the mix every shipped run in
+  # this repo was trained on, so its per-source caps and quality filters are
+  # empirically settled rather than freshly guessed.
+  #
+  # Cost is the ~1.2 TiB download. Check `ta runpod plan` before provisioning.
+  - override /data: multiasr
+
+model:
+  # Granite Speech 5.0 TurboCTC, encoder-only Conformer (472.9M params,
+  # d=1024), Apache-2.0. Verified in isolation on this stack: running its own
+  # CTC head over our exact feature-extraction path decodes LibriSpeech
+  # near-perfectly, so the features, padding mask and time-major layout are
+  # all correct before the projector ever sees them.
+  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc
+  # Qwen3.5-2B. Three properties that matter to this repo:
+  #   - The checkpoint is Qwen3_5ForConditionalGeneration (vision + video), but
+  #     AutoModelForCausalLM maps `qwen3_5` straight to Qwen3_5ForCausalLM and
+  #     loads it with 0 missing / 0 unexpected / 0 mismatched keys. No
+  #     text-only transplant is needed -- contrast Gemma 4, where the causal-LM
+  #     class silently random-initializes every tensor and needs
+  #     _gemma_text_only.
+  #   - It ships a chat_template, which DataCollatorForChatML requires. Turns
+  #     close with "<|im_end|>", which _derive_turn_end_token_id picks up, so
+  #     generation stops where training supervises.
+  #   - hidden_size is 2048 and the vocab is 248,320 with tie_word_embeddings.
+  text_model_id: Qwen/Qwen3.5-2B
+  system_prompt: ""
+  projector_type: mlp
+
+  # sdpa, overriding ASRConfig's flash_attention_2 default. FA2 earns that
+  # default on a dense decoder like stage_1's Qwen3-0.6B, but Qwen3.5 is hybrid
+  # and the arithmetic does not carry over: only 6 of 24 layers are
+  # full_attention, and at this recipe's sequence length (237 audio tokens for
+  # 19s plus prompt and transcript, so T ~ 320) the QK^T + AV work FA2
+  # optimizes is 0.7% of decoder FLOPs against 78% in the MLP. Even at T=4096
+  # it is 8%. Doubling 0.7% is not worth a dependency -- and it drops this
+  # experiment's reliance on the flash-attn source build, which the repo
+  # already documents as routinely failing on RunPod images.
+  #
+  # The fp32/FA2 startup-warning argument from the joint revision no longer
+  # applies (model_dtype is bfloat16 below), but the FLOP argument alone is
+  # sufficient and it is the load-bearing one.
+  attn_implementation: sdpa
+
+  # Granite's feature extractor stacks mel pairs (100 Hz -> 50 Hz, 320-dim) and
+  # the encoder subsamples 4x, so encoder output is already 12.5 Hz. Frame
+  # stacking would be redundant and pool_stride must stay 1; at 4 the sequence
+  # collapses to 3.1 Hz and starves the decoder.
+  #
+  # 12.5 Hz is also the published optimum, not just the value that falls out
+  # of Granite's stride: Voxtral (arXiv 2507.13264) ablated 50 / 25 / 12.5 /
+  # 6.25 Hz and found little ASR degradation at 25 and 12.5, a >1% penalty at
+  # 6.25, and 12.5 Hz actually beating the 50 Hz baseline by 1.5% on
+  # understanding tasks. So the untested middle option here (pool_stride 2 ->
+  # 6.25 Hz) is the one the literature rules out. Leave this at 1.
+  projector_pool_stride: 1
+  # Matches Granite's two floor(L/2) subsample layers. Verified against the
+  # real encoder at 1/2/5/10/19s -- predicted token count equals actual output
+  # length exactly at every duration.
+  encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
+
+  # Bridges Granite's 1024 into Qwen's 2048. With pool_stride=1 the input is
+  # 1024 (not 1024*k), so 4096 puts the projector at 1024*4096 + 4096*2048 =
+  # 12.6M params -- the ~12M this repo's projectors have historically used.
+  # A size preference rather than a necessity now that the decoder trains too:
+  # 12.6M is 0.9% of this run's 1.386B trainable budget, not the whole of it
+  # the way it is under granite_gemma's projector-only recipe.
+  projector_hidden_dim: 4096
+  # 0.05, halved from stage_1's 0.1. That value was set to close a measured
+  # 0.167 train/eval gap on a joint recipe whose trainable surface was a 0.6B
+  # decoder plus a ~150M embedding table, over two passes of its mix. This run
+  # is also joint, so the overfit mechanism is live rather than structurally
+  # absent -- but it differs on both axes that set the 0.1: the trainable
+  # decoder here is 1.37B against 0.6B (more capacity, but embed_tokens is
+  # frozen so the memorization-prone table is out of reach), and it is ONE
+  # epoch over multiasr's ~3.16M rows, so no example is seen twice.
+  #
+  # Single-epoch exposure is the load-bearing half of that. 0.05 splits the
+  # difference: enough regularization on the one tensor both halves of the
+  # stack touch, without spending projector capacity against a gap a
+  # single-pass run may never open.
+  #
+  # Watch train vs eval CE: with label_smoothing=0.0 both are raw CE and
+  # directly comparable. Train sitting slightly above eval is the healthy
+  # fine-tune signature; train pulling below eval is the signal to go back
+  # toward 0.1.
+  projector_dropout: 0.05
+
+  # fp32 master weights, as config.yaml and stage_1 use for a trainable
+  # decoder, and NOT the bfloat16 granite_gemma gets away with. This is
+  # required by decoder_learning_rate, not a precision preference: Adam's step
+  # at 2e-5 is ~1e-3 relative on decoder weights of ~0.015-0.02, and
+  # bfloat16's 8-bit mantissa gives a 2^-8 = 3.9e-3 relative ULP. Every
+  # decoder update would round to zero and the run would silently train the
+  # projector only while reporting two param groups. Compute is still bf16 via
+  # training.bf16=true autocast; this is about where the master copy lives.
+  #
+  # projector_dtype is now redundant (it matches model_dtype) but kept
+  # explicit: the projector is the one module that must stay fp32 even if
+  # model_dtype is ever taken back to bfloat16 for a projector-only run.
+  #
+  # The cost is the entire VRAM story of this file, so it is worth itemizing
+  # against the 79.6 GiB an H100 80GB actually reports. Param counts are
+  # exact (safetensors headers / a meta-device instantiation), not estimates:
+  # encoder 0.4729B, decoder 1.8818B of which the tied embed_tokens table is
+  # 0.5086B and frozen, projector 0.0126B -> 1.3858B trainable.
+  #   fp32 weights (enc + dec + proj)            8.82 GiB
+  #   fp32 gradients (1.3858B)                   5.16 GiB
+  #   AdamW exp_avg + exp_avg_sq, fp32           10.33 GiB
+  #   autocast's bf16 cast of every fp32 weight   4.39 GiB
+  #   CUDA context + cuBLAS workspaces + NCCL    ~1.00 GiB
+  #   ------------------------------------------ ~29.7 GiB static
+  # The fourth line is the one that is easy to forget. torch.autocast caches
+  # its bf16 casts for the lifetime of the autocast region, and that region
+  # ends when the FORWARD ends -- precisely when the activation tape is at its
+  # maximum. So it stacks onto the peak rather than overlapping the trough.
+  #
+  # AdamW's states are fp32 because torch.optim.AdamW allocates them with
+  # zeros_like(param); there is no separate optimizer-dtype knob to turn.
+  # Under model_dtype: bfloat16 the same three optimizer lines would total
+  # 7.74 GiB instead of 24.31, which is the ~16 GiB that numerical
+  # correctness costs here.
+  model_dtype: float32
+  projector_dtype: float32
+
+  # Off, matching stage_1's finding that LS=0.1 was net-negative on this
+  # stack: it failed to close the train/eval gap while regressing WER across
+  # most evals with a loose-generation signature. Also note Qwen3.5's vocab is
+  # 248,320, so the unfused LabelSmoother path would be ruinous; smoothing
+  # rides liger's fused CE when enabled at all.
+  label_smoothing: 0.0
+
+  max_new_tokens: 256
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-granite-qwen"
+
+  # MUST stay false, for two independent reasons.
+  #
+  # 1. It crashes. The DataCollator drops rows outside [0.8s, 19s] *inside
+  #    collate*, i.e. after the sampler has already assigned rows to batches.
+  #    HF's LengthGroupedSampler sorts DESCENDING by duration within
+  #    megabatches of train_batch_size * grad_accum * 50 = 4,800 rows, so the
+  #    entire >19s tail lands at the head of every megabatch. Any source with
+  #    more than 32/4800 = 0.7% of rows over 19s therefore produces whole
+  #    micro-batches that are 100% dropped, and DataCollator raises
+  #    ValueError("No valid audio samples in batch"). Simulated against
+  #    Loquacious `medium` (10.8% of rows >19s): 10.5% of micro-batches fully
+  #    empty, first one at index 0 -- the run dies on step 0. multiasr's
+  #    long-form sources (LibriHeavy, VoxPopuli, TEDLIUM, Earnings22) are well
+  #    over the 0.7% threshold too.
+  # 2. No multiasr source ships a `duration` column, so turning this on also
+  #    triggers DatasetLoader._ensure_duration's full-decode map over ~3.3M
+  #    rows just to compute the lengths the sampler needs.
+  #
+  # The padding win is real but it is not available without first moving
+  # duration filtering out of the collator and into DatasetLoader, which
+  # needs durations at load time and so runs into (2) as well. Left as a
+  # follow-up; `load_dataset` in map mode means that decode pass would at
+  # least be cached once rather than per-epoch.
+  group_by_length: false
+
+  # Joint: projector and decoder both train from step 0, matching
+  # production.yaml rather than granite_gemma's projector-only recipe.
+  freeze_language_model: false
+  freeze_projector: false
+  # Load-bearing, not belt-and-braces. Qwen3.5 has tie_word_embeddings=True,
+  # so embed_tokens and lm_head are the same 0.5086B tensor; without this,
+  # common-token gradients arriving through lm_head rewrite the embedding
+  # table while rare rows (CJK, niche Unicode, code syntax) get only the
+  # weight-decay pull and drift uncontrolled. This is the drift channel
+  # stage_1 documents, and freezing it is what lets decoder_learning_rate sit
+  # at 2e-5 instead of the 1e-5 earlier probes derived. Audio embeddings reach
+  # the LM through the projector via masked_scatter, so freezing the text
+  # vocabulary does not touch the audio path. It also takes 0.5086B out of the
+  # gradient and Adam-state budget: 6.1 GiB of the fp32 accounting above.
+  freeze_text_embed_tokens: true
+
+  # Two param groups at a 50x gap, as in production.yaml. 1e-3 is the value
+  # stage_1 and granite_gemma both use for a fresh-init projector, and the
+  # observed trajectory is stable across recipes: ||grad_proj|| starts near 9
+  # and settles to 0.4-0.6 once the bridge function is learned. This is also
+  # the base LR, so it is what any group without an explicit override gets --
+  # which is exactly the trap decoder_learning_rate documents below.
+  learning_rate: 1e-3
+  # Set explicitly, and it MUST stay set while freeze_language_model is false.
+  # An earlier revision of this file paired a trainable decoder with
+  # `decoder_learning_rate: null` on the theory that a missing LR would fail
+  # loudly. It does not. ASRTrainer.create_optimizer (scripts/train.py:902)
+  # does:
+  #     dec_lr = self.decoder_learning_rate if ... is not None else base_lr
+  # so null silently inherits `learning_rate` -- the PROJECTOR's 1e-3, 50x
+  # what a pretrained decoder can take, and Qwen3.5-2B would be wrecked in the
+  # first few hundred steps with nothing in the logs naming the cause.
+  #
+  # 2e-5 is production.yaml's value and is safe here for the same reason it is
+  # there: freeze_text_embed_tokens=true closes the tied embed/lm_head drift
+  # channel, which is what let that number sit above the 1e-5 derived from
+  # earlier loquacious_plus probes. Watch attn/mlp/RMSNorm drift (ta debug
+  # analyze-weights); stage_1 saw 1-4% relative at step 11,650 and the signal
+  # to tighten back toward 1e-5 is that accelerating past ~8% by step ~20k.
+  decoder_learning_rate: 2e-5
+
+  # 0.01 on the decoder, production.yaml's value and the LLaVA / Qwen-Audio /
+  # LLaMA standard. Restored from the 0.0 the projector-only revision used,
+  # whose justification ("no trainable decoder, so the drift argument is
+  # moot") does not survive freeze_language_model: false.
+  #
+  # Routing is already correct and worth knowing about rather than
+  # rediscovering: ASRTrainer.create_optimizer adds Qwen3RMSNorm / LlamaRMSNorm
+  # to the forbidden-layers set, because HF's ALL_LAYERNORM_LAYERS contains
+  # only torch.nn.LayerNorm and misses them silently, and it also excludes
+  # nn.Embedding tables. So RMSNorm gains and the (frozen anyway) embedding
+  # land in the no-decay group and only attn/mlp projections are decayed.
+  weight_decay: 0.01
+  # Still 0 for the projector, and for a reason unrelated to the decoder:
+  # pulling projector weights toward zero biases the projection magnitude away
+  # from whatever scale the LM's first layer actually wants to consume.
+  projector_weight_decay: 0.0
+
+  # Smoothing rides model.label_smoothing (liger fused CE) when enabled at
+  # all. Trainer's own factor stays 0 so it never pops labels and applies a
+  # second, unfused LabelSmoother -- which at V=248k would materialize a
+  # (B,T,V) fp32 log_softmax.
+  label_smoothing_factor: 0.0
+
+  # 2.1% of the run. multiasr delivers ~3,159,000 rows to the sampler (the
+  # sampler sees raw rows -- the collator's duration and empty-label filters
+  # run at collate time, downstream of it), so at effective batch 96 with
+  # dataloader_drop_last this is floor(3159271/32) = 98,727 micro-batches / 3
+  # = ~32,909 optimizer steps.
+  #
+  # Was 2000, which is the value stage_1 justified as "2.4% of the 85k-step
+  # run." That justification does not survive a shorter schedule, and the
+  # joint revision of this file carried the number across to an 11,188-step
+  # Loquacious run where it silently became 17.9% -- most of a fifth of
+  # training spent ramping. 2026 WSD scheduling work converges on 0.5-2%
+  # warmup for short runs, with warmup length only weakly affecting final
+  # risk.
+  #
+  # 700 rather than the 250 that was right for the 11k-step Loquacious plan:
+  # the target is the ~2% fraction, and multiasr is ~3x the steps. 700 also
+  # keeps warmup comfortably past step 488, where stage_1 observed the
+  # projector's noise->signal transition completing -- worth having when the
+  # projector is the only thing training.
+  warmup_steps: 700
+
+  lr_scheduler_type: cosine_with_min_lr
+  lr_scheduler_kwargs:
+    min_lr_rate: 0.05
+
+  # production.yaml's value, and the one granite_gemma uses. Restored from the
+  # joint revision's 1.0, which production.yaml had already measured as
+  # harmful on this stack: over 184 logged post-warmup steps the grad-norm
+  # distribution was median=1.18, p90=1.40, p95=1.50, p99=2.19, max=2.24, so a
+  # 1.0 cap clipped 90% of post-warmup steps and scaled the median update down
+  # by ~15%. 2.5 sits just above the observed p99 while still catching genuine
+  # blow-up spikes.
+  #
+  # The joint recipe's second clipping concern is back, and it is the one to
+  # watch on this run. Global-norm clipping runs over ALL parameters at once,
+  # so while the fresh projector's ||grad|| sits near 9 it dominates the global
+  # norm and any clip scales the decoder's update down with it -- the
+  # "spill-over" effect AGGC (arXiv 2601.11864) describes. The decoder pays for
+  # the projector's initialization transient.
+  #
+  # warmup_steps: 700 covers most of it (the projector's noise->signal
+  # transition completed at step 488 in stage_1, and ||grad_proj|| settles to
+  # 0.4-0.6 after), so the exposure is bounded. If early decoder drift looks
+  # suppressed, the fix is a shorter clip on the projector group rather than a
+  # looser global one.
+  #
+  # Still uncalibrated for this exact pairing: read grad_norm over the first
+  # ~500 steps and tighten toward the observed median if it sits low.
+  max_grad_norm: 2.5
+
+  seed: 44
+  auto_find_batch_size: false
+  # Effective batch 96, matching granite_gemma and production.yaml's intent,
+  # so the 1e-3 projector LR transfers without renegotiation.
+  #
+  # 32 x 3 and NOT the 48 x 2 that the projector-only revision of this file
+  # had headroom for. This is the whole VRAM accounting and it is worth having
+  # written down, because the naive reading of the observation that prompted it
+  # ("the run only reaches 52% of VRAM, so raise the batch") gives the wrong
+  # answer under this recipe.
+  #
+  # The observation was real: at per_device=32 the projector-only run sat at
+  # 52% of an H100 80GB, ~41.4 of the 79.6 GiB nvidia-smi reports. Backing
+  # activations out of it against that recipe's ~5.6 GiB static gives
+  # ~(41.4 - 5.6) / 32 = ~1.12 GiB of activation tape per sample.
+  #
+  # But the idle 48% was never spare capacity waiting for a bigger batch. It
+  # was the optimizer-state budget a projector-only recipe does not spend, and
+  # going joint + fp32 spends exactly it: static rises from ~5.6 to ~29.7 GiB
+  # (itemized at model_dtype above). So:
+  #   per_device=24 (x4)  29.7 + 26.9 = ~57 GiB   71%
+  #   per_device=32 (x3)  29.7 + 35.8 = ~65 GiB   82%
+  #   per_device=48 (x2)  29.7 + 53.7 = ~83 GiB   OVER THE CARD
+  # 48 is out of reach, not merely tight. 32 is the largest divisor of 96 that
+  # fits, so accumulation stays at 3.
+  #
+  # Two things make the linear extrapolation in activations trustworthy here
+  # rather than a guess:
+  #   - Padding is already saturated. group_by_length is false (see above), so
+  #     every batch pads to its own longest row and the collator's window is
+  #     [0.8s, 19s]. multiasr's long-form sources put enough mass near the 19s
+  #     ceiling that most 32-row batches already contain a near-ceiling row,
+  #     so E[max duration] barely moves with batch size and per-sample cost
+  #     stays flat instead of creeping up.
+  #   - The 52% is close to a high-water mark, not a spot sample. Nothing in
+  #     this repo logs torch's allocator counters, so it comes from nvidia-smi
+  #     via wandb system metrics -- which sees *reserved* memory, and torch's
+  #     caching allocator does not return blocks to the driver. The worst batch
+  #     seen so far is already priced in.
+  #
+  # 82% is closer to the edge than this repo likes (granite_gemma has a
+  # documented history of sitting at 99% and then dying), and the estimate
+  # carries the uncertainty of a single extrapolated data point. Re-measure on
+  # run one. If it OOMs, in preference order:
+  #   1. optim: adamw_bnb_8bit -- buys back ~7.7 GiB of the 10.33 GiB of Adam
+  #      state and touches nothing about the recipe. bitsandbytes is already a
+  #      linux-marked dependency in pyproject.toml, so it is installed on the
+  #      pod (just not on a mac). Note it quantizes the optimizer STATE only;
+  #      params stay fp32, so the 2e-5 update-precision argument above is
+  #      untouched. Cheapest fix available.
+  #   2. gradient_checkpointing: true -- cuts the ~36 GiB activation term by
+  #      roughly the layer count. Costs ~30% wall-clock for an extra forward
+  #      per layer, and buys far more room than the effective batch can use,
+  #      since 96 is pinned.
+  #   3. per_device 24 x 4 -- last resort. Same effective batch, but 33% more
+  #      micro-batches for the same 32,909 optimizer steps.
+  per_device_train_batch_size: 32
+  # Eval runs under prediction_loss_only (no compute_metrics is passed, so
+  # Trainer infers it) and therefore under no_grad: no layer activations are
+  # retained and the (B,T,248320) logits never materialize past liger's fused
+  # CE. Eval memory is ~static plus one layer, so this could go well above the
+  # train batch; tracking the train batch instead, because 16 evals is not
+  # where this run's wall-clock goes and a second number to keep in sync is a
+  # cost of its own.
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 3
+
+  num_train_epochs: 1
+  # ~32,909 steps, so 16 evals / 16 saves against save_total_limit: 5. The
+  # eval-resolution problem the 11k-step Loquacious plan had (5 evals total)
+  # does not arise at this schedule length.
+  save_steps: 2000
+  eval_steps: 2000
+
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 8
+
+  # Inductor's decompose_triton_kernel_wrapper_functional pass asserts on
+  # liger's wrapped triton kernels. Qwen3.5 is additionally a hybrid model
+  # (linear_attention layers with full_attention every 4th, SSM state held in
+  # fp32), which is a further compile risk worth not taking on run one.
+  #
+  # liger itself stays on and matters more here than anywhere: the fused
+  # linear CE is what keeps the (B,T,248320) logits tensor from being
+  # materialized. Gradients still flow through lm_head to reach the projector,
+  # so freezing the decoder does not remove that pressure.
+  torch_compile: false
+
+  # THROUGHPUT -- Qwen3.5 is hybrid: three of every four layers are
+  # `linear_attention` (gated delta rule + a causal depthwise conv), so the
+  # fast path for most of the decoder lives outside core transformers. Without
+  # the kernels, both the forward and the decode step log fallbacks:
+  #   `chunk_gated_delta_rule` / `fused_recurrent_gated_delta_rule` ...
+  #     because `flash-linear-attention` is not installed
+  #   `causal_conv1d_fn` / `causal_conv1d_update` ...
+  #     because `causal_conv1d` is not installed
+  # Numerics are unaffected -- transformers calls the fallbacks "correct but
+  # much slower" -- so this costs wall-clock, not quality. At ~32,909 steps
+  # that is worth checking before launch rather than after.
+  #
+  # flash-linear-attention is now a regular linux dependency, so `poetry
+  # install` covers it. causal-conv1d is an nvcc source build (sdist only) and
+  # sits in an optional group; add it on a pod that has the CUDA toolkit:
+  #   poetry install --with hybrid-kernels

@@ -9,7 +9,7 @@ from typing import Annotated
 import typer
 
 # Enable fast HuggingFace transfers (must be set before importing HF libraries)
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
 
 from datasets import Audio, DatasetDict, Value, load_dataset
 from huggingface_hub import DatasetCard, DatasetCardData

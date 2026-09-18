@@ -22,11 +22,9 @@ except ImportError:
 __all__ = ["ForcedAligner", "SpeakerDiarizer", "ASRPipeline"]
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
-_DEFAULT_MIN_REPEATS = 3
-_TRAILING_CHAR_RE = re.compile(rf"(.)\1{{{_DEFAULT_MIN_REPEATS - 1},}}$")
-_TRAILING_WORD_RE = re.compile(
-    rf"\b(\w+)(?:\s+\1){{{_DEFAULT_MIN_REPEATS - 1},}}\s*$", re.IGNORECASE
-)
+_MIN_REPEATS = 3
+_TRAILING_CHAR_RE = re.compile(rf"(.)\1{{{_MIN_REPEATS - 1},}}$")
+_TRAILING_WORD_RE = re.compile(rf"\b(\w+)(?:\s+\1){{{_MIN_REPEATS - 1},}}\s*$", re.IGNORECASE)
 
 
 class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
@@ -211,10 +209,16 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         Args:
             model_inputs: Dict with input_features and attention_mask
-            **generate_kwargs: Generation parameters
+            **generate_kwargs: Generation parameters. Pass ``output_scores=True``
+                (and ``return_dict_in_generate=True``, which is then implied) to
+                also return per-step top-1 and top-2 log-probabilities — used by
+                the eval harness's confidence metric. Backward-compatible: when
+                unset, returns just token IDs as before.
 
         Returns:
-            Dict with generated token IDs
+            Dict with generated token IDs, and optionally per-step
+            ``top1_logprob`` / ``top2_logprob`` tensors when scores were
+            requested.
         """
         # Extract audio features and is_last flag
         is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
@@ -222,13 +226,59 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         input_features = model_inputs["input_features"].to(self.model.device)
         audio_attention_mask = model_inputs["attention_mask"].to(self.model.device)
 
-        generated_ids = self.model.generate(
+        # Opt-in: when output_scores is requested, force return_dict_in_generate
+        # so we get a GenerateOutput rather than a bare token tensor.
+        want_scores = bool(generate_kwargs.get("output_scores", False))
+        if want_scores:
+            generate_kwargs.setdefault("return_dict_in_generate", True)
+
+        generate_output = self.model.generate(
             input_features=input_features,
             audio_attention_mask=audio_attention_mask,
             **generate_kwargs,
         )
 
-        return {"tokens": generated_ids, "is_last": is_last}
+        # Default (no scores requested): generate returns a tensor of token IDs.
+        if torch.is_tensor(generate_output):
+            return {"tokens": generate_output, "is_last": is_last}
+
+        # Scores requested: GenerateOutput dict-like with .sequences and .scores.
+        # `scores` is a tuple of per-step logits tensors (batch, vocab); convert
+        # each to log-probs and take top-2 to produce two short tensors over the
+        # generation horizon — kept small (no full vocab) so this is cheap to
+        # carry through postprocess.
+        sequences = generate_output.sequences
+        scores = generate_output.scores
+        # This pipeline is single-item: postprocess() also reduces to
+        # `tokens[0]`. Taking batch element 0 of each score tensor is
+        # therefore consistent with the text we return, but only while the
+        # batch really is one clip -- with batch_size > 1 every item would be
+        # annotated with sample 0's confidence and nothing downstream could
+        # tell. Fail loudly instead of returning a plausible wrong number.
+        if sequences.shape[0] > 1:
+            raise ValueError(
+                f"ASRPipeline received a batch of {sequences.shape[0]} but only "
+                "returns one transcript; per-item confidence would be wrong. "
+                "Call it with one clip per invocation."
+            )
+        top1_logprobs: list[float] = []
+        top2_logprobs: list[float] = []
+        if scores:
+            # Reduce each step on-device, then transfer every step in one go.
+            # Calling .item() per step would block on the device 2x per token.
+            per_step = [
+                torch.topk(torch.log_softmax(step_logits[0].float(), dim=-1), k=2).values
+                for step_logits in scores
+            ]
+            for top1, top2 in torch.stack(per_step).tolist():
+                top1_logprobs.append(top1)
+                top2_logprobs.append(top2)
+        return {
+            "tokens": sequences,
+            "top1_logprob": top1_logprobs,
+            "top2_logprob": top2_logprobs,
+            "is_last": is_last,
+        }
 
     def postprocess(self, model_outputs, **kwargs) -> dict[str, str]:
         """Convert model output tokens to text.
@@ -255,21 +305,28 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         # Filter out eos tokens that the tokenizer doesn't recognize as special
         # (generation_config.eos_token_id may differ from tokenizer.eos_token_id)
-        if hasattr(self, "model") and hasattr(self.model, "generation_config"):
-            eos_ids = self.model.generation_config.eos_token_id
-            if eos_ids is not None:
-                eos_set = set(eos_ids) if isinstance(eos_ids, list) else {eos_ids}
-                tokens = [t for t in tokens.tolist() if t not in eos_set]
+        eos_ids = self.model.generation_config.eos_token_id
+        if eos_ids is not None:
+            eos_set = set(eos_ids) if isinstance(eos_ids, list) else {eos_ids}
+            tokens = [t for t in tokens.tolist() if t not in eos_set]
 
         text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
         # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
         if "<think>" in text:
             text = _THINK_TAG_RE.sub("", text).strip()
         text = _truncate_repetitions(text)
-        return {"text": text}
+        out: dict[str, Any] = {"text": text}
+        # Pass through per-step logprobs when _forward captured them (i.e. caller
+        # passed output_scores=True). Lets eval harnesses compute confidence
+        # stats without re-running the model.
+        if "top1_logprob" in model_outputs:
+            out["top1_logprob"] = model_outputs["top1_logprob"]
+        if "top2_logprob" in model_outputs:
+            out["top2_logprob"] = model_outputs["top2_logprob"]
+        return out
 
 
-def _truncate_repetitions(text: str, min_repeats: int = 3) -> str:
+def _truncate_repetitions(text: str) -> str:
     """Truncate repeated words/phrases/characters at end of text.
 
     Detects patterns like:
@@ -279,7 +336,6 @@ def _truncate_repetitions(text: str, min_repeats: int = 3) -> str:
 
     Args:
         text: Input text to process
-        min_repeats: Minimum repetitions to trigger truncation (default 3)
 
     Returns:
         Text with trailing repetitions removed
@@ -287,33 +343,26 @@ def _truncate_repetitions(text: str, min_repeats: int = 3) -> str:
     if not text:
         return text
 
-    if min_repeats == _DEFAULT_MIN_REPEATS:
-        char_pattern = _TRAILING_CHAR_RE
-        word_pattern = _TRAILING_WORD_RE
-    else:
-        char_pattern = re.compile(rf"(.)\1{{{min_repeats - 1},}}$")
-        word_pattern = re.compile(rf"\b(\w+)(?:\s+\1){{{min_repeats - 1},}}\s*$", re.IGNORECASE)
-
-    text = char_pattern.sub(r"\1", text)
-    while word_pattern.search(text):
-        text = word_pattern.sub(r"\1", text)
+    text = _TRAILING_CHAR_RE.sub(r"\1", text)
+    while _TRAILING_WORD_RE.search(text):
+        text = _TRAILING_WORD_RE.sub(r"\1", text)
 
     # 3. Truncate repeated phrases (2-20 words) at end
     # e.g., "i am sorry i am sorry i am sorry" -> "i am sorry"
     words = text.split()
-    if len(words) < min_repeats * 2:
+    if len(words) < _MIN_REPEATS * 2:
         return text
 
     # Cheap pre-check: trailing window must contain duplicates for any phrase repeat
     # to be possible. set(window) == window means all unique → no repetition.
-    window = words[-min_repeats * 2 :]
+    window = words[-_MIN_REPEATS * 2 :]
     if len(set(window)) == len(window):
         return text
 
-    for phrase_len in range(2, min(21, len(words) // min_repeats + 1)):
+    for phrase_len in range(2, min(21, len(words) // _MIN_REPEATS + 1)):
         phrase_escaped = re.escape(" ".join(words[-phrase_len:]))
         phrase_pattern = re.compile(
-            rf"(^|.*?\s)({phrase_escaped})(?:\s+{phrase_escaped}){{{min_repeats - 1},}}\s*$",
+            rf"(^|.*?\s)({phrase_escaped})(?:\s+{phrase_escaped}){{{_MIN_REPEATS - 1},}}\s*$",
             re.IGNORECASE,
         )
         match = phrase_pattern.match(text)

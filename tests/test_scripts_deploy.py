@@ -56,6 +56,122 @@ class TestRunpodConnectionUtils:
         assert "id_ed25519" in key_path
 
 
+class TestRemoteDiskPreflight:
+    """`ta runpod train` refuses a pod /workspace cannot hold.
+
+    The failure this guards against is expensive and late: ENOSPC arrives
+    hours in, as an xet reconstruction error during dataset prep.
+    """
+
+    @staticmethod
+    def _conn(stdout: str, ok: bool = True):
+        from unittest.mock import MagicMock
+
+        conn = MagicMock()
+        conn.run.return_value = MagicMock(ok=ok, stdout=stdout)
+        return conn
+
+    def test_parses_available_column_from_df(self):
+        from scripts.deploy.runpod import _remote_free_gib
+
+        # `df -Pk` columns: Filesystem 1K-blocks Used Available Capacity Mounted
+        conn = self._conn("overlay 2113650000 1000000 2097152000 1% /workspace\n")
+        free = _remote_free_gib(conn)
+
+        assert free == pytest.approx(2097152000 / 1024**2, rel=1e-6)  # 2000 GiB
+
+    def test_returns_none_when_df_fails(self):
+        from scripts.deploy.runpod import _remote_free_gib
+
+        assert _remote_free_gib(self._conn("", ok=False)) is None
+
+    def test_returns_none_on_unparseable_output(self):
+        from scripts.deploy.runpod import _remote_free_gib
+
+        assert _remote_free_gib(self._conn("df: /workspace: No such file\n")) is None
+
+    def test_exits_when_pod_is_too_small(self, monkeypatch):
+        import typer
+
+        from scripts.deploy import runpod
+
+        monkeypatch.setattr(runpod, "_remote_free_gib", lambda conn, *a, **k: 100.0)
+        monkeypatch.setattr(
+            "scripts.deploy.plan.build_plan",
+            lambda *a, **k: type("P", (), {"disk": {"recommended": 2500.0}})(),
+        )
+
+        with pytest.raises(typer.Exit):
+            runpod._check_remote_disk(self._conn(""), "stage_1", [])
+
+    def test_proceeds_when_pod_is_big_enough(self, monkeypatch):
+        from scripts.deploy import runpod
+
+        monkeypatch.setattr(runpod, "_remote_free_gib", lambda conn, *a, **k: 3000.0)
+        monkeypatch.setattr(
+            "scripts.deploy.plan.build_plan",
+            lambda *a, **k: type("P", (), {"disk": {"recommended": 2500.0}})(),
+        )
+
+        # No exception == training is allowed to start.
+        runpod._check_remote_disk(self._conn(""), "stage_1", [])
+
+    def test_unreadable_df_does_not_block_training(self, monkeypatch):
+        from scripts.deploy import runpod
+
+        monkeypatch.setattr(runpod, "_remote_free_gib", lambda conn, *a, **k: None)
+
+        # A df we cannot read is not evidence the pod is too small; the
+        # preflight must not become a new way for `train` to fail.
+        runpod._check_remote_disk(self._conn(""), "stage_1", [])
+
+    def test_plan_failure_does_not_block_training(self, monkeypatch):
+        from scripts.deploy import runpod
+
+        monkeypatch.setattr(runpod, "_remote_free_gib", lambda conn, *a, **k: 100.0)
+
+        def boom(*a, **k):
+            raise RuntimeError("Hub is down")
+
+        monkeypatch.setattr("scripts.deploy.plan.build_plan", boom)
+
+        runpod._check_remote_disk(self._conn(""), "stage_1", [])
+
+
+class TestDiskPlan:
+    """plan.py's disk model must count what actually lands on /workspace."""
+
+    def test_datasets_charged_for_parquet_and_arrow(self):
+        from scripts.deploy.plan import DATASET_DISK_FACTOR
+
+        # datasets keeps the Hub parquet download AND the arrow tables it
+        # generates from it; measured at 2.05x on librispeech_asr_dummy.
+        assert DATASET_DISK_FACTOR > 2.0
+
+    def test_checkpoints_scale_with_trainable_stack_and_retention(self):
+        """A joint fine-tune's checkpoints are the decoder + AdamW, times
+        save_total_limit -- not one projector-sized file."""
+        from scripts.deploy.plan import build_plan
+
+        plan = build_plan(
+            "stage_1",
+            ["training.save_total_limit=1", "data=librispeech_dummy"],
+            512,
+        )
+        one = next(v for k, v in plan.disk.items() if k.startswith("checkpoints"))
+
+        plan5 = build_plan(
+            "stage_1",
+            ["training.save_total_limit=5", "data=librispeech_dummy"],
+            512,
+        )
+        five = next(v for k, v in plan5.disk.items() if k.startswith("checkpoints"))
+
+        assert five == pytest.approx(one * 5)
+        # stage_1 fine-tunes Qwen3-0.6B, so one checkpoint is GiB-scale.
+        assert one > 1.0
+
+
 class TestBuildTrainingScript:
     """Tests for build_training_script function."""
 

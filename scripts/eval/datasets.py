@@ -103,13 +103,6 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         audio_field="audio",
         text_field="normalized_text",
     ),
-    "switchboard": DatasetConfig(
-        name="switchboard",
-        path="hhoangphuoc/switchboard",
-        audio_field="audio",
-        text_field="transcript",
-        default_split="validation",
-    ),
     "librispeech": DatasetConfig(
         name="librispeech",
         path="openslr/librispeech_asr",

@@ -5,6 +5,43 @@ import transformers
 # Default conv layers for Whisper/GLM-ASR audio encoders: [(pad, kernel, stride), ...]
 DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
 
+# Granite Speech 5.0 TurboCTC. Its feature extractor already stacks mel frame
+# pairs (100 Hz -> 50 Hz, 320-dim output), so the `mel_length` handed to
+# compute_encoder_output_length is the 50 Hz frame count and only the encoder's
+# own 4x reduction remains. Granite subsamples with `t // 2` (floor, dropping a
+# trailing odd frame) in each of the two `subsample_layers`; two
+# (pad=0, kernel=2, stride=2) entries reproduce floor(L/2) exactly under the
+# generic formula below. Verified against the real encoder at 1/2/5/10/20s
+# (T_fe 50/100/250/500/1000 -> 12/25/62/125/250).
+# Full path: 100 Hz mel -> 2x FE stacking -> 4x encoder -> 12.5 Hz.
+GRANITE_ENCODER_CONV_LAYERS = [(0, 2, 2), (0, 2, 2)]
+
+# Encoders whose `input_features` are (batch, time, feature_dim) rather than
+# Whisper/GLM-ASR's (batch, n_mels, mel_len). Conformer-family checkpoints
+# (Granite Speech 5.0, Parakeet, Nemotron) are all time-major.
+_TIME_MAJOR_ENCODER_MARKERS = ("granite-speech", "parakeet", "nemotron")
+
+# Decoders that already ship a native audio-placeholder token. Reusing it is
+# strictly better than adding "<audio>" and resizing, above all when the
+# decoder is frozen: masked_scatter overwrites the placeholder's *input*
+# embedding, but Gemma4 also looks the token up in `embed_tokens_per_layer` to
+# build its per-layer embeddings (PLE), and that row is NOT overwritten. A
+# freshly added row would hand every audio position a random, permanently
+# untrainable PLE vector. Gemma's own "<|audio|>" row is pretrained for
+# exactly this placeholder role.
+_NATIVE_AUDIO_TOKENS = {"gemma-4": "<|audio|>"}
+
+
+def native_audio_token(text_model_id: Optional[str]) -> Optional[str]:
+    """Return the decoder's built-in audio placeholder token, if it has one."""
+    lowered = (text_model_id or "").lower()
+    return next((tok for key, tok in _NATIVE_AUDIO_TOKENS.items() if key in lowered), None)
+
+
+def is_time_major_encoder(audio_model_id: Optional[str]) -> bool:
+    """Whether `audio_model_id` expects (batch, time, feature) input_features."""
+    return any(m in (audio_model_id or "").lower() for m in _TIME_MAJOR_ENCODER_MARKERS)
+
 
 def compute_encoder_output_length(mel_length, conv_layers=None):
     """Apply encoder conv layer formulas to compute output length.
@@ -47,6 +84,40 @@ class ASRConfig(transformers.PretrainedConfig):
         # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
         encoder_conv_layers: Optional[list] = None,
         audio_sample_rate: int = 16000,
+        # Whether the encoder takes `input_features` as (batch, time, feature)
+        # instead of Whisper/GLM-ASR's (batch, n_mels, mel_len). Only
+        # SpecAugment unpacks all three dims, so this exists to keep
+        # `_mask_input_features` masking the time axis rather than the feature
+        # axis. Left as None it is auto-detected from `audio_model_id`, so a
+        # Granite/Parakeet swap can't silently mask the wrong axis.
+        audio_features_time_major: Optional[bool] = None,
+        # Whether to forward the mel padding mask into the audio encoder.
+        # This matters a lot for Granite: it uses block attention over fixed
+        # 128-frame blocks, so with `padding="longest"` batches the pad frames
+        # leak into real frames -- measured max abs difference on the VALID
+        # frames of a 1s clip padded alongside a 10s clip is 2.14.
+        #
+        # Auto-detected as True for the Conformer family and False for
+        # Whisper/GLM-ASR. The legacy path is deliberately left unchanged:
+        # GLM-ASR has been trained without an encoder mask for every run in
+        # this repo's history, and silently switching it would make new runs
+        # incomparable to those baselines. Flip it explicitly to test.
+        encoder_attention_mask: Optional[bool] = None,
+        # Placeholder token whose embeddings get replaced by projector output.
+        # Defaults to the decoder's native audio token when it has one (Gemma 4),
+        # otherwise "<audio>", which is added to the tokenizer and requires an
+        # embedding resize.
+        audio_token: Optional[str] = None,
+        # dtype for the projector alone. The fp32-master-weights argument only
+        # applies to parameters an optimizer actually updates, so pinning the
+        # whole stack to float32 to protect a 10M-param projector wastes 2
+        # bytes on every frozen parameter -- 10.4 GiB on a frozen Gemma 4 E2B
+        # (5.12B stored params; "E2B" counts *active* params, and the
+        # per-layer-embedding table alone is 2.35B). Set this to float32 while
+        # model_dtype stays bfloat16 to get master-weight precision where it
+        # matters at frozen-model memory cost. Defaults to model_dtype, so
+        # existing recipes are unchanged.
+        projector_dtype: Optional[str] = None,
         projector_pool_stride: int = 4,
         downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
@@ -78,6 +149,46 @@ class ASRConfig(transformers.PretrainedConfig):
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
         freeze_text_embed_tokens: bool = False,
+        # Gemma 4 keeps a SECOND vocabulary table, `embed_tokens_per_layer`
+        # (262144 x 8960 = 2.35B params -- roughly half the whole decoder),
+        # read once per token per layer. `freeze_text_embed_tokens` does not
+        # cover it: that flag only touches `get_input_embeddings()`. Freezing
+        # this one matters for two independent reasons:
+        #   - Memory. Unfrozen it alone carries ~9.4 GiB of fp32 AdamW moments
+        #     plus 4.4 GiB of bf16 grads, which is what makes a full E2B
+        #     fine-tune not fit where a layers-only one does.
+        #   - Rare-token drift. It is a per-token lookup, so the same argument
+        #     that motivates freezing embed_tokens applies: tokens absent from
+        #     the ASR label distribution get no task gradient and only the
+        #     weight-decay pull, shrinking their rows toward zero.
+        # No-op on decoders without a per-layer table (Qwen3, Llama, ...).
+        freeze_text_per_layer_embeddings: bool = False,
+        # Audio encoder is frozen by default — the published recipe treats
+        # GLM-ASR-Nano as a fixed feature extractor. Setting this to False
+        # makes the encoder trainable; pair with `encoder_learning_rate` in
+        # the training config to avoid destroying pretrained encoder weights
+        # at the projector/decoder LR.
+        freeze_audio_encoder: bool = True,
+        # SpecAugment on mel input (training-only), parameters match
+        # transformers' WhisperConfig / Wav2Vec2 conventions. Most relevant
+        # when the encoder is trainable (`freeze_audio_encoder=False`) —
+        # without augmentation the encoder sees identical mel inputs on
+        # every visit and overfits fast. Standard for ASR encoder fine-
+        # tuning (Whisper, Conformer, wav2vec2 all use it). Applied to
+        # log-mel input where zero is in-distribution (silence);
+        # structurally different from the prior encoder-output ZM which
+        # was removed because zero was OOD for the encoder's emission
+        # distribution. Uses `_compute_mask_indices` from
+        # transformers.models.whisper.modeling_whisper — the same helper
+        # Whisper itself uses, vectorized over the batch and torch.compile
+        # compatible. Default values match Whisper's defaults.
+        apply_spec_augment: bool = False,
+        mask_time_prob: float = 0.05,
+        mask_time_length: int = 10,
+        mask_time_min_masks: int = 2,
+        mask_feature_prob: float = 0.0,
+        mask_feature_length: int = 10,
+        mask_feature_min_masks: int = 0,
         do_sample: bool = False,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -121,6 +232,18 @@ class ASRConfig(transformers.PretrainedConfig):
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
+        self.audio_features_time_major = (
+            is_time_major_encoder(audio_model_id)
+            if audio_features_time_major is None
+            else audio_features_time_major
+        )
+        self.encoder_attention_mask = (
+            is_time_major_encoder(audio_model_id)
+            if encoder_attention_mask is None
+            else encoder_attention_mask
+        )
+        self.audio_token = audio_token or native_audio_token(text_model_id) or "<audio>"
+        self.projector_dtype = projector_dtype or model_dtype
         self.audio_sample_rate = audio_sample_rate
         self.projector_pool_stride = projector_pool_stride
         self.downsample_rate = downsample_rate
@@ -155,6 +278,15 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_projector = freeze_projector
         self.freeze_language_model = freeze_language_model
         self.freeze_text_embed_tokens = freeze_text_embed_tokens
+        self.freeze_text_per_layer_embeddings = freeze_text_per_layer_embeddings
+        self.freeze_audio_encoder = freeze_audio_encoder
+        self.apply_spec_augment = apply_spec_augment
+        self.mask_time_prob = mask_time_prob
+        self.mask_time_length = mask_time_length
+        self.mask_time_min_masks = mask_time_min_masks
+        self.mask_feature_prob = mask_feature_prob
+        self.mask_feature_length = mask_feature_length
+        self.mask_feature_min_masks = mask_feature_min_masks
 
         explicit_generation_args = {
             "num_beams": num_beams,

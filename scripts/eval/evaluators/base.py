@@ -1,6 +1,7 @@
 """Base evaluator classes and shared utilities."""
 
 import os
+from enum import Enum
 
 import attrs
 import jiwer
@@ -11,8 +12,17 @@ from scripts.eval.audio import TextNormalizer
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
 
-# AssemblyAI model options
-ASSEMBLYAI_MODELS = {"best", "universal", "universal-3-pro"}
+
+class AssemblyAIModel(str, Enum):
+    """AssemblyAI model options."""
+
+    best = "best"
+    universal = "universal"
+    universal_3_pro = "universal-3-pro"
+
+
+# Valid `model` values accepted by setup_assemblyai; the enum is the source.
+ASSEMBLYAI_MODELS = {m.value for m in AssemblyAIModel}
 
 
 def setup_assemblyai(
@@ -41,6 +51,15 @@ class EvalResult:
     reference: str
     wer: float
     time: float
+    # Per-sample confidence stats from greedy decode (None when the evaluator
+    # cannot expose per-token logits — external APIs, old in-tree pipelines).
+    # `mean_top1_logprob`: average log-probability of emitted tokens.
+    # `mean_margin`: average (top1 - top2) logprob gap across emitted tokens.
+    # `num_tokens`: number of generated tokens contributing to the averages.
+    # Aggregated to corpus-level in Evaluator.compute_metrics.
+    mean_top1_logprob: float | None = None
+    mean_margin: float | None = None
+    num_tokens: int | None = None
 
 
 @attrs.define
@@ -70,7 +89,6 @@ class AlignmentResult:
     ref_ends: list[float]
     num_aligned_words: int
     num_ref_words: int
-    num_pred_words: int
     time: float
     reference_text: str
     predicted_text: str
@@ -103,8 +121,17 @@ class Evaluator:
         reference = sample["reference"]
         audio = sample["audio"]
 
+        confidence: dict | None = None
         try:
-            prediction, inference_time = self.transcribe(audio)
+            transcribe_result = self.transcribe(audio)
+            # transcribe() may return (text, time) or (text, time, confidence_dict).
+            # The 3-tuple form lets evaluators that can extract per-token logits
+            # (e.g. LocalEvaluator with a scores-capable pipeline) surface them
+            # without forcing every evaluator subclass to change signature.
+            if len(transcribe_result) == 3:
+                prediction, inference_time, confidence = transcribe_result
+            else:
+                prediction, inference_time = transcribe_result
         except Exception as e:
             print(f"Error on sample {idx}: {e}")
             prediction, inference_time = "", 0.0
@@ -113,7 +140,15 @@ class Evaluator:
         norm_ref = self.normalizer.normalize(reference)
         sample_wer = jiwer.wer(norm_ref, norm_pred) * 100 if norm_ref else 0.0
 
-        return idx, EvalResult(prediction, reference, sample_wer, inference_time)
+        return idx, EvalResult(
+            prediction,
+            reference,
+            sample_wer,
+            inference_time,
+            mean_top1_logprob=(confidence or {}).get("mean_top1_logprob"),
+            mean_margin=(confidence or {}).get("mean_margin"),
+            num_tokens=(confidence or {}).get("num_tokens"),
+        )
 
     def evaluate(self, dataset, max_samples: int | None = None) -> list[EvalResult]:
         """Run evaluation loop on dataset."""
@@ -220,8 +255,27 @@ class Evaluator:
         if not self.results:
             return {"wer": 0.0, "avg_time": 0.0, "num_samples": 0}
 
-        return {
+        metrics = {
             "wer": self._corpus_wer(self.results),
             "avg_time": sum(r.time for r in self.results) / len(self.results),
             "num_samples": len(self.results),
         }
+
+        # Corpus-level confidence aggregates: token-weighted means across samples
+        # that have per-token stats (skips API evaluators that can't expose
+        # logits). Weighting by num_tokens — not by sample count — gives the
+        # right "average over emitted tokens" answer when sample lengths differ.
+        weighted_logprob = 0.0
+        weighted_margin = 0.0
+        total_tokens = 0
+        for r in self.results:
+            if r.num_tokens and r.mean_top1_logprob is not None and r.mean_margin is not None:
+                weighted_logprob += r.mean_top1_logprob * r.num_tokens
+                weighted_margin += r.mean_margin * r.num_tokens
+                total_tokens += r.num_tokens
+        if total_tokens > 0:
+            metrics["mean_top1_logprob"] = weighted_logprob / total_tokens
+            metrics["mean_margin"] = weighted_margin / total_tokens
+            metrics["total_tokens"] = total_tokens
+
+        return metrics

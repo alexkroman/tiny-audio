@@ -220,6 +220,23 @@ def install_dependencies(conn: Connection) -> None:
 set -eo pipefail
 
 export PATH="/root/.local/bin:$PATH"
+
+# RunPod images ship torch in system dist-packages alongside its nvidia-*
+# CUDA wheels. When the project pins a different torch version it installs
+# into --user and shadows the image copy, but the nvidia libs stay in the
+# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
+# `import torch` dies with ImportError. Observed on
+# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
+# broke the flash-attn build, whose metadata hook imports torch.
+NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
+# Spelled out with if/else on purpose: these scripts are built with Python
+# f-strings, so shell brace-expansion syntax would be parsed as an f-string
+# replacement field and raise NameError at build time.
+if [ -n "$LD_LIBRARY_PATH" ]; then
+  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
+else
+  export LD_LIBRARY_PATH="$NVLIBS"
+fi
 export PIP_ROOT_USER_ACTION=ignore
 export POETRY_VIRTUALENVS_CREATE=false
 export PIP_BREAK_SYSTEM_PACKAGES=1
@@ -236,6 +253,23 @@ python -c "import torch; assert torch.cuda.is_available()" || {
 }
 
 # Poetry tooling — only install what's missing
+# RunPod images ship torch in system dist-packages alongside its nvidia-*
+# CUDA wheels. When the project pins a different torch version it installs
+# into --user and shadows the image copy, but the nvidia libs stay in the
+# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
+# `import torch` dies with ImportError. Observed on
+# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
+# broke the flash-attn build, whose metadata hook imports torch.
+NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
+# Spelled out with if/else on purpose: these scripts are built with Python
+# f-strings, so shell brace-expansion syntax would be parsed as an f-string
+# replacement field and raise NameError at build time.
+if [ -n "$LD_LIBRARY_PATH" ]; then
+  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
+else
+  export LD_LIBRARY_PATH="$NVLIBS"
+fi
+
 command -v poetry >/dev/null 2>&1 || pip install --user poetry
 python -c "import poetry_plugin_export" 2>/dev/null || pip install --user poetry-plugin-export
 poetry config virtualenvs.create false
@@ -259,6 +293,65 @@ pip install --user -e . --no-deps
 # attn_implementation=flash_attention_2 — without flash-attn the model load
 # falls back to sdpa with a warning.
 pip install --user flash-attn --no-build-isolation --quiet
+
+# causal-conv1d is the CUDA kernel for the depthwise causal conv inside
+# Qwen3.5's linear-attention layers (three of every four layers). Without it
+# transformers logs `causal_conv1d_fn` / `causal_conv1d_update` falling back to
+# a reference implementation it calls "correct but much slower".
+#
+# Installed here rather than as a project dependency for two reasons. It only
+# publishes an sdist, so it compiles against nvcc and torch at install time and
+# needs --no-build-isolation for the same reason flash-attn above does. And the
+# `poetry export --only main` line further up would skip an optional group
+# anyway — the pyproject `hybrid-kernels` group exists for local pods, but the
+# bootstrap path is this script.
+#
+# Non-fatal: the fallback is numerically correct, so an image without nvcc
+# should train slower rather than fail to deploy.
+#
+# ninja/packaging are declared build deps of the sdist, and --no-build-isolation
+# means pip will not fetch them itself — without ninja the compile silently
+# drops to a single-threaded path that takes far longer.
+pip install --user ninja packaging --quiet
+pip install --user causal-conv1d --no-build-isolation --quiet \
+  || echo "WARN: causal-conv1d build failed; Qwen3.5 conv falls back to the slower reference path"
+
+# flash-linear-attention is the fast path for the gated delta rule in those
+# same layers, but it is only safe when paired with tilelang. On Hopper with
+# Triton >=3.4.0 and <3.7.1 fla's Triton kernel for gated chunk_bwd_dqkwg is
+# known-wrong (fla-org#640), so fla raises instead of producing bad gradients.
+# Its TileLang backend is auto-enabled on exactly that combination but needs
+# both the tilelang package and a usable nvcc; without them dispatch falls
+# through to the Triton path and training dies at the first backward.
+#
+# So: install tilelang first (prebuilt manylinux wheel, no compile), then fla,
+# then ask fla's own predicates whether the gated path would raise. If it
+# would, remove fla so transformers uses its reference kernels -- slower, but
+# correct and it actually runs. Verifying here means a bad combination fails at
+# deploy time instead of twenty minutes into training.
+pip install --user tilelang --quiet || echo "WARN: tilelang install failed"
+pip install --user flash-linear-attention --quiet || echo "WARN: flash-linear-attention install failed"
+python - <<'FLA_CHECK' || pip uninstall -y flash-linear-attention fla-core >/dev/null 2>&1
+import sys
+try:
+    from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, TRITON_ABOVE_3_7_1
+    from fla.ops.common.backends.tilelang import TileLangBackend
+except Exception as e:
+    print(f"fla not importable ({type(e).__name__}); nothing to verify")
+    sys.exit(0)
+broken_triton = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 and not TRITON_ABOVE_3_7_1
+if not broken_triton:
+    print("fla: Triton gated path OK on this GPU/Triton combination")
+    sys.exit(0)
+if TileLangBackend.is_available() and TileLangBackend.is_enabled():
+    print("fla: Hopper + broken Triton, but TileLang backend is active")
+    sys.exit(0)
+print(
+    "fla: Hopper with Triton in the broken range and no usable TileLang backend "
+    "-- removing flash-linear-attention so training uses the reference kernels"
+)
+sys.exit(1)
+FLA_CHECK
 
 # liger-kernel provides the fused linear cross-entropy used by
 # apply_liger_kernel_to_qwen3() in scripts/train.py. poetry export already
@@ -319,6 +412,63 @@ echo "Dependencies verified for $TA_PYTHON"
     print(f"Dependencies installed successfully! Full log: {log_path}")
 
 
+@app.command(name="plan")
+def plan(
+    experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
+    seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
+    gpu: str = typer.Option("NVIDIA H100 80GB HBM3", "--gpu"),
+    image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output"),
+    overrides: list[str] = typer.Argument(None, help="Extra Hydra overrides"),
+):
+    """Estimate GPU memory + disk for a config and emit a pod create command."""
+    from scripts.deploy.plan import plan_command
+
+    plan_command(
+        experiment=experiment,
+        seq_len=seq_len,
+        gpu=gpu,
+        image=image,
+        as_json=as_json,
+        overrides=overrides,
+    )
+
+
+@app.command(name="up")
+def up(
+    experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
+    seq_len: int = typer.Option(512, "--seq-len"),
+    name: str | None = typer.Option(None, "--name"),
+    image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
+    max_attempts: int = typer.Option(6, "--max-attempts"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    overrides: list[str] = typer.Argument(None),
+):
+    """Size a config, then create a pod on the first GPU type with capacity."""
+    from scripts.deploy.plan import provision_command
+
+    provision_command(
+        experiment=experiment,
+        seq_len=seq_len,
+        name=name,
+        image=image,
+        max_attempts=max_attempts,
+        dry_run=dry_run,
+        overrides=overrides,
+    )
+
+
+@app.command(name="wait")
+def wait(
+    pod_id: str = typer.Argument(..., help="Pod id from `ta runpod up`"),
+    timeout_s: int = typer.Option(900, "--timeout"),
+):
+    """Block until a pod exposes SSH, then print `<ip> <port>`."""
+    from scripts.deploy.plan import wait_command
+
+    wait_command(pod_id=pod_id, timeout_s=timeout_s)
+
+
 @app.command()
 def deploy(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
@@ -350,6 +500,83 @@ def deploy(
     print(f"To connect: ssh -i ~/.ssh/id_ed25519 -p {port} root@{host}")
 
 
+# Every remote script shares this header: the fd limit, the nvidia-lib
+# LD_LIBRARY_PATH repair, and the HF cache/token exports. It lived inline in all
+# three builders below and had already drifted between them.
+_SCRIPT_PREAMBLE = """#!/bin/bash
+# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
+
+ulimit -n 65536
+{pip_install}export PATH="/root/.local/bin:$PATH"
+
+# RunPod images ship torch in system dist-packages alongside its nvidia-*
+# CUDA wheels. When the project pins a different torch version it installs
+# into --user and shadows the image copy, but the nvidia libs stay in the
+# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
+# `import torch` dies with ImportError. Observed on
+# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
+# broke the flash-attn build, whose metadata hook imports torch.
+NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
+# Spelled out with if/else on purpose: these scripts are built with Python
+# f-strings, so shell brace-expansion syntax would be parsed as an f-string
+# replacement field and raise NameError at build time.
+if [ -n "$LD_LIBRARY_PATH" ]; then
+  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
+else
+  export LD_LIBRARY_PATH="$NVLIBS"
+fi
+export HF_HOME=/workspace/.cache/huggingface
+export HF_DATASETS_CACHE=/workspace/datasets
+export HF_XET_HIGH_PERFORMANCE=1
+export HF_TOKEN="{hf_token}"
+# TileLang JIT-compiles fla's gated delta-rule kernels on first use (~8s each,
+# a handful of them -- sequence length is marked dynamic in the kernel, so this
+# is bounded warmup rather than per-step recompilation). Its cache defaults to
+# ~/.tilelang/cache, i.e. /root, which is ephemeral container storage: every
+# fresh pod would recompile from scratch. Point it at the persistent volume for
+# the same reason HF_HOME is redirected above.
+export TILELANG_CACHE_DIR=/workspace/.cache/tilelang
+"""
+
+
+def _script_preamble(hf_token: str, *, pip_packages: str = "", extras: str = "") -> str:
+    """Shared shell header for the remote train/sift/eval scripts.
+
+    Args:
+        hf_token: Value exported as HF_TOKEN.
+        pip_packages: Extra packages to install before the run; the pip line is
+            omitted entirely when empty. Only the eval script needs one
+            (modelscope) now that Xet has replaced hf_transfer.
+        extras: Extra `export` lines appended to the header.
+    """
+    pip_install = (
+        f"pip install {pip_packages} --quiet --root-user-action=ignore\n" if pip_packages else ""
+    )
+    preamble = _SCRIPT_PREAMBLE.format(pip_install=pip_install, hf_token=hf_token)
+    return preamble + extras
+
+
+def _script_epilogue(label: str, finished: str) -> str:
+    """Shared tail: report the exit code, then idle so tmux stays inspectable.
+
+    Args:
+        label: Name used in the success/failure banners.
+        finished: Name used in the closing message.
+    """
+    return f"""
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "===== {label} Completed Successfully ====="
+else
+    echo "===== {label} Failed with exit code: $EXIT_CODE ====="
+fi
+
+echo "{finished} finished. Session will remain active for inspection."
+sleep infinity
+"""
+
+
 def build_training_script(
     experiment: str,
     hf_token: str,
@@ -366,60 +593,136 @@ def build_training_script(
 
     extra_args_str = " ".join(extra_args) if extra_args else ""
 
-    return f"""#!/bin/bash
-# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
-
-ulimit -n 65536
-pip install hf_transfer --quiet --root-user-action=ignore
-export PATH="/root/.local/bin:$PATH"
-export TOKENIZERS_PARALLELISM=false
-export HF_DATASETS_AUDIO_DECODER="soundfile"
-export HF_HOME=/workspace/.cache/huggingface
-export HF_DATASETS_CACHE=/workspace/datasets
-export HF_HUB_ENABLE_HF_TRANSFER=1
-export HF_TOKEN="{hf_token}"
-{wandb_exports}
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
-export TORCH_CUDNN_BENCHMARK=1
-# Keep the inductor + triton caches on local NVMe (/root/.cache/...), not on
-# the NFS-backed /workspace volume. /workspace previously caused ESTALE
-# (Errno 116, "Stale file handle") crashes inside Inductor's compile-worker
-# pool when the underlying NFS handle expired mid-write — typical for any
-# parallel-write workload on a networked FS. The cost of putting these on
-# local NVMe is one cold-cache compile per pod boot (seconds–minutes);
-# the cost of ESTALE is a dead training job.
-export TORCHINDUCTOR_CACHE_DIR=/root/.cache/torch_inductor
-export TRITON_CACHE_DIR=/root/.cache/triton
-export TORCHINDUCTOR_FX_GRAPH_CACHE=1
-export TORCH_DYNAMO_ALLOW_UNSPEC_INT_ON_NN_MODULE=1
-export TORCH_CUDA_GRAPHS_ENABLED=0
-
+    extra_exports = (
+        "export TOKENIZERS_PARALLELISM=false\n"
+        'export HF_DATASETS_AUDIO_DECODER="soundfile"\n'
+        f"{wandb_exports}"
+        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+        "export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1\n"
+        "export TORCH_CUDNN_BENCHMARK=1\n"
+        # Keep the inductor + triton caches on local NVMe (/root/.cache/...), not
+        # on the NFS-backed /workspace volume. /workspace previously caused ESTALE
+        # (Errno 116, "Stale file handle") crashes inside Inductor's compile-worker
+        # pool when the underlying NFS handle expired mid-write -- typical for any
+        # parallel-write workload on a networked FS. The cost of putting these on
+        # local NVMe is one cold-cache compile per pod boot (seconds-minutes);
+        # the cost of ESTALE is a dead training job.
+        "export TORCHINDUCTOR_CACHE_DIR=/root/.cache/torch_inductor\n"
+        "export TRITON_CACHE_DIR=/root/.cache/triton\n"
+        "export TORCHINDUCTOR_FX_GRAPH_CACHE=1\n"
+        "export TORCH_DYNAMO_ALLOW_UNSPEC_INT_ON_NN_MODULE=1\n"
+        "export TORCH_CUDA_GRAPHS_ENABLED=0\n"
+    )
+    body = f"""
 cd /workspace
-python -m scripts.train +experiments={experiment} {extra_args_str}
-EXIT_CODE=$?
+python -m scripts.train +experiments={experiment} {extra_args_str}"""
+    return (
+        _script_preamble(hf_token, extras=extra_exports)
+        + body
+        + _script_epilogue("Training", "Training script")
+    )
 
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "===== Training Completed Successfully ====="
-else
-    echo "===== Training Failed with exit code: $EXIT_CODE ====="
-fi
 
-echo "Training script finished. Session will remain active for inspection."
-sleep infinity
-"""
+def _remote_free_gib(conn: Connection, path: str = "/workspace") -> float | None:
+    """Free space on the filesystem backing `path`, in GiB (None if unreadable)."""
+    result = conn.run(f"df -Pk {path} | tail -1", hide=True, warn=True)
+    if not result.ok:
+        return None
+    fields = result.stdout.split()
+    try:
+        # `df -Pk` reports 1K blocks; the 4th field is Available.
+        return int(fields[3]) / (1024**2)
+    except (IndexError, ValueError):
+        return None
+
+
+# Where a run materializes its bulk: the dataset cache (parquet + generated
+# arrow) and the Hub cache (model weights). Both are exported by
+# _script_preamble, so they are the same paths the training script will use.
+_REMOTE_CACHE_DIRS = ("/workspace/datasets", "/workspace/.cache/huggingface")
+
+
+def _remote_used_gib(conn: Connection, paths: tuple[str, ...]) -> float:
+    """GiB already materialized under `paths` on the pod (0 if unreadable).
+
+    `du` walks metadata, and /workspace is often a network volume holding a
+    few hundred thousand parquet shards, so each call is bounded by `timeout`
+    rather than allowed to stall the preflight. An unreadable or missing path
+    contributes 0, which just makes the check conservative again.
+    """
+    total_kb = 0
+    for path in paths:
+        result = conn.run(f"timeout 60 du -sk {path} 2>/dev/null | tail -1", hide=True, warn=True)
+        if not result.ok or not result.stdout.strip():
+            continue
+        try:
+            total_kb += int(result.stdout.split()[0])
+        except (IndexError, ValueError):
+            continue
+    return total_kb / (1024**2)
+
+
+def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) -> None:
+    """Refuse to start a run that /workspace cannot physically hold.
+
+    ENOSPC does not surface at launch. It surfaces hours later as an xet
+    "File reconstruction error: No space left on device" partway through
+    dataset prep, after the pod has been billed for the whole time. The plan
+    already knows what a recipe needs and `df` knows what the pod has, so
+    there is no reason to find out the expensive way. The usual trigger is a
+    pod sized for one experiment then handed a different one to train --
+    `up` and `train` share a default, but either can be pointed elsewhere
+    with -e.
+    """
+    from scripts.deploy.plan import build_plan
+
+    free = _remote_free_gib(conn)
+    if free is None:
+        print("Could not read `df /workspace`; skipping the disk preflight.")
+        return
+    try:
+        need = build_plan(experiment, overrides, 512).disk["recommended"]
+    except Exception as exc:  # unresolvable config, gated repo, Hub outage
+        print(f"Disk preflight skipped ({type(exc).__name__}: {exc}).")
+        return
+
+    # `need` is the size of a run starting from an empty pod. Re-running an
+    # experiment on a pod that already holds its dataset would double-count:
+    # the bytes are simultaneously "required" and already subtracted from
+    # `free`. Compare against what is still left to write instead.
+    cached = _remote_used_gib(conn, _REMOTE_CACHE_DIRS)
+    remaining = max(need - cached, 0.0)
+    print(
+        f"/workspace has {free:,.0f} GiB free; {experiment} needs ~{need:,.0f} GiB total, "
+        f"~{cached:,.0f} GiB already cached -> ~{remaining:,.0f} GiB still to write."
+    )
+    if free < remaining:
+        print(
+            f"\nNot enough disk -- short by {remaining - free:,.0f} GiB. `datasets` holds\n"
+            "the downloaded parquet and its generated arrow tables at the same time, and\n"
+            "checkpoints scale with the trainable stack, so this run would die with\n"
+            "ENOSPC mid-prep. Levers, cheapest first: lower `save_total_limit`, provision\n"
+            f"a bigger pod (see `ta runpod plan -e {experiment}`), or pass\n"
+            "--skip-disk-check to override."
+        )
+        raise typer.Exit(1)
 
 
 @app.command()
 def train(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
     port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
-    experiment: str = typer.Option("mlp", "--experiment", "-e", help="Experiment config to run"),
+    experiment: str = typer.Option(
+        "granite_gemma", "--experiment", "-e", help="Experiment config to run"
+    ),
     session_name: str | None = typer.Option(
         None, "--session-name", "-s", help="Custom tmux session name"
     ),
     no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
     force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+    skip_disk_check: bool = typer.Option(
+        False, "--skip-disk-check", help="Start even if /workspace looks too small"
+    ),
     wandb_run_id: str | None = typer.Option(None, "--wandb-run-id", help="W&B run ID to resume"),
     wandb_resume: Annotated[
         str | None,
@@ -435,6 +738,9 @@ def train(
 
     if not test_connection(conn):
         sys.exit(1)
+
+    if not skip_disk_check:
+        _check_remote_disk(conn, experiment, list(extra_args or []))
 
     if session_name is None:
         session_name = _auto_session_name(f"train_{experiment}")
@@ -539,23 +845,14 @@ def build_sift_script(
     compile_arg = "--compile" if use_compile else ""
     datasets_arg = f"--datasets {' '.join(datasets)}" if datasets else ""
 
-    return f"""#!/bin/bash
-# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
-
-ulimit -n 65536
-pip install hf_transfer --quiet --root-user-action=ignore
-export PATH="/root/.local/bin:$PATH"
-export HF_HOME=/workspace/.cache/huggingface
-export HF_DATASETS_CACHE=/workspace/datasets
-export HF_HUB_ENABLE_HF_TRANSFER=1
-export HF_TOKEN="{hf_token}"
-
-# A40 GPU optimizations (48GB VRAM)
-export CUDA_VISIBLE_DEVICES=0
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
-export TORCH_CUDNN_BENCHMARK=1
-
+    extra_exports = (
+        "\n# A40 GPU optimizations (48GB VRAM)\n"
+        "export CUDA_VISIBLE_DEVICES=0\n"
+        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+        "export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1\n"
+        "export TORCH_CUDNN_BENCHMARK=1\n"
+    )
+    body = f"""
 cd /workspace
 
 python -m scripts.generate_sift_dataset \\
@@ -564,18 +861,12 @@ python -m scripts.generate_sift_dataset \\
     {compile_arg} \\
     {max_samples_arg} \\
     {datasets_arg}
-
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "===== SIFT Dataset Generation Completed Successfully ====="
-else
-    echo "===== SIFT Dataset Generation Failed with exit code: $EXIT_CODE ====="
-fi
-
-echo "Script finished. Session will remain active for inspection."
-sleep infinity
 """
+    return (
+        _script_preamble(hf_token, extras=extra_exports)
+        + body
+        + _script_epilogue("SIFT Dataset Generation", "Script")
+    )
 
 
 @app.command()
@@ -666,22 +957,13 @@ def build_eval_script(
     if assemblyai_api_key:
         assemblyai_export = f'export ASSEMBLYAI_API_KEY="{assemblyai_api_key}"'
 
-    return f"""#!/bin/bash
-# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
-
-ulimit -n 65536
-pip install hf_transfer modelscope --quiet --root-user-action=ignore
-export PATH="/root/.local/bin:$PATH"
-export HF_HOME=/workspace/.cache/huggingface
-export HF_DATASETS_CACHE=/workspace/datasets
-export HF_HUB_ENABLE_HF_TRANSFER=1
-export HF_TOKEN="{hf_token}"
-{assemblyai_export}
-
-# GPU optimizations
-export CUDA_VISIBLE_DEVICES=0
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
+    extra_exports = (
+        f"{assemblyai_export}\n"
+        "\n# GPU optimizations\n"
+        "export CUDA_VISIBLE_DEVICES=0\n"
+        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+    )
+    body = f"""
 cd /workspace
 
 python -m scripts.eval.cli \\
@@ -693,18 +975,12 @@ python -m scripts.eval.cli \\
     {streaming_arg} \\
     --output-dir /workspace/outputs \\
     {extra_args_str}
-
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "===== Evaluation Completed Successfully ====="
-else
-    echo "===== Evaluation Failed with exit code: $EXIT_CODE ====="
-fi
-
-echo "Eval script finished. Session will remain active for inspection."
-sleep infinity
 """
+    return (
+        _script_preamble(hf_token, pip_packages="modelscope", extras=extra_exports)
+        + body
+        + _script_epilogue("Evaluation", "Eval script")
+    )
 
 
 @app.command()

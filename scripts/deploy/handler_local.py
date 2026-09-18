@@ -8,13 +8,6 @@ from pathlib import Path
 
 import typer
 
-try:
-    from tiny_audio.handler import EndpointHandler
-except ImportError as e:
-    print(f"Failed to import handler: {e}")
-    print("   Make sure tiny_audio package is installed")
-    sys.exit(1)
-
 app = typer.Typer(help="Test HuggingFace inference endpoint handler locally")
 
 
@@ -33,16 +26,19 @@ def find_latest_model(base_dir: str = "outputs") -> str | None:
 
 def find_test_audio() -> str | None:
     """Find a test audio file in the project."""
-    test_paths = [
-        ".venv/lib/python3.11/site-packages/gradio/test_data/test_audio.wav",
-        ".venv/lib/python3.11/site-packages/gradio/media_assets/audio/cantina.wav",
-        "demo/sample.wav",
-        "tests/test_audio.wav",
-    ]
-
     base_dir = Path(__file__).parent.parent.parent
 
-    for test_path in test_paths:
+    # Gradio ships sample audio; glob the python version out of the path so
+    # this keeps working across interpreter upgrades (was hardcoded to 3.11).
+    for pattern in (
+        ".venv/lib/python3.*/site-packages/gradio/test_data/test_audio.wav",
+        ".venv/lib/python3.*/site-packages/gradio/media_assets/audio/cantina.wav",
+    ):
+        match = next(iter(sorted(base_dir.glob(pattern))), None)
+        if match:
+            return str(match)
+
+    for test_path in ("demo/sample.wav", "tests/test_audio.wav"):
         full_path = base_dir / test_path
         if full_path.exists():
             return str(full_path)
@@ -96,6 +92,16 @@ def test(
     ),
 ):
     """Test the EndpointHandler with various configurations."""
+    # Imported here, not at module scope: it pulls in transformers + torch
+    # (~2.8s), which every other `ta dev` command would otherwise pay because
+    # scripts/dev.py imports this module to register the command.
+    try:
+        from tiny_audio.handler import EndpointHandler
+    except ImportError as e:
+        print(f"Failed to import handler: {e}")
+        print("   Make sure tiny_audio package is installed")
+        sys.exit(1)
+
     model_path = model or "mazesmazes/tiny-audio"
     if model is None:
         typer.echo(f"No model specified, using default: {model_path}")

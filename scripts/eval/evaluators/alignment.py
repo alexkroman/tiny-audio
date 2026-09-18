@@ -87,13 +87,11 @@ class BaseAlignmentEvaluator:
         audio_field: str = "audio",
         text_field: str = "transcript",
         words_field: str = "words",
-        num_workers: int = 1,
         verbose: bool = False,
     ):
         self.audio_field = audio_field
         self.text_field = text_field
         self.words_field = words_field
-        self.num_workers = num_workers
         self.verbose = verbose
         self.normalizer = TextNormalizer()
         self.results: list[AlignmentResult] = []
@@ -142,7 +140,6 @@ class BaseAlignmentEvaluator:
                     ref_ends=[],
                     num_aligned_words=0,
                     num_ref_words=len(ref_words),
-                    num_pred_words=len(pred_words),
                     time=inference_time,
                     reference_text=ref_text,
                     predicted_text=pred_text,
@@ -169,7 +166,6 @@ class BaseAlignmentEvaluator:
                 ref_ends=ref_ends,
                 num_aligned_words=len(aligned_pairs),
                 num_ref_words=len(ref_words),
-                num_pred_words=len(pred_words),
                 time=inference_time,
                 reference_text=ref_text,
                 predicted_text=pred_text,
@@ -362,10 +358,9 @@ class DeepgramAlignmentEvaluator(BaseAlignmentEvaluator):
         audio_field: str = "audio",
         text_field: str = "transcript",
         words_field: str = "words",
-        num_workers: int = 1,
         verbose: bool = False,
     ):
-        super().__init__(audio_field, text_field, words_field, num_workers, verbose=verbose)
+        super().__init__(audio_field, text_field, words_field, verbose=verbose)
         from deepgram import DeepgramClient
 
         self.client = DeepgramClient(api_key=api_key)
@@ -412,10 +407,9 @@ class ElevenLabsAlignmentEvaluator(BaseAlignmentEvaluator):
         audio_field: str = "audio",
         text_field: str = "transcript",
         words_field: str = "words",
-        num_workers: int = 1,
         verbose: bool = False,
     ):
-        super().__init__(audio_field, text_field, words_field, num_workers, verbose=verbose)
+        super().__init__(audio_field, text_field, words_field, verbose=verbose)
         from elevenlabs.client import ElevenLabs
 
         self.client = ElevenLabs(api_key=api_key)

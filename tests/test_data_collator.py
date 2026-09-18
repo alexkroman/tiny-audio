@@ -424,7 +424,12 @@ class TestAudioTokenCountsExposed:
 class TestExtractAudioArraysFilters:
     """Collator must drop rows that would poison training:
     pre-norm-empty text, post-norm-empty text (entire label was an annotation
-    marker), and audio longer than the Whisper window (silently truncated)."""
+    marker), and over-long audio (silently truncated while the label keeps its
+    full transcript).
+
+    The duration bound is read from DataCollator._MAX_AUDIO_SECONDS rather than
+    hardcoded. It has been retuned before (30.0 -> 19.0, to cut mel-spec peak
+    memory) and hardcoding it left these tests asserting the old window."""
 
     def test_drops_post_normalize_empty_text(self, collator):
         # Switchboard ships ~2% of rows where the whole label is `<noise>` —
@@ -436,21 +441,38 @@ class TestExtractAudioArraysFilters:
         assert len(arrays) == 1
         assert kept[0]["text"] == "hello world"
 
-    def test_drops_audio_longer_than_30_seconds(self, collator):
-        # Whisper's feature extractor pads/truncates to a fixed 30s window;
-        # >30s audio is silently truncated while the label keeps its full
-        # transcript — observed in EdAcc (max 46s) and Earnings22 (max 26s).
-        good = create_sample("normal length", duration_sec=5.0)
-        too_long = create_sample("very long", duration_sec=35.0)
+    def test_drops_audio_over_max_duration(self, collator):
+        # Over-cap audio is silently truncated by the feature extractor while
+        # the label keeps its full transcript, so the row teaches the model to
+        # hallucinate the unheard tail — observed in EdAcc (max 46s) and
+        # Earnings22 (max 26s).
+        good = create_sample("normal length", duration_sec=1.0)
+        too_long = create_sample("very long", duration_sec=DataCollator._MAX_AUDIO_SECONDS + 5.0)
         arrays, kept = collator._extract_audio_arrays([good, too_long])
         assert len(arrays) == 1
         assert kept[0]["text"] == "normal length"
 
-    def test_keeps_audio_at_30_second_boundary(self, collator):
-        # Exactly 30s should still pass — the cap is strictly greater-than.
-        ok = create_sample("exactly thirty seconds", duration_sec=30.0)
+    def test_keeps_audio_at_max_duration_boundary(self, collator):
+        # The cap is strictly greater-than, so exactly _MAX_AUDIO_SECONDS passes.
+        ok = create_sample("at the cap", duration_sec=DataCollator._MAX_AUDIO_SECONDS)
         arrays, _ = collator._extract_audio_arrays([ok])
         assert len(arrays) == 1
+
+    def test_keeps_audio_at_min_duration_boundary(self, collator):
+        # Mirror of the upper bound: the floor is strictly less-than, so a clip
+        # of exactly _MIN_AUDIO_SECONDS is kept while anything under is dropped.
+        ok = create_sample("at the floor", duration_sec=DataCollator._MIN_AUDIO_SECONDS)
+        arrays, _ = collator._extract_audio_arrays([ok])
+        assert len(arrays) == 1
+
+    def test_drops_audio_under_min_duration(self, collator):
+        # Sub-floor clips are boundary-cut segments and isolated backchannels
+        # where the audio span and the reference transcript don't line up.
+        good = create_sample("normal length", duration_sec=1.0)
+        too_short = create_sample("yeah", duration_sec=DataCollator._MIN_AUDIO_SECONDS / 2)
+        arrays, kept = collator._extract_audio_arrays([good, too_short])
+        assert len(arrays) == 1
+        assert kept[0]["text"] == "normal length"
 
     def test_drops_pre_normalize_empty_text(self, collator):
         # Existing behavior — empty-string labels were already dropped.

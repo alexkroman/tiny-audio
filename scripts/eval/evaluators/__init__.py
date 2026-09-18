@@ -23,6 +23,7 @@ from .asr import (
 )
 from .base import (
     AlignmentResult,
+    AssemblyAIModel,
     DiarizationResult,
     EvalResult,
     Evaluator,
@@ -46,6 +47,7 @@ from .mcq import (
 )
 
 __all__ = [
+    "AssemblyAIModel",
     # Result types
     "EvalResult",
     "DiarizationResult",

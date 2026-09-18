@@ -1,0 +1,62 @@
+# Loquacious Set (a.k.a. LargeScaleASR) `medium` — single-source mix for the
+# granite_gemma recipe.
+#
+# 2,500 hours / 1,074,114 train rows, assembled by SpeechBrain as 500h each
+# from VoxPopuli, LibriHeavy, YODAS, People's Speech and CommonVoice 18.0.
+# That is the same source pool as configs/data/multiasr.yaml, pre-balanced
+# into one repo: ~233 GB of parquet against multiasr's ~1.2 TiB, which is
+# what makes it provisionable on a single container disk (see `ta runpod
+# plan`). The tradeoff vs multiasr is coverage, not quality — no Gigaspeech,
+# SPGISpeech, TEDLIUM, AMI or Earnings-22, so the meeting/telephony and
+# financial-call domains are absent from training here.
+#
+# Two properties of this repo that the loader has to absorb:
+#
+#   - Audio lives in a `wav` column typed `Audio(decode=False)`, so rows
+#     arrive as raw bytes rather than decoded arrays. DatasetLoader renames
+#     it to `audio` and then re-casts with `Audio(sampling_rate=...)`, which
+#     restores decoding; no special handling needed here beyond
+#     audio_column.
+#   - Transcripts are heavily normalized to ALL-CAPS with no punctuation.
+#     _needs_truecase treats >90% uppercase as a mono-case source, so
+#     truecase fires and lifts labels to proper-cased form — but nothing
+#     restores punctuation. Labels from this source are therefore
+#     cased-but-unpunctuated, the same shape as TEDLIUM/AMI in the multiasr
+#     mix. The difference is that here it is 100% of the mix rather than a
+#     ~7% minority, so expect the decoder's output distribution to drop
+#     punctuation. WER is unaffected (Whisper's EnglishTextNormalizer strips
+#     punct from both sides), but treat any punctuation-sensitive readout of
+#     this run as uninformative.
+#
+# Usage:
+#   poetry run python scripts/train.py +experiments=granite_gemma
+
+datasets:
+  - path: speechbrain/LoquaciousSet
+    name: medium
+    # `wav`, not `audio` — see the decode=False note above.
+    audio_column: wav
+    text_column: text
+    # Ships a float32 `duration` column, so group_by_length needs no
+    # full-decode map to compute one. Harmless while granite_gemma sets
+    # group_by_length: false; free if it is ever turned on.
+    duration_column: duration
+    task: transcribe
+    train_splits: [train]
+    # The eval split is named `dev` (not `validation`), and unlike the train
+    # tiers it is config-independent: every config points at the same
+    # `dev/dev*` files (15h / 7,759 rows, drawn from each source's own dev
+    # set plus manually transcribed YODAS). `test` (21h / 8,087 rows) is
+    # left for offline scoring via `ta eval`.
+    eval_splits: [dev]
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+# Single-source config, so this is just a 500-row cap on `dev`. Kept as the
+# per-dataset key rather than the global `max_eval_samples` to match
+# multiasr.yaml, so swapping between the two data configs doesn't silently
+# change which cap applies.
+max_eval_samples_per_dataset: 500

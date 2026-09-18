@@ -165,6 +165,10 @@ class TestPostprocess:
         pipeline.tokenizer = MagicMock()
         pipeline.tokenizer.decode.return_value = "hello world"
 
+        # postprocess reads the model's stop ids; a real pipeline always has one.
+        pipeline.model = MagicMock()
+        pipeline.model.generation_config.eos_token_id = None
+
         return pipeline
 
     def test_handles_list_outputs(self, mock_pipeline):

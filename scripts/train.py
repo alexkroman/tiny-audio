@@ -8,6 +8,7 @@
 # than per-line.
 
 import contextlib
+import functools
 import logging
 import os
 import random
@@ -130,15 +131,41 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # sources skip truecase and don't need this cleanup).
 _SPACE_BEFORE_SENT_PUNCT_RE = re.compile(r"\s+([.,!?])")
 _SENT_START_LOWERCASE_RE = re.compile(r"([.!?])\s+([a-z])")
+# A period that closes a run of spelled-out letters is not a sentence boundary.
+# AMI writes acronyms inline as "S. S. H." / "X. M. L.", and AMI has no real
+# sentence punctuation at all, so capitalizing after one is always wrong there
+# (measured: 13 of 300 rows contain a period, and all 13 are spelled letters).
+# Matched against the text preceding the period, so it fires on the SECOND and
+# later members of a run — the discriminator against Gigaspeech's tag-derived
+# boundaries, which look like "e t. the video game." where the letter before
+# the period carries no period of its own.
+_SPELLED_LETTER_RUN_RE = re.compile(r"\b[A-Za-z]\.\s+[A-Za-z]$")
 _EM_DASH_RE = re.compile(r"\s*--\s*")
 _GONNA_ARTIFACT_RE = re.compile(r"\bgonNA\b")
 _WANNA_ARTIFACT_RE = re.compile(r"\bwanNA\b")
 _GOTTA_ARTIFACT_RE = re.compile(r"\bgotTA\b")
 
 
+def _capitalize_sentence_starts(text: str) -> str:
+    """Uppercase the first letter after sentence-final punctuation.
+
+    Truecase fails to capitalize the next sentence after a mid-string period
+    ("E T. the Video game." instead of "E T. The Video game."), so this fixes
+    it up — except after a spelled-letter run, where the period is part of an
+    acronym rather than a boundary.
+    """
+
+    def repl(match: re.Match) -> str:
+        if _SPELLED_LETTER_RUN_RE.search(text[: match.start()]):
+            return match.group(0)
+        return f"{match.group(1)} {match.group(2).upper()}"
+
+    return _SENT_START_LOWERCASE_RE.sub(repl, text)
+
+
 def _post_truecase_cleanup(text: str) -> str:
     text = _SPACE_BEFORE_SENT_PUNCT_RE.sub(r"\1", text)
-    text = _SENT_START_LOWERCASE_RE.sub(lambda m: f"{m.group(1)} {m.group(2).upper()}", text)
+    text = _capitalize_sentence_starts(text)
     text = _EM_DASH_RE.sub(" -- ", text)
     text = _GONNA_ARTIFACT_RE.sub("gonna", text)
     text = _WANNA_ARTIFACT_RE.sub("wanna", text)
@@ -171,16 +198,40 @@ if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         nltk.download("punkt", quiet=True)
 
 
+# Per-source casing policy, set via a dataset config's `text_case` field and
+# carried to the collator on the `_text_case` column. Declaring it beats the
+# per-row heuristic below because the answer is a property of the SOURCE, not
+# of the row — see _needs_truecase's own docstring, which names the sources it
+# is trying to re-derive from characters.
+TEXT_CASE_MONO = "mono"  # ALL-CAPS or zero-cap source; recase it
+TEXT_CASE_CASED = "cased"  # ships case + proper nouns; never touch
+# Below this many letters the statistical truecaser has too little context to
+# be reliable — it promotes backchannels to proper nouns. Short mono-case text
+# gets a deterministic recase instead.
+_MIN_TRUECASE_LETTERS = 5
+
+
 def _needs_truecase(text: str) -> bool:
-    """Apply truecase only to mono-case text. Already-cased sources
-    (LibriHeavy text_original, CV, VoxPopuli raw_text, SPGISpeech) carry
-    proper-noun casing that the statistical truecaser would damage
-    (e.g. "McClarnon" -> "Mcclarnon"). Heuristic: text with any internal
-    capitalization beyond what truecase would produce is already cased.
+    """Heuristic fallback for sources with no declared `text_case`.
+
+    Apply truecase only to mono-case text. Already-cased sources (LibriHeavy
+    text_original, CV, VoxPopuli raw_text, SPGISpeech) carry proper-noun
+    casing that the statistical truecaser would damage (e.g. "McClarnon" ->
+    "Mcclarnon"). Heuristic: text with any internal capitalization beyond what
+    truecase would produce is already cased.
+
+    Prefer declaring `text_case` on the dataset. This heuristic misclassifies
+    in both directions and cannot do better from a single row: a lowercase
+    FRAGMENT of a cased source (SPGISpeech's sliding window emits these for
+    13% of rows) is character-identical to a row from a genuinely uncased
+    source, and punctuation does not separate them either.
     """
     letters = [c for c in text if c.isalpha()]
-    if len(letters) < 5:
-        # Too short to recase meaningfully ("yeah", "OH"). Leave alone.
+    if len(letters) < _MIN_TRUECASE_LETTERS:
+        # Too short to recase meaningfully ("yeah", "OH"). Leave alone. Note
+        # this is only safe when the source is already cased; a declared
+        # `mono` source routes to _recase_monocase_text instead, which handles
+        # short text deterministically rather than passing it through.
         return False
     upper_count = sum(c.isupper() for c in letters)
     upper_frac = upper_count / len(letters)
@@ -191,7 +242,34 @@ def _needs_truecase(text: str) -> bool:
     return upper_count == 0
 
 
-def _normalize_label(raw_text: str) -> str:
+def _capitalize_first_letter(text: str) -> str:
+    for i, char in enumerate(text):
+        if char.isalpha():
+            return f"{text[:i]}{char.upper()}{text[i + 1 :]}"
+    return text
+
+
+def _recase_monocase_text(text: str) -> str:
+    """Recase a row from a source declared `text_case: mono`.
+
+    Long text goes to the statistical truecaser. Short text does not: the
+    truecaser needs context, and without it the old code simply passed the row
+    through unchanged — which on an ALL-CAPS source means shipping "YEAH" /
+    "OKAY" / "HMM" as training labels. Measured at 21% of AMI rows. A
+    deterministic lowercase-then-capitalize is all these actually need and it
+    cannot invent proper nouns.
+    """
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) >= _MIN_TRUECASE_LETTERS:
+        return _post_truecase_cleanup(truecase.get_true_case(text))
+    return _capitalize_first_letter(text.lower())
+
+
+# Pure function of its input, and the collator normalizes each row twice: once
+# to test for an empty label and once to build the sample. Cache sized well
+# above the largest training batch so the second call is always a hit.
+@functools.lru_cache(maxsize=4096)
+def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
     """Canonicalize a training transcript label to cased+punct form.
 
     Pipeline (in order):
@@ -214,10 +292,14 @@ def _normalize_label(raw_text: str) -> str:
     4. Canonicalize percent — mirrors scripts/analysis.py:normalize_text
        so the train-time label matches eval-time WER canonicalization.
     5. Collapse whitespace.
-    6. Apply truecase only to mono-case text (see _needs_truecase). This
-       lifts ALL-CAPS sources (Gigaspeech, AMI) and zero-cap sources
-       (TEDLIUM, Peoples, Switchboard) to proper-cased form without
-       damaging already-cased sources (LibriHeavy, CV, SPGI, VoxPopuli).
+    6. Recase according to `text_case`, the source's declared casing policy
+       (set per dataset in the data config, carried on the `_text_case`
+       column). `mono` lifts ALL-CAPS sources (Gigaspeech, AMI) and zero-cap
+       sources (TEDLIUM, Peoples, Switchboard) to proper-cased form; `cased`
+       leaves already-cased sources (LibriHeavy, CV, SPGI, VoxPopuli)
+       untouched. When a source declares nothing, fall back to the per-row
+       _needs_truecase heuristic — which is what every source used to get,
+       and which misclassifies lowercase fragments of cased sources.
 
     Output target format is cased text with punctuation where available —
     aligning the dominant training label distribution to the Qwen3
@@ -239,6 +321,10 @@ def _normalize_label(raw_text: str) -> str:
     text = _WHITESPACE_RE.sub(" ", text).strip()
     if not text:
         return ""
+    if text_case == TEXT_CASE_CASED:
+        return text
+    if text_case == TEXT_CASE_MONO:
+        return _recase_monocase_text(text)
     if _needs_truecase(text):
         text = truecase.get_true_case(text)
         text = _post_truecase_cleanup(text)
@@ -307,6 +393,69 @@ class DatasetLoader:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
 
+        # text_override: replace the text column with a constant string for
+        # every row in this source. Used for non-speech / silence-rejection
+        # datasets (e.g. WHAM noise) that ship audio without a transcript and
+        # should train the model to emit an explicit response (typically "")
+        # on non-speech input. Also flips `_allow_empty_label` so the
+        # DataCollator's empty-label filter doesn't drop these rows.
+        text_override = dataset_cfg.get("text_override")
+        if text_override is not None:
+            if "text" in ds.column_names:
+                ds = ds.remove_columns(["text"])
+            n = len(ds)
+            ds = ds.add_column("text", [text_override] * n)
+            ds = ds.add_column("_allow_empty_label", [True] * n)
+
+        # force_lowercase: lowercase the entire text column before
+        # _normalize_label runs. Used for sources whose annotation convention
+        # uses ALL-CAPS within otherwise-lowercase text as a non-orthographic
+        # signal (e.g. Buckeye uses caps for prosodic stress: "and just
+        # STARTED picking a fight"). The mixed-case pattern defeats the
+        # _needs_truecase heuristic (which only recases pure mono-case
+        # sources), leaving the emphasis-caps to survive normalization and
+        # produce inconsistent training labels (~15% of Buckeye rows).
+        # Force-lowercasing first collapses these to clean zero-cap text,
+        # which then qualifies for truecase and produces uniformly cased
+        # output. WER scoring is unaffected (Whisper normalizer lowercases
+        # both sides); this fix is about training-label consistency.
+        if dataset_cfg.get("force_lowercase"):
+            ds = ds.map(
+                lambda b: {"text": [(t or "").lower() for t in b["text"]]},
+                batched=True,
+                num_proc=self.num_proc,
+            )
+
+        # text_case: declares whether this source's transcripts already carry
+        # case ("cased") or arrive mono-case and need recasing ("mono").
+        # Stored per row, like _allow_empty_label, so _normalize_label does not
+        # have to re-derive a source property from a single row's characters.
+        # Omit it to keep the legacy per-row heuristic.
+        text_case = dataset_cfg.get("text_case")
+        if text_case is not None:
+            if text_case not in (TEXT_CASE_MONO, TEXT_CASE_CASED):
+                raise ValueError(
+                    f"text_case must be {TEXT_CASE_MONO!r} or {TEXT_CASE_CASED!r}, "
+                    f"got {text_case!r} for {dataset_path}"
+                )
+            ds = ds.add_column("_text_case", [text_case] * len(ds))
+
+        # random_truncate_seconds: [min, max] enables per-row random
+        # truncation in the DataCollator. Each row gets a fresh uniform
+        # [min, max] target duration each time it's pulled into a batch,
+        # with a random start offset within the original audio. Used for
+        # noise-rejection sources (WHAM) where the source audio is uniformly
+        # long (~30s) and we want effective length diversity in training so
+        # the model learns "any duration of noise → emit empty" rather than
+        # "30s noise → emit empty." Stored per-row so the DataCollator can
+        # apply it without knowing which dataset a row came from.
+        truncate_range = dataset_cfg.get("random_truncate_seconds")
+        if truncate_range is not None:
+            t_min, t_max = float(truncate_range[0]), float(truncate_range[1])
+            n = len(ds)
+            ds = ds.add_column("_random_truncate_min_s", [t_min] * n)
+            ds = ds.add_column("_random_truncate_max_s", [t_max] * n)
+
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
         if self.multitask_enabled:
@@ -317,6 +466,16 @@ class DatasetLoader:
             keep_cols = {"audio", "text"}
         if self.needs_duration:
             keep_cols = keep_cols | {"duration"}
+        # Preserve the empty-label bypass marker so it reaches the collator.
+        if "_allow_empty_label" in ds.column_names:
+            keep_cols = keep_cols | {"_allow_empty_label"}
+        # Preserve the declared casing policy so _normalize_label can use it.
+        if "_text_case" in ds.column_names:
+            keep_cols = keep_cols | {"_text_case"}
+        # Preserve the per-row random-truncation bounds so the collator can
+        # apply them at batch time.
+        if "_random_truncate_min_s" in ds.column_names:
+            keep_cols = keep_cols | {"_random_truncate_min_s", "_random_truncate_max_s"}
         extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
@@ -338,12 +497,22 @@ class DatasetLoader:
         return ds
 
     def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
-        """Cap (downsample) or repeat-pad (upsample) to ``target`` samples."""
+        """Cap (downsample) or repeat-pad (upsample) to ``target`` samples.
+
+        When downsampling, shuffle deterministically before subsetting so
+        the cap is a representative sample rather than the first N rows
+        in the dataset's natural order. Several HF datasets ship with
+        non-random ordering (LibriHeavy by chapter/speaker, CV by
+        validation date, etc.); taking `range(target)` directly would
+        introduce selection bias on top of the intended volume cap. Seed
+        pinned to `self.seed` for reproducibility across runs with the
+        same config.
+        """
         current = len(ds)
         if current == target:
             return ds
         if current > target:
-            return ds.select(range(target))
+            return ds.shuffle(seed=self.seed).select(range(target))
         repeats = (target // current) + 1
         indices = list(range(current)) * repeats
         return ds.select(indices[:target])
@@ -423,6 +592,7 @@ class DataCollator:
         system_prompt: str = None,
         projector: Any = None,
         encoder_conv_layers: list = None,
+        audio_token: str = "<audio>",
     ):
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
@@ -430,6 +600,9 @@ class DataCollator:
         self.system_prompt = system_prompt
         self.projector = projector
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
+        # Must match ASRModel.audio_token -- the collator emits this string and
+        # forward() locates the scatter positions by its token id.
+        self.audio_token = audio_token
         # Whisper's encoder requires a fixed 3000 mel frames; other encoders
         # (GLM-ASR) accept variable-length input, so only pad to longest.
         self._audio_padding = (
@@ -448,7 +621,15 @@ class DataCollator:
     # Whisper's feature extractor pads/truncates to a fixed 30s window. Audio
     # longer than this is silently truncated while the label is kept whole,
     # training the model to transcribe content it never sees. Drop those rows.
-    _MAX_AUDIO_SECONDS = 30.0
+    # Lowered from 30s to 19s to reduce batch-memory pressure: with
+    # group_by_length disabled, a single long sample forces the whole batch
+    # to its length. 19s sits just under the ~20s production-norm cap for
+    # ASR fine-tunes and drops the long-form tail of TEDLIUM / Earnings22 /
+    # Peoples / VoxPopuli (roughly 3-8% of rows in those sources). In
+    # exchange, mel-spec peak memory drops ~37% vs the 30s default, freeing
+    # headroom for auto_find_batch_size (observed batch=70 at max=30s →
+    # expected ~100+ at max=19s for the same mix without WHAM).
+    _MAX_AUDIO_SECONDS = 19.0
     # Sub-0.8s clips are dominated by boundary-cut segments and isolated
     # backchannels ("yeah", "ok", "umhum") where the audio span and the
     # reference transcript don't actually line up — eval-side analysis on
@@ -468,6 +649,22 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
+                # Per-row random truncation (set via the dataset config's
+                # `random_truncate_seconds: [min, max]`). Used for non-
+                # speech-rejection sources (WHAM) where source audio is
+                # uniformly long but training needs effective length
+                # diversity. Picks a fresh uniform [min, max] target each
+                # time the row enters a batch, with a random start offset
+                # within the original audio. No-op if the original audio is
+                # already shorter than the sampled target.
+                t_min = f.get("_random_truncate_min_s")
+                t_max = f.get("_random_truncate_max_s")
+                if t_min is not None and t_max is not None and audio.size > 0:
+                    target_s = random.uniform(float(t_min), float(t_max))
+                    target_n = int(target_s * self.sample_rate)
+                    if 0 < target_n < audio.size:
+                        start = random.randint(0, audio.size - target_n)
+                        audio = audio[start : start + target_n]
                 # Drop samples that would poison the gradient or break the
                 # encoder: empty / NaN audio, labels that normalize to empty
                 # (entire label was an annotation marker like <noise>), audio
@@ -483,7 +680,14 @@ class DataCollator:
                     continue
                 if not np.isfinite(audio).all():
                     continue
-                if not _normalize_label(f.get("text") or ""):
+                # Empty-label filter normally drops rows whose entire text was
+                # an annotation marker (e.g. Gigaspeech <NOISE>-only segments).
+                # Bypass it for rows explicitly flagged via the dataset's
+                # `text_override` (non-speech-rejection sources like WHAM where
+                # an empty assistant turn is the intended training target).
+                if not f.get("_allow_empty_label", False) and not _normalize_label(
+                    f.get("text") or "", f.get("_text_case")
+                ):
                     continue
                 duration_s = audio.size / self.sample_rate
                 if duration_s > self._MAX_AUDIO_SECONDS:
@@ -514,11 +718,20 @@ class DataCollator:
 
     def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
         """Build a single chat sample. Subclasses can override for task-specific prompts."""
-        text = _normalize_label(feature.get("text") or "")
+        raw_text = feature.get("text") or ""
+        # Skip normalization for explicit-text-override rows so the literal
+        # override (typically "" for non-speech-rejection) reaches the chat
+        # template unchanged. _normalize_label("") returns "" anyway, but the
+        # branch is the clearer invariant.
+        text = (
+            raw_text
+            if feature.get("_allow_empty_label")
+            else _normalize_label(raw_text, feature.get("_text_case"))
+        )
         return self._make_messages(num_audio_tokens, random.choice(TRANSCRIBE_PROMPTS), text)
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
-        user_content = ("<audio>" * num_audio_tokens) + " " + prompt
+        user_content = (self.audio_token * num_audio_tokens) + " " + prompt
         messages = []
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
@@ -579,55 +792,110 @@ class ASRTrainer(Trainer):
         decoder_learning_rate: float | None = None,
         decoder_weight_decay: float | None = None,
         projector_weight_decay: float | None = None,
+        encoder_learning_rate: float | None = None,
+        encoder_weight_decay: float | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.decoder_learning_rate = decoder_learning_rate
         self.decoder_weight_decay = decoder_weight_decay
         self.projector_weight_decay = projector_weight_decay
+        self.encoder_learning_rate = encoder_learning_rate
+        self.encoder_weight_decay = encoder_weight_decay
 
     def create_optimizer(self):
-        """Optimizer with separate LR / weight decay for projector and language model.
+        """Optimizer with separate LR / weight decay per component.
 
         Mirrors HF Trainer.create_optimizer's decay/no-decay split, but adds a
-        second axis: parameters under `language_model.` get `decoder_learning_rate`
-        and `decoder_weight_decay`; projector params get `projector_weight_decay`
-        (when set). Each falls back to `args.learning_rate` / `args.weight_decay`.
+        second axis: parameters under `audio_tower.` get `encoder_learning_rate`
+        / `encoder_weight_decay`; parameters under `language_model.` get
+        `decoder_learning_rate` / `decoder_weight_decay`; everything else
+        (projector) gets `projector_weight_decay` (when set). Each falls back
+        to `args.learning_rate` / `args.weight_decay`.
+
+        The encoder LR override is only meaningful when
+        `config.freeze_audio_encoder=False` — frozen encoder parameters have
+        `requires_grad=False` and never enter the optimizer regardless.
+
+        The no-decay set is wider than HF's: biases, every `*Norm` gain, and
+        all `nn.Embedding` tables (see the inline notes for why each).
         """
         overrides = (
             self.decoder_learning_rate is not None
             or self.decoder_weight_decay is not None
             or self.projector_weight_decay is not None
+            or self.encoder_learning_rate is not None
+            or self.encoder_weight_decay is not None
         )
         if self.optimizer is not None or not overrides:
             return super().create_optimizer()
 
-        from transformers.models.llama.modeling_llama import LlamaRMSNorm
-        from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
         from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
         from transformers.trainer_pt_utils import get_parameter_names
 
-        # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm. Qwen3 / Llama
-        # use RMSNorm subclasses, so without these their gain weights silently
-        # land in the decay group and get pulled toward zero — destabilizing
-        # the residual-stream scale the projector's _NORM_INIT was tuned to.
+        # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm, but every
+        # decoder here normalizes with an RMSNorm subclass instead, whose gain
+        # weights would silently land in the decay group and be pulled toward
+        # zero — destabilizing the residual-stream scale the projector's
+        # _NORM_INIT was tuned to. This used to be a two-entry allowlist
+        # (Qwen3RMSNorm, LlamaRMSNorm), which quietly excluded every other
+        # family — an unfrozen Gemma 4 E2B would have decayed all 247 of its
+        # Gemma4RMSNorm gain tensors across 9 distinct sites. Match
+        # structurally on the class name so a new decoder is covered on
+        # arrival rather than needing an import added here.
         opt_model = self.model
-        forbidden = list(ALL_LAYERNORM_LAYERS) + [Qwen3RMSNorm, LlamaRMSNorm]
+        norm_modules = [type(m) for m in opt_model.modules() if type(m).__name__.endswith("Norm")]
+        forbidden = list(ALL_LAYERNORM_LAYERS) + norm_modules
         decay_parameters = set(get_parameter_names(opt_model, forbidden))
         decay_parameters = {n for n in decay_parameters if "bias" not in n}
 
-        groups: dict[tuple[bool, bool], list] = {
-            (True, True): [],  # decoder, decay
-            (True, False): [],  # decoder, no decay
-            (False, True): [],  # other, decay
-            (False, False): [],  # other, no decay
+        # Embedding tables are excluded from weight decay on top of the norm
+        # exclusion above. Under narrow ASR fine-tuning most of a 248k-row
+        # vocab never appears in any batch, so those rows receive no task
+        # gradient and WD is the *only* force acting on them: they shrink
+        # monotonically toward zero. With tie_word_embeddings=True that same
+        # tensor backs lm_head, so the damage lands on the output projection
+        # and degrades rare-token prediction at decode time. (This is a
+        # fine-tuning-regime argument, not a universal one — under pretraining
+        # every token is seen and decaying embeddings is the usual choice.)
+        #
+        # Matched by tensor identity rather than by name. Tying means
+        # lm_head.weight IS embed_tokens.weight, and get_parameter_names walks
+        # the module tree so it yields BOTH names, while named_parameters()
+        # below deduplicates and yields only whichever the traversal reaches
+        # first. A name-based exclusion would therefore work on Qwen (where
+        # model.embed_tokens precedes lm_head) and silently fail on any
+        # architecture that registers its output head first. Identity holds
+        # regardless of which name wins.
+        no_decay_param_ids = {
+            id(p)
+            for module in opt_model.modules()
+            if isinstance(module, torch.nn.Embedding)
+            for p in module.parameters(recurse=False)
+        }
+
+        # Three-way component split. Names are checked against fixed prefixes
+        # so the routing matches the freeze flags exactly: `audio_tower.*`,
+        # `language_model.*`, and everything else (projector + auxiliary).
+        groups: dict[tuple[str, bool], list] = {
+            ("encoder", True): [],
+            ("encoder", False): [],
+            ("decoder", True): [],
+            ("decoder", False): [],
+            ("other", True): [],
+            ("other", False): [],
         }
         for name, param in opt_model.named_parameters():
             if not param.requires_grad:
                 continue
-            is_decoder = name.startswith("language_model.")
-            decay = name in decay_parameters
-            groups[(is_decoder, decay)].append(param)
+            if name.startswith("audio_tower."):
+                component = "encoder"
+            elif name.startswith("language_model."):
+                component = "decoder"
+            else:
+                component = "other"
+            decay = name in decay_parameters and id(param) not in no_decay_param_ids
+            groups[(component, decay)].append(param)
 
         base_wd = self.args.weight_decay
         base_lr = self.args.learning_rate
@@ -636,11 +904,16 @@ class ASRTrainer(Trainer):
         proj_wd = (
             self.projector_weight_decay if self.projector_weight_decay is not None else base_wd
         )
+        enc_lr = self.encoder_learning_rate if self.encoder_learning_rate is not None else base_lr
+        enc_wd = self.encoder_weight_decay if self.encoder_weight_decay is not None else base_wd
+
         optimizer_grouped_parameters = [
-            {"params": groups[(False, True)], "weight_decay": proj_wd, "lr": base_lr},
-            {"params": groups[(False, False)], "weight_decay": 0.0, "lr": base_lr},
-            {"params": groups[(True, True)], "weight_decay": dec_wd, "lr": dec_lr},
-            {"params": groups[(True, False)], "weight_decay": 0.0, "lr": dec_lr},
+            {"params": groups[("other", True)], "weight_decay": proj_wd, "lr": base_lr},
+            {"params": groups[("other", False)], "weight_decay": 0.0, "lr": base_lr},
+            {"params": groups[("decoder", True)], "weight_decay": dec_wd, "lr": dec_lr},
+            {"params": groups[("decoder", False)], "weight_decay": 0.0, "lr": dec_lr},
+            {"params": groups[("encoder", True)], "weight_decay": enc_wd, "lr": enc_lr},
+            {"params": groups[("encoder", False)], "weight_decay": 0.0, "lr": enc_lr},
         ]
         optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
 
@@ -708,6 +981,8 @@ TRAINING_MODEL_PARAMS = [
     "freeze_projector",
     "freeze_language_model",
     "freeze_text_embed_tokens",
+    "freeze_text_per_layer_embeddings",
+    "freeze_audio_encoder",
 ]
 
 
@@ -739,25 +1014,49 @@ def main(cfg: DictConfig) -> None:
             wandb.run.summary["git_commit"] = git_commit
             wandb.run.summary["git_dirty"] = git_dirty
 
-    # Patch transformers.models.qwen3 with liger fused kernels before the LM
-    # class is instantiated. The big win is fused linear cross-entropy: instead
-    # of materializing the (B, T, V) fp32 log-softmax tensor that HF's standard
-    # CE / LabelSmoother path requires (~15GB at B=50, V=151k on Qwen3-0.6B),
-    # liger fuses lm_head @ hidden_states + softmax + CE into a single kernel
-    # with peak memory O(B·T·D). Label smoothing flows through this kernel via
-    # the loss_function's **kwargs path (see ASRModel.forward) — so set HF
-    # Trainer's label_smoothing_factor=0 in configs to bypass the LabelSmoother
-    # and rely on model.config.label_smoothing instead.
+    # Patch the decoder's transformers module with liger fused kernels before
+    # the LM class is instantiated. The big win is fused linear cross-entropy:
+    # instead of materializing the (B, T, V) fp32 log-softmax tensor that HF's
+    # standard CE / LabelSmoother path requires (~15GB at B=50, V=151k on
+    # Qwen3-0.6B), liger fuses lm_head @ hidden_states + softmax + CE into a
+    # single kernel with peak memory O(B·T·D). Label smoothing flows through
+    # this kernel via the loss_function's **kwargs path (see ASRModel.forward)
+    # — so set HF Trainer's label_smoothing_factor=0 in configs to bypass the
+    # LabelSmoother and rely on model.config.label_smoothing instead.
+    #
+    # The patcher is per-architecture, so it must track text_model_id. Getting
+    # this wrong is not a crash but an OOM: Gemma 4's vocab is 262,144, so an
+    # unfused (B, T, V) logits tensor is ~17GB at B=32/T=512 before the
+    # log_softmax copy. First match wins, so longer keys are listed first.
     if cfg.training.get("use_liger", True):
-        try:
-            from liger_kernel.transformers import apply_liger_kernel_to_qwen3
-
-            apply_liger_kernel_to_qwen3()
-        except ImportError:
+        liger_patchers = (
+            ("gemma-4", "apply_liger_kernel_to_gemma4"),
+            ("qwen3.5", "apply_liger_kernel_to_qwen3_5"),
+            ("qwen3", "apply_liger_kernel_to_qwen3"),
+        )
+        text_model_id = str(cfg.model.get("text_model_id", "")).lower()
+        patcher_name = next((fn for key, fn in liger_patchers if key in text_model_id), None)
+        if patcher_name is None:
             logging.warning(
-                "liger-kernel not installed — falling back to stock Qwen3 kernels. "
-                "Install with `poetry install` on Linux to enable fused linear CE."
+                "No liger patcher mapped for text_model_id=%r — training with stock "
+                "kernels and unfused cross-entropy. Add an entry to liger_patchers "
+                "if this decoder has liger support.",
+                cfg.model.get("text_model_id"),
             )
+        else:
+            try:
+                import liger_kernel.transformers as liger
+
+                getattr(liger, patcher_name)()
+                logging.info("Applied liger kernels via %s()", patcher_name)
+            except (ImportError, AttributeError) as e:
+                logging.warning(
+                    "liger-kernel unavailable or missing %s (%s) — falling back to "
+                    "stock kernels. Install with `poetry install` on Linux and pin a "
+                    "version that exports it to enable fused linear CE.",
+                    patcher_name,
+                    e,
+                )
 
     model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_config_dict, dict), "model config must be a dict"
@@ -778,7 +1077,13 @@ def main(cfg: DictConfig) -> None:
     else:
         model = ASRModel(asr_config)
 
-    model.config.use_cache = False
+    # Disable the KV cache for training on the decoder's own config, NOT on the
+    # ASRConfig. ASRConfig.use_cache is an inference setting: __init__ copies it
+    # into generation_config, and save_pretrained serializes it, so writing
+    # False here baked `use_cache: false` into every checkpoint and every model
+    # pushed to the Hub. Generation then ran without a cache, re-encoding the
+    # whole prompt at each step -- quadratic decode on the reload path.
+    model.language_model.config.use_cache = False
 
     if hub_model_id := cfg.training.get("hub_model_id"):
         model.config.pretrained_model_path = hub_model_id
@@ -802,6 +1107,7 @@ def main(cfg: DictConfig) -> None:
             sample_rate=cfg.data.sample_rate,
             projector=model.projector,
             encoder_conv_layers=model.config.encoder_conv_layers,
+            audio_token=model.audio_token,
         )
     else:
         data_collator = DataCollator(
@@ -811,6 +1117,7 @@ def main(cfg: DictConfig) -> None:
             system_prompt=cfg.model.system_prompt,
             projector=model.projector,
             encoder_conv_layers=model.config.encoder_conv_layers,
+            audio_token=model.audio_token,
         )
 
     callbacks = []
@@ -829,6 +1136,8 @@ def main(cfg: DictConfig) -> None:
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     decoder_weight_decay = training_config.pop("decoder_weight_decay", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
+    encoder_learning_rate = training_config.pop("encoder_learning_rate", None)
+    encoder_weight_decay = training_config.pop("encoder_weight_decay", None)
     # Dynamo flags set unconditionally — applies whether the user enables
     # torch.compile via TrainingArguments or whether some upstream dep
     # (liger / transformers) invokes dynamo internally. cache_size_limit
@@ -860,6 +1169,8 @@ def main(cfg: DictConfig) -> None:
         decoder_learning_rate=decoder_learning_rate,
         decoder_weight_decay=decoder_weight_decay,
         projector_weight_decay=projector_weight_decay,
+        encoder_learning_rate=encoder_learning_rate,
+        encoder_weight_decay=encoder_weight_decay,
     )
 
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))

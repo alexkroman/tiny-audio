@@ -65,15 +65,19 @@ class ForcedAligner:
         trellis = torch.full((num_frames + 1, num_tokens + 1), -float("inf"))
         trellis[0, 0] = 0
 
+        # Each row depends only on the previous row, so the token axis vectorizes.
+        # blank[t] is the stay cost; emit[t, j] the cost of emitting tokens[j].
+        blank = emission[:, blank_id]
+        emit = emission.index_select(1, torch.as_tensor(tokens, dtype=torch.long))
+
         for t in range(num_frames):
-            for j in range(num_tokens + 1):
-                # Stay: emit blank and stay at j tokens
-                stay = trellis[t, j] + emission[t, blank_id]
-
-                # Move: emit token j and advance to j+1 tokens
-                move = trellis[t, j - 1] + emission[t, tokens[j - 1]] if j > 0 else -float("inf")
-
-                trellis[t + 1, j] = max(stay, move)  # Viterbi: take best path
+            # j == 0: only staying on blank is reachable.
+            trellis[t + 1, 0] = trellis[t, 0] + blank[t]
+            if num_tokens:
+                # Viterbi over j >= 1: best of staying at j or advancing from j-1.
+                trellis[t + 1, 1:] = torch.maximum(
+                    trellis[t, 1:] + blank[t], trellis[t, :-1] + emit[t]
+                )
 
         return trellis
 
@@ -159,22 +163,18 @@ class ForcedAligner:
     @classmethod
     def align(
         cls,
-        audio: np.ndarray,
+        audio: np.ndarray | torch.Tensor,
         text: str,
         sample_rate: int = 16000,
-        _language: str = "eng",
-        _batch_size: int = 16,
     ) -> list[dict]:
         """Align transcript to audio and return word-level timestamps.
 
         Uses Viterbi trellis algorithm for optimal forced alignment.
 
         Args:
-            audio: Audio waveform as numpy array
+            audio: Audio waveform as a numpy array or torch tensor
             text: Transcript text to align
             sample_rate: Audio sample rate (default 16000)
-            _language: ISO-639-3 language code (default "eng" for English, unused)
-            _batch_size: Batch size for alignment model (unused)
 
         Returns:
             List of dicts with 'word', 'start', 'end' keys

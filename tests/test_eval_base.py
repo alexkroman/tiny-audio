@@ -106,7 +106,6 @@ class TestAlignmentResult:
             ref_ends=[0.4, 0.9, 1.4],
             num_aligned_words=3,
             num_ref_words=3,
-            num_pred_words=3,
             time=0.5,
             reference_text="hello world test",
             predicted_text="hello world test",
@@ -118,19 +117,15 @@ class TestAlignmentResult:
 class TestBaseAlignmentEvaluator:
     """Tests for BaseAlignmentEvaluator class."""
 
-    def test_init_num_workers_default(self):
-        """Test that num_workers defaults to 1."""
+    def test_init_defaults(self):
+        """Test default field initialization."""
         from scripts.eval.evaluators.alignment import BaseAlignmentEvaluator
 
         evaluator = BaseAlignmentEvaluator()
-        assert evaluator.num_workers == 1
-
-    def test_init_num_workers_custom(self):
-        """Test that custom num_workers is accepted."""
-        from scripts.eval.evaluators.alignment import BaseAlignmentEvaluator
-
-        evaluator = BaseAlignmentEvaluator(num_workers=4)
-        assert evaluator.num_workers == 4
+        assert evaluator.audio_field == "audio"
+        assert evaluator.text_field == "transcript"
+        assert evaluator.words_field == "words"
+        assert evaluator.results == []
 
 
 class TestEvaluator:
