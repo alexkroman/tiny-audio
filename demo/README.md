@@ -9,14 +9,14 @@ python_version: "3.11"
 app_file: app.py
 pinned: false
 license: mit
-short_description: Efficient ASR with Whisper encoder and SmolLM3 decoder
+short_description: ASR with a GLM-ASR encoder and Qwen3-0.6B decoder
 models:
   - mazesmazes/tiny-audio
 tags:
   - audio
   - automatic-speech-recognition
-  - whisper
-  - smollm
+  - glm-asr
+  - qwen3
   - mlp
 suggested_hardware: cpu-basic
 preload_from_hub:
@@ -27,23 +27,23 @@ preload_from_hub:
 
 This Space demonstrates an Automatic Speech Recognition (ASR) model that combines:
 
-- **Whisper encoder** for audio feature extraction
-- **SmolLM3 decoder** for efficient text generation
+- **GLM-ASR-Nano-2512 encoder** for audio feature extraction
+- **Qwen3-0.6B decoder** for text generation
 
 ## Features
 
 - 🎙️ **Record from microphone** or upload audio files
-- ⚡ **Fast inference** with a small number of trainable parameters
-- 🎯 **English transcription** optimized for speech-to-text
-- 📊 **Lightweight model** suitable for edge deployment
+- ⏱️ **Word-level timestamps** via forced alignment
+- 🗣️ **Speaker diarization** to label who said what
+- 🎯 **English transcription** with punctuation and casing
 
 ## Model Architecture
 
-The model uses a novel architecture that bridges audio and text modalities:
+The model bridges audio and text with a small trained projector:
 
-1. **Audio Encoder**: Frozen Whisper encoder
-2. **Projection Layer**: Custom audio-to-text space mapping
-3. **Text Decoder**: SmolLM3 (frozen)
+1. **Audio Encoder**: GLM-ASR-Nano-2512 encoder (frozen)
+2. **Projection Layer**: 2-layer MLP with frame stacking, mapping audio features into the decoder's embedding space (~6.3M params)
+3. **Text Decoder**: Qwen3-0.6B, fine-tuned jointly with the projector
 
 ## Usage
 
@@ -53,7 +53,7 @@ The model uses a novel architecture that bridges audio and text modalities:
 
 ## Limitations
 
-- Maximum audio length: 30 seconds
+- Best results on clips under 30 seconds
 - Optimized for English language
 - Best performance with clear speech and minimal background noise
 
@@ -70,7 +70,7 @@ If you use this model in your research, please cite:
 ```bibtex
 @software{kroman2024tinyaudio,
   author = {Kroman, Alex},
-  title = {Tiny Audio: Train your own speech recognition model in 24 hours},
+  title = {Tiny Audio: A minimal, hackable speech recognition codebase},
   year = {2024},
   publisher = {GitHub},
   url = {https://github.com/alexkroman/tiny-audio}
