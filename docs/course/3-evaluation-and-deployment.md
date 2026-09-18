@@ -2,7 +2,18 @@
 
 *1 hour (15 min lecture + 45 min hands-on)*
 
-**Goal**: Evaluate your model, analyze errors, and deploy a public demo.
+**Goal**: Measure your model, find out *where* it fails, and put it in front of other people.
+
+> **Before you start.** You need a model on the Hugging Face Hub. If your Class 2 run has
+> pushed at least one checkpoint, use that. If it hasn't finished, or you skipped the cloud
+> run, use the published model instead; every command below works the same way.
+>
+> ```bash
+> export MODEL=your-username/tiny-audio-yourname   # or: mazesmazes/tiny-audio
+> ```
+>
+> The commands below refer to `$MODEL`, and to `$NAME` for its short name (the part after the
+> slash, e.g. `tiny-audio-yourname`), which is how the analysis tools identify it.
 
 ---
 
@@ -11,172 +22,217 @@
 ### Word Error Rate (WER)
 
 ```
-WER = (Substitutions + Insertions + Deletions) / Total Reference Words
+WER = (Substitutions + Insertions + Deletions) / Words in the reference
 ```
+
+Align the prediction against the reference word by word, count the edits, divide by the
+reference length. A WER of 10% means roughly one word in ten is wrong. It can exceed 100% if
+the model hallucinates a lot of extra words.
 
 | WER | Quality |
 |-----|---------|
-| < 5% | Excellent (commercial) |
+| < 5% | Excellent. Commercial APIs on clean speech |
 | 5-10% | Very good |
-| 10-20% | Good (our target) |
-| > 30% | Poor |
+| 10-20% | Good. A realistic target for the course run |
+| > 30% | Poor. Something is wrong with the model or the data |
+
+**Normalization matters.** Before scoring, both reference and prediction go through Whisper's
+`EnglishTextNormalizer`: lowercase, punctuation stripped, numbers and common spellings
+standardized ("twenty five dollars" and "$25" agree). Without this, a perfect transcript with
+different comma placement would count as errors. It also means WER says nothing about your
+model's punctuation or capitalization. The raw pair is saved alongside the normalized one so
+you can inspect those by hand.
 
 ### Evaluation Datasets
 
-| Dataset | What it tests |
-|---------|---------------|
-| **LoquaciousSet** | General benchmark (default) |
-| **Earnings22** | Financial domain, earnings calls |
-| **AMI** | Multi-speaker meetings |
-| **LibriSpeech** | Clean read speech |
+Tiny Audio's registry covers 13 test sets. Each stresses something different:
+
+| Name (`-d`) | Domain | Why it's hard |
+|-------------|--------|---------------|
+| `loquacious` | Mixed read and spontaneous English (default) | Broad benchmark |
+| `librispeech`, `librispeech-other` | Audiobooks | Clean baseline; `other` is harder speakers |
+| `tedlium` | TED talks | Presentational speech, technical vocabulary |
+| `commonvoice` | Crowd-sourced read sentences | Thousands of speakers, accents, cheap mics |
+| `voxpopuli` | European Parliament | Non-native accents |
+| `peoples` | Public-domain speech | Varied recording quality |
+| `gigaspeech` | Podcasts and YouTube | Conversational, noisy |
+| `earnings22` | Earnings calls | Financial jargon, names, numbers, phone-quality audio |
+| `spgispeech` | Financial presentations | Formatted numbers and entities |
+| `ami`, `ami-sdm` | Meetings | Overlapping speakers; `sdm` is a single distant microphone |
+| `expresso` | Expressive read speech | Emotional and whispered speech |
+
+A model that does well on LibriSpeech and badly on AMI is normal. A model that does badly on
+LibriSpeech has a problem.
 
 ### Error Analysis
 
-Understanding *why* your model fails is as important as measuring WER:
+An aggregate WER tells you *how much* the model fails. To improve it you need to know *how*:
 
-- **High-WER samples**: Which audio clips fail?
-- **Entity errors**: Names, numbers, technical terms
-- **Pattern detection**: Accents, noise, domain-specific issues
+- **Worst samples**: sort by per-sample WER. The top of the list is usually noisy audio,
+  mislabeled references, or a mode failure (empty output, endless repetition).
+- **Entity errors**: names, places, organizations, and numbers. These carry the most meaning
+  and are the hardest for a small decoder to spell.
+- **Comparison**: the same clips through another model. If everyone fails on a clip, blame the
+  clip.
 
 ### Deployment Options
 
-| Option | Cost | Use case |
-|--------|------|----------|
-| **HF Spaces** | Free | Interactive demos |
-| **HF Inference Endpoints** | Paid | Production APIs |
-| **Local server** | Self-hosted | Privacy, custom deployment |
+| Option | Cost | When |
+|--------|------|------|
+| **Hub repo** | Free | Already done: training pushed your checkpoints there |
+| **Hugging Face Space** (Gradio) | Free on CPU | A public demo anyone can try in a browser |
+| **Inference Endpoints** | Paid GPU | A production HTTP API; the repo ships the handler |
+| **Local server** | Your hardware | Privacy, or wiring into your own app |
 
 ---
 
 ## Part B: Hands-On (45 min)
 
-### Exercise 1: Basic Evaluation (10 min)
+### Exercise 1: Evaluate (10 min)
 
 ```bash
-# Evaluate on default dataset (LoquaciousSet)
-poetry run ta eval -m your-username/your-model -n 500
+# Default benchmark: LoquaciousSet test split
+poetry run ta eval -m $MODEL -n 200
 
-# Evaluate on specific datasets
-poetry run ta eval -m your-username/your-model -d earnings22 -n 100
-poetry run ta eval -m your-username/your-model -d ami -n 100
+# A second domain
+poetry run ta eval -m $MODEL -d earnings22 -n 100
 
-# Evaluate multiple datasets at once
-poetry run ta eval -m your-username/your-model -d loquacious -d earnings22 -n 100
+# Several at once
+poetry run ta eval -m $MODEL -d loquacious -d tedlium -d ami -n 100
 ```
 
-**Output:**
+Each sample prints as it's scored:
 
 ```
-Sample 1: WER = 8.33%, Time = 1.23s
-  Ref:  The quick brown fox jumps over the lazy dog
-  Pred: The quick brown fox jumps over the lazy dog
-...
-CHECKPOINT @ 100 samples:
-  Corpus WER: 12.45%
+Sample 1: WER=8.3%, Time=1.23s
+  Ref:  the quick brown fox jumps over the lazy dog
+  Pred: the quick brown fox jumped over the lazy dog
 ```
 
-Results saved to `outputs/eval_*/results.json`.
+and each dataset ends with a summary table (WER, sample count, average time per clip).
 
-### Exercise 2: Error Analysis (15 min)
+Results land in `outputs/<timestamp>_<short-name>_<dataset>/`:
 
-**Find high-error samples:**
+- `results.txt`: every sample with its WER, the normalized reference and prediction, and the
+  raw (unnormalized) pair
+- `metrics.txt`: the corpus-level numbers
+
+The analysis commands read these directories, so don't delete them.
+
+Score the published model on the same datasets so you have a comparison point:
 
 ```bash
-# Find samples with WER > 30%
-poetry run ta analysis high-wer your-username/your-model --threshold 30
-
-# Find samples with WER > 50%
-poetry run ta analysis high-wer your-username/your-model --threshold 50
+poetry run ta eval -m mazesmazes/tiny-audio -n 200
 ```
 
-This helps identify:
-- Audio quality issues
-- Accent/dialect challenges
-- Domain-specific vocabulary gaps
+### Exercise 2: Analyze Errors (15 min)
 
-**Compare models:**
+**Worst samples.** The model pattern is the short name, matched exactly:
 
 ```bash
-# Compare your model against others
-poetry run ta analysis compare your-model mazesmazes/tiny-audio
-
-# Compare multiple models
-poetry run ta analysis compare model1 model2 model3
+poetry run ta analysis high-wer $NAME --threshold 50
+poetry run ta analysis high-wer $NAME --threshold 30 --latest -o worst.md
 ```
 
-**Find entity errors:**
+Read a dozen of the worst. Sort them into buckets: bad audio, bad reference label, rare
+vocabulary, model mode failure. The bucket that dominates tells you what to fix.
+
+**Compare models.** Any models you've evaluated, by short name:
 
 ```bash
-# Build the entity index first (reads the raw references in your eval runs)
+poetry run ta analysis compare $NAME tiny-audio
+```
+
+This prints a WER table per dataset, plus breakdowns by clip length and by entity type.
+
+**Entity errors.** Build the entity index from the references in your eval runs, then list the
+samples where your model got a named entity wrong:
+
+```bash
 poetry run ta analysis extract-entities
-
-# Show samples where those entities were transcribed incorrectly
-poetry run ta analysis entity-errors your-username/your-model
+poetry run ta analysis entity-errors $NAME
+poetry run ta analysis entity-errors $NAME --type PERSON
 ```
 
-**Debug model health:**
+**Inspect the weights.** If a run misbehaved, check whether training moved the decoder a
+healthy amount and whether the projector's scale drifted:
 
 ```bash
-# Inspect weight health after training
-poetry run ta debug analyze-weights your-username/your-model
-
-# Analyze LoRA adapter weights
-poetry run ta debug analyze-lora your-username/your-model
+poetry run ta debug analyze-weights $MODEL
+poetry run ta debug compare-to-base $MODEL     # drift from Qwen3-0.6B, layer by layer
+poetry run ta debug analyze-lora -r $MODEL     # only if you trained with LoRA
 ```
 
-### Exercise 3: Deploy to Hugging Face Spaces (10 min)
+### Exercise 3: Check Your Hub Repo (5 min)
 
-**Create Space:**
+Open `https://huggingface.co/$MODEL`. Training pushed each checkpoint there as it was saved,
+so the repo already contains:
 
-1. Go to [huggingface.co](https://huggingface.co) → New Space
-2. Name: `tiny-audio-demo`, SDK: Gradio, Hardware: CPU basic (free)
+- `model.safetensors`: the trained weights only, meaning the projector and the fine-tuned
+  decoder. The frozen encoder is not stored; `config.json` names it and it is downloaded from
+  its own repo at load time
+- `config.json`: the `ASRConfig`, including which encoder and decoder to load
+- `asr_modeling.py`, `projectors.py`, and the other custom code files that make
+  `trust_remote_code=True` work
+- Tokenizer and feature-extractor files
 
-**Deploy:**
+Two things it does *not* have yet: a model card, and any code fixes you made after training
+started. `ta push` uploads exactly those:
 
 ```bash
-poetry run ta deploy --repo-id your-username/tiny-audio-demo
+poetry run ta push --repo-id $MODEL
 ```
 
-The Space will use the default model. To use your own model, edit the deployment config.
+It stages the `tiny_audio/*.py` files, the repo's `MODEL_CARD.md` as the Hub `README.md`, and
+`requirements.txt`, then uploads them. It does **not** upload weights. Edit `MODEL_CARD.md` to
+describe your model before you push it.
 
-Space builds in 2-3 minutes. Share the link!
-
-**Run local demo:**
-
-```bash
-# Test locally before deploying
-poetry run ta demo --model your-username/your-model --port 7860
-```
-
-### Exercise 4: Push Model to Hub (5 min)
-
-```bash
-# Push your trained model
-poetry run ta push --repo-id your-username/your-model-name
-```
-
-This uploads:
-- `config.json` - Model configuration
-- `model.safetensors` - Projector weights
-- `tokenizer.json` - Tokenizer files
-
-### Exercise 5: Inference Endpoints (5 min)
-
-**Free serverless** (rate limited):
+Test the result the way a stranger would:
 
 ```python
-from huggingface_hub import InferenceClient
-
-client = InferenceClient()
-result = client.automatic_speech_recognition("audio.wav", model="your-username/your-model")
-print(result["text"])
+from transformers import pipeline
+pipe = pipeline("automatic-speech-recognition", model="your-username/tiny-audio-yourname", trust_remote_code=True)
+print(pipe("audio.wav")["text"])
 ```
 
-**Dedicated endpoint** (paid, production):
+### Exercise 4: Deploy a Demo to Hugging Face Spaces (10 min)
 
-1. Go to your model → Deploy → Inference Endpoints
-2. Configure GPU and scaling
-3. Create endpoint
+The `demo/` directory is a complete Gradio app. It reads the model ID from the `MODEL_ID`
+environment variable, so the same code serves any Tiny Audio model.
+
+1. Edit `demo/README.md`. Its front matter is the Space's card: set `title`, and change the
+   `models:` list and `preload_from_hub:` to your model ID.
+2. Deploy. The command creates the Space if it doesn't exist:
+
+   ```bash
+   poetry run ta deploy --repo-id your-username/tiny-audio-demo
+   ```
+
+3. In the Space's **Settings → Variables**, add `MODEL_ID` = `your-username/tiny-audio-yourname`.
+   The Space restarts. (Without this it serves the published model.)
+
+The first build takes a few minutes on the free CPU tier. Inference on CPU is slow but works.
+Share the link.
+
+To test locally before deploying:
+
+```bash
+poetry run ta demo --model $MODEL --port 7860
+```
+
+### Exercise 5: Production Endpoints (5 min)
+
+For an HTTP API on a GPU, use Inference Endpoints. The repo's `handler.py` is uploaded with
+the custom code, so the endpoint knows how to load and warm up the model:
+
+1. On your model page, choose **Deploy → Inference Endpoints**
+2. Pick a GPU and a scaling policy (scale-to-zero keeps idle cost near nothing)
+3. Create it, then call it with any HTTP client, or evaluate through it by passing the
+   endpoint URL as the model:
+
+   ```bash
+   poetry run ta eval -m https://<your-endpoint>.endpoints.huggingface.cloud --endpoint -n 50
+   ```
 
 ---
 
@@ -185,61 +241,71 @@ print(result["text"])
 ### Comparing with Commercial APIs
 
 ```bash
-# Compare against AssemblyAI
-export ASSEMBLYAI_API_KEY='your_key'
-poetry run ta eval -m assemblyai --assemblyai-model universal -d loquacious -n 100 -w 4
+export ASSEMBLYAI_API_KEY='...'
+poetry run ta eval -m assemblyai -d loquacious -n 200 -w 4          # universal-3-pro by default
 
-# Compare against Deepgram
-export DEEPGRAM_API_KEY='your_key'
-poetry run ta eval -m deepgram -d loquacious -n 100
+export DEEPGRAM_API_KEY='...'
+poetry run ta eval -m deepgram -d loquacious -n 200 -w 4            # nova-3
+
+export ELEVENLABS_API_KEY='...'
+poetry run ta eval -m elevenlabs -d loquacious -n 200 -w 4          # scribe-v2
+
+# macOS only: Apple's on-device recognizer
+poetry run ta eval -m apple-speech -d loquacious -n 200
 ```
 
-### Batch Evaluation
+`-w` runs API calls in parallel. Then `ta analysis compare $NAME assemblyai deepgram` puts them
+side by side.
+
+### Every Dataset at Once
 
 ```bash
-# Evaluate with multiple workers (faster for API-based models)
-poetry run ta eval -m your-model -n 1000 -w 8
+poetry run ta eval -m $MODEL -d all -n 100
 ```
 
-### Output Formats
+### Running Evaluation on the Pod
+
+If you still have a RunPod instance up, evaluation is much faster there:
 
 ```bash
-# Save detailed results
-poetry run ta eval -m your-model -n 100 -o ./my_results
-
-# Results include:
-# - results.json: Full results with predictions
-# - summary.txt: WER statistics
-# - errors.csv: High-error samples for analysis
+poetry run ta runpod eval <HOST> <PORT> -m $MODEL -d loquacious -d ami -n 500
 ```
 
 ---
 
 ## Debugging Poor Performance
 
-| Symptom | Likely Cause | Solution |
-|---------|--------------|----------|
-| High WER on all samples | Undertrained | Train longer, check loss curve |
-| High WER on specific domain | Domain gap | Fine-tune on domain data |
-| High WER on accented speech | Training data bias | Add diverse training data |
-| Gibberish output | Model corrupted | Check checkpoint, retrain |
-| Repeated words | Generation config | Check `no_repeat_ngram_size` |
+| Symptom | Likely cause | What to do |
+|---------|--------------|------------|
+| High WER everywhere | Undertrained | Check the loss curve; train longer or on more data |
+| High WER on one domain | Domain gap | Add that domain's data to your data config |
+| High WER on accented speech | Training data bias | Add CommonVoice or VoxPopuli to the mix |
+| Empty or one-word outputs | Audio too quiet, or the run collapsed | Inspect the clips; check `analyze-weights` |
+| Runaway repetition | Decoder loop | The pipeline truncates repeats; check `max_new_tokens`; more training usually fixes it |
+| Great eval loss, bad WER | Mismatch between eval split and test set | Compare label formats; check normalization |
+| Wrong casing or punctuation but good WER | Training labels lacked them | Expected with LoquaciousSet; add cased, punctuated data |
 
 ---
 
-## Congratulations!
+## Congratulations
 
 You now have:
-- A trained ASR model on Hugging Face
-- Evaluation results across datasets
-- Error analysis tools
-- A live demo anyone can use
 
-**Next steps:**
-- Try different projector widths (`model.projector_hidden_dim`)
-- Multi-stage training with LoRA
-- Train on domain-specific data
-- Build a real application
+- A speech recognition model you trained, on the Hub, loadable with three lines of Python
+- WER numbers on several domains, and a comparison against the published model
+- A list of its worst failures and what kind they are
+- A public demo
+
+**Where to go next:**
+
+- Retrain with a change and compare: a wider projector (`model.projector_hidden_dim=2048`), a
+  different stride (`model.projector_pool_stride=2`), or LoRA instead of full fine-tuning
+- Add a second dataset to your data config, targeting the domain where you failed worst
+- Read `configs/data/multiasr.yaml` to see how the production mix was assembled, and why
+  corpora were added and removed
+- Try a different encoder or decoder; `granite_qwen.yaml` shows how little changes
+- Build something with the model: the `tiny_audio/integrations/` directory has a voice-agent
+  integration to start from
 
 ---
 
