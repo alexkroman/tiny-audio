@@ -1,6 +1,7 @@
-"""SLAM-ASR: Frozen HuBERT + Trainable Projector + Frozen Qwen3-8B
+"""Tiny Audio: frozen GLM-ASR encoder + trainable MLP projector + Qwen3-0.6B decoder.
 
-Simple direct audio-to-text mapping without chat templates.
+A minimal, hackable ASR model. The encoder stays frozen; the projector and
+decoder train jointly (see configs/experiments/stage_1.yaml).
 """
 
 __version__ = "0.1.0"
