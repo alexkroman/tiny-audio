@@ -1,7 +1,7 @@
 """Base evaluator classes and shared utilities."""
 
 import os
-from enum import Enum
+from enum import StrEnum
 
 import attrs
 import jiwer
@@ -13,7 +13,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
 
 
-class AssemblyAIModel(str, Enum):
+class AssemblyAIModel(StrEnum):
     """AssemblyAI model options."""
 
     best = "best"

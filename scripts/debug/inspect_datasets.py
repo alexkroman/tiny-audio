@@ -24,7 +24,7 @@ from datasets import load_dataset
 # sample — verifies my recent changes (Gigaspeech tag remap, truecase,
 # ftfy/NFKC) behave as intended on freshly-sampled data.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from train import _normalize_label  # noqa: E402  pyright: ignore[reportMissingImports]
+from train import _normalize_label
 
 # Mirror train.py's regexes so we can flag what's NOT already handled.
 _CORPUS_MARKER_RE = re.compile(

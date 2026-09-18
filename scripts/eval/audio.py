@@ -2,6 +2,7 @@
 
 import functools
 import io
+from typing import ClassVar
 
 import numpy as np
 import soundfile as sf
@@ -45,7 +46,7 @@ def prepare_wav_bytes(wav_data) -> bytes:
             return audio_to_wav_bytes(wav_data["array"], wav_data["sampling_rate"])
         if "bytes" in wav_data:
             return wav_data["bytes"]
-        if "path" in wav_data and wav_data["path"]:
+        if wav_data.get("path"):
             return _read_path_to_wav(wav_data["path"])
 
     if hasattr(wav_data, "array") and hasattr(wav_data, "sampling_rate"):
@@ -97,7 +98,7 @@ class TextNormalizer:
     def __init__(self):
         self._normalizer = _english_normalizer()
 
-    _SPELLING_FIXES = {
+    _SPELLING_FIXES: ClassVar[dict[str, str]] = {
         "okay": "ok",
         "all right": "alright",
         "kinda": "kind of",

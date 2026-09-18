@@ -154,7 +154,7 @@ class TestProcessorCall:
         call_args = mock_processor.tokenizer.apply_chat_template.call_args
         messages = call_args[0][0]
 
-        user_msg = [m for m in messages if m["role"] == "user"][0]
+        user_msg = next(m for m in messages if m["role"] == "user")
         assert "<audio>" in user_msg["content"]
 
     def test_call_without_audio(self, mock_processor):
@@ -212,7 +212,7 @@ class TestProcessorAudioTokenCount:
 
         call_args = processor.tokenizer.apply_chat_template.call_args
         messages = call_args[0][0]
-        user_msg = [m for m in messages if m["role"] == "user"][0]
+        user_msg = next(m for m in messages if m["role"] == "user")
 
         audio_tokens = user_msg["content"].count("<audio>")
 

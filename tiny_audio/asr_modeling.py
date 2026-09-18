@@ -2,9 +2,9 @@ import functools
 import json
 import logging
 import math
+from collections.abc import Iterator
 from pathlib import Path
 from threading import Thread
-from typing import Iterator, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -80,6 +80,7 @@ class ChunkedEmbedding(nn.Module):
     """
 
     def __init__(self, embedding: nn.Embedding) -> None:
+        """Split `embedding`'s table into MPS-safe column chunks, keeping its metadata."""
         super().__init__()
         self.num_embeddings = embedding.num_embeddings
         self.embedding_dim = embedding.embedding_dim
@@ -104,6 +105,7 @@ class ChunkedEmbedding(nn.Module):
         del source
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Look up `input_ids` in every chunk and concatenate along the feature dim."""
         out = torch.cat([F.embedding(input_ids, chunk) for chunk in self.chunks], dim=-1)
         if self.embed_scale is not None:
             out = out * self.embed_scale.to(out.dtype)
@@ -119,6 +121,7 @@ class ChunkedEmbedding(nn.Module):
         return torch.cat(list(self.chunks), dim=1)
 
     def extra_repr(self) -> str:
+        """Describe the table like `nn.Embedding` does, plus the chunk count."""
         return (
             f"{self.num_embeddings}, {self.embedding_dim}, "
             f"chunks={len(self.chunks)} (MPS int32-indexing workaround)"
@@ -141,7 +144,7 @@ def chunk_oversized_embeddings(root: nn.Module) -> list[str]:
     return replaced
 
 
-def _max_attention_head_dim(text_config) -> Optional[int]:
+def _max_attention_head_dim(text_config) -> int | None:
     """Largest attention head dim across layers, or None if undeterminable.
 
     Has to cope with heterogeneous configs: Gemma 4 varies head_dim per layer,
@@ -163,7 +166,7 @@ def _max_attention_head_dim(text_config) -> Optional[int]:
     return max(usable) if usable else None
 
 
-def _resolve_attn_implementation(requested: Optional[str]) -> Optional[str]:
+def _resolve_attn_implementation(requested: str | None) -> str | None:
     """Coerce flash_attention_2 to sdpa when CUDA isn't available, and avoid sdpa on MPS.
 
     FA2 is CUDA-only. On MPS/CPU, requesting it either errors at load or
@@ -204,7 +207,7 @@ def _resolve_attn_implementation(requested: Optional[str]) -> Optional[str]:
 def _gather_audio_embeds(
     audio_embeds: torch.Tensor,
     token_counts: torch.Tensor,
-    max_tokens: Optional[int] = None,
+    max_tokens: int | None = None,
 ) -> torch.Tensor:
     """Flatten per-sample audio embeddings into a packed tensor.
 
@@ -231,8 +234,8 @@ def _assert_audio_token_counts(
     audio_embeds: torch.Tensor,
     token_counts: torch.Tensor,
     projector,
-    encoder_valid_lengths: Optional[torch.Tensor] = None,
-    max_tokens: Optional[int] = None,
+    encoder_valid_lengths: torch.Tensor | None = None,
+    max_tokens: int | None = None,
 ) -> None:
     """Check, per sample, that the projector produced the tokens the prompt expects.
 
@@ -303,6 +306,7 @@ def _patch_gemma_decode_loop(model) -> None:
     # `wraps` sets __wrapped__, which inspect.signature follows.
     @functools.wraps(inner_prepare)
     def prepare_inputs_for_generation(*args, is_first_iteration: bool = False, **kwargs):
+        """Drop stale `per_layer_inputs` on every decode step after the first."""
         model_inputs = inner_prepare(*args, is_first_iteration=is_first_iteration, **kwargs)
         if not is_first_iteration:
             model_inputs.pop("per_layer_inputs", None)
@@ -440,6 +444,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             cls._is_loading_from_pretrained = False
 
     def __init__(self, config: ASRConfig, **kwargs) -> None:
+        """Build encoder, projector, decoder and tokenizer from `config`.
+
+        `**kwargs` are the loader arguments `from_pretrained` forwards (e.g.
+        `device_map`); they are intentionally ignored, see `from_pretrained`.
+        """
         super().__init__(config)
 
         # Shadows the class attribute when the config names one, so a run that
@@ -885,7 +894,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if not already_in_vocab:
             existing_special = getattr(self.tokenizer, "additional_special_tokens", None) or []
             self.tokenizer.add_special_tokens(
-                {"additional_special_tokens": existing_special + [self.audio_token]}
+                {"additional_special_tokens": [*existing_special, self.audio_token]}
             )
             # mean_resizing=True initializes the new row at the mean of existing
             # rows so its scale matches the pretrained distribution. The
@@ -932,7 +941,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 cfg.eos_token_id = self.tokenizer.eos_token_id
                 cfg.bos_token_id = self.tokenizer.bos_token_id
 
-    def _derive_turn_end_token_id(self) -> Optional[int]:
+    def _derive_turn_end_token_id(self) -> int | None:
         """Return the token id the chat template uses to close an assistant turn.
 
         Renders a throwaway assistant turn whose content is a sentinel, then
@@ -958,7 +967,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 tokenize=False,
                 add_generation_prompt=False,
             )
-        except Exception:  # noqa: BLE001 - any template failure means "no answer"
+        except Exception:
             return None
         if not isinstance(rendered, str) or sentinel not in rendered:
             return None
@@ -1078,15 +1087,19 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         return targets
 
     def get_input_embeddings(self) -> nn.Module:
+        """Return the decoder's token embedding module."""
         return self.language_model.get_input_embeddings()
 
     def set_input_embeddings(self, value: nn.Module) -> None:
+        """Replace the decoder's token embedding module."""
         self.language_model.set_input_embeddings(value)
 
     def get_output_embeddings(self) -> nn.Module:
+        """Return the decoder's LM head."""
         return self.language_model.get_output_embeddings()
 
     def set_output_embeddings(self, value: nn.Module) -> None:
+        """Replace the decoder's LM head."""
         self.language_model.set_output_embeddings(value)
 
     def get_processor(self):
@@ -1131,11 +1144,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if not getattr(self.config, "freeze_language_model", True):
             lm = self.language_model
             if hasattr(lm, "peft_config"):
-                for k, v in lm.state_dict().items():
-                    if "lora_" in k:
+                for name, v in lm.state_dict().items():
+                    if "lora_" in name:
                         continue
-                    if k.startswith("base_model.model."):
-                        k = k[len("base_model.model.") :]
+                    k = name.removeprefix("base_model.model.")
                     # LoRA layers wrap the original Linear as `<name>.base_layer.<weight|bias>`.
                     k = k.replace(".base_layer.", ".")
                     sd[f"language_model.{k}"] = v
@@ -1160,7 +1172,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 return candidate
         return None
 
-    def _per_layer_kwargs(self, input_ids: Optional[torch.Tensor]) -> dict:
+    def _per_layer_kwargs(self, input_ids: torch.Tensor | None) -> dict:
         """Precompute Gemma 4 per-layer embeddings (PLE) from clean `input_ids`.
 
         Gemma 4 builds a token-identity PLE component by looking `input_ids` up
@@ -1200,7 +1212,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         audio_features: torch.Tensor,
         expected_token_counts: torch.Tensor,
-        audio_attention_mask: Optional[torch.Tensor] = None,
+        audio_attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Encode audio features and return flattened embeddings matching expected_token_counts.
 
@@ -1275,7 +1287,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def _mask_input_features(
         self,
         input_features: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """SpecAugment on mel input (pure-torch, vectorized, compile-ready).
 
@@ -1364,7 +1376,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         mask_length: int,
         min_masks: int,
         device: torch.device,
-        valid_lengths: Optional[torch.Tensor] = None,
+        valid_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Vectorized SpecAugment mask sampler — torch.compile-friendly.
 
@@ -1428,17 +1440,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None,
-        input_features: Optional[torch.Tensor] = None,
-        audio_attention_mask: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        past_key_values: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.Tensor] = None,
-        audio_token_counts: Optional[torch.Tensor] = None,
+        input_ids: torch.Tensor | None = None,
+        input_features: torch.Tensor | None = None,
+        audio_attention_mask: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        past_key_values: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        labels: torch.Tensor | None = None,
+        use_cache: bool | None = None,
+        cache_position: torch.Tensor | None = None,
+        audio_token_counts: torch.Tensor | None = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
@@ -1574,9 +1586,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         input_features: torch.Tensor,
         audio_attention_mask: torch.Tensor,
-        input_ids: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Encode audio and splice it into the decoder's input embeddings.
 
         Builds the chat prompt when `input_ids` is not supplied. The number of
@@ -1619,10 +1631,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     @torch.no_grad()
     def generate(
         self,
-        input_ids: Optional[torch.Tensor] = None,
-        input_features: Optional[torch.Tensor] = None,
-        audio_attention_mask: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        input_ids: torch.Tensor | None = None,
+        input_features: torch.Tensor | None = None,
+        audio_attention_mask: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
         **generate_kwargs,
     ):
         """Generate transcription from audio input.
@@ -1776,7 +1788,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         thread.join()
 
-    def save_pretrained(self, save_directory: Union[str, Path], **kwargs) -> None:
+    def save_pretrained(self, save_directory: str | Path, **kwargs) -> None:
         """Save model, tokenizer, and processor."""
         import shutil
 

@@ -1,4 +1,6 @@
-from typing import Optional, Union
+"""Processor that turns raw audio (and optional text) into model inputs."""
+
+from typing import ClassVar, Union
 
 import torch
 import transformers
@@ -17,7 +19,7 @@ except ImportError:
 class ASRProcessor(ProcessorMixin):
     """Processor for Whisper-based ASR models."""
 
-    attributes = ["feature_extractor", "tokenizer"]
+    attributes: ClassVar[list[str]] = ["feature_extractor", "tokenizer"]
     feature_extractor_class = "AutoFeatureExtractor"
     tokenizer_class = "AutoTokenizer"
     # Fallback only. The real value comes from `ASRConfig.audio_token`, which
@@ -34,8 +36,8 @@ class ASRProcessor(ProcessorMixin):
         feature_extractor,
         tokenizer,
         projector=None,
-        encoder_conv_layers: Optional[list] = None,
-        audio_token: Optional[str] = None,
+        encoder_conv_layers: list | None = None,
+        audio_token: str | None = None,
     ):
         """Initialize the ASR processor.
 
@@ -59,7 +61,7 @@ class ASRProcessor(ProcessorMixin):
         """Compute encoder output length using conv layer formulas."""
         return compute_encoder_output_length(mel_length, self.encoder_conv_layers)
 
-    def _render_prompt(self, num_audio_tokens: int, text: Optional[str]) -> torch.Tensor:
+    def _render_prompt(self, num_audio_tokens: int, text: str | None) -> torch.Tensor:
         """Tokenize one chat prompt carrying exactly `num_audio_tokens` placeholders."""
         if num_audio_tokens > 0:
             user_content = self.audio_token * num_audio_tokens
@@ -80,12 +82,8 @@ class ASRProcessor(ProcessorMixin):
             enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
         )
 
-        # Handle both tensor and BatchEncoding returns
-        if isinstance(tokenized, torch.Tensor):
-            ids = tokenized
-        else:
-            # BatchEncoding or dict-like object
-            ids = tokenized.get("input_ids", tokenized.input_ids)
+        # apply_chat_template returns a bare tensor or a BatchEncoding/mapping.
+        ids = tokenized if isinstance(tokenized, torch.Tensor) else tokenized["input_ids"]
         return (ids[0] if ids.dim() > 1 else ids).to(torch.long)
 
     def _stack_prompt_rows(self, rows: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -113,8 +111,8 @@ class ASRProcessor(ProcessorMixin):
 
     def __call__(
         self,
-        audio: Optional[Union[list, "torch.Tensor"]] = None,
-        text: Optional[str] = None,
+        audio: Union[list, "torch.Tensor"] | None = None,
+        text: str | None = None,
         return_tensors: str = "pt",
         **kwargs,
     ) -> dict:

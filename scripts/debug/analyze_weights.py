@@ -138,7 +138,7 @@ def estimate_effective_rank(tensor: torch.Tensor, threshold: float = 0.99) -> tu
     t = tensor.float()
     try:
         if min(t.shape) > 1000:
-            _, singular_values, _ = torch.svd_lowrank(t, q=min(500, min(t.shape)))
+            _, singular_values, _ = torch.svd_lowrank(t, q=min(500, *t.shape))
         else:
             _, singular_values, _ = torch.linalg.svd(t, full_matrices=False)
     except Exception:
@@ -1025,7 +1025,7 @@ def main(
             help="Which model component to analyze: projector / decoder / encoder / all",
         ),
     ] = "projector",
-    filter: Annotated[
+    filter_: Annotated[
         str | None,
         typer.Option(
             "--filter",
@@ -1069,11 +1069,11 @@ def main(
     - (decoder) embed_tokens row-norm distribution (rare-token drift)
     - (decoder) RMSNorm gain coherence (WD-on-norm routing health)
     """
-    if filter is not None:
+    if filter_ is not None:
         # Explicit filter — try to auto-detect component for display mode.
-        effective_filter = filter
+        effective_filter = filter_
         for comp, fil in COMPONENT_FILTERS.items():
-            if fil and fil in filter:
+            if fil and fil in filter_:
                 component = comp
                 break
     else:

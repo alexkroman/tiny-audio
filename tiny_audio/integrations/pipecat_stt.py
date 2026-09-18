@@ -1,7 +1,5 @@
 """Pipecat STT service adapter for Tiny Audio model."""
 
-from typing import Optional
-
 import numpy as np
 import torch
 
@@ -42,12 +40,13 @@ class TinyAudioSTTService(SegmentedSTTService):
         *,
         model_id: str = "mazesmazes/tiny-audio",
         streaming: bool = True,
-        device: Optional[str] = None,
+        device: str | None = None,
         **kwargs,
     ):
+        """Store the model settings; the model itself loads lazily on first use."""
         super().__init__(**kwargs)
         self._model = None
-        self._model_dtype: Optional[torch.dtype] = None
+        self._model_dtype: torch.dtype | None = None
         self._model_id = model_id
         self._streaming = streaming
         self._device = device

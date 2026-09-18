@@ -215,6 +215,7 @@ class MLPAudioProjector(nn.Module):
         detached = out.detach()
 
         def _hook(grad: torch.Tensor) -> None:
+            """Accumulate `sum(dL/dout * out)` for this forward pass."""
             contribution = (grad.detach() * detached).sum()
             prev = self.scale_grad
             self.scale_grad = contribution if prev is None else prev + contribution

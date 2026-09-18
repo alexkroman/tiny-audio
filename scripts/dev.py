@@ -16,10 +16,24 @@ console = Console()
 CODE_PATHS = ["tiny_audio", "scripts", "tests"]
 LIB_PATH = "tiny_audio"
 
+# Every threshold below is a ratchet: raise it when the codebase clears the
+# next rung, never lower it to get a red build green. Coverage's floor lives in
+# `[tool.coverage.report] fail_under` (pyproject.toml) and is enforced by
+# TEST_COMMAND via pytest-cov.
+DOCSTRING_MIN_LIB = "95"  # tiny_audio/: the published model code
+DOCSTRING_MIN_SCRIPTS = "65"  # scripts/: CLI + training; probes drag it down
+DEAD_CODE_MIN_CONFIDENCE = "80"
+
 LINT_COMMANDS = [
-    ["poetry", "check"],
+    # `--lock` also fails when poetry.lock is missing or stale relative to
+    # pyproject.toml, so a dependency edit can't land without its lock update.
+    ["poetry", "check", "--lock"],
     ["ruff", "check", *CODE_PATHS],
-    ["yamllint", "configs/"],
+    # `ta dev format` rewrites; `check` must refuse anything it would rewrite,
+    # otherwise formatting drift only shows up as noise in the next PR.
+    ["ruff", "format", "--check", *CODE_PATHS],
+    ["black", "--check", *CODE_PATHS],
+    ["yamllint", "configs/", ".github/"],
     ["taplo", "check", "pyproject.toml"],
 ]
 TYPE_CHECK_COMMANDS = [
@@ -27,8 +41,34 @@ TYPE_CHECK_COMMANDS = [
     ["pyright", LIB_PATH],
 ]
 SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"]
-DOCSTRINGS_COMMAND = ["interrogate", LIB_PATH, "--fail-under", "50"]
-CHECK_COMMANDS = [*LINT_COMMANDS, *TYPE_CHECK_COMMANDS, SECURITY_COMMAND, DOCSTRINGS_COMMAND]
+DEAD_CODE_COMMAND = [
+    "vulture",
+    "tiny_audio",
+    "scripts",
+    "--min-confidence",
+    DEAD_CODE_MIN_CONFIDENCE,
+]
+DOCSTRINGS_COMMANDS = [
+    ["interrogate", LIB_PATH, "--fail-under", DOCSTRING_MIN_LIB],
+    ["interrogate", "scripts", "--fail-under", DOCSTRING_MIN_SCRIPTS],
+]
+CHECK_COMMANDS = [
+    *LINT_COMMANDS,
+    *TYPE_CHECK_COMMANDS,
+    SECURITY_COMMAND,
+    DEAD_CODE_COMMAND,
+    *DOCSTRINGS_COMMANDS,
+]
+# pytest-cov reads `fail_under` from `[tool.coverage.report]`, so the same
+# floor applies locally, in the pre-commit gate and in CI.
+TEST_COMMAND = [
+    "pytest",
+    "-v",
+    f"--cov={LIB_PATH}",
+    "--cov=scripts",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+]
 
 
 def run(*args: str) -> int:
@@ -85,27 +125,19 @@ def type_check():
 
 @app.command()
 def test():
-    """Run pytest tests."""
-    raise typer.Exit(run("pytest", "-v"))
+    """Run pytest with the coverage floor enforced."""
+    raise typer.Exit(run(*TEST_COMMAND))
 
 
 @app.command()
 def coverage():
-    """Run tests with coverage report."""
-    raise typer.Exit(
-        run(
-            "pytest",
-            f"--cov={LIB_PATH}",
-            "--cov-report=term-missing",
-            "--cov-report=html",
-            "-v",
-        )
-    )
+    """Run tests with coverage report (adds an HTML report under htmlcov/)."""
+    raise typer.Exit(run(*TEST_COMMAND, "--cov-report=html"))
 
 
 @app.command()
 def check():
-    """Run all checks (lint + type-check + security + docstrings)."""
+    """Run all checks (lint + format + type-check + security + dead-code + docstrings)."""
     raise typer.Exit(run_all(*CHECK_COMMANDS))
 
 
@@ -117,9 +149,9 @@ def build():
 
 @app.command()
 def precommit():
-    """Pre-commit quality gate (format, lint, type-check, security, docstrings, test, build)."""
+    """Pre-commit quality gate (format, check, test with coverage floor, build)."""
     format_code()
-    raise typer.Exit(run_all(*CHECK_COMMANDS, ["pytest", "-v"], ["poetry", "build"]))
+    raise typer.Exit(run_all(*CHECK_COMMANDS, TEST_COMMAND, ["poetry", "build"]))
 
 
 @app.command("install-hooks")
@@ -137,13 +169,13 @@ def security():
 @app.command("dead-code")
 def dead_code():
     """Find dead/unused code with vulture."""
-    raise typer.Exit(run("vulture", "tiny_audio", "scripts", "--min-confidence", "80"))
+    raise typer.Exit(run(*DEAD_CODE_COMMAND))
 
 
 @app.command()
 def docstrings():
-    """Check docstring coverage with interrogate."""
-    raise typer.Exit(run("interrogate", LIB_PATH, "-v", "--fail-under", "50"))
+    """Check docstring coverage with interrogate (verbose, per-file table)."""
+    raise typer.Exit(run_all(*[[*cmd, "-v"] for cmd in DOCSTRINGS_COMMANDS]))
 
 
 def _register_handler():

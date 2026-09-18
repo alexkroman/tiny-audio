@@ -174,7 +174,8 @@ tilelang = {version = ">=0.1.9", markers = "sys_platform == 'linux'"}
 
 [tool.black]
 line-length = 100
-target-version = ["py38", "py39", "py310", "py311"]
+# Must agree with `requires-python` above and `[tool.ruff] target-version`.
+target-version = ["py312"]
 include = '\.pyi?$'
 
 [tool.isort]
@@ -233,8 +234,15 @@ python_files = "test_*.py *_test.py"
 python_classes = "Test*"
 python_functions = "test_*"
 
-# Default options
-addopts = "-v -s --tb=short"
+# Default options. `--strict-markers` rejects typos in @pytest.mark.<name>
+# (an unregistered marker is otherwise a silent no-op that never deselects
+# anything); `--strict-config` turns unknown ini keys into errors instead of
+# warnings, so a misspelled option can't quietly disable itself.
+addopts = "-v -s --tb=short --strict-markers --strict-config"
+
+# An @xfail test that unexpectedly passes is a stale expectation; fail it so
+# the marker gets removed rather than masking a later regression.
+xfail_strict = true
 
 # Test paths
 testpaths = ["tests"]
@@ -254,7 +262,10 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py38"
+# Must agree with `requires-python`: a lower target hides every pyupgrade
+# rewrite the real interpreter already supports (PEP 604 unions, PEP 585
+# generics) and lets code that only runs on 3.12 pass as if it were portable.
+target-version = "py312"
 extend-exclude = [
     ".git",
     "__pycache__",
@@ -283,23 +294,93 @@ select = [
     "RET", # flake8-return
     "SIM", # flake8-simplify
     "PTH", # flake8-use-pathlib
+    "A",   # flake8-builtins (shadowed builtins)
+    "PIE", # flake8-pie (misc. lints: duplicate class fields, redundant startswith chains)
+    "PT",  # flake8-pytest-style
+    "RSE", # flake8-raise
+    "TID", # flake8-tidy-imports
+    "Q",   # flake8-quotes (agrees with black/ruff-format)
+    "G",   # flake8-logging-format
+    "LOG", # flake8-logging
+    "TRY", # tryceratops (exception-handling anti-patterns)
+    "FLY", # flynt (static string joins)
+    "PERF", # perflint
+    "PGH", # pygrep-hooks (blanket noqa / type: ignore)
+    "PLC", # pylint conventions
+    "PLE", # pylint errors
+    "PLW", # pylint warnings
+    "FURB", # refurb (modernization)
+    "RUF", # ruff-specific rules
 ]
 extend-ignore = [
     "E203",  # whitespace before ':'
     "E501",  # line too long (handled by black)
     "B008",  # do not perform function calls in argument defaults
     "B905",  # zip() without an explicit strict= parameter
+    # Lazy imports are deliberate throughout: `ta` defers every heavy import
+    # (torch, transformers, gradio) to the command that needs it so that
+    # `ta dev lint` doesn't pay ~4.5s of import time per invocation.
+    "PLC0415",  # import-outside-top-level
+    # Long f-string messages inside raise are the house style; moving each one
+    # into an exception subclass buys nothing here.
+    "TRY003",  # raise-vanilla-args
+    # En dashes, arrows and other typographic characters are used on purpose in
+    # user-facing strings, ITN regexes and comments.
+    "RUF001", "RUF002", "RUF003",  # ambiguous-unicode-character-*
+    # A loop with a guard and a side effect is often clearer than an
+    # `extend(...)` over a comprehension; the perf difference is negligible here.
+    "PERF401",  # manual-list-comprehension
 ]
 
 [tool.ruff.lint.per-file-ignores]
 # Mathematical notation (A, B, W, S for matrices) is conventional in LoRA analysis
 "scripts/debug/analyze_lora.py" = ["N806"]
+# `test` here is a typer command (`ta dev handler`), not a pytest test; its
+# defaulted parameters are CLI options.
+"scripts/deploy/handler_local.py" = ["PT028"]
 
 [tool.mdformat]
 wrap = 100
 number = false
 # Exclude files with YAML front matter (mdformat mangles `---` delimiters)
 exclude = ["MODEL_CARD.md", "demo/README.md"]
+
+[tool.coverage.run]
+branch = true
+source = ["tiny_audio", "scripts"]
+omit = [
+    # One-off research probes, not shipped behaviour; each is a __main__ script
+    # against a live checkpoint or dataset and has no unit-testable surface.
+    "scripts/debug/probe_*.py",
+    "scripts/debug/bench_*.py",
+    "scripts/debug/inspect_datasets.py",
+    "scripts/debug/check_gradient_flow.py",
+    "scripts/debug/compare_to_base.py",
+    "scripts/debug/analyze_weights.py",
+    "scripts/debug/analyze_lora.py",
+]
+
+[tool.coverage.report]
+# Ratchet: `ta dev test` fails below this. Raise it as coverage grows; never
+# lower it to make a red build green. Set from a run without Hub access
+# (the model-loading tests error out there), so CI measures higher -- bump
+# this to just under CI's number after the next green run.
+fail_under = 45
+show_missing = true
+skip_covered = true
+precision = 1
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+    # `except ImportError` fallbacks for the flat-layout HF Hub checkout, where
+    # the package is loaded as a set of sibling modules rather than `tiny_audio.*`.
+    "except ImportError:",
+]
+
+[tool.coverage.xml]
+output = "coverage.xml"
 
 [tool.bandit]
 # Skip B615: We intentionally want latest HuggingFace model versions

@@ -438,6 +438,7 @@ def _available_gpus(min_vram_gib: float) -> list[tuple[int, str]]:
 
     out = subprocess.run(
         ["runpodctl", "gpu", "list", "-o", "json"],
+        check=False,
         capture_output=True,
         text=True,
         timeout=120,
@@ -504,7 +505,8 @@ def provision_command(
     for vram_gib, gpu_id in candidates[:max_attempts]:
         print(f"trying {gpu_id} ({vram_gib} GB)... ", end="", flush=True)
         result = subprocess.run(
-            [
+            check=False,
+            args=[
                 "runpodctl",
                 "pod",
                 "create",
@@ -564,6 +566,7 @@ def wait_command(
     while time.time() < deadline:
         out = subprocess.run(
             ["runpodctl", "pod", "get", pod_id, "-o", "json"],
+            check=False,
             capture_output=True,
             text=True,
             timeout=120,

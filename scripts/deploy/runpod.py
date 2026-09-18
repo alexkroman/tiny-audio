@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -21,7 +21,7 @@ SSH_KEY_PATH = "~/.ssh/id_ed25519"
 
 
 def _auto_session_name(prefix: str) -> str:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M")
     return f"{prefix}_{timestamp}"
 
 
@@ -68,11 +68,11 @@ def test_connection(conn: Connection) -> bool:
     print(f"Testing SSH connection to {conn.host}:{conn.port}...")
     try:
         conn.run("echo Connected", hide=True)
-        print("SSH connection successful!")
-        return True
     except Exception as e:
         print(f"Failed to connect via SSH: {e}")
         return False
+    print("SSH connection successful!")
+    return True
 
 
 def list_tmux_sessions(conn: Connection) -> list[str]:
@@ -120,7 +120,7 @@ def attach_tmux_session(host: str, port: int, session_name: str) -> None:
         f"ssh -i {SSH_KEY_PATH} -p {port} -o StrictHostKeyChecking=no "
         f"-t root@{host} \"tmux attach-session -t '{session_name}'\""
     )
-    subprocess.run(cmd, shell=True)
+    subprocess.run(cmd, shell=True, check=False)
     print(f"\nDetached from session '{session_name}'.")
 
 
@@ -866,8 +866,8 @@ python -m scripts.eval.cli \\
     )
 
 
-@app.command()
-def eval(
+@app.command("eval")
+def eval_model(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
     port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
     model: str = typer.Option(..., "--model", "-m", help="Model path/ID or 'assemblyai'"),
@@ -909,7 +909,7 @@ def eval(
         sys.exit(1)
 
     if session_name is None:
-        model_short = model.split("/")[-1] if "/" in model else model
+        model_short = model.rsplit("/", maxsplit=1)[-1] if "/" in model else model
         session_name = _auto_session_name(f"eval_{model_short}")
 
     if force:

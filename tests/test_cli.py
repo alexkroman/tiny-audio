@@ -52,7 +52,7 @@ class TestSubcommandHelp:
     """Parametrized tests for subcommand --help."""
 
     @pytest.mark.parametrize(
-        "cmd,expected_keywords",
+        ("cmd", "expected_keywords"),
         [
             (["eval"], ["--model", "-m"]),
             (["analysis"], ["high-wer", "compare"]),
@@ -66,7 +66,7 @@ class TestSubcommandHelp:
     )
     def test_subcommand_help(self, cmd, expected_keywords):
         """Test that subcommand --help works and shows expected keywords."""
-        result = runner.invoke(app, cmd + ["--help"])
+        result = runner.invoke(app, [*cmd, "--help"])
         assert result.exit_code == 0, f"'{' '.join(cmd)} --help' failed: {result.output}"
         output = _clean(result.output)
         for keyword in expected_keywords:
@@ -77,7 +77,7 @@ class TestNestedCommands:
     """Parametrized tests for nested command accessibility."""
 
     @pytest.mark.parametrize(
-        "cmd_path,expected_keyword",
+        ("cmd_path", "expected_keyword"),
         [
             # Runpod subcommands (now top-level)
             (["runpod", "deploy"], "host"),
@@ -99,7 +99,7 @@ class TestNestedCommands:
     )
     def test_nested_command_help(self, cmd_path, expected_keyword):
         """Test that nested commands are accessible and show expected options."""
-        result = runner.invoke(app, cmd_path + ["--help"])
+        result = runner.invoke(app, [*cmd_path, "--help"])
         assert result.exit_code == 0, f"'{' '.join(cmd_path)} --help' failed: {result.output}"
         err = f"Expected '{expected_keyword}' in {cmd_path} help"
         assert expected_keyword.lower() in _clean(result.output).lower(), err
@@ -169,6 +169,6 @@ class TestCLIStructure:
     )
     def test_nested_commands_accessible(self, cmd_path):
         """Test that all nested commands are accessible."""
-        result = runner.invoke(app, cmd_path + ["--help"])
+        result = runner.invoke(app, [*cmd_path, "--help"])
         assert result.exit_code == 0, f"'{' '.join(cmd_path)} --help' failed: {result.output}"
         assert len(result.output) > 50, f"'{' '.join(cmd_path)}' help output seems too short"

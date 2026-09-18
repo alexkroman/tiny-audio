@@ -306,9 +306,12 @@ class TestPipelineCall:
         fake_segments = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0}]
         fake_words = [{"word": "hello", "start": 0.1, "end": 0.4}]
 
-        with patch("tiny_audio.asr_pipeline.ForcedAligner.align", return_value=fake_words), patch(
-            "tiny_audio.asr_pipeline.SpeakerDiarizer.diarize", return_value=fake_segments
-        ) as mock_diarize:
+        with (
+            patch("tiny_audio.asr_pipeline.ForcedAligner.align", return_value=fake_words),
+            patch(
+                "tiny_audio.asr_pipeline.SpeakerDiarizer.diarize", return_value=fake_segments
+            ) as mock_diarize,
+        ):
             result = pipeline(
                 {"array": audio, "sampling_rate": 16000},
                 return_speakers=True,

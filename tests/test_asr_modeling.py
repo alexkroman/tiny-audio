@@ -1,5 +1,7 @@
 """Tests for ASRModel — projector dispatch, tokenizer init, embeddings, audio token counting."""
 
+from typing import ClassVar
+
 import pytest
 import torch
 
@@ -491,7 +493,7 @@ class TestFlashAttentionHeadDimGuard:
                 self.head_dim = d
 
         class Cfg:
-            per_layer_config = [Layer(256), Layer(512), Layer(256)]
+            per_layer_config: ClassVar[list] = [Layer(256), Layer(512), Layer(256)]
 
         assert _max_attention_head_dim(Cfg()) == 512
 
@@ -505,7 +507,7 @@ class TestFlashAttentionHeadDimGuard:
                 self.head_dim = d
 
         class Cfg:
-            per_layer_config = [Layer(256), Layer(512)]
+            per_layer_config: ClassVar[list] = [Layer(256), Layer(512)]
 
             @property
             def head_dim(self):
@@ -996,13 +998,13 @@ class TestAssertProjectorLoaded:
         """A projector left at random init must not load silently."""
         from tiny_audio.asr_modeling import _assert_projector_loaded
 
-        with pytest.raises(RuntimeError, match="projector.linear_1.weight"):
+        with pytest.raises(RuntimeError, match=r"projector\.linear_1\.weight"):
             _assert_projector_loaded(self._keys(missing=["projector.linear_1.weight"]), "mlp")
 
     def test_raises_on_unexpected_projector_key(self):
         from tiny_audio.asr_modeling import _assert_projector_loaded
 
-        with pytest.raises(RuntimeError, match="projector.stale.weight"):
+        with pytest.raises(RuntimeError, match=r"projector\.stale\.weight"):
             _assert_projector_loaded(self._keys(unexpected=["projector.stale.weight"]), "mlp")
 
     def test_legacy_layout_gets_an_actionable_hint(self):
