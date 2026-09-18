@@ -19,6 +19,8 @@ class AssemblyAIModel(str, Enum):
     best = "best"
     universal = "universal"
     universal_3_pro = "universal-3-pro"
+    # API name uses dashes for the decimal: "universal-3-5-pro", not "3.5".
+    universal_3_5_pro = "universal-3-5-pro"
 
 
 # Valid `model` values accepted by setup_assemblyai; the enum is the source.

@@ -72,6 +72,11 @@ def _require_api_key(env_var: str) -> str:
     return api_key
 
 
+def _one_line(text: str) -> str:
+    """Collapse whitespace so a raw transcript stays on a single results.txt line."""
+    return " ".join(text.split())
+
+
 def save_results(
     model_name: str,
     dataset_name: str,
@@ -115,6 +120,15 @@ def save_results(
             f.write(f"Sample {i} - WER: {r.wer:.2f}%\n")
             f.write(f"Ground Truth: {norm_ref}\n")
             f.write(f"Prediction: {norm_pred}\n")
+            # Raw (un-normalized) pair, written after the normalized one so the
+            # existing "Ground Truth: "/"Prediction: " parsers keep matching the
+            # WER-bearing text. Formatting metrics (ITN, casing, punctuation)
+            # need these: EnglishTextNormalizer both performs ITN
+            # ("twenty five dollars" -> "$25") and destroys it
+            # ("3:00 p.m." -> "3 0 p m"), so the normalized pair carries no
+            # formatting signal. Newlines are flattened to keep one line each.
+            f.write(f"Ground Truth Raw: {_one_line(r.reference)}\n")
+            f.write(f"Prediction Raw: {_one_line(r.prediction)}\n")
             f.write("-" * 80 + "\n")
 
     # Save summary metrics
