@@ -119,6 +119,24 @@ class TestFindModelDirs:
 
         assert len(dirs) == 2
 
+    def test_empty_pattern_matches_every_model(self, tmp_path: Path):
+        """`extract-entities` defaults to an empty pattern meaning "all models"."""
+        (tmp_path / "20240101_120000_tiny-audio_librispeech").mkdir()
+        (tmp_path / "20240102_130000_whisper_commonvoice").mkdir()
+
+        dirs = find_model_dirs(tmp_path, "")
+
+        assert len(dirs) == 2
+
+    def test_empty_pattern_still_honors_exclude(self, tmp_path: Path):
+        (tmp_path / "20240101_120000_tiny-audio_librispeech").mkdir()
+        (tmp_path / "20240102_130000_whisper_commonvoice").mkdir()
+
+        dirs = find_model_dirs(tmp_path, "", exclude=["whisper"])
+
+        assert len(dirs) == 1
+        assert "tiny-audio" in dirs[0].name
+
     def test_find_no_matches(self, tmp_path: Path):
         """Test when no directories match."""
         (tmp_path / "20240101_120000_whisper_librispeech").mkdir()

@@ -19,6 +19,20 @@ console = Console()
 
 KEYWORDS_FILE = "outputs/keywords.json"
 
+# OntoNotes' seven numeric labels. The ITN table scores these spans off the raw
+# reference, covers classes NER never labels at all (phone numbers, URLs,
+# versions), and separates a formatting miss from a recognition miss -- so the
+# entity table leaves them out and reports semantic recall only.
+ITN_COVERED_ENTITY_TYPES = {
+    "CARDINAL",
+    "DATE",
+    "MONEY",
+    "ORDINAL",
+    "PERCENT",
+    "QUANTITY",
+    "TIME",
+}
+
 
 def extract_dataset_name(dir_name: str) -> str:
     """Extract dataset name from output directory name.
@@ -240,7 +254,20 @@ def extract_entities(
     min_count: int = typer.Option(20, help="Minimum entity count to include a type"),
     latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
 ):
-    """Extract named entities from reference texts and save to keywords.json."""
+    """Extract named entities from reference texts and save to keywords.json.
+
+    Entities are read off the *raw* reference. `EnglishTextNormalizer` output is
+    lowercased and stripped of punctuation, and spaCy's NER leans on both -- run
+    against normalized text it loses most PERSON/ORG spans and nearly all of the
+    rarer labels (PRODUCT, WORK_OF_ART, FAC, EVENT, LAW). Samples written before
+    raw transcripts were persisted carry no raw reference and are skipped rather
+    than extracted from normalized text.
+
+    References stay keyed by the normalized ground truth, which every run has;
+    only extraction needs the raw form, since `entity_in_text` normalizes both
+    sides before matching. Entity `start`/`end` offsets therefore index the raw
+    reference, not the key.
+    """
     import spacy
 
     console.print("Loading spaCy model...")
@@ -252,31 +279,43 @@ def extract_entities(
 
     all_references = {}
     entity_counts = defaultdict(int)
+    missing_raw: set[str] = set()
 
     for results_file in sorted(results_files):
         samples = parse_results_file(results_file)
 
         for sample in samples:
             gt = sample["ground_truth"]
-            if gt not in all_references:
-                doc = nlp(gt)
-                entities = [
-                    {
-                        "text": ent.text,
-                        "label": ent.label_,
-                        "start": ent.start_char,
-                        "end": ent.end_char,
-                    }
-                    for ent in doc.ents
-                ]
-                all_references[gt] = {"entities": entities}
-                for ent in entities:
-                    entity_counts[ent["label"]] += 1
+            if gt in all_references:
+                continue
+            gt_raw = sample.get("ground_truth_raw")
+            if gt_raw is None:
+                missing_raw.add(gt)
+                continue
+
+            doc = nlp(gt_raw)
+            entities = [
+                {
+                    "text": ent.text,
+                    "label": ent.label_,
+                    "start": ent.start_char,
+                    "end": ent.end_char,
+                }
+                for ent in doc.ents
+            ]
+            all_references[gt] = {"entities": entities}
+            for ent in entities:
+                entity_counts[ent["label"]] += 1
+
+    # A reference skipped in one file may carry raw text in another.
+    missing_raw -= set(all_references)
 
     valid_types = {t for t, c in entity_counts.items() if c >= min_count}
 
     keywords = {
         "total_references": len(all_references),
+        "source_text": "raw",
+        "references_missing_raw": len(missing_raw),
         "entity_counts_by_type": {t: c for t, c in entity_counts.items() if t in valid_types},
         "min_count_threshold": min_count,
         "excluded_types": {t: c for t, c in entity_counts.items() if t not in valid_types},
@@ -296,6 +335,17 @@ def extract_entities(
 
     console.print(f"\nExtracted entities from {len(all_references)} unique references")
     console.print(f"References with entities: {len(keywords['references'])}")
+    if missing_raw:
+        console.print(
+            f"[yellow]Skipped {len(missing_raw)} references with no raw transcript[/yellow] "
+            "(re-run `ta eval` to capture them)."
+        )
+    if keywords["excluded_types"]:
+        dropped = ", ".join(
+            f"{t} ({c})"
+            for t, c in sorted(keywords["excluded_types"].items(), key=lambda kv: -kv[1])
+        )
+        console.print(f"[dim]Below --min-count {min_count}: {dropped}[/dim]")
     console.print(f"Saved to [bold]{keywords_path}[/bold]")
 
 
@@ -785,32 +835,34 @@ def compare(
         console.print(mcq_table)
 
     # === Entity Errors Table ===
-    # Get all entity types across models
+    # Get all entity types across models, minus the numeric ones the ITN table
+    # already covers (see ITN_COVERED_ENTITY_TYPES) -- what is left is semantic
+    # recall: did the model get the name at all.
     all_entity_types = set()
     for m in model_metrics.values():
         all_entity_types.update(m["entity_errors"].keys())
+    all_entity_types -= ITN_COVERED_ENTITY_TYPES
 
     if all_entity_types:
         # Order entity types by frequency
         entity_type_order = [
-            "CARDINAL",
-            "DATE",
             "GPE",
             "PERSON",
             "ORG",
             "NORP",
-            "ORDINAL",
-            "TIME",
-            "QUANTITY",
             "LOC",
-            "MONEY",
-            "PERCENT",
+            "FAC",
+            "PRODUCT",
+            "EVENT",
+            "WORK_OF_ART",
+            "LAW",
+            "LANGUAGE",
         ]
         ordered_entity_types = [t for t in entity_type_order if t in all_entity_types]
         ordered_entity_types += [t for t in sorted(all_entity_types) if t not in entity_type_order]
 
         console.print("\n")
-        entity_table = Table(title="Missed Entity Errors")
+        entity_table = Table(title="Missed Entity Errors (semantic types; numeric types in ITN)")
         entity_table.add_column("Model", style="cyan")
         entity_table.add_column("Average", justify="right", style="bold")
         for etype in ordered_entity_types:
@@ -820,9 +872,13 @@ def compare(
         for model, data in model_metrics.items():
             display_name = data.get("display_name", model)
             row = [display_name]
-            # Calculate average entity error rate
-            total_found = sum(e["found"] for e in data["entity_errors"].values())
-            total_entities = sum(e["total"] for e in data["entity_errors"].values())
+            # Average over the displayed types only, so it is not dominated by
+            # the numeric labels this table no longer shows.
+            shown = [
+                data["entity_errors"][t] for t in ordered_entity_types if t in data["entity_errors"]
+            ]
+            total_found = sum(e["found"] for e in shown)
+            total_entities = sum(e["total"] for e in shown)
             if total_entities > 0:
                 avg_err = (total_entities - total_found) / total_entities * 100
                 row.append(f"{avg_err:.2f}%")
@@ -842,6 +898,11 @@ def compare(
             entity_table.add_row(*row)
 
         console.print(entity_table)
+        console.print(
+            "[dim]% of reference entities absent from the prediction. "
+            "Numeric types (dates, money, counts) are scored in the ITN table below, "
+            "which separates a formatting miss from a recognition miss.[/dim]"
+        )
 
     # === ITN Formatting Table (raw text, pattern-based) ===
     # Only runs written after raw-transcript persistence landed contribute here;

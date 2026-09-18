@@ -107,7 +107,10 @@ poetry run ta analysis compare model1 model2 model3
 **Find entity errors:**
 
 ```bash
-# Extract named entities that were transcribed incorrectly
+# Build the entity index first (reads the raw references in your eval runs)
+poetry run ta analysis extract-entities
+
+# Show samples where those entities were transcribed incorrectly
 poetry run ta analysis entity-errors your-username/your-model
 ```
 
