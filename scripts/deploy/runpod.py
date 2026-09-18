@@ -399,7 +399,7 @@ echo "Dependencies verified for $TA_PYTHON"
 
 @app.command(name="plan")
 def plan(
-    experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
+    experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
     seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
     gpu: str = typer.Option("NVIDIA H100 80GB HBM3", "--gpu"),
     image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
@@ -421,7 +421,7 @@ def plan(
 
 @app.command(name="up")
 def up(
-    experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
+    experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
     seq_len: int = typer.Option(512, "--seq-len"),
     name: str | None = typer.Option(None, "--name"),
     image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
@@ -698,7 +698,7 @@ def train(
     host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
     port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
     experiment: str = typer.Option(
-        "granite_gemma", "--experiment", "-e", help="Experiment config to run"
+        "granite_qwen", "--experiment", "-e", help="Experiment config to run"
     ),
     session_name: str | None = typer.Option(
         None, "--session-name", "-s", help="Custom tmux session name"
