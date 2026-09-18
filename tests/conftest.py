@@ -53,16 +53,6 @@ def mock_projector():
 # =============================================================================
 
 
-def build_deepgram_utterance(speaker: int, start: float, end: float, text: str = ""):
-    """Factory for Deepgram utterance mocks."""
-    utterance = MagicMock()
-    utterance.speaker = speaker
-    utterance.start = start
-    utterance.end = end
-    utterance.transcript = text
-    return utterance
-
-
 def build_deepgram_word(word: str, start: float, end: float):
     """Factory for Deepgram word mocks."""
     w = MagicMock()
@@ -70,31 +60,6 @@ def build_deepgram_word(word: str, start: float, end: float):
     w.start = start
     w.end = end
     return w
-
-
-def build_deepgram_diarization_response(utterances: list | None = None):
-    """Factory for Deepgram diarization API response mocks.
-
-    Args:
-        utterances: List of dicts with keys: speaker, start, end, text (optional)
-
-    Returns:
-        MagicMock configured as a Deepgram response
-    """
-    response = MagicMock()
-    if utterances:
-        response.results.utterances = [
-            build_deepgram_utterance(
-                speaker=u["speaker"],
-                start=u["start"],
-                end=u["end"],
-                text=u.get("text", ""),
-            )
-            for u in utterances
-        ]
-    else:
-        response.results.utterances = None
-    return response
 
 
 def build_deepgram_transcription_response(transcript: str = "", words: list | None = None):
@@ -120,17 +85,6 @@ def build_deepgram_transcription_response(transcript: str = "", words: list | No
     channel.alternatives = [alternative]
     response.results.channels = [channel]
     return response
-
-
-@pytest.fixture
-def deepgram_diarization_response():
-    """Sample Deepgram diarization response with 2 speakers."""
-    return build_deepgram_diarization_response(
-        [
-            {"speaker": 0, "start": 0.0, "end": 1.5, "text": "Hello"},
-            {"speaker": 1, "start": 1.5, "end": 3.0, "text": "Hi there"},
-        ]
-    )
 
 
 @pytest.fixture
@@ -211,21 +165,6 @@ class MockProjectorConfig:
         self.llm_dim = kwargs.get("llm_dim", 512)
         self.projector_hidden_dim = kwargs.get("projector_hidden_dim", 1024)
         self.projector_pool_stride = kwargs.get("projector_pool_stride", 4)
-
-        # MoE settings
-        self.num_experts = kwargs.get("num_experts", 4)
-        self.num_experts_per_tok = kwargs.get("num_experts_per_tok", 2)
-        self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 0.02)
-        self.router_z_loss_coef = kwargs.get("router_z_loss_coef", 0.001)
-        self.adapter_hidden_dim = kwargs.get("adapter_hidden_dim", 1024)
-
-        # QFormer settings
-        self.qformer_window_size = kwargs.get("qformer_window_size", 15)
-        self.downsample_rate = kwargs.get("downsample_rate", 5)
-        self.qformer_hidden_size = kwargs.get("qformer_hidden_size")
-        self.qformer_num_layers = kwargs.get("qformer_num_layers", 2)
-        self.qformer_num_heads = kwargs.get("qformer_num_heads", 8)
-        self.qformer_intermediate_size = kwargs.get("qformer_intermediate_size")
 
 
 @pytest.fixture

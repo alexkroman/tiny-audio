@@ -1,4 +1,4 @@
-"""CLI for ASR, diarization, and alignment evaluation."""
+"""CLI for ASR evaluation."""
 
 import os
 from datetime import datetime, timezone
@@ -11,38 +11,21 @@ from rich.table import Table
 
 from scripts.eval.audio import TextNormalizer
 from scripts.eval.datasets import (
-    ALIGNMENT_DATASETS,
-    CLASSIFICATION_DATASETS,
     DATASET_REGISTRY,
-    DIARIZATION_DATASETS,
-    MCQ_DATASETS,
     load_eval_dataset,
 )
 from scripts.eval.evaluators import (
     AppleSpeechEvaluator,
-    AssemblyAIAlignmentEvaluator,
-    AssemblyAIDiarizationEvaluator,
     AssemblyAIEvaluator,
-    AssemblyAIMMAUEvaluator,
     AssemblyAIModel,
     AssemblyAIStreamingEvaluator,
-    ClassificationEvaluator,
-    ClassificationResult,
-    DeepgramAlignmentEvaluator,
-    DeepgramDiarizationEvaluator,
     DeepgramEvaluator,
-    ElevenLabsAlignmentEvaluator,
-    ElevenLabsDiarizationEvaluator,
     ElevenLabsEvaluator,
     EndpointEvaluator,
     EvalResult,
-    LocalDiarizationEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
-    MCQResult,
-    MMAUEvaluator,
     SwiftSDKEvaluator,
-    TimestampAlignmentEvaluator,
 )
 
 app = typer.Typer(help="Evaluate ASR models on standard datasets")
@@ -50,7 +33,7 @@ console = Console()
 
 
 # Valid dataset choices
-VALID_DATASETS = ["all", "all-full"] + list(DATASET_REGISTRY.keys())
+VALID_DATASETS = ["all"] + list(DATASET_REGISTRY.keys())
 
 
 def get_model_name(model_path: str) -> str:
@@ -150,99 +133,6 @@ def save_results(
     return result_dir
 
 
-def save_diarization_results(
-    model_name: str,
-    dataset_name: str,
-    results,
-    metrics: dict,
-    output_dir: str = "outputs",
-) -> Path:
-    """Save diarization evaluation results and metrics."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_diarization"
-    result_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save detailed results
-    results_file = result_dir / "results.txt"
-    with results_file.open("w") as f:
-        for i, r in enumerate(results, 1):
-            f.write(f"Sample {i}\n")
-            f.write(f"  DER: {r.der:.2f}%\n")
-            f.write(
-                f"  Components: conf={r.confusion:.2f}%, miss={r.missed:.2f}%, fa={r.false_alarm:.2f}%\n"
-            )
-            f.write(f"  Speakers: ref={r.num_speakers_ref}, hyp={r.num_speakers_hyp}\n")
-            f.write(f"  Time: {r.time:.2f}s\n")
-            f.write("-" * 80 + "\n")
-
-    # Save summary metrics
-    metrics_file = result_dir / "metrics.txt"
-    with metrics_file.open("w") as f:
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write("-" * 40 + "\n")
-        for key, value in metrics.items():
-            if isinstance(value, float):
-                f.write(f"{key}: {value:.4f}\n")
-            else:
-                f.write(f"{key}: {value}\n")
-
-    console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
-    return result_dir
-
-
-def save_alignment_results(
-    model_name: str,
-    dataset_name: str,
-    results,
-    metrics: dict,
-    output_dir: str = "outputs",
-) -> Path:
-    """Save alignment evaluation results and metrics."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_alignment"
-    result_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save detailed results
-    results_file = result_dir / "results.txt"
-    with results_file.open("w") as f:
-        for i, r in enumerate(results, 1):
-            f.write(f"Sample {i}\n")
-            f.write(f"  Aligned: {r.num_aligned_words}/{r.num_ref_words} words\n")
-            if r.num_aligned_words > 0:
-                mae_start = sum(abs(p - ref) for p, ref in zip(r.pred_starts, r.ref_starts)) / len(
-                    r.pred_starts
-                )
-                mae_end = sum(abs(p - ref) for p, ref in zip(r.pred_ends, r.ref_ends)) / len(
-                    r.pred_ends
-                )
-                f.write(f"  MAE (start): {mae_start * 1000:.1f}ms\n")
-                f.write(f"  MAE (end): {mae_end * 1000:.1f}ms\n")
-            f.write(f"  Time: {r.time:.2f}s\n")
-            f.write(f"  Reference: {r.reference_text[:100]}...\n")
-            f.write(f"  Prediction: {r.predicted_text[:100]}...\n")
-            f.write("-" * 80 + "\n")
-
-    # Save summary metrics
-    metrics_file = result_dir / "metrics.txt"
-    with metrics_file.open("w") as f:
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write("-" * 40 + "\n")
-        for key, value in metrics.items():
-            if isinstance(value, float):
-                f.write(f"{key}: {value:.4f}\n")
-            else:
-                f.write(f"{key}: {value}\n")
-
-    console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
-    return result_dir
-
-
 def print_asr_metrics(dataset_name: str, metrics: dict):
     """Print ASR metrics using rich table."""
     table = Table(title=f"Results: {dataset_name}")
@@ -264,164 +154,6 @@ def print_asr_metrics(dataset_name: str, metrics: dict):
     console.print(table)
 
 
-def print_diarization_metrics(dataset_name: str, metrics: dict):
-    """Print diarization metrics using rich table."""
-    table = Table(title=f"Results: {dataset_name}")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
-
-    table.add_row("DER", f"{metrics['der']:.2f}%")
-    table.add_row("Confusion", f"{metrics['confusion']:.2f}%")
-    table.add_row("Missed", f"{metrics['missed']:.2f}%")
-    table.add_row("False Alarm", f"{metrics['false_alarm']:.2f}%")
-    table.add_row("Samples", str(metrics["num_samples"]))
-    table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
-
-    console.print(table)
-
-
-def print_alignment_metrics(dataset_name: str, metrics: dict):
-    """Print alignment metrics using rich table."""
-    table = Table(title=f"Results: {dataset_name}")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
-
-    table.add_row("Median AE", f"{metrics['mae'] * 1000:.1f}ms")
-    table.add_row("Samples", str(metrics["num_samples"]))
-    table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
-
-    console.print(table)
-
-
-def save_mcq_results(
-    model_name: str,
-    dataset_name: str,
-    results: list[MCQResult],
-    metrics: dict,
-    output_dir: str = "outputs",
-) -> Path:
-    """Save MCQ evaluation results and metrics."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_mcq"
-    result_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save detailed results
-    results_file = result_dir / "results.txt"
-    with results_file.open("w") as f:
-        for i, r in enumerate(results, 1):
-            status = "✓" if r.correct else "✗"
-            f.write(f"Sample {i} [{status}]\n")
-            f.write(f"  Category: {r.category}\n")
-            f.write(f"  Question: {r.question}\n")
-            f.write(f"  Choices: {r.choices}\n")
-            f.write(f"  Prediction: {r.prediction}\n")
-            f.write(f"  Matched: {r.matched_choice}\n")
-            f.write(f"  Reference: {r.reference}\n")
-            f.write(f"  Time: {r.time:.2f}s\n")
-            f.write("-" * 80 + "\n")
-
-    # Save summary metrics
-    metrics_file = result_dir / "metrics.txt"
-    with metrics_file.open("w") as f:
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write("-" * 40 + "\n")
-        f.write(f"Accuracy: {metrics['accuracy']:.2f}%\n")
-        f.write(f"Correct: {metrics['correct']}/{metrics['total']}\n")
-        f.write(f"Avg Time: {metrics['avg_time']:.2f}s\n")
-        f.write(f"Num Samples: {metrics['num_samples']}\n")
-        f.write("-" * 40 + "\n")
-        f.write("Per-Category Accuracy:\n")
-        for cat, acc in sorted(metrics.get("category_accuracy", {}).items()):
-            f.write(f"  {cat}: {acc:.2f}%\n")
-
-    console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
-    return result_dir
-
-
-def print_mcq_metrics(dataset_name: str, metrics: dict):
-    """Print MCQ metrics using rich table."""
-    table = Table(title=f"Results: {dataset_name}")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
-
-    table.add_row("Accuracy", f"{metrics['accuracy']:.2f}%")
-    table.add_row("Correct", f"{metrics['correct']}/{metrics['total']}")
-    table.add_row("Samples", str(metrics["num_samples"]))
-    table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
-
-    console.print(table)
-
-    # Print per-category breakdown if available
-    if "category_accuracy" in metrics and metrics["category_accuracy"]:
-        cat_table = Table(title="Per-Category Accuracy")
-        cat_table.add_column("Category", style="cyan")
-        cat_table.add_column("Accuracy", style="green")
-        for cat, acc in sorted(metrics["category_accuracy"].items()):
-            cat_table.add_row(cat, f"{acc:.2f}%")
-        console.print(cat_table)
-
-
-def save_classification_results(
-    model_name: str,
-    dataset_name: str,
-    results: list[ClassificationResult],
-    metrics: dict,
-    output_dir: str = "outputs",
-) -> Path:
-    """Save classification evaluation results and metrics."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
-    task = metrics.get("task", "classification")
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}_{dataset_name}_{task}"
-    result_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save detailed results
-    results_file = result_dir / "results.txt"
-    with results_file.open("w") as f:
-        for i, r in enumerate(results, 1):
-            status = "correct" if r.correct else "wrong"
-            f.write(f"Sample {i} [{status}]\n")
-            f.write(f"  Instruction: {r.instruction}\n")
-            f.write(f"  Prediction: {r.prediction}\n")
-            f.write(f"  Reference: {r.reference}\n")
-            f.write(f"  Time: {r.time:.2f}s\n")
-            f.write("-" * 80 + "\n")
-
-    # Save summary metrics
-    metrics_file = result_dir / "metrics.txt"
-    with metrics_file.open("w") as f:
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        f.write(f"Task: {task}\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write("-" * 40 + "\n")
-        f.write(f"Accuracy: {metrics['accuracy']:.2f}%\n")
-        f.write(f"Correct: {metrics['correct']}/{metrics['total']}\n")
-        f.write(f"Avg Time: {metrics['avg_time']:.2f}s\n")
-        f.write(f"Num Samples: {metrics['num_samples']}\n")
-
-    console.print(f"\nResults saved to: [bold]{result_dir}[/bold]")
-    return result_dir
-
-
-def print_classification_metrics(dataset_name: str, metrics: dict):
-    """Print classification metrics using rich table."""
-    task = metrics.get("task", "classification")
-    table = Table(title=f"Results: {dataset_name} ({task})")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
-
-    table.add_row("Accuracy", f"{metrics['accuracy']:.2f}%")
-    table.add_row("Correct", f"{metrics['correct']}/{metrics['total']}")
-    table.add_row("Samples", str(metrics["num_samples"]))
-    table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
-
-    console.print(table)
-
-
 def validate_datasets(datasets: list[str]) -> list[str]:
     """Validate and expand dataset names."""
     for ds in datasets:
@@ -430,20 +162,9 @@ def validate_datasets(datasets: list[str]) -> list[str]:
             console.print(f"Valid choices: {', '.join(VALID_DATASETS)}")
             raise typer.Exit(1)
 
-    # Expand "all" to ASR datasets only (exclude diarization, alignment, MCQ, classification, expresso)
+    # Expand "all" to the ASR datasets (expresso is TTS-style, opt in by name)
     if "all" in datasets:
-        return [
-            k
-            for k in DATASET_REGISTRY
-            if k not in DIARIZATION_DATASETS
-            and k not in ALIGNMENT_DATASETS
-            and k not in MCQ_DATASETS
-            and k not in CLASSIFICATION_DATASETS
-            and k != "expresso"
-        ]
-    # Expand "all-full" to include diarization, alignment, MCQ, and classification datasets too
-    if "all-full" in datasets:
-        return list(DATASET_REGISTRY.keys())
+        return [k for k in DATASET_REGISTRY if k != "expresso"]
 
     return datasets
 
@@ -464,7 +185,7 @@ def main(
         typer.Option(
             "--datasets",
             "-d",
-            help="Datasets to evaluate on ('all' for ASR only, 'all-full' includes diarization/alignment)",
+            help="Datasets to evaluate on ('all' for every ASR dataset)",
         ),
     ] = None,
     split: Annotated[str, typer.Option(help="Dataset split")] = "test",
@@ -480,15 +201,6 @@ def main(
     streaming: Annotated[
         bool, typer.Option("--streaming", "-s", help="Use streaming evaluation (for local or AAI)")
     ] = False,
-    num_speakers: Annotated[
-        Optional[int], typer.Option("--num-speakers", help="Number of speakers (for diarization)")
-    ] = None,
-    min_speakers: Annotated[
-        Optional[int], typer.Option("--min-speakers", help="Min speakers (for diarization)")
-    ] = None,
-    max_speakers: Annotated[
-        Optional[int], typer.Option("--max-speakers", help="Max speakers (for diarization)")
-    ] = None,
     config: Annotated[
         Optional[str],
         typer.Option("--config", "-c", help="Dataset config override (e.g., 'en' for CommonVoice)"),
@@ -514,10 +226,6 @@ def main(
         int,
         typer.Option("--num-workers", "-w", help="Number of parallel workers for API evaluations"),
     ] = 1,
-    verbose: Annotated[
-        bool,
-        typer.Option("--verbose", "-v", help="Show word-by-word alignment details"),
-    ] = False,
     model_name: Annotated[
         Optional[str],
         typer.Option(
@@ -550,199 +258,6 @@ def main(
 
         cfg = DATASET_REGISTRY[dataset_name]
         actual_split = cfg.default_split if split == "test" else split
-
-        # Handle diarization datasets
-        if dataset_name in DIARIZATION_DATASETS:
-            dataset = load_eval_dataset(dataset_name, actual_split, config, decode_audio=False)
-            if model == "assemblyai":
-                api_key = _require_api_key("ASSEMBLYAI_API_KEY")
-                model_id = assemblyai_model.value
-                evaluator = AssemblyAIDiarizationEvaluator(
-                    api_key=api_key,
-                    model=assemblyai_model.value,
-                    audio_field=cfg.audio_field,
-                    speakers_field=cfg.speakers_field,
-                    timestamps_start_field=cfg.timestamps_start_field,
-                    timestamps_end_field=cfg.timestamps_end_field,
-                    num_workers=num_workers,
-                )
-            elif model == "deepgram":
-                api_key = _require_api_key("DEEPGRAM_API_KEY")
-                model_id = "nova-3"
-                evaluator = DeepgramDiarizationEvaluator(
-                    api_key=api_key,
-                    audio_field=cfg.audio_field,
-                    speakers_field=cfg.speakers_field,
-                    timestamps_start_field=cfg.timestamps_start_field,
-                    timestamps_end_field=cfg.timestamps_end_field,
-                    num_workers=num_workers,
-                )
-            elif model == "elevenlabs":
-                api_key = _require_api_key("ELEVENLABS_API_KEY")
-                model_id = "scribe-v2"
-                evaluator = ElevenLabsDiarizationEvaluator(
-                    api_key=api_key,
-                    audio_field=cfg.audio_field,
-                    speakers_field=cfg.speakers_field,
-                    timestamps_start_field=cfg.timestamps_start_field,
-                    timestamps_end_field=cfg.timestamps_end_field,
-                    num_workers=num_workers,
-                )
-            else:
-                # Local diarization using TEN-VAD + ECAPA-TDNN + spectral clustering
-                model_id = "local" if model == "local" else get_model_name(model)
-                evaluator = LocalDiarizationEvaluator(
-                    audio_field=cfg.audio_field,
-                    speakers_field=cfg.speakers_field,
-                    timestamps_start_field=cfg.timestamps_start_field,
-                    timestamps_end_field=cfg.timestamps_end_field,
-                    num_speakers=num_speakers,
-                    min_speakers=min_speakers or 2,
-                    max_speakers=max_speakers or 10,
-                    num_workers=num_workers,
-                )
-
-            results = evaluator.evaluate(dataset, max_samples)
-            metrics = evaluator.compute_metrics()
-            save_diarization_results(
-                model_name or model_id, dataset_name, results, metrics, output_dir
-            )
-            print_diarization_metrics(dataset_name, metrics)
-            continue
-
-        # Handle alignment datasets
-        if dataset_name in ALIGNMENT_DATASETS:
-            dataset = load_eval_dataset(dataset_name, actual_split, config)
-
-            if model == "assemblyai":
-                api_key = _require_api_key("ASSEMBLYAI_API_KEY")
-                model_id = assemblyai_model.value
-                evaluator = AssemblyAIAlignmentEvaluator(
-                    api_key=api_key,
-                    model=assemblyai_model.value,
-                    audio_field=cfg.audio_field,
-                    text_field=cfg.text_field,
-                    words_field=cfg.words_field,
-                    verbose=verbose,
-                )
-            elif model == "deepgram":
-                api_key = _require_api_key("DEEPGRAM_API_KEY")
-                model_id = "nova-3"
-                evaluator = DeepgramAlignmentEvaluator(
-                    api_key=api_key,
-                    audio_field=cfg.audio_field,
-                    text_field=cfg.text_field,
-                    words_field=cfg.words_field,
-                    verbose=verbose,
-                )
-            elif model == "elevenlabs":
-                api_key = _require_api_key("ELEVENLABS_API_KEY")
-                model_id = "scribe-v2"
-                evaluator = ElevenLabsAlignmentEvaluator(
-                    api_key=api_key,
-                    audio_field=cfg.audio_field,
-                    text_field=cfg.text_field,
-                    words_field=cfg.words_field,
-                    verbose=verbose,
-                )
-            else:
-                model_id = get_model_name(model)
-                evaluator = TimestampAlignmentEvaluator(
-                    model_path=model,
-                    audio_field=cfg.audio_field,
-                    text_field=cfg.text_field,
-                    words_field=cfg.words_field,
-                    user_prompt=user_prompt,
-                    verbose=verbose,
-                )
-
-            results = evaluator.evaluate(dataset, max_samples)
-            metrics = evaluator.compute_metrics()
-            save_alignment_results(
-                model_name or model_id, dataset_name, results, metrics, output_dir
-            )
-            print_alignment_metrics(dataset_name, metrics)
-            continue
-
-        # Handle MCQ datasets (audio understanding benchmarks)
-        if dataset_name in MCQ_DATASETS:
-            from datasets import load_dataset as hf_load_dataset
-
-            dataset = hf_load_dataset(cfg.path, split=actual_split, streaming=True)
-
-            if model == "assemblyai":
-                api_key = _require_api_key("ASSEMBLYAI_API_KEY")
-                model_id = assemblyai_model.value
-                evaluator = AssemblyAIMMAUEvaluator(
-                    api_key=api_key,
-                    model=assemblyai_model.value,
-                    audio_field=cfg.audio_field,
-                    question_field=cfg.question_field,
-                    answer_field=cfg.answer_field,
-                    choices_field=cfg.choices_field,
-                    category_field=cfg.category_field,
-                    num_workers=num_workers,
-                )
-            else:
-                model_id = get_model_name(model)
-                evaluator = MMAUEvaluator(
-                    model_path=model,
-                    audio_field=cfg.audio_field,
-                    question_field=cfg.question_field,
-                    answer_field=cfg.answer_field,
-                    choices_field=cfg.choices_field,
-                    category_field=cfg.category_field,
-                    user_prompt=user_prompt,
-                    num_workers=num_workers,
-                )
-
-            results = evaluator.evaluate(dataset, max_samples)
-            metrics = evaluator.compute_metrics()
-            save_mcq_results(model_name or model_id, dataset_name, results, metrics, output_dir)
-            print_mcq_metrics(dataset_name, metrics)
-            continue
-
-        # Handle classification datasets (emotion, gender, age)
-        if dataset_name in CLASSIFICATION_DATASETS:
-            from datasets import load_dataset as hf_load_dataset
-
-            # Load with config if specified (e.g., Common Voice needs "en" config)
-            if cfg.config:
-                dataset = hf_load_dataset(cfg.path, cfg.config, split=actual_split, streaming=True)
-            else:
-                dataset = hf_load_dataset(cfg.path, split=actual_split, streaming=True)
-
-            # Determine task type from dataset name
-            if "emotion" in dataset_name:
-                task = "emotion"
-            elif "gender" in dataset_name:
-                task = "gender"
-            elif "age" in dataset_name:
-                task = "age"
-            elif "accent" in dataset_name:
-                task = "accent"
-            elif "rate" in dataset_name:
-                task = "rate"
-            else:
-                task = "classification"
-
-            model_id = get_model_name(model)
-            evaluator = ClassificationEvaluator(
-                model_path=model,
-                audio_field=cfg.audio_field,
-                instruction_field=cfg.question_field,
-                answer_field=cfg.answer_field,
-                task=task,
-                num_workers=num_workers,
-            )
-
-            results = evaluator.evaluate(dataset, max_samples)
-            metrics = evaluator.compute_metrics()
-            save_classification_results(
-                model_name or model_id, dataset_name, results, metrics, output_dir
-            )
-            print_classification_metrics(dataset_name, metrics)
-            continue
 
         # ASR evaluation
         dataset = load_eval_dataset(dataset_name, actual_split, config)

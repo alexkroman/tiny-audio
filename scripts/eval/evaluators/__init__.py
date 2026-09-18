@@ -1,15 +1,7 @@
-"""Evaluator classes for ASR, diarization, and alignment tasks."""
+"""Evaluator classes for ASR evaluation."""
 
 from scripts.eval.audio import TextNormalizer
 
-from .alignment import (
-    AssemblyAIAlignmentEvaluator,
-    BaseAlignmentEvaluator,
-    DeepgramAlignmentEvaluator,
-    ElevenLabsAlignmentEvaluator,
-    TimestampAlignmentEvaluator,
-    align_words_to_reference,
-)
 from .asr import (
     AppleSpeechEvaluator,
     AssemblyAIEvaluator,
@@ -22,36 +14,16 @@ from .asr import (
     SwiftSDKEvaluator,
 )
 from .base import (
-    AlignmentResult,
     AssemblyAIModel,
-    DiarizationResult,
     EvalResult,
     Evaluator,
     setup_assemblyai,
-)
-from .classification import (
-    ClassificationEvaluator,
-    ClassificationResult,
-)
-from .diarization import (
-    AssemblyAIDiarizationEvaluator,
-    DeepgramDiarizationEvaluator,
-    DiarizationEvaluator,
-    ElevenLabsDiarizationEvaluator,
-    LocalDiarizationEvaluator,
-)
-from .mcq import (
-    AssemblyAIMMAUEvaluator,
-    MCQResult,
-    MMAUEvaluator,
 )
 
 __all__ = [
     "AssemblyAIModel",
     # Result types
     "EvalResult",
-    "DiarizationResult",
-    "AlignmentResult",
     # Base
     "Evaluator",
     "TextNormalizer",
@@ -66,24 +38,4 @@ __all__ = [
     "ElevenLabsEvaluator",
     "AppleSpeechEvaluator",
     "SwiftSDKEvaluator",
-    # Diarization evaluators
-    "DiarizationEvaluator",
-    "AssemblyAIDiarizationEvaluator",
-    "DeepgramDiarizationEvaluator",
-    "ElevenLabsDiarizationEvaluator",
-    "LocalDiarizationEvaluator",
-    # Alignment evaluators
-    "BaseAlignmentEvaluator",
-    "TimestampAlignmentEvaluator",
-    "AssemblyAIAlignmentEvaluator",
-    "DeepgramAlignmentEvaluator",
-    "ElevenLabsAlignmentEvaluator",
-    "align_words_to_reference",
-    # MCQ evaluators
-    "MCQResult",
-    "MMAUEvaluator",
-    "AssemblyAIMMAUEvaluator",
-    # Classification evaluators
-    "ClassificationResult",
-    "ClassificationEvaluator",
 ]

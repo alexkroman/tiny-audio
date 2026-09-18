@@ -63,7 +63,6 @@ class ASRProcessor(ProcessorMixin):
         self,
         audio: Optional[Union[list, "torch.Tensor"]] = None,
         text: Optional[str] = None,
-        system_prompt: Optional[str] = None,
         return_tensors: str = "pt",
         **kwargs,
     ) -> dict:
@@ -72,7 +71,6 @@ class ASRProcessor(ProcessorMixin):
         Args:
             audio: Raw audio waveform(s)
             text: Target transcription (optional, for training - but use DataCollator instead)
-            system_prompt: Optional system prompt
             return_tensors: Return format ("pt" for PyTorch)
 
         Returns:
@@ -107,10 +105,7 @@ class ASRProcessor(ProcessorMixin):
         else:
             user_content = self.TRANSCRIBE_PROMPT or ""
 
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_content})
+        messages = [{"role": "user", "content": user_content}]
         if text is not None:
             messages.append({"role": "assistant", "content": text})
 

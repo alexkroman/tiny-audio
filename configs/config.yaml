@@ -13,7 +13,6 @@ model:
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
   text_model_id: Qwen/Qwen3-0.6B
-  system_prompt: ""
   projector_type: mlp  # Options: mlp, mosa, moe, qformer
 
   # Master weights in fp32 so AdamW updates below the bf16 ULP gap (~0.0078
@@ -46,11 +45,6 @@ hydra:
     subdir: ${hydra.job.num}
   job:
     chdir: true
-
-# Early stopping (set patience to enable)
-early_stopping:
-  patience: null
-  threshold: 0.0
 
 verbose: false
 

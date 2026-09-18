@@ -432,7 +432,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def __init__(self, config: ASRConfig, **kwargs) -> None:
         super().__init__(config)
 
-        self.system_prompt = config.system_prompt
         # Shadows the class attribute when the config names one, so a run that
         # trained under a specific instruction decodes under the same one.
         if getattr(config, "transcribe_prompt", None) is not None:
@@ -451,17 +450,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Set up generation config with greedy decoding defaults
         self.generation_config = self.language_model.generation_config
         self.generation_config.max_new_tokens = config.max_new_tokens
-        self.generation_config.min_new_tokens = config.min_new_tokens
-        self.generation_config.num_beams = config.num_beams
-        self.generation_config.do_sample = config.do_sample
-        # Set sampling params from config (None means use model defaults)
-        self.generation_config.temperature = config.temperature
-        self.generation_config.top_p = config.top_p
-        self.generation_config.top_k = config.top_k
         self.generation_config.use_cache = config.use_cache
-        self.generation_config.length_penalty = config.length_penalty
-        self.generation_config.repetition_penalty = config.repetition_penalty
-        self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
         # Set EOS tokens, filtering out any that don't exist in the tokenizer.
         # `convert_tokens_to_ids` reports "not in vocab" inconsistently: Qwen-
         # style tokenizers return None, while Gemma's returns unk_token_id.
@@ -536,20 +525,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # all decoder params except the text embedding and LM head.
         if getattr(config, "freeze_text_embed_tokens", False):
             self.language_model.get_input_embeddings().weight.requires_grad_(False)
-
-        # Freeze Gemma 4's per-layer embedding table. This is a separate
-        # vocabulary lookup from embed_tokens (see ASRConfig for why it is
-        # worth its own flag), so `freeze_text_embed_tokens` does not reach it.
-        if getattr(config, "freeze_text_per_layer_embeddings", False):
-            table = self._per_layer_embedding_table()
-            if table is None:
-                logging.warning(
-                    "freeze_text_per_layer_embeddings=True but %s has no per-layer "
-                    "embedding table — ignoring. Only Gemma 4 style decoders have one.",
-                    config.text_model_id,
-                )
-            else:
-                table.weight.requires_grad_(False)
 
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
@@ -791,13 +766,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
             if config.encoder_dim is None:
                 raise ValueError("Could not auto-detect encoder_dim. Please specify in config.")
-
-            # Concatenating intermediate layers widens what the projector sees.
-            # Applied only on auto-detect so an explicit encoder_dim in a config
-            # is taken at face value.
-            n_extra = len(getattr(config, "encoder_cat_layers", []) or [])
-            if n_extra:
-                config.encoder_dim *= n_extra + 1
 
         if config.llm_dim is None:
             dec_cfg = self.language_model.config
@@ -1182,17 +1150,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 return candidate
         return None
 
-    def _per_layer_embedding_table(self) -> Optional[nn.Module]:
-        """Gemma 4's `embed_tokens_per_layer` lookup table, or None.
-
-        It hangs off the same submodule as `get_per_layer_inputs`, so reuse
-        that walk instead of guessing the decoder's layout a second time.
-        """
-        ple_model = self._ple_text_model()
-        if ple_model is None:
-            return None
-        return getattr(ple_model, "embed_tokens_per_layer", None)
-
     def _per_layer_kwargs(self, input_ids: Optional[torch.Tensor]) -> dict:
         """Precompute Gemma 4 per-layer embeddings (PLE) from clean `input_ids`.
 
@@ -1228,35 +1185,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             audio_attention_mask.sum(dim=-1),
             self.config.encoder_conv_layers,
         )
-
-    def _select_encoder_features(self, encoder_out, cat_layers: list) -> torch.Tensor:
-        """Final encoder layer, optionally concatenated with intermediate layers.
-
-        Channel-wise concat, matching granite_speech_plus's `cat_hidden_layers`
-        (`torch.cat([*exported, final], dim=-1)`). Concatenated raw, as IBM
-        does: the layers have quite different scales (measured RMS ~3.1 at
-        layer 3 vs ~0.63 at the final layer, since each block's `norm_out`
-        carries its own learned gain), but the projector's `input_norm` has a
-        per-channel learnable gain and can rebalance the halves.
-        """
-        final = encoder_out.last_hidden_state
-        if not cat_layers:
-            return final
-
-        hidden = getattr(encoder_out, "hidden_states", None)
-        if not hidden:
-            raise ValueError(
-                f"encoder_cat_layers={cat_layers} was requested but "
-                f"{type(self.audio_tower).__name__} returned no hidden_states."
-            )
-        try:
-            extra = [hidden[i] for i in cat_layers]
-        except IndexError as exc:
-            raise ValueError(
-                f"encoder_cat_layers={cat_layers} out of range: the encoder "
-                f"exposes {len(hidden)} hidden states (0..{len(hidden) - 1})."
-            ) from exc
-        return torch.cat([*extra, final], dim=-1)
 
     def _encode_audio(
         self,
@@ -1301,18 +1229,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         ):
             tower_kwargs["attention_mask"] = audio_attention_mask.to(audio_features.device)
 
-        cat_layers = getattr(self.config, "encoder_cat_layers", []) or []
-        if cat_layers:
-            tower_kwargs["output_hidden_states"] = True
-
         encoder_frozen = getattr(self.config, "freeze_audio_encoder", True)
         if encoder_frozen:
             with torch.no_grad():
                 encoder_out = self.audio_tower(**tower_kwargs)
-                hidden_states = self._select_encoder_features(encoder_out, cat_layers)
+                hidden_states = encoder_out.last_hidden_state
         else:
             encoder_out = self.audio_tower(**tower_kwargs)
-            hidden_states = self._select_encoder_features(encoder_out, cat_layers)
+            hidden_states = encoder_out.last_hidden_state
 
         # Conformer encoders (Granite) return their own validity mask, halved
         # alongside each subsampling block. That is the encoder's arithmetic
@@ -1361,8 +1285,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         signal.
 
         Reads ASRConfig fields by Whisper naming convention: mask_time_prob,
-        mask_time_length, mask_time_min_masks, mask_feature_prob,
-        mask_feature_length, mask_feature_min_masks.
+        mask_time_length, mask_time_min_masks.
 
         Args:
             input_features: (batch, n_mels, mel_len) log-mel features.
@@ -1378,7 +1301,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 Pass None to treat the whole axis as valid.
 
         Returns:
-            Same-shape tensor with time-axis and/or feature-axis masks zeroed.
+            Same-shape tensor with time-axis masks zeroed.
         """
         input_features = input_features.clone()
         config = self.config
@@ -1388,11 +1311,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # cells -- so the axis order is read from config rather than guessed.
         time_major = getattr(config, "audio_features_time_major", False)
         if time_major:
-            batch_size, sequence_length, hidden_size = input_features.size()
-            time_dim, feature_dim = 1, 2
+            batch_size, sequence_length, _ = input_features.size()
+            feature_dim = 2
         else:
-            batch_size, hidden_size, sequence_length = input_features.size()
-            time_dim, feature_dim = 2, 1
+            batch_size, _, sequence_length = input_features.size()
+            feature_dim = 1
         device = input_features.device
 
         valid_lengths = None
@@ -1419,20 +1342,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # Broadcast (B, T) over the feature axis to mask all bins at
             # masked times: (B, 1, T) feature-major, (B, T, 1) time-major.
             input_features.masked_fill_(mask_time.unsqueeze(feature_dim), 0)
-
-        if getattr(config, "mask_feature_prob", 0.0) > 0:
-            mask_feature = self._sample_mask_indices(
-                batch_size,
-                hidden_size,
-                mask_prob=config.mask_feature_prob,
-                mask_length=config.mask_feature_length,
-                min_masks=config.mask_feature_min_masks,
-                device=device,
-                valid_lengths=None,  # mel-bin axis is never padded
-            )
-            # Broadcast (B, F) over the time axis to mask all time steps at
-            # masked bins: (B, F, 1) feature-major, (B, 1, F) time-major.
-            input_features.masked_fill_(mask_feature.unsqueeze(time_dim), 0)
 
         return input_features
 
@@ -1568,7 +1477,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # runs.
         kwargs.setdefault("return_dict", True)
 
-        outputs = self.language_model(
+        return self.language_model(
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
@@ -1579,13 +1488,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             **ple_kwargs,
             **kwargs,
         )
-
-        if outputs.loss is not None and hasattr(self.projector, "get_aux_loss"):
-            aux_loss = self.projector.get_aux_loss()
-            if aux_loss is not None and aux_loss.numel() > 0:
-                outputs.loss = outputs.loss + aux_loss.to(outputs.loss.device)
-
-        return outputs
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
         """Prepare inputs for generation, handling audio features for cached decoding."""
@@ -1616,15 +1518,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         encoder_output_len = int(encoder_lengths.max().item())
         return int(self.projector.get_output_length(encoder_output_len))
 
-    def _render_audio_prompt(
-        self,
-        num_audio_tokens: int,
-        system_prompt: Optional[str],
-    ) -> torch.Tensor:
+    def _render_audio_prompt(self, num_audio_tokens: int) -> torch.Tensor:
         """Tokenize one chat prompt carrying exactly `num_audio_tokens` placeholders."""
         messages: list[dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
         # Audio tokens only (instruction-free) unless a transcribe prompt is set
         user_content = self.audio_token * num_audio_tokens
         if self.TRANSCRIBE_PROMPT:
@@ -1667,7 +1563,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         input_features: torch.Tensor,
         audio_attention_mask: torch.Tensor,
-        system_prompt: Optional[str] = None,
         input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
@@ -1698,8 +1593,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # zero-fills the difference. Silent, and it scales with how ragged the
         # batch is, so batch-1 eval never sees it.
         if input_ids is None:
-            system_prompt = system_prompt or self.system_prompt
-            rows = [self._render_audio_prompt(int(n), system_prompt) for n in token_counts.tolist()]
+            rows = [self._render_audio_prompt(int(n)) for n in token_counts.tolist()]
             input_ids, attention_mask = self._left_pad_prompt_rows(rows, device)
 
         # Get text embeddings and replace audio tokens with audio embeddings
@@ -1718,7 +1612,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         input_features: Optional[torch.Tensor] = None,
         audio_attention_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        system_prompt: Optional[str] = None,
         **generate_kwargs,
     ):
         """Generate transcription from audio input.
@@ -1735,7 +1628,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         input_ids, attention_mask, inputs_embeds = self._prepare_audio_inputs(
             input_features,
             audio_attention_mask,
-            system_prompt=system_prompt,
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
@@ -1799,7 +1691,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self,
         input_features: torch.Tensor,
         audio_attention_mask: torch.Tensor,
-        system_prompt: Optional[str] = None,
         **generate_kwargs,
     ) -> Iterator[str]:
         """Generate transcription with streaming token output.
@@ -1810,14 +1701,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         Args:
             input_features: Mel spectrogram features (batch, n_mels, mel_len)
             audio_attention_mask: Mask for real vs padded mel frames (batch, mel_len)
-            system_prompt: Optional system prompt override
             **generate_kwargs: Additional generation arguments
 
         Yields:
             Partial transcript text as each token is generated
         """
         input_ids, attention_mask, inputs_embeds = self._prepare_audio_inputs(
-            input_features, audio_attention_mask, system_prompt=system_prompt
+            input_features, audio_attention_mask
         )
 
         # Setup streamer for token-by-token output

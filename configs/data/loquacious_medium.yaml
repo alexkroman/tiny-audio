@@ -37,10 +37,6 @@ datasets:
     # `wav`, not `audio` — see the decode=False note above.
     audio_column: wav
     text_column: text
-    # Ships a float32 `duration` column, so group_by_length needs no
-    # full-decode map to compute one. Harmless while granite_gemma sets
-    # group_by_length: false; free if it is ever turned on.
-    duration_column: duration
     task: transcribe
     train_splits: [train]
     # The eval split is named `dev` (not `validation`), and unlike the train

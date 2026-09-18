@@ -49,9 +49,6 @@ poetry run ta runpod checkpoint <HOST> <PORT>
 poetry run python scripts/train.py +experiments=transcription
 
 # Train with different projector
-poetry run python scripts/train.py +experiments=mosa
-poetry run python scripts/train.py +experiments=moe
-poetry run python scripts/train.py +experiments=qformer
 
 # Override config values
 poetry run python scripts/train.py +experiments=transcription training.learning_rate=1e-4
@@ -83,7 +80,7 @@ poetry run ta analysis compare model1 model2
 poetry run ta analysis entity-errors your-model
 
 # Debug model health
-poetry run ta debug check-mosa your-model
+poetry run ta debug analyze-weights your-model
 poetry run ta debug analyze-lora your-model
 ```
 
@@ -120,9 +117,7 @@ ______________________________________________________________________
 | Type | Description | Use Case |
 |------|-------------|----------|
 | `mlp` | 2-layer MLP with frame stacking | Default, fast training |
-| `mosa` | Dense mixture of experts | Better accuracy, more VRAM |
 | `moe` | Shared + sparse routed experts | Balance of speed and accuracy |
-| `qformer` | QFormer with learnable queries | Advanced, BLIP-2 style |
 
 ______________________________________________________________________
 
@@ -181,9 +176,6 @@ configs/
 │   └── production.yaml  # Training hyperparameters
 └── experiments/         # Projector presets
     ├── transcription.yaml  # Stage 1: MLP projector
-    ├── mosa.yaml        # MOSA projector
-    ├── moe.yaml         # MoE projector
-    ├── qformer.yaml     # QFormer projector
     ├── mlp_lora.yaml    # Stage 2: LoRA only
     └── mlp_fine_tune.yaml  # Stage 3: Projector + LoRA
 ```

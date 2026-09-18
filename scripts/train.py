@@ -31,14 +31,12 @@ import wandb
 from datasets import (
     Audio,
     Dataset,
-    Value,
     concatenate_datasets,
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 from transformers import (
-    EarlyStoppingCallback,
     Trainer,
     TrainerCallback,
     TrainingArguments,
@@ -66,7 +64,6 @@ TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 # conditioning, contradictory targets: the model can only learn a hedge, and
 # every dropped mark scores as an error against punctuated references.
 TRANSCRIBE_PROMPTS_PUNCT = ["Transcribe the speech with proper punctuation and capitalization"]
-DESCRIBE_PROMPTS = ["Describe all the information you can hear"]
 
 # Gigaspeech ships inline punctuation as angle-bracket tags so we restore
 # them to real punctuation before any other normalization. Pattern follows
@@ -349,21 +346,15 @@ class DatasetLoader:
     """Loads and prepares datasets for training.
 
     Downloads each train/eval split fully via HuggingFace's Arrow cache,
-    then concatenates and shuffles. ``group_by_length`` is supported via
-    an optional duration column.
+    then concatenates and shuffles.
     """
 
-    def __init__(self, config: DictConfig, multitask_enabled: bool = False):
+    def __init__(self, config: DictConfig):
         self.config = config.data
         self.sample_rate = self.config.sample_rate
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
         self.num_proc = self.config.get("num_proc", 16)
-        # `duration` is only consumed by Trainer's group_by_length sampler; skip
-        # any duration prep when group_by_length is off. Avoids a slow column
-        # cast (and potentially a full-decode map) on every train run.
-        self.needs_duration = bool(config.training.get("group_by_length", False))
-        self.multitask_enabled = multitask_enabled
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
         dataset_path = dataset_cfg.get("path")
@@ -398,52 +389,16 @@ class DatasetLoader:
             "text": dataset_cfg.get("text_column", "text"),
             "audio": dataset_cfg.get("audio_column", "audio"),
         }
-        if duration_source := dataset_cfg.get("duration_column"):
-            col_map["duration"] = duration_source
-
         for target, source in col_map.items():
             if source != target and source in ds.column_names:
                 if target in ds.column_names:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
 
-        # text_override: replace the text column with a constant string for
-        # every row in this source. Used for non-speech / silence-rejection
-        # datasets (e.g. WHAM noise) that ship audio without a transcript and
-        # should train the model to emit an explicit response (typically "")
-        # on non-speech input. Also flips `_allow_empty_label` so the
-        # DataCollator's empty-label filter doesn't drop these rows.
-        text_override = dataset_cfg.get("text_override")
-        if text_override is not None:
-            if "text" in ds.column_names:
-                ds = ds.remove_columns(["text"])
-            n = len(ds)
-            ds = ds.add_column("text", [text_override] * n)
-            ds = ds.add_column("_allow_empty_label", [True] * n)
-
-        # force_lowercase: lowercase the entire text column before
-        # _normalize_label runs. Used for sources whose annotation convention
-        # uses ALL-CAPS within otherwise-lowercase text as a non-orthographic
-        # signal (e.g. Buckeye uses caps for prosodic stress: "and just
-        # STARTED picking a fight"). The mixed-case pattern defeats the
-        # _needs_truecase heuristic (which only recases pure mono-case
-        # sources), leaving the emphasis-caps to survive normalization and
-        # produce inconsistent training labels (~15% of Buckeye rows).
-        # Force-lowercasing first collapses these to clean zero-cap text,
-        # which then qualifies for truecase and produces uniformly cased
-        # output. WER scoring is unaffected (Whisper normalizer lowercases
-        # both sides); this fix is about training-label consistency.
-        if dataset_cfg.get("force_lowercase"):
-            ds = ds.map(
-                lambda b: {"text": [(t or "").lower() for t in b["text"]]},
-                batched=True,
-                num_proc=self.num_proc,
-            )
-
         # text_case: declares whether this source's transcripts already carry
         # case ("cased") or arrive mono-case and need recasing ("mono").
-        # Stored per row, like _allow_empty_label, so _normalize_label does not
-        # have to re-derive a source property from a single row's characters.
+        # Stored per row so _normalize_label does not have to re-derive a
+        # source property from a single row's characters.
         # Omit it to keep the legacy per-row heuristic.
         text_case = dataset_cfg.get("text_case")
         if text_case is not None:
@@ -467,35 +422,9 @@ class DatasetLoader:
                 )
             ds = ds.add_column("_text_punct", [text_punct] * len(ds))
 
-        # random_truncate_seconds: [min, max] enables per-row random
-        # truncation in the DataCollator. Each row gets a fresh uniform
-        # [min, max] target duration each time it's pulled into a batch,
-        # with a random start offset within the original audio. Used for
-        # noise-rejection sources (WHAM) where the source audio is uniformly
-        # long (~30s) and we want effective length diversity in training so
-        # the model learns "any duration of noise → emit empty" rather than
-        # "30s noise → emit empty." Stored per-row so the DataCollator can
-        # apply it without knowing which dataset a row came from.
-        truncate_range = dataset_cfg.get("random_truncate_seconds")
-        if truncate_range is not None:
-            t_min, t_max = float(truncate_range[0]), float(truncate_range[1])
-            n = len(ds)
-            ds = ds.add_column("_random_truncate_min_s", [t_min] * n)
-            ds = ds.add_column("_random_truncate_max_s", [t_max] * n)
-
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        if self.multitask_enabled:
-            task = dataset_cfg.get("task", "transcribe")
-            ds = ds.add_column("task", [task] * len(ds))
-            keep_cols = {"audio", "text", "sift_response", "task"}
-        else:
-            keep_cols = {"audio", "text"}
-        if self.needs_duration:
-            keep_cols = keep_cols | {"duration"}
-        # Preserve the empty-label bypass marker so it reaches the collator.
-        if "_allow_empty_label" in ds.column_names:
-            keep_cols = keep_cols | {"_allow_empty_label"}
+        keep_cols = {"audio", "text"}
         # Preserve the declared casing policy so _normalize_label can use it.
         if "_text_case" in ds.column_names:
             keep_cols = keep_cols | {"_text_case"}
@@ -503,10 +432,6 @@ class DatasetLoader:
         # the matching prompt.
         if "_text_punct" in ds.column_names:
             keep_cols = keep_cols | {"_text_punct"}
-        # Preserve the per-row random-truncation bounds so the collator can
-        # apply them at batch time.
-        if "_random_truncate_min_s" in ds.column_names:
-            keep_cols = keep_cols | {"_random_truncate_min_s", "_random_truncate_max_s"}
         extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
@@ -548,38 +473,18 @@ class DatasetLoader:
         indices = list(range(current)) * repeats
         return ds.select(indices[:target])
 
-    def _ensure_duration(self, ds: Dataset) -> Dataset:
-        # `group_by_length` requires a `duration` column. Compute from audio
-        # length when no source field provides one. Run AFTER resampling so we
-        # don't decode samples that get trimmed. Cast to float32 only when the
-        # source ships a different dtype (sources mix float32/float64/null and
-        # concatenate_datasets rejects the mismatch); skipping a no-op cast
-        # avoids a multi-minute column rewrite on large streams.
-        if "duration" not in ds.column_names:
-            sr = self.sample_rate
-
-            def _add_duration(batch):
-                return {"duration": [a["array"].shape[0] / sr for a in batch["audio"]]}
-
-            ds = ds.map(_add_duration, batched=True, num_proc=self.num_proc)
-        if ds.features["duration"].dtype != "float32":
-            ds = ds.cast_column("duration", Value("float32"))
-        return ds
-
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
 
         for d_cfg in tqdm(self.config.datasets, desc="Loading datasets"):
-            train_splits = d_cfg.get("train_splits", [d_cfg.get("train_split", "train")])
-            val_splits = d_cfg.get("eval_splits", [d_cfg.get("eval_split", "validation")])
+            train_splits = d_cfg.get("train_splits", ["train"])
+            val_splits = d_cfg.get("eval_splits", ["validation"])
             target_samples = d_cfg.get("target_samples")
 
             for train_split in train_splits:
                 ds = self._prepare_split(d_cfg, train_split)
                 if target_samples:
                     ds = self._resample_to_target(ds, target_samples)
-                if self.needs_duration:
-                    ds = self._ensure_duration(ds)
                 train_datasets.append(ds)
 
             # Per-dataset eval cap applied here (pre-concat) so each eval
@@ -593,8 +498,6 @@ class DatasetLoader:
                 ds = self._prepare_split(d_cfg, val_split)
                 if eval_cap_per_dataset:
                     ds = ds.select(range(min(len(ds), eval_cap_per_dataset)))
-                if self.needs_duration:
-                    ds = self._ensure_duration(ds)
                 val_datasets.append(ds)
 
         train_ds = (
@@ -620,7 +523,6 @@ class DataCollator:
         tokenizer: Any,
         feature_extractor: Any,
         sample_rate: int,
-        system_prompt: str = None,
         projector: Any = None,
         encoder_conv_layers: list = None,
         audio_token: str = "<audio>",
@@ -628,7 +530,6 @@ class DataCollator:
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
-        self.system_prompt = system_prompt
         self.projector = projector
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
         # Must match ASRModel.audio_token -- the collator emits this string and
@@ -642,7 +543,7 @@ class DataCollator:
             else "longest"
         )
         # 4096 tokens accommodates the long-tail of audio (up to 30s ≈ 187
-        # audio tokens) + system prompt + user prompt + assistant transcript
+        # audio tokens) + user prompt + assistant transcript
         # (dense speech can produce 1000-1500 transcript tokens). At 2048 the
         # longest TEDLIUM / Earnings22 samples silently truncated the
         # assistant turn — model trained on partial labels. Qwen3-0.6B
@@ -680,22 +581,6 @@ class DataCollator:
                 audio = audio.squeeze()
                 if audio.ndim > 1:
                     audio = audio.mean(axis=0)
-                # Per-row random truncation (set via the dataset config's
-                # `random_truncate_seconds: [min, max]`). Used for non-
-                # speech-rejection sources (WHAM) where source audio is
-                # uniformly long but training needs effective length
-                # diversity. Picks a fresh uniform [min, max] target each
-                # time the row enters a batch, with a random start offset
-                # within the original audio. No-op if the original audio is
-                # already shorter than the sampled target.
-                t_min = f.get("_random_truncate_min_s")
-                t_max = f.get("_random_truncate_max_s")
-                if t_min is not None and t_max is not None and audio.size > 0:
-                    target_s = random.uniform(float(t_min), float(t_max))
-                    target_n = int(target_s * self.sample_rate)
-                    if 0 < target_n < audio.size:
-                        start = random.randint(0, audio.size - target_n)
-                        audio = audio[start : start + target_n]
                 # Drop samples that would poison the gradient or break the
                 # encoder: empty / NaN audio, labels that normalize to empty
                 # (entire label was an annotation marker like <noise>), audio
@@ -711,14 +596,9 @@ class DataCollator:
                     continue
                 if not np.isfinite(audio).all():
                     continue
-                # Empty-label filter normally drops rows whose entire text was
-                # an annotation marker (e.g. Gigaspeech <NOISE>-only segments).
-                # Bypass it for rows explicitly flagged via the dataset's
-                # `text_override` (non-speech-rejection sources like WHAM where
-                # an empty assistant turn is the intended training target).
-                if not f.get("_allow_empty_label", False) and not _normalize_label(
-                    f.get("text") or "", f.get("_text_case")
-                ):
+                # Drop rows whose entire text was an annotation marker
+                # (e.g. Gigaspeech <NOISE>-only segments).
+                if not _normalize_label(f.get("text") or "", f.get("_text_case")):
                     continue
                 duration_s = audio.size / self.sample_rate
                 if duration_s > self._MAX_AUDIO_SECONDS:
@@ -748,17 +628,8 @@ class DataCollator:
         return audio_arrays, valid_features
 
     def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
-        """Build a single chat sample. Subclasses can override for task-specific prompts."""
-        raw_text = feature.get("text") or ""
-        # Skip normalization for explicit-text-override rows so the literal
-        # override (typically "" for non-speech-rejection) reaches the chat
-        # template unchanged. _normalize_label("") returns "" anyway, but the
-        # branch is the clearer invariant.
-        text = (
-            raw_text
-            if feature.get("_allow_empty_label")
-            else _normalize_label(raw_text, feature.get("_text_case"))
-        )
+        """Build a single chat sample."""
+        text = _normalize_label(feature.get("text") or "", feature.get("_text_case"))
         # Prompt carries the label convention, so the punctuated and
         # unpunctuated halves of the mix stop competing for the same
         # conditioning. Undeclared sources keep the plain prompt.
@@ -767,11 +638,10 @@ class DataCollator:
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
         user_content = (self.audio_token * num_audio_tokens) + " " + prompt
-        messages = []
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
-        messages.append({"role": "user", "content": user_content})
-        messages.append({"role": "assistant", "content": response})
+        messages = [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": response},
+        ]
         return {"messages": messages}
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
@@ -801,23 +671,6 @@ class DataCollator:
         return batch
 
 
-class MultiTaskDataCollator(DataCollator):
-    """Collates audio and text data for multi-task ASR + SIFT training."""
-
-    def __init__(self, *args, **kwargs):
-        kwargs["system_prompt"] = ""
-        super().__init__(*args, **kwargs)
-
-    def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
-        if feature.get("task") == "sift":
-            response = (feature.get("sift_response") or feature.get("text") or "").strip()
-            prompt = random.choice(DESCRIBE_PROMPTS)
-        else:
-            response = (feature.get("text") or "").strip().lower()
-            prompt = random.choice(TRANSCRIBE_PROMPTS)
-        return self._make_messages(num_audio_tokens, prompt, response)
-
-
 class ASRTrainer(Trainer):
     """Trainer subclass for ASR models."""
 
@@ -825,7 +678,6 @@ class ASRTrainer(Trainer):
         self,
         *args,
         decoder_learning_rate: float | None = None,
-        decoder_weight_decay: float | None = None,
         projector_weight_decay: float | None = None,
         encoder_learning_rate: float | None = None,
         encoder_weight_decay: float | None = None,
@@ -833,7 +685,6 @@ class ASRTrainer(Trainer):
     ):
         super().__init__(*args, **kwargs)
         self.decoder_learning_rate = decoder_learning_rate
-        self.decoder_weight_decay = decoder_weight_decay
         self.projector_weight_decay = projector_weight_decay
         self.encoder_learning_rate = encoder_learning_rate
         self.encoder_weight_decay = encoder_weight_decay
@@ -844,7 +695,7 @@ class ASRTrainer(Trainer):
         Mirrors HF Trainer.create_optimizer's decay/no-decay split, but adds a
         second axis: parameters under `audio_tower.` get `encoder_learning_rate`
         / `encoder_weight_decay`; parameters under `language_model.` get
-        `decoder_learning_rate` / `decoder_weight_decay`; everything else
+        `decoder_learning_rate`; everything else
         (projector) gets `projector_weight_decay` (when set). Each falls back
         to `args.learning_rate` / `args.weight_decay`.
 
@@ -857,7 +708,6 @@ class ASRTrainer(Trainer):
         """
         overrides = (
             self.decoder_learning_rate is not None
-            or self.decoder_weight_decay is not None
             or self.projector_weight_decay is not None
             or self.encoder_learning_rate is not None
             or self.encoder_weight_decay is not None
@@ -955,7 +805,7 @@ class ASRTrainer(Trainer):
         base_wd = self.args.weight_decay
         base_lr = self.args.learning_rate
         dec_lr = self.decoder_learning_rate if self.decoder_learning_rate is not None else base_lr
-        dec_wd = self.decoder_weight_decay if self.decoder_weight_decay is not None else base_wd
+        dec_wd = base_wd
         proj_wd = (
             self.projector_weight_decay if self.projector_weight_decay is not None else base_wd
         )
@@ -1217,7 +1067,6 @@ TRAINING_MODEL_PARAMS = [
     "freeze_projector",
     "freeze_language_model",
     "freeze_text_embed_tokens",
-    "freeze_text_per_layer_embeddings",
     "freeze_audio_encoder",
 ]
 
@@ -1308,10 +1157,7 @@ def main(cfg: DictConfig) -> None:
         model_config_dict[param] = val
     asr_config = ASRConfig(**model_config_dict)
 
-    if cfg.model.get("pretrained_model_path"):
-        model = ASRModel.from_pretrained(cfg.model.pretrained_model_path, config=asr_config)
-    else:
-        model = ASRModel(asr_config)
+    model = ASRModel(asr_config)
 
     # Disable the KV cache for training on the decoder's own config, NOT on the
     # ASRConfig. ASRConfig.use_cache is an inference setting: __init__ copies it
@@ -1332,45 +1178,24 @@ def main(cfg: DictConfig) -> None:
             "true",
         )
 
-    multitask_enabled = cfg.get("multitask", {}).get("enabled", False)
+    train_dataset, val_dataset = DatasetLoader(cfg).load()
 
-    train_dataset, val_dataset = DatasetLoader(cfg, multitask_enabled=multitask_enabled).load()
-
-    if multitask_enabled:
-        data_collator = MultiTaskDataCollator(
-            tokenizer=model.tokenizer,
-            feature_extractor=model.feature_extractor,
-            sample_rate=cfg.data.sample_rate,
-            projector=model.projector,
-            encoder_conv_layers=model.config.encoder_conv_layers,
-            audio_token=model.audio_token,
-        )
-    else:
-        data_collator = DataCollator(
-            tokenizer=model.tokenizer,
-            feature_extractor=model.feature_extractor,
-            sample_rate=cfg.data.sample_rate,
-            system_prompt=cfg.model.system_prompt,
-            projector=model.projector,
-            encoder_conv_layers=model.config.encoder_conv_layers,
-            audio_token=model.audio_token,
-        )
+    data_collator = DataCollator(
+        tokenizer=model.tokenizer,
+        feature_extractor=model.feature_extractor,
+        sample_rate=cfg.data.sample_rate,
+        projector=model.projector,
+        encoder_conv_layers=model.config.encoder_conv_layers,
+        audio_token=model.audio_token,
+    )
 
     callbacks = []
-    if cfg.early_stopping.patience:
-        callbacks.append(
-            EarlyStoppingCallback(
-                early_stopping_patience=cfg.early_stopping.patience,
-                early_stopping_threshold=cfg.early_stopping.threshold,
-            )
-        )
     if push_to_hub:
         callbacks.append(PushToHubCallback())
 
     training_config = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_config, dict)
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
-    decoder_weight_decay = training_config.pop("decoder_weight_decay", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
     encoder_learning_rate = training_config.pop("encoder_learning_rate", None)
     encoder_weight_decay = training_config.pop("encoder_weight_decay", None)
@@ -1387,13 +1212,6 @@ def main(cfg: DictConfig) -> None:
     # _gather_audio_embeds).
     torch._dynamo.config.cache_size_limit = 256
     torch._dynamo.config.capture_scalar_outputs = True
-    if compile_config := training_config.pop("torch_compile_config", None):
-        torch._dynamo.config.cache_size_limit = compile_config.get("cache_size_limit", 256)
-        torch._dynamo.config.capture_scalar_outputs = compile_config.get(
-            "capture_scalar_outputs", True
-        )
-        torch._inductor.config.compile_threads = compile_config.get("compile_threads", 4)
-
     trainer = ASRTrainer(
         model=model,
         args=TrainingArguments(**get_valid_training_args(training_config)),
@@ -1403,7 +1221,6 @@ def main(cfg: DictConfig) -> None:
         processing_class=model.tokenizer,
         callbacks=callbacks,
         decoder_learning_rate=decoder_learning_rate,
-        decoder_weight_decay=decoder_weight_decay,
         projector_weight_decay=projector_weight_decay,
         encoder_learning_rate=encoder_learning_rate,
         encoder_weight_decay=encoder_weight_decay,

@@ -64,38 +64,6 @@ class EvalResult:
     num_tokens: int | None = None
 
 
-@attrs.define
-class DiarizationResult:
-    """Result of a single diarization evaluation."""
-
-    der: float
-    confusion: float
-    missed: float
-    false_alarm: float
-    time: float
-    num_speakers_ref: int
-    num_speakers_hyp: int
-    total: float = 0.0
-    confusion_raw: float = 0.0
-    missed_raw: float = 0.0
-    false_alarm_raw: float = 0.0
-
-
-@attrs.define
-class AlignmentResult:
-    """Result of a single timestamp alignment evaluation."""
-
-    pred_starts: list[float]
-    pred_ends: list[float]
-    ref_starts: list[float]
-    ref_ends: list[float]
-    num_aligned_words: int
-    num_ref_words: int
-    time: float
-    reference_text: str
-    predicted_text: str
-
-
 def _is_skipped_reference(reference) -> bool:
     """Filter out unscoreable samples (TEDLIUM markers, inaudible)."""
     if not isinstance(reference, str):

@@ -145,9 +145,6 @@ dataloader_prefetch_factor: 8
 dataloader_pin_memory: true
 dataloader_persistent_workers: true
 dataloader_drop_last: true
-# Disabled: multi-dataset configs have inconsistent duration columns.
-group_by_length: false
-length_column_name: duration
 
 # Misc
 disable_tqdm: false

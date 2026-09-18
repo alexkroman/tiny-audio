@@ -21,9 +21,6 @@ def make_masker(**config_fields):
         "mask_time_prob": 0.05,
         "mask_time_length": 10,
         "mask_time_min_masks": 2,
-        "mask_feature_prob": 0.0,
-        "mask_feature_length": 10,
-        "mask_feature_min_masks": 0,
     }
     defaults.update(config_fields)
     stub = SimpleNamespace(config=SimpleNamespace(**defaults))
@@ -176,19 +173,6 @@ class TestMaskInputFeatures:
         zeroed = out == 0
         assert not zeroed[0, 50:, :].any()
         assert zeroed[0, :50, :].any()
-
-    def test_feature_axis_masking_is_independent_of_attention_mask(self):
-        """Mel bins are never padded, so the feature axis uses the full range."""
-        masker = make_masker(mask_time_prob=0.0, mask_feature_prob=0.5, mask_feature_length=4)
-        features = torch.ones(1, 80, 3000)
-        attention_mask = torch.zeros(1, 3000)
-        attention_mask[0, :100] = 1
-
-        out = ASRModel._mask_input_features(masker, features, attention_mask)
-
-        zeroed = out == 0
-        # A masked mel bin is zeroed across all time steps, including padding.
-        assert zeroed[0, :, 2999].any()
 
     def test_input_is_not_mutated(self):
         masker = make_masker(mask_time_prob=0.5)

@@ -22,14 +22,6 @@ poetry run python scripts/train.py +experiments=transcription data.max_train_sam
 poetry run python scripts/train.py +experiments=transcription
 ```
 
-## Projector Types
-
-| Type | Command | Notes |
-|------|---------|-------|
-| MLP | `+experiments=transcription` | Default, fastest |
-| MOSA | `+experiments=mosa` | Dense MoE |
-| MoE | `+experiments=moe` | Sparse experts |
-
 ## Evaluate
 
 ```bash

@@ -540,7 +540,7 @@ export TILELANG_CACHE_DIR=/workspace/.cache/tilelang
 
 
 def _script_preamble(hf_token: str, *, pip_packages: str = "", extras: str = "") -> str:
-    """Shared shell header for the remote train/sift/eval scripts.
+    """Shared shell header for the remote train/eval scripts.
 
     Args:
         hf_token: Value exported as HF_TOKEN.
@@ -830,108 +830,6 @@ def attach(
             print(f"Session '{session_name}' not found or an error occurred.")
     else:
         attach_tmux_session(host, port, session_name)
-
-
-def build_sift_script(
-    hf_token: str,
-    output_repo: str,
-    batch_size: int,
-    max_samples: int | None,
-    use_compile: bool,
-    datasets: list[str] | None,
-) -> str:
-    """Generate the SIFT dataset generation script content."""
-    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
-    compile_arg = "--compile" if use_compile else ""
-    datasets_arg = f"--datasets {' '.join(datasets)}" if datasets else ""
-
-    extra_exports = (
-        "\n# A40 GPU optimizations (48GB VRAM)\n"
-        "export CUDA_VISIBLE_DEVICES=0\n"
-        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
-        "export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1\n"
-        "export TORCH_CUDNN_BENCHMARK=1\n"
-    )
-    body = f"""
-cd /workspace
-
-python -m scripts.generate_sift_dataset \\
-    --output-repo {output_repo} \\
-    --batch-size {batch_size} \\
-    {compile_arg} \\
-    {max_samples_arg} \\
-    {datasets_arg}
-"""
-    return (
-        _script_preamble(hf_token, extras=extra_exports)
-        + body
-        + _script_epilogue("SIFT Dataset Generation", "Script")
-    )
-
-
-@app.command()
-def sift(
-    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
-    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
-    output_repo: str = typer.Option(
-        "mazesmazes/sift-audio", "--output-repo", "-o", help="HuggingFace repo for output"
-    ),
-    session_name: str | None = typer.Option(
-        None, "--session-name", "-s", help="Custom tmux session name"
-    ),
-    batch_size: int = typer.Option(128, "--batch-size", "-b", help="Batch size for generation"),
-    max_samples: int | None = typer.Option(
-        None, "--max-samples", "-n", help="Max samples per dataset"
-    ),
-    datasets: Annotated[
-        list[str] | None,
-        typer.Option("--datasets", "-d", help="Specific datasets to process"),
-    ] = None,
-    use_compile: bool = typer.Option(
-        False, "--compile", help="Use torch.compile for faster inference"
-    ),
-    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
-    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
-):
-    """Generate SIFT datasets on a remote RunPod instance.
-
-    Available datasets: crema-d, ravdess, tess, meld, loquacious
-    """
-    conn = get_connection(host, port)
-
-    if not test_connection(conn):
-        sys.exit(1)
-
-    if session_name is None:
-        session_name = _auto_session_name("sift")
-
-    if force:
-        print(f"Killing existing session '{session_name}' if present...")
-        kill_tmux_session(conn, session_name)
-
-    hf_token = os.environ.get("HF_TOKEN", "")
-    if not hf_token:
-        print("Warning: HF_TOKEN environment variable not set.")
-
-    print(f"\nStarting SIFT generation session '{session_name}'...")
-    print(f"Output repo: {output_repo}")
-    print(f"Batch size: {batch_size}")
-    if max_samples:
-        print(f"Max samples: {max_samples}")
-    if datasets:
-        print(f"Datasets: {', '.join(datasets)}")
-    if use_compile:
-        print("Using torch.compile for faster inference")
-
-    _start_remote_tmux_script(
-        conn,
-        host,
-        port,
-        session_name,
-        build_sift_script(hf_token, output_repo, batch_size, max_samples, use_compile, datasets),
-        f"/tmp/sift_{session_name}.sh",
-        no_attach,
-    )
 
 
 def build_eval_script(

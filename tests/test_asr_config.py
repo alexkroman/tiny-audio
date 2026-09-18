@@ -11,11 +11,9 @@ class TestASRConfigDefaults:
     def test_default_projector_type_is_mlp(self, base_asr_config):
         assert base_asr_config.projector_type == "mlp"
 
-    def test_default_generation_params_are_greedy(self, base_asr_config):
-        assert base_asr_config.do_sample is False
-        assert base_asr_config.num_beams == 1
+    def test_default_generation_params(self, base_asr_config):
         assert base_asr_config.max_new_tokens == 128
-        assert base_asr_config.repetition_penalty == 1.0
+        assert base_asr_config.use_cache is True
 
     def test_default_lora_disabled(self, base_asr_config):
         assert base_asr_config.use_lora is False

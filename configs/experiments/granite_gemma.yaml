@@ -40,7 +40,6 @@ model:
   # `google/gemma-4-E2B` ships no chat_template and DataCollatorForChatML
   # needs one. hidden_size is 1536 (NOT 2048 as some write-ups claim).
   text_model_id: google/gemma-4-E2B-it
-  system_prompt: ""
   projector_type: mlp
 
   # Granite's feature extractor stacks mel pairs (100 Hz -> 50 Hz, 320-dim),
@@ -86,7 +85,6 @@ model:
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-granite-gemma"
-  group_by_length: false
 
   # The whole point of this experiment: projector-only.
   freeze_language_model: true

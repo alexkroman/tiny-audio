@@ -66,7 +66,6 @@ model:
   #     generation stops where training supervises.
   #   - hidden_size is 2048 and the vocab is 248,320 with tie_word_embeddings.
   text_model_id: Qwen/Qwen3.5-2B
-  system_prompt: ""
   projector_type: mlp
 
   # sdpa, overriding ASRConfig's flash_attention_2 default. FA2 earns that
@@ -191,31 +190,6 @@ model:
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-granite-qwen"
-
-  # MUST stay false, for two independent reasons.
-  #
-  # 1. It crashes. The DataCollator drops rows outside [0.8s, 19s] *inside
-  #    collate*, i.e. after the sampler has already assigned rows to batches.
-  #    HF's LengthGroupedSampler sorts DESCENDING by duration within
-  #    megabatches of train_batch_size * grad_accum * 50 = 4,800 rows, so the
-  #    entire >19s tail lands at the head of every megabatch. Any source with
-  #    more than 32/4800 = 0.7% of rows over 19s therefore produces whole
-  #    micro-batches that are 100% dropped, and DataCollator raises
-  #    ValueError("No valid audio samples in batch"). Simulated against
-  #    Loquacious `medium` (10.8% of rows >19s): 10.5% of micro-batches fully
-  #    empty, first one at index 0 -- the run dies on step 0. multiasr's
-  #    long-form sources (LibriHeavy, VoxPopuli, TEDLIUM, Earnings22) are well
-  #    over the 0.7% threshold too.
-  # 2. No multiasr source ships a `duration` column, so turning this on also
-  #    triggers DatasetLoader._ensure_duration's full-decode map over ~3.3M
-  #    rows just to compute the lengths the sampler needs.
-  #
-  # The padding win is real but it is not available without first moving
-  # duration filtering out of the collator and into DatasetLoader, which
-  # needs durations at load time and so runs into (2) as well. Left as a
-  # follow-up; `load_dataset` in map mode means that decode pass would at
-  # least be cached once rather than per-epoch.
-  group_by_length: false
 
   # Joint: projector and decoder both train from step 0, matching
   # production.yaml rather than granite_gemma's projector-only recipe.
@@ -403,8 +377,8 @@ training:
   #
   # Two things make the linear extrapolation in activations trustworthy here
   # rather than a guess:
-  #   - Padding is already saturated. group_by_length is false (see above), so
-  #     every batch pads to its own longest row and the collator's window is
+  #   - Padding is already saturated. Every batch pads to its own longest
+  #     row and the collator's window is
   #     [0.8s, 19s]. multiasr's long-form sources put enough mass near the 19s
   #     ceiling that most 32-row batches already contain a near-ceiling row,
   #     so E[max duration] barely moves with batch size and per-sample cost

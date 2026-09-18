@@ -77,10 +77,10 @@ def _vocab_table_params(text_cfg) -> dict[str, int]:
     """Per-token lookup-table sizes for a decoder, computed from its config.
 
     These can be frozen independently of the rest of the decoder
-    (`freeze_text_embed_tokens` / `freeze_text_per_layer_embeddings`), and on
-    Gemma 4 they are the majority of the checkpoint -- so counting them as
-    trainable overstates AdamW state badly. Empty entries are omitted, so
-    decoders without a per-layer table simply don't report one.
+    (`freeze_text_embed_tokens`), and on Gemma 4 they are the majority of the
+    checkpoint -- so counting them as trainable overstates AdamW state badly.
+    Empty entries are omitted, so decoders without a per-layer table simply
+    don't report one.
     """
     tables: dict[str, int] = {}
     vocab = int(getattr(text_cfg, "vocab_size", 0) or 0)
@@ -165,19 +165,15 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     dec_trainable = not train.get("freeze_language_model", True)
     dec_cfg = AutoConfig.from_pretrained(text_id)
     text_cfg = dec_cfg.get_text_config() if hasattr(dec_cfg, "get_text_config") else dec_cfg
-    # Split the frozen vocabulary tables out of the trainable decoder. Both
-    # freeze flags act on individual tensors inside the language model, so a
+    # Split the frozen vocabulary table out of the trainable decoder. The
+    # freeze flag acts on an individual tensor inside the language model, so a
     # single all-or-nothing `trainable` on one component would charge AdamW
-    # state for 2.75B parameters that never see the optimizer on this recipe.
+    # state for parameters that never see the optimizer on this recipe.
     frozen_tables: dict[str, int] = {}
     if dec_trainable:
         tables = _vocab_table_params(text_cfg)
-        for flag, key in (
-            ("freeze_text_embed_tokens", "embed_tokens"),
-            ("freeze_text_per_layer_embeddings", "embed_tokens_per_layer"),
-        ):
-            if train.get(flag, False) and tables.get(key):
-                frozen_tables[key] = tables[key]
+        if train.get("freeze_text_embed_tokens", False) and tables.get("embed_tokens"):
+            frozen_tables["embed_tokens"] = tables["embed_tokens"]
     frozen_table_params = sum(frozen_tables.values())
 
     plan.components.append(
