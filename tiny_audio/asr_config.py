@@ -62,7 +62,7 @@ class ASRConfig(transformers.PretrainedConfig):
     This config combines settings for:
     - Audio encoder (GLM-ASR/Whisper)
     - Text decoder (Qwen)
-    - Projector (MLP, MOSA, MoE, QFormer)
+    - Projector (MLP)
     - Generation parameters
     - Training options (LoRA)
     """
@@ -76,8 +76,6 @@ class ASRConfig(transformers.PretrainedConfig):
         text_model_id: str = "Qwen/Qwen3-0.6B",
         attn_implementation: str = "flash_attention_2",
         model_dtype: str = "bfloat16",
-        num_beams: Optional[int] = None,
-        system_prompt: str = "You are a helpful assistant.",
         # Instruction appended after the audio placeholders at inference. Must
         # match the prompt the desired output convention was TRAINED under --
         # when a run splits prompts by whether a source is punctuated (see
@@ -87,23 +85,6 @@ class ASRConfig(transformers.PretrainedConfig):
         transcribe_prompt: Optional[str] = None,
         encoder_dim: Optional[int] = None,
         llm_dim: Optional[int] = None,
-        # Intermediate encoder layers to concatenate (channel-wise) with the
-        # final layer before the projector. None or [] = final layer only.
-        #
-        # This is the entire architectural delta IBM shipped in
-        # granite_speech_plus over 4.1 (`cat_hidden_layers`), and the shipped
-        # 4.1-2b-plus checkpoint uses [3] on a 16-layer encoder. The rationale
-        # is specific to CTC-trained encoders: Granite's final layer feeds a
-        # Linear(1024, 16384) CTC head and is a near-one-hot posterior
-        # (measured median max-prob 0.9998, 69% blank), so it has discarded
-        # acoustic detail an LLM could use for punctuation and casing. An
-        # intermediate layer measured cos=0.044 against the final one, i.e.
-        # close to orthogonal -- genuinely complementary information.
-        #
-        # Indices are into `output_hidden_states`, where [0] is the embedding
-        # output and [i] is the output of layer i-1. `encoder_dim` is widened
-        # automatically by (len(encoder_cat_layers) + 1).
-        encoder_cat_layers: Optional[list] = None,
         # Encoder conv layers: list of (padding, kernel_size, stride) tuples
         # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
         encoder_conv_layers: Optional[list] = None,
@@ -143,9 +124,8 @@ class ASRConfig(transformers.PretrainedConfig):
         # existing recipes are unchanged.
         projector_dtype: Optional[str] = None,
         projector_pool_stride: int = 4,
-        downsample_rate: int = 5,  # Granite default
         projector_hidden_dim: Optional[int] = None,
-        projector_type: str = "mlp",  # "mlp", "mosa", "moe", "qformer"
+        projector_type: str = "mlp",
         # Target RMS for the projector's output, i.e. the magnitude at which
         # audio tokens enter the decoder's residual stream. "auto" measures the
         # decoder's own `embed_tokens` RMS at construction; a float sets it
@@ -172,16 +152,6 @@ class ASRConfig(transformers.PretrainedConfig):
         # (B,T,V) fp32 log_softmax materialization that the HF LabelSmoother
         # path requires (~15GB at B=50/V=152k on Qwen3-0.6B).
         label_smoothing: float = 0.0,
-        # MoE-specific configuration
-        num_experts: int = 4,  # Number of experts in MoE projectors
-        num_experts_per_tok: int = 2,  # Top-k experts per token
-        router_aux_loss_coef: float = 0.01,  # Auxiliary loss coefficient for load balancing
-        # QFormer-specific configuration (Granite defaults)
-        qformer_window_size: int = 15,  # Window size for QFormer processing
-        qformer_hidden_size: Optional[int] = None,  # QFormer hidden size (defaults to encoder_dim)
-        qformer_num_layers: int = 2,  # Number of QFormer transformer layers
-        qformer_num_heads: int = 16,  # Number of attention heads in QFormer
-        qformer_intermediate_size: Optional[int] = None,  # FFN size (defaults to 4x hidden)
         # LoRA configuration (for Stage 2 fine-tuning)
         use_lora: bool = False,
         lora_rank: int = 8,  # SALMONN default
@@ -191,20 +161,6 @@ class ASRConfig(transformers.PretrainedConfig):
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
         freeze_text_embed_tokens: bool = False,
-        # Gemma 4 keeps a SECOND vocabulary table, `embed_tokens_per_layer`
-        # (262144 x 8960 = 2.35B params -- roughly half the whole decoder),
-        # read once per token per layer. `freeze_text_embed_tokens` does not
-        # cover it: that flag only touches `get_input_embeddings()`. Freezing
-        # this one matters for two independent reasons:
-        #   - Memory. Unfrozen it alone carries ~9.4 GiB of fp32 AdamW moments
-        #     plus 4.4 GiB of bf16 grads, which is what makes a full E2B
-        #     fine-tune not fit where a layers-only one does.
-        #   - Rare-token drift. It is a per-token lookup, so the same argument
-        #     that motivates freezing embed_tokens applies: tokens absent from
-        #     the ASR label distribution get no task gradient and only the
-        #     weight-decay pull, shrinking their rows toward zero.
-        # No-op on decoders without a per-layer table (Qwen3, Llama, ...).
-        freeze_text_per_layer_embeddings: bool = False,
         # Audio encoder is frozen by default — the published recipe treats
         # GLM-ASR-Nano as a fixed feature extractor. Setting this to False
         # makes the encoder trainable; pair with `encoder_learning_rate` in
@@ -228,18 +184,7 @@ class ASRConfig(transformers.PretrainedConfig):
         mask_time_prob: float = 0.05,
         mask_time_length: int = 10,
         mask_time_min_masks: int = 2,
-        mask_feature_prob: float = 0.0,
-        mask_feature_length: int = 10,
-        mask_feature_min_masks: int = 0,
-        do_sample: bool = False,
-        temperature: Optional[float] = None,
-        top_p: Optional[float] = None,
-        top_k: Optional[int] = None,
         max_new_tokens: Optional[int] = None,
-        min_new_tokens: Optional[int] = None,
-        repetition_penalty: Optional[float] = None,
-        length_penalty: Optional[float] = None,
-        no_repeat_ngram_size: Optional[int] = None,
         use_cache: Optional[bool] = None,
         **kwargs,
     ):
@@ -250,19 +195,14 @@ class ASRConfig(transformers.PretrainedConfig):
             text_model_id: HuggingFace model ID for text decoder (Qwen)
             attn_implementation: Attention implementation ("flash_attention_2", "sdpa", "eager")
             model_dtype: Model dtype ("bfloat16", "float16", "float32")
-            projector_type: Projector architecture ("mlp", "mosa", "moe", "qformer")
+            projector_type: Projector architecture ("mlp")
             use_lora: Enable LoRA adapters for Stage 2 fine-tuning
         """
         # Set default generation parameters (greedy decoding only).
         # Applied via setattr below — keeping these out of kwargs so they
         # don't get re-overwritten by super().__init__(**kwargs) at the end.
         generation_defaults = {
-            "num_beams": 1,
             "max_new_tokens": 128,
-            "min_new_tokens": 0,
-            "repetition_penalty": 1.0,
-            "length_penalty": 1.0,
-            "no_repeat_ngram_size": 0,
             "use_cache": True,
         }
 
@@ -270,11 +210,9 @@ class ASRConfig(transformers.PretrainedConfig):
         self.text_model_id = text_model_id
         self.attn_implementation = attn_implementation
         self.model_dtype = model_dtype
-        self.system_prompt = system_prompt
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
-        self.encoder_cat_layers = list(encoder_cat_layers) if encoder_cat_layers else []
         self.audio_features_time_major = (
             is_time_major_encoder(audio_model_id)
             if audio_features_time_major is None
@@ -289,22 +227,11 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_dtype = projector_dtype or model_dtype
         self.audio_sample_rate = audio_sample_rate
         self.projector_pool_stride = projector_pool_stride
-        self.downsample_rate = downsample_rate
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
         self.projector_output_rms = projector_output_rms
         self.transcribe_prompt = transcribe_prompt
         self.label_smoothing = label_smoothing
-        # MoE-specific configuration
-        self.num_experts = num_experts
-        self.num_experts_per_tok = num_experts_per_tok
-        self.router_aux_loss_coef = router_aux_loss_coef
-        # QFormer-specific configuration
-        self.qformer_window_size = qformer_window_size
-        self.qformer_hidden_size = qformer_hidden_size
-        self.qformer_num_layers = qformer_num_layers
-        self.qformer_num_heads = qformer_num_heads
-        self.qformer_intermediate_size = qformer_intermediate_size
         # LoRA configuration
         self.use_lora = use_lora
         self.lora_rank = lora_rank
@@ -322,32 +249,19 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_projector = freeze_projector
         self.freeze_language_model = freeze_language_model
         self.freeze_text_embed_tokens = freeze_text_embed_tokens
-        self.freeze_text_per_layer_embeddings = freeze_text_per_layer_embeddings
         self.freeze_audio_encoder = freeze_audio_encoder
         self.apply_spec_augment = apply_spec_augment
         self.mask_time_prob = mask_time_prob
         self.mask_time_length = mask_time_length
         self.mask_time_min_masks = mask_time_min_masks
-        self.mask_feature_prob = mask_feature_prob
-        self.mask_feature_length = mask_feature_length
-        self.mask_feature_min_masks = mask_feature_min_masks
 
         explicit_generation_args = {
-            "num_beams": num_beams,
             "max_new_tokens": max_new_tokens,
-            "min_new_tokens": min_new_tokens,
-            "repetition_penalty": repetition_penalty,
-            "length_penalty": length_penalty,
-            "no_repeat_ngram_size": no_repeat_ngram_size,
             "use_cache": use_cache,
         }
         for key, default in generation_defaults.items():
             value = explicit_generation_args[key]
             setattr(self, key, value if value is not None else default)
-        self.do_sample = do_sample
-        self.temperature = temperature
-        self.top_p = top_p
-        self.top_k = top_k
 
         if "audio_config" not in kwargs:
             self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)

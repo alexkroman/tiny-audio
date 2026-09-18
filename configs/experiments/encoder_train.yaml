@@ -56,19 +56,14 @@ model:
   # `transformers.models.whisper.modeling_whisper._compute_mask_indices`
   # via ASRModel._mask_input_features, applied training-only. Defaults
   # match Whisper's config: time mask 10 frames at prob 0.05 (min 2
-  # masks); feature mask disabled by default (Whisper's default too —
-  # frequency masking helps less than time masking for ASR).
+  # masks).
   apply_spec_augment: true
   mask_time_prob: 0.05
   mask_time_length: 10
   mask_time_min_masks: 2
-  mask_feature_prob: 0.0
-  mask_feature_length: 10
-  mask_feature_min_masks: 0
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-next-encoder"
-  group_by_length: false
 
   # Freeze configuration — the defining choice of this recipe:
   #   - audio encoder: UNFROZEN (the bet of this experiment)

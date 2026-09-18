@@ -157,18 +157,6 @@ class TestProcessorCall:
         user_msg = [m for m in messages if m["role"] == "user"][0]
         assert "<audio>" in user_msg["content"]
 
-    def test_call_with_system_prompt(self, mock_processor):
-        """Should include system prompt when provided."""
-        audio = torch.randn(16000)
-        mock_processor(audio=audio, system_prompt="You are helpful.")
-
-        call_args = mock_processor.tokenizer.apply_chat_template.call_args
-        messages = call_args[0][0]
-
-        system_msgs = [m for m in messages if m["role"] == "system"]
-        assert len(system_msgs) == 1
-        assert system_msgs[0]["content"] == "You are helpful."
-
     def test_call_without_audio(self, mock_processor):
         """Should handle call without audio (text-only)."""
         result = mock_processor(text="hello")

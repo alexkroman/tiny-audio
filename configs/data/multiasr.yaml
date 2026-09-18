@@ -102,10 +102,7 @@
 #   15.5 GB. 8 kHz native, which is the point rather than a defect: the
 #   loader's Audio(sampling_rate=16000) cast upsamples it and leaves
 #   band-limited audio in a 16 kHz container, which is what the encoder sees
-#   on real telephony at inference. It also ships a `duration` column, which
-#   no source in this mix currently has -- relevant to group_by_length, whose
-#   blocker is precisely that durations are missing and _ensure_duration has
-#   to full-decode to recover them.
+#   on real telephony at inference.
 #
 #   Verified 2026-09-17: gated=manual. Repo metadata and README read fine
 #   unauthenticated, but data files 403 with GatedRepoError, so adding the

@@ -114,8 +114,8 @@ poetry run ta analysis entity-errors your-username/your-model
 **Debug model health:**
 
 ```bash
-# Check if MOSA model is healthy
-poetry run ta debug check-mosa your-username/your-model
+# Inspect weight health after training
+poetry run ta debug analyze-weights your-username/your-model
 
 # Analyze LoRA adapter weights
 poetry run ta debug analyze-lora your-username/your-model
@@ -233,7 +233,7 @@ You now have:
 - A live demo anyone can use
 
 **Next steps:**
-- Try different projector types (mosa, moe)
+- Try different projector widths (`model.projector_hidden_dim`)
 - Multi-stage training with LoRA
 - Train on domain-specific data
 - Build a real application

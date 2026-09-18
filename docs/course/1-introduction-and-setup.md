@@ -159,7 +159,7 @@ poetry run ta dev test
 |------|---------|
 | `tiny_audio/asr_modeling.py` | Core model: encoder + projector + decoder |
 | `tiny_audio/asr_config.py` | Configuration (model IDs, projector type, etc.) |
-| `tiny_audio/projectors.py` | Projector architectures (MLP, MOSA, MoE, QFormer) |
+| `tiny_audio/projectors.py` | Projector architecture (MLP) |
 | `tiny_audio/asr_pipeline.py` | HuggingFace pipeline for inference |
 | `scripts/train.py` | Training script with Hydra configs |
 
@@ -179,7 +179,7 @@ poetry run python scripts/train.py +experiments=transcription training.learning_
 
 Config files live in `configs/`:
 - `config.yaml` - Main defaults
-- `experiments/` - Projector presets (transcription, mosa, moe)
+- `experiments/` - Training recipes (stage_1, encoder_train, granite_qwen, ...)
 - `training/` - Training hyperparameters
 - `data/` - Dataset settings
 

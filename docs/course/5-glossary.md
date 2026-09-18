@@ -99,12 +99,6 @@ A parameter-efficient fine-tuning technique that adds small trainable matrices t
 **MLP (Multi-Layer Perceptron)**
 A simple neural network with stacked linear layers and activation functions.
 
-**MoE (Mixture of Experts)**
-An architecture where multiple "expert" networks specialize in different inputs, with a router selecting which experts to use.
-
-**QFormer**
-A query-based transformer that uses learnable queries to compress and project sequences.
-
 **Qwen3**
 The language model from Alibaba used as the decoder. We use Qwen3-0.6B.
 
@@ -118,14 +112,6 @@ ______________________________________________________________________
 **MLP Projector**
 The simplest projector: frame stacking followed by two linear layers. Fast to train, good baseline. (~12M parameters)
 
-**MOSA Projector**
-Dense mixture of experts with frame stacking. All experts contribute to every prediction via softmax routing. Uses LoRA by default.
-
-**MoE Projector**
-A shared expert plus sparse routed experts (top-k). Balance between MLP simplicity and MoE capacity. Uses LoRA by default.
-
-**QFormer Projector**
-Uses learnable query tokens and cross-attention to compress audio sequences. Based on BLIP-2.
 
 ______________________________________________________________________
 

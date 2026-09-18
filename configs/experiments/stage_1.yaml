@@ -86,7 +86,6 @@ model:
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-next-sat"
-  group_by_length: false  # Disabled: multi-dataset configs have inconsistent duration columns
 
   # Joint training: projector trains from fresh init, decoder fine-tunes from
   # Qwen3-0.6B base weights. Encoder stays frozen via the default in asr_modeling.

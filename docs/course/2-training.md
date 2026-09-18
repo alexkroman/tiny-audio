@@ -80,7 +80,7 @@ Edit `my_experiment.yaml`:
 
 ```yaml
 model:
-  projector_type: mlp  # or mosa, moe, qformer
+  projector_type: mlp
 
 training:
   hub_model_id: "your-username/tiny-audio-yourname"  # CHANGE THIS
@@ -154,27 +154,6 @@ poetry run python scripts/train.py +experiments=transcription training.learning_
 
 # Resume from checkpoint
 poetry run python scripts/train.py +experiments=transcription training.resume_from_checkpoint=/path/to/checkpoint-XXXX
-```
-
----
-
-## Projector Types
-
-| Type | Description | Speed | VRAM |
-|------|-------------|-------|------|
-| `mlp` | 2-layer MLP with frame stacking | Fast | Low |
-| `mosa` | Dense MoE, all experts contribute | Slow | High |
-| `moe` | Shared + sparse routed experts | Medium | Medium |
-| `qformer` | QFormer with learnable queries | Slow | High |
-
-Start with `transcription`. Try others after you have a baseline.
-
-```bash
-# Different projectors
-poetry run python scripts/train.py +experiments=transcription
-poetry run python scripts/train.py +experiments=mosa
-poetry run python scripts/train.py +experiments=moe
-poetry run python scripts/train.py +experiments=qformer
 ```
 
 ---

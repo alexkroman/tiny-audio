@@ -101,26 +101,18 @@ poetry run python scripts/train.py +experiments=transcription training.learning_
 poetry run python scripts/train.py +experiments=transcription training.resume_from_checkpoint=/path/to/checkpoint-XXXX
 ```
 
-### Projector Types
-
-```bash
-poetry run python scripts/train.py +experiments=transcription  # Simple MLP (~12M params)
-poetry run python scripts/train.py +experiments=mosa           # Dense mixture of experts
-poetry run python scripts/train.py +experiments=moe            # Sparse routed experts
-poetry run python scripts/train.py +experiments=qformer        # Transformer with learnable queries
-```
-
 ### Multi-Stage Training with LoRA
 
 ```bash
-# Stage 1: Train projector only (default)
-poetry run python scripts/train.py +experiments=transcription
+# Stage 1: Train the projector (and decoder) with the base recipe
+poetry run python scripts/train.py +experiments=stage_1
 
-# Stage 2: Freeze projector, train LoRA adapters on LLM
-poetry run python scripts/train.py +experiments=mlp_lora
+# Stage 2: Freeze the projector, train LoRA adapters on the LLM
+poetry run python scripts/train.py +experiments=stage_1 \
+  training.use_lora=true training.freeze_projector=true
 
 # Stage 3: Fine-tune both projector and LoRA
-poetry run python scripts/train.py +experiments=mlp_fine_tune
+poetry run python scripts/train.py +experiments=stage_1 training.use_lora=true
 ```
 
 ## Architecture
@@ -189,7 +181,7 @@ poetry run ta --help  # Show all commands
 | `ta deploy` | Deploy demo to HuggingFace Space |
 | `ta push` | Push model to HuggingFace Hub |
 | `ta demo` | Launch local Gradio demo |
-| `ta debug` | Debug utilities (check-mosa, analyze-lora) |
+| `ta debug` | Debug utilities (analyze-weights, analyze-lora) |
 | `ta runpod` | Remote training on RunPod |
 | `ta dev` | Development tools (lint, format, test, etc.) |
 
@@ -209,7 +201,7 @@ Configuration uses [Hydra](https://hydra.cc/). Override any value with `key=valu
 
 ```bash
 # Override model settings
-poetry run python scripts/train.py model.projector_type=moe
+poetry run python scripts/train.py model.projector_hidden_dim=2048
 
 # Override training settings
 poetry run python scripts/train.py training.learning_rate=1e-4 training.batch_size=8
@@ -223,13 +215,12 @@ poetry run python scripts/train.py data.max_train_samples=10000
 ```
 configs/
 ├── config.yaml           # Main config (imports data + training)
-├── experiments/          # Projector presets
-│   ├── transcription.yaml # Simple MLP (Stage 1)
-│   ├── mosa.yaml         # Dense MoE
-│   ├── moe.yaml          # Sparse MoE
-│   ├── qformer.yaml      # Transformer
-│   ├── mlp_lora.yaml     # Stage 2: LoRA only
-│   └── mlp_fine_tune.yaml # Stage 3: Projector + LoRA
+├── experiments/          # Training recipes
+│   ├── stage_1.yaml      # Frozen encoder + trainable decoder
+│   ├── encoder_train.yaml # Trainable encoder + frozen decoder
+│   ├── granite_qwen.yaml # Granite encoder + Qwen3.5 decoder
+│   ├── granite_gemma.yaml # Granite encoder + Gemma 4 decoder
+│   └── mps_smoke.yaml    # Local CPU/MPS smoke test
 ├── data/
 │   └── multiasr.yaml     # Multi-ASR dataset config
 └── training/
@@ -242,7 +233,7 @@ configs/
 model:
   audio_model_id: "zai-org/GLM-ASR-Nano-2512"  # Audio encoder
   text_model_id: "Qwen/Qwen3-0.6B"              # Language model
-  projector_type: mlp                           # mlp, mosa, moe, qformer
+  projector_type: mlp                           # MLP projector
 
 training:
   learning_rate: 1e-4
@@ -330,9 +321,6 @@ class MyProjector(nn.Module):
 ```python
 PROJECTOR_CLASSES = {
     "mlp": MLPAudioProjector,
-    "mosa": MOSAProjector,
-    "moe": MoEAudioProjector,
-    "qformer": QFormerAudioProjector,
     "my_projector": MyProjector,  # Add here
 }
 ```

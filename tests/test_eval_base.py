@@ -4,8 +4,6 @@ import pytest
 
 from scripts.eval.evaluators.base import (
     ASSEMBLYAI_MODELS,
-    AlignmentResult,
-    DiarizationResult,
     EvalResult,
     Evaluator,
 )
@@ -36,96 +34,6 @@ class TestEvalResult:
             time=0.5,
         )
         assert result.wer == 100.0
-
-
-class TestDiarizationResult:
-    """Tests for DiarizationResult dataclass."""
-
-    def test_create_diarization_result(self):
-        """Test creating a DiarizationResult."""
-        result = DiarizationResult(
-            der=15.5,
-            confusion=5.0,
-            missed=8.0,
-            false_alarm=2.5,
-            time=3.0,
-            num_speakers_ref=3,
-            num_speakers_hyp=3,
-        )
-        assert result.der == 15.5
-        assert result.confusion == 5.0
-        assert result.missed == 8.0
-        assert result.false_alarm == 2.5
-        assert result.num_speakers_ref == 3
-        assert result.num_speakers_hyp == 3
-
-    def test_default_values(self):
-        """Test default values for optional fields."""
-        result = DiarizationResult(
-            der=10.0,
-            confusion=3.0,
-            missed=5.0,
-            false_alarm=2.0,
-            time=1.0,
-            num_speakers_ref=2,
-            num_speakers_hyp=2,
-        )
-        assert result.total == 0.0
-        assert result.confusion_raw == 0.0
-        assert result.missed_raw == 0.0
-        assert result.false_alarm_raw == 0.0
-
-
-class TestDiarizationEvaluator:
-    """Tests for DiarizationEvaluator class."""
-
-    def test_init_num_workers_default(self):
-        """Test that num_workers defaults to 1."""
-        from scripts.eval.evaluators.diarization import DiarizationEvaluator
-
-        evaluator = DiarizationEvaluator()
-        assert evaluator.num_workers == 1
-
-    def test_init_num_workers_custom(self):
-        """Test that custom num_workers is accepted."""
-        from scripts.eval.evaluators.diarization import DiarizationEvaluator
-
-        evaluator = DiarizationEvaluator(num_workers=4)
-        assert evaluator.num_workers == 4
-
-
-class TestAlignmentResult:
-    """Tests for AlignmentResult dataclass."""
-
-    def test_create_alignment_result(self):
-        """Test creating an AlignmentResult."""
-        result = AlignmentResult(
-            pred_starts=[0.0, 0.5, 1.0],
-            pred_ends=[0.4, 0.9, 1.4],
-            ref_starts=[0.0, 0.5, 1.0],
-            ref_ends=[0.4, 0.9, 1.4],
-            num_aligned_words=3,
-            num_ref_words=3,
-            time=0.5,
-            reference_text="hello world test",
-            predicted_text="hello world test",
-        )
-        assert len(result.pred_starts) == 3
-        assert result.num_aligned_words == 3
-
-
-class TestBaseAlignmentEvaluator:
-    """Tests for BaseAlignmentEvaluator class."""
-
-    def test_init_defaults(self):
-        """Test default field initialization."""
-        from scripts.eval.evaluators.alignment import BaseAlignmentEvaluator
-
-        evaluator = BaseAlignmentEvaluator()
-        assert evaluator.audio_field == "audio"
-        assert evaluator.text_field == "transcript"
-        assert evaluator.words_field == "words"
-        assert evaluator.results == []
 
 
 class TestEvaluator:
