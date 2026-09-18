@@ -13,6 +13,8 @@ import typer
 from fabric import Connection
 from invoke import UnexpectedExit
 
+from scripts.utils import get_project_root
+
 app = typer.Typer(help="RunPod remote operations CLI")
 
 SSH_KEY_PATH = "~/.ssh/id_ed25519"
@@ -253,23 +255,6 @@ python -c "import torch; assert torch.cuda.is_available()" || {
 }
 
 # Poetry tooling — only install what's missing
-# RunPod images ship torch in system dist-packages alongside its nvidia-*
-# CUDA wheels. When the project pins a different torch version it installs
-# into --user and shadows the image copy, but the nvidia libs stay in the
-# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
-# `import torch` dies with ImportError. Observed on
-# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
-# broke the flash-attn build, whose metadata hook imports torch.
-NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
-# Spelled out with if/else on purpose: these scripts are built with Python
-# f-strings, so shell brace-expansion syntax would be parsed as an f-string
-# replacement field and raise NameError at build time.
-if [ -n "$LD_LIBRARY_PATH" ]; then
-  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
-else
-  export LD_LIBRARY_PATH="$NVLIBS"
-fi
-
 command -v poetry >/dev/null 2>&1 || pip install --user poetry
 python -c "import poetry_plugin_export" 2>/dev/null || pip install --user poetry-plugin-export
 poetry config virtualenvs.create false
@@ -485,7 +470,7 @@ def deploy(
     if not test_connection(conn):
         sys.exit(1)
 
-    project_root = Path(__file__).parent.parent.parent.absolute()
+    project_root = get_project_root()
 
     if not skip_setup:
         setup_remote_environment(conn)

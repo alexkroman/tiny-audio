@@ -1,5 +1,6 @@
 """Audio utilities and text normalization for ASR evaluation."""
 
+import functools
 import io
 
 import numpy as np
@@ -56,6 +57,21 @@ def prepare_wav_bytes(wav_data) -> bytes:
     raise ValueError(f"Unsupported audio format: {type(wav_data)}")
 
 
+def as_16k_array(audio) -> np.ndarray:
+    """Decode any container `prepare_wav_bytes` accepts to a 16 kHz array."""
+    if isinstance(audio, dict) and ("array" in audio or "raw" in audio):
+        array = audio["array"] if "array" in audio else audio["raw"]
+        sample_rate = audio.get("sampling_rate", 16000)
+    else:
+        array, sample_rate = sf.read(io.BytesIO(prepare_wav_bytes(audio)))
+
+    if sample_rate != 16000:
+        import librosa
+
+        array = librosa.resample(array, orig_sr=sample_rate, target_sr=16000)
+    return array
+
+
 class TextNormalizer:
     """Whisper-based text normalizer for ASR evaluation.
 
@@ -79,8 +95,7 @@ class TextNormalizer:
     """
 
     def __init__(self):
-        tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
-        self._normalizer = EnglishTextNormalizer(tokenizer.english_spelling_normalizer)
+        self._normalizer = _english_normalizer()
 
     _SPELLING_FIXES = {
         "okay": "ok",
@@ -94,3 +109,14 @@ class TextNormalizer:
         for src, dst in self._SPELLING_FIXES.items():
             text = text.replace(src, dst)
         return text
+
+
+@functools.cache
+def _english_normalizer() -> EnglishTextNormalizer:
+    """Build Whisper's English normalizer once per process.
+
+    Constructing it pulls the whisper-tiny tokenizer, and a `ta eval -d all`
+    run builds one TextNormalizer per evaluator per dataset.
+    """
+    tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+    return EnglishTextNormalizer(tokenizer.english_spelling_normalizer)

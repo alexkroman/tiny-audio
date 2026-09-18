@@ -88,7 +88,7 @@ def _loose_tokens(text: str) -> list[str]:
     return [t for t in (re.sub(r"[^a-z0-9]", "", w) for w in text.lower().split()) if t]
 
 
-def _contains_subsequence(haystack: list[str], needle: list[str]) -> bool:
+def contains_subsequence(haystack: list[str], needle: list[str]) -> bool:
     if not needle:
         return False
     for i in range(len(haystack) - len(needle) + 1):
@@ -122,7 +122,7 @@ def score_sample(raw_reference: str, raw_prediction: str) -> dict[str, dict[str,
         if exact:
             stats["exact"] += 1
             stats["loose"] += 1
-        elif _contains_subsequence(pred_tokens, _loose_tokens(matched)):
+        elif contains_subsequence(pred_tokens, _loose_tokens(matched)):
             stats["loose"] += 1
 
     return out

@@ -8,6 +8,8 @@ from pathlib import Path
 
 import typer
 
+from scripts.utils import get_project_root
+
 app = typer.Typer(help="Test HuggingFace inference endpoint handler locally")
 
 
@@ -26,7 +28,7 @@ def find_latest_model(base_dir: str = "outputs") -> str | None:
 
 def find_test_audio() -> str | None:
     """Find a test audio file in the project."""
-    base_dir = Path(__file__).parent.parent.parent
+    base_dir = get_project_root()
 
     # Gradio ships sample audio; glob the python version out of the path so
     # this keeps working across interpreter upgrades (was hardcoded to 3.11).

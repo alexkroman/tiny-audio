@@ -5,13 +5,14 @@ import functools
 import json
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from scripts.itn import ITN_CLASSES, merge_scores, score_sample
+from scripts.itn import ITN_CLASSES, contains_subsequence, merge_scores, score_sample
 from scripts.utils import _extract_model_from_dir, find_model_dirs, parse_results_file
 
 app = typer.Typer(help="Analysis tools for ASR evaluation results")
@@ -72,13 +73,7 @@ def entity_in_text(entity_text: str, text: str) -> bool:
         return True
 
     # Check word-by-word match
-    entity_words = norm_entity.split()
-    text_words = norm_text.split()
-    if len(entity_words) <= len(text_words):
-        for i in range(len(text_words) - len(entity_words) + 1):
-            if text_words[i : i + len(entity_words)] == entity_words:
-                return True
-    return False
+    return contains_subsequence(norm_text.split(), norm_entity.split())
 
 
 @app.command("high-wer")
@@ -565,6 +560,12 @@ def _sort_key_desc(value: str) -> tuple[int, float]:
         return (1, 0.0)
 
 
+def _dataset_wer(ds_data: dict) -> float | None:
+    """Per-dataset WER, preferring the value recomputed from saved samples."""
+    wer = ds_data.get("wer_calculated")
+    return ds_data.get("wer") if wer is None else wer
+
+
 @app.command("compare")
 def compare(
     models: list[str] = typer.Argument(..., help="Model patterns to compare"),
@@ -595,82 +596,59 @@ def compare(
     ordered_datasets = [d for d in DATASET_ORDER if d in all_datasets]
     ordered_datasets += [d for d in sorted(all_datasets) if d not in DATASET_ORDER]
 
-    # === Latency Table ===
-    console.print("\n")
-    latency_table = Table(title="Latency (ms)")
-    latency_table.add_column("Model", style="cyan")
-    latency_table.add_column("Average", justify="right", style="bold")
-    for ds in ordered_datasets:
-        latency_table.add_column(DATASET_SHORT_NAMES.get(ds, ds), justify="right")
-
-    rows = []
-    for model, data in model_metrics.items():
-        display_name = data.get("display_name", model)
-        row = [display_name]
-        avg_lat = data.get("avg_latency")
-        row.append(f"{avg_lat * 1000:.0f}" if avg_lat is not None else "-")
+    def print_dataset_table(
+        title: str,
+        summary_column: str,
+        summary_key: str,
+        dataset_value: Callable[[dict], float | None],
+        fmt: Callable[[float], str],
+    ) -> None:
+        """Model x dataset table with a leading summary column, best first."""
+        console.print("\n")
+        table = Table(title=title)
+        table.add_column("Model", style="cyan")
+        table.add_column(summary_column, justify="right", style="bold")
         for ds in ordered_datasets:
-            ds_data = data["datasets"].get(ds, {})
-            lat = ds_data.get("avg_time")
-            row.append(f"{lat * 1000:.0f}" if lat is not None else "-")
-        rows.append(row)
+            table.add_column(DATASET_SHORT_NAMES.get(ds, ds), justify="right")
 
-    for row in sorted(rows, key=lambda r: _sort_key(r[1])):
-        latency_table.add_row(*row)
+        rows = []
+        for model, data in model_metrics.items():
+            summary = data.get(summary_key)
+            row = [
+                data.get("display_name", model),
+                fmt(summary) if summary is not None else "-",
+            ]
+            for ds in ordered_datasets:
+                value = dataset_value(data["datasets"].get(ds, {}))
+                row.append(fmt(value) if value is not None else "-")
+            rows.append(row)
 
-    console.print(latency_table)
+        for row in sorted(rows, key=lambda r: _sort_key(r[1])):
+            table.add_row(*row)
 
-    # === WER Table ===
-    console.print("\n")
-    wer_table = Table(title="Accuracy by WER")
-    wer_table.add_column("Model", style="cyan")
-    wer_table.add_column("Corpus", justify="right", style="bold")
-    for ds in ordered_datasets:
-        wer_table.add_column(DATASET_SHORT_NAMES.get(ds, ds), justify="right")
+        console.print(table)
 
-    rows = []
-    for model, data in model_metrics.items():
-        display_name = data.get("display_name", model)
-        row = [display_name]
-        corpus_wer = data.get("corpus_wer")
-        row.append(f"{corpus_wer:.2f}%" if corpus_wer is not None else "-")
-        for ds in ordered_datasets:
-            ds_data = data["datasets"].get(ds, {})
-            wer = ds_data.get("wer_calculated")
-            if wer is None:
-                wer = ds_data.get("wer")
-            row.append(f"{wer:.2f}%" if wer is not None else "-")
-        rows.append(row)
-
-    for row in sorted(rows, key=lambda r: _sort_key(r[1])):
-        wer_table.add_row(*row)
-
-    console.print(wer_table)
-
-    # === Insertion Rate Table ===
-    console.print("\n")
-    ins_table = Table(title="Insertion Rate (Hallucination Proxy)")
-    ins_table.add_column("Model", style="cyan")
-    ins_table.add_column("Corpus", justify="right", style="bold")
-    for ds in ordered_datasets:
-        ins_table.add_column(DATASET_SHORT_NAMES.get(ds, ds), justify="right")
-
-    rows = []
-    for model, data in model_metrics.items():
-        display_name = data.get("display_name", model)
-        row = [display_name]
-        avg_ins = data.get("corpus_ins_rate")
-        row.append(f"{avg_ins:.2f}%" if avg_ins is not None else "-")
-        for ds in ordered_datasets:
-            ds_data = data["datasets"].get(ds, {})
-            ins = ds_data.get("ins_rate")
-            row.append(f"{ins:.2f}%" if ins is not None else "-")
-        rows.append(row)
-
-    for row in sorted(rows, key=lambda r: _sort_key(r[1])):
-        ins_table.add_row(*row)
-
-    console.print(ins_table)
+    print_dataset_table(
+        "Latency (ms)",
+        "Average",
+        "avg_latency",
+        lambda ds: ds.get("avg_time"),
+        lambda v: f"{v * 1000:.0f}",
+    )
+    print_dataset_table(
+        "Accuracy by WER",
+        "Corpus",
+        "corpus_wer",
+        _dataset_wer,
+        lambda v: f"{v:.2f}%",
+    )
+    print_dataset_table(
+        "Insertion Rate (Hallucination Proxy)",
+        "Corpus",
+        "corpus_ins_rate",
+        lambda ds: ds.get("ins_rate"),
+        lambda v: f"{v:.2f}%",
+    )
 
     # === WER by Word Count Table ===
     console.print("\n")

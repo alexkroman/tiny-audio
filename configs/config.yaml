@@ -13,7 +13,7 @@ model:
   audio_model_id: zai-org/GLM-ASR-Nano-2512
   # Qwen3-0.6B ships with a chat_template, which DataCollatorForChatML requires.
   text_model_id: Qwen/Qwen3-0.6B
-  projector_type: mlp  # Options: mlp, mosa, moe, qformer
+  projector_type: mlp
 
   # Master weights in fp32 so AdamW updates below the bf16 ULP gap (~0.0078
   # near 1.0) actually land — bf16 master weights silently round small
@@ -45,9 +45,3 @@ hydra:
     subdir: ${hydra.job.num}
   job:
     chdir: true
-
-verbose: false
-
-# Data loading. EPYC 9355 has 32 cores; this is one-shot dataset prep, so
-# we can afford to use most of them.
-num_proc: 24

@@ -9,7 +9,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from scripts.eval.audio import TextNormalizer
 from scripts.eval.datasets import (
     DATASET_REGISTRY,
     load_eval_dataset,
@@ -69,7 +68,6 @@ def save_results(
     base_url: str | None = None,
 ) -> Path:
     """Save evaluation results and metrics to a timestamped directory."""
-    normalizer = TextNormalizer()
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_model_name = model_name.replace("/", "_")
 
@@ -98,8 +96,8 @@ def save_results(
     results_file = result_dir / "results.txt"
     with results_file.open("w") as f:
         for i, r in enumerate(results, 1):
-            norm_pred = normalizer.normalize(r.prediction)
-            norm_ref = normalizer.normalize(r.reference)
+            norm_pred = r.norm_prediction
+            norm_ref = r.norm_reference
             f.write(f"Sample {i} - WER: {r.wer:.2f}%\n")
             f.write(f"Ground Truth: {norm_ref}\n")
             f.write(f"Prediction: {norm_pred}\n")

@@ -16,7 +16,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from scripts.eval.audio import prepare_wav_bytes
+from scripts.eval.audio import as_16k_array, prepare_wav_bytes
 
 from .base import Evaluator, console, setup_assemblyai
 
@@ -104,23 +104,29 @@ def _resolve_local_runtime() -> tuple[int | str, str]:
     return -1, "float32"
 
 
+def _build_local_pipeline(model_path: str):
+    """Build the ASR pipeline both local evaluators run on."""
+    from transformers import pipeline
+
+    device, model_dtype = _resolve_local_runtime()
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model=model_path,
+        trust_remote_code=True,
+        device=device,
+        model_kwargs={"model_dtype": model_dtype},
+    )
+    console.print(f"[dim]Using device: {device}, model_dtype: {model_dtype}[/dim]")
+    return pipe
+
+
 class LocalEvaluator(Evaluator):
     """Evaluator for local models."""
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from transformers import pipeline
-
-        device, model_dtype = _resolve_local_runtime()
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model_path,
-            trust_remote_code=True,
-            device=device,
-            model_kwargs={"model_dtype": model_dtype},
-        )
+        self.pipe = _build_local_pipeline(model_path)
         self.user_prompt = user_prompt
-        console.print(f"[dim]Using device: {device}, model_dtype: {model_dtype}[/dim]")
 
         print_generation_config(self.pipe.model, model_path)
 
@@ -155,21 +161,11 @@ class LocalStreamingEvaluator(Evaluator):
 
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        from transformers import pipeline
-
-        device, model_dtype = _resolve_local_runtime()
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model_path,
-            trust_remote_code=True,
-            device=device,
-            model_kwargs={"model_dtype": model_dtype},
-        )
+        self.pipe = _build_local_pipeline(model_path)
         self.model = self.pipe.model
         self.model.eval()
         self.processor = self.model.get_processor()
         self.user_prompt = user_prompt
-        console.print(f"[dim]Using device: {device}, model_dtype: {model_dtype}[/dim]")
 
         # Track timing stats
         self.ttfb_times: list[float] = []
@@ -178,25 +174,10 @@ class LocalStreamingEvaluator(Evaluator):
         # Print generation config
         print_generation_config(self.model, model_path)
 
-    def transcribe(self, audio) -> tuple[str, float]:
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
         from transformers import TextIteratorStreamer
 
-        # Extract audio array
-        if isinstance(audio, dict) and "array" in audio:
-            audio_array = audio["array"]
-            sample_rate = audio.get("sampling_rate", 16000)
-        elif isinstance(audio, dict) and "raw" in audio:
-            audio_array = audio["raw"]
-            sample_rate = audio.get("sampling_rate", 16000)
-        else:
-            wav_bytes = prepare_wav_bytes(audio)
-            audio_array, sample_rate = sf.read(io.BytesIO(wav_bytes))
-
-        # Resample to 16kHz if needed
-        if sample_rate != 16000:
-            import librosa
-
-            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
+        audio_array = as_16k_array(audio)
 
         # Process audio (ASRProcessor handles sampling_rate internally)
         inputs = self.processor(
@@ -260,7 +241,7 @@ class LocalStreamingEvaluator(Evaluator):
         )
 
         full_text = "".join(tokens).strip()
-        return full_text, processing_time
+        return full_text, processing_time, None
 
     def compute_metrics(self) -> dict:
         """Compute final metrics including streaming-specific timing."""
@@ -283,7 +264,7 @@ class EndpointEvaluator(Evaluator):
 
         self.client = InferenceClient(base_url=endpoint_url)
 
-    def transcribe(self, audio) -> tuple[str, float]:
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
         wav_bytes = prepare_wav_bytes(audio)
 
         start = time.time()
@@ -296,7 +277,7 @@ class EndpointEvaluator(Evaluator):
             text = result.text
         else:
             text = str(result)
-        return text, elapsed
+        return text, elapsed, None
 
 
 class AssemblyAIEvaluator(Evaluator):
@@ -308,12 +289,12 @@ class AssemblyAIEvaluator(Evaluator):
         super().__init__(**kwargs)
         self.transcriber = setup_assemblyai(api_key, model, base_url=base_url)
 
-    def transcribe(self, audio) -> tuple[str, float]:
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
         transcript = self.transcriber.transcribe(io.BytesIO(wav_bytes))
         elapsed = time.time() - start
-        return transcript.text or "", elapsed
+        return transcript.text or "", elapsed, None
 
 
 class AssemblyAIStreamingEvaluator(Evaluator):
@@ -349,7 +330,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
                 cap = int(os.environ.get("ASSEMBLYAI_STREAM_CONCURRENCY", cls._DEFAULT_CONCURRENCY))
                 cls._stream_semaphore = threading.Semaphore(cap)
 
-    def transcribe(self, audio) -> tuple[str, float]:
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
         import random
 
         pcm_data = self._prepare_pcm(audio)
@@ -359,7 +340,8 @@ class AssemblyAIStreamingEvaluator(Evaluator):
             try:
                 assert self._stream_semaphore is not None
                 with self._stream_semaphore:
-                    return self._run_session(pcm_data)
+                    text, elapsed = self._run_session(pcm_data)
+                    return text, elapsed, None
             except RuntimeError as e:
                 last_err = e
                 code = getattr(e, "streaming_code", None)
@@ -371,17 +353,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         raise last_err  # unreachable; appeases type checker
 
     def _prepare_pcm(self, audio) -> bytes:
-        if isinstance(audio, dict) and "array" in audio:
-            audio_array = audio["array"]
-            sample_rate = audio.get("sampling_rate", 16000)
-        else:
-            wav_bytes = prepare_wav_bytes(audio)
-            audio_array, sample_rate = sf.read(io.BytesIO(wav_bytes))
-
-        if sample_rate != 16000:
-            import librosa
-
-            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
+        audio_array = as_16k_array(audio)
 
         if isinstance(audio_array, np.ndarray):
             if audio_array.dtype != np.float32:
@@ -469,7 +441,7 @@ class DeepgramEvaluator(Evaluator):
 
         self.client = DeepgramClient(api_key=api_key)
 
-    def transcribe(self, audio) -> tuple[str, float]:
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
 
@@ -480,7 +452,7 @@ class DeepgramEvaluator(Evaluator):
         elapsed = time.time() - start
 
         text = response.results.channels[0].alternatives[0].transcript
-        return text, elapsed
+        return text, elapsed, None
 
 
 class ElevenLabsEvaluator(Evaluator):
@@ -493,7 +465,7 @@ class ElevenLabsEvaluator(Evaluator):
         self.client = ElevenLabs(api_key=api_key)
         self.model = model
 
-    def transcribe(self, audio) -> tuple[str, float]:
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
 
@@ -505,7 +477,7 @@ class ElevenLabsEvaluator(Evaluator):
 
         # Extract text from transcription response
         text = transcription.text if hasattr(transcription, "text") else str(transcription)
-        return text or "", elapsed
+        return text or "", elapsed, None
 
 
 def _pump_run_loop_until(event: threading.Event, timeout_seconds: float) -> bool:
@@ -577,7 +549,7 @@ class AppleSpeechEvaluator(Evaluator):
             raise RuntimeError("SFSpeechRecognizer not available right now")
         return recognizer
 
-    def transcribe(self, audio) -> tuple[str, float]:
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
         wav_bytes = prepare_wav_bytes(audio)
         fd, temp_path = tempfile.mkstemp(suffix=".wav", dir=self.temp_dir)
         try:
@@ -616,7 +588,7 @@ class AppleSpeechEvaluator(Evaluator):
 
             if error_box[0]:
                 raise RuntimeError(f"SFSpeechRecognizer error: {error_box[0]}")
-            return text_box[0], elapsed
+            return text_box[0], elapsed, None
         finally:
             with contextlib.suppress(OSError):
                 Path(temp_path).unlink()
@@ -805,7 +777,7 @@ class SwiftSDKEvaluator(Evaluator):
             raise RuntimeError(f"Swift binary unexpected startup line: {ready_msg}")
         console.print("[bold green]Swift SDK ready[/bold green]")
 
-    def transcribe(self, audio) -> tuple[str, float]:
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
         # The eval framework passes either a path string or a dict-like with an
         # 'array' field. The Swift binary takes file paths only — write to a
         # temp wav if we got an in-memory array.
@@ -825,7 +797,7 @@ class SwiftSDKEvaluator(Evaluator):
                 raise RuntimeError(f"Swift transcribe failed: {msg['error']}")
             text = msg.get("text", "")
             elapsed_ms = msg.get("elapsed_ms", 0)
-            return text, elapsed_ms / 1000.0
+            return text, elapsed_ms / 1000.0, None
         finally:
             if is_temp:
                 Path(path).unlink(missing_ok=True)

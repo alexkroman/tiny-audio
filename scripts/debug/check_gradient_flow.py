@@ -24,11 +24,11 @@ from __future__ import annotations
 import argparse
 import math
 from collections import defaultdict
-from pathlib import Path
 
 import torch
 import yaml
 
+from scripts.utils import get_project_root
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.projectors import MLPAudioProjector
@@ -41,7 +41,7 @@ def load_embedded_training_knobs() -> dict[str, float | None]:
     weight_decay, projector_weight_decay. Missing keys map to None;
     the caller falls back to printing actuals without the mismatch check.
     """
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = get_project_root()
     yaml_path = repo_root / "configs" / "experiments" / "embedded.yaml"
     if not yaml_path.exists():
         return {
