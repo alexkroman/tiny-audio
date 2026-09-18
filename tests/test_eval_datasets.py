@@ -12,11 +12,9 @@ class TestDatasetConfig:
     def test_create_minimal_config(self):
         """Test creating config with minimal required fields."""
         config = DatasetConfig(
-            name="test",
             path="test/path",
             audio_field="audio",
         )
-        assert config.name == "test"
         assert config.path == "test/path"
         assert config.audio_field == "audio"
         assert config.text_field == "text"  # Default
@@ -25,7 +23,6 @@ class TestDatasetConfig:
     def test_create_full_config(self):
         """Test creating config with all fields."""
         config = DatasetConfig(
-            name="test",
             path="test/path",
             audio_field="wav",
             text_field="transcript",
@@ -63,7 +60,6 @@ class TestDatasetRegistry:
     def test_all_configs_have_required_fields(self):
         """Test that all configs have required fields."""
         for name, config in DATASET_REGISTRY.items():
-            assert config.name == name, f"Config name mismatch for {name}"
             assert config.path, f"Missing path for {name}"
             assert config.audio_field, f"Missing audio_field for {name}"
             assert config.text_field, f"Missing text_field for {name}"

@@ -85,17 +85,24 @@ class TestAppleSpeechEvaluator:
         ev = fake_speech_frameworks["asr"].AppleSpeechEvaluator(num_workers=4)
         assert ev.num_workers == 1
 
-    def test_transcribe_returns_text_and_elapsed(self, fake_speech_frameworks, mocker):
+    def test_transcribe_returns_text_elapsed_and_confidence(self, fake_speech_frameworks, mocker):
+        """`transcribe` returns (text, time, confidence) for every evaluator.
+
+        Confidence is None here: the Speech framework exposes no per-token
+        logits. The uniform arity is what lets `Evaluator._process_sample`
+        unpack the result without length-sniffing it.
+        """
         mocker.patch.object(
             fake_speech_frameworks["asr"], "prepare_wav_bytes", return_value=b"WAVDATA"
         )
         ev = fake_speech_frameworks["asr"].AppleSpeechEvaluator()
         _stage_transcription(ev.recognizer, text="hello world")
 
-        text, elapsed = ev.transcribe(audio={"array": [], "sampling_rate": 16000})
+        text, elapsed, confidence = ev.transcribe(audio={"array": [], "sampling_rate": 16000})
 
         assert text == "hello world"
         assert elapsed >= 0
+        assert confidence is None
 
     def test_transcribe_propagates_error(self, fake_speech_frameworks, mocker):
         mocker.patch.object(

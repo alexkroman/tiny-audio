@@ -62,6 +62,16 @@ class EvalResult:
     mean_top1_logprob: float | None = None
     mean_margin: float | None = None
     num_tokens: int | None = None
+    # Normalized forms, computed once in _process_sample. Everything that
+    # scores or prints this result reads these instead of re-normalizing:
+    # _corpus_wer runs at every checkpoint over all results so far, so
+    # re-normalizing there made the eval loop quadratic in sample count.
+    norm_prediction: str = attrs.field(
+        default=attrs.Factory(lambda self: self.prediction, takes_self=True)
+    )
+    norm_reference: str = attrs.field(
+        default=attrs.Factory(lambda self: self.reference, takes_self=True)
+    )
 
 
 def _is_skipped_reference(reference) -> bool:
@@ -81,8 +91,13 @@ class Evaluator:
         self.normalizer = TextNormalizer()
         self.results: list[EvalResult] = []
 
-    def transcribe(self, audio) -> tuple[str, float]:
-        """Transcribe audio and return (text, inference_time). Override in subclass."""
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+        """Transcribe audio, returning (text, inference_time, confidence).
+
+        `confidence` is None for evaluators that cannot expose per-token
+        logits (external APIs); evaluators with a scores-capable pipeline
+        return a dict of per-sample stats. Override in subclass.
+        """
         raise NotImplementedError
 
     def _process_sample(self, sample_data: tuple[int, dict]) -> tuple[int, EvalResult]:
@@ -93,15 +108,7 @@ class Evaluator:
 
         confidence: dict | None = None
         try:
-            transcribe_result = self.transcribe(audio)
-            # transcribe() may return (text, time) or (text, time, confidence_dict).
-            # The 3-tuple form lets evaluators that can extract per-token logits
-            # (e.g. LocalEvaluator with a scores-capable pipeline) surface them
-            # without forcing every evaluator subclass to change signature.
-            if len(transcribe_result) == 3:
-                prediction, inference_time, confidence = transcribe_result
-            else:
-                prediction, inference_time = transcribe_result
+            prediction, inference_time, confidence = self.transcribe(audio)
         except Exception as e:
             print(f"Error on sample {idx}: {e}")
             prediction, inference_time = "", 0.0
@@ -109,15 +116,18 @@ class Evaluator:
         norm_pred = self.normalizer.normalize(prediction)
         norm_ref = self.normalizer.normalize(reference)
         sample_wer = jiwer.wer(norm_ref, norm_pred) * 100 if norm_ref else 0.0
+        confidence = confidence or {}
 
         return idx, EvalResult(
             prediction,
             reference,
             sample_wer,
             inference_time,
-            mean_top1_logprob=(confidence or {}).get("mean_top1_logprob"),
-            mean_margin=(confidence or {}).get("mean_margin"),
-            num_tokens=(confidence or {}).get("num_tokens"),
+            mean_top1_logprob=confidence.get("mean_top1_logprob"),
+            mean_margin=confidence.get("mean_margin"),
+            num_tokens=confidence.get("num_tokens"),
+            norm_prediction=norm_pred,
+            norm_reference=norm_ref,
         )
 
     def evaluate(self, dataset, max_samples: int | None = None) -> list[EvalResult]:
@@ -143,16 +153,24 @@ class Evaluator:
             yield {"audio": sample[self.audio_field], "reference": reference}
 
     def _print_sample_log(self, prefix: str, idx: int, result: EvalResult) -> None:
-        norm_pred = self.normalizer.normalize(result.prediction)
-        norm_ref = self.normalizer.normalize(result.reference)
         print(f"{prefix}Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s")
-        print(f"  Ref:  {norm_ref}")
-        print(f"  Pred: {norm_pred}")
+        print(f"  Ref:  {result.norm_reference}")
+        print(f"  Pred: {result.norm_prediction}")
 
     def _corpus_wer(self, results: list[EvalResult]) -> float:
-        preds = [self.normalizer.normalize(r.prediction) for r in results]
-        refs = [self.normalizer.normalize(r.reference) for r in results]
-        return jiwer.wer(refs, preds) * 100
+        """Corpus WER over results whose reference survives normalization.
+
+        `jiwer.wer` raises ValueError on an empty ground truth, and a
+        reference can normalize to "" -- a disfluency-only utterance like
+        "Uh." does. `_process_sample` already scores those as 0 rather than
+        calling jiwer; without the same guard here a single such row takes
+        down the whole run at the first checkpoint, after all the API spend.
+        """
+        pairs = [(r.norm_reference, r.norm_prediction) for r in results if r.norm_reference]
+        if not pairs:
+            return 0.0
+        refs, preds = zip(*pairs, strict=True)
+        return jiwer.wer(list(refs), list(preds)) * 100
 
     def _collect_samples(self, dataset, max_samples: int | None) -> list[dict]:
         """Collect samples for parallel processing."""

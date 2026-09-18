@@ -160,6 +160,54 @@ class ForcedAligner:
     START_OFFSET = 0.06  # Subtract from start times (shift earlier)
     END_OFFSET = -0.03  # Add to end times (shift later)
 
+    @staticmethod
+    def _tokenize_words(
+        text: str, dictionary: dict, blank_id: int = 0
+    ) -> tuple[list[str], list[int]]:
+        """Split `text` into alignable words and the CTC token sequence for them.
+
+        Returns `(words, tokens)` where `tokens` is each word's character ids
+        joined by the separator id, and `words` lists only the words that
+        contributed at least one token -- so the token groups the Viterbi path
+        produces line up 1:1 with `words`.
+
+        That pairing is the whole point. A word can produce no usable tokens in
+        two ways, and both used to leave an empty group behind while still
+        emitting the separators on either side of it:
+
+        - every character is outside the label set (digits, "...");
+        - every character maps to a control id. In wav2vec2's label set index 0
+          is spelled "-", so a hyphen is the *blank* symbol, and "--" became
+          two blank target tokens rather than a word.
+
+        Pairing groups against a plain `text.split()` then shifted every later
+        word onto the previous word's timing and dropped the last one:
+        "hello -- world" returned `hello, --` with `--` carrying WORLD's frames.
+
+        `blank_id` defaults to 0 to match the `blank_id=0` that `align` passes
+        to `_get_trellis` and `_backtrack`.
+        """
+        separator_id = dictionary.get("|", dictionary.get(" ", 0))
+        # Neither may appear as a target token: the separator would split the
+        # word in two, and the blank is what the trellis emits *between*
+        # tokens. Either one desyncs the group-to-word pairing.
+        control_ids = {separator_id, blank_id}
+        words: list[str] = []
+        tokens: list[int] = []
+        for word in text.split():
+            word_tokens = [
+                token_id
+                for c in word.upper()
+                if (token_id := dictionary.get(c)) is not None and token_id not in control_ids
+            ]
+            if not word_tokens:
+                continue
+            if tokens:
+                tokens.append(separator_id)
+            tokens.extend(word_tokens)
+            words.append(word)
+        return words, tokens
+
     @classmethod
     def align(
         cls,
@@ -210,17 +258,9 @@ class ForcedAligner:
 
         emission = emissions[0].cpu()
 
-        # Normalize text: uppercase, keep only valid characters
-        transcript = text.upper()
-
-        # Build tokens from transcript (including word separators)
-        tokens = []
-        for char in transcript:
-            if char in dictionary:
-                tokens.append(dictionary[char])
-            elif char == " ":
-                tokens.append(dictionary.get("|", dictionary.get(" ", 0)))
-
+        # Tokenize per word so each Viterbi token group maps back to the word
+        # it came from; words with no representable characters are dropped.
+        words, tokens = cls._tokenize_words(text, dictionary)
         if not tokens:
             return []
 
@@ -236,7 +276,6 @@ class ForcedAligner:
         end_offset = cls.END_OFFSET
 
         # Group aligned tokens into words based on pipe separator
-        words = text.split()
         word_timestamps = []
         current_word_start = None
         current_word_end = None

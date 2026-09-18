@@ -12,7 +12,6 @@ import functools
 import logging
 import math
 import os
-import random
 import re
 import subprocess
 from dataclasses import fields
@@ -50,7 +49,7 @@ from tiny_audio.asr_config import (
 )
 from tiny_audio.asr_modeling import ASRModel
 
-TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
+TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 # Used for sources whose transcripts natively carry punctuation, selected per
 # row via the `text_punct` dataset field. Granite Speech 4.1 documents exactly
 # this mechanism -- its model card says punctuation and truecasing are chosen
@@ -63,7 +62,7 @@ TRANSCRIBE_PROMPTS = ["Transcribe the speech to text"]
 # under the same prompt the punctuated ~75% uses to produce it. Identical
 # conditioning, contradictory targets: the model can only learn a hedge, and
 # every dropped mark scores as an error against punctuated references.
-TRANSCRIBE_PROMPTS_PUNCT = ["Transcribe the speech with proper punctuation and capitalization"]
+TRANSCRIBE_PROMPT_PUNCT = "Transcribe the speech with proper punctuation and capitalization"
 
 # Gigaspeech ships inline punctuation as angle-bracket tags so we restore
 # them to real punctuation before any other normalization. Pattern follows
@@ -633,8 +632,8 @@ class DataCollator:
         # Prompt carries the label convention, so the punctuated and
         # unpunctuated halves of the mix stop competing for the same
         # conditioning. Undeclared sources keep the plain prompt.
-        prompts = TRANSCRIBE_PROMPTS_PUNCT if feature.get("_text_punct") else TRANSCRIBE_PROMPTS
-        return self._make_messages(num_audio_tokens, random.choice(prompts), text)
+        prompt = TRANSCRIBE_PROMPT_PUNCT if feature.get("_text_punct") else TRANSCRIBE_PROMPT
+        return self._make_messages(num_audio_tokens, prompt, text)
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
         user_content = (self.audio_token * num_audio_tokens) + " " + prompt
@@ -896,7 +895,12 @@ class ASRTrainer(Trainer):
             metrics = {}
             for group, grads in groups.items():
                 if grads:
-                    stacked = torch.stack([g.detach().float().norm(2) for g in grads])
+                    stacked = torch.stack(
+                        [
+                            torch.linalg.vector_norm(g.detach(), 2, dtype=torch.float32)
+                            for g in grads
+                        ]
+                    )
                     metrics[f"grad_norm/{group}"] = stacked.norm(2).item()
             if metrics:
                 total = math.sqrt(sum(v * v for v in metrics.values()))
@@ -931,7 +935,10 @@ class ASRTrainer(Trainer):
             name = pg.get("name") or pg.get("component") or "other"
             lr, eps = pg.get("lr", 0.0), pg.get("eps", 1e-8)
             b1, b2 = pg.get("betas", (0.9, 0.999))
-            upd_sq = w_sq = 0.0
+            # Accumulate on-device and sync once per device, rather than
+            # blocking on .item() twice for every parameter in the group.
+            upd_terms: dict[torch.device, torch.Tensor] = {}
+            w_terms: dict[torch.device, torch.Tensor] = {}
             for p in pg["params"]:
                 st = opt.state.get(p)
                 if not st or "exp_avg" not in st:
@@ -943,10 +950,15 @@ class ASRTrainer(Trainer):
                 )
                 if t < 1:
                     continue
-                m = st["exp_avg"].float() / (1 - b1**t)
-                v = st["exp_avg_sq"].float() / (1 - b2**t)
-                upd_sq += (lr * m / (v.sqrt() + eps)).pow(2).sum().item()
-                w_sq += p.detach().float().pow(2).sum().item()
+                m = st["exp_avg"].to(torch.float32) / (1 - b1**t)
+                v = st["exp_avg_sq"].to(torch.float32) / (1 - b2**t)
+                upd = (lr * m / (v.sqrt() + eps)).pow(2).sum()
+                w = torch.linalg.vector_norm(p.detach(), 2, dtype=torch.float32).pow(2)
+                dev = p.device
+                upd_terms[dev] = upd_terms[dev] + upd if dev in upd_terms else upd
+                w_terms[dev] = w_terms[dev] + w if dev in w_terms else w
+            upd_sq = sum(x.item() for x in upd_terms.values())
+            w_sq = sum(x.item() for x in w_terms.values())
             if w_sq > 0:
                 totals.setdefault(name, [0.0, 0.0])
                 totals[name][0] += upd_sq
@@ -969,19 +981,18 @@ class ASRTrainer(Trainer):
         """
         model = self.model
         projector = getattr(model, "projector", None)
-        if projector is None or not hasattr(projector, "linear_1"):
+        if projector is None or not hasattr(projector, "measure_output_rms"):
             return {}
         try:
             was_training = projector.training
             projector.eval()
+            out_rms = projector.measure_output_rms()
             with torch.no_grad():
-                k = getattr(projector, "k", 1)
-                enc_dim = projector.linear_1.in_features // k
-                w = projector.linear_2.weight
-                probe = torch.randn(1, 64 * k, enc_dim, dtype=w.dtype, device=w.device)
-                out_rms = projector(probe).float().pow(2).mean().sqrt().item()
                 emb = model.language_model.get_input_embeddings().weight
-                emb_rms = emb.detach().float().pow(2).mean().sqrt().item()
+                emb_rms = (
+                    torch.linalg.vector_norm(emb.detach(), 2, dtype=torch.float32)
+                    / math.sqrt(emb.numel())
+                ).item()
         except Exception:  # diagnostics must never take the run down
             return {}
         finally:

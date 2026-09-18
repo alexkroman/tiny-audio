@@ -2,6 +2,8 @@
 
 from typing import Any, Dict, List, Union
 
+import torch
+
 try:
     # For remote execution, imports are relative
     from .asr_modeling import ASRModel
@@ -10,6 +12,15 @@ except ImportError:
     # For local execution, imports are not relative
     from asr_modeling import ASRModel  # type: ignore[no-redef]
     from asr_pipeline import ASRPipeline  # type: ignore[no-redef]
+
+
+def _best_device() -> torch.device:
+    """Best available inference device (cuda > mps > cpu)."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 class EndpointHandler:
@@ -28,22 +39,25 @@ class EndpointHandler:
         import os
 
         import nltk
-        from transformers.utils import is_flash_attn_2_available
 
         nltk.download("punkt_tab", quiet=True)
 
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-        model_kwargs = {
-            "device_map": "auto",
-            "torch_dtype": "auto",
-            "low_cpu_mem_usage": True,
-        }
-        if is_flash_attn_2_available():
-            model_kwargs["attn_implementation"] = "flash_attention_2"
-
-        self.model = ASRModel.from_pretrained(path, **model_kwargs)
-        self.device = next(self.model.parameters()).device
+        # `ASRModel.from_pretrained` constructs its own submodules and forwards
+        # **kwargs to `ASRModel.__init__`, which discards them -- no loader
+        # reads `device_map`, `torch_dtype` or `low_cpu_mem_usage`, and it sets
+        # `_is_loading_from_pretrained` precisely to keep `device_map="auto"`
+        # out of the sub-model loaders. Passing them here did nothing, so the
+        # model stayed on CPU and a GPU Inference Endpoint silently decoded on
+        # CPU. Place it explicitly instead. dtype comes from
+        # `config.model_dtype` and the attention backend from
+        # `config.attn_implementation`, which already downgrades FA2 when
+        # flash_attn is missing.
+        self.model = ASRModel.from_pretrained(path)
+        self.device = _best_device()
+        self.model.to(self.device)
+        self.model.eval()
 
         self.pipe = ASRPipeline(
             model=self.model,

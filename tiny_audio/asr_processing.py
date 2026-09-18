@@ -59,6 +59,58 @@ class ASRProcessor(ProcessorMixin):
         """Compute encoder output length using conv layer formulas."""
         return compute_encoder_output_length(mel_length, self.encoder_conv_layers)
 
+    def _render_prompt(self, num_audio_tokens: int, text: Optional[str]) -> torch.Tensor:
+        """Tokenize one chat prompt carrying exactly `num_audio_tokens` placeholders."""
+        if num_audio_tokens > 0:
+            user_content = self.audio_token * num_audio_tokens
+            if self.TRANSCRIBE_PROMPT:
+                user_content += " " + self.TRANSCRIBE_PROMPT
+        else:
+            user_content = self.TRANSCRIBE_PROMPT or ""
+
+        messages = [{"role": "user", "content": user_content}]
+        if text is not None:
+            messages.append({"role": "assistant", "content": text})
+
+        tokenized = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=(text is None),
+            return_tensors="pt",
+            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
+        )
+
+        # Handle both tensor and BatchEncoding returns
+        if isinstance(tokenized, torch.Tensor):
+            ids = tokenized
+        else:
+            # BatchEncoding or dict-like object
+            ids = tokenized.get("input_ids", tokenized.input_ids)
+        return (ids[0] if ids.dim() > 1 else ids).to(torch.long)
+
+    def _stack_prompt_rows(self, rows: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Stack per-sample prompt rows into a batch, left-padding if ragged.
+
+        Left, not right: these feed `generate`, so padding must not sit between
+        the prompt and the first generated token. Mirrors
+        `ASRModel._left_pad_prompt_rows`; pad positions never carry
+        `audio_token_id`, so the model's masked_scatter is unaffected.
+        """
+        max_len = max(row.shape[0] for row in rows)
+        if all(row.shape[0] == max_len for row in rows):
+            input_ids = torch.stack(rows)
+            return input_ids, torch.ones_like(input_ids)
+
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id or 0
+        input_ids = torch.full((len(rows), max_len), int(pad_id), dtype=torch.long)
+        attention_mask = torch.zeros((len(rows), max_len), dtype=torch.long)
+        for i, row in enumerate(rows):
+            input_ids[i, max_len - row.shape[0] :] = row
+            attention_mask[i, max_len - row.shape[0] :] = 1
+        return input_ids, attention_mask
+
     def __call__(
         self,
         audio: Optional[Union[list, "torch.Tensor"]] = None,
@@ -69,7 +121,7 @@ class ASRProcessor(ProcessorMixin):
         """Process audio and text inputs for inference.
 
         Args:
-            audio: Raw audio waveform(s)
+            audio: Raw audio waveform(s). A batch gets one prompt per sample.
             text: Target transcription (optional, for training - but use DataCollator instead)
             return_tensors: Return format ("pt" for PyTorch)
 
@@ -77,6 +129,7 @@ class ASRProcessor(ProcessorMixin):
             Dict with input_features, input_ids, attention_mask
         """
         result = {}
+        token_counts = [0]
 
         # Process audio
         if audio is not None:
@@ -90,46 +143,30 @@ class ASRProcessor(ProcessorMixin):
             result["input_features"] = audio_inputs["input_features"]
             result["audio_attention_mask"] = audio_inputs["attention_mask"]
 
-            # Use actual audio length (from attention mask) for token count
-            real_mel_len = int(audio_inputs["attention_mask"].sum(dim=-1).max().item())
-            encoder_output_len = self._compute_encoder_output_length(real_mel_len)
-            num_audio_tokens = self.projector.get_output_length(encoder_output_len)
-        else:
-            num_audio_tokens = 0
+            if self.projector is None:
+                raise ValueError(
+                    "ASRProcessor needs a projector to size the audio prompt. Build it "
+                    "with ASRModel.get_processor() instead of constructing it directly."
+                )
 
-        # Build prompt with audio token placeholders (instruction-free)
-        if num_audio_tokens > 0:
-            user_content = self.audio_token * num_audio_tokens
-            if self.TRANSCRIBE_PROMPT:
-                user_content += " " + self.TRANSCRIBE_PROMPT
-        else:
-            user_content = self.TRANSCRIBE_PROMPT or ""
+            # One count per sample, from that sample's own mel length. Sizing a
+            # single shared prompt from the batch max -- which this used to do --
+            # returns batch-1 `input_ids` against batch-B `input_features`, and
+            # gives every shorter row more `<audio>` placeholders than the
+            # projector produced for it. `masked_scatter` then mis-scatters
+            # silently. This is the same failure `_prepare_audio_inputs`
+            # documents as fixed on the model side, and it only shows up on a
+            # ragged batch, so batch-1 eval never sees it.
+            mel_lengths = audio_inputs["attention_mask"].sum(dim=-1).reshape(-1)
+            token_counts = [
+                int(self.projector.get_output_length(self._compute_encoder_output_length(int(m))))
+                for m in mel_lengths
+            ]
 
-        messages = [{"role": "user", "content": user_content}]
-        if text is not None:
-            messages.append({"role": "assistant", "content": text})
-
-        # Tokenize
-        tokenized = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=(text is None),
-            return_tensors=return_tensors,
-            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
-        )
-
-        # Handle both tensor and BatchEncoding returns
-        if isinstance(tokenized, torch.Tensor):
-            input_ids = tokenized
-        else:
-            # BatchEncoding or dict-like object
-            input_ids = tokenized.get("input_ids", tokenized.input_ids)
-
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-
+        rows = [self._render_prompt(n, text) for n in token_counts]
+        input_ids, attention_mask = self._stack_prompt_rows(rows)
         result["input_ids"] = input_ids
-        result["attention_mask"] = torch.ones_like(input_ids)
+        result["attention_mask"] = attention_mask
 
         return result
 

@@ -8,11 +8,7 @@ MIT License (https://opensource.org/licenses/MIT)
 import warnings
 
 import numpy as np
-import scipy
-import sklearn.metrics.pairwise
 import torch
-from sklearn.cluster._kmeans import k_means
-from sklearn.preprocessing import normalize
 
 
 def _get_device() -> torch.device:
@@ -66,7 +62,9 @@ class SpectralCluster:
 
     def get_sim_mat(self, embeddings: np.ndarray) -> np.ndarray:
         """Compute cosine similarity matrix."""
-        return sklearn.metrics.pairwise.cosine_similarity(embeddings, embeddings)
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        return cosine_similarity(embeddings, embeddings)
 
     def p_pruning(self, affinity: np.ndarray) -> np.ndarray:
         """Prune low similarity values in affinity matrix (keep top pval fraction)."""
@@ -92,7 +90,9 @@ class SpectralCluster:
         self, laplacian: np.ndarray, k_oracle: int | None = None
     ) -> tuple[np.ndarray, int]:
         """Extract spectral embeddings from Laplacian."""
-        lambdas, eig_vecs = scipy.linalg.eigh(laplacian)
+        from scipy.linalg import eigh
+
+        lambdas, eig_vecs = eigh(laplacian)
 
         if k_oracle is not None:
             num_of_spk = k_oracle
@@ -107,6 +107,8 @@ class SpectralCluster:
 
     def cluster_embs(self, emb: np.ndarray, k: int) -> np.ndarray:
         """Cluster spectral embeddings using k-means."""
+        from sklearn.cluster._kmeans import k_means
+
         _, labels, _ = k_means(emb, k, n_init=10)
         return labels
 
@@ -166,6 +168,8 @@ class SpeakerClusterer:
             return np.zeros(embeddings.shape[0], dtype=int)
 
         # Normalize embeddings and replace NaN/inf
+        from sklearn.preprocessing import normalize
+
         embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
         embeddings = normalize(embeddings)
 
@@ -199,6 +203,7 @@ class SpeakerClusterer:
         """Merge similar speakers by cosine similarity of centroids."""
         from scipy.cluster.hierarchy import fcluster, linkage
         from scipy.spatial.distance import pdist
+        from sklearn.preprocessing import normalize
 
         unique_labels = np.unique(labels)
         if len(unique_labels) <= 1:
@@ -218,8 +223,13 @@ class SpeakerClusterer:
         return np.array([label_map[lbl] for lbl in labels])
 
 
-class LocalSpeakerDiarizer:
-    """Local speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
+class SpeakerDiarizer:
+    """Speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
+
+    Example:
+        >>> segments = SpeakerDiarizer.diarize(audio_array)
+        >>> for seg in segments:
+        ...     print(f"{seg['speaker']}: {seg['start']:.2f} - {seg['end']:.2f}")
 
     Pipeline:
     1. TEN-VAD detects speech segments
@@ -381,7 +391,11 @@ class LocalSpeakerDiarizer:
         frame_duration = hop_size / sample_rate
         speech_frames: list[bool] = []
 
-        for i in range(0, len(audio_int16) - hop_size, hop_size):
+        # `- hop_size + 1`, not `- hop_size`: the latter stops one frame
+        # early and drops the last COMPLETE frame (3 frames for 1024 samples
+        # instead of 4), truncating the trailing speech segment by one hop and
+        # forcing a silence/speaker cut at the end of every clip.
+        for i in range(0, len(audio_int16) - hop_size + 1, hop_size):
             frame = audio_int16[i : i + hop_size]
             _, is_speech = vad_model.process(frame)
             speech_frames.append(is_speech)
@@ -513,6 +527,8 @@ class LocalSpeakerDiarizer:
 
         # Normalize all embeddings at once
         if embeddings:
+            from sklearn.preprocessing import normalize
+
             return normalize(np.array(embeddings)), window_segments
         return np.array([]), []
 
@@ -679,52 +695,3 @@ class LocalSpeakerDiarizer:
             word["speaker"] = best_speaker
 
         return words
-
-
-class SpeakerDiarizer:
-    """Speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
-
-    Example:
-        >>> segments = SpeakerDiarizer.diarize(audio_array)
-        >>> for seg in segments:
-        ...     print(f"{seg['speaker']}: {seg['start']:.2f} - {seg['end']:.2f}")
-    """
-
-    @classmethod
-    def diarize(
-        cls,
-        audio: np.ndarray | str,
-        sample_rate: int = 16000,
-        num_speakers: int | None = None,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        **_kwargs,
-    ) -> list[dict]:
-        """Run speaker diarization on audio.
-
-        Args:
-            audio: Audio waveform as numpy array or path to audio file
-            sample_rate: Audio sample rate (default 16000)
-            num_speakers: Exact number of speakers (if known)
-            min_speakers: Minimum number of speakers
-            max_speakers: Maximum number of speakers
-
-        Returns:
-            List of dicts with 'speaker', 'start', 'end' keys
-        """
-        return LocalSpeakerDiarizer.diarize(
-            audio,
-            sample_rate=sample_rate,
-            num_speakers=num_speakers,
-            min_speakers=min_speakers or 2,
-            max_speakers=max_speakers or 10,
-        )
-
-    @classmethod
-    def assign_speakers_to_words(
-        cls,
-        words: list[dict],
-        speaker_segments: list[dict],
-    ) -> list[dict]:
-        """Assign speaker labels to words based on timestamp overlap."""
-        return LocalSpeakerDiarizer.assign_speakers_to_words(words, speaker_segments)

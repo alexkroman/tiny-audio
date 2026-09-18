@@ -1,6 +1,7 @@
 """CLI for ASR evaluation."""
 
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
@@ -9,7 +10,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from scripts.eval.audio import TextNormalizer
 from scripts.eval.datasets import (
     DATASET_REGISTRY,
     load_eval_dataset,
@@ -60,6 +60,22 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
+_DIR_SEGMENT_RE = re.compile(r"[^A-Za-z0-9.-]+")
+
+
+def _dir_segment(value: str) -> str:
+    """Sanitize one `_`-delimited field of a run directory name.
+
+    Run directories are `{date}_{time}_{model}[_{endpoint}]_{dataset}`, and
+    every consumer splits them on `_` (`scripts.utils._extract_model_from_dir`
+    takes field 2, `scripts.analysis.extract_dataset_name` takes the last).
+    An underscore inside a field silently shifts all the others: with
+    `--model-name granite_qwen` the model parses as "granite", so
+    `ta analysis compare granite_qwen` can never find the run it just wrote.
+    """
+    return _DIR_SEGMENT_RE.sub("-", value).strip("-") or "unknown"
+
+
 def save_results(
     model_name: str,
     dataset_name: str,
@@ -69,9 +85,8 @@ def save_results(
     base_url: str | None = None,
 ) -> Path:
     """Save evaluation results and metrics to a timestamped directory."""
-    normalizer = TextNormalizer()
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_model_name = model_name.replace("/", "_")
+    safe_model_name = _dir_segment(model_name)
 
     # Extract short identifier from base_url (e.g., "sandbox013" from the URL)
     url_suffix = ""
@@ -85,21 +100,23 @@ def save_results(
         parts = host.split(".")
         for part in parts:
             if "sandbox" in part.lower():
-                url_suffix = f"_{part}"
+                url_suffix = f"_{_dir_segment(part)}"
                 break
         if not url_suffix and host:
             # Fallback: use first part of hostname
-            url_suffix = f"_{parts[0]}"
+            url_suffix = f"_{_dir_segment(parts[0])}"
 
-    result_dir = Path(output_dir) / f"{timestamp}_{safe_model_name}{url_suffix}_{dataset_name}"
+    result_dir = (
+        Path(output_dir) / f"{timestamp}_{safe_model_name}{url_suffix}_{_dir_segment(dataset_name)}"
+    )
     result_dir.mkdir(parents=True, exist_ok=True)
 
     # Save detailed results
     results_file = result_dir / "results.txt"
     with results_file.open("w") as f:
         for i, r in enumerate(results, 1):
-            norm_pred = normalizer.normalize(r.prediction)
-            norm_ref = normalizer.normalize(r.reference)
+            norm_pred = r.norm_prediction
+            norm_ref = r.norm_reference
             f.write(f"Sample {i} - WER: {r.wer:.2f}%\n")
             f.write(f"Ground Truth: {norm_ref}\n")
             f.write(f"Prediction: {norm_pred}\n")

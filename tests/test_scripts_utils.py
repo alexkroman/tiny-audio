@@ -171,6 +171,39 @@ class TestFindModelDirs:
         assert "20240103" in dirs[2].name
 
 
+class TestFindModelDirsLatest:
+    """Tests for find_model_dirs(latest=True)."""
+
+    def test_latest_keeps_one_run_per_model_and_dataset(self, tmp_path: Path):
+        """An empty pattern spans models, so the key must include the model."""
+        (tmp_path / "20240101_120000_tiny-audio_ami").mkdir()
+        (tmp_path / "20240105_120000_tiny-audio_ami").mkdir()
+        (tmp_path / "20240103_120000_whisper_ami").mkdir()
+
+        dirs = find_model_dirs(tmp_path, "", latest=True)
+
+        names = sorted(d.name for d in dirs)
+        assert names == ["20240103_120000_whisper_ami", "20240105_120000_tiny-audio_ami"]
+
+    def test_latest_treats_suffixed_runs_as_separate_evaluations(self, tmp_path: Path):
+        """`_mcq` is a suffix, not the dataset -- two MCQ datasets must both survive."""
+        (tmp_path / "20240101_120000_tiny-audio_ami_mcq").mkdir()
+        (tmp_path / "20240102_120000_tiny-audio_earnings22_mcq").mkdir()
+        (tmp_path / "20240103_120000_tiny-audio_ami").mkdir()
+
+        dirs = find_model_dirs(tmp_path, "tiny-audio", latest=True)
+
+        assert len(dirs) == 3
+
+    def test_latest_picks_the_newest_of_identical_runs(self, tmp_path: Path):
+        (tmp_path / "20240101_120000_tiny-audio_ami").mkdir()
+        (tmp_path / "20240202_120000_tiny-audio_ami").mkdir()
+
+        dirs = find_model_dirs(tmp_path, "tiny-audio", latest=True)
+
+        assert [d.name for d in dirs] == ["20240202_120000_tiny-audio_ami"]
+
+
 class TestGetProjectRoot:
     """Tests for get_project_root function."""
 

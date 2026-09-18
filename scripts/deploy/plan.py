@@ -115,11 +115,11 @@ def _repo_weight_bytes(repo_id: str, repo_type: str = "model", name: str | None 
 
 
 def _load_cfg(experiment: str, overrides: list[str]):
-    from pathlib import Path
-
     from hydra import compose, initialize_config_dir
 
-    configs = Path(__file__).resolve().parents[2] / "configs"
+    from scripts.utils import get_project_root
+
+    configs = get_project_root() / "configs"
     with initialize_config_dir(config_dir=str(configs), version_base=None):
         return compose(config_name="config", overrides=[f"+experiments={experiment}", *overrides])
 

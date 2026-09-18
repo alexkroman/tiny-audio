@@ -201,7 +201,11 @@ def _resolve_attn_implementation(requested: Optional[str]) -> Optional[str]:
     return requested
 
 
-def _gather_audio_embeds(audio_embeds: torch.Tensor, token_counts: torch.Tensor) -> torch.Tensor:
+def _gather_audio_embeds(
+    audio_embeds: torch.Tensor,
+    token_counts: torch.Tensor,
+    max_tokens: Optional[int] = None,
+) -> torch.Tensor:
     """Flatten per-sample audio embeddings into a packed tensor.
 
     For each row i, takes the first ``token_counts[i]`` rows of
@@ -209,10 +213,12 @@ def _gather_audio_embeds(audio_embeds: torch.Tensor, token_counts: torch.Tensor)
     ``audio_embeds.shape[1]``, the deficit is zero-padded.
 
     Equivalent to a per-sample slice/cat loop but with O(1) host-device
-    syncs per call (one ``max().item()``) instead of one per sample.
+    syncs per call (one ``max().item()``) instead of one per sample. Callers
+    that already have that maximum on the host pass it as ``max_tokens`` so
+    the forward pays no sync at all.
     """
     _, max_len, _ = audio_embeds.shape
-    needed = int(token_counts.max().item())
+    needed = int(token_counts.max().item()) if max_tokens is None else max_tokens
     if needed > max_len:
         audio_embeds = F.pad(audio_embeds, (0, 0, 0, needed - max_len))
         max_len = needed
@@ -226,6 +232,7 @@ def _assert_audio_token_counts(
     token_counts: torch.Tensor,
     projector,
     encoder_valid_lengths: Optional[torch.Tensor] = None,
+    max_tokens: Optional[int] = None,
 ) -> None:
     """Check, per sample, that the projector produced the tokens the prompt expects.
 
@@ -258,7 +265,10 @@ def _assert_audio_token_counts(
             )
 
     available = audio_embeds.shape[1]
-    needed = int(token_counts.max().item()) if token_counts.numel() else 0
+    if max_tokens is not None:
+        needed = max_tokens
+    else:
+        needed = int(token_counts.max().item()) if token_counts.numel() else 0
     if needed > available:
         raise ValueError(
             f"Projector produced {available} audio frames but the prompt expects up to "
@@ -1256,10 +1266,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         audio_embeds = self.projector(hidden_states)
 
         token_counts = expected_token_counts.to(device=audio_embeds.device, dtype=torch.long)
+        max_tokens = int(token_counts.max().item()) if token_counts.numel() else 0
         _assert_audio_token_counts(
-            audio_embeds, token_counts, self.projector, encoder_valid_lengths
+            audio_embeds, token_counts, self.projector, encoder_valid_lengths, max_tokens
         )
-        return _gather_audio_embeds(audio_embeds, token_counts)
+        return _gather_audio_embeds(audio_embeds, token_counts, max_tokens)
 
     def _mask_input_features(
         self,

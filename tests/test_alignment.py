@@ -174,6 +174,105 @@ class TestAlign:
         assert words == []
 
 
+class TestTokenizeWords:
+    """_tokenize_words keeps words and CTC token groups in lockstep."""
+
+    # blank=0, separator=1, then the letters.
+    LABELS = ("-", "|", "H", "E", "L", "O", "W", "R", "D")
+    DICT = {c: i for i, c in enumerate(LABELS)}
+
+    def test_plain_words_are_separator_joined(self):
+        from tiny_audio.alignment import ForcedAligner
+
+        words, tokens = ForcedAligner._tokenize_words("hello world", self.DICT)
+
+        assert words == ["hello", "world"]
+        assert tokens.count(self.DICT["|"]) == 1
+
+    def test_unrepresentable_word_is_dropped_not_shifted(self):
+        """ "--" has no representable characters, so it cannot be aligned.
+
+        Leaving it in `words` while it contributes no token group shifted every
+        later word onto the previous word's timing and dropped the last one.
+        """
+        from tiny_audio.alignment import ForcedAligner
+
+        words, tokens = ForcedAligner._tokenize_words("hello -- world", self.DICT)
+
+        assert words == ["hello", "world"]
+        # Exactly one separator: no empty group between the two real words.
+        assert tokens.count(self.DICT["|"]) == 1
+
+    def test_one_group_per_word(self):
+        """Token groups split on the separator must match `words` 1:1."""
+        from tiny_audio.alignment import ForcedAligner
+
+        words, tokens = ForcedAligner._tokenize_words("hello 123 world ... do", self.DICT)
+
+        groups = []
+        current: list[int] = []
+        for t in tokens:
+            if t == self.DICT["|"]:
+                groups.append(current)
+                current = []
+            else:
+                current.append(t)
+        groups.append(current)
+
+        assert words == ["hello", "world", "do"]
+        assert len(groups) == len(words)
+        assert all(groups)
+
+    def test_no_representable_characters_at_all(self):
+        from tiny_audio.alignment import ForcedAligner
+
+        assert ForcedAligner._tokenize_words("123 ---", self.DICT) == ([], [])
+
+
+class TestAlignWordPairing:
+    """align() must label each timing span with the word it came from."""
+
+    LABELS = ("-", "|", "H", "E", "L", "O", "W", "R", "D")
+
+    def _emission(self, token_ids: list[int]) -> torch.Tensor:
+        """One high-probability frame per token, blank-separated."""
+        num_labels = len(self.LABELS)
+        frames = []
+        for tid in token_ids:
+            row = [-8.0] * num_labels
+            row[tid] = 0.0
+            frames.append(row)
+            blank = [-8.0] * num_labels
+            blank[0] = 0.0
+            frames.append(blank)
+        return torch.tensor([frames])
+
+    def test_dashes_do_not_shift_word_labels(self):
+        """Replays the reported failure: "hello -- world" mislabeled the spans."""
+        from tiny_audio.alignment import ForcedAligner
+
+        dictionary = {c: i for i, c in enumerate(self.LABELS)}
+        # HELLO | WORLD
+        target = [dictionary[c] for c in ["H", "E", "L", "L", "O", "|", "W", "O", "R", "L", "D"]]
+
+        fake_model = MagicMock()
+        fake_model.return_value = (self._emission(target), None)
+        fake_bundle = MagicMock()
+        fake_bundle.sample_rate = 16000
+
+        ForcedAligner._bundle = fake_bundle
+        ForcedAligner._model = fake_model
+        ForcedAligner._labels = self.LABELS
+        ForcedAligner._dictionary = dictionary
+
+        words = ForcedAligner.align(np.zeros(16000, dtype=np.float32), "hello -- world")
+
+        assert [w["word"] for w in words] == ["hello", "world"]
+        assert words[0]["end"] <= words[1]["end"]
+        for w in words:
+            assert w["end"] >= w["start"] >= 0.0
+
+
 class TestGetInstance:
     """get_instance is a singleton — second call returns the same model."""
 

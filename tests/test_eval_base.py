@@ -99,7 +99,7 @@ class TestMockEvaluator:
         def transcribe(self, audio):
             response = self.responses[self.call_count % len(self.responses)]
             self.call_count += 1
-            return response, 0.1
+            return response, 0.1, None
 
     def test_sequential_evaluation(self):
         """Test sequential evaluation."""

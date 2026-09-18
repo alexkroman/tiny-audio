@@ -140,20 +140,25 @@ class MLPAudioProjector(nn.Module):
         if target_rms <= 0:
             return
 
-        with torch.no_grad():
-            enc_dim = self.linear_1.in_features // self.k
-            probe = torch.randn(
-                1,
-                64 * self.k,
-                enc_dim,
-                dtype=self.linear_2.weight.dtype,
-                device=self.linear_2.weight.device,
-            )
-            measured = self.forward(probe).pow(2).mean().sqrt().item()
+        measured = self.measure_output_rms()
 
         if not math.isfinite(measured) or measured <= 0.0:
             return
         self.output_scale.fill_(float(target_rms) / measured)
+
+    def measure_output_rms(self) -> float:
+        """RMS of this projector's output on a standard-normal probe.
+
+        Used both to calibrate ``output_scale`` at init and by the trainer to
+        log whether that calibration is holding as the weights move. Both need
+        the same probe geometry, so it is defined once here rather than
+        reconstructed from ``linear_1``/``linear_2`` internals by the caller.
+        """
+        with torch.no_grad():
+            w = self.linear_2.weight
+            enc_dim = self.linear_1.in_features // self.k
+            probe = torch.randn(1, 64 * self.k, enc_dim, dtype=w.dtype, device=w.device)
+            return self.forward(probe).float().pow(2).mean().sqrt().item()
 
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length (matches GLM-ASR)."""

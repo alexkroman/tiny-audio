@@ -48,7 +48,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         super().__init__(
             model=model, feature_extractor=feature_extractor, tokenizer=tokenizer, **kwargs
         )
-        self._current_audio = None
 
     def _sanitize_parameters(self, **kwargs):
         """Intercept our custom parameters before parent class validates them."""
@@ -60,7 +59,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         kwargs.pop("max_speakers", None)
         kwargs.pop("hf_token", None)
         kwargs.pop("user_prompt", None)
-        kwargs.pop("diarization_backend", None)
 
         return super()._sanitize_parameters(**kwargs)
 
@@ -98,28 +96,57 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if return_speakers:
             return_timestamps = True
 
-        # Set custom user prompt if provided
+        # Set custom user prompt if provided. The restore below is in a
+        # `finally` because this mutates shared model state: without it an
+        # exception anywhere in the call leaves the custom prompt in place for
+        # every later call on this pipeline, and the eval harness swallows that
+        # exception and keeps scoring against the wrong prompt.
         original_prompt = None
         if user_prompt:
             original_prompt = self.model.TRANSCRIBE_PROMPT
             self.model.TRANSCRIBE_PROMPT = user_prompt
 
-        # Store audio for timestamp alignment and diarization
-        if return_timestamps or return_speakers:
-            self._current_audio = self._extract_audio(inputs)
+        try:
+            return self._transcribe(
+                inputs,
+                return_timestamps=return_timestamps,
+                return_speakers=return_speakers,
+                diarization_params=diarization_params,
+                **kwargs,
+            )
+        finally:
+            if original_prompt is not None:
+                self.model.TRANSCRIBE_PROMPT = original_prompt
+
+    def _transcribe(
+        self,
+        inputs,
+        *,
+        return_timestamps: bool,
+        return_speakers: bool,
+        diarization_params: dict,
+        **kwargs,
+    ):
+        """Transcribe, then attach timestamps and speakers if requested."""
+        # Decode once for timestamp alignment and diarization, then hand the
+        # decoded array to the parent so it doesn't run ffmpeg over the same
+        # input a second time.
+        current_audio = (
+            self._extract_audio(inputs) if (return_timestamps or return_speakers) else None
+        )
 
         # Run standard transcription
-        result = super().__call__(inputs, **kwargs)
+        result = super().__call__(current_audio if current_audio is not None else inputs, **kwargs)
 
         # Add timestamps if requested
-        if return_timestamps and self._current_audio is not None:
+        if return_timestamps and current_audio is not None:
             text = result.get("text", "")
             if text:
                 try:
                     words = ForcedAligner.align(
-                        self._current_audio["array"],
+                        current_audio["array"],
                         text,
-                        sample_rate=self._current_audio.get("sampling_rate", 16000),
+                        sample_rate=current_audio.get("sampling_rate", 16000),
                     )
                     result["words"] = words
                 except Exception as e:
@@ -129,12 +156,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 result["words"] = []
 
         # Add speaker diarization if requested
-        if return_speakers and self._current_audio is not None:
+        if return_speakers and current_audio is not None:
             try:
                 # Run diarization
                 speaker_segments = SpeakerDiarizer.diarize(
-                    self._current_audio["array"],
-                    sample_rate=self._current_audio.get("sampling_rate", 16000),
+                    current_audio["array"],
+                    sample_rate=current_audio.get("sampling_rate", 16000),
                     **{k: v for k, v in diarization_params.items() if v is not None},
                 )
                 result["speaker_segments"] = speaker_segments
@@ -148,11 +175,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             except Exception as e:
                 result["speaker_segments"] = []
                 result["diarization_error"] = str(e)
-
-        # Clean up
-        self._current_audio = None
-        if original_prompt is not None:
-            self.model.TRANSCRIBE_PROMPT = original_prompt
 
         return result
 
