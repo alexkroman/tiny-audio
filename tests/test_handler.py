@@ -50,23 +50,41 @@ class TestEndpointHandlerInit:
     """Tests for EndpointHandler initialization logic."""
 
     def test_device_detection_cpu(self, mocker):
-        """Should use CPU when CUDA not available."""
+        """Should fall back to CPU when neither CUDA nor MPS is available.
+
+        The handler picks cuda > mps > cpu itself (it no longer reads the device
+        off the model's parameters), so both accelerators have to be stubbed out
+        or this test picks MPS on Apple Silicon.
+        """
         mocker.patch("torch.cuda.is_available", return_value=False)
+        mocker.patch("torch.backends.mps.is_available", return_value=False)
         mock_model = mocker.patch("tiny_audio.handler.ASRModel")
         mocker.patch("tiny_audio.handler.ASRPipeline")
-
-        # Set up the mock to return a proper device
-        mock_instance = mocker.MagicMock()
-        mock_param = mocker.MagicMock()
-        mock_param.device = torch.device("cpu")
-        mock_instance.parameters.return_value = iter([mock_param])
-        mock_model.from_pretrained.return_value = mock_instance
+        mock_model.from_pretrained.return_value = mocker.MagicMock()
 
         from tiny_audio.handler import EndpointHandler
 
         handler = EndpointHandler("/fake/path")
 
         assert handler.device == torch.device("cpu")
+        mock_model.from_pretrained.return_value.to.assert_called_once_with(torch.device("cpu"))
+
+    @pytest.mark.parametrize(
+        ("cuda", "mps", "expected"),
+        [
+            (True, True, "cuda"),
+            (False, True, "mps"),
+            (False, False, "cpu"),
+        ],
+    )
+    def test_best_device_prefers_cuda_then_mps(self, mocker, cuda, mps, expected):
+        """_best_device should prefer CUDA, then MPS, then CPU."""
+        mocker.patch("torch.cuda.is_available", return_value=cuda)
+        mocker.patch("torch.backends.mps.is_available", return_value=mps)
+
+        from tiny_audio.handler import _best_device
+
+        assert _best_device() == torch.device(expected)
 
     def test_handler_sets_tf32_flags(self):
         """Handler __init__ should set TF32 flags."""
