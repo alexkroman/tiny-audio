@@ -158,9 +158,11 @@ class TestEnsureModel:
         fake_param.dtype = torch.float32
         fake_model.parameters.return_value = iter([fake_param])
 
-        with patch("tiny_audio.ASRModel.from_pretrained", return_value=fake_model), patch(
-            "torch.backends.mps.is_available", return_value=False
-        ), patch("torch.cuda.is_available", return_value=False):
+        with (
+            patch("tiny_audio.ASRModel.from_pretrained", return_value=fake_model),
+            patch("torch.backends.mps.is_available", return_value=False),
+            patch("torch.cuda.is_available", return_value=False),
+        ):
             service._ensure_model()
 
         assert service._device == torch.device("cpu")

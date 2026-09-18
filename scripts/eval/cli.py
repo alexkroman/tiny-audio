@@ -2,9 +2,9 @@
 
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -33,7 +33,7 @@ console = Console()
 
 
 # Valid dataset choices
-VALID_DATASETS = ["all"] + list(DATASET_REGISTRY.keys())
+VALID_DATASETS = ["all", *list(DATASET_REGISTRY.keys())]
 
 
 def get_model_name(model_path: str) -> str:
@@ -85,7 +85,7 @@ def save_results(
     base_url: str | None = None,
 ) -> Path:
     """Save evaluation results and metrics to a timestamped directory."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     safe_model_name = _dir_segment(model_name)
 
     # Extract short identifier from base_url (e.g., "sandbox013" from the URL)
@@ -190,7 +190,7 @@ def validate_datasets(datasets: list[str]) -> list[str]:
 def main(
     ctx: typer.Context,
     model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--model",
             "-m",
@@ -198,7 +198,7 @@ def main(
         ),
     ] = None,
     datasets: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         typer.Option(
             "--datasets",
             "-d",
@@ -207,7 +207,7 @@ def main(
     ] = None,
     split: Annotated[str, typer.Option(help="Dataset split")] = "test",
     max_samples: Annotated[
-        Optional[int], typer.Option("--max-samples", "-n", help="Maximum samples to evaluate")
+        int | None, typer.Option("--max-samples", "-n", help="Maximum samples to evaluate")
     ] = None,
     endpoint: Annotated[
         bool, typer.Option("--endpoint", "-e", help="Use HF Inference Endpoint")
@@ -219,17 +219,17 @@ def main(
         bool, typer.Option("--streaming", "-s", help="Use streaming evaluation (for local or AAI)")
     ] = False,
     config: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--config", "-c", help="Dataset config override (e.g., 'en' for CommonVoice)"),
     ] = None,
     output_dir: Annotated[
         str, typer.Option("--output-dir", "-o", help="Output directory for results")
     ] = "outputs",
     user_prompt: Annotated[
-        Optional[str], typer.Option("--user-prompt", help="Custom user prompt for the model")
+        str | None, typer.Option("--user-prompt", help="Custom user prompt for the model")
     ] = None,
     base_url: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--base-url", help="Custom API base URL (for AssemblyAI sandbox)"),
     ] = None,
     locale: Annotated[
@@ -244,7 +244,7 @@ def main(
         typer.Option("--num-workers", "-w", help="Number of parallel workers for API evaluations"),
     ] = 1,
     model_name: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--model-name",
             help="Override the auto-derived model label used in output dir names "

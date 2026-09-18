@@ -28,7 +28,7 @@ def tokenizer():
     # Add <audio> token like ASRModel does
     existing_special = getattr(tok, "additional_special_tokens", None) or []
     if "<audio>" not in existing_special:
-        tok.add_special_tokens({"additional_special_tokens": existing_special + ["<audio>"]})
+        tok.add_special_tokens({"additional_special_tokens": [*existing_special, "<audio>"]})
     return tok
 
 

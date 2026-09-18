@@ -333,7 +333,8 @@ class TestOrphanedNtContraction:
         # Already-joined `didn't` (no space) must be untouched.
         result = _normalize_label("i didn't think so")
         assert "didn't" in result
-        assert "didn 't" not in result and "didn 'T" not in result
+        assert "didn 't" not in result
+        assert "didn 'T" not in result
 
     def test_does_not_break_alternate_tokenization(self):
         # TEDLIUM's other tokenization style — `did n't` — joins correctly

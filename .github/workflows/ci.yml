@@ -46,6 +46,12 @@ jobs:
       - name: Run quality checks
         run: poetry run ta dev check
 
+      # The wheel is what `ta runpod` ships and what the HF Space installs;
+      # a packaging regression (missing include, bad script entry point)
+      # should fail here rather than on the pod.
+      - name: Build package
+        run: poetry run ta dev build
+
   test:
     name: Tests
     runs-on: ubuntu-latest
@@ -86,5 +92,16 @@ jobs:
       - name: Install dependencies
         run: poetry install --with dev --no-interaction
 
+      # `ta dev test` enforces the coverage floor from
+      # `[tool.coverage.report] fail_under` via pytest-cov.
       - name: Run tests
         run: poetry run ta dev test
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14

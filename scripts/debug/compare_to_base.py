@@ -262,7 +262,7 @@ def compare_to_base(
             # `linear_attn.norm` group with attention while the standalone
             # `input_layernorm` / `post_attention_layernorm` still land in
             # `norm`. Keeping the two scripts consistent is the point.
-            if comp.startswith("self_attn") or comp.startswith("linear_attn"):
+            if comp.startswith(("self_attn", "linear_attn")):
                 bucket = "attn"
             elif comp.startswith("mlp"):
                 bucket = "mlp"

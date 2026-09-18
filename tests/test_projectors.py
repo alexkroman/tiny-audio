@@ -103,7 +103,7 @@ class TestProjectorRegistry:
     def test_registry_instantiation(self):
         """Test that all registered projectors can be instantiated."""
         config = MockProjectorConfig()
-        for _name, cls in PROJECTOR_CLASSES.items():
+        for cls in PROJECTOR_CLASSES.values():
             projector = cls(config)
             assert hasattr(projector, "forward")
             assert hasattr(projector, "get_output_length")

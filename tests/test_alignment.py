@@ -1,5 +1,6 @@
 """Tests for ForcedAligner — Viterbi trellis, backtrack, and align()."""
 
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -179,7 +180,7 @@ class TestTokenizeWords:
 
     # blank=0, separator=1, then the letters.
     LABELS = ("-", "|", "H", "E", "L", "O", "W", "R", "D")
-    DICT = {c: i for i, c in enumerate(LABELS)}
+    DICT: ClassVar[dict[str, int]] = {c: i for i, c in enumerate(LABELS)}
 
     def test_plain_words_are_separator_joined(self):
         from tiny_audio.alignment import ForcedAligner

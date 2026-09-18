@@ -1,4 +1,4 @@
-from typing import Optional
+"""Configuration for the ASR model: encoder, decoder, projector and training options."""
 
 import transformers
 
@@ -32,13 +32,13 @@ _TIME_MAJOR_ENCODER_MARKERS = ("granite-speech", "parakeet", "nemotron")
 _NATIVE_AUDIO_TOKENS = {"gemma-4": "<|audio|>"}
 
 
-def native_audio_token(text_model_id: Optional[str]) -> Optional[str]:
+def native_audio_token(text_model_id: str | None) -> str | None:
     """Return the decoder's built-in audio placeholder token, if it has one."""
     lowered = (text_model_id or "").lower()
     return next((tok for key, tok in _NATIVE_AUDIO_TOKENS.items() if key in lowered), None)
 
 
-def is_time_major_encoder(audio_model_id: Optional[str]) -> bool:
+def is_time_major_encoder(audio_model_id: str | None) -> bool:
     """Whether `audio_model_id` expects (batch, time, feature) input_features."""
     return any(m in (audio_model_id or "").lower() for m in _TIME_MAJOR_ENCODER_MARKERS)
 
@@ -82,12 +82,12 @@ class ASRConfig(transformers.PretrainedConfig):
         # `text_punct` in the data configs), inference has to pick the half it
         # actually wants, which for a formatted-text eval is the punctuated one.
         # None keeps ASRModel.TRANSCRIBE_PROMPT's class default.
-        transcribe_prompt: Optional[str] = None,
-        encoder_dim: Optional[int] = None,
-        llm_dim: Optional[int] = None,
+        transcribe_prompt: str | None = None,
+        encoder_dim: int | None = None,
+        llm_dim: int | None = None,
         # Encoder conv layers: list of (padding, kernel_size, stride) tuples
         # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
-        encoder_conv_layers: Optional[list] = None,
+        encoder_conv_layers: list | None = None,
         audio_sample_rate: int = 16000,
         # Whether the encoder takes `input_features` as (batch, time, feature)
         # instead of Whisper/GLM-ASR's (batch, n_mels, mel_len). Only
@@ -95,7 +95,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # `_mask_input_features` masking the time axis rather than the feature
         # axis. Left as None it is auto-detected from `audio_model_id`, so a
         # Granite/Parakeet swap can't silently mask the wrong axis.
-        audio_features_time_major: Optional[bool] = None,
+        audio_features_time_major: bool | None = None,
         # Whether to forward the mel padding mask into the audio encoder.
         # This matters a lot for Granite: it uses block attention over fixed
         # 128-frame blocks, so with `padding="longest"` batches the pad frames
@@ -107,12 +107,12 @@ class ASRConfig(transformers.PretrainedConfig):
         # GLM-ASR has been trained without an encoder mask for every run in
         # this repo's history, and silently switching it would make new runs
         # incomparable to those baselines. Flip it explicitly to test.
-        encoder_attention_mask: Optional[bool] = None,
+        encoder_attention_mask: bool | None = None,
         # Placeholder token whose embeddings get replaced by projector output.
         # Defaults to the decoder's native audio token when it has one (Gemma 4),
         # otherwise "<audio>", which is added to the tokenizer and requires an
         # embedding resize.
-        audio_token: Optional[str] = None,
+        audio_token: str | None = None,
         # dtype for the projector alone. The fp32-master-weights argument only
         # applies to parameters an optimizer actually updates, so pinning the
         # whole stack to float32 to protect a 10M-param projector wastes 2
@@ -122,9 +122,9 @@ class ASRConfig(transformers.PretrainedConfig):
         # model_dtype stays bfloat16 to get master-weight precision where it
         # matters at frozen-model memory cost. Defaults to model_dtype, so
         # existing recipes are unchanged.
-        projector_dtype: Optional[str] = None,
+        projector_dtype: str | None = None,
         projector_pool_stride: int = 4,
-        projector_hidden_dim: Optional[int] = None,
+        projector_hidden_dim: int | None = None,
         projector_type: str = "mlp",
         # Target RMS for the projector's output, i.e. the magnitude at which
         # audio tokens enter the decoder's residual stream. "auto" measures the
@@ -144,7 +144,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # positions 13x smaller in relative terms -- the prefix passes through
         # all layers close to unchanged. Measured at init on granite_qwen
         # before this landed: projector out 0.198 vs embed_tokens 0.0150.
-        projector_output_rms: Optional[float | str] = "auto",
+        projector_output_rms: float | str | None = "auto",
         # Label smoothing applied inside the LM's loss function (not HF Trainer's
         # LabelSmoother). Train-only — ASRModel.forward zeros it on eval. Routing
         # smoothing through the loss_function flows through liger's fused linear
@@ -157,7 +157,7 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_rank: int = 8,  # SALMONN default
         lora_alpha: int = 32,  # SALMONN default (scaling factor 4.0)
         lora_dropout: float = 0.0,
-        lora_target_modules: Optional[list] = None,  # Default: all linear layers
+        lora_target_modules: list | None = None,  # Default: all linear layers
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
         freeze_text_embed_tokens: bool = False,
@@ -184,8 +184,8 @@ class ASRConfig(transformers.PretrainedConfig):
         mask_time_prob: float = 0.05,
         mask_time_length: int = 10,
         mask_time_min_masks: int = 2,
-        max_new_tokens: Optional[int] = None,
-        use_cache: Optional[bool] = None,
+        max_new_tokens: int | None = None,
+        use_cache: bool | None = None,
         **kwargs,
     ):
         """Initialize ASR model configuration.

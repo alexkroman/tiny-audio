@@ -21,21 +21,21 @@ from .base import (
 )
 
 __all__ = [
+    "AppleSpeechEvaluator",
+    "AssemblyAIEvaluator",
     "AssemblyAIModel",
+    "AssemblyAIStreamingEvaluator",
+    "DeepgramEvaluator",
+    "ElevenLabsEvaluator",
+    "EndpointEvaluator",
     # Result types
     "EvalResult",
     # Base
     "Evaluator",
-    "TextNormalizer",
-    "setup_assemblyai",
     # ASR evaluators
     "LocalEvaluator",
     "LocalStreamingEvaluator",
-    "EndpointEvaluator",
-    "AssemblyAIEvaluator",
-    "AssemblyAIStreamingEvaluator",
-    "DeepgramEvaluator",
-    "ElevenLabsEvaluator",
-    "AppleSpeechEvaluator",
     "SwiftSDKEvaluator",
+    "TextNormalizer",
+    "setup_assemblyai",
 ]

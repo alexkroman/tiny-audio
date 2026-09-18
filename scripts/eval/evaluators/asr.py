@@ -661,6 +661,7 @@ class SwiftSDKEvaluator(Evaluator):
         console.print("[bold cyan]Building Swift tests (for mlx.metallib)...[/bold cyan]")
         test_build_result = subprocess.run(
             ["swift", "build", "--package-path", str(swift_dir), "--build-tests"],
+            check=False,
             capture_output=True,
             text=True,
         )
@@ -674,7 +675,8 @@ class SwiftSDKEvaluator(Evaluator):
         # Always rebuild release before running. Cheap when up-to-date.
         console.print("[bold cyan]Building tiny-audio-swift-eval (release)...[/bold cyan]")
         build_result = subprocess.run(
-            [
+            check=False,
+            args=[
                 "swift",
                 "build",
                 "--package-path",

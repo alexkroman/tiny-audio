@@ -83,7 +83,7 @@ def build_param_groups(
     from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
     from transformers.trainer_pt_utils import get_parameter_names
 
-    forbidden = list(ALL_LAYERNORM_LAYERS) + [Qwen3RMSNorm, LlamaRMSNorm]
+    forbidden = [*list(ALL_LAYERNORM_LAYERS), Qwen3RMSNorm, LlamaRMSNorm]
     decay_set = set(get_parameter_names(model, forbidden))
     decay_set = {n for n in decay_set if "bias" not in n}
 

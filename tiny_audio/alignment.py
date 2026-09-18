@@ -139,14 +139,11 @@ class ForcedAligner:
 
         # Convert to spans
         token_spans: list[tuple[int, float, float]] = []
-        for token_idx, frames in enumerate(token_frames):
+        for token_idx, emitted_frames in enumerate(token_frames):
+            frames = emitted_frames
             if not frames:
                 # Token never emitted - assign minimal span after previous
-                if token_spans:
-                    prev_end = token_spans[-1][2]
-                    frames = [int(prev_end)]
-                else:
-                    frames = [0]
+                frames = [int(token_spans[-1][2])] if token_spans else [0]
 
             token_id = tokens[token_idx]
             start_frame = float(min(frames))
@@ -231,7 +228,8 @@ class ForcedAligner:
 
         device = _get_device()
         model, _labels, dictionary = cls.get_instance(device)
-        assert cls._bundle is not None and dictionary is not None  # Initialized by get_instance
+        assert cls._bundle is not None
+        assert dictionary is not None
 
         # Convert audio to tensor (copy to ensure array is writable)
         if isinstance(audio, np.ndarray):

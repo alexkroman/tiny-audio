@@ -19,7 +19,7 @@ except ImportError:
     from diarization import SpeakerDiarizer  # type: ignore[no-redef]
 
 # Re-export for backwards compatibility
-__all__ = ["ForcedAligner", "SpeakerDiarizer", "ASRPipeline"]
+__all__ = ["ASRPipeline", "ForcedAligner", "SpeakerDiarizer"]
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
 _MIN_REPEATS = 3

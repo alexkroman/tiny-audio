@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from huggingface_hub import HfApi
@@ -26,7 +26,7 @@ def main(
         typer.Option("--branch", "-b", help="Branch to push to"),
     ] = "main",
     checkpoint_dir: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--checkpoint-dir",
             "-c",

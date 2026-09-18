@@ -112,7 +112,7 @@ def analyze(raw: str, norm: str) -> dict[str, Any]:
         # informational signal, not necessarily a bug.
         issues.append(f"INPUT_HAD_BRACKETS: {raw_brackets!r}")
 
-    needs_tc = _needs_truecase(norm if norm else "")
+    needs_tc = _needs_truecase(norm or "")
     return {
         "raw": raw,
         "norm": norm,

@@ -28,6 +28,7 @@ class SpectralCluster:
     """
 
     def __init__(self, min_num_spks: int = 1, max_num_spks: int = 15, pval: float = 0.06):
+        """Configure the speaker-count search range and the affinity pruning fraction."""
         self.min_num_spks = min_num_spks
         self.max_num_spks = max_num_spks
         self.pval = pval
@@ -132,6 +133,7 @@ class SpeakerClusterer:
         max_num_spks: int = 10,
         merge_thr: float = 0.90,  # Moderate merging
     ):
+        """Configure the speaker-count range and the centroid-merge cosine threshold."""
         self.min_num_spks = min_num_spks
         self.max_num_spks = max_num_spks
         self.merge_thr = merge_thr

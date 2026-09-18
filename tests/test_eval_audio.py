@@ -30,7 +30,7 @@ class TestAudioToWavBytes:
         audio = np.random.randn(1, 16000).astype(np.float32)
         wav_bytes = audio_to_wav_bytes(audio, 16000)
 
-        audio_back, sr = sf.read(io.BytesIO(wav_bytes))
+        audio_back, _sr = sf.read(io.BytesIO(wav_bytes))
         assert audio_back.ndim == 1
 
     def test_different_sample_rates(self):
@@ -38,7 +38,7 @@ class TestAudioToWavBytes:
         for sr in [8000, 16000, 22050, 44100]:
             audio = np.random.randn(sr).astype(np.float32)
             wav_bytes = audio_to_wav_bytes(audio, sr)
-            audio_back, sr_back = sf.read(io.BytesIO(wav_bytes))
+            _audio_back, sr_back = sf.read(io.BytesIO(wav_bytes))
             assert sr_back == sr
 
 
@@ -156,6 +156,8 @@ class TestTextNormalizer:
         place of real punctuation. Whisper's normalizer drops <...> tags."""
         raw = "hello <COMMA> world <PERIOD> how are you <QUESTIONMARK>"
         result = normalizer.normalize(raw)
-        assert "<" not in result and ">" not in result
-        assert "comma" not in result and "period" not in result
+        assert "<" not in result
+        assert ">" not in result
+        assert "comma" not in result
+        assert "period" not in result
         assert "questionmark" not in result

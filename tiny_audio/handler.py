@@ -1,6 +1,6 @@
 """Custom inference handler for HuggingFace Inference Endpoints."""
 
-from typing import Any, Dict, List, Union
+from typing import Any
 
 import torch
 
@@ -66,7 +66,7 @@ class EndpointHandler:
             device=self.device,
         )
 
-    def __call__(self, data: Dict[str, Any]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+    def __call__(self, data: dict[str, Any]) -> dict[str, Any] | list[dict[str, Any]]:
         """Process an inference request.
 
         Args:

@@ -332,7 +332,7 @@ poetry install
 ### Running Tests
 
 ```bash
-poetry run ta dev test                    # Run all tests
+poetry run ta dev test                    # Run all tests (enforces the coverage floor)
 poetry run pytest tests/test_projectors.py -v  # Single file
 poetry run pytest -k "test_forward" -v    # By name pattern
 ```
@@ -341,9 +341,9 @@ poetry run pytest -k "test_forward" -v    # By name pattern
 
 ```bash
 poetry run ta dev format      # Format code (black, ruff, mdformat)
-poetry run ta dev lint        # Lint (poetry check, ruff, yamllint, taplo)
+poetry run ta dev lint        # Lint + format check (poetry check --lock, ruff, black, yamllint, taplo)
 poetry run ta dev type-check  # Type check (mypy, pyright)
-poetry run ta dev check       # Lint + type-check + security + docstrings
+poetry run ta dev check       # Lint + type-check + security + dead code + docstrings
 poetry run ta dev precommit   # Full quality gate
 ```
 

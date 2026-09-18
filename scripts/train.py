@@ -23,6 +23,8 @@ os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
 for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
+logger = logging.getLogger(__name__)
+
 import hydra
 import numpy as np
 import torch
@@ -187,18 +189,18 @@ def _post_truecase_cleanup(text: str) -> str:
 # composed/decomposed forms (café vs cafe + ◌́) and width variants
 # (full-width Latin → half-width). Applied first in _normalize_label so
 # downstream regexes see canonical ASCII-leaning text.
-import ftfy  # noqa: E402  pyright: ignore[reportMissingImports]
+import ftfy
 
 # Truecase: NLTK-backed statistical recasing for transcripts that arrive
 # in mono-case form (all-upper or zero-caps). LOCAL_RANK=0 guard mirrors
 # Ultravox — avoids multiple workers racing on the punkt download.
-import truecase  # noqa: E402  pyright: ignore[reportMissingImports]
+import truecase
 
-if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+if int(os.environ.get("LOCAL_RANK", "0")) == 0:
     try:
         truecase.get_true_case("test")
     except LookupError:
-        import nltk  # noqa: E402  pyright: ignore[reportMissingImports]
+        import nltk
 
         # NLTK 3.9+ requires `punkt_tab`; older NLTKs use `punkt`. Download
         # both so this works on either base image. Quiet=True suppresses
@@ -523,7 +525,7 @@ class DataCollator:
         feature_extractor: Any,
         sample_rate: int,
         projector: Any = None,
-        encoder_conv_layers: list = None,
+        encoder_conv_layers: list | None = None,
         audio_token: str = "<audio>",
     ):
         self.tokenizer = tokenizer
@@ -618,7 +620,7 @@ class DataCollator:
                 # NLTK punkt_tab LookupError that was silently dropping
                 # ~48% of training samples (every mono-case row from
                 # Gigaspeech / AMI / Peoples / TEDLIUM / Switchboard).
-                logging.debug("Skipping row in DataCollator: %s: %s", type(e).__name__, e)
+                logger.debug("Skipping row in DataCollator: %s: %s", type(e).__name__, e)
                 continue
             finally:
                 f["audio"] = None
@@ -1063,9 +1065,9 @@ def _git_state() -> tuple[str | None, bool]:
                 ["git", "status", "--porcelain"], cwd=cwd, stderr=subprocess.DEVNULL, text=True
             ).strip()
         )
-        return sha, dirty
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None, False
+    return sha, dirty
 
 
 TRAINING_MODEL_PARAMS = [
@@ -1133,7 +1135,7 @@ def main(cfg: DictConfig) -> None:
         text_model_id = str(cfg.model.get("text_model_id", "")).lower()
         patcher_name = next((fn for key, fn in liger_patchers if key in text_model_id), None)
         if patcher_name is None:
-            logging.warning(
+            logger.warning(
                 "No liger patcher mapped for text_model_id=%r — training with stock "
                 "kernels and unfused cross-entropy. Add an entry to liger_patchers "
                 "if this decoder has liger support.",
@@ -1144,9 +1146,9 @@ def main(cfg: DictConfig) -> None:
                 import liger_kernel.transformers as liger
 
                 getattr(liger, patcher_name)()
-                logging.info("Applied liger kernels via %s()", patcher_name)
+                logger.info("Applied liger kernels via %s()", patcher_name)
             except (ImportError, AttributeError) as e:
-                logging.warning(
+                logger.warning(
                     "liger-kernel unavailable or missing %s (%s) — falling back to "
                     "stock kernels. Install with `poetry install` on Linux and pin a "
                     "version that exports it to enable fused linear CE.",

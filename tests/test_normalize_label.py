@@ -10,6 +10,8 @@ Covers the Ultravox-style training-label normalizer:
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from scripts.train import (
@@ -211,7 +213,7 @@ class TestDeclaredTextCase:
 
     # Real SPGISpeech rows that the heuristic misclassifies as mono-case:
     # sliding-window fragments that happen to contain no capital letter.
-    SPGI_FRAGMENTS = [
+    SPGI_FRAGMENTS: ClassVar[list[str]] = [
         (
             "with which we will work and be able to clear out all the various "
             "permissions as we move to finalize the bankable feasibility study"
@@ -243,7 +245,8 @@ class TestDeclaredTextCase:
             "permissions as we move to finalize the bankable feasibility study"
         )
         heuristic = _normalize_label(text, None)
-        assert "Permissions" in heuristic and "Bankable" in heuristic
+        assert "Permissions" in heuristic
+        assert "Bankable" in heuristic
         assert _normalize_label(text, TEXT_CASE_CASED) == text
 
     @pytest.mark.parametrize(

@@ -88,7 +88,7 @@ def analyze(raw: str, norm: str) -> list[str]:
 
     if HYPHEN_SPACE_RE.search(norm):
         issues.append("SPACED_HYPHEN")
-    if "--" in norm and " -- " not in norm and norm not in {"--"}:
+    if "--" in norm and " -- " not in norm and norm != "--":
         # `--` without surrounding spaces (post-fix should always have spaces if both sides
         # are alphanumeric). But word-internal `--` is uncommon; still worth flagging.
         issues.append("UNSPACED_EMDASH")
