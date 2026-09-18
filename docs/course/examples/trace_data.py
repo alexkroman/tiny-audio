@@ -9,7 +9,6 @@ import numpy as np
 import torch
 from datasets import load_dataset
 
-from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
 def main():
@@ -24,12 +23,14 @@ def main():
     print(f"  Reference text: {reference_text}")
 
     # --- 2. Load the full ASR model ---
+    # from_pretrained loads the trained projector and decoder weights from the Hub
+    # (and the frozen encoder from its own repo). Constructing ASRModel(config)
+    # directly would give a randomly initialised projector.
     print("\nLoading ASR model (this may take a moment)...")
-    config = ASRConfig.from_pretrained("mazesmazes/tiny-audio", trust_remote_code=True)
-    model = ASRModel(config)
+    model = ASRModel.from_pretrained("mazesmazes/tiny-audio")
 
     try:
-        encoder_device = next(model.encoder.parameters()).device
+        encoder_device = next(model.audio_tower.parameters()).device
     except StopIteration:
         encoder_device = "cpu"
 
@@ -48,9 +49,9 @@ def main():
     
     # Get Encoder Output
     with torch.no_grad():
-        encoder_dtype = next(model.encoder.parameters()).dtype
+        encoder_dtype = next(model.audio_tower.parameters()).dtype
         input_features = input_features.to(device=encoder_device, dtype=encoder_dtype)
-        encoder_output = model.encoder(input_features).last_hidden_state
+        encoder_output = model.audio_tower(input_features=input_features).last_hidden_state
     
     # Get Projector Output
     with torch.no_grad():
@@ -60,7 +61,7 @@ def main():
     # Find nearest text embeddings for each time step
     with torch.no_grad():
         # Get the text embedding matrix from the decoder
-        text_embeddings = model.decoder.get_input_embeddings().weight  # [vocab_size, hidden_dim]
+        text_embeddings = model.language_model.get_input_embeddings().weight  # [vocab_size, hidden_dim]
 
         # Move to same device as projector output
         device = projector_output.device

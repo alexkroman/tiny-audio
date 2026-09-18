@@ -1,271 +1,284 @@
-# Quick Reference Guide
+# Quick Reference
 
-A one-page reference for the most common commands and concepts.
+The commands and numbers from the course on one page.
 
-______________________________________________________________________
+---
 
 ## Essential Commands
 
-### Development
+### Setup and Development
 
 ```bash
-# Install dependencies
-poetry install
+poetry install                                    # Python 3.12 required
+poetry run hf auth login                          # Hugging Face credentials
+poetry run ta --help                              # every command group
 
-# Run the demo
-poetry run ta demo --model mazesmazes/tiny-audio
-
-# Evaluate a model
-poetry run ta eval -m your-username/your-model -d loquacious -n 100
-
-# Run all checks (lint, type-check, test)
-poetry run ta dev check
-
-# Run tests
-poetry run ta dev test
-```
-
-### Training (Cloud GPU)
-
-```bash
-# Deploy to RunPod
-poetry run ta runpod deploy <HOST> <PORT>
-
-# Start training
-export HF_TOKEN='hf_your_token'
-poetry run ta runpod train <HOST> <PORT> --experiment my_experiment
-
-# Attach to running session
-poetry run ta runpod attach <HOST> <PORT>
-
-# Find latest checkpoint
-poetry run ta runpod checkpoint <HOST> <PORT>
+poetry run ta demo --model mazesmazes/tiny-audio  # Gradio demo on :7860
+poetry run ta dev test                            # test suite
+poetry run ta dev check                           # lint + type-check + security + docstrings
+poetry run ta dev format                          # black, ruff, mdformat
 ```
 
 ### Training (Local)
 
 ```bash
-# Train with default MLP projector
-poetry run python scripts/train.py +experiments=transcription
+# 10-step smoke test on 73 clips (laptop friendly)
+poetry run python scripts/train.py +experiments=mps_smoke
 
-# Train with different projector
+# Production recipe (80 GB GPU, terabyte of data)
+poetry run python scripts/train.py +experiments=stage_1
 
-# Override config values
-poetry run python scripts/train.py +experiments=transcription training.learning_rate=1e-4
+# Your own experiment, with overrides
+poetry run python scripts/train.py +experiments=my_run training.per_device_train_batch_size=16
 
-# Resume from checkpoint
-poetry run python scripts/train.py +experiments=transcription training.resume_from_checkpoint=/path/to/checkpoint
+# Projector + LoRA instead of full decoder fine-tuning
+poetry run python scripts/train.py +experiments=my_run training.use_lora=true
 
-# Multi-stage training with LoRA
-poetry run python scripts/train.py +experiments=mlp_lora       # Stage 2
-poetry run python scripts/train.py +experiments=mlp_fine_tune  # Stage 3
+# Projector only (decoder frozen)
+poetry run python scripts/train.py +experiments=my_run training.freeze_language_model=true
+
+# Resume
+poetry run python scripts/train.py +experiments=my_run training.resume_from_checkpoint=<dir>/checkpoint-1000
 ```
 
-### Evaluation & Analysis
+### Training (RunPod)
 
 ```bash
-# Basic evaluation
-poetry run ta eval -m your-model -n 100
+poetry run ta runpod plan --experiment my_run           # VRAM, disk, GPU pick (no download)
+poetry run ta runpod deploy <HOST> <PORT>               # rsync code + install deps
+poetry run ta runpod deploy <HOST> <PORT> --skip-setup --skip-deps   # sync only
 
-# Evaluate on specific dataset
-poetry run ta eval -m your-model -d earnings22 -n 100
+export HF_TOKEN='hf_...'                                # write token
+poetry run ta runpod train <HOST> <PORT> --experiment my_run [hydra overrides...]
 
-# Find high-error samples
-poetry run ta analysis high-wer your-model --threshold 30
+poetry run ta runpod attach <HOST> <PORT>               # reattach to tmux
+poetry run ta runpod attach <HOST> <PORT> --logs -n 200 # print recent output
+poetry run ta runpod checkpoint <HOST> <PORT>           # newest checkpoint path
+poetry run ta runpod eval <HOST> <PORT> -m <model> -d loquacious -n 500
 
-# Compare models
-poetry run ta analysis compare model1 model2
-
-# Find entity errors (extract-entities builds the index it reads)
-poetry run ta analysis extract-entities
-poetry run ta analysis entity-errors your-model
-
-# Debug model health
-poetry run ta debug analyze-weights your-model
-poetry run ta debug analyze-lora your-model
+# Optional, needs runpodctl + API key
+poetry run ta runpod up --experiment my_run --dry-run
+poetry run ta runpod wait <pod-id>
 ```
 
-### Deployment
+### Evaluation
 
 ```bash
-# Push model to HuggingFace Hub
-poetry run ta push --repo-id your-username/your-model
-
-# Deploy to HuggingFace Spaces
-poetry run ta deploy --repo-id your-username/your-space
+poetry run ta eval -m <model> -n 200                    # LoquaciousSet test (default)
+poetry run ta eval -m <model> -d earnings22 -d ami -n 100
+poetry run ta eval -m <model> -d all -n 100
+poetry run ta eval -m assemblyai -n 200 -w 4            # needs ASSEMBLYAI_API_KEY
+poetry run ta eval -m deepgram -n 200 -w 4              # needs DEEPGRAM_API_KEY
+poetry run ta eval -m elevenlabs -n 200 -w 4            # needs ELEVENLABS_API_KEY
+poetry run ta eval -m apple-speech -n 200               # macOS only
+poetry run ta eval -m https://<endpoint>.endpoints.huggingface.cloud --endpoint -n 50
 ```
 
-______________________________________________________________________
+Results: `outputs/<timestamp>_<short-name>_<dataset>/{results.txt,metrics.txt}`
+
+### Analysis
+
+The model argument is the **short name** (text after the last `/`), matched exactly.
+
+```bash
+poetry run ta analysis high-wer <short-name> --threshold 50 [--latest] [-o file.md]
+poetry run ta analysis compare <short-name> tiny-audio assemblyai
+poetry run ta analysis extract-entities               # build outputs/keywords.json first
+poetry run ta analysis entity-errors <short-name> [--type PERSON]
+
+poetry run ta debug analyze-weights <model>
+poetry run ta debug compare-to-base <model> [--per-layer]
+poetry run ta debug analyze-lora -r <model>
+poetry run ta debug check-gradient-flow <model>
+```
+
+### Publishing and Deployment
+
+```bash
+# Weights: pushed automatically during training (push_to_hub + hub_model_id)
+
+poetry run ta push --repo-id <model>                  # custom code + MODEL_CARD.md + requirements (no weights)
+poetry run ta deploy --repo-id <user>/<space>         # upload demo/ to a Gradio Space
+# then set MODEL_ID=<model> in the Space's Settings → Variables
+```
+
+---
 
 ## Architecture
 
 ```
-Audio → GLM-ASR Encoder (frozen) → Projector (trained) → Qwen3 (frozen) → Text
+Audio → GLM-ASR encoder (frozen) → MLP projector (trained) → Qwen3-0.6B (fine-tuned) → Text
 ```
 
-Only the projector (~12M params) is trained. Encoder and decoder remain frozen.
+| Component | Model | Params | Trains? | LR |
+|-----------|-------|--------|---------|----|
+| Audio encoder | GLM-ASR-Nano-2512, encoder only | ~635M | No | none |
+| Projector | RMSNorm → Linear → GELU → Linear | ~6.3M | Yes, from scratch | 1e-3 |
+| Decoder | Qwen3-0.6B | ~600M | Yes, fine-tuned | 2e-5 |
 
-| Component | Model | Parameters | Status |
-|-----------|-------|------------|--------|
-| Audio Encoder | GLM-ASR-Nano-2512 | ~600M | Frozen |
-| Projector | MLP (2-layer) | ~12M | **Trained** |
-| Language Model | Qwen3-0.6B | ~600M | Frozen |
+### Shapes (10 s of audio)
 
-______________________________________________________________________
+| Stage | Shape | Rate |
+|-------|-------|------|
+| Waveform | 160,000 | 16 kHz |
+| Log-mel | 128 × 1000 | 100 frames/s |
+| Encoder output | 500 × 1280 | 50 frames/s |
+| Stacked (k = 4) | 125 × 5120 | 12.5 tokens/s |
+| Projector output | 125 × 1024 | 12.5 tokens/s |
 
-## Projector Types
+**Frame stacking**: `output_length = (input_length - k) // k + 1`, `k = 4`.
 
-| Type | Description | Use Case |
-|------|-------------|----------|
-| `mlp` | 2-layer MLP with frame stacking | Default, fast training |
-| `moe` | Shared + sparse routed experts | Balance of speed and accuracy |
+**Prompt the decoder sees**: `<audio>…<audio> Transcribe the speech to text` as the user turn,
+transcript as the assistant turn, via Qwen3's chat template.
 
-______________________________________________________________________
+---
 
-## Multi-Stage Training
+## Experiments (`configs/experiments/`)
 
-| Stage | Config | What trains | Purpose |
-|-------|--------|-------------|---------|
-| 1 | `+experiments=transcription` | Projector only | Learn audio→text mapping |
-| 2 | `+experiments=mlp_lora` | LoRA adapters only | Fine-tune LLM |
-| 3 | `+experiments=mlp_fine_tune` | Projector + LoRA | Joint optimization |
+| Config | Encoder | Decoder | Trains | Data |
+|--------|---------|---------|--------|------|
+| `stage_1` | GLM-ASR-Nano (frozen) | Qwen3-0.6B | Projector + decoder + embeddings | `multiasr` |
+| `encoder_train` | Whisper-medium.en (trained) | Qwen3-0.6B (frozen) | Projector + encoder | `multiasr` |
+| `granite_qwen` | Granite Speech 470M | Qwen3.5-2B | Projector + decoder | `multiasr` |
+| `granite_gemma` | Granite Speech 470M | Gemma 4 E2B (frozen) | Projector | `loquacious_medium` |
+| `granite_gemma_smoke` | as above | as above | 50 steps | `librispeech_dummy` |
+| `mps_smoke` | GLM-ASR-Nano | Qwen3-0.6B | 10 steps, batch 1 | `librispeech_dummy` |
 
-______________________________________________________________________
+### Freeze Flags
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `training.freeze_audio_encoder` | `true` | Encoder fixed |
+| `training.freeze_language_model` | `false` | `true` = projector-only training |
+| `training.freeze_text_embed_tokens` | `true` | Embedding table fixed |
+| `training.freeze_projector` | `false` | `true` = LoRA-only training |
+| `training.use_lora` | `false` | LoRA adapters (rank 8, alpha 32) instead of full fine-tune |
+
+---
 
 ## Key Hyperparameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `training.max_steps` | 50,000 | Training duration |
-| `training.per_device_train_batch_size` | 4 | Samples per step |
-| `training.learning_rate` | 1e-4 | Update aggressiveness |
-| `training.warmup_steps` | 1000 | LR warmup period |
-| `model.projector_pool_stride` | 5 | Frame stacking factor |
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| `training.learning_rate` | `1e-3` | Projector |
+| `training.decoder_learning_rate` | `2e-5` | Decoder |
+| `training.per_device_train_batch_size` | `100` | Production, 80 GB GPU |
+| `training.gradient_accumulation_steps` | `1` | |
+| `training.num_train_epochs` | `2` | `stage_1`: 1 |
+| `training.max_steps` | `-1` | Positive value overrides epochs |
+| `training.warmup_steps` | `2000` | |
+| `training.lr_scheduler_type` | `cosine_with_min_lr` | floor = `min_lr_rate` × peak |
+| `training.max_grad_norm` | `2.5` | `stage_1`: 1.0 |
+| `training.weight_decay` | `0.01` | projector: 0.0 |
+| `training.eval_steps`, `save_steps` | `2000` | |
+| `model.projector_pool_stride` | `4` | |
+| `model.projector_hidden_dim` | `1024` | |
+| `model.label_smoothing` | `0.1` | `stage_1`: 0.0 |
 
-______________________________________________________________________
+---
 
-## Evaluation Datasets
+## Evaluation Datasets (`-d`)
 
-| Dataset | Command | What it tests |
-|---------|---------|---------------|
-| LoquaciousSet | `-d loquacious` | General benchmark (default) |
-| Earnings22 | `-d earnings22` | Financial domain |
-| AMI | `-d ami` | Meeting transcription |
+| Name | Domain |
+|------|--------|
+| `loquacious` | Mixed English (default) |
+| `librispeech`, `librispeech-other` | Audiobooks |
+| `tedlium` | TED talks |
+| `commonvoice` | Crowd-sourced read speech |
+| `voxpopuli` | European Parliament |
+| `peoples` | Public-domain speech |
+| `gigaspeech` | Podcasts, YouTube |
+| `earnings22` | Earnings calls |
+| `spgispeech` | Financial presentations |
+| `ami`, `ami-sdm` | Meetings (headset / distant mic) |
+| `expresso` | Expressive speech |
 
-______________________________________________________________________
+---
 
 ## Training Metrics
 
-| Metric | Healthy Range | Warning Sign |
-|--------|---------------|--------------|
-| Training Loss | Decreasing | Stuck or increasing |
-| Eval Loss | Decreasing | Rising (overfitting) |
-| Gradient Norm | 1-10 | >100 (instability) |
+| Metric | Healthy | Warning |
+|--------|---------|---------|
+| `train/loss` | Below 1.0 within ~500 steps, then slowly falling | Flat, or `NaN` |
+| `eval/loss` | Tracks training loss | Rising while training loss falls (overfit) |
+| `train/grad_norm` | 1-3 after warmup | Spikes over 100 |
 
-**The "Cliff"**: Training loss often plateaus for 1000-1500 steps, then drops suddenly. This is normal!
+---
 
-______________________________________________________________________
-
-## Config File Structure
+## Config Layout
 
 ```
 configs/
-├── config.yaml          # Main config (model defaults)
-├── data/
-│   └── multiasr.yaml    # Multi-ASR dataset config
-├── training/
-│   └── production.yaml  # Training hyperparameters
-└── experiments/         # Projector presets
-    ├── transcription.yaml  # Stage 1: MLP projector
-    ├── mlp_lora.yaml    # Stage 2: LoRA only
-    └── mlp_fine_tune.yaml  # Stage 3: Projector + LoRA
+├── config.yaml               # model defaults, imports data + training
+├── training/production.yaml  # trainer defaults
+├── data/                     # multiasr, loquacious_medium, librispeech_dummy, (your own)
+└── experiments/              # recipes; use with +experiments=<name>
 ```
 
-______________________________________________________________________
+Override syntax is `key=value` (Hydra), never `--key value`. Experiment files start with
+`# @package _global_`.
 
-## CLI Reference
+---
 
-| Command | Description |
-|---------|-------------|
-| `ta eval` | Evaluate ASR models |
-| `ta analysis` | WER analysis (high-wer, entity-errors, compare) |
-| `ta demo` | Launch Gradio demo |
-| `ta deploy` | Deploy to HF Spaces |
-| `ta push` | Push model to HF Hub |
-| `ta debug` | Debug utilities |
-| `ta runpod` | Remote training |
-| `ta dev` | Development tools |
+## Common Options
 
-### CLI Options
+| Option | Short | Applies to |
+|--------|-------|------------|
+| `--model` | `-m` | `eval`, `demo`, `runpod eval` |
+| `--datasets` | `-d` | `eval` (repeatable, or `all`) |
+| `--max-samples` | `-n` | `eval` |
+| `--num-workers` | `-w` | `eval` with API backends |
+| `--output-dir` | `-o` | `eval` (default `outputs`) |
+| `--threshold` | `-t` | `analysis high-wer` |
+| `--experiment` | `-e` | `runpod plan`, `runpod train`, `runpod up` |
+| `--repo-id` | `-r` | `push`, `deploy`, `debug analyze-lora` |
 
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--model` | `-m` | Model ID |
-| `--datasets` | `-d` | Datasets |
-| `--max-samples` | `-n` | Sample limit |
-| `--output-dir` | `-o` | Output path |
-| `--num-workers` | `-w` | Parallel workers |
+---
 
-______________________________________________________________________
-
-## Tmux Cheat Sheet
+## tmux (on the pod)
 
 | Action | Keys |
 |--------|------|
 | Detach | `Ctrl+B`, then `D` |
-| Scroll up | `Ctrl+B`, then `[` |
-| Exit scroll | `q` |
+| Scroll | `Ctrl+B`, then `[`; `q` to exit |
 | Stop training | `Ctrl+C` |
 
-______________________________________________________________________
-
-## Common Issues
-
-| Problem | Solution |
-|---------|----------|
-| CUDA OOM | Reduce batch size |
-| SSH fails | Check RunPod SSH key |
-| Slow training | Check GPU utilization |
-| Loss not decreasing | Try different learning rate |
-| Model outputs gibberish | Wait for "cliff" (~1500 steps) |
-| Import errors | Run `poetry install` |
-| Hydra config error | Use `key=value` not `--key value` |
-
-______________________________________________________________________
+---
 
 ## Environment Variables
 
 | Variable | Purpose |
 |----------|---------|
-| `HF_TOKEN` | HuggingFace authentication |
-| `WANDB_API_KEY` | Weights & Biases |
-| `ASSEMBLYAI_API_KEY` | AssemblyAI evaluation |
-| `DEEPGRAM_API_KEY` | Deepgram evaluation |
+| `HF_TOKEN` | Hub downloads and checkpoint uploads (write token for training) |
+| `WANDB_API_KEY` | Weights & Biases login |
+| `WANDB_RUN_ID`, `WANDB_RESUME` | Resume a W&B run (`ta runpod train --wandb-run-id`) |
+| `MODEL_ID` | Model served by the Gradio demo / Space |
+| `ASSEMBLYAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | Commercial API baselines |
 
-______________________________________________________________________
+---
 
-## Account URLs
+## Common Issues
 
-- GitHub: [github.com](https://github.com)
-- Hugging Face: [huggingface.co](https://huggingface.co)
-- Weights & Biases: [wandb.ai](https://wandb.ai)
-- RunPod: [runpod.io](https://runpod.io)
+| Problem | Fix |
+|---------|-----|
+| Poetry refuses the Python version | Install 3.12; `poetry env use python3.12` |
+| CUDA out of memory | Lower `per_device_train_batch_size`, raise `gradient_accumulation_steps`, or add `training.use_lora=true` |
+| Pod out of disk | `ta runpod plan` before renting; data caches at ~2× download size |
+| `HF_TOKEN` warning at launch | Export a write token before `ta runpod train` |
+| W&B prompts for login | Paste your key, or pass `training.report_to=none` |
+| Hydra "could not override" | Use `key=value`; check the key exists in `config.yaml` or `production.yaml` |
+| `analysis` finds no results | Use the short model name (after the last `/`); it must match exactly |
+| Space serves the wrong model | Set `MODEL_ID` in the Space's variables |
 
-______________________________________________________________________
+---
 
-## Key Formulas
+## Formulas
 
-**Frame stacking**:
-```
-output_length = (input_length - k) // k + 1
-```
-Where `k` is the pooling stride (default: 5).
+**Frame stacking**: `output_length = (input_length - k) // k + 1`
 
-**Word Error Rate**:
-```
-WER = (Substitutions + Insertions + Deletions) / Total Reference Words
-```
+**WER**: `(Substitutions + Insertions + Deletions) / Reference words`, after Whisper text
+normalization on both sides.
 
-______________________________________________________________________
+---
 
 [← Class 3: Evaluation](./3-evaluation-and-deployment.md) | [Glossary →](./5-glossary.md)
