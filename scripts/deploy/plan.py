@@ -349,7 +349,7 @@ def _fmt(n: float) -> str:
 
 
 def plan_command(
-    experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
+    experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
     seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
     gpu: str = typer.Option(
         "NVIDIA H100 80GB HBM3", "--gpu", help="GPU id for the emitted command"
@@ -453,7 +453,7 @@ def _available_gpus(min_vram_gib: float) -> list[tuple[int, str]]:
 
 
 def provision_command(
-    experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
+    experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
     seq_len: int = typer.Option(512, "--seq-len"),
     name: str | None = typer.Option(
         None, "--name", help="Pod name (default tiny-audio-<experiment>)"
