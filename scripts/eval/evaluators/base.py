@@ -158,9 +158,19 @@ class Evaluator:
         print(f"  Pred: {result.norm_prediction}")
 
     def _corpus_wer(self, results: list[EvalResult]) -> float:
-        preds = [r.norm_prediction for r in results]
-        refs = [r.norm_reference for r in results]
-        return jiwer.wer(refs, preds) * 100
+        """Corpus WER over results whose reference survives normalization.
+
+        `jiwer.wer` raises ValueError on an empty ground truth, and a
+        reference can normalize to "" -- a disfluency-only utterance like
+        "Uh." does. `_process_sample` already scores those as 0 rather than
+        calling jiwer; without the same guard here a single such row takes
+        down the whole run at the first checkpoint, after all the API spend.
+        """
+        pairs = [(r.norm_reference, r.norm_prediction) for r in results if r.norm_reference]
+        if not pairs:
+            return 0.0
+        refs, preds = zip(*pairs, strict=True)
+        return jiwer.wer(list(refs), list(preds)) * 100
 
     def _collect_samples(self, dataset, max_samples: int | None) -> list[dict]:
         """Collect samples for parallel processing."""

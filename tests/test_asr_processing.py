@@ -221,6 +221,76 @@ class TestProcessorAudioTokenCount:
         assert audio_tokens == 10
 
 
+class TestProcessorRaggedBatch:
+    """A batch of unequal-length audio must get one prompt per sample."""
+
+    @pytest.fixture
+    def batch_processor(self, mocker):
+        """Processor over a 2-sample batch: 80 valid mel frames vs 40."""
+        from tiny_audio.asr_processing import ASRProcessor
+
+        fe = mocker.MagicMock()
+        fe.sampling_rate = 16000
+        fe.return_value = {
+            "input_features": torch.randn(2, 80, 100),
+            "attention_mask": torch.stack(
+                [
+                    torch.cat([torch.ones(80), torch.zeros(20)]),
+                    torch.cat([torch.ones(40), torch.zeros(60)]),
+                ]
+            ),
+        }
+
+        tok = mocker.MagicMock()
+        tok.convert_tokens_to_ids.return_value = 12345
+        tok.pad_token_id = 0
+        # One id per audio placeholder, so row length tracks the count.
+        tok.apply_chat_template.side_effect = lambda messages, **kw: torch.tensor(
+            [[12345] * messages[0]["content"].count("<audio>")]
+        )
+
+        proj = mocker.MagicMock()
+        proj.get_output_length.side_effect = lambda x: x // 4
+
+        return ASRProcessor(fe, tok, proj)
+
+    def test_prompt_rows_match_batch_size(self, batch_processor):
+        """`input_ids` must have one row per audio sample, not one row total."""
+        result = batch_processor(audio=[torch.randn(16000), torch.randn(8000)])
+
+        assert result["input_ids"].shape[0] == result["input_features"].shape[0] == 2
+        assert result["attention_mask"].shape == result["input_ids"].shape
+
+    def test_each_row_gets_its_own_token_count(self, batch_processor):
+        """Sizing every row from the batch max over-counts the shorter rows.
+
+        Encoder: 80 -> 40 and 40 -> 20; projector: // 4 -> 10 and 5. The
+        shorter row must carry 5 placeholders, not the batch max of 10 --
+        `masked_scatter` mis-scatters when a row claims more audio positions
+        than the projector produced for it.
+        """
+        result = batch_processor(audio=[torch.randn(16000), torch.randn(8000)])
+
+        counts = [int((row == batch_processor.audio_token_id).sum()) for row in result["input_ids"]]
+        assert counts == [10, 5]
+
+    def test_shorter_row_is_left_padded(self, batch_processor):
+        """Padding goes on the left so it never sits before the first new token."""
+        result = batch_processor(audio=[torch.randn(16000), torch.randn(8000)])
+
+        short = result["attention_mask"][1]
+        assert short.tolist() == [0] * 5 + [1] * 5
+
+    def test_projector_is_required_for_audio(self, mock_feature_extractor, mock_tokenizer):
+        """Without a projector the token count is unknowable -- say so."""
+        from tiny_audio.asr_processing import ASRProcessor
+
+        processor = ASRProcessor(mock_feature_extractor, mock_tokenizer)
+
+        with pytest.raises(ValueError, match="needs a projector"):
+            processor(audio=torch.randn(16000))
+
+
 class TestProcessorAudioToken:
     """The placeholder token must come from the config, not a hardcoded default."""
 

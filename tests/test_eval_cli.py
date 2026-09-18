@@ -1,11 +1,13 @@
 """Tests for scripts/eval/cli.py - CLI utilities and result saving."""
 
 import tempfile
+from pathlib import Path
 
 import pytest
 
 from scripts.eval.cli import save_results
 from scripts.eval.evaluators.base import EvalResult
+from scripts.utils import _extract_model_from_dir, find_model_dirs
 
 
 class TestSaveResults:
@@ -106,7 +108,7 @@ class TestSaveResults:
             assert len(parts[0]) == 8  # YYYYMMDD
 
     def test_model_name_slash_replacement(self, sample_results, sample_metrics):
-        """Test that slashes in model name are replaced."""
+        """Slashes are replaced, and not with `_` -- that is the field separator."""
         with tempfile.TemporaryDirectory() as tmpdir:
             result_dir = save_results(
                 model_name="org/model-name",
@@ -116,7 +118,25 @@ class TestSaveResults:
                 output_dir=tmpdir,
             )
             assert "/" not in result_dir.name
-            assert "org_model-name" in result_dir.name
+            assert "org-model-name" in result_dir.name
+
+    def test_underscored_model_name_round_trips(self, sample_results, sample_metrics):
+        """`--model-name granite_qwen` must still be findable by that label.
+
+        The directory name is split on `_` by `_extract_model_from_dir`, so an
+        underscore in the model label used to shift every later field and make
+        `ta analysis compare granite_qwen` match nothing.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_dir = save_results(
+                model_name="granite_qwen",
+                dataset_name="ami",
+                results=sample_results,
+                metrics=sample_metrics,
+                output_dir=tmpdir,
+            )
+            assert _extract_model_from_dir(result_dir.name) == "granite-qwen"
+            assert find_model_dirs(Path(tmpdir), "granite-qwen") == [result_dir]
 
 
 class TestSaveResultsWithBaseUrl:

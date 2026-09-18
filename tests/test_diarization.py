@@ -104,3 +104,46 @@ class TestDeviceHelper:
         device = _get_device()
         assert isinstance(device, torch.device)
         assert device.type in ("cuda", "mps", "cpu")
+
+
+class TestVadFraming:
+    """_get_speech_segments must process every complete VAD frame."""
+
+    HOP_SIZE = 256
+
+    def _run(self, mocker, num_samples: int):
+        """Run the VAD loop over `num_samples` of always-speech audio."""
+        from tiny_audio.diarization import SpeakerDiarizer
+
+        vad = mocker.MagicMock()
+        vad.process.return_value = (0.9, True)
+        mocker.patch.object(SpeakerDiarizer, "_get_ten_vad_model", return_value=vad)
+
+        audio = np.ones(num_samples, dtype=np.float32) * 0.5
+        _segments, vad_frames = SpeakerDiarizer._get_speech_segments(audio, sample_rate=16000)
+        return vad, vad_frames
+
+    @pytest.mark.parametrize("num_samples", [256, 1024, 1280, 4096])
+    def test_processes_every_complete_frame(self, mocker, num_samples):
+        """Stopping at `len - hop` dropped the last complete frame.
+
+        For 1024 samples that is 3 frames instead of 4, so the trailing 16ms of
+        speech is truncated and a silence cut is forced at the end of the clip.
+        """
+        vad, vad_frames = self._run(mocker, num_samples)
+
+        expected = num_samples // self.HOP_SIZE
+        assert vad.process.call_count == expected
+        assert len(vad_frames) == expected
+
+    def test_does_not_process_a_partial_trailing_frame(self, mocker):
+        """A trailing remainder shorter than one hop is still left out."""
+        vad, _ = self._run(mocker, 1023)
+
+        assert vad.process.call_count == 1023 // self.HOP_SIZE
+
+    def test_audio_shorter_than_one_frame_yields_nothing(self, mocker):
+        vad, vad_frames = self._run(mocker, 255)
+
+        assert vad.process.call_count == 0
+        assert vad_frames == []

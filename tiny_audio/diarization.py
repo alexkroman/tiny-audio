@@ -391,7 +391,11 @@ class SpeakerDiarizer:
         frame_duration = hop_size / sample_rate
         speech_frames: list[bool] = []
 
-        for i in range(0, len(audio_int16) - hop_size, hop_size):
+        # `- hop_size + 1`, not `- hop_size`: the latter stops one frame
+        # early and drops the last COMPLETE frame (3 frames for 1024 samples
+        # instead of 4), truncating the trailing speech segment by one hop and
+        # forcing a silence/speaker cut at the end of every clip.
+        for i in range(0, len(audio_int16) - hop_size + 1, hop_size):
             frame = audio_int16[i : i + hop_size]
             _, is_speech = vad_model.process(frame)
             speech_frames.append(is_speech)

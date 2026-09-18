@@ -96,12 +96,38 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if return_speakers:
             return_timestamps = True
 
-        # Set custom user prompt if provided
+        # Set custom user prompt if provided. The restore below is in a
+        # `finally` because this mutates shared model state: without it an
+        # exception anywhere in the call leaves the custom prompt in place for
+        # every later call on this pipeline, and the eval harness swallows that
+        # exception and keeps scoring against the wrong prompt.
         original_prompt = None
         if user_prompt:
             original_prompt = self.model.TRANSCRIBE_PROMPT
             self.model.TRANSCRIBE_PROMPT = user_prompt
 
+        try:
+            return self._transcribe(
+                inputs,
+                return_timestamps=return_timestamps,
+                return_speakers=return_speakers,
+                diarization_params=diarization_params,
+                **kwargs,
+            )
+        finally:
+            if original_prompt is not None:
+                self.model.TRANSCRIBE_PROMPT = original_prompt
+
+    def _transcribe(
+        self,
+        inputs,
+        *,
+        return_timestamps: bool,
+        return_speakers: bool,
+        diarization_params: dict,
+        **kwargs,
+    ):
+        """Transcribe, then attach timestamps and speakers if requested."""
         # Decode once for timestamp alignment and diarization, then hand the
         # decoded array to the parent so it doesn't run ffmpeg over the same
         # input a second time.
@@ -149,10 +175,6 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             except Exception as e:
                 result["speaker_segments"] = []
                 result["diarization_error"] = str(e)
-
-        # Clean up
-        if original_prompt is not None:
-            self.model.TRANSCRIBE_PROMPT = original_prompt
 
         return result
 
