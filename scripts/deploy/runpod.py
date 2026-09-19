@@ -401,7 +401,12 @@ echo "Dependencies verified for $TA_PYTHON"
 def plan(
     experiment: str = typer.Option("granite_gemma", "--experiment", "-e"),
     seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
-    gpu: str = typer.Option("NVIDIA H100 80GB HBM3", "--gpu"),
+    # No default: plan_command picks the cheapest listed GPU that actually
+    # fits the estimate. Hardcoding an H100 here meant every plan recommended
+    # an 80 GB card regardless of need -- granite_qwen_lora wants ~36 GiB.
+    gpu: str | None = typer.Option(
+        None, "--gpu", help="Override the GPU id (default: cheapest that fits)"
+    ),
     image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output"),
     overrides: list[str] = typer.Argument(None, help="Extra Hydra overrides"),

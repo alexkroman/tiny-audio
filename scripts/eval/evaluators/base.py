@@ -8,6 +8,7 @@ import jiwer
 from rich.console import Console
 
 from scripts.eval.audio import TextNormalizer
+from scripts.eval.formatting import compute_formatting_metrics
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
@@ -265,5 +266,17 @@ class Evaluator:
             metrics["mean_top1_logprob"] = weighted_logprob / total_tokens
             metrics["mean_margin"] = weighted_margin / total_tokens
             metrics["total_tokens"] = total_tokens
+
+        # Casing / punctuation, scored on RAW text. `wer` above is computed
+        # after Whisper's normalizer lowercases and strips punctuation from
+        # both sides, so it is structurally blind to the formatting this model
+        # exists to produce -- and blind to the truecase damage that reaches
+        # 42% of the training labels. Keys are omitted for corpora whose
+        # references are not cased or not punctuated (LibriSpeech is ALL-CAPS,
+        # AMI/TEDLIUM/Peoples are mono-case), rather than reporting a
+        # meaningless 0.0. See scripts/eval/formatting.py.
+        metrics.update(
+            compute_formatting_metrics([(r.reference, r.prediction) for r in self.results])
+        )
 
         return metrics

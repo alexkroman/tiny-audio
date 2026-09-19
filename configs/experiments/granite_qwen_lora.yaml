@@ -1,0 +1,255 @@
+# @package _global_
+# CAPACITY REALLOCATION EXPERIMENT
+#
+#   ibm-granite/granite-speech-5.0-470m-turboctc  (FROZEN)
+#     -> MLP projector (fresh init, 12.6M, lr 1e-3)
+#     -> Qwen/Qwen3.5-2B, base weights FROZEN + LoRA all-linear r=64 (67.3M, lr 2e-4)
+#
+# Trainable drops 1.3859B -> 0.0799B (5.8%). Everything else is held at the
+# granite_qwen values so the comparison is single-variable.
+#
+#   poetry run python scripts/train.py +experiments=granite_qwen_lora
+#
+# ---------------------------------------------------------------------------
+# WHY: the decoder's 1.37B trainable params are not earning their WER.
+#
+# Measured by running the frozen encoder's OWN CTC head over the same 100
+# samples/dataset with the same normalizer:
+#
+#   pooled, all 12 sets      CTC-only 7.56   full stack 7.00   decoder +0.56
+#   pooled, minus TEDLIUM    CTC-only 7.29   full stack 7.62   decoder -0.33
+#
+# The encoder ALONE beats the full stack on 7 of 12 datasets. The decoder's
+# entire net WER contribution is TEDLIUM (+6.18) and a little SPGISpeech
+# (+1.22); it is negative on peoples (-3.52), ami-sdm (-1.76), ami (-1.06)
+# and loquacious (-0.60).
+#
+# The decoder is NOT useless -- it is what produces formatting, which WER is
+# blind to because the eval normalizer lowercases and strips punctuation from
+# both sides. On the 270 cased+punctuated eval samples (scripts/eval/formatting.py):
+#
+#                       ours     universal-3-5-pro
+#   orthographic WER    10.14          14.65
+#   case error rate      1.43%          2.52%
+#   punctuation F1      77.07          72.86
+#
+# A CTC head would score ~100% orthographic WER -- it emits neither. So the
+# goal is to KEEP the decoder's formatting ability while paying far less for
+# it, which is what LoRA over frozen base weights does.
+#
+# Precedent: nvidia/canary-qwen-2.5b reaches 4.43 on the Open ASR Leaderboard
+# with a FROZEN Qwen3-1.7B + LoRA and a TRAINABLE encoder -- the inverse of
+# this repo's allocation. Its config.json, read directly:
+#   freeze_params: ['^llm\..+$', '^embed_tokens\..+$']
+#   prevent_freeze_params: ['^.+\.lora_.+$']
+#   lora: {r: 128, alpha: 256, target_modules: [q_proj, v_proj]}
+# NOTE its leaderboard number is NOT comparable to ours: different protocol
+# (cleaned dataset variants, unweighted macro-average, full test sets).
+# ---------------------------------------------------------------------------
+
+defaults:
+  - override /data: multiasr
+
+model:
+  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc
+  text_model_id: Qwen/Qwen3.5-2B
+  projector_type: mlp
+  attn_implementation: sdpa
+  projector_pool_stride: 1
+  encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
+  projector_hidden_dim: 4096
+  # CAVEAT, measured rather than assumed. Two separate claims live behind this
+  # one word, and only the first holds:
+  #
+  #   1. The auto-resolved TARGET is correct. It logs 0.015010; the actual RMS
+  #      of Qwen3.5-2B's embed_tokens table [248320, 2048], computed in float64
+  #      from the safetensors, is 0.015008. Not garbage.
+  #   2. The MECHANISM does not hold that target through training. `output_scale`
+  #      is a fixed, non-learnable buffer (0.076075 in the shipped checkpoint),
+  #      so it pins the output to 1.0x embed RMS AT INIT ONLY. The projector's
+  #      weights then grow -- ||linear_1|| 157.5, ||linear_2|| 186.5 -- and the
+  #      output drifts with them. Probing the trained checkpoint at the repo's
+  #      own geometry: output RMS 0.8350, i.e. **55.6x embed RMS** against a
+  #      design target of 1.0x. An independent probe using the repo's
+  #      measure_output_rms() got 48.6x; different probe, same conclusion.
+  #
+  # So the audio prefix ends the run ~4x HOTTER than the 13.1x that motivated
+  # adding output_scale in the first place (1/0.076075 = 13.1x, which this
+  # measurement also confirms). Corroborating weight evidence from the
+  # completed run: MLP drift and post_attention_layernorm drift are both
+  # sharply front-loaded (layers 0-2 at ~20-21% MLP and 8.2%/6.1% norm, against
+  # 14.8-17.4% and 0.5-0.7% at layers 20-23), which is what the first few
+  # decoder layers renormalising a hot prefix looks like.
+  #
+  # Left as `auto` for this run anyway, deliberately:
+  #   - It is not a regression. The same drift happened under the previous
+  #     recipe, so keeping it holds the comparison single-variable.
+  #   - The fix is not obvious. A trailing weightless RMSNorm times the fixed
+  #     scale would pin it every forward (Gemma3n does exactly this in
+  #     Gemma3nMultimodalEmbedder), but the author built `_maybe_probe_scale_
+  #     gradient` precisely to test whether the loss WANTS the hot scale, and
+  #     its sign is wandb-only. Check `scale_grad` before "fixing" this.
+  #   - Note this run frets less about it than the last one: the decoder base
+  #     is frozen, so the compensation that layers 0-2 were doing now has to
+  #     come from LoRA instead. If the hot prefix is genuinely costly, this run
+  #     is where it shows up most clearly.
+  projector_output_rms: auto
+  transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
+  label_smoothing: 0.0
+  max_new_tokens: 256
+
+  # bfloat16, NOT the fp32 master weights granite_qwen needs. That requirement
+  # came from decoder_learning_rate=2e-5: Adam's step at 2e-5 on weights of
+  # ~0.015-0.02 is ~1e-3 relative, below bfloat16's 2^-8 = 3.9e-3 ULP, so
+  # every decoder update would round to zero. LoRA removes the problem from
+  # both directions -- the B matrix starts at zero (so updates are large
+  # relative to the weight, not to a pretrained magnitude) and the LR is 10x
+  # higher. The projector stays fp32 regardless; it is the one module that
+  # must not lose precision.
+  #
+  # This is most of why the run is cheap: no fp32 master copy of a 1.88B
+  # decoder, and optimizer state over 80M params instead of 1.386B.
+  model_dtype: bfloat16
+  projector_dtype: float32
+
+  use_lora: true
+  # r=64 with alpha=128 (scale 2.0). Canary-Qwen uses r=128/alpha=256 on a
+  # much narrower target set; spreading over all-linear at r=64 lands at a
+  # comparable parameter budget with broader coverage.
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.0
+
+  # "all-linear" rather than a hand-written list, and NOT Canary-Qwen's
+  # [q_proj, v_proj]. Two independent reasons:
+  #
+  # 1. Qwen3.5 is HYBRID. Only 6 of its 24 layers are full_attention; the
+  #    other 18 are linear-attention (gated delta-net) with entirely
+  #    different projection names. Copying [q_proj, v_proj] verbatim adapts
+  #    12 matrices in 6 layers and leaves 18 layers completely frozen --
+  #    measured: 3.34M trainable, 0.18% of the decoder.
+  #
+  # 2. More importantly, q/v is the WRONG PLACE even on a dense model. Drift
+  #    of the completed granite_qwen run vs base Qwen3.5-2B, by projection:
+  #      mlp.down_proj        24 matrices   19.30%   <- largest
+  #      mlp.up_proj          24            18.39%
+  #      linear_attn.in_proj_b 18           18.07%
+  #      self_attn.k_proj      6            16.23%
+  #      mlp.gate_proj        24            15.01%
+  #      linear_attn.out_proj 18            14.45%
+  #      self_attn.q_proj      6            13.62%   <- NVIDIA's target
+  #      self_attn.v_proj      6            10.12%   <- NVIDIA's target
+  #      ALL decoder weights 319            13.31%
+  #    The MLP is both the largest adaptation site and ~906M of the 1.37B
+  #    trainable params. q/v sit near the bottom of the major projections.
+  #
+  # Verified against peft 0.20.0 on the real checkpoint: "all-linear" resolves
+  # to 186 matrices covering mlp.{gate,up,down}_proj (24 each),
+  # linear_attn.{in_proj_a,in_proj_b,in_proj_qkv,in_proj_z,out_proj} (18 each)
+  # and self_attn.{q,k,v,o}_proj (6 each) = 67.28M trainable, 3.58% of base,
+  # and it correctly does NOT adapt lm_head (which matters -- lm_head is tied
+  # to the frozen embed_tokens).
+  lora_target_modules: all-linear
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-granite-qwen-lora"
+
+  # Base decoder weights frozen; only the LoRA tensors take gradients. This is
+  # the same shape as Canary-Qwen's freeze_params + prevent_freeze_params pair.
+  freeze_language_model: true
+  freeze_projector: false
+  freeze_text_embed_tokens: true
+
+  # ENCODER STAYS FROZEN FOR THIS RUN -- deliberately, and this is the main
+  # open decision in the experiment.
+  #
+  # The substitution-dominated error profile (pooled S 3.30 / D 2.12 / I 1.57
+  # against the baseline's 3.17 / 2.70 / 1.90 -- we win on coverage and lose
+  # on word choice) points at acoustic discrimination, i.e. the encoder. And
+  # the CTC control shows the encoder alone already beats the full stack on
+  # 7/12 sets. So unfreezing its top blocks is the intervention most likely to
+  # IMPROVE WER, not merely to make the run cheaper.
+  #
+  # It is held back anyway, for three reasons:
+  #   - Attribution. The baseline is 7.00 with a full-FT decoder. Change the
+  #     decoder's trainable surface AND the encoder's in one run and a WER
+  #     delta cannot be assigned to either.
+  #   - Sequencing. If LoRA at 67M matches full-FT at 1.37B, the decoder
+  #     capacity was genuinely unnecessary and the freed budget is available
+  #     for the encoder against a clean, directly comparable baseline. If it
+  #     does NOT match, the decoder capacity was load-bearing -- which
+  #     contradicts the CTC reading and is worth knowing BEFORE spending on an
+  #     encoder unfreeze.
+  #   - Risk asymmetry. Unfreezing 88-198M encoder params on ~7.6k hours risks
+  #     damaging a model IBM trained on ~60k hours. Verified budgets on the
+  #     real encoder: top 2 -> 88.45M (18.7%), top 4 -> 143.33M (30.3%),
+  #     top 6 -> 198.21M (41.9%), each including `out`/`out_mid` and never
+  #     `input_linear`.
+  #
+  # To run the follow-up, set encoder_trainable_top_layers: 4 and
+  # encoder_learning_rate: 1e-5 (an order of magnitude under the projector).
+  # The selection is tested in tests/test_encoder_partial_unfreeze.py, which
+  # asserts on parameter identity and on autograd behaviour, not on a count.
+  freeze_audio_encoder: true
+  encoder_trainable_top_layers: 0
+
+  # Projector unchanged at 1e-3 (fresh init, same job as before). LoRA at 2e-4
+  # rather than the old 2e-5 full-FT decoder LR: LoRA's B matrix initialises to
+  # zero, so it needs a materially higher LR than pretrained weights being
+  # nudged. 1e-4 to 3e-4 is the standard band; 2e-4 sits mid-range. This is the
+  # one hyperparameter here with no measurement behind it -- read grad_norm and
+  # the LoRA-vs-base weight ratio over the first ~2k steps and adjust.
+  learning_rate: 1e-3
+  decoder_learning_rate: 2e-4
+
+  label_smoothing_factor: 0.0
+  weight_decay: 0.01
+  projector_weight_decay: 0.0
+  warmup_steps: 700
+  lr_scheduler_type: cosine_with_min_lr
+  lr_scheduler_kwargs:
+    min_lr_rate: 0.05
+  max_grad_norm: 2.5
+  seed: 44
+
+  auto_find_batch_size: false
+  # Same effective batch as granite_qwen (32 x 3 = 96) so the projector LR
+  # transfers unchanged. Per-device can likely go higher -- optimizer state
+  # drops from 1.386B to 80M params and there is no fp32 master copy -- but
+  # raising it would change the effective batch and break the comparison.
+  # Measure the VRAM headroom on this run, spend it on epochs in the next.
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 3
+
+  # ONE epoch, matching granite_qwen, so this is a like-for-like comparison.
+  #
+  # The weight analysis says the previous run was mildly under-trained:
+  # eval-best landed at step 32,000 of 32,922 (97.2% through), the 12-dataset
+  # mean WER was still falling (8.997 -> 8.973 -> 8.868), and the train/eval
+  # gap was dead flat at 0.189 +/- 0.004 across all 17 evals, i.e. zero
+  # overfitting. So 2-3 epochs is very likely the right call -- and it is now
+  # affordable. But changing epochs AND the capacity allocation in the same
+  # run is the same attribution mistake as unfreezing the encoder here. Get
+  # the single-variable number first.
+  num_train_epochs: 1
+  save_steps: 2000
+  eval_steps: 2000
+
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 8
+  torch_compile: false
+
+  # SUCCESS CRITERIA, written down in advance so the result is not
+  # rationalised after the fact:
+  #   PASS  corpus WER within ~0.3 of granite_qwen's 7.00 AND orthographic WER
+  #         within ~0.5 of 10.14. Decoder capacity was not load-bearing; spend
+  #         the freed budget on epochs and the encoder unfreeze.
+  #   FAIL  WER regresses >1.0, or orthographic WER regresses >1.5. The
+  #         decoder's full-FT capacity WAS doing work -- most likely on
+  #         formatting, which plain WER cannot see. Re-check per-dataset
+  #         before concluding; TEDLIUM is where the decoder demonstrably earns
+  #         its keep (+6.18 over the CTC head) and is the first place a
+  #         capacity loss should show.
+  # Either way, re-run the frozen-encoder CTC baseline (7.56 pooled) as the
+  # floor: a stack that does not clearly beat it is not earning its params.

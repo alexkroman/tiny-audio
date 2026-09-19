@@ -31,6 +31,28 @@ def test_registry_config_is_used_and_audio_is_cast(fake_load):
     field, audio = loaded.cast_column.call_args.args
     assert field == cfg.audio_field
     assert audio.sampling_rate == 16000
+    # Shuffle is applied after the cast, so the returned object is the shuffled
+    # view rather than the cast one.
+    assert out is loaded.cast_column.return_value.shuffle.return_value
+
+
+def test_shuffle_is_on_by_default_with_a_fixed_seed(fake_load):
+    """Test splits ship grouped by speaker/chapter/meeting, so first-N sampling
+    is not corpus-representative: the first 100 rows of LibriSpeech clean/test
+    cover 2 of 40 speakers. A fixed-seed shuffle buffer keeps selection
+    deterministic while restoring coverage (measured: 2 -> 34 speakers).
+    """
+    _, loaded = fake_load
+    ds_mod.load_eval_dataset("loquacious", "test")
+    loaded.cast_column.return_value.shuffle.assert_called_once_with(
+        seed=ds_mod.SHUFFLE_SEED, buffer_size=ds_mod.SHUFFLE_BUFFER_SIZE
+    )
+
+
+def test_shuffle_can_be_disabled_to_reproduce_old_numbers(fake_load):
+    _, loaded = fake_load
+    out = ds_mod.load_eval_dataset("loquacious", "test", shuffle=False)
+    loaded.cast_column.return_value.shuffle.assert_not_called()
     assert out is loaded.cast_column.return_value
 
 
