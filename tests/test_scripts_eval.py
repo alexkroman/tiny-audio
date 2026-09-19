@@ -181,3 +181,67 @@ class TestModelDtypeIsTheWorkingOverride:
         ASRConfig(model_dtype="float32").save_pretrained(tmp_path)
         cfg = ASRConfig.from_pretrained(tmp_path, model_dtype="bfloat16")
         assert cfg.model_dtype == "bfloat16"
+
+
+class TestStreamingRetry:
+    """AssemblyAIStreamingEvaluator retries only on transient stream close codes."""
+
+    @pytest.fixture
+    def evaluator(self, monkeypatch):
+        from scripts.eval.evaluators.asr import AssemblyAIStreamingEvaluator
+
+        # tenacity sleeps through time.sleep; skip the backoff in tests.
+        monkeypatch.setattr("tenacity.nap.time.sleep", lambda _s: None)
+        return AssemblyAIStreamingEvaluator(api_key="test")
+
+    @staticmethod
+    def _stream_error(code: int | None) -> RuntimeError:
+        exc = RuntimeError(f"closed with {code}")
+        if code is not None:
+            exc.streaming_code = code  # type: ignore[attr-defined]
+        return exc
+
+    def test_transient_close_code_is_retried(self, evaluator, monkeypatch):
+        calls = []
+
+        def run_session(_pcm):
+            calls.append(1)
+            if len(calls) < 3:
+                raise self._stream_error(1013)
+            return "hello", 0.5
+
+        monkeypatch.setattr(evaluator, "_prepare_pcm", lambda _a: b"")
+        monkeypatch.setattr(evaluator, "_run_session", run_session)
+
+        assert evaluator.transcribe(object()) == ("hello", 0.5, None)
+        assert len(calls) == 3
+
+    def test_non_retryable_error_is_raised_immediately(self, evaluator, monkeypatch):
+        calls = []
+
+        def run_session(_pcm):
+            calls.append(1)
+            raise self._stream_error(None)
+
+        monkeypatch.setattr(evaluator, "_prepare_pcm", lambda _a: b"")
+        monkeypatch.setattr(evaluator, "_run_session", run_session)
+
+        with pytest.raises(RuntimeError, match="closed with None"):
+            evaluator.transcribe(object())
+        assert len(calls) == 1
+
+    def test_gives_up_after_max_retries(self, evaluator, monkeypatch):
+        from scripts.eval.evaluators.asr import AssemblyAIStreamingEvaluator
+
+        calls = []
+
+        def run_session(_pcm):
+            calls.append(1)
+            raise self._stream_error(4029)
+
+        monkeypatch.setattr(evaluator, "_prepare_pcm", lambda _a: b"")
+        monkeypatch.setattr(evaluator, "_run_session", run_session)
+
+        with pytest.raises(RuntimeError, match="closed with 4029"):
+            evaluator.transcribe(object())
+        assert len(calls) == AssemblyAIStreamingEvaluator._MAX_RETRIES + 1
