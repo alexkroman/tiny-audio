@@ -52,7 +52,7 @@ export HF_TOKEN='hf_...'                                # write token
 poetry run ta runpod train <HOST> <PORT> --experiment my_run [hydra overrides...]
 
 poetry run ta runpod attach <HOST> <PORT>               # reattach to tmux
-poetry run ta runpod attach <HOST> <PORT> --logs -n 200 # print recent output
+poetry run ta runpod attach <HOST> <PORT> --logs --lines 200   # print recent output
 poetry run ta runpod checkpoint <HOST> <PORT>           # newest checkpoint path
 poetry run ta runpod eval <HOST> <PORT> -m <model> -d loquacious -n 500
 
@@ -81,14 +81,14 @@ Results: `outputs/<timestamp>_<short-name>_<dataset>/{results.txt,metrics.txt}`
 The model argument is the **short name** (text after the last `/`), matched exactly.
 
 ```bash
-poetry run ta analysis high-wer <short-name> --threshold 50 [--latest] [-o file.md]
+poetry run ta analysis high-wer <short-name> --threshold 50 [--latest] [--output-file file.md]
 poetry run ta analysis compare <short-name> tiny-audio assemblyai
 poetry run ta analysis extract-entities               # build outputs/keywords.json first
-poetry run ta analysis entity-errors <short-name> [--type PERSON]
+poetry run ta analysis entity-errors <short-name> [--entity-type PERSON]
 
 poetry run ta debug analyze-weights <model>
 poetry run ta debug compare-to-base <model> [--per-layer]
-poetry run ta debug analyze-lora -r <model>
+poetry run ta debug analyze-lora <model>
 poetry run ta debug check-gradient-flow <model>
 ```
 

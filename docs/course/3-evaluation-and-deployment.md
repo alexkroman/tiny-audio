@@ -131,7 +131,7 @@ poetry run ta eval -m mazesmazes/tiny-audio -n 200
 
 ```bash
 poetry run ta analysis high-wer $NAME --threshold 50
-poetry run ta analysis high-wer $NAME --threshold 30 --latest -o worst.md
+poetry run ta analysis high-wer $NAME --threshold 30 --latest --output-file worst.md
 ```
 
 Read a dozen of the worst. Sort them into buckets: bad audio, bad reference label, rare
@@ -151,7 +151,7 @@ samples where your model got a named entity wrong:
 ```bash
 poetry run ta analysis extract-entities
 poetry run ta analysis entity-errors $NAME
-poetry run ta analysis entity-errors $NAME --type PERSON
+poetry run ta analysis entity-errors $NAME --entity-type PERSON
 ```
 
 **Inspect the weights.** If a run misbehaved, check whether training moved the decoder a
@@ -160,7 +160,7 @@ healthy amount and whether the projector's scale drifted:
 ```bash
 poetry run ta debug analyze-weights $MODEL
 poetry run ta debug compare-to-base $MODEL     # drift from Qwen3-0.6B, layer by layer
-poetry run ta debug analyze-lora -r $MODEL     # only if you trained with LoRA
+poetry run ta debug analyze-lora $MODEL        # only if you trained with LoRA
 ```
 
 ### Exercise 3: Check Your Hub Repo (5 min)

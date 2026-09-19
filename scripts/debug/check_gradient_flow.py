@@ -21,11 +21,13 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
 import math
 from collections import defaultdict
+from enum import StrEnum
+from typing import Annotated
 
 import torch
+import typer
 import yaml
 
 from scripts.utils import get_project_root
@@ -543,42 +545,36 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         print("         - optimizer groups route every trainable param exactly once")
 
 
+class Dtype(StrEnum):
+    """Torch dtypes the probe can run in."""
+
+    float32 = "float32"
+    bfloat16 = "bfloat16"
+    float16 = "float16"
+
+
 def main(
-    model_id: str | None = None,
-    dtype: str = "float32",
-    device: str = "cpu",
+    model: Annotated[
+        str | None,
+        typer.Argument(
+            help="HuggingFace model ID (or local path) of a trained checkpoint; "
+            "omit to build a fresh model from base-LM weights + a random projector "
+            "(verifies plumbing, not training state)"
+        ),
+    ] = None,
+    dtype: Annotated[Dtype, typer.Option("--dtype", help="Torch dtype to run in")] = Dtype.float32,
+    device: Annotated[str, typer.Option("--device", help="cpu / cuda / mps")] = "cpu",
 ) -> None:
-    """Run gradient-flow probe.
-
-    Args:
-        model_id: Hub repo id or local path to a trained checkpoint. If
-            omitted, build a fresh model from base-LM weights + randomly-
-            initialized projector (verifies plumbing, not training state).
-        dtype: float32 / bfloat16 / float16.
-        device: cpu / cuda / mps.
-    """
+    """Probe gradient flow on a checkpoint (per-component grad norms)."""
     torch_dtype = {
-        "float32": torch.float32,
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-    }[dtype]
+        Dtype.float32: torch.float32,
+        Dtype.bfloat16: torch.bfloat16,
+        Dtype.float16: torch.float16,
+    }[Dtype(dtype)]
     torch.manual_seed(0)
-    model = build_model(torch_dtype, device, model_id=model_id)
-    report(model, torch_dtype, device)
-
-
-def _argparse_main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model-id",
-        default=None,
-        help="Hub repo id or local path; omit to build a fresh model.",
-    )
-    parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"])
-    parser.add_argument("--device", default="cpu")
-    args = parser.parse_args()
-    main(model_id=args.model_id, dtype=args.dtype, device=args.device)
+    built = build_model(torch_dtype, device, model_id=model)
+    report(built, torch_dtype, device)
 
 
 if __name__ == "__main__":
-    _argparse_main()
+    typer.run(main)

@@ -187,13 +187,13 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
 
 @app.command()
 def main(
-    repo_id: Annotated[
+    model: Annotated[
         str,
-        typer.Option("--repo-id", "-r", help="HuggingFace model ID"),
+        typer.Argument(help="HuggingFace model ID (or local path) holding the LoRA adapter"),
     ] = "mazesmazes/tiny-audio",
 ):
     """Analyze LoRA adapter weights."""
-    analyze_lora_adapter(repo_id)
+    analyze_lora_adapter(model)
 
 
 if __name__ == "__main__":

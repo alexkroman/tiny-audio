@@ -1,6 +1,7 @@
 """Evaluator classes for ASR evaluation."""
 
 from scripts.eval.audio import TextNormalizer
+from scripts.eval.constants import AssemblyAIModel
 
 from .asr import (
     AppleSpeechEvaluator,
@@ -14,7 +15,6 @@ from .asr import (
     SwiftSDKEvaluator,
 )
 from .base import (
-    AssemblyAIModel,
     EvalResult,
     Evaluator,
     setup_assemblyai,

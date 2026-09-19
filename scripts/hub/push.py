@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Push custom model files to Hugging Face Hub."""
 
-import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -11,7 +10,7 @@ import typer
 from huggingface_hub import HfApi
 from rich.console import Console
 
-app = typer.Typer(help="Push model files to Hugging Face Hub")
+app = typer.Typer(add_completion=False)
 console = Console()
 
 
@@ -26,20 +25,21 @@ def main(
         typer.Option("--branch", "-b", help="Branch to push to"),
     ] = "main",
     checkpoint_dir: Annotated[
-        str | None,
+        Path | None,
         typer.Option(
             "--checkpoint-dir",
-            "-c",
-            help="Path to checkpoint directory to copy tokenizer files from",
+            exists=True,
+            file_okay=False,
+            help="Checkpoint directory to copy tokenizer files from",
         ),
     ] = None,
+    hf_token: Annotated[
+        str,
+        typer.Option("--hf-token", envvar="HF_TOKEN", help="Hugging Face write token"),
+    ] = ...,
 ):
     """Push model files to Hugging Face Hub."""
-    if not os.environ.get("HF_TOKEN"):
-        console.print("[red]Error: HF_TOKEN environment variable must be set[/red]")
-        raise typer.Exit(1)
-
-    api = HfApi(token=os.environ["HF_TOKEN"])
+    api = HfApi(token=hf_token)
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -82,14 +82,13 @@ def main(
             console.print("Copied requirements.txt to staging")
 
         if checkpoint_dir:
-            checkpoint_path = Path(checkpoint_dir)
             for filename in (
                 "tokenizer_config.json",
                 "tokenizer.json",
                 "special_tokens_map.json",
                 "added_tokens.json",
             ):
-                src = checkpoint_path / filename
+                src = checkpoint_dir / filename
                 if src.exists():
                     shutil.copy2(src, temp_path / filename)
                     console.print(f"Copied {src} to staging")

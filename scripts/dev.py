@@ -8,8 +8,9 @@ from rich.console import Console
 
 app = typer.Typer(
     name="dev",
-    help="Development commands (lint, test, format, etc.)",
+    help="Run the project's lint, format, test and build tasks.",
     no_args_is_help=True,
+    add_completion=False,
 )
 console = Console()
 
@@ -181,7 +182,7 @@ def docstrings():
 def _register_handler():
     from scripts.deploy.handler_local import test as handler_test
 
-    app.command(name="handler", help="Test inference endpoint handler locally")(handler_test)
+    app.command(name="handler")(handler_test)
 
 
 _register_handler()

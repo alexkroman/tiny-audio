@@ -2,7 +2,6 @@
 """Compare a fine-tuned model's weights against its base to measure drift."""
 
 import re
-import sys
 from collections import defaultdict
 from typing import Annotated
 
@@ -312,17 +311,17 @@ def compare_to_base(
 
 @app.command()
 def main(
-    trained_id: Annotated[
+    model: Annotated[
         str,
-        typer.Argument(help="Fine-tuned HuggingFace model ID"),
+        typer.Argument(help="Fine-tuned HuggingFace model ID (or local path)"),
     ] = "mazesmazes/tiny-audio-embedded-2",
-    base_id: Annotated[
+    base_model: Annotated[
         str,
-        typer.Option("--base", "-b", help="Base model ID to compare against"),
+        typer.Option("--base-model", help="Base model ID to compare against"),
     ] = "Qwen/Qwen3-0.6B",
     per_layer: Annotated[
         bool,
-        typer.Option("--per-layer", "-l", help="Show per-layer attn/mlp/norm drift table"),
+        typer.Option("--per-layer", help="Show per-layer attn/mlp/norm drift table"),
     ] = False,
     top_k: Annotated[
         int,
@@ -330,8 +329,8 @@ def main(
     ] = 15,
 ):
     """Compare a fine-tuned model against its base, reporting drift metrics."""
-    success = compare_to_base(trained_id, base_id, show_per_layer=per_layer, top_k=top_k)
-    sys.exit(0 if success else 1)
+    success = compare_to_base(model, base_model, show_per_layer=per_layer, top_k=top_k)
+    raise typer.Exit(0 if success else 1)
 
 
 if __name__ == "__main__":

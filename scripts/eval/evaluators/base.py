@@ -1,31 +1,17 @@
 """Base evaluator classes and shared utilities."""
 
 import os
-from enum import StrEnum
 
 import attrs
 import jiwer
 from rich.console import Console
 
 from scripts.eval.audio import TextNormalizer
+from scripts.eval.constants import ASSEMBLYAI_MODELS
 from scripts.eval.formatting import compute_formatting_metrics
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
-
-
-class AssemblyAIModel(StrEnum):
-    """AssemblyAI model options."""
-
-    best = "best"
-    universal = "universal"
-    universal_3_pro = "universal-3-pro"
-    # API name uses dashes for the decimal: "universal-3-5-pro", not "3.5".
-    universal_3_5_pro = "universal-3-5-pro"
-
-
-# Valid `model` values accepted by setup_assemblyai; the enum is the source.
-ASSEMBLYAI_MODELS = {m.value for m in AssemblyAIModel}
 
 
 def setup_assemblyai(

@@ -2,7 +2,7 @@
 """Static analysis of model weights for training health diagnostics."""
 
 import json
-import sys
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -34,11 +34,20 @@ def _threshold_status(value: float, warn: float, high: float) -> str:
     return "❌ HIGH"
 
 
+class Component(StrEnum):
+    """Model components `--component` can select."""
+
+    projector = "projector"
+    decoder = "decoder"
+    encoder = "encoder"
+    all = "all"
+
+
 COMPONENT_FILTERS = {
-    "projector": "projector",
-    "decoder": "language_model",
-    "encoder": "audio_tower",
-    "all": "",
+    Component.projector: "projector",
+    Component.decoder: "language_model",
+    Component.encoder: "audio_tower",
+    Component.all: "",
 }
 
 
@@ -1013,23 +1022,18 @@ def analyze_weights(
 
 @app.command()
 def main(
-    model_id: Annotated[
+    model: Annotated[
         str,
-        typer.Argument(help="HuggingFace model ID"),
+        typer.Argument(help="HuggingFace model ID (or local path)"),
     ] = "mazesmazes/tiny-audio",
     component: Annotated[
-        str,
-        typer.Option(
-            "--component",
-            "-c",
-            help="Which model component to analyze: projector / decoder / encoder / all",
-        ),
-    ] = "projector",
+        Component,
+        typer.Option("--component", help="Which model component to analyze"),
+    ] = Component.projector,
     filter_: Annotated[
         str | None,
         typer.Option(
             "--filter",
-            "-f",
             help="Override --component with an arbitrary substring filter",
         ),
     ] = None,
@@ -1069,6 +1073,7 @@ def main(
     - (decoder) embed_tokens row-norm distribution (rare-token drift)
     - (decoder) RMSNorm gain coherence (WD-on-norm routing health)
     """
+    component = Component(component)
     if filter_ is not None:
         # Explicit filter — try to auto-detect component for display mode.
         effective_filter = filter_
@@ -1077,21 +1082,18 @@ def main(
                 component = comp
                 break
     else:
-        effective_filter = COMPONENT_FILTERS.get(component)
-        if effective_filter is None:
-            console.print(f"[red]Unknown --component: {component}[/red]")
-            sys.exit(2)
+        effective_filter = COMPONENT_FILTERS[component]
 
     success = analyze_weights(
-        model_id,
+        model,
         filter_prefix=effective_filter or None,
         verbose=verbose,
-        component=component,
+        component=component.value,
         per_tensor=per_tensor,
         skip_rank=skip_rank,
         compare_base=compare_base,
     )
-    sys.exit(0 if success else 1)
+    raise typer.Exit(0 if success else 1)
 
 
 if __name__ == "__main__":

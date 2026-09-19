@@ -4,6 +4,7 @@ The ratchet tests pin the *minimum* each threshold may take. Raising a floor
 is a one-line edit here too; lowering one fails CI, which is the point.
 """
 
+import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -207,40 +208,48 @@ class TestPrecommitHookIsTheGate:
 class TestLazyRegistration:
     """`ta <group>` imports only that group's module."""
 
-    def test_only_requested_group_is_registered(self, monkeypatch):
+    @staticmethod
+    def _fresh_cli():
+        """Reload scripts.cli so its LazyGroup starts with an empty cache."""
+        import importlib
+
         from scripts import cli
 
-        fresh = typer.Typer()
-        monkeypatch.setattr(cli, "app", fresh)
-        cli._register_for_argv(["dev", "lint"])
-        assert [g.name for g in fresh.registered_groups] == ["dev"]
-        assert fresh.registered_commands == []
+        return importlib.reload(cli)
 
-    def test_single_command_is_registered_alone(self, monkeypatch):
-        from scripts import cli
+    def test_root_lists_every_subcommand_without_importing(self, monkeypatch):
+        cli = self._fresh_cli()
+        for module in cli.SUBCOMMANDS.values():
+            monkeypatch.delitem(sys.modules, module, raising=False)
+        group = typer.main.get_command(cli.app)
+        ctx = typer.Context(group)
+        assert group.list_commands(ctx) == list(cli.SUBCOMMANDS)
+        assert not any(m in sys.modules for m in cli.SUBCOMMANDS.values())
 
-        fresh = typer.Typer()
-        monkeypatch.setattr(cli, "app", fresh)
-        cli._register_for_argv(["deploy", "--help"])
-        assert fresh.registered_groups == []
-        assert [c.name for c in fresh.registered_commands] == ["deploy"]
+    def test_resolving_one_command_imports_only_its_module(self, monkeypatch):
+        cli = self._fresh_cli()
+        for module in cli.SUBCOMMANDS.values():
+            monkeypatch.delitem(sys.modules, module, raising=False)
+        group = typer.main.get_command(cli.app)
+        ctx = typer.Context(group)
+        command = group.get_command(ctx, "dev")
+        assert command is not None
+        assert command.name == "dev"
+        assert "scripts.dev" in sys.modules
+        assert "demo.app" not in sys.modules
+        assert "scripts.eval.cli" not in sys.modules
 
-    def test_help_registers_everything(self, monkeypatch):
-        from scripts import cli
+    def test_resolved_commands_are_cached(self):
+        cli = self._fresh_cli()
+        group = typer.main.get_command(cli.app)
+        ctx = typer.Context(group)
+        assert group.get_command(ctx, "dev") is group.get_command(ctx, "dev")
 
-        fresh = typer.Typer()
-        monkeypatch.setattr(cli, "app", fresh)
-        cli._register_for_argv(["--help"])
-        assert {g.name for g in fresh.registered_groups} == set(cli._GROUPS)
-        assert {c.name for c in fresh.registered_commands} == set(cli._COMMANDS)
-
-    def test_unknown_first_arg_registers_everything(self, monkeypatch):
-        from scripts import cli
-
-        fresh = typer.Typer()
-        monkeypatch.setattr(cli, "app", fresh)
-        cli._register_for_argv(["nonsense"])
-        assert len(fresh.registered_groups) == len(cli._GROUPS)
+    def test_unknown_command_resolves_to_none(self):
+        cli = self._fresh_cli()
+        group = typer.main.get_command(cli.app)
+        ctx = typer.Context(group)
+        assert group.get_command(ctx, "nonsense") is None
 
 
 def test_project_root_has_pyproject():
