@@ -81,6 +81,15 @@ model:
   # The fp32/FA2 startup-warning argument from the joint revision no longer
   # applies (model_dtype is bfloat16 below), but the FLOP argument alone is
   # sufficient and it is the load-bearing one.
+  # NOTE: setting this under `model:` alone is INERT. `attn_implementation` is
+  # the first entry in scripts/train.py's TRAINING_MODEL_PARAMS, and the merge
+  # at train.py:1314 copies every one of those names from `cfg.training` over
+  # `cfg.model` whenever the training value is non-None. production.yaml sets
+  # flash_attention_2, so this line was silently overridden for the entire
+  # first run -- the shipped checkpoint's config.json reads
+  # "attn_implementation": "flash_attention_2". The override below in the
+  # `training:` block is the one that actually takes effect; both are kept in
+  # sync, and train.py now warns when they disagree.
   attn_implementation: sdpa
 
   # Granite's feature extractor stacks mel pairs (100 Hz -> 50 Hz, 320-dim) and
@@ -190,6 +199,13 @@ model:
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-granite-qwen"
+
+  # The effective attention setting -- see the long argument under
+  # `model.attn_implementation` above. This block wins the TRAINING_MODEL_PARAMS
+  # merge, so overriding production.yaml's flash_attention_2 has to happen here.
+  # It also drops this experiment's reliance on the flash-attn source build,
+  # which the repo documents as routinely failing on RunPod images.
+  attn_implementation: sdpa
 
   # Joint: projector and decoder both train from step 0, matching
   # production.yaml rather than granite_gemma's projector-only recipe.

@@ -1,4 +1,6 @@
 import functools
+import importlib.util
+import inspect
 import json
 import logging
 import math
@@ -533,6 +535,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Language model (frozen)
         self.language_model = self._load_language_model(config, target_dtype)
 
+        # Does the decoder's forward take `skip_logits`? Only liger's patched
+        # `lce_forward` declares it; the stock transformers forward does not.
+        # Resolved once here rather than per-step, and read in forward() to
+        # skip the lm_head projection on eval (see the comment there). Checked
+        # on the class rather than the instance because liger patches the
+        # class. scripts/train.py applies liger BEFORE constructing ASRModel,
+        # so this sees the patched state.
+        self._lm_accepts_skip_logits = (
+            "skip_logits" in inspect.signature(type(self.language_model).forward).parameters
+        )
+
         # Initialize tokenizer and special tokens
         self._init_tokenizer(config)
 
@@ -761,6 +774,28 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
+
+        # Opt into transformers' hub-kernel dispatch. For Qwen3.5 this is the
+        # difference between the gated-delta-net fast path and the torch
+        # reference: 18 of its 24 layers are linear_attention, and upstream
+        # measures "more than an order of magnitude on an H100" for
+        # chunk_gated_delta_rule alone. Numerics are unaffected -- the
+        # decorator's fallback chain (hub -> original package -> torch) picks
+        # an implementation, not a different computation.
+        #
+        # Gated rather than unconditional: the kernels are CUDA binaries, so
+        # asking for them on mps/cpu only buys resolution failures and log
+        # noise. Absent `kernels`, from_pretrained pops the flag and proceeds.
+        if torch.cuda.is_available() and importlib.util.find_spec("kernels") is not None:
+            decoder_kwargs["use_kernels"] = True
+        else:
+            logger.debug(
+                "Hub kernels not requested (cuda=%s, kernels installed=%s) — "
+                "Qwen3.5-style linear-attention layers will use the torch "
+                "reference path.",
+                torch.cuda.is_available(),
+                importlib.util.find_spec("kernels") is not None,
+            )
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
 
@@ -1578,6 +1613,27 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # `return_dict` instead!". Supplying the value means the fallback never
         # runs.
         kwargs.setdefault("return_dict", True)
+
+        # Skip the lm_head projection on eval when liger's fused linear CE is
+        # in play. granite_qwen.yaml claims "the (B,T,248320) logits never
+        # materialize past liger's fused CE" and that "eval memory is ~static
+        # plus one layer" -- that was not true as configured. Trainer injects
+        # `skip_logits=True` only when `args.use_liger_kernel` is set
+        # (trainer.py:3135), and this repo patches liger by hand instead and
+        # leaves that flag False. liger's own default is
+        # `skip_logits = self.training and labels is not None`, and eval runs
+        # under model.eval(), so the full logits tensor was being built: at
+        # B=32, T~320, V=248320 that is ~5.1 GiB in bf16 plus the fp32 upcast
+        # inside the loss.
+        #
+        # Done here rather than via `use_liger_kernel: true` because that flag
+        # makes transformers call apply_liger_kernel(), which *raises* when
+        # liger-kernel is unavailable -- and liger is a linux-only dependency
+        # (pyproject.toml), so it would break every mps_smoke run on a mac.
+        # Gating on the patched signature is equivalent where it matters and
+        # inert everywhere else.
+        if not self.training and labels is not None and self._lm_accepts_skip_logits:
+            kwargs.setdefault("skip_logits", True)
 
         return self.language_model(
             attention_mask=attention_mask,

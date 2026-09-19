@@ -1606,6 +1606,27 @@ files = [
 ]
 
 [[package]]
+name = "dnspython"
+version = "2.8.0"
+description = "DNS toolkit"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "dnspython-2.8.0-py3-none-any.whl", hash = "sha256:01d9bbc4a2d76bf0db7c1f729812ded6d912bd318d3b1cf81d30c0f845dbf3af"},
+    {file = "dnspython-2.8.0.tar.gz", hash = "sha256:181d3c6996452cb1189c4046c61599b84a5a86e099562ffde77d26984ff26d0f"},
+]
+
+[package.extras]
+dev = ["black (>=25.1.0)", "coverage (>=7.0)", "flake8 (>=7)", "hypercorn (>=0.17.0)", "mypy (>=1.17)", "pylint (>=3)", "pytest (>=8.4)", "pytest-cov (>=6.2.0)", "quart-trio (>=0.12.0)", "sphinx (>=8.2.0)", "sphinx-rtd-theme (>=3.0.0)", "twine (>=6.1.0)", "wheel (>=0.45.0)"]
+dnssec = ["cryptography (>=45)"]
+doh = ["h2 (>=4.2.0)", "httpcore (>=1.0.0)", "httpx (>=0.28.0)"]
+doq = ["aioquic (>=1.2.0)"]
+idna = ["idna (>=3.10)"]
+trio = ["trio (>=0.30)"]
+wmi = ["wmi (>=1.5.1) ; platform_system == \"Windows\""]
+
+[[package]]
 name = "docstring-parser"
 version = "0.18.0"
 description = "Parse Python docstrings in reST, Google and Numpydoc format"
@@ -1657,6 +1678,22 @@ websockets = ">=13.0"
 
 [package.extras]
 pyaudio = ["pyaudio (>=0.2.14)"]
+
+[[package]]
+name = "email-validator"
+version = "2.3.0"
+description = "A robust email address syntax and deliverability validation library."
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "email_validator-2.3.0-py3-none-any.whl", hash = "sha256:80f13f623413e6b197ae73bb10bf4eb0908faf509ad8362c5edeb0be7fd450b4"},
+    {file = "email_validator-2.3.0.tar.gz", hash = "sha256:9fc05c37f2f6cf439ff414f8fc46d917929974a82244c20eb10231ba60c54426"},
+]
+
+[package.dependencies]
+dnspython = ">=2.0.0"
+idna = ">=2.0.0"
 
 [[package]]
 name = "en_core_web_sm"
@@ -2284,6 +2321,26 @@ pyyaml = ">=5.1"
 "ruamel.yaml" = ">=0.17.28,<0.19.0"
 
 [[package]]
+name = "id"
+version = "1.6.1"
+description = "A tool for generating OIDC identities"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "id-1.6.1-py3-none-any.whl", hash = "sha256:f5ec41ed2629a508f5d0988eda142e190c9c6da971100612c4de9ad9f9b237ca"},
+    {file = "id-1.6.1.tar.gz", hash = "sha256:d0732d624fb46fd4e7bc4e5152f00214450953b9e772c182c1c22964def1a069"},
+]
+
+[package.dependencies]
+urllib3 = ">=2,<3"
+
+[package.extras]
+dev = ["build", "bump (>=1.3.2)", "id[lint,test]"]
+lint = ["bandit", "interrogate", "mypy", "ruff (<0.14.15)"]
+test = ["coverage[toml]", "pretend", "pytest", "pytest-cov"]
+
+[[package]]
 name = "identify"
 version = "2.6.19"
 description = "File identification library for Python"
@@ -2545,6 +2602,60 @@ cloudpickle = ">=3.0"
 [package.extras]
 docs = ["distributed", "lz4", "matplotlib", "numpy", "numpydoc", "pandas", "psutil", "pydata-sphinx-theme", "sphinx", "sphinx-copybutton", "sphinx-design", "sphinx-gallery", "tqdm"]
 test = ["distributed", "lz4", "memory_profiler", "numpy", "pytest", "pytest-asyncio", "pytest-cov", "pytest-run-parallel", "pytest-timeout", "threadpoolctl"]
+
+[[package]]
+name = "kernels"
+version = "0.17.1"
+description = "Download compute kernels"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "kernels-0.17.1-cp314-cp314t-macosx_10_12_x86_64.whl", hash = "sha256:b48585fb15bfe9d606bb07b650a1c437684c7823a63f985bbd63a64f8f698b26"},
+    {file = "kernels-0.17.1-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:25faa26a99d1bbfd8a0d53307718f447d1a8c735840989f23edaded82c505f32"},
+    {file = "kernels-0.17.1-cp314-cp314t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:5b7ba9f219c02c1dbd3bf3cc17d42ecdccf1ac622a493cd19e8e3b43d1096de8"},
+    {file = "kernels-0.17.1-cp314-cp314t-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:ee622ee06668887948443f5685c3631d108b1361ddb0cc3925d8120bee0eaece"},
+    {file = "kernels-0.17.1-cp314-cp314t-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:d9a1962e2877a9ce328748eacdfc806beab28ce2b0265d9ad82ada9cb9b9b1a8"},
+    {file = "kernels-0.17.1-cp314-cp314t-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:a67b984e38f7f7ffee843258585242b4b26360adc07cc53c9df82ce9357c1506"},
+    {file = "kernels-0.17.1-cp314-cp314t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:4f9fd5ba598df3b832d64e777224292c868a986362120165a52b80896f95ef94"},
+    {file = "kernels-0.17.1-cp314-cp314t-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:ef825c1a905d39001f21aae224ff67a8929150244d3ada555fccb226b4f71b2a"},
+    {file = "kernels-0.17.1-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:9ef506f7052a48a694c6f4ba7dd0b17fad5b6e5f85526d44dcf6e15b799af152"},
+    {file = "kernels-0.17.1-cp314-cp314t-musllinux_1_2_armv7l.whl", hash = "sha256:1babfce935ddbe24547a2aba4a719755a51cb65d8430658ab7e4bf1bc8acddb2"},
+    {file = "kernels-0.17.1-cp314-cp314t-musllinux_1_2_i686.whl", hash = "sha256:547b5beadb2e8b9b201c107421b6a8ac6efe85c415743914585277d4ffe2e05b"},
+    {file = "kernels-0.17.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:117b77f83c5b5b7d095d7c8d636af8ddae33739ede67ac2f1b668241d465946c"},
+    {file = "kernels-0.17.1-cp314-cp314t-win32.whl", hash = "sha256:54268ac25fc17826b782b2ee6da8598d77362224edc10244b67caac5c6d671da"},
+    {file = "kernels-0.17.1-cp314-cp314t-win_amd64.whl", hash = "sha256:87b9b2bb9d334a69db655f231d9c3561dac36e72c3ec429c5b023da0e7008623"},
+    {file = "kernels-0.17.1-cp38-abi3-macosx_10_12_x86_64.whl", hash = "sha256:f70a1f9f7090f5f550f9129e160ba9b613db00828818046c8e37cd3bca45b38a"},
+    {file = "kernels-0.17.1-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:68600793e975148a05ffa78e53101d4d06a02a630d9e0d58db1ebd66016c3495"},
+    {file = "kernels-0.17.1-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:e3d3b2e297d1eb98c49cff56dc7cdd9bf6df1c7104fe703896372b3ad0327c42"},
+    {file = "kernels-0.17.1-cp38-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:4f4b345553065ffa391e52f35455aa5900be1ecda0c37a25bfbde8d3e571dc66"},
+    {file = "kernels-0.17.1-cp38-abi3-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:3ec9bf40d98aeda00c66bfbcb1fc1a5367d6e47956ffc7ae3a2858c609cb4900"},
+    {file = "kernels-0.17.1-cp38-abi3-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:74ea54ba4d9387c5919e7364b737852269a8da17fb5351c179302a97a6a0ab46"},
+    {file = "kernels-0.17.1-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:dba64d56593f6c13b2391df37879f5621561819287fbdc9e1a7aceb3c320b76c"},
+    {file = "kernels-0.17.1-cp38-abi3-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:8ecfaec3103f144f5d8f2a6caa4a3fe589c4188dc1f8da549c7c0459d960f3e9"},
+    {file = "kernels-0.17.1-cp38-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:66aacfb8354819e12564fbd9a529ab28dcc97921327a5f48cb3f7a450ec25261"},
+    {file = "kernels-0.17.1-cp38-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:bde1ef650474a1c66f884e9b8e670ce81224aca4e97c822dfeb754f5aad36b19"},
+    {file = "kernels-0.17.1-cp38-abi3-musllinux_1_2_i686.whl", hash = "sha256:7c813124856a4bd2295281812d664bdc3babfcd84f1bc5776861e65f41801ca2"},
+    {file = "kernels-0.17.1-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:4a7c42bfddff033f8282ef448207bad3cd90642999e7b879c5081515d69925fc"},
+    {file = "kernels-0.17.1-cp38-abi3-win32.whl", hash = "sha256:a79fc56dc73528db2ec9c3c72721b5cec3b822d33ada2bf1d96abd7f15056f41"},
+    {file = "kernels-0.17.1-cp38-abi3-win_amd64.whl", hash = "sha256:cacef777c2cb40fdac23600c2b17394bb0b741ddab2966a1394c525eb01f3695"},
+    {file = "kernels-0.17.1-cp38-abi3-win_arm64.whl", hash = "sha256:5595bc76b88f656b1cff787f2d39be86606682b225e36093d6c22ef632a17268"},
+    {file = "kernels-0.17.1.tar.gz", hash = "sha256:76281502f5e13b0fe97154c019a7989bcea797e05428b80c461367b827151b71"},
+]
+
+[package.dependencies]
+huggingface-hub = ">=1.10.0"
+packaging = ">=20.0"
+pyyaml = ">=6"
+sigstore = ">=4,<5"
+tomlkit = ">=0.13.3"
+
+[package.extras]
+benchmark = ["matplotlib (>=3.7.0)", "numpy (>=2.0.2)", "tabulate (>=0.9.0)", "torch"]
+curated = ["apache-tvm-ffi (>=0.1.9,<0.2.0)", "einops", "nvidia-cutlass-dsl"]
+curated-xpu = ["apache-tvm-ffi (>=0.1.9,<0.2.0)", "einops"]
+docs = ["hf-doc-builder"]
+torch = ["torch"]
 
 [[package]]
 name = "lazy-loader"
@@ -5070,6 +5181,18 @@ files = [
 ]
 
 [[package]]
+name = "pyasn1"
+version = "0.6.4"
+description = "Pure-Python implementation of ASN.1 types and DER/BER/CER codecs (X.208)"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "pyasn1-0.6.4-py3-none-any.whl", hash = "sha256:deda9277cfd454080ec40b207fb6df82206a3a2688735233cdcd8d3d565f088b"},
+    {file = "pyasn1-0.6.4.tar.gz", hash = "sha256:9c447d8431c947fe4c8febc4ed9e760bc29011a5b01e5c74b67025bd9fb8ce81"},
+]
+
+[[package]]
 name = "pyaudio"
 version = "0.2.14"
 description = "Cross-platform audio I/O with PortAudio"
@@ -5123,6 +5246,7 @@ files = [
 
 [package.dependencies]
 annotated-types = ">=0.6.0"
+email-validator = {version = ">=2.0.0", optional = true, markers = "extra == \"email\""}
 pydantic-core = "2.46.5"
 typing-extensions = ">=4.14.1"
 typing-inspection = ">=0.4.2"
@@ -5293,6 +5417,21 @@ markers = {hybrid-kernels = "sys_platform == \"linux\""}
 windows-terminal = ["colorama (>=0.4.6)"]
 
 [[package]]
+name = "pyjwt"
+version = "2.14.0"
+description = "JSON Web Token implementation in Python"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "pyjwt-2.14.0-py3-none-any.whl", hash = "sha256:ad0cef71c756a56e74863c2919cf0985f72decbcfcb550ee2f422e7c62b5eedc"},
+    {file = "pyjwt-2.14.0.tar.gz", hash = "sha256:77283c83fb56ecf566a886c757a714bc83668e38156de2cce8263302f42e0b86"},
+]
+
+[package.extras]
+crypto = ["cryptography (>=3.4.0)"]
+
+[[package]]
 name = "pyloudnorm"
 version = "0.1.1"
 description = "Implementation of ITU-R BS.1770-4 loudness algorithm in Python."
@@ -5420,6 +5559,26 @@ files = [
 [package.dependencies]
 pyobjc-core = ">=12.2.2"
 pyobjc-framework-Cocoa = ">=12.2.2"
+
+[[package]]
+name = "pyopenssl"
+version = "26.4.0"
+description = "Python wrapper module around the OpenSSL library"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "pyopenssl-26.4.0-py3-none-any.whl", hash = "sha256:f0eb0cb2d581d3ad2b9c489468485e7f2ab6727d08401bcf9d824c3caddf3c1c"},
+    {file = "pyopenssl-26.4.0.tar.gz", hash = "sha256:28dfcce0162b9211413e26dfbfdf1d24317fbeba18fc93c12400a1856b2a0bc7"},
+]
+
+[package.dependencies]
+cryptography = ">=49.0.0,<51"
+typing-extensions = {version = ">=4.9", markers = "python_version < \"3.13\""}
+
+[package.extras]
+docs = ["sphinx (!=5.2.0,!=5.2.0.post0,!=7.2.5)", "sphinx_rtd_theme"]
+test = ["pretend", "pytest (>=3.0.1)", "pytest-rerunfailures"]
 
 [[package]]
 name = "pyright"
@@ -6016,6 +6175,50 @@ docs = ["numpydoc", "sphinx (!=1.3.1)"]
 tests = ["pytest (<8)", "pytest-cov", "scipy (>=1.1)"]
 
 [[package]]
+name = "rfc3161-client"
+version = "1.0.9"
+description = ""
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "rfc3161_client-1.0.9-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:5e619d7e28ffa3a46685923e6d6ba4ce2e74cb09a41c77995a0702cc1a533bc4"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:a7004edfbf1bb7ec7801978a39fa7a7fe385ca59673df90d7578079b6eba3b24"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7b703b233dbee7228d117d5f1c118363c61d523fa6f018c9217c79e3c6684f86"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:d3cbf1991b6f3457efcb25e1d31179cac556112e6d3e65ec9e0fd70c6e9af90d"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:614da494c6f8850c5d6d98c23bc291a4e4dbf2c3c9082d9907fa156f9e4a75c6"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fac3f440a507555e684dc5daba75e33dc08f0f45fdefa48448f19001233a6b21"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:0ac247d5aa22f3514d1e284bdc547d2ad5f101e1e5d7f6db25db2ab3a0c59f06"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:03be7ac7919c7f4c566076b07773b81b1f1b28d447fa91c6960fb5f82fac5bc1"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-musllinux_1_2_i686.whl", hash = "sha256:8208999e94e1252e3f5f748f5efe59d3b9c308d04c7626be1becfbf3236c9de4"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:d4cf92f0e784ff02ff5ea1c574f8521f30953dc178092424126dbd8348034f93"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-win32.whl", hash = "sha256:4d33f5aaec2974239e1c62a79a6fcf32506b09095482377a8b5be3a00fa67dfb"},
+    {file = "rfc3161_client-1.0.9-cp39-abi3-win_amd64.whl", hash = "sha256:908f6a775da4bdce1d39f825a4431f389542696078ef3e4ed911a068bcaf1792"},
+    {file = "rfc3161_client-1.0.9.tar.gz", hash = "sha256:66997415086d2c6e5d57a2d315157b32a9c3f4f1312877ca8eb55e2e0ddf8ce4"},
+]
+
+[package.dependencies]
+cryptography = ">=43"
+
+[[package]]
+name = "rfc8785"
+version = "0.1.4"
+description = "A pure-Python implementation of RFC 8785 (JSON Canonicalization Scheme)"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "rfc8785-0.1.4-py3-none-any.whl", hash = "sha256:520d690b448ecf0703691c76e1a34a24ddcd4fc5bc41d589cb7c58ec651bcd48"},
+    {file = "rfc8785-0.1.4.tar.gz", hash = "sha256:e545841329fe0eee4f6a3b44e7034343100c12b4ec566dc06ca9735681deb4da"},
+]
+
+[package.extras]
+dev = ["build", "rfc8785[doc,lint,test]"]
+doc = ["pdoc"]
+lint = ["interrogate", "mypy (>=1.0)", "ruff (>=0.3,<1.0)"]
+test = ["coverage", "pytest", "pytest-cov"]
+
+[[package]]
 name = "rich"
 version = "15.0.0"
 description = "Render rich text, tables, progress bars, syntax highlighting, markdown and more to the terminal"
@@ -6352,6 +6555,29 @@ doc = ["intersphinx_registry", "jupyterlite-pyodide-kernel", "jupyterlite-sphinx
 test = ["Cython", "array-api-strict (>=2.3.1)", "asv", "gmpy2", "hypothesis (>=6.30)", "meson", "mpmath", "ninja ; sys_platform != \"emscripten\"", "pooch", "pytest (>=8.0.0)", "pytest-cov", "pytest-timeout", "pytest-xdist", "scikit-umfpack", "scipy-doctest (>=2.0.0)", "threadpoolctl"]
 
 [[package]]
+name = "securesystemslib"
+version = "1.5.1"
+description = "A library that provides cryptographic and general-purpose routines for Secure Systems Lab projects at NYU"
+optional = false
+python-versions = "~=3.10"
+groups = ["main"]
+files = [
+    {file = "securesystemslib-1.5.1-py3-none-any.whl", hash = "sha256:ada8bdf817da29ece4ba91654f6a162ce7cfbadbc3ae3f840f7313f9d22675de"},
+    {file = "securesystemslib-1.5.1.tar.gz", hash = "sha256:4b8d00abd93707ead10b69eb2b8582376a1364de3b0a71077de534c2ef4985e0"},
+]
+
+[package.extras]
+awskms = ["boto3", "botocore", "cryptography (>=40.0.0)"]
+azurekms = ["azure-identity", "azure-keyvault-keys", "cryptography (>=40.0.0)"]
+crypto = ["cryptography (>=48.0.0)"]
+gcpkms = ["cryptography (>=48.0.0)", "google-cloud-kms (>=3.11.0)"]
+hsm = ["cryptography (>=40.0.0)", "python-pkcs11"]
+pyspx = ["pyspx (>=0.5.0)"]
+sigstore = ["sigstore (>=4,<5)"]
+tkey = ["cryptography (>=48.0.0)", "keylet (>=0.6.0)"]
+vault = ["cryptography (>=40.0.0)", "hvac"]
+
+[[package]]
 name = "semantic-version"
 version = "2.10.0"
 description = "A library implementing the 'SemVer' scheme."
@@ -6473,6 +6699,71 @@ files = [
     {file = "shellingham-1.5.4.tar.gz", hash = "sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de"},
 ]
 markers = {hybrid-kernels = "sys_platform == \"linux\""}
+
+[[package]]
+name = "sigstore"
+version = "4.5.0"
+description = "A tool for signing Python package distributions"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "sigstore-4.5.0-py3-none-any.whl", hash = "sha256:f045b207f2e12605cf775ec38e89c5eda625d71ffa7830477db65e47ec2bc8b2"},
+    {file = "sigstore-4.5.0.tar.gz", hash = "sha256:020d3e07f622b2916bf453e66ff6ff0711e1fdc5ab69e8bd8902f71d9fcb316f"},
+]
+
+[package.dependencies]
+cryptography = ">=42"
+id = ">=1.1.0"
+platformdirs = ">=4.2,<5.0"
+pyasn1 = ">=0.6,<1.0"
+pydantic = ">=2,<3"
+pyjwt = ">=2.1"
+pyOpenSSL = ">=23.0.0"
+requests = "*"
+rfc3161-client = ">=1.0.3,<1.1.0"
+rfc8785 = ">=0.1.2,<0.2.0"
+rich = ">=13,<16"
+sigstore-models = "0.0.6"
+sigstore-rekor-types = "0.0.18"
+tuf = ">=6,<8"
+
+[[package]]
+name = "sigstore-models"
+version = "0.0.6"
+description = "Pydantic based models for Sigstore's protobuf specifications"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "sigstore_models-0.0.6-py3-none-any.whl", hash = "sha256:5201a68f4d7d0f8bec1e2f4378eb646b084c52609a4e31db8c385095fff68b2e"},
+    {file = "sigstore_models-0.0.6.tar.gz", hash = "sha256:c766c09470c2a7e8a4a333c893f07e2001c56a3ff1757b1a246119f53169a849"},
+]
+
+[package.dependencies]
+pydantic = ">=2.12"
+typing-extensions = ">=4.14.1"
+
+[[package]]
+name = "sigstore-rekor-types"
+version = "0.0.18"
+description = "Python models for Rekor's API types"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "sigstore_rekor_types-0.0.18-py3-none-any.whl", hash = "sha256:b62bf38c5b1a62bc0d7fe0ee51a0709e49311d137c7880c329882a8f4b2d1d78"},
+    {file = "sigstore_rekor_types-0.0.18.tar.gz", hash = "sha256:19aef25433218ebf9975a1e8b523cc84aaf3cd395ad39a30523b083ea7917ec5"},
+]
+
+[package.dependencies]
+pydantic = {version = ">=2,<3", extras = ["email"]}
+
+[package.extras]
+codegen = ["datamodel-code-generator (>=0.25.2)", "sigstore-rekor-types[lint]"]
+dev = ["build", "sigstore-rekor-types[codegen,doc,lint]"]
+doc = ["pdoc (>=14.2,<16.0)"]
+lint = ["mypy (>=1.0)", "ruff (<0.7.5)"]
 
 [[package]]
 name = "six"
@@ -7469,6 +7760,22 @@ files = [
 nltk = "*"
 
 [[package]]
+name = "tuf"
+version = "7.0.1"
+description = "A secure updater framework for Python"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "tuf-7.0.1-py3-none-any.whl", hash = "sha256:d30434bda6e079ab303fb30d1b3006d939a10ca34783b1573d61cd9b802fa45c"},
+    {file = "tuf-7.0.1.tar.gz", hash = "sha256:5ada1db78da3518fa851e28588f4b2249b8662a28ae528f54afa2a1de541fb31"},
+]
+
+[package.dependencies]
+securesystemslib = ">=1.0,<2.0"
+urllib3 = ">=2.0,<3.0"
+
+[[package]]
 name = "typer"
 version = "0.27.2"
 description = "Typer, build great CLIs. Easy to code. Based on Python type hints."
@@ -8287,4 +8594,4 @@ local = ["pyaudio"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.13"
-content-hash = "f803f95d5819f617299231ea0d6426f894b8e4f90d0951244670ed9855bf1f43"
+content-hash = "92a95f8e6047a90433a11a1256497970a2c12d566e3cc71019db29f6c592f223"

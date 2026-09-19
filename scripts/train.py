@@ -1287,6 +1287,23 @@ def main(cfg: DictConfig) -> None:
         val = cfg.training.get(param)
         if val is None:
             continue
+        # Warn when both blocks set the same key. `training:` silently wins, so
+        # a `model:`-block value is dead config -- which is exactly how
+        # granite_qwen.yaml's `attn_implementation: sdpa` was overridden by
+        # production.yaml's flash_attention_2 for a full 33k-step run, with 15
+        # lines of FLOP arithmetic above it describing a setting the run never
+        # used. Loud rather than silent; the merge itself is unchanged.
+        model_val = model_config_dict.get(param)
+        if model_val is not None and model_val != val:
+            logger.warning(
+                "Config conflict on %r: model=%r is overridden by training=%r. "
+                "`training:` wins the TRAINING_MODEL_PARAMS merge -- set the "
+                "value you want under `training:`, and keep `model:` in sync or "
+                "remove it.",
+                param,
+                model_val,
+                val,
+            )
         # Strip OmegaConf wrappers so list/dict params (e.g. lora_target_modules)
         # land in ASRConfig as plain Python types — otherwise config.save_pretrained
         # hits a TypeError when json.dumps walks a ListConfig at checkpoint time.
