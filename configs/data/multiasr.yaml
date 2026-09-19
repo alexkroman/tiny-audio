@@ -46,42 +46,52 @@
 # in the mix and the YouTube-monologue register didn't earn its 6.3%
 # mix share. If re-introducing later, filter by dnsmos > 3.0 + Scribe/
 # Emilia transcript agreement to suppress the label-noise tail.
-# Peoples: `clean_sa` only (311K). Both `_sa` configs apply the
-# sentence-alignment filter on top of the corpus-level CER ≤ 20%
-# bound, so each segment's audio span matches its label span; the
-# prior `clean` (1.5M, NOT sentence-aligned) revision regressed
-# training because per-segment audio/text drift on what became the
-# largest corpus poisoned the gradient. `dirty_sa` (602K, noisier
-# `dirty` source tier with uncontrolled mics / older archival audio /
-# varying SNR) was dropped after observing its share of the
-# supervision signal was net-negative for eval — at 12% of the mix
-# its label-quality and acoustic-conditions tradeoff didn't earn the
-# slot relative to expanding cleaner-label corpora. Peoples eval refs
-# are human-transcribed (paid native-English transcribers per the
-# MLCommons dataset card), so the eval signal itself is clean. No
-# dataset is repeated — every source runs at natural train-split
-# size, so each example is seen at most once per epoch.
+# Peoples: REMOVED FROM TRAINING 2026-09-18 (kept as an eval set).
+# CORRECTION to what this header used to claim: it asserted that "both
+# `_sa` configs apply the sentence-alignment filter ... so each segment's
+# audio span matches its label span." That is false. The `_sa` filter
+# constrains alignment QUALITY, not segment boundaries — `clean_sa`
+# ships fixed ~15s grid windows in which 99.3% of rows begin mid-stream
+# and the word straddling each seam is lost. The full measurement and
+# the removal rationale are at the (now commented-out) clean_sa entry
+# below. `dirty_sa` (602K) had been dropped earlier for label quality.
+# Peoples eval refs ARE clean — test/validation are utterance-bounded,
+# not grid-cut (median 4.2s vs train's 14.8s), and are human-transcribed
+# per the MLCommons card. No dataset is repeated — every source runs at
+# natural train-split size, so each example is seen at most once per
+# epoch.
 #
 # Two columns: the raw load_dataset() row count (pre-filter), and the
 # count after the DataCollator drops (audio <0.8s, >30s, empty-norm
 # label) plus the CV down_votes filter. Audit (2026-05-15, 200–500
 # samples streamed per dataset) is the source for the loss-rate column;
 # percentages are of the post-filter total.
+# Shares below are AFTER two 2026-09-18 removals: Peoples clean_sa (311,000 /
+# 10.1%, grid-cut labels) and Earnings22 (~11,000 / 0.4%, eval contamination).
+# Every remaining source's share rose because the denominator shrank; no cap
+# changed. TEDLIUM's effective count also drops by roughly half from the new
+# edge-`<unk>` filter in scripts/train.py (30.4% of its rows start with a
+# stripped `<unk>`, 21.9% end with one), which is NOT yet reflected below --
+# re-measure on the next run.
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy med (cap 600K)│ ~1,067,000│   600,000 │   19.4% │
-# │ CommonVoice 17 en (600K) │ ~1,100,000│   600,000 │   19.4% │
-# │ Gigaspeech M (cap 600K)  │   ~910,000│   600,000 │   19.4% │
-# │ SPGISpeech M             │   385,000 │   385,000 │   12.5% │
-# │ Peoples clean_sa         │   311,000 │   311,000 │   10.1% │
-# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    8.7% │
-# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    5.3% │
-# │ AMI IHM                  │   108,502 │   ~79,000 │    2.6% │
-# │ AMI SDM                  │   107,319 │   ~67,000 │    2.2% │
-# │ Earnings22 train         │    11,450 │   ~11,000 │    0.4% │
-# └──────────────────────────┴           ┴           ┴         ┘
-# Total raw: ~4,436,271  →  Total effective: ~3,086,000 (-30.4%)
+# │ LibriHeavy med (cap 600K)│ ~1,067,000│   600,000 │   21.7% │
+# │ CommonVoice 17 en (600K) │ ~1,100,000│   600,000 │   21.7% │
+# │ Gigaspeech M (cap 600K)  │   ~910,000│   600,000 │   21.7% │
+# │ SPGISpeech M             │   385,000 │   385,000 │   13.9% │
+# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    9.7% │
+# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    6.0% │
+# │ AMI IHM                  │   108,502 │   ~79,000 │    2.9% │
+# │ AMI SDM                  │   107,319 │   ~67,000 │    2.4% │
+# │ (Peoples clean_sa)       │   REMOVED │         0 │    0.0% │
+# │ (Earnings22)             │   REMOVED │         0 │    0.0% │
+# └──────────────────────────┴───────────┴───────────┴─────────┘
+# Total raw: ~4,113,821  →  Total effective: ~2,764,000
+# 8 training sources. AMI combined is 5.3% and is still the entire
+# conversational share; the mix has zero 8 kHz telephony. Finance register is
+# now carried by SPGISpeech alone (13.9%), which has professionally
+# transcribed labels and no overlap with any eval split.
 #
 # SWITCHBOARD REMOVED (2026-09-17). `hhoangphuoc/switchboard` returns 404 /
 # RepositoryNotFoundError -- the repo is gone from the Hub, which is the
@@ -294,16 +304,90 @@ datasets:
   # tail did NOT improve Peoples WER in either cap-1M or uncapped runs
   # (both ~25), so the volume bet wasn't paying off on the source
   # distribution anyway.
-  - path: MLCommons/peoples_speech
-    name: clean_sa
-    audio_column: audio
-    text_column: text
-    task: transcribe
-    # Lowercase, no punctuation.
-    text_case: mono
-    text_punct: false
-    train_splits: [train]
-    eval_splits: []
+  # PEOPLES clean_sa REMOVED FROM TRAINING (2026-09-18). It was 311K rows /
+  # 10.1% of the mix, the 5th-largest source. Kept as an EVAL set (the
+  # `validation` entry below is unaffected).
+  #
+  # The claim in the header of this file -- that both `_sa` configs apply a
+  # sentence-alignment filter "so each segment's audio span matches its label
+  # span" -- is WRONG. The `_sa` filter constrains alignment *quality*, not
+  # segment boundaries. What `clean_sa` actually ships, measured by streaming
+  # it:
+  #   - 85.8-95.7% of rows are fixed ~15s windows (14.0-15.1s), cut on a grid
+  #     rather than on sentence boundaries.
+  #   - Row ids are literal chunk indices off one source mp3
+  #     (`..._DOT_mp3_00000.flac`, `_00001.flac`, ...).
+  #   - Only 4 of 600 sampled rows (0.7%) are chunk `00000`. So 99.3% of rows
+  #     begin mid-stream BY CONSTRUCTION -- there is no clean subset to filter
+  #     down to.
+  #   - Labels do not join across seams; the word straddling each cut is lost.
+  #     Label density is 2.773 words/sec of audio against 3.016 for the
+  #     non-grid-cut eval segments, an estimated ~8% label shortfall (that
+  #     figure is confounded by register differences, so treat it as an
+  #     estimate, but the direction is unambiguous).
+  #
+  # The TEST and VALIDATION splits do NOT share this defect -- checked
+  # explicitly, because if they did the regression would be a broken benchmark
+  # rather than a model problem:
+  #            duration median   % in 14.0-15.1s band   label density
+  #   train          14.77s              90.7%            2.708 w/s
+  #   test            4.21s               0.3%            3.016 w/s
+  #   validation      4.06s               1.3%            2.831 w/s
+  # Train is grid-cut; test and validation are utterance-bounded. So the eval
+  # references are clean and the deficit is real. It also means the recipe was
+  # training on 15s grid chunks and evaluating on short utterances -- a
+  # duration/segmentation distribution mismatch layered on top of the label
+  # damage, which is why the onset prior cost so much at eval time.
+  #
+  # Why that is harmful rather than merely noisy: for a large share of these
+  # rows the loss-minimising behaviour is "do not transcribe the speech at
+  # t=0", and the clips also start at sample 0 with no lead-in, so onset
+  # position became a learnable cue for "skip the first word". Measured on the
+  # Peoples eval: the model dropped >=1 leading reference word on 52/100
+  # samples (92 words = 5.59 WER pts) against 22 samples / 45 words for
+  # universal-3-5-pro; that 2.86-point gap exceeds the entire +2.61 deficit,
+  # and stripping leading/trailing deletion runs made the two systems tie.
+  #
+  # The decisive argument for removal rather than mitigation: training on
+  # these 311K rows did not buy Peoples accuracy. The frozen Granite encoder's
+  # own CTC head -- which never saw this data -- scores 18.53 on the Peoples
+  # eval against our full stack's 22.05. We paid 10.1% of the mix to be 3.5
+  # WER points WORSE on the corpus we were buying. Peoples was also the single
+  # largest error pool in the whole eval suite (24.3% of all our word errors)
+  # and the only statistically significant regression (+3.46 at n=500,
+  # CI [+2.45, +4.43]).
+  #
+  # Alternatives considered and rejected:
+  #   - Filter to clean rows: impossible, 99.3% of rows are mid-stream.
+  #   - Use another Hub mirror: every mirror inherits the upstream windowing.
+  #     Verified on `ylacombe/peoples_speech_repunc` -- identical chunk-index
+  #     ids, identical ~15s durations, identical failed seams. It does add a
+  #     `repunc_text` field, but re-punctuating does not re-segment.
+  #   - Re-segment ourselves: the right long-term fix and still worth doing.
+  #     `MLCommons/unsupervised_peoples_speech` carries the raw long-form
+  #     audio, so forced-aligning the full transcripts and re-splitting on
+  #     sentence boundaries is possible -- but that is an alignment pipeline,
+  #     not a config change. Revisit if the register is missed.
+  #
+  # KNOWN RISK, stated plainly: this file's own history records that cutting
+  # exposure on a corpus regressed cross-eval performance even on unrelated
+  # evals, by removing cross-corpus regularization. Dropping 10.1% of the mix
+  # may cost something on the conversational evals that no longer have Peoples
+  # in the gradient. Run this as a SINGLE-VARIABLE change and compare AMI /
+  # AMI-SDM / Loquacious against the previous run before concluding. If the
+  # regularization loss is real, the answer is re-segmentation, not reinstating
+  # the grid-cut labels.
+  #
+  # Paired mitigation kept in place: _EDGE_CONTENT_TAG_RE in scripts/train.py
+  # drops TEDLIUM rows whose label starts or ends with a stripped `<unk>`
+  # (30.4% / 21.9% of TEDLIUM rows) -- a second, independent source of the
+  # same onset-truncation prior.
+  #
+  # A lead-in-jitter augmentation was also written and then removed: with
+  # Peoples gone there is no grid-cut source left to justify it. Gigaspeech,
+  # the other long-form source, is utterance-segmented (median 3.00s, 0.2% of
+  # rows in the 14.0-15.1s band, median 126s gap between segments), so every
+  # segment already starts at a real speech onset.
 
   # People's Speech validation split — MLCommons ships dev/test as separate
   # configs (not splits inside clean_sa). Validation is human-transcribed
@@ -375,8 +459,31 @@ datasets:
     text_punct: true
     train_splits: [train]
     eval_splits: []
-    # Big-3 cap. M's natural size (~910K) is closest to the cap of the
-    # three, so this trims the least.
+    # Exclude the audiobook tier. Measured 2026-09-18 via the HF
+    # datasets-server `statistics` endpoint:
+    #             audiobook   youtube   podcast
+    #   m/train     26.2%      42.1%     31.7%   (62,770-row partial scan)
+    #   dev/valid    0.0%      55.3%     44.7%   (FULL 6,750-row scan)
+    # The split we are scored on contains zero audiobook, yet a quarter of
+    # the Gigaspeech rows we train on are audiobook -- a register that is 0%
+    # of the eval, and one the mix already over-supplies via 600K LibriHeavy
+    # audiobook rows.
+    #
+    # This is free, which is why it is worth doing even though the Gigaspeech
+    # WER gap is not statistically significant (+0.41 at n=500, CI
+    # [-0.04, +0.85]). Non-audiobook GS M is ~672K rows, still above the
+    # 600K target_samples cap below, so row count, mix share and download are
+    # all UNCHANGED -- ~157K out-of-register rows are swapped for in-register
+    # ones rather than removed. There is no data-volume cost to weigh.
+    #
+    # Must be applied before the keep_cols pruning in _prepare_split, which
+    # is why the filter is declared here and executed early; see
+    # `exclude_where` in scripts/train.py.
+    exclude_where:
+      column: source
+      values: [audiobook]
+    # Big-3 cap. M's natural size (~910K, ~672K after the audiobook
+    # exclusion) is closest to the cap of the three, so this trims the least.
     target_samples: 600000
 
   # Gigaspeech dev split — official repo ships dev/test as separate configs
@@ -438,15 +545,38 @@ datasets:
   # 5-15s typical, well under the 30s Whisper window. text_column is
   # `sentence` matching the eval pipeline's field for direct format
   # parity.
-  - path: sanchit-gandhi/earnings22_robust_split
-    audio_column: audio
-    text_column: sentence
-    task: transcribe
-    # Cased+punct. Fragment rows with no capital would fool the heuristic.
-    text_case: cased
-    text_punct: true
-    train_splits: [train]
-    eval_splits: []
+  # EARNINGS22 REMOVED FROM TRAINING (2026-09-18) -- EVAL CONTAMINATION.
+  # It was 11,450 raw / ~11,000 effective / 0.4% of the mix.
+  #
+  # `sanchit-gandhi/earnings22_robust_split` is NOT call-disjoint, despite the
+  # note above claiming "the rows are disjoint". Measured by streaming 3,000
+  # train and 1,500 test rows: **124 of 124 sampled test `source_id`s also
+  # appear in the train sample -- 100%**. The re-split is a segment-level
+  # random shuffle over a flat pool of ~125 calls, so every call in the test
+  # set has sibling segments -- same speakers, same acoustics, same company
+  # names and tickers -- in training. The original claim is true at the ROW
+  # level and false at the CALL/SESSION level, which is the level that matters.
+  #
+  # `scripts/eval/datasets.py` scores the test split of this same repo, so the
+  # Earnings22 eval number was measuring memorisation. The scale of the
+  # distortion: our 5.88 WER against AssemblyAI universal-3-5-pro's 10.90 was
+  # the single largest apparent win in the suite and one of only three
+  # statistically significant results -- and the baseline had never seen the
+  # data. Removing it from the POOLED comparison moves us from a significant
+  # overall win (-0.77, CI [-1.23, -0.34]) to a statistical tie
+  # (-0.39, CI [-0.81, +0.02]).
+  #
+  # Dropping it from training rather than re-splitting: a call-disjoint
+  # re-split is possible (group by `source_id`, hold out ~20% of calls) but
+  # buys ~0.4% of the mix while adding a bespoke split to maintain. The eval
+  # is the valuable half -- Earnings22 is a standard benchmark and the only
+  # accented multi-dialect earnings-call set in the suite -- so keep scoring
+  # it and stop training on it. SPGISpeech M (385K, 13.9%) already carries the
+  # finance register with professionally-transcribed labels.
+  #
+  # Every other eval corpus here uses canonical speaker-disjoint benchmark
+  # splits; Earnings22 was the only custom re-split and the only contaminated
+  # one. Checked, not assumed.
 
   # VoxPopuli `en` (facebook, natural ~168K / ~543hr). European Parliament
   # L2-accented English read by parliamentarians — restores the VP

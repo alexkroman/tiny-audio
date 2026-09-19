@@ -3,7 +3,7 @@ applied at training time in DataCollator._build_sample.
 
 After the Ultravox-style normalizer rewrite the pipeline is:
   ftfy + NFKC → Gigaspeech punct-tag → marker strip → TEDLIUM bracket strip →
-  percent canon → whitespace collapse → conditional truecase
+  per-cent spelling canon → whitespace collapse → conditional truecase
 
 Tests below capture both the marker-stripping correctness (deterministic)
 and the truecase output (which depends on the truecase library's NLTK-backed
@@ -14,20 +14,27 @@ values shift, update with `python -c "from scripts.train import _normalize_label
 
 import pytest
 
-from scripts.train import _normalize_label
+from scripts.train import _has_edge_content_tag, _normalize_label
 
 
 class TestPercentCanonicalization:
-    def test_percent_symbol_becomes_word(self):
+    """The `%` character is PRESERVED. A prior revision rewrote it to
+    " percent", which destroyed `%` in 100% of training targets and was the
+    measured cause of ~93% of a 66%-vs-94% raw-text ITN gap. Removing it is
+    WER-neutral: Whisper's EnglishTextNormalizer maps "105 percent" and
+    "105%" to the same string on both reference and hypothesis.
+    """
+
+    def test_percent_symbol_is_preserved(self):
         # Lowercase input → truecase fires → sentence-initial cap.
-        assert _normalize_label("we grew 25%") == "We grew 25 percent"
+        assert _normalize_label("we grew 25%") == "We grew 25%"
 
     def test_percent_symbol_mid_sentence(self):
         # Truecase capitalizes acronym-shaped tokens like "q2" → "Q2".
-        assert _normalize_label("a 25% margin in q2") == "A 25 percent margin in Q2"
+        assert _normalize_label("a 25% margin in q2") == "A 25% margin in Q2"
 
     def test_decimal_percent(self):
-        assert _normalize_label("decreasing 0.4% quarter") == "Decreasing 0.4 percent quarter"
+        assert _normalize_label("decreasing 0.4% quarter") == "Decreasing 0.4% quarter"
 
     def test_per_cent_two_word_form(self):
         assert _normalize_label("we grew 25 per cent") == "We grew 25 percent"
@@ -102,13 +109,14 @@ class TestGigaspeechEdgeCases:
 
 class TestCombinedNormalization:
     def test_percent_and_gigaspeech_marker(self):
-        # Mixed case after percent insertion (lowercase 'percent' appended to
-        # UPPER text) → upper_frac in (0.05, 0.9) → truecase SKIPPED →
-        # output preserves mixed case as-is.
-        assert _normalize_label("WE GREW 25% <PERIOD>") == "WE GREW 25 percent."
+        # Now that `%` survives, no lowercase "percent" is appended, so the
+        # text stays ALL-CAPS → upper_frac > 0.9 → truecase FIRES. Under the
+        # old rewrite this landed in the mixed-case band and truecase was
+        # skipped, yielding "WE GREW 25 percent.".
+        assert _normalize_label("WE GREW 25% <PERIOD>") == "We grew 25%."
 
     def test_marker_then_percent(self):
-        assert _normalize_label("HELLO <COMMA> WE GREW 25%") == "HELLO, WE GREW 25 percent"
+        assert _normalize_label("HELLO <COMMA> WE GREW 25%") == "Hello, we grew 25%"
 
 
 class TestHygiene:
@@ -138,8 +146,16 @@ class TestHygiene:
 
 
 class TestTedliumNormalization:
-    """TEDLIUM ships <unk> in ~92% of train rows and [...] editorial brackets
-    in ~0.25%. Both stripped; surrounding lowercase prose gets truecased.
+    """TEDLIUM ships <unk> in 60.8% of train rows (measured over 800 streamed
+    rows, 2026-09-18) and [...] editorial brackets in ~0.25%. Both stripped;
+    surrounding lowercase prose gets truecased.
+
+    NOTE: _normalize_label still strips <unk> wherever it appears, and these
+    tests pin that. Rows whose label STARTS or ENDS with <unk> are dropped
+    upstream by the collator (see TestEdgeContentTagFilter and
+    _has_edge_content_tag), because stripping an edge <unk> yields a target
+    missing its first or last spoken word while the audio retains it. So in
+    practice only the mid-sentence case below survives into training.
     """
 
     def test_unk_at_start(self):
@@ -167,6 +183,58 @@ class TestTedliumNormalization:
 
     def test_unk_and_bracket_combined(self):
         assert _normalize_label("<unk> hello [ aside ] world") == "Hello world"
+
+
+class TestEdgeContentTagFilter:
+    """<unk>/<foreign>/<overlap> stand in for spoken words the audio still
+    contains. At the START or END of a label, stripping them supervises
+    onset/offset truncation, which was the measured root cause of this
+    recipe's Peoples Speech regression. The collator drops those rows.
+
+    Non-speech tags (<noise>/<music>/<sil>/<laugh>/<breath>) are NOT
+    content-bearing — no word was uttered — so they must not trigger the drop.
+    Medial content tags also must not trigger it: dropping every <unk> row
+    would remove 60.8% of TEDLIUM, the one dataset where the decoder
+    measurably beats the frozen encoder.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "<unk> i thought i would read poems",
+            "<unk> called dirt",
+            "health <unk>",
+            "washing my mouth out with soap <unk>",
+            "<UNK> case insensitive",
+            "  <unk> leading whitespace before tag",
+            "trailing whitespace after tag <unk>   ",
+            "<foreign> hola there",
+            "and then <overlap>",
+            "<unk> both ends <unk>",
+        ],
+    )
+    def test_edge_content_tag_is_dropped(self, text):
+        assert _has_edge_content_tag(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "hello <unk> world",  # medial — kept
+            "she said <foreign> in reply",  # medial — kept
+            "<noise> hello",  # non-speech at edge — kept
+            "hello <music>",  # non-speech at edge — kept
+            "<sil> quiet then speech",
+            "laughing <laugh> loudly",
+            "she said [ medicine ] and laughed",  # bracket, not a tag
+            "plain text with no tags",
+            "",
+        ],
+    )
+    def test_kept(self, text):
+        assert _has_edge_content_tag(text) is False
+
+    def test_none_is_safe(self):
+        assert _has_edge_content_tag(None) is False
 
 
 class TestEdAccNormalization:

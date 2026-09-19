@@ -18,6 +18,7 @@ number can be argued with rather than trusted blindly.
 
 from __future__ import annotations
 
+import functools
 import json
 from dataclasses import dataclass, field
 
@@ -40,6 +41,17 @@ ENV_DISK_GIB = 12.0
 # the cache_dir, i.e. 2.05x the download size. Charging the download once is
 # how a correctly-sized pod still dies with ENOSPC halfway through prep.
 DATASET_DISK_FACTOR = 2.05
+
+# Past this, emit the network-volume provisioning flow instead of a plain
+# container disk. RunPod container disks are carved from host-local storage,
+# so a ~1 TB+ request is refused on every GPU type and reads as "no capacity"
+# rather than as a disk problem.
+NETWORK_VOLUME_THRESHOLD_GB = 1024
+# `runpodctl network-volume create --size` accepts 1-4000 (GB).
+NETWORK_VOLUME_MAX_GB = 4000
+# With a volume mounted at /workspace, HF_HOME and HF_DATASETS_CACHE both
+# resolve onto it, so the container disk only holds the image and python env.
+CONTAINER_DISK_WITH_VOLUME_GB = 50
 
 
 @dataclass
@@ -71,6 +83,55 @@ def _safetensors_params(repo_id: str) -> tuple[int, str]:
     total = sum(n for dtype, n in counts.items() if not dtype.startswith("I"))
     dominant = max(counts.items(), key=lambda kv: kv[1])[0] if counts else "?"
     return total, dominant
+
+
+# Towers that live in a multimodal checkpoint but that AutoModelForCausalLM
+# does not load, so LoRA never sees them. Qwen3.5-2B ships an `mtp.` multi-
+# token-prediction head; counting it added a phantom 25th layer and overstated
+# a rank-64 estimate by 2.55M.
+_NON_LM_TOWER_PREFIXES = ("mtp.", "visual.", "audio_tower.", "vision_tower.")
+
+
+def _lora_trainable_params(repo_id: str, rank: int, target_modules) -> int:
+    """Exact LoRA parameter count from safetensors headers (no weight download).
+
+    A rank-r adapter on a linear of shape (out, in) adds r*(in+out). Reading the
+    real shapes beats deriving them from the config: Qwen3.5 is hybrid, so its
+    24 layers carry five differently-shaped linear-attention projections plus
+    MLP, and only 6 of them have q/k/v/o at all.
+
+    `target_modules` follows peft: the string "all-linear" means every 2-D
+    weight in the transformer body except the embedding and the output head;
+    a list matches against the module-name suffix.
+
+    Validated against peft 0.20.0 on the real checkpoint: r=64 / "all-linear"
+    on Qwen3.5-2B gives 67.28M over 186 matrices here and 67.28M there.
+    """
+    from huggingface_hub import get_safetensors_metadata
+
+    meta = get_safetensors_metadata(repo_id)
+    shapes = {
+        name: info.shape for f in meta.files_metadata.values() for name, info in f.tensors.items()
+    }
+    all_linear = isinstance(target_modules, str) and target_modules == "all-linear"
+    names = list(target_modules or []) if not all_linear else []
+
+    total = 0
+    for name, shape in shapes.items():
+        if len(shape) != 2 or ".layers." not in name:
+            continue
+        if any(name.startswith(p) or f".{p}" in name for p in _NON_LM_TOWER_PREFIXES):
+            continue
+        # lm_head and the embedding table are never adapted by "all-linear",
+        # and adapting lm_head would be wrong here anyway -- it is tied to the
+        # frozen embed_tokens.
+        if "embed" in name or "lm_head" in name:
+            continue
+        if not all_linear and not any(f".{n}.weight" == name[-len(n) - 8 :] for n in names):
+            continue
+        out_f, in_f = shape
+        total += rank * (in_f + out_f)
+    return total
 
 
 def _vocab_table_params(text_cfg) -> dict[str, int]:
@@ -185,6 +246,30 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             f"checkpoint {dec_dtype}",
         )
     )
+    # LoRA adapters. Without this the plan reports a frozen decoder as
+    # contributing zero trainable params, which is wrong whenever `use_lora`
+    # is on -- it understated the granite_qwen_lora recipe by 67.28M and made
+    # AdamW state look 6x smaller than it is. The adapters are freshly
+    # initialised, so they add optimizer state but nothing to download.
+    if cfg.model.get("use_lora", False):
+        lora_params = _lora_trainable_params(
+            text_id,
+            int(cfg.model.get("lora_rank", 8)),
+            cfg.model.get("lora_target_modules") or ["q_proj", "v_proj"],
+        )
+        if lora_params:
+            targets = cfg.model.get("lora_target_modules")
+            label = targets if isinstance(targets, str) else "custom targets"
+            plan.components.append(
+                Component(
+                    f"  LoRA adapters (r={cfg.model.get('lora_rank', 8)}, {label})",
+                    lora_params,
+                    0,  # fresh init, nothing to fetch
+                    True,
+                    "trainable; base decoder frozen",
+                )
+            )
+
     if frozen_table_params:
         plan.components.append(
             Component(
@@ -351,8 +436,10 @@ def _fmt(n: float) -> str:
 def plan_command(
     experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
     seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
-    gpu: str = typer.Option(
-        "NVIDIA H100 80GB HBM3", "--gpu", help="GPU id for the emitted command"
+    gpu: str | None = typer.Option(
+        None,
+        "--gpu",
+        help="GPU id for the emitted command (default: cheapest listed GPU that fits)",
     ),
     image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output"),
@@ -409,12 +496,123 @@ def plan_command(
 
     disk_gb = int(plan.disk["recommended"] * 1.15) + 5
     print("\n--- Provision ---")
-    print(
-        f"  runpodctl pod create --name tiny-audio-{experiment} \\\n"
-        f'    --gpu-id "{gpu}" --image {image} \\\n'
-        f"    --container-disk-in-gb {disk_gb} --ports '22/tcp' \\\n"
-        f'    --env "{{\\"SSH_PUBLIC_KEY\\":\\"$(cat ~/.ssh/id_ed25519.pub)\\"}}"\n'
-    )
+
+    # Pick the GPU from the VRAM estimate rather than defaulting to an H100.
+    # This recipe needs ~36 GiB; an 80 GB H100 is roughly 2x the card and
+    # several times the price of the smallest part that fits. `_available_gpus`
+    # returns fitting types smallest-first, which approximates cheapest-first
+    # (the catalog exposes no price field).
+    #
+    # When the run needs a network volume, the choice is JOINTLY constrained:
+    # the GPU has to exist in a datacenter that also supports volumes. Picking
+    # on VRAM alone selects e.g. an A40, whose datacenters have no volume
+    # support, and then there is nowhere to put 1.5 TiB.
+    needs_volume = disk_gb > NETWORK_VOLUME_THRESHOLD_GB
+    if gpu is None:
+        fitting = _available_gpus(plan.vram["recommended (x1.25)"])
+        placeable = [
+            (vram_gib, gpu_id)
+            for vram_gib, gpu_id in fitting
+            if not needs_volume or _datacenters_for_gpu(gpu_id, require_network_volume=True)
+        ]
+        if placeable:
+            vram_gib, gpu = placeable[0]
+            why = " with network-volume support" if needs_volume else ""
+            print(
+                f"  Cheapest listed GPU that fits "
+                f"{plan.vram['recommended (x1.25)']:.0f} GiB{why}: {gpu} ({vram_gib} GB)"
+            )
+            others = ", ".join(f"{g} ({v} GB)" for v, g in placeable[1:6])
+            if others:
+                print(f"  Also fit (--gpu to override): {others}")
+            skipped = [g for v, g in fitting if (v, g) not in placeable]
+            if skipped:
+                print(
+                    f"  Fit on VRAM but have no volume-capable datacenter: {', '.join(skipped[:6])}"
+                )
+            print()
+        elif fitting:
+            vram_gib, gpu = fitting[0]
+            print(
+                f"  {gpu} ({vram_gib} GB) fits, but no datacenter offering it also\n"
+                f"  supports network volumes. Either cut the dataset mix below\n"
+                f"  {NETWORK_VOLUME_THRESHOLD_GB} GB, or override --gpu.\n"
+            )
+        else:
+            gpu = "NVIDIA H100 80GB HBM3"
+            print(
+                f"  No listed GPU reports enough VRAM for "
+                f"{plan.vram['recommended (x1.25)']:.0f} GiB; falling back to {gpu}.\n"
+            )
+
+    if disk_gb > NETWORK_VOLUME_THRESHOLD_GB:
+        # Everything that grows lives on /workspace (HF_HOME and
+        # HF_DATASETS_CACHE both point there), so a network volume absorbs the
+        # whole figure and the container disk only has to hold the image plus
+        # the python env. Asking for a >1 TB container disk is the usual cause
+        # of "no instances available" on every GPU type -- container disks come
+        # from host-local storage.
+        vol_gb = min(int(plan.disk["recommended"] * 1.15) + 5, NETWORK_VOLUME_MAX_GB)
+        vol_name = f"tiny-audio-{experiment}"
+        capped = vol_gb >= NETWORK_VOLUME_MAX_GB
+
+        dcs = _datacenters_for_gpu(gpu, require_network_volume=True)
+        excluded = [
+            d for d, _, _ in _datacenters_for_gpu(gpu) if d not in NETWORK_VOLUME_DATACENTERS
+        ]
+        if dcs:
+            print(f"  Datacenters with {gpu} AND network-volume support:")
+            for dc_id, loc, stock in dcs:
+                print(f"    {dc_id:<12} {loc:<22} stock: {stock or 'unreported'}")
+            if excluded:
+                print(
+                    f"\n  Has the GPU but NO network-volume support, so excluded: "
+                    f"{', '.join(excluded)}"
+                )
+            print(
+                "\n  A network volume is pinned to one datacenter and a pod can only\n"
+                "  mount a volume in its own, so both commands below use the same id.\n"
+                "  If creation is refused, the error lists the currently supported\n"
+                "  datacenters -- refresh NETWORK_VOLUME_DATACENTERS in this file.\n"
+            )
+            dc_id = dcs[0][0]
+        else:
+            print(
+                "  No datacenter both offers this GPU and supports network volumes\n"
+                "  (or `runpodctl datacenter list` could not be read). Substitute a\n"
+                "  datacenter id below after checking `runpodctl datacenter list`.\n"
+            )
+            dc_id = "<DC_ID>"
+
+        print(
+            f"  # 1. create the volume (size in GB; max {NETWORK_VOLUME_MAX_GB}):\n"
+            f"  runpodctl network-volume create --name {vol_name} \\\n"
+            f"    --size {vol_gb} --data-center-id {dc_id}\n\n"
+            f"  # 2. create the pod in that SAME datacenter, attaching the volume:\n"
+            f"  runpodctl pod create --name tiny-audio-{experiment} \\\n"
+            f'    --gpu-id "{gpu}" --image {image} \\\n'
+            f"    --network-volume-id <VOLUME_ID> --data-center-ids {dc_id} \\\n"
+            f"    --container-disk-in-gb {CONTAINER_DISK_WITH_VOLUME_GB} --ports '22/tcp' \\\n"
+            f'    --env "{{\\"SSH_PUBLIC_KEY\\":\\"$(cat ~/.ssh/id_ed25519.pub)\\"}}"\n'
+        )
+        if capped:
+            print(
+                f"  ! {plan.disk['recommended'] / 1024:.2f} TiB needed but a RunPod network volume\n"
+                f"    caps at {NETWORK_VOLUME_MAX_GB} GB. Cut the dataset mix, or stage sources\n"
+                f"    across runs -- this will not fit on one volume.\n"
+            )
+        print(
+            f"  Container disk stays at {CONTAINER_DISK_WITH_VOLUME_GB} GB on purpose: with the\n"
+            f"  volume mounted at /workspace, weights and datasets land there, and the\n"
+            f"  container disk only holds the image and the python env.\n"
+        )
+    else:
+        print(
+            f"  runpodctl pod create --name tiny-audio-{experiment} \\\n"
+            f'    --gpu-id "{gpu}" --image {image} \\\n'
+            f"    --container-disk-in-gb {disk_gb} --ports '22/tcp' \\\n"
+            f'    --env "{{\\"SSH_PUBLIC_KEY\\":\\"$(cat ~/.ssh/id_ed25519.pub)\\"}}"\n'
+        )
     print(f"  Needs a GPU with >= {plan.vram['recommended (x1.25)']:.0f} GiB VRAM.")
     print(
         "  Disk note: the remote training script exports HF_HOME=/workspace/.cache\n"
@@ -450,6 +648,105 @@ def _available_gpus(min_vram_gib: float) -> list[tuple[int, str]]:
         if g.get("available") and g.get("memoryInGb", 0) >= min_vram_gib
     ]
     return sorted(set(fitting))
+
+
+# `runpodctl datacenter list` reports stock per GPU per datacenter. Observed
+# values are High / Medium / Low / "".
+#
+# "Low" outranks "": a reported status of any kind means the datacenter is
+# actually offering that GPU, whereas an empty string carries no stock signal
+# at all and is the weaker bet. (An earlier revision of this file had these
+# two the other way round on the theory that "Low" was an explicit scarcity
+# warning. It is not -- it is stock information, and stock information beats
+# none.) `pod create` failing with "no longer any instances" is still normal
+# on any of them; this only orders which to try first.
+_STOCK_RANK = {"High": 0, "Medium": 1, "Low": 2, "": 3}
+
+# Datacenters that actually support network volumes. This is a SEPARATE and
+# much smaller set than "datacenters that have the GPU", and nothing in
+# `runpodctl datacenter list` exposes it -- suggesting a datacenter that has
+# an H100 but no volume support gets you:
+#   create network volume: Data center "AP-IN-1" not found or does not
+#   support network volumes. Available data centers: ...
+# which is how this list was obtained (2026-09-18). The error enumerates the
+# supported set, so the cheap way to refresh it is to run
+# `runpodctl network-volume create --name x --size 1 --data-center-id NOPE`
+# and read the message; it fails without creating anything.
+#
+# Concretely, 6 of the 13 datacenters offering an H100 80GB HBM3 do NOT
+# support network volumes: AP-IN-1, CA-MTL-1, US-GA-2, US-KS-2, US-MO-1,
+# US-NE-1. Filtering matters.
+NETWORK_VOLUME_DATACENTERS = frozenset(
+    [
+        "AP-IN-2",
+        "AP-JP-1",
+        "CA-MTL-3",
+        "CA-MTL-4",
+        "EU-FR-1",
+        "EU-NL-1",
+        "EU-RO-1",
+        "EUR-IS-1",
+        "EUR-IS-3",
+        "EUR-NO-1",
+        "EUR-NO-2",
+        "US-CA-2",
+        "US-CO-1",
+        "US-IL-1",
+        "US-MO-2",
+        "US-NC-2",
+        "US-TX-3",
+    ]
+)
+
+
+@functools.cache
+def _datacenter_catalog() -> tuple:
+    """`runpodctl datacenter list`, fetched once per process.
+
+    Cached because GPU selection probes this for every candidate GPU type, and
+    shelling out ~30 times would dominate the runtime of a command that
+    otherwise only reads HTTP headers. Returns a tuple so the cache key is
+    hashable; an empty tuple means the CLI was unavailable.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["runpodctl", "datacenter", "list", "-o", "json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        ).stdout
+        return tuple(json.loads(out[out.index("[") :]))
+    except Exception:
+        return ()
+
+
+def _datacenters_for_gpu(
+    gpu_id: str, require_network_volume: bool = False
+) -> list[tuple[str, str, str]]:
+    """Datacenters offering `gpu_id`, most likely to fill first.
+
+    Returns (datacenter_id, location, stock_status). A network volume is bound
+    to one datacenter and a pod can only mount a volume in its own, so the
+    volume has to be created where the GPU actually is -- picking the wrong
+    one means creating the volume, failing to place the pod, and deleting it
+    again.
+
+    With `require_network_volume`, the result is additionally filtered to
+    datacenters that support network volumes at all. That is a strictly
+    smaller set which no API field exposes; see NETWORK_VOLUME_DATACENTERS.
+    """
+    catalog = _datacenter_catalog()
+    hits = [
+        (dc["id"], dc.get("location", "?"), gpu.get("stockStatus", ""))
+        for dc in catalog
+        for gpu in dc.get("gpuAvailability", [])
+        if gpu.get("gpuId") == gpu_id
+        and (not require_network_volume or dc["id"] in NETWORK_VOLUME_DATACENTERS)
+    ]
+    return sorted(hits, key=lambda h: (_STOCK_RANK.get(h[2], 9), h[0]))
 
 
 def provision_command(

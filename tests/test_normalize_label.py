@@ -135,14 +135,21 @@ class TestResidualMarkers:
 
 
 class TestPercentCanonicalization:
-    def test_percent_sign_becomes_word(self):
+    """Only the `per cent` -> `percent` spelling collapse survives. The `%`
+    character is preserved: rewriting it to " percent" destroyed `%` in 100%
+    of training targets and cost ~93% of a measured 66%-vs-94% raw-text ITN
+    gap. The removal is WER-neutral — Whisper's EnglishTextNormalizer maps
+    "five percent" and "5%" to the same string on both sides of the score.
+    """
+
+    def test_percent_sign_is_preserved(self):
         result = _normalize_label("inflation rose to five % this year")
-        assert "%" not in result
-        assert "percent" in result.lower()
+        assert "%" in result
 
     def test_per_cent_becomes_single_word(self):
         result = _normalize_label("inflation rose to five per cent this year")
         assert "percent" in result.lower()
+        assert "per cent" not in result.lower()
 
 
 class TestUnicodeCleanup:

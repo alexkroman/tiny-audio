@@ -129,6 +129,53 @@ _PER_CENT_RE = re.compile(r"\bper ?cent\b")
 _ORPHAN_NT_RE = re.compile(r"\b(\w+n)\s+'t\b")
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# Annotation tags that stand in for SPOKEN LEXICAL CONTENT the audio still
+# contains, as opposed to non-speech events. `_RESIDUAL_ANGLE_TAG_RE` deletes
+# every tag, which is correct for <noise>/<music>/<sil>/<laugh>/<breath> (no
+# word was uttered) but wrong for these three:
+#   <unk>     TEDLIUM — a word the transcriber could not identify. The word
+#             IS in the audio; only the transcription is missing.
+#   <foreign> EdAcc  — speech in another language, present in the audio.
+#   <overlap> EdAcc  — overlapping speech, present in the audio.
+# When such a tag sits at the START or END of a label, stripping it produces a
+# target that omits the first or last spoken word while the audio keeps it —
+# i.e. it directly supervises onset/offset truncation.
+#
+# Measured on 800 streamed `sanchit-gandhi/tedlium-data` train rows
+# (2026-09-18): 60.8% of rows contain <unk>, 30.4% START with one, 21.9% END
+# with one. TEDLIUM is 8.7% of the multiasr mix, so ~2.6% of ALL training rows
+# were teaching leading-word deletion and ~1.9% trailing-word deletion.
+#
+# This compounds a second, independent source of the same prior: Peoples
+# Speech `clean_sa` ships fixed ~15s windows (95.7% of rows in [14.0, 15.1]s)
+# whose labels lose words at the chunk seams. Eval symptom: the model dropped
+# >=1 leading reference word on 52/100 Peoples samples (92 words = 5.59 WER
+# points) versus 22/45 for a commercial baseline, and removing leading and
+# trailing deletion runs made the two systems tie. A frozen-encoder CTC
+# control — which never saw this training data — beat the full stack by 3.52
+# WER on Peoples, confirming the prior is decoder-learned rather than acoustic.
+#
+# We drop EDGE occurrences only, not medial ones. Medial <unk> is also a
+# lexically-incomplete target, but dropping every <unk> row would remove 60.8%
+# of TEDLIUM, and TEDLIUM is the single dataset where the decoder measurably
+# earns its keep over the frozen encoder (+6.18 WER). Edge position is also
+# what the eval evidence actually implicates: a positional prior is learnable,
+# a scattered mid-sentence omission is closer to label noise.
+_EDGE_CONTENT_TAG_RE = re.compile(
+    r"^\s*<(?:unk|foreign|overlap)>|<(?:unk|foreign|overlap)>\s*$", re.IGNORECASE
+)
+
+
+def _has_edge_content_tag(raw_text: str) -> bool:
+    """True when a label starts or ends with a content-bearing annotation tag.
+
+    Such rows supervise onset/offset truncation once the tag is stripped, so
+    the collator drops them rather than training on a label that is known to
+    be missing its first or last spoken word.
+    """
+    return bool(_EDGE_CONTENT_TAG_RE.search(raw_text or ""))
+
+
 # Post-truecase cleanup. Truecase's NLTK-backed tokenizer reformats text
 # in three ways that survive into training labels:
 #   1. Sentence-final periods get split off as standalone tokens, then
@@ -301,8 +348,8 @@ def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
        audio segment may still contain speech around the tagged moment;
        strip-not-drop preserves the partial transcript. The collator's
        empty-label filter catches the entire-label-was-just-a-tag case.
-    4. Canonicalize percent — mirrors scripts/analysis.py:normalize_text
-       so the train-time label matches eval-time WER canonicalization.
+    4. Collapse the `per cent` spelling variant to `percent`. The literal
+       `%` character is PRESERVED — see the note below.
     5. Collapse whitespace.
     6. Recase according to `text_case`, the source's declared casing policy
        (set per dataset in the data config, carried on the `_text_case`
@@ -312,6 +359,30 @@ def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
        untouched. When a source declares nothing, fall back to the per-row
        _needs_truecase heuristic — which is what every source used to get,
        and which misclassifies lowercase fragments of cased sources.
+
+    A prior revision of step 4 also ran `text.replace("%", " percent")`, to
+    mirror an eval-side rule in scripts/analysis.py. That was removed
+    (2026-09-18) because it destroyed the `%` character in 100% of training
+    targets: only Earnings22 and SPGISpeech ship `%` natively (~6,188 rows of
+    the ~3.09M mix) and both were rewritten, so the decoder emitted 0 `%` in
+    6,055 sampled eval predictions and scored 0% on the `percent` class of
+    the raw-text ITN metric against 92.9% for a commercial baseline — ~93% of
+    a measured 66%-vs-94% ITN gap, from this one line.
+
+    Two facts make the removal safe rather than a trade:
+      - It is WER-neutral by construction. Whisper's EnglishTextNormalizer,
+        which the eval applies symmetrically to reference and hypothesis,
+        maps "105 percent" and "105%" to the identical string. WER cannot
+        see this change in either direction.
+      - The capability was never missing. `$` was not stripped and the
+        decoder reproduces it correctly — including spontaneously, e.g.
+        "five thousand dollars" -> "$400,000" — on ~240 training rows, 26x
+        less supervision than `%` would have had. So the cause was the
+        rewrite, not the data volume.
+
+    The eval-side copy in scripts/analysis.py is correct and should stay: it
+    is applied to both sides at scoring time, which is canonicalization
+    rather than label destruction.
 
     Output target format is cased text with punctuation where available —
     aligning the dominant training label distribution to the Qwen3
@@ -327,7 +398,6 @@ def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
     text = _GIGASPEECH_PUNCT_RE.sub(lambda m: _GIGASPEECH_PUNCT_MAP[m.group(1).upper()], text)
     text = _RESIDUAL_ANGLE_TAG_RE.sub(" ", text)
     text = _TEDLIUM_BRACKET_RE.sub(" ", text)
-    text = text.replace("%", " percent")
     text = _PER_CENT_RE.sub("percent", text)
     text = _ORPHAN_NT_RE.sub(r"\1't", text)
     text = _WHITESPACE_RE.sub(" ", text).strip()
@@ -384,6 +454,51 @@ class DatasetLoader:
                 lambda dv: dv == 0,
                 num_proc=self.num_proc,
                 input_columns="down_votes",
+            )
+
+        # Declarative row filter on a source-metadata column, e.g.
+        #   exclude_where: {column: source, values: [audiobook]}
+        # It must run HERE, before the keep_cols pruning below drops every
+        # column that is not audio/text/_text_case/_text_punct -- by then the
+        # column you want to filter on no longer exists.
+        #
+        # Motivating case (Gigaspeech): the `dev` split we score contains
+        # ZERO audiobook rows (full 6,750-row scan: 55.3% youtube, 44.7%
+        # podcast), while 26.2% of Gigaspeech `m` train rows ARE audiobook --
+        # a register that is 0% of the eval, on top of the 600K LibriHeavy
+        # audiobook rows the mix already carries. Excluding it is free:
+        # non-audiobook GS M is ~672K rows, still above the 600K
+        # target_samples cap, so row count, mix share and download are all
+        # unchanged. Rows are swapped, not lost.
+        exclude_where = dataset_cfg.get("exclude_where")
+        if exclude_where:
+            column = exclude_where.get("column")
+            values = set(exclude_where.get("values") or [])
+            if not column or not values:
+                raise ValueError(
+                    f"exclude_where needs both 'column' and non-empty 'values', "
+                    f"got {exclude_where!r} for {dataset_path}"
+                )
+            if column not in ds.column_names:
+                # Fail loudly: a silently-ignored filter would train on the
+                # rows you believe you excluded, and the mix table would lie.
+                raise ValueError(
+                    f"exclude_where column {column!r} not in {dataset_path} "
+                    f"(available: {sorted(ds.column_names)})"
+                )
+            before = len(ds)
+            ds = ds.filter(
+                lambda v: v not in values,
+                num_proc=self.num_proc,
+                input_columns=column,
+            )
+            logger.info(
+                "exclude_where on %s: dropped %d/%d rows where %s in %s",
+                dataset_path,
+                before - len(ds),
+                before,
+                column,
+                sorted(values),
             )
 
         col_map = {
@@ -599,7 +714,16 @@ class DataCollator:
                     continue
                 # Drop rows whose entire text was an annotation marker
                 # (e.g. Gigaspeech <NOISE>-only segments).
-                if not _normalize_label(f.get("text") or "", f.get("_text_case")):
+                raw_text = f.get("text") or ""
+                if not _normalize_label(raw_text, f.get("_text_case")):
+                    continue
+                # Drop rows whose label starts or ends with a content-bearing
+                # tag (<unk>/<foreign>/<overlap>). Stripping those yields a
+                # target missing its first or last spoken word while the audio
+                # retains it, which supervises onset/offset truncation — the
+                # measured root cause of this recipe's Peoples regression.
+                # See _EDGE_CONTENT_TAG_RE for the rates and the evidence.
+                if _has_edge_content_tag(raw_text):
                     continue
                 duration_s = audio.size / self.sample_rate
                 if duration_s > self._MAX_AUDIO_SECONDS:
@@ -1081,6 +1205,7 @@ TRAINING_MODEL_PARAMS = [
     "freeze_language_model",
     "freeze_text_embed_tokens",
     "freeze_audio_encoder",
+    "encoder_trainable_top_layers",
 ]
 
 

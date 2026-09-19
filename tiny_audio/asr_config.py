@@ -167,6 +167,22 @@ class ASRConfig(transformers.PretrainedConfig):
         # the training config to avoid destroying pretrained encoder weights
         # at the projector/decoder LR.
         freeze_audio_encoder: bool = True,
+        # Partial encoder unfreeze: train only the TOP N transformer blocks
+        # (plus the output projections that feed the projector), keeping the
+        # lower blocks frozen. 0 = the all-or-nothing behaviour of
+        # `freeze_audio_encoder` above.
+        #
+        # This is the middle option between "frozen feature extractor" and
+        # "train all 472.9M encoder params on 7.6k hours". The lower blocks
+        # carry general acoustic features learned from IBM's ~60k hours and
+        # are the most expensive to damage; the top blocks are the ones
+        # specialised to the encoder's own 16,384-BPE CTC head, which is
+        # exactly the specialisation an LLM decoder does not want.
+        #
+        # Only meaningful with `freeze_audio_encoder: true` — this then
+        # selectively re-enables the top N. Pair with `encoder_learning_rate`
+        # (an order of magnitude below the projector LR).
+        encoder_trainable_top_layers: int = 0,
         # SpecAugment on mel input (training-only), parameters match
         # transformers' WhisperConfig / Wav2Vec2 conventions. Most relevant
         # when the encoder is trainable (`freeze_audio_encoder=False`) —
@@ -250,6 +266,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_language_model = freeze_language_model
         self.freeze_text_embed_tokens = freeze_text_embed_tokens
         self.freeze_audio_encoder = freeze_audio_encoder
+        self.encoder_trainable_top_layers = encoder_trainable_top_layers
         self.apply_spec_augment = apply_spec_augment
         self.mask_time_prob = mask_time_prob
         self.mask_time_length = mask_time_length
