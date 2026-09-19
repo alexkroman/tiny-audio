@@ -1,5 +1,4 @@
 import functools
-import importlib.util
 import inspect
 import json
 import logging
@@ -21,6 +20,7 @@ from transformers import (
 )
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.utils import is_kernels_available
 
 try:
     from .asr_config import ASRConfig, compute_encoder_output_length
@@ -786,15 +786,26 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Gated rather than unconditional: the kernels are CUDA binaries, so
         # asking for them on mps/cpu only buys resolution failures and log
         # noise. Absent `kernels`, from_pretrained pops the flag and proceeds.
-        if torch.cuda.is_available() and importlib.util.find_spec("kernels") is not None:
+        # Gate on transformers' OWN predicate, not on whether the package
+        # imports. transformers accepts `kernels` only inside a version window
+        # (KERNELS_MIN_VERSION <= v < KERNELS_MAX_VERSION) and
+        # set_use_kernels RAISES inside from_pretrained when the installed
+        # version is outside it -- so a presence check like find_spec() turns a
+        # would-be speedup into a hard crash at model construction. That is
+        # precisely what an earlier revision did: it saw kernels 0.17.1
+        # installed, asked for them, and died against a transformers wanting
+        # <0.17.0. is_kernels_available() checks presence AND the window, so a
+        # mismatch now degrades to the torch reference path.
+        kernels_ok = is_kernels_available()
+        if torch.cuda.is_available() and kernels_ok:
             decoder_kwargs["use_kernels"] = True
         else:
-            logger.debug(
-                "Hub kernels not requested (cuda=%s, kernels installed=%s) — "
-                "Qwen3.5-style linear-attention layers will use the torch "
-                "reference path.",
+            logger.info(
+                "Hub kernels not requested (cuda=%s, kernels usable=%s) — "
+                "Qwen3.5-style linear-attention layers will use the slower "
+                "torch reference path.",
                 torch.cuda.is_available(),
-                importlib.util.find_spec("kernels") is not None,
+                kernels_ok,
             )
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)

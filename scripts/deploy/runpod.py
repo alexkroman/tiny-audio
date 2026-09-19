@@ -372,6 +372,45 @@ FLA_CHECK
 #
 # Non-fatal by design -- an unreachable Hub should train slower, not block the
 # deploy.
+# Install `kernels` at the version the INSTALLED transformers accepts, not a
+# version we guessed. transformers gates on a window
+# (KERNELS_MIN_VERSION <= v < KERNELS_MAX_VERSION) and
+# PreTrainedModel.set_use_kernels RAISES rather than warning when the
+# installed version falls outside it:
+#     ValueError: Kernels are not available. Please install a compatible
+#     version (0.16.0 <= version < 0.17.0)
+# That is a hard crash inside from_pretrained, i.e. the run dies at model
+# construction. It is exactly what happened when `kernels` was briefly a main
+# dependency pinned ">=0.6.0": poetry resolved 0.17.1 and every pod died.
+#
+# Reading the window off transformers keeps this correct across upgrades
+# instead of re-pinning by hand. Runs after the requirements install above so
+# it overrides whatever poetry resolved.
+# `set -eo pipefail` is active, and a failing command substitution inside an
+# assignment DOES abort the script -- unlike every other `python` call here,
+# which is wrapped in `|| ...` and so fails safe. Disable errexit across just
+# this assignment so a missing interpreter, a slow/failed transformers import
+# or an older transformers without these constants degrades to "skip the
+# install" instead of killing the whole bootstrap.
+set +e
+KERNELS_SPEC=$(python3 - <<'KERNELS_SPEC_PY' 2>/dev/null
+try:
+    from transformers.utils.import_utils import KERNELS_MAX_VERSION, KERNELS_MIN_VERSION
+
+    print(f"kernels>={KERNELS_MIN_VERSION},<{KERNELS_MAX_VERSION}")
+except Exception:
+    pass
+KERNELS_SPEC_PY
+)
+set -e
+if [ -n "$KERNELS_SPEC" ]; then
+  echo "Installing $KERNELS_SPEC (window declared by the installed transformers)"
+  pip install --user "$KERNELS_SPEC" --quiet \
+    || echo "WARN: kernels install failed; hybrid layers fall back to the torch reference path"
+else
+  echo "WARN: could not read the transformers kernels window; skipping kernels install"
+fi
+
 python - <<'KERNEL_WARM' || echo "WARN: Hub kernel pre-warm failed; first model load will retry, then fall back"
 import sys
 
@@ -452,10 +491,16 @@ echo "Dependencies verified for $TA_PYTHON"
 @app.command(name="plan")
 def plan(
     experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
-    seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
+    # 320, not 512: the measured granite_qwen sequence is 237 audio tokens at
+    # the 19s collator ceiling plus prompt and transcript. This default
+    # shadows plan_command's own, so the two have to be kept in sync -- it was
+    # 512 here while plan.py said 320, which silently inflated every estimate
+    # by 1.6x. Same shape of bug as `attn_implementation` being set under
+    # `model:` while `training:` quietly won.
+    seq_len: int = typer.Option(320, "--seq-len", help="Assumed tokens per sample"),
     # No default: plan_command picks the cheapest listed GPU that actually
     # fits the estimate. Hardcoding an H100 here meant every plan recommended
-    # an 80 GB card regardless of need -- granite_qwen_lora wants ~36 GiB.
+    # an 80 GB card regardless of need.
     gpu: str | None = typer.Option(
         None, "--gpu", help="Override the GPU id (default: cheapest that fits)"
     ),

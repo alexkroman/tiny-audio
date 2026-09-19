@@ -30,7 +30,38 @@ DTYPE_BYTES = {"float32": 4, "float16": 2, "bfloat16": 2}
 OPTIMIZER_STATES = 2
 # Headroom for fragmentation, cuBLAS workspaces, NCCL buffers and the CUDA
 # context. 1.25 is deliberately modest; raise it if runs OOM near the estimate.
+# NOTE: this used to be doing double duty, silently absorbing part of the
+# activation undercount described at ACTIVATION_CALIBRATION below. Now that the
+# activation term is calibrated against a real run, this is pure safety margin
+# again.
 OVERHEAD_FACTOR = 1.25
+# The analytical per-layer activation formula further down is a FLOOR, not an
+# estimate, and this reconciles it with reality.
+#
+# Measured, from the completed granite_qwen run on an H100 80GB (recorded in
+# configs/experiments/granite_qwen.yaml): per_device=32 sat at ~41.4 of the
+# 79.6 GiB nvidia-smi reports, against ~5.6 GiB of static for that recipe, so
+#     (41.4 - 5.6) / 32          = 1.12 GiB of activation tape per sample
+#     1.12 GiB / (320 tok * 24 layers) = 156,587 bytes / token / layer
+# The formula below yields 2 * (6*2048 + 3*6144) = 61,440 for the same model.
+#     156,587 / 61,440 = 2.55
+#
+# Where the missing 2.55x comes from, in rough order of size:
+#   - Qwen3.5 is HYBRID. 18 of its 24 layers are `linear_attention` (gated
+#     delta rule + causal depthwise conv), whose retained state is nothing
+#     like the `6*hidden + 3*inter` a standard transformer block implies.
+#     The formula has no notion of layer_types at all.
+#   - SwiGLU keeps the gate*up elementwise product, a fourth `inter` tensor.
+#   - Two RMSNorms per layer each save their input.
+#   - LoRA runs add an r-sized activation per targeted linear (186 of them at
+#     r=64 for granite_qwen_lora) -- real but only ~0.6% of the gap.
+#
+# Derived from ONE measurement on ONE recipe, so treat it as calibration, not
+# theory. It is conservative for a dense decoder (granite_gemma), which has no
+# gated-delta-net state -- over-provisioning there is the cheap direction.
+# Re-derive if a run's observed peak diverges: the inputs are all in the
+# wandb system metrics plus the static breakdown this script prints.
+ACTIVATION_CALIBRATION = 2.55
 # Rough size of the installed python env + apt packages on the pod.
 ENV_DISK_GIB = 12.0
 # datasets keeps two persistent copies of every source, and neither is cleaned
@@ -341,9 +372,15 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
 
     # Per token per layer: attention q/k/v/o + residual (~6*hidden) and the
     # MLP's gate/up/down (~3*intermediate). Coarse but the right order.
-    per_tok_layer = bytes_per * (6 * (llm_dim or 0) + 3 * inter)
+    # Scaled by ACTIVATION_CALIBRATION -- see its definition; unscaled this
+    # term is 2.55x under what the granite_qwen run actually used, which is
+    # enough to recommend a 48 GB card for a job that needs ~42 GiB.
+    per_tok_layer = bytes_per * (6 * (llm_dim or 0) + 3 * inter) * ACTIVATION_CALIBRATION
     if ckpt:
         # Only layer boundaries are kept; one layer is recomputed at a time.
+        # The boundary term is a plain hidden-sized tensor per layer and is
+        # NOT subject to the calibration, which corrects the within-layer
+        # tape; only the single recomputed layer carries that.
         acts = (
             batch * seq_len * (llm_dim or 0) * layers * bytes_per + batch * seq_len * per_tok_layer
         )
@@ -435,7 +472,11 @@ def _fmt(n: float) -> str:
 
 def plan_command(
     experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
-    seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
+    seq_len: int = typer.Option(
+        320,
+        "--seq-len",
+        help="Assumed tokens per sample. Default 320 is the measured granite_qwen sequence: 237 audio tokens at the 19s collator ceiling, plus prompt and transcript. Raise it for recipes with a longer window -- the activation term is linear in this.",
+    ),
     gpu: str | None = typer.Option(
         None,
         "--gpu",
@@ -751,7 +792,7 @@ def _datacenters_for_gpu(
 
 def provision_command(
     experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
-    seq_len: int = typer.Option(512, "--seq-len"),
+    seq_len: int = typer.Option(320, "--seq-len"),
     name: str | None = typer.Option(
         None, "--name", help="Pod name (default tiny-audio-<experiment>)"
     ),

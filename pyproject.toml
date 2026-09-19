@@ -81,31 +81,23 @@ pyannote-core = ">=6.0.0"  # For DER metric calculation
 pyannote-metrics = ">=4.0.0"  # For DER metric calculation
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 liger-kernel = {version = ">=0.5.0", markers = "sys_platform == 'linux'"}
-# Hub kernels: the supported way to get Qwen3.5's linear-attention fast path
-# without the nvcc source builds the `hybrid-kernels` group documents below.
-# transformers 5.17 ships default mappings for exactly the four functions that
-# otherwise fall back (integrations/hub_kernels.py):
-#     chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-#         -> kernels-community/fla
-#     causal_conv1d_fn, causal_conv1d_update
-#         -> kernels-community/mamba-ssm
-# and modeling_qwen3_5.py decorates the torch reference impls with
-# @use_kernel_func_from_hub_with_fallback, whose priority is
-# hub kernels -> original package -> torch reference. Upstream's own warning
-# quantifies the stake: "for chunk_gated_delta_rule the gap is more than an
-# order of magnitude on an H100", and 18 of Qwen3.5-2B's 24 layers are on that
-# path. Prebuilt binaries, so no nvcc and no tilelang.
-#
-# Pure-Python loader, safe to install everywhere; it only does anything when a
-# model is loaded with use_kernels=True on a supported device. Restricted to
-# the `kernels-community` org by default (ALLOW_ALL_KERNELS = False).
-kernels = ">=0.6.0"
+# NOTE: `kernels` (Hub kernel loader for Qwen3.5's linear-attention fast path)
+# is deliberately NOT a dependency here. transformers gates it to a version
+# WINDOW (KERNELS_MIN_VERSION <= v < KERNELS_MAX_VERSION) and raises inside
+# from_pretrained when the installed version falls outside it. Pinning a range
+# in this file couples the lock to one transformers release and gets it wrong
+# on the next upgrade -- it was briefly pinned ">=0.6.0", poetry resolved
+# 0.17.1 against a transformers wanting <0.17.0, and every pod died at model
+# construction. scripts/deploy/runpod.py reads the window off the installed
+# transformers and installs to match, the same way flash-attn and
+# causal-conv1d are handled.
 # NOTE: the Qwen3.5 linear-attention fast path (flash-linear-attention +
 # tilelang + causal-conv1d) is deliberately NOT a main dependency -- see the
 # `hybrid-kernels` group below for why installing it unconditionally can turn a
-# slow run into a crashed one. `kernels` above is the lower-risk route to the
-# same speedup and should be preferred; the group remains for pods that
-# already have nvcc or want the upstream packages specifically.
+# slow run into a crashed one. The Hub-kernel route installed by
+# scripts/deploy/runpod.py is lower-risk and takes priority at runtime; this
+# group remains as the fallback for pods that have nvcc or want the upstream
+# packages specifically.
 pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
 fabric = ">=3.0.0"
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
