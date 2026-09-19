@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-from datasets import Audio, Dataset
+from datasets import Audio, ClassLabel, Dataset
 from omegaconf import OmegaConf
 
 from scripts.train import DatasetLoader
@@ -102,37 +102,71 @@ class TestExcludeWhere:
     """
 
     @staticmethod
-    def _ds():
-        from datasets import Dataset
-
-        return Dataset.from_dict(
+    def _ds(sources, class_label: bool):
+        """Four rows tagged by `source`, as a plain string column or — like
+        real Gigaspeech — as a ClassLabel whose rows are integer ids."""
+        n = 16000
+        ds = Dataset.from_dict(
             {
-                "text": ["a", "b", "c", "d"],
-                "source": ["youtube", "audiobook", "podcast", "audiobook"],
+                "audio": [{"array": np.zeros(n, dtype=np.float32), "sampling_rate": 16000}]
+                * len(sources),
+                "text": list("abcd")[: len(sources)],
+                "source": list(sources),
             }
-        )
+        ).cast_column("audio", Audio(sampling_rate=16000))
+        if class_label:
+            # Real Gigaspeech label order; ids are 0/1/2, not the names.
+            ds = ds.cast_column("source", ClassLabel(names=["audiobook", "podcast", "youtube"]))
+        return ds
 
-    def test_excludes_listed_values(self):
-        ds = self._ds()
-        values = {"audiobook"}
-        out = ds.filter(lambda v: v not in values, input_columns="source")
-        assert out["source"] == ["youtube", "podcast"]
-        assert out["text"] == ["a", "c"]
+    @staticmethod
+    def _cfg(values=("audiobook",)):
+        return {
+            "path": "fake/gigaspeech",
+            "audio_column": "audio",
+            "text_column": "text",
+            "exclude_where": {"column": "source", "values": list(values)},
+        }
+
+    @pytest.mark.parametrize("class_label", [False, True], ids=["string", "classlabel"])
+    def test_excludes_listed_values(self, class_label):
+        """Gigaspeech stores `source` as a ClassLabel, so rows hold ints, not
+        the label strings the datasets-server statistics endpoint renders.
+        Comparing rows against the names silently dropped 0/910140 rows."""
+        fake = self._ds(["youtube", "audiobook", "podcast", "audiobook"], class_label)
+        cfg = self._cfg()
+        ds = _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
+
+        assert ds["text"] == ["a", "c"], "audiobook rows survived the filter"
 
     def test_keeps_everything_when_no_match(self):
-        ds = self._ds()
-        values = {"nonexistent-tier"}
-        out = ds.filter(lambda v: v not in values, input_columns="source")
-        assert len(out) == 4
+        fake = self._ds(["youtube", "podcast"], class_label=False)
+        cfg = self._cfg(values=["nonexistent-tier"])
+        ds = _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
+
+        assert len(ds) == 2
+
+    def test_unknown_class_label_fails_loudly(self):
+        """A name the ClassLabel does not define can only ever match nothing,
+        so it is a config bug, not an empty result."""
+        fake = self._ds(["youtube", "audiobook"], class_label=True)
+        cfg = self._cfg(values=["audio_book"])
+        with pytest.raises(ValueError, match="not a label of"):
+            _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
 
     def test_missing_column_raises_rather_than_silently_passing(self):
         """A silently-ignored filter would train on the rows you believe were
         excluded and make the mix table a lie, so _prepare_split raises."""
-        ds = self._ds()
-        assert "category" not in ds.column_names
+        fake = self._ds(["youtube", "audiobook"], class_label=False)
+        cfg = self._cfg()
+        cfg["exclude_where"]["column"] = "category"
+        with pytest.raises(ValueError, match="not in fake/gigaspeech"):
+            _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
 
     @pytest.mark.parametrize("bad", [{}, {"column": "source"}, {"values": ["x"]}])
     def test_incomplete_config_is_rejected(self, bad):
-        column = bad.get("column")
-        values = set(bad.get("values") or [])
-        assert not (column and values), "incomplete exclude_where must be rejected"
+        fake = self._ds(["youtube", "audiobook"], class_label=False)
+        cfg = self._cfg()
+        cfg["exclude_where"] = bad
+        with pytest.raises(ValueError, match="needs both"):
+            _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)

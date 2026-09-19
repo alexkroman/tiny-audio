@@ -348,21 +348,21 @@ training:
   # by ~15%. 2.5 sits just above the observed p99 while still catching genuine
   # blow-up spikes.
   #
-  # The joint recipe's second clipping concern is back, and it is the one to
-  # watch on this run. Global-norm clipping runs over ALL parameters at once,
-  # so while the fresh projector's ||grad|| sits near 9 it dominates the global
-  # norm and any clip scales the decoder's update down with it -- the
-  # "spill-over" effect AGGC (arXiv 2601.11864) describes. The decoder pays for
-  # the projector's initialization transient.
+  # The joint recipe's second clipping concern -- that global-norm clipping
+  # makes the decoder pay for the fresh projector's initialization transient,
+  # the "spill-over" effect AGGC (arXiv 2601.11864) describes -- was measured
+  # on the full 32,909-step run and does not occur here. Per-group grad norms
+  # logged over that run put the projector at 0.13% of ||g||^2 post-warmup
+  # (max 0.46%, median ||grad_proj|| 0.035 against ||grad_dec|| 1.00), so the
+  # decoder IS the global norm and clipping cannot scale it down on the
+  # projector's behalf. warmup_steps: 700 covers the transient that made the
+  # question worth asking. Do not re-add per-group grad-norm logging to
+  # re-check this; the instrumentation was removed once it answered.
   #
-  # warmup_steps: 700 covers most of it (the projector's noise->signal
-  # transition completed at step 488 in stage_1, and ||grad_proj|| settles to
-  # 0.4-0.6 after), so the exposure is bounded. If early decoder drift looks
-  # suppressed, the fix is a shorter clip on the projector group rather than a
-  # looser global one.
-  #
-  # Still uncalibrated for this exact pairing: read grad_norm over the first
-  # ~500 steps and tighten toward the observed median if it sits low.
+  # 2.5 is also calibrated for this pairing now rather than inherited:
+  # post-warmup grad_norm ran median 1.01, p95 1.84, max 67.9 (a single
+  # warmup-era spike), and the cap bound on 16 of 659 logged steps, all of
+  # them inside warmup. It is doing exactly the job it is meant to.
   max_grad_norm: 2.5
 
   seed: 44

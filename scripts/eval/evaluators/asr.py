@@ -126,6 +126,12 @@ class LocalEvaluator(Evaluator):
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
         self.pipe = _build_local_pipeline(model_path)
+        # Explicit, not incidental. LocalStreamingEvaluator has always done
+        # this; this class never did, and got away with it only because
+        # nothing in the stack was train/eval-sensitive. A partially unfrozen
+        # Granite encoder is: its 16 BatchNorm1d modules normalise with batch
+        # statistics in train mode, which cost 25 WER points on Earnings22.
+        self.pipe.model.eval()
         self.user_prompt = user_prompt
 
         print_generation_config(self.pipe.model, model_path)

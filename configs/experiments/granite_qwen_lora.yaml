@@ -111,6 +111,13 @@ model:
   # decoder, and optimizer state over 80M params instead of 1.386B.
   model_dtype: bfloat16
   projector_dtype: float32
+  # REQUIRED by encoder_trainable_top_layers > 0 below, not a preference.
+  # Granite's weights have RMS 0.0868, where one bfloat16 ULP is 4.88e-4;
+  # Adam's step at encoder_learning_rate=1e-5 is ~1e-5, i.e. 49x below a single
+  # ULP, so every encoder update would round to zero and the unfreeze would be
+  # a silent no-op paying full optimizer state. fp32 for the whole 472.9M
+  # encoder costs +0.95 GB over bfloat16; the decoder stays bfloat16.
+  encoder_dtype: float32
 
   use_lora: true
   # r=64 with alpha=128 (scale 2.0). Canary-Qwen uses r=128/alpha=256 on a
@@ -186,19 +193,87 @@ training:
   #     top 6 -> 198.21M (41.9%), each including `out`/`out_mid` and never
   #     `input_linear`.
   #
-  # To run the follow-up, set encoder_trainable_top_layers: 4 and
-  # encoder_learning_rate: 1e-5 (an order of magnitude under the projector).
-  # The selection is tested in tests/test_encoder_partial_unfreeze.py, which
-  # asserts on parameter identity and on autograd behaviour, not on a count.
-  freeze_audio_encoder: true
-  encoder_trainable_top_layers: 0
+  # FULL ENCODER. All 16 blocks plus input_linear and out/out_mid -- 472.9M,
+  # not a top-N slice.
+  #
+  # This replaces an earlier top-4 selection (143.33M, then 109.76M with
+  # out/out_mid suppressed) that was chosen from a per-block gradient profile
+  # measured on LibriSpeech-clean. Two things overturned it:
+  #
+  #   1. PRECEDENT. Neither of the two closest published recipes does a
+  #      partial encoder unfreeze. fixie-ai/ultravox-v0_5-llama-3_2-1b ships
+  #      audio_tower + projector and NO language_model at all -- its LLM loads
+  #      unmodified from meta-llama/Llama-3.2-1B-Instruct. nvidia/
+  #      canary-qwen-2.5b freezes only ['^llm\..+$', '^embed_tokens\..+$'].
+  #      Both train the whole encoder.
+  #
+  #   2. THE PROFILE POINTED THE WRONG WAY. Ultravox's encoder drift against
+  #      openai/whisper-large-v3-turbo is 14.74% overall, and it peaks in the
+  #      MIDDLE of the stack -- layer 12 at 49.4%, layers 8-16 all above 44%,
+  #      against 28-38% at the top. A top-N selection would have frozen
+  #      exactly the region that moved most. Our own profile rose toward the
+  #      top, but that was an instantaneous gradient on the easiest dataset in
+  #      the suite; Ultravox's is the endpoint of a completed run.
+  #
+  # `encoder_trainable_top_layers` and `encoder_trainable_post_projections`
+  # are both inert while freeze_audio_encoder is false -- those fields only
+  # ever re-enable layers the freeze path turned off. Left unset rather than
+  # set to misleading values.
+  #
+  # NOTE this puts the encoder into TRAIN mode during training (see
+  # _apply_train_mode), so Granite's 16 BatchNorm1d modules now use batch
+  # statistics and update their running stats -- unlike the partial-unfreeze
+  # path, which kept them frozen. That is handled: save_pretrained serializes
+  # the full encoder state_dict including those buffers when it is fully
+  # unfrozen (verified: 550 tensors, 48 of them BN buffers), so they
+  # round-trip. Inference still needs model.eval(), which LocalEvaluator now
+  # calls explicitly.
+  freeze_audio_encoder: false
+  # 1e-4, matching granite_qwen_encoder.yaml exactly. Holding the encoder
+  # settings identical across the two files is the point: they are meant to
+  # isolate ONE variable -- LoRA decoder here vs fully frozen decoder there --
+  # and a different encoder LR would confound that.
+  #
+  # Raised from the 1e-5 the top-4 selection used, which was deliberately
+  # conservative for a cautious partial unfreeze. Sized against the target:
+  # 0.357% drift measured at 2,000 steps with lr 1e-5 on 4 blocks, scaled 10x
+  # in LR and 15x in steps, gives ~14% under a diffusive walk -- Ultravox's
+  # measured 14.74% endpoint. Check the drift at the 2k checkpoint: ~3.6% is
+  # on track, materially above ~6% means the walk is linear rather than
+  # diffusive and this should drop to 3e-5.
+  encoder_learning_rate: 1e-4
 
-  # Projector unchanged at 1e-3 (fresh init, same job as before). LoRA at 2e-4
-  # rather than the old 2e-5 full-FT decoder LR: LoRA's B matrix initialises to
-  # zero, so it needs a materially higher LR than pretrained weights being
-  # nudged. 1e-4 to 3e-4 is the standard band; 2e-4 sits mid-range. This is the
-  # one hyperparameter here with no measurement behind it -- read grad_norm and
-  # the LoRA-vs-base weight ratio over the first ~2k steps and adjust.
+  # Projector unchanged at 1e-3 (fresh init, same job as before). LoRA lowered
+  # from 2e-4 to 1e-4 -- the measurement this comment used to ask for has now
+  # been taken.
+  #
+  # ||dW||/||W|| of the adapter at step 2,000 (6.7% of the schedule), including
+  # peft's alpha/r = 2.0 scaling, against the completed full-FT run's drift:
+  #
+  #                  LoRA @2k (6.7%)   full-FT @32.9k (100%)
+  #   in_proj_b           35.86%              18.07%
+  #   k_proj              23.55%              16.23%
+  #   up_proj             22.40%              18.39%
+  #   gate_proj           21.60%              15.01%
+  #   q_proj              21.31%              13.62%
+  #   down_proj           19.73%              19.30%
+  #   ALL adapted         19.58%              13.31% (all 319 matrices)
+  #
+  # At 6.7% of training LoRA had already perturbed the decoder 1.47x more than
+  # the full fine-tune managed over an ENTIRE run, and on every matched module
+  # without exception -- with B initialised at zero, so still climbing. That
+  # contradicts the premise of this file: the point is to keep the decoder's
+  # formatting ability while paying less for it, and a perturbation larger than
+  # full-FT's is not the gentler intervention the parameter count suggests.
+  # Trainable params and perturbation size are independent knobs; cutting
+  # params 17x while raising the LR 10x moved them in opposite directions.
+  #
+  # 1e-4 is still inside the standard 1e-4..3e-4 LoRA band, at the low end
+  # where a preservation experiment belongs. Watch the ratio again at 2k: the
+  # target is to land near full-FT's 13.31% by the END of the run, not at 7%.
+  # Note in_proj_b is the worst offender and is the delta-net GATE, whose dW is
+  # rank-capped at 16 by its (16, 2048) shape -- the most destabilising place
+  # to put a large relative change.
   # Must be set HERE, not only under `model:`. attn_implementation is the
   # first entry in scripts/train.py's TRAINING_MODEL_PARAMS, and that merge
   # copies every one of those names from `training:` over `model:`. With only
@@ -214,11 +289,43 @@ training:
   attn_implementation: sdpa
 
   learning_rate: 1e-3
-  decoder_learning_rate: 2e-4
+  decoder_learning_rate: 1e-4
 
   label_smoothing_factor: 0.0
   weight_decay: 0.01
-  projector_weight_decay: 0.0
+  # Restored to granite_qwen's 0.01 from the 0.0 this file shipped with. The
+  # projector is the ONLY group where decoupled AdamW's decay does measurable
+  # work -- it shrinks by exp(-steps * lr * mean_lr_factor * wd), which over
+  # this schedule is 15.9% at lr 1e-3 against 0.34% for the decoder at 2e-5.
+  #
+  # The reason to want that brake is now measured rather than assumed. Probing
+  # the step-2000 checkpoint on real audio with a scalar knob `c` on the
+  # projector output:
+  #
+  #   dL/d(log c) at c=1, per batch:
+  #     +0.0278 +0.0057 +0.0262 -0.0188 +0.0052 -0.0430
+  #     mean +0.0005, sd 0.0273, |t| = 0.05
+  #
+  # i.e. the loss is statistically indifferent to the audio prefix's scale.
+  # A line search agrees: loss is 0.2394 / 0.2350 / 0.2622 at 3.81x / 7.62x /
+  # 15.24x embed RMS -- a flat basin roughly 2x-8x wide, turning sharply bad
+  # outside it (0.4756 at 30.5x).
+  #
+  # Zero gradient plus a flat basin means the output scale is a locally FREE
+  # parameter with no restoring force, which is exactly the condition under
+  # which Adam's weight-norm growth wanders: the per-parameter step is ~lr
+  # regardless of gradient, so linear_2 grows and drags the scale along. That
+  # is the 1x -> 48x drift the previous run logged, and it is a random walk up
+  # a flat valley floor rather than the loss expressing a preference. Weight
+  # decay is the only force opposing it, and since the loss is indifferent it
+  # costs nothing in loss terms.
+  #
+  # NOT a reason to pin the scale directly (a trailing weightless RMSNorm, as
+  # Gemma3nMultimodalEmbedder does). The same line search shows reverting to
+  # the 1.0x design target costs +0.0468 loss, ~20% relative, because the
+  # weights co-adapt to whatever scale they grew into. Control linear_2's norm
+  # growth, do not clamp its output.
+  projector_weight_decay: 0.01
   warmup_steps: 700
   lr_scheduler_type: cosine_with_min_lr
   lr_scheduler_kwargs:
@@ -257,13 +364,29 @@ training:
   # window, and multiasr puts enough mass near the ceiling that most 32-row
   # batches already contain a near-ceiling row -- so E[max duration] is
   # already saturated and per-sample cost stays flat rather than creeping up.
-  per_device_train_batch_size: 48
+  # 32 x 3 = 96, NOT the 48 x 2 this file shipped with. 48 OOMed on an 80 GB
+  # card: the process reached 79.16 GiB of 79.25 and died asking for 190 MiB.
+  #
+  # The cause was an activation term nobody was counting. While the encoder is
+  # frozen ASRModel.forward runs it under no_grad and retains nothing; unfreeze
+  # it and 16 conformer blocks at ~237 frames x 1024 dims keep their full tape.
+  # Backing it out of the observed peak: 79.4 GiB needed - 12.5 static = ~66.9
+  # GiB of activations at batch 48, i.e. ~1.39 GiB/sample against the ~1.12
+  # the frozen-encoder recipe measured. scripts/deploy/plan.py models this now
+  # (it reported 61.78 GiB for the frozen version and reports 83.88 here).
+  #
+  # Scaling the measured peak: 32 -> ~57 GiB (72%), 24 -> ~46 GiB (58%).
+  # 32 keeps the effective batch at 96 with one extra micro-step and lands at
+  # the utilization granite_qwen already survived a full run at (82%). Drop to
+  # 24 x 4 if it OOMs again; gradient_checkpointing: true is the other lever
+  # and now reaches the encoder too, at ~30% wall-clock.
+  per_device_train_batch_size: 32
   # Tracks the train batch. Eval runs under prediction_loss_only and therefore
   # no_grad, so no activation tape is retained and memory is ~static plus one
   # layer; 48 is comfortable either way, and with ASRModel.forward now passing
   # skip_logits on eval the (B,T,248320) logits never materialise.
-  per_device_eval_batch_size: 48
-  gradient_accumulation_steps: 2
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 3
 
   # ONE epoch, matching granite_qwen, so this is a like-for-like comparison.
   #

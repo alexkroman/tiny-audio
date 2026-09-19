@@ -62,6 +62,17 @@ OVERHEAD_FACTOR = 1.25
 # Re-derive if a run's observed peak diverges: the inputs are all in the
 # wandb system metrics plus the static breakdown this script prints.
 ACTIVATION_CALIBRATION = 2.55
+# DataCollator._MAX_AUDIO_SECONDS -- every batch pads to its own longest row
+# and multiasr puts enough mass near the ceiling that the worst case is the
+# one to plan for.
+MAX_AUDIO_SECONDS = 19.0
+# Frames per second entering the encoder's block stack, before
+# `encoder_conv_layers` subsampling. Granite's feature extractor emits 100 Hz
+# log-mels and stacks adjacent pairs (its input dim is 160 = 80 mels x 2), so
+# the stack runs at 50 Hz. Whisper-family encoders are also 50 Hz after their
+# stride-2 conv front end, so this holds for both encoders this repo uses.
+ENCODER_FRAME_RATE_HZ = 50.0
+
 # Rough size of the installed python env + apt packages on the pod.
 ENV_DISK_GIB = 12.0
 # datasets keeps two persistent copies of every source, and neither is cleaned
@@ -241,16 +252,42 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
 
     # ---- encoder -----------------------------------------------------------
     enc_params, enc_dtype = _safetensors_params(audio_id)
-    enc_trainable = not train.get("freeze_audio_encoder", True)
+    enc_cfg_probe = AutoConfig.from_pretrained(audio_id)
+    enc_probe_inner = getattr(enc_cfg_probe, "encoder_config", None) or enc_cfg_probe
+    enc_depth = int(getattr(enc_probe_inner, "num_hidden_layers", 0) or 0)
+    enc_top_n = int(train.get("encoder_trainable_top_layers", 0) or 0)
+    enc_frozen_flag = bool(train.get("freeze_audio_encoder", True))
+
+    # A partial unfreeze is trainable too. `freeze_audio_encoder: true` PLUS
+    # `encoder_trainable_top_layers: N` is the documented idiom, so reading the
+    # flag alone reported 109.76M of trainable encoder as frozen and dropped
+    # its gradients and AdamW state (~1.3 GiB) from the estimate entirely.
+    # Split it the way the decoder's frozen vocabulary table is split.
+    if not enc_frozen_flag:
+        enc_trainable_params = enc_params
+    elif enc_top_n and enc_depth:
+        # Pro-rata by block. Approximate -- it charges the pre/post-stack
+        # projections at the same rate as a block, so for Granite's top-4 it
+        # says 118.2M against an actual 109.76M. Errs high, which is the safe
+        # direction for sizing a card.
+        enc_trainable_params = int(enc_params * min(enc_top_n, enc_depth) / enc_depth)
+    else:
+        enc_trainable_params = 0
+
     plan.components.append(
         Component(
             f"encoder ({audio_id})",
-            enc_params,
+            enc_params - enc_trainable_params,
             _repo_weight_bytes(audio_id),
-            enc_trainable,
+            False,
             f"checkpoint {enc_dtype}",
         )
     )
+    if enc_trainable_params:
+        label = "all blocks" if not enc_frozen_flag else f"top {enc_top_n} of {enc_depth} blocks"
+        plan.components.append(
+            Component(f"  encoder trainable ({label})", enc_trainable_params, 0, True, "")
+        )
 
     # ---- decoder -----------------------------------------------------------
     dec_params, dec_dtype = _safetensors_params(text_id)
@@ -387,6 +424,56 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     else:
         acts = batch * seq_len * layers * per_tok_layer
 
+    # Encoder activation tape. Zero while the encoder is frozen -- ASRModel.forward
+    # runs it under no_grad, so nothing is retained -- and a large term the moment
+    # it is not. Missing this is what made granite_qwen_lora plan at 67.94 GiB and
+    # then OOM at 79.16 on an 80 GB card: only the static side (+6 GiB) was
+    # counted, and the tape is bigger than the static.
+    #
+    # Granite's 16 conformer blocks run at the post-subsampling rate, so the
+    # sequence length here is the ENCODER's, not the decoder's: 19s of audio is
+    # ~950 frames at the stacked-mel rate, and encoder_conv_layers halves twice
+    # to ~237. Per token per block the tape is dominated by the two half-step
+    # feed-forwards (2 x 2 x ff_expansion x d), attention q/k/v/o (4d) plus its
+    # score matrix, and the conv module -- the same shape as the decoder term,
+    # so it reuses the same empirical calibration.
+    # Fraction of the block stack that keeps its tape. Autograd retains
+    # activations only from the first trainable parameter onward, and the
+    # projector sits AFTER the encoder, so a top-N unfreeze retains the top N
+    # blocks and nothing below them. Gating on `freeze_audio_encoder` alone
+    # reported zero for the partial case; measured peaks say otherwise --
+    # frozen 55.4 GiB, top-4 60.6, full ~79.4 at batch 48, and 4/16 of the
+    # full increment is 6.0 GiB against an observed 5.2.
+    enc_layers = int(getattr(enc_inner, "num_hidden_layers", 0) or 0)
+    if not bool(train.get("freeze_audio_encoder", True)):
+        trainable_blocks = enc_layers
+    else:
+        top_n = int(train.get("encoder_trainable_top_layers", 0) or 0)
+        trainable_blocks = min(top_n, enc_layers)
+
+    enc_acts = 0
+    if trainable_blocks and encoder_dim:
+        enc_layers = trainable_blocks
+        # The encoder's sequence is its own, NOT the decoder's `seq_len`: it is
+        # acoustic frames, and there are far more of them than there are text
+        # tokens. DataCollator caps audio at 19s and Granite's extractor stacks
+        # mel pairs to 50 Hz, so ~950 frames enter the block stack and
+        # encoder_conv_layers halves twice to ~237. Using seq_len here instead
+        # gave 82 and undercounted the tape ~3x.
+        enc_seq = int(MAX_AUDIO_SECONDS * ENCODER_FRAME_RATE_HZ)
+        for pad, kernel, stride in cfg.model.get("encoder_conv_layers") or []:
+            enc_seq = (enc_seq + 2 * pad - (kernel - 1) - 1) // stride + 1
+        if enc_layers:
+            per_tok_enc = (
+                bytes_per * (6 * encoder_dim + 3 * 4 * encoder_dim) * ACTIVATION_CALIBRATION
+            )
+            enc_acts = batch * enc_seq * enc_layers * per_tok_enc
+            if ckpt:
+                enc_acts = batch * enc_seq * encoder_dim * enc_layers * bytes_per + (
+                    batch * enc_seq * per_tok_enc
+                )
+    acts += enc_acts
+
     # Cross-entropy. liger fuses lm_head+softmax+CE into O(B*T*D); without it
     # the (B, T, V) fp32 logits plus a log_softmax copy dominate everything.
     #
@@ -407,6 +494,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         "gradients": grads / GIB,
         "optimizer (AdamW x2)": optim / GIB,
         "activations (est.)": acts / GIB,
+        "  of which encoder": enc_acts / GIB,
         "cross-entropy": logits / GIB,
         "subtotal": subtotal / GIB,
         "recommended (x1.25)": subtotal * OVERHEAD_FACTOR / GIB,

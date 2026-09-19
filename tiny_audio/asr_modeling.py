@@ -150,19 +150,47 @@ def find_encoder_layer_stack(encoder: nn.Module) -> tuple[str, nn.Module] | None
     return None
 
 
-def unfreeze_encoder_top_layers(encoder: nn.Module, top_n: int) -> list[str]:
-    """Unfreeze the top `top_n` encoder blocks plus the output projections.
+def _resolve_dtype(name, fallback: torch.dtype) -> torch.dtype:
+    """Resolve a config dtype name to a `torch.dtype`, falling back when unusable.
+
+    Only a genuine `str` naming a real floating-point dtype is honoured. Stand-in
+    config objects hand back a `MagicMock` for every attribute, and
+    `getattr(torch, MagicMock())` raises `TypeError: attribute name must be
+    string` -- which turned an unset optional field into a hard crash for any
+    caller holding a mock or a checkpoint config predating the field. Same
+    hazard `encoder_trainable_top_layers` guards against just below.
+    """
+    if not isinstance(name, str):
+        return fallback
+    resolved = getattr(torch, name, None)
+    return (
+        resolved if isinstance(resolved, torch.dtype) and resolved.is_floating_point else fallback
+    )
+
+
+def unfreeze_encoder_top_layers(
+    encoder: nn.Module, top_n: int, include_post_projections: bool = True
+) -> list[str]:
+    """Unfreeze the top `top_n` encoder blocks, optionally with the output projections.
 
     Assumes the caller has already frozen the whole encoder. Returns the sorted
     names of every parameter switched back on, so callers (and tests) can
     assert on exactly what moved rather than trusting a count.
 
-    The post-stack projections (Granite's `out` / `out_mid`) are included: they
-    sit between the top block and the projector, so leaving them frozen would
-    force the newly-trainable blocks to adapt through a fixed output map. The
-    pre-stack `input_linear` stays frozen -- it is the feature front-end, the
-    part most expensive to damage and least specialised to the encoder's own
-    CTC head.
+    The post-stack projections (Granite's `out` / `out_mid`) are included by
+    default: they sit between the top block and the projector, so leaving them
+    frozen forces the newly-trainable blocks to adapt through a fixed output
+    map. That is a reasonable prior, but on this stack it is not what the
+    gradient says. Probing the step-2000 granite_qwen_lora checkpoint on real
+    audio, `out`/`out_mid` carry 33.57M params -- 23% of a top-4 budget -- for
+    an RMS-per-param gradient of 1.14e-05 against 1.4-1.7e-04 in the top
+    blocks, i.e. **0.27% of the selection's squared gradient**. Dropping them
+    moved the aggregate norm from 1.5840 to 1.5827. Pass False to reclaim the
+    parameters; the default stays True so existing recipes are unchanged.
+
+    The pre-stack `input_linear` stays frozen either way -- it is the feature
+    front-end, the part most expensive to damage and least specialised to the
+    encoder's own CTC head.
 
     Raises if the layer stack cannot be found or `top_n` exceeds its depth:
     silently unfreezing nothing would produce a run that looks like a
@@ -191,7 +219,7 @@ def unfreeze_encoder_top_layers(encoder: nn.Module, top_n: int) -> list[str]:
             unfrozen.append(f"{path}.{idx}.{name}")
     # Post-stack projections, identified positionally: direct children that are
     # not the stack itself and not the pre-stack input projection.
-    for name, child in encoder.named_children():
+    for name, child in encoder.named_children() if include_post_projections else ():
         if name == path.split(".")[0] or name.startswith("input"):
             continue
         for pname, param in child.named_parameters():
@@ -769,7 +797,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # then complains "current dype is torch.float32, expected fp16/bf16",
         # and even with sdpa the projector→encoder feed mismatches dtypes.
         # `.to(dtype=...)` after load is idempotent and forces the issue.
-        encoder = encoder.to(dtype=dtype)
+        # `encoder_dtype` overrides the stack dtype when the encoder has
+        # trainable blocks; it must be fp32 for Adam's step to survive
+        # rounding. See ASRConfig.encoder_dtype for the arithmetic.
+        encoder = encoder.to(dtype=_resolve_dtype(getattr(config, "encoder_dtype", None), dtype))
         if getattr(config, "freeze_audio_encoder", True):
             encoder.requires_grad_(False)
             encoder.train(False)  # equivalent to .eval(); avoids a security hook false-positive
@@ -780,8 +811,34 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             top_n = getattr(config, "encoder_trainable_top_layers", 0)
             top_n = top_n if isinstance(top_n, int) and not isinstance(top_n, bool) else 0
             if top_n > 0:
-                unfreeze_encoder_top_layers(encoder, top_n)
-                encoder.train(True)
+                unfreeze_encoder_top_layers(
+                    encoder,
+                    top_n,
+                    include_post_projections=bool(
+                        getattr(config, "encoder_trainable_post_projections", True)
+                    ),
+                )
+        # Deliberately does NOT call `encoder.train(True)` for the partial
+        # unfreeze. Construction must not decide train/eval mode: `train()` /
+        # `eval()` own that, and `_apply_train_mode` already routes the encoder
+        # correctly on every such call. Setting train mode here instead left it
+        # sticky for any consumer that never calls either -- which is exactly
+        # what LocalEvaluator did, and Granite's encoder carries 16
+        # BatchNorm1d modules. In train mode those normalise with per-utterance
+        # batch statistics rather than IBM's running statistics: near-harmless
+        # on in-domain clean audio, and measured at 12.27% -> 37.44% WER on
+        # Earnings22, where the audio is out of distribution and the clips are
+        # short enough for batch statistics to be noisy.
+        #
+        # Note the encoder stays in EVAL mode during training too (the branch
+        # in `_apply_train_mode` keyed on `freeze_audio_encoder`, which the
+        # partial-unfreeze recipe leaves True). That is correct rather than
+        # incidental: frozen BatchNorm statistics are standard practice when
+        # fine-tuning a pretrained encoder, gradients still reach the conv
+        # weights and BN's own affine parameters through an eval-mode BN, and
+        # it keeps the running stats identical to base -- which matters because
+        # a partial-unfreeze checkpoint saves only trainable PARAMETERS, not
+        # buffers, so drifting running stats would silently not round-trip.
         return encoder
 
     @classmethod
@@ -1019,8 +1076,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # The projector may run at a higher precision than the frozen stack --
         # it is the only module with optimizer state, so it is the only one
         # that needs master-weight precision. See ASRConfig.projector_dtype.
-        proj_name = getattr(config, "projector_dtype", None)
-        proj_dtype = getattr(torch, proj_name) if proj_name else dtype
+        proj_dtype = _resolve_dtype(getattr(config, "projector_dtype", None), dtype)
         self._projector_dtype = proj_dtype
         return projector.to(device=device, dtype=proj_dtype)
 
@@ -1201,12 +1257,23 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         variant for this box raises FileNotFoundError there -- step 0 of the
         run, after the dataset and the model are already up. Qwen3.5's conv
         functions hit exactly this: they map to kernels-community/mamba-ssm,
-        and NO branch of that repo has a torch 2.8 build -- v2 (the version
-        transformers pins) starts at torch 2.11, v3 at 2.13, main at 2.10 --
-        while the RunPod base image is on torch 2.8. Checked on the Hub rather
-        than inferred from one error message: there is no newer version to
-        move to, so the fallback below is the outcome until the base image's
-        torch moves.
+        which transformers pins at `version=2` (integrations/hub_kernels.py),
+        and THAT REVISION's build set starts at torch 2.11 while the RunPod
+        base image is on torch 2.8.
+
+        An earlier version of this comment concluded that no branch of the
+        repo had a torch 2.8 build and there was nothing to move to. That was
+        wrong: it read "the pinned revision has no matching build" as "no
+        build exists". Checked against the Hub -- tags v0.0.2, v0.0.3 and
+        v0.0.4 all ship torch28-cxx11-cu{126,128,129}-x86_64-linux, and so
+        does main. `scripts/train._repin_causal_conv1d_kernel` re-registers
+        these two layers against the newest revision carrying a build for the
+        local torch, so on a correctly provisioned pod the fast path resolves
+        and this fallback is not reached.
+
+        The fallback stays because it still covers what the re-pin cannot:
+        `kernels` absent, the Hub unreachable at startup, or a torch version
+        nobody has built a variant for.
 
         `kernels`' own `use_fallback=True` does not cover this. It guards the
         mapping lookups only; once a repo is selected, `_get_layer_memoize` ->
@@ -1304,7 +1371,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         to the projector); includes the encoder only when it's trainable.
         """
         targets: list[nn.Module] = [self.language_model]
-        if not getattr(self.config, "freeze_audio_encoder", True):
+        # Autograd state again, not the flag: a partially unfrozen encoder has
+        # an activation tape worth checkpointing even though the flag is True.
+        if any(p.requires_grad for p in self.audio_tower.parameters()):
             targets.append(self.audio_tower)
         return targets
 
@@ -1361,8 +1430,22 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         round-trip with the rest of the LM.
         """
         sd = {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
-        if not getattr(self.config, "freeze_audio_encoder", True):
-            sd.update({f"audio_tower.{k}": v for k, v in self.audio_tower.state_dict().items()})
+        # Keyed on autograd state, not `freeze_audio_encoder`. Under the
+        # documented partial-unfreeze recipe that flag stays True while the top
+        # N blocks train, so gating on it meant a trained encoder was never
+        # written to the checkpoint -- the run did the work and threw it away.
+        # Only the trainable tensors are saved: the rest reload from
+        # `audio_model_id`, and from_pretrained overlays with strict=False.
+        enc_trainable = {n for n, p in self.audio_tower.named_parameters() if p.requires_grad}
+        if enc_trainable:
+            fully = len(enc_trainable) == sum(1 for _ in self.audio_tower.parameters())
+            sd.update(
+                {
+                    f"audio_tower.{k}": v
+                    for k, v in self.audio_tower.state_dict().items()
+                    if fully or k in enc_trainable
+                }
+            )
         if not getattr(self.config, "freeze_language_model", True):
             lm = self.language_model
             if hasattr(lm, "peft_config"):
@@ -1473,7 +1556,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         ):
             tower_kwargs["attention_mask"] = audio_attention_mask.to(audio_features.device)
 
-        encoder_frozen = getattr(self.config, "freeze_audio_encoder", True)
+        # Gate on autograd state, NOT on `freeze_audio_encoder` alone. The
+        # documented partial-unfreeze recipe is `freeze_audio_encoder: true`
+        # PLUS `encoder_trainable_top_layers: N` (see ASRConfig), which leaves
+        # the flag True while `_load_audio_encoder` switches the top N blocks
+        # back on. Reading the flag here then wrapped those blocks in no_grad
+        # and zeroed their gradients -- exactly the failure the comment above
+        # warns about -- so the run paid ~1.6 GiB of AdamW state for 198M
+        # params that could never move, with nothing in the logs saying so.
+        encoder_frozen = not any(p.requires_grad for p in self.audio_tower.parameters())
         if encoder_frozen:
             with torch.no_grad():
                 encoder_out = self.audio_tower(**tower_kwargs)

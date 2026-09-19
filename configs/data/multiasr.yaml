@@ -471,10 +471,23 @@ datasets:
     #
     # This is free, which is why it is worth doing even though the Gigaspeech
     # WER gap is not statistically significant (+0.41 at n=500, CI
-    # [-0.04, +0.85]). Non-audiobook GS M is ~672K rows, still above the
-    # 600K target_samples cap below, so row count, mix share and download are
-    # all UNCHANGED -- ~157K out-of-register rows are swapped for in-register
-    # ones rather than removed. There is no data-volume cost to weigh.
+    # [-0.04, +0.85]). MEASURED on the 2026-09-19 run: 253,247 of 910,140
+    # m/train rows are audiobook (27.8%), leaving 656,893 -- still above the
+    # 600K target_samples cap below, which _resample_to_target applies AFTER
+    # this filter. So Gigaspeech contributes exactly 600K rows either way and
+    # row count, mix share and download are all UNCHANGED. The ~167K
+    # out-of-register rows that used to land in the 600K sample are swapped
+    # for in-register ones, not removed; there is no volume to make up.
+    #
+    # Headroom is only 56,893 rows (9.5%). Exclude a second tier here and the
+    # cap stops binding, at which point _resample_to_target silently
+    # repeat-pads rows to reach 600K -- check the dropped/kept counts in the
+    # exclude_where log line before adding one.
+    #
+    # `source` is a ClassLabel (ids 0=audiobook, 1=podcast, 2=youtube), not a
+    # string column; _prepare_split resolves these names to ids. Comparing
+    # rows against the names directly matches nothing -- that bug made this
+    # filter drop 0/910140 rows on its first run.
     #
     # Must be applied before the keep_cols pruning in _prepare_split, which
     # is why the filter is declared here and executed early; see
@@ -482,7 +495,7 @@ datasets:
     exclude_where:
       column: source
       values: [audiobook]
-    # Big-3 cap. M's natural size (~910K, ~672K after the audiobook
+    # Big-3 cap. M's natural size (910,140; 656,893 after the audiobook
     # exclusion) is closest to the cap of the three, so this trims the least.
     target_samples: 600000
 

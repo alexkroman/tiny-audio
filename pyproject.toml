@@ -80,7 +80,16 @@ torchvision = ">=0.23.0,<0.24.0"  # Pairs with torch 2.8.x
 pyannote-core = ">=6.0.0"  # For DER metric calculation
 pyannote-metrics = ">=4.0.0"  # For DER metric calculation
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
-liger-kernel = {version = ">=0.5.0", markers = "sys_platform == 'linux'"}
+# >=0.8.0, NOT the previous >=0.5.0. `apply_liger_kernel_to_qwen3_5` first
+# ships in 0.8.0 (verified against the wheels: 0.7.0 does not export it), and
+# without it scripts/train.py's patcher lookup raises AttributeError, gets
+# caught, and degrades to a warning. The cost of that warning is not small:
+# no fused linear CE means every labelled forward materializes a
+# (B, T, 248320) logits tensor plus its fp32 upcast and its gradient --
+# ~29 GiB at B=48/T=330, and the OOM that killed several granite_qwen_lora
+# launches. A floor that admits seven versions lacking the architecture this
+# repo trains is a silent 29 GiB regression waiting for a fresh resolve.
+liger-kernel = {version = ">=0.8.0", markers = "sys_platform == 'linux'"}
 # NOTE: `kernels` (Hub kernel loader for Qwen3.5's linear-attention fast path)
 # is deliberately NOT a dependency here. transformers gates it to a version
 # WINDOW (KERNELS_MIN_VERSION <= v < KERNELS_MAX_VERSION) and raises inside

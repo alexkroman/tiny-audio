@@ -31,6 +31,7 @@ import torch
 import wandb
 from datasets import (
     Audio,
+    ClassLabel,
     Dataset,
     concatenate_datasets,
     load_dataset,
@@ -471,10 +472,10 @@ class DatasetLoader:
         # target_samples cap, so row count, mix share and download are all
         # unchanged. Rows are swapped, not lost.
         exclude_where = dataset_cfg.get("exclude_where")
-        if exclude_where:
+        if exclude_where is not None:
             column = exclude_where.get("column")
-            values = set(exclude_where.get("values") or [])
-            if not column or not values:
+            names = list(exclude_where.get("values") or [])
+            if not column or not names:
                 raise ValueError(
                     f"exclude_where needs both 'column' and non-empty 'values', "
                     f"got {exclude_where!r} for {dataset_path}"
@@ -486,19 +487,47 @@ class DatasetLoader:
                     f"exclude_where column {column!r} not in {dataset_path} "
                     f"(available: {sorted(ds.column_names)})"
                 )
+            # Gigaspeech's `source` is a ClassLabel, so its rows hold ints
+            # (0=audiobook, 1=podcast, 2=youtube), NOT the label strings the
+            # datasets-server `statistics` endpoint renders. Comparing rows
+            # against the human-readable names matches nothing and drops zero
+            # rows. Resolve names -> ids so the config stays readable, and let
+            # str2int reject a name the column does not define.
+            feature = (ds.features or {}).get(column)
+            if isinstance(feature, ClassLabel):
+                try:
+                    values = {feature.str2int(n) for n in names}
+                except ValueError as exc:
+                    raise ValueError(
+                        f"exclude_where value not a label of {column!r} in "
+                        f"{dataset_path} (defined: {feature.names})"
+                    ) from exc
+            else:
+                values = set(names)
             before = len(ds)
             ds = ds.filter(
                 lambda v: v not in values,
                 num_proc=self.num_proc,
                 input_columns=column,
             )
+            if before == len(ds):
+                # Matching nothing is the failure mode this filter had for its
+                # whole first run: it is far more likely a type/name mismatch
+                # than a split that genuinely carries none of these rows.
+                logger.warning(
+                    "exclude_where on %s matched NO rows -- check that %s values "
+                    "%s exist in this split",
+                    dataset_path,
+                    column,
+                    names,
+                )
             logger.info(
                 "exclude_where on %s: dropped %d/%d rows where %s in %s",
                 dataset_path,
                 before - len(ds),
                 before,
                 column,
-                sorted(values),
+                names,
             )
 
         col_map = {
@@ -585,6 +614,17 @@ class DatasetLoader:
             return ds
         if current > target:
             return ds.shuffle(seed=self.seed).select(range(target))
+        # Upsampling repeats rows verbatim, so the extra "samples" carry no
+        # new signal. That is intended for small sources, but it is also what
+        # happens when a filter (e.g. exclude_where) cuts a large source below
+        # its cap -- silently, since the row count still reads 600K. Say so.
+        logger.warning(
+            "target_samples %d exceeds the %d available rows; repeat-padding "
+            "%.2fx (no new signal in the duplicated rows)",
+            target,
+            current,
+            target / current,
+        )
         repeats = (target // current) + 1
         indices = list(range(current)) * repeats
         return ds.select(indices[:target])
@@ -937,41 +977,33 @@ class ASRTrainer(Trainer):
         enc_lr = self.encoder_learning_rate if self.encoder_learning_rate is not None else base_lr
         enc_wd = self.encoder_weight_decay if self.encoder_weight_decay is not None else base_wd
 
-        # `name` is carried purely so `_trust_ratios` can attribute each group;
-        # torch ignores keys it does not recognize in a param group.
         optimizer_grouped_parameters = [
             {
-                "name": "projector",
                 "params": groups[("other", True)],
                 "weight_decay": proj_wd,
                 "lr": base_lr,
             },
             {
-                "name": "projector",
                 "params": groups[("other", False)],
                 "weight_decay": 0.0,
                 "lr": base_lr,
             },
             {
-                "name": "decoder",
                 "params": groups[("decoder", True)],
                 "weight_decay": dec_wd,
                 "lr": dec_lr,
             },
             {
-                "name": "decoder",
                 "params": groups[("decoder", False)],
                 "weight_decay": 0.0,
                 "lr": dec_lr,
             },
             {
-                "name": "encoder",
                 "params": groups[("encoder", True)],
                 "weight_decay": enc_wd,
                 "lr": enc_lr,
             },
             {
-                "name": "encoder",
                 "params": groups[("encoder", False)],
                 "weight_decay": 0.0,
                 "lr": enc_lr,
@@ -983,127 +1015,33 @@ class ASRTrainer(Trainer):
         self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
 
-    def _clip_grad_norm(self, model):
-        """Clip exactly as the base Trainer does, but log per-group norms first.
+    def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
+        """Attach the projector's output-scale diagnostic to each training log.
 
-        Global-norm clipping scales every parameter by one factor
-        `min(1, max_grad_norm / ||g||_global)`. With a fresh projector at
-        ||grad|| ~= 9 alongside a decoder at ~1.2, the projector dominates that
-        global norm and any clip scales the decoder's update down with it.
-        Nothing in this repo logged the two groups separately, so that concern
-        could never be checked against a number — HF reports one scalar, which
-        by construction cannot separate them.
-
-        Instrumentation only: the clipping below is byte-identical to the base
-        implementation, and `_get_grad_norm` still receives the global pre-clip
-        norm so `grad_norm` stays comparable across runs. Split the clip only
-        if these logs show projector >> decoder persistently past warmup —
-        per-group clipping makes the combined update no longer a scalar
-        multiple of the true gradient, which every comparable published recipe
-        avoids.
-
-        `on_pre_optimizer_step` cannot do this: Trainer fires it after
-        `_clip_grad_norm`, so a callback only ever sees post-clip gradients.
+        Riding the Trainer's own log call rather than calling `self.log` from
+        inside the step is what puts this metric on the SAME wandb step as
+        `train/loss`. Its previous home (a `_clip_grad_norm` override) emitted
+        a step of its own, so every diagnostic row carried NaN for loss and
+        every loss row carried NaN for the diagnostic, and the two series could
+        not be plotted against each other or correlated from `run.history()`.
         """
-        if self.state.global_step % max(1, self.args.logging_steps) == 0:
-            groups: dict[str, list] = {"projector": [], "decoder": [], "encoder": []}
-            for name, param in model.named_parameters():
-                if param.grad is None:
-                    continue
-                clean = name.removeprefix("_orig_mod.").removeprefix("module.")
-                if clean.startswith("audio_tower."):
-                    groups["encoder"].append(param.grad)
-                elif clean.startswith("language_model."):
-                    groups["decoder"].append(param.grad)
-                else:
-                    groups["projector"].append(param.grad)
-
-            metrics = {}
-            for group, grads in groups.items():
-                if grads:
-                    stacked = torch.stack(
-                        [
-                            torch.linalg.vector_norm(g.detach(), 2, dtype=torch.float32)
-                            for g in grads
-                        ]
-                    )
-                    metrics[f"grad_norm/{group}"] = stacked.norm(2).item()
-            if metrics:
-                total = math.sqrt(sum(v * v for v in metrics.values()))
-                if self.args.max_grad_norm > 0 and total > 0:
-                    metrics["grad_norm/clip_factor"] = min(1.0, self.args.max_grad_norm / total)
-                metrics.update(self._trust_ratios())
-                metrics.update(self._projector_output_rms())
-                self.log(metrics)
-
-        return super()._clip_grad_norm(model)
-
-    def _trust_ratios(self) -> dict:
-        """Per-group ||update|| / ||w||, the scale-free "is this LR sane" metric.
-
-        Grad-norm ratios cannot answer that question: ||g|| = r * sqrt(N), so
-        they are dominated by parameter count (the decoder has 109x the
-        projector's params, so its norm is ~10x larger at equal per-parameter
-        gradient). AdamW also divides gradient magnitude out entirely -- the
-        step is lr * m_hat/(sqrt(v_hat)+eps), i.e. ~lr per parameter regardless
-        of ||g||. What actually governs learning is the step relative to the
-        weight, and the healthy fine-tuning band is roughly 1e-3 to 1e-2.
-
-        Read from the optimizer's own Adam state, so this reflects the update
-        actually applied on the previous step rather than a theoretical bound.
-        """
-        opt = self.optimizer
-        if opt is None or not getattr(opt, "param_groups", None):
-            return {}
-
-        totals: dict[str, list[float]] = {}
-        for pg in opt.param_groups:
-            name = pg.get("name") or pg.get("component") or "other"
-            lr, eps = pg.get("lr", 0.0), pg.get("eps", 1e-8)
-            b1, b2 = pg.get("betas", (0.9, 0.999))
-            # Accumulate on-device and sync once per device, rather than
-            # blocking on .item() twice for every parameter in the group.
-            upd_terms: dict[torch.device, torch.Tensor] = {}
-            w_terms: dict[torch.device, torch.Tensor] = {}
-            for p in pg["params"]:
-                st = opt.state.get(p)
-                if not st or "exp_avg" not in st:
-                    continue
-                t = int(
-                    st.get("step", 0)
-                    if not torch.is_tensor(st.get("step", 0))
-                    else st["step"].item()
-                )
-                if t < 1:
-                    continue
-                m = st["exp_avg"].to(torch.float32) / (1 - b1**t)
-                v = st["exp_avg_sq"].to(torch.float32) / (1 - b2**t)
-                upd = (lr * m / (v.sqrt() + eps)).pow(2).sum()
-                w = torch.linalg.vector_norm(p.detach(), 2, dtype=torch.float32).pow(2)
-                dev = p.device
-                upd_terms[dev] = upd_terms[dev] + upd if dev in upd_terms else upd
-                w_terms[dev] = w_terms[dev] + w if dev in w_terms else w
-            upd_sq = sum(x.item() for x in upd_terms.values())
-            w_sq = sum(x.item() for x in w_terms.values())
-            if w_sq > 0:
-                totals.setdefault(name, [0.0, 0.0])
-                totals[name][0] += upd_sq
-                totals[name][1] += w_sq
-
-        return {
-            f"trust_ratio/{name}": math.sqrt(u) / math.sqrt(w)
-            for name, (u, w) in totals.items()
-            if w > 0
-        }
+        if "loss" in logs:
+            logs.update(self._projector_output_rms())
+        super().log(logs, start_time)
 
     def _projector_output_rms(self) -> dict:
-        """Projector output RMS against the decoder's embedding RMS.
+        """Projector output RMS as a multiple of the decoder's embedding RMS.
 
-        The whole point of `projector_output_rms` is that audio tokens should
-        enter the residual stream at the same magnitude as text tokens. Nothing
-        else in the run reports whether that holds once training starts moving
-        the weights, and the repo has already measured one small-init attempt
-        drifting back up by ~35x. This is the number that says whether it stuck.
+        Audio tokens should enter the residual stream at the magnitude text
+        tokens do. `projector_output_rms: auto` sets that at construction and
+        this is the only thing that reports whether it survives training. It
+        does not: over granite_qwen's 32,909-step run the ratio started at
+        1.0x by construction, reached ~48x by step ~13k and plateaued there.
+
+        Reported as the ratio alone. The raw RMS rode alongside it for that
+        full run and carried nothing extra -- `freeze_text_embed_tokens` pins
+        the denominator, so the two series differed by a constant to sixteen
+        significant figures.
         """
         model = self.model
         projector = getattr(model, "projector", None)
@@ -1124,25 +1062,9 @@ class ASRTrainer(Trainer):
         finally:
             projector.train(was_training)
 
-        metrics = {"projector/output_rms": out_rms}
-        if emb_rms > 0:
-            metrics["projector/output_rms_over_embed"] = out_rms / emb_rms
-
-        # dL/d(log c) for a hypothetical output-scale multiplier c, accumulated
-        # by the projector's backward hook. This is the metric that decides
-        # whether the observed drift toward ~47x embed RMS is the loss pursuing
-        # a larger injection magnitude (persistently negative) or just Adam
-        # dragging the scale along as the weights grow (hovering near zero).
-        # Drained here so it does not accumulate across logging intervals.
-        # Averaged over the micro-batches accumulated since the last drain, so
-        # the value does not scale with logging_steps or grad accumulation.
-        scale_grad = getattr(projector, "scale_grad", None)
-        count = getattr(projector, "scale_grad_count", 0)
-        if scale_grad is not None and count:
-            metrics["projector/dloss_dlogscale"] = float(scale_grad.detach().item()) / count
-            projector.scale_grad = None
-            projector.scale_grad_count = 0
-        return metrics
+        if emb_rms <= 0:
+            return {}
+        return {"projector/output_rms_over_embed": out_rms / emb_rms}
 
 
 class PushToHubCallback(TrainerCallback):
@@ -1206,7 +1128,174 @@ TRAINING_MODEL_PARAMS = [
     "freeze_text_embed_tokens",
     "freeze_audio_encoder",
     "encoder_trainable_top_layers",
+    "encoder_trainable_post_projections",
 ]
+
+
+# transformers pins kernels-community/mamba-ssm at `version=2`
+# (integrations/hub_kernels.py), and that revision's build set starts at torch
+# 2.11. RunPod's base image is on torch 2.8, so Hub-kernel dispatch resolves
+# the repo, then raises FileNotFoundError when it looks for a matching variant
+# -- ASRModel.train catches it and falls back to the torch reference path for
+# Qwen3.5's causal depthwise conv.
+#
+# That fallback is avoidable. Released tags DO carry torch 2.8 builds, checked
+# against the Hub rather than inferred:
+#   v0.0.4  torch28, torch29                       torch28-cxx11-cu{126,128,129}-x86_64-linux
+#   v0.0.3  torch25..29                            same
+#   v0.0.2  torch25..28                            same
+#   main    torch28, 29, 210, 211, 212             same
+# Newest released tag first, `main` last, so the pin stays reproducible unless
+# only main has a matching build (which is what a future torch upgrade looks
+# like).
+_CONV1D_KERNEL_REPO = "kernels-community/mamba-ssm"
+_CONV1D_KERNEL_REVISIONS = ("v0.0.4", "v0.0.3", "v0.0.2", "main")
+_CONV1D_KERNEL_LAYERS = ("causal_conv1d_fn", "causal_conv1d_update")
+
+
+def _kernel_revision_for(torch_tag: str, arch: str, revisions=_CONV1D_KERNEL_REVISIONS):
+    """First revision carrying a build variant for this torch + CPU, else None.
+
+    Build directories are named `build/torch28-cxx11-cu126-x86_64-linux/...`,
+    so the match is prefix on the torch tag plus the machine arch.
+    """
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    for revision in revisions:
+        try:
+            files = api.list_repo_files(_CONV1D_KERNEL_REPO, revision=revision)
+        except Exception as exc:  # unknown tag, offline, rate limited
+            logger.debug("Could not list %s@%s: %s", _CONV1D_KERNEL_REPO, revision, exc)
+            continue
+        variants = {f.split("/")[1] for f in files if f.startswith("build/") and f.count("/") >= 2}
+        if any(
+            v.startswith(f"{torch_tag}-") and arch in v and v.endswith("linux") for v in variants
+        ):
+            return revision
+    return None
+
+
+def _repin_causal_conv1d_kernel() -> None:
+    """Point the causal-conv1d Hub kernels at a revision built for this torch.
+
+    Must run AFTER the model is constructed: transformers calls
+    `register_kernel_mapping_transformers()` inside `from_pretrained`, and
+    `register_kernel_mapping` merges with `inherit_mapping=True`, so anything
+    registered earlier would be overwritten by the defaults. Registering here
+    overrides only these two layer names and leaves the kernels-community/fla
+    entries (the gated delta-net fast path, 18 of 24 layers) untouched.
+
+    Entirely best-effort. Every failure path leaves the previous behaviour
+    intact, because ASRModel.train still catches an unresolvable kernel and
+    disables Hub dispatch.
+    """
+    if not torch.cuda.is_available():
+        return
+    try:
+        import platform
+
+        from kernels import LayerRepository, Mode
+        from transformers.integrations.hub_kernels import register_kernel_mapping_transformers
+
+        version = torch.__version__.split("+")[0].split(".")
+        torch_tag = f"torch{version[0]}{version[1]}"
+        arch = platform.machine()
+        revision = _kernel_revision_for(torch_tag, arch)
+        if revision is None:
+            logger.warning(
+                "No %s revision carries a build for %s/%s; leaving the default "
+                "pin in place. The causal-conv1d fast path will fall back to "
+                "the torch reference implementation (same numerics, slower).",
+                _CONV1D_KERNEL_REPO,
+                torch_tag,
+                arch,
+            )
+            return
+        register_kernel_mapping_transformers(
+            {
+                name: {
+                    "cuda": {
+                        mode: LayerRepository(
+                            repo_id=_CONV1D_KERNEL_REPO, layer_name=name, revision=revision
+                        )
+                        for mode in (Mode.TRAINING, Mode.INFERENCE)
+                    }
+                }
+                for name in _CONV1D_KERNEL_LAYERS
+            }
+        )
+        logger.info(
+            "Re-pinned %s to %s (has a %s-%s build); transformers' default "
+            "version=2 pin starts at torch 2.11.",
+            ", ".join(_CONV1D_KERNEL_LAYERS),
+            revision,
+            torch_tag,
+            arch,
+        )
+    except ImportError:
+        return  # `kernels` not installed; nothing dispatches from the Hub
+    except Exception as exc:
+        logger.warning(
+            "Could not re-pin the causal-conv1d Hub kernel (%s: %s). Continuing "
+            "with transformers' default pin.",
+            type(exc).__name__,
+            exc,
+        )
+
+
+def _require_fused_cross_entropy(model, cfg) -> None:
+    """Fail at startup when fused CE is unavailable on a GPU run.
+
+    Without liger's fused linear cross-entropy, every labelled forward
+    materializes a (batch, seq, vocab) logits tensor plus its fp32 upcast and
+    its gradient. On Qwen3.5-2B (vocab 248,320) at batch 48 / seq 330 that is
+    ~25 GiB -- most of an 80 GB card, spent on a tensor nothing in this repo
+    reads. It is also what killed several granite_qwen_lora launches with an
+    OOM in backward.
+
+    This used to be two `logger.warning` calls (one here, one in
+    `ASRModel.__init__`). Both fired correctly and both were missed, because a
+    warning scrolls past during model load and the run then trains normally --
+    just 25 GiB heavier and at permanent OOM risk. The failure has no symptom
+    until the batch that does not fit.
+
+    Raised only where the memory actually costs something: CUDA, a large
+    vocabulary, and liger requested. CPU/MPS smoke runs on a mac cannot have
+    liger at all (it is a linux-only dependency) and must stay runnable.
+    Set `training.allow_unfused_ce: true` to proceed anyway.
+    """
+    if getattr(model, "_lm_accepts_skip_logits", False):
+        return
+    if not cfg.training.get("use_liger", True):
+        return  # deliberately off; the planner already accounts for it
+    if cfg.training.get("allow_unfused_ce", False):
+        logger.warning(
+            "Fused cross-entropy is NOT active and allow_unfused_ce is set -- "
+            "continuing with the unfused path. Expect materially higher VRAM."
+        )
+        return
+    if not torch.cuda.is_available():
+        return  # mac / CPU smoke runs: liger is linux-only, nothing to fix
+
+    vocab = getattr(model.language_model.config, "vocab_size", 0) or 0
+    if vocab < 100_000:
+        return  # small vocab: the logits tensor is not the dominant term
+
+    batch = cfg.training.get("per_device_train_batch_size", 1)
+    est_gib = batch * 330 * vocab * 4 * 2 / 2**30
+    raise RuntimeError(
+        f"liger's fused linear cross-entropy is NOT active for "
+        f"{type(model.language_model).__name__} (vocab {vocab:,}). Every "
+        f"training step would materialize a (batch, seq, {vocab:,}) logits "
+        f"tensor -- roughly {est_gib:.0f} GiB at batch {batch}, seq 330 -- and "
+        f"risk an OOM in backward.\n"
+        f"Fix: `poetry install` on this machine (liger-kernel >=0.8.0 is "
+        f"required for qwen3.5 and is pinned in pyproject.toml), then check "
+        f"the log for 'Applied liger kernels via ...'.\n"
+        f"Override with `training.allow_unfused_ce=true` if this is "
+        f"deliberate."
+    )
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
@@ -1313,6 +1402,9 @@ def main(cfg: DictConfig) -> None:
     asr_config = ASRConfig(**model_config_dict)
 
     model = ASRModel(asr_config)
+
+    _require_fused_cross_entropy(model, cfg)
+    _repin_causal_conv1d_kernel()
 
     # Disable the KV cache for training on the decoder's own config, NOT on the
     # ASRConfig. ASRConfig.use_cache is an inference setting: __init__ copies it

@@ -123,6 +123,19 @@ class ASRConfig(transformers.PretrainedConfig):
         # matters at frozen-model memory cost. Defaults to model_dtype, so
         # existing recipes are unchanged.
         projector_dtype: str | None = None,
+        # Same idea as `projector_dtype`, for the encoder, and load-bearing the
+        # moment `encoder_trainable_top_layers > 0`. AdamW allocates its states
+        # with `zeros_like(param)`, so a bfloat16 encoder gets bfloat16 moments
+        # and the update is applied in bfloat16. Granite Speech 5.0's weights
+        # have RMS 0.0868, where one bf16 ULP is 4.88e-4; Adam's step at the
+        # recommended encoder LR of 1e-5 is ~1e-5, i.e. 49x BELOW a single ULP,
+        # so every update rounds away and the encoder silently does not train.
+        # You would need lr ~5e-4 to clear the ULP, which is far too hot for a
+        # pretrained Conformer. This is the same argument granite_qwen.yaml
+        # makes for the decoder, and it bites harder here because the encoder's
+        # weights are ~5x larger than the decoder's (0.087 vs 0.015-0.02).
+        # Defaults to model_dtype, so frozen-encoder recipes are unchanged.
+        encoder_dtype: str | None = None,
         projector_pool_stride: int = 4,
         projector_hidden_dim: int | None = None,
         projector_type: str = "mlp",
@@ -183,6 +196,12 @@ class ASRConfig(transformers.PretrainedConfig):
         # selectively re-enables the top N. Pair with `encoder_learning_rate`
         # (an order of magnitude below the projector LR).
         encoder_trainable_top_layers: int = 0,
+        # Whether `encoder_trainable_top_layers` also unfreezes the post-stack
+        # output projections (Granite's `out` / `out_mid`). True preserves the
+        # original behaviour. False is worth it on Granite Speech 5.0, where
+        # those two carry 33.57M params for 0.27% of the selection's squared
+        # gradient -- see unfreeze_encoder_top_layers for the measurement.
+        encoder_trainable_post_projections: bool = True,
         # SpecAugment on mel input (training-only), parameters match
         # transformers' WhisperConfig / Wav2Vec2 conventions. Most relevant
         # when the encoder is trainable (`freeze_audio_encoder=False`) —
@@ -241,6 +260,7 @@ class ASRConfig(transformers.PretrainedConfig):
         )
         self.audio_token = audio_token or native_audio_token(text_model_id) or "<audio>"
         self.projector_dtype = projector_dtype or model_dtype
+        self.encoder_dtype = encoder_dtype or model_dtype
         self.audio_sample_rate = audio_sample_rate
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
@@ -267,6 +287,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_text_embed_tokens = freeze_text_embed_tokens
         self.freeze_audio_encoder = freeze_audio_encoder
         self.encoder_trainable_top_layers = encoder_trainable_top_layers
+        self.encoder_trainable_post_projections = encoder_trainable_post_projections
         self.apply_spec_augment = apply_spec_augment
         self.mask_time_prob = mask_time_prob
         self.mask_time_length = mask_time_length

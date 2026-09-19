@@ -93,11 +93,6 @@ class MLPAudioProjector(nn.Module):
         # checkpoint -- recomputing it at load time would calibrate against the
         # freshly-initialized weights rather than the trained ones.
         self.register_buffer("output_scale", torch.ones(()), persistent=True)
-        # Set by the backward hook in `_maybe_probe_scale_gradient`, drained by
-        # the trainer. Not a parameter and not a buffer, so it stays out of the
-        # optimizer and out of the checkpoint.
-        self.scale_grad: torch.Tensor | None = None
-        self.scale_grad_count: int = 0
         self._calibrate_output_scale(getattr(config, "projector_output_rms", None))
 
     def _calibrate_output_scale(self, target_rms) -> None:
@@ -177,51 +172,7 @@ class MLPAudioProjector(nn.Module):
         x = self.input_norm(x)
         x = self.linear_1(x)
         x = self.act(x)
-        out = self.linear_2(x) * self.output_scale
-        self._maybe_probe_scale_gradient(out)
-        return out
-
-    def _maybe_probe_scale_gradient(self, out: torch.Tensor) -> None:
-        """Accumulate dL/d(log c), where c is a hypothetical output-scale multiplier.
-
-        This answers the one question the output-scale story actually turns on:
-        does the LOSS want a different injection magnitude, or is the observed
-        drift just Adam's step size interacting with weight norm?
-
-        Measured on a live run, the ratio of projector output RMS to the
-        decoder's embedding RMS starts at 1.0 by construction and climbs to
-        ~47x by step 12k, then plateaus. Two readings, with opposite
-        implications:
-          - Adam artifact. The per-parameter step is ~lr regardless of
-            gradient, so weights grow until lr/|w| lands in a usable band, and
-            the output scale is dragged along. Then the scale is cosmetic and
-            pinning it is free.
-          - The loss wants it. A large-magnitude write reserves residual
-            bandwidth and survives the stack for later positions to attend to,
-            and attention reads are scale-invariant (q/k/v all derive from an
-            RMSNorm'd hidden state). Then pinning the scale costs quality.
-
-        `dL/dc` at `c = 1` is `sum(dL/dout * out)` by the chain rule, and
-        because `d/d(log c) = c * d/dc`, at `c = 1` the two coincide. Computing
-        it from a backward hook on `out` avoids materializing a second copy of
-        a `[B, T, llm_dim]` tensor, which an explicit probe multiplier would.
-
-        Sign is what matters: persistently negative means the loss is pushing
-        the scale up and the drift is intentional; hovering around zero means
-        the loss is indifferent and the drift is optimizer noise.
-        """
-        if not self.training or not out.requires_grad:
-            return
-        detached = out.detach()
-
-        def _hook(grad: torch.Tensor) -> None:
-            """Accumulate `sum(dL/dout * out)` for this forward pass."""
-            contribution = (grad.detach() * detached).sum()
-            prev = self.scale_grad
-            self.scale_grad = contribution if prev is None else prev + contribution
-            self.scale_grad_count += 1
-
-        out.register_hook(_hook)
+        return self.linear_2(x) * self.output_scale
 
 
 # =============================================================================

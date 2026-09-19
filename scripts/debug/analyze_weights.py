@@ -824,8 +824,12 @@ def analyze_weights(
         if show_per_tensor:
             print_tensor_analysis(stats, verbose=verbose)
 
+    # Bound unconditionally: the health summary below reads `base_weights` on
+    # every path, but only the decoder path ever loads base weights. Assigning
+    # it inside the `if` made `-c projector` (and any --filter) crash with an
+    # UnboundLocalError after printing the whole report.
+    base_weights: dict[str, torch.Tensor] | None = None
     if is_decoder_mode:
-        base_weights = None
         if compare_base:
             text_model_id = config.get("text_model_id")
             if text_model_id:

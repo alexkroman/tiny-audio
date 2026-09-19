@@ -8287,4 +8287,4 @@ local = ["pyaudio"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.13"
-content-hash = "f803f95d5819f617299231ea0d6426f894b8e4f90d0951244670ed9855bf1f43"
+content-hash = "dedcefc785808decd3ed89bd08f93f16243c1abc93135e4d5b0033b32d6f9cd8"

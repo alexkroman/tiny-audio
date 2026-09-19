@@ -156,3 +156,218 @@ class TestGradientsActuallyFlowWhereIntended:
 
         assert torch.equal(frozen_encoder.layers[0].lin.weight, before_frozen)
         assert not torch.equal(frozen_encoder.layers[15].lin.weight, before_live)
+
+
+class TestGradientsSurviveASRModelForward:
+    """The bug the toy-encoder tests above cannot see.
+
+    Everything else in this file exercises `unfreeze_encoder_top_layers`
+    against a synthetic module. That verifies the helper sets `requires_grad`
+    correctly, and it always did -- but `ASRModel.forward` separately decided
+    whether to run the encoder under `torch.no_grad()`, and it decided by
+    reading `config.freeze_audio_encoder`. The documented partial-unfreeze
+    recipe leaves that flag True (see ASRConfig: "Only meaningful with
+    `freeze_audio_encoder: true` -- this then selectively re-enables the top
+    N"), so the top blocks were unfrozen, entered the optimizer, and received
+    exactly zero gradient. Silent: no error, no warning, just a no-op
+    experiment paying full AdamW state.
+    """
+
+    def test_top_blocks_get_gradient_through_the_real_forward(self, base_asr_config):
+        import copy
+
+        from tiny_audio.asr_modeling import ASRModel
+
+        config = copy.deepcopy(base_asr_config)
+        config.freeze_audio_encoder = True
+        config.encoder_trainable_top_layers = 1
+        model = ASRModel(config)
+        model.train()
+
+        trainable = [p for p in model.audio_tower.parameters() if p.requires_grad]
+        assert trainable, "fixture encoder exposed no trainable params to test"
+
+        mel_bins = model.audio_tower.config.num_mel_bins
+        input_ids = torch.tensor([[model.audio_token_id, 1, 2]])
+        model(
+            input_features=torch.randn(1, mel_bins, 3000),
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            labels=input_ids.clone(),
+        ).loss.backward()
+
+        assert all(p.grad is not None for p in trainable), (
+            "unfrozen encoder params got no gradient -- ASRModel.forward is "
+            "running the encoder under no_grad despite requires_grad=True"
+        )
+        assert any(p.grad.abs().sum() > 0 for p in trainable)
+
+    def test_fully_frozen_encoder_still_gets_no_gradient(self, base_asr_config):
+        import copy
+
+        from tiny_audio.asr_modeling import ASRModel
+
+        config = copy.deepcopy(base_asr_config)
+        config.freeze_audio_encoder = True
+        config.encoder_trainable_top_layers = 0
+        model = ASRModel(config)
+        model.train()
+
+        input_ids = torch.tensor([[model.audio_token_id, 1, 2]])
+        model(
+            input_features=torch.randn(1, model.audio_tower.config.num_mel_bins, 3000),
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            labels=input_ids.clone(),
+        ).loss.backward()
+
+        assert all(p.grad is None for p in model.audio_tower.parameters())
+
+
+class TestPartialUnfreezeIsUsableEndToEnd:
+    """The two things a top-N unfreeze needs beyond `requires_grad`.
+
+    Both were gated on `config.freeze_audio_encoder`, which the documented
+    recipe leaves True, so both silently did the wrong thing: the encoder
+    trained in a dtype too coarse to represent its own update, and whatever it
+    did learn was dropped at checkpoint time.
+    """
+
+    def _config(self, base_asr_config, **overrides):
+        import copy
+
+        config = copy.deepcopy(base_asr_config)
+        config.freeze_audio_encoder = True
+        config.encoder_trainable_top_layers = 1
+        for key, value in overrides.items():
+            setattr(config, key, value)
+        return config
+
+    def test_encoder_dtype_overrides_model_dtype(self, base_asr_config):
+        from tiny_audio.asr_modeling import ASRModel
+
+        model = ASRModel(
+            self._config(base_asr_config, model_dtype="bfloat16", encoder_dtype="float32")
+        )
+        assert {p.dtype for p in model.audio_tower.parameters()} == {torch.float32}
+        assert {p.dtype for p in model.language_model.parameters()} == {torch.bfloat16}
+
+    def test_encoder_dtype_defaults_to_model_dtype(self, base_asr_config):
+        from tiny_audio.asr_config import ASRConfig
+
+        assert ASRConfig(model_dtype="bfloat16").encoder_dtype == "bfloat16"
+        assert ASRConfig(model_dtype="float32").encoder_dtype == "float32"
+
+    def test_state_dict_persists_exactly_the_trainable_encoder_tensors(self, base_asr_config):
+        from tiny_audio.asr_modeling import ASRModel
+
+        model = ASRModel(self._config(base_asr_config))
+        trainable = sorted(n for n, p in model.audio_tower.named_parameters() if p.requires_grad)
+        assert trainable, "fixture encoder exposed no trainable params"
+
+        saved = sorted(
+            k.removeprefix("audio_tower.")
+            for k in model.state_dict()
+            if k.startswith("audio_tower.")
+        )
+        assert saved == trainable
+
+    def test_fully_frozen_encoder_is_still_absent_from_state_dict(self, base_asr_config):
+        from tiny_audio.asr_modeling import ASRModel
+
+        model = ASRModel(self._config(base_asr_config, encoder_trainable_top_layers=0))
+        assert not [k for k in model.state_dict() if k.startswith("audio_tower.")]
+
+    def test_gradient_checkpointing_includes_a_partially_unfrozen_encoder(self, base_asr_config):
+        from tiny_audio.asr_modeling import ASRModel
+
+        model = ASRModel(self._config(base_asr_config))
+        assert model.audio_tower in model._gradient_checkpointing_targets()
+
+        frozen = ASRModel(self._config(base_asr_config, encoder_trainable_top_layers=0))
+        assert frozen.audio_tower not in frozen._gradient_checkpointing_targets()
+
+
+class TestPostProjectionOptOut:
+    """`out`/`out_mid` are 23% of a top-4 budget for 0.27% of its gradient."""
+
+    def test_post_projections_excluded_when_opted_out(self, frozen_encoder):
+        unfreeze_encoder_top_layers(frozen_encoder, 2, include_post_projections=False)
+        assert frozen_encoder.out.weight.requires_grad is False
+        assert frozen_encoder.out_mid.weight.requires_grad is False
+        assert frozen_encoder.layers[15].lin.weight.requires_grad is True
+        assert frozen_encoder.input_linear.weight.requires_grad is False
+
+    def test_opting_out_only_drops_the_post_projections(self, frozen_encoder):
+        with_post = set(unfreeze_encoder_top_layers(frozen_encoder, 2))
+        for p in frozen_encoder.parameters():
+            p.requires_grad_(False)
+        without = set(
+            unfreeze_encoder_top_layers(frozen_encoder, 2, include_post_projections=False)
+        )
+        assert without < with_post
+        assert all(n.startswith(("out.", "out_mid.")) for n in with_post - without)
+
+    def test_default_still_includes_them(self, frozen_encoder):
+        unfreeze_encoder_top_layers(frozen_encoder, 2)
+        assert frozen_encoder.out.weight.requires_grad is True
+
+    def test_config_flag_reaches_the_model(self, base_asr_config):
+        import copy
+
+        from tiny_audio.asr_modeling import ASRModel
+
+        config = copy.deepcopy(base_asr_config)
+        config.freeze_audio_encoder = True
+        config.encoder_trainable_top_layers = 1
+        config.encoder_trainable_post_projections = False
+        model = ASRModel(config)
+        without = {n for n, p in model.audio_tower.named_parameters() if p.requires_grad}
+        assert without, "expected the top block to be trainable"
+        assert all(n.startswith("layers.") for n in without), sorted(without)[:5]
+
+        config.encoder_trainable_post_projections = True
+        with_post = {
+            n for n, p in ASRModel(config).audio_tower.named_parameters() if p.requires_grad
+        }
+        assert without < with_post
+
+
+class TestEncoderIsNeverLeftInTrainMode:
+    """Construction must not decide train/eval mode.
+
+    `_load_audio_encoder` used to call `encoder.train(True)` after a partial
+    unfreeze. Any consumer that then called neither `train()` nor `eval()`
+    inherited train mode -- and Granite's encoder carries 16 BatchNorm1d
+    modules, which in train mode normalise with per-utterance batch statistics
+    instead of the pretrained running statistics. Measured cost on a real
+    checkpoint: Earnings22 WER 12.27% -> 37.44%.
+    """
+
+    def _model(self, base_asr_config, top_n):
+        import copy
+
+        from tiny_audio.asr_modeling import ASRModel
+
+        config = copy.deepcopy(base_asr_config)
+        config.freeze_audio_encoder = True
+        config.encoder_trainable_top_layers = top_n
+        return ASRModel(config)
+
+    @pytest.mark.parametrize("top_n", [0, 1])
+    def test_encoder_is_in_eval_mode_straight_after_construction(self, base_asr_config, top_n):
+        model = self._model(base_asr_config, top_n)
+        assert model.audio_tower.training is False
+        assert not any(m.training for m in model.audio_tower.modules())
+
+    def test_partial_unfreeze_still_leaves_params_trainable(self, base_asr_config):
+        model = self._model(base_asr_config, 1)
+        assert any(p.requires_grad for p in model.audio_tower.parameters())
+
+    def test_model_train_does_not_wake_the_encoder(self, base_asr_config):
+        """Frozen BatchNorm statistics are the point -- see _load_audio_encoder."""
+        model = self._model(base_asr_config, 1)
+        model.train()
+        assert model.audio_tower.training is False
+        model.eval()
+        assert model.audio_tower.training is False
