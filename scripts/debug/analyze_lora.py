@@ -24,12 +24,6 @@ LORA_MODULE_TYPES = (
 )
 
 
-def _section(title: str) -> None:
-    console.print("\n" + "=" * 80)
-    console.print(f"[bold]{title}[/bold]")
-    console.print("=" * 80)
-
-
 def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
     """Download and analyze LoRA adapter weights."""
 
@@ -65,7 +59,7 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
                 pair["module_type"] = module_type
                 break
 
-    _section("PER-LAYER ANALYSIS")
+    console.rule("[bold]PER-LAYER ANALYSIS[/bold]")
 
     total_params = 0
     all_effective_ratios = []
@@ -107,7 +101,7 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
         stats["energy_concentrations"].append(energy_concentration)
         stats["params"] += params
 
-    _section("SUMMARY BY MODULE TYPE")
+    console.rule("[bold]SUMMARY BY MODULE TYPE[/bold]")
     console.print(
         f"\n{'Module':<12} {'Count':>6} {'Params':>10} {'Avg Norm':>12} {'Eff Rank':>10} {'Rank Util':>11} {'Top50% E':>10}"
     )
@@ -144,7 +138,7 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
         sum(all_effective_ratios) / len(all_effective_ratios) if all_effective_ratios else 0
     )
 
-    _section("ANALYSIS & RECOMMENDATIONS")
+    console.rule("[bold]ANALYSIS & RECOMMENDATIONS[/bold]")
 
     module_importance.sort(key=lambda x: x[2], reverse=True)
 

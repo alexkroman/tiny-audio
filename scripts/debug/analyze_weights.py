@@ -20,12 +20,6 @@ app = typer.Typer(help="Analyze model weights for training health")
 console = Console()
 
 
-def _section(title: str, width: int = 70) -> None:
-    console.print("\n" + "=" * width)
-    console.print(f"[bold]{title}[/bold]")
-    console.print("=" * width)
-
-
 def _threshold_status(value: float, warn: float, high: float) -> str:
     if value < warn:
         return "✅ OK"
@@ -442,7 +436,11 @@ def print_decoder_summary(
             layer_groups.setdefault(idx, []).append(s)
 
     if layer_groups:
-        _section("DECODER PER-LAYER DRIFT" + (" (Δ FROM BASE)" if base_weights else ""))
+        console.rule(
+            "[bold]"
+            + ("DECODER PER-LAYER DRIFT" + (" (Δ FROM BASE)" if base_weights else ""))
+            + "[/bold]"
+        )
         table = Table(show_header=True, header_style="bold")
         table.add_column("Layer", justify="right")
         if base_weights:
@@ -531,8 +529,10 @@ def print_decoder_summary(
 
     embed_stats = next((s for s in all_stats if s.get("tensor_kind") == "embed"), None)
     if embed_stats is not None and embed_stats["name"] in weights:
-        _section(
-            "EMBED_TOKENS" + (" DRIFT FROM BASE" if base_weights else " ROW-NORM DISTRIBUTION")
+        console.rule(
+            "[bold]"
+            + ("EMBED_TOKENS" + (" DRIFT FROM BASE" if base_weights else " ROW-NORM DISTRIBUTION"))
+            + "[/bold]"
         )
         embed = weights[embed_stats["name"]].float()
         base_embed_tensor = resolve_base_tensor(embed_stats["name"], base_weights)
@@ -618,7 +618,11 @@ def print_decoder_summary(
 
     norm_stats = [s for s in all_stats if s.get("tensor_kind") == "norm"]
     if norm_stats:
-        _section("RMSNORM GAIN" + (" Δ FROM BASE" if base_weights else " COHERENCE"))
+        console.rule(
+            "[bold]"
+            + ("RMSNORM GAIN" + (" Δ FROM BASE" if base_weights else " COHERENCE"))
+            + "[/bold]"
+        )
 
         if base_weights:
             deltas: list[float] = []
@@ -719,7 +723,7 @@ def analyze_weights(
     compare_base: bool = True,
 ):
     """Analyze model weights for training health."""
-    _section(f"Weight Analysis: {model_id}")
+    console.rule(f"[bold]Weight Analysis: {model_id}[/bold]")
 
     try:
         config_path = hf_hub_download(repo_id=model_id, filename="config.json")
@@ -755,7 +759,7 @@ def analyze_weights(
             return False
         console.print(f"\nFiltering to weights containing '{filter_prefix}'")
 
-    _section("WEIGHT TENSORS")
+    console.rule("[bold]WEIGHT TENSORS[/bold]")
 
     # Determine trainability from the saved config rather than hardcoding
     # "projector" — language_model.* is trainable when freeze_language_model
@@ -815,7 +819,7 @@ def analyze_weights(
     compute_rank = (not skip_rank) and show_per_tensor
 
     if show_per_tensor:
-        _section("DETAILED WEIGHT ANALYSIS")
+        console.rule("[bold]DETAILED WEIGHT ANALYSIS[/bold]")
 
     all_stats = []
     for name in sorted(weights.keys()):
@@ -840,7 +844,7 @@ def analyze_weights(
             text_model_id=config.get("text_model_id"),
         )
 
-    _section("OVERALL TRAINING HEALTH SUMMARY")
+    console.rule("[bold]OVERALL TRAINING HEALTH SUMMARY[/bold]")
 
     total_nans = sum(s["nan_count"] for s in all_stats)
     total_infs = sum(s["inf_count"] for s in all_stats)
