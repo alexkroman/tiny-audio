@@ -371,7 +371,11 @@ FLA_CHECK
 # one-time cost per volume rather than per pod.
 #
 # Non-fatal by design -- an unreachable Hub should train slower, not block the
-# deploy.
+# deploy. A miss here is also survivable at runtime: resolution is retried on
+# the first cuda-side kernelize, and ASRModel.train catches the failure,
+# disables use_kernels and carries on with the torch reference path. What this
+# block buys is the warning arriving while someone is still watching the
+# deploy, instead of a WARNING line buried in step 0 of a multi-day run.
 # Install `kernels` at the version the INSTALLED transformers accepts, not a
 # version we guessed. transformers gates on a window
 # (KERNELS_MIN_VERSION <= v < KERNELS_MAX_VERSION) and
@@ -411,7 +415,7 @@ else
   echo "WARN: could not read the transformers kernels window; skipping kernels install"
 fi
 
-python - <<'KERNEL_WARM' || echo "WARN: Hub kernel pre-warm failed; first model load will retry, then fall back"
+python - <<'KERNEL_WARM' || echo "WARN: Hub kernel pre-warm incomplete; those layers use the torch reference path"
 import sys
 
 try:
@@ -420,13 +424,23 @@ except ImportError as e:
     print(f"kernels not importable ({e}); skipping pre-warm")
     sys.exit(0)
 
+# Every repo is attempted even after one fails. They back different layers --
+# fla the gated delta rule, mamba-ssm the causal conv and chunk scan -- so a
+# repo without a build for this torch/CUDA/arch says nothing about the next
+# one, and stopping at the first failure both skips a cache that would have
+# worked and hides the second repo's status from the deploy log. This is the
+# check that would have named kernels-community/mamba-ssm (torch 2.11+ wheels
+# only) before a torch 2.8 pod reached step 0.
+failed = []
 for repo in ("kernels-community/fla", "kernels-community/mamba-ssm"):
     try:
         get_kernel(repo)
         print(f"hub kernel cached: {repo}")
     except Exception as e:  # noqa: BLE001 - any failure here is non-fatal
         print(f"hub kernel unavailable: {repo} ({type(e).__name__}: {e})")
-        sys.exit(1)
+        failed.append(repo)
+
+sys.exit(1 if failed else 0)
 KERNEL_WARM
 
 # liger-kernel provides the fused linear cross-entropy used by

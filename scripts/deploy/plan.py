@@ -389,6 +389,15 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
 
     # Cross-entropy. liger fuses lm_head+softmax+CE into O(B*T*D); without it
     # the (B, T, V) fp32 logits plus a log_softmax copy dominate everything.
+    #
+    # What makes `use_liger` a sufficient condition is ASRModel.forward
+    # requesting `skip_logits=True` on every labelled forward. Leaning on
+    # liger's own default instead is what made this term wrong once already:
+    # that default reads the DECODER's `training` flag, which is False
+    # whenever the decoder is frozen, so granite_qwen_lora planned at 60.10
+    # GiB and then OOMed on a 12.37 GiB logits gradient. The term is still
+    # optimistic if liger has no patcher for the architecture -- train.py
+    # warns in that case, and so does ASRModel.__init__.
     fused = bool(train.get("use_liger", True))
     logits = 0 if fused else batch * seq_len * vocab * 4 * 2
 
