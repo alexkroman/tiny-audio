@@ -102,15 +102,48 @@ class TestExcludeWhere:
     """
 
     @staticmethod
-    def _ds():
-        from datasets import Dataset
+    def _ds(class_label: bool = False):
+        """Build a fixture dataset.
 
-        return Dataset.from_dict(
-            {
-                "text": ["a", "b", "c", "d"],
-                "source": ["youtube", "audiobook", "podcast", "audiobook"],
-            }
-        )
+        `class_label=True` mirrors Gigaspeech, whose `source` column is
+        ClassLabel(names=['audiobook','podcast','youtube']) -- so rows hold
+        integer codes, not strings. An earlier version of the filter compared
+        the configured strings straight against those ints, matched nothing,
+        and silently dropped 0 of 910,140 rows.
+        """
+        from datasets import ClassLabel, Dataset, Features, Value
+
+        names = ["audiobook", "podcast", "youtube"]
+        rows = {
+            "text": ["a", "b", "c", "d"],
+            "source": ["youtube", "audiobook", "podcast", "audiobook"],
+        }
+        if not class_label:
+            return Dataset.from_dict(rows)
+        feats = Features({"text": Value("string"), "source": ClassLabel(names=names)})
+        rows["source"] = [names.index(v) for v in rows["source"]]
+        return Dataset.from_dict(rows, features=feats)
+
+    def test_classlabel_column_holds_ints_not_strings(self):
+        """The property that made the original bug silent."""
+        ds = self._ds(class_label=True)
+        assert ds["source"] == [2, 0, 1, 0]
+        assert ds.features["source"].str2int("audiobook") == 0
+
+    def test_classlabel_values_resolve_before_filtering(self):
+        ds = self._ds(class_label=True)
+        feature = ds.features["source"]
+        wanted = {feature.str2int(v) for v in ["audiobook"]}
+        assert wanted == {0}
+        out = ds.filter(lambda v: v not in wanted, input_columns="source")
+        assert len(out) == 2
+        assert out["text"] == ["a", "c"]
+
+    def test_naive_string_compare_on_classlabel_drops_nothing(self):
+        """Regression guard: this is precisely what used to happen."""
+        ds = self._ds(class_label=True)
+        out = ds.filter(lambda v: v not in {"audiobook", "podcast"}, input_columns="source")
+        assert len(out) == len(ds), "if this passes, the int/str mismatch is real"
 
     def test_excludes_listed_values(self):
         ds = self._ds()
