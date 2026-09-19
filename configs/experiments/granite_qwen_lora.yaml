@@ -199,6 +199,20 @@ training:
   # nudged. 1e-4 to 3e-4 is the standard band; 2e-4 sits mid-range. This is the
   # one hyperparameter here with no measurement behind it -- read grad_norm and
   # the LoRA-vs-base weight ratio over the first ~2k steps and adjust.
+  # Must be set HERE, not only under `model:`. attn_implementation is the
+  # first entry in scripts/train.py's TRAINING_MODEL_PARAMS, and that merge
+  # copies every one of those names from `training:` over `model:`. With only
+  # the `model:` line, production.yaml's flash_attention_2 silently won and
+  # this experiment's sdpa choice never reached ASRConfig -- the same way it
+  # was overridden for the whole granite_qwen run. train.py now warns when the
+  # two disagree; keep them in sync.
+  #
+  # sdpa is still right on an A100: at T~320 the QK^T + AV work FA2 optimizes
+  # is a low single-digit fraction of decoder FLOPs (18 of 24 Qwen3.5 layers
+  # are linear_attention and never touch it), and it drops the flash-attn
+  # source build from the critical path.
+  attn_implementation: sdpa
+
   learning_rate: 1e-3
   decoder_learning_rate: 2e-4
 
@@ -213,14 +227,43 @@ training:
   seed: 44
 
   auto_find_batch_size: false
-  # Same effective batch as granite_qwen (32 x 3 = 96) so the projector LR
-  # transfers unchanged. Per-device can likely go higher -- optimizer state
-  # drops from 1.386B to 80M params and there is no fp32 master copy -- but
-  # raising it would change the effective batch and break the comparison.
-  # Measure the VRAM headroom on this run, spend it on epochs in the next.
-  per_device_train_batch_size: 32
-  per_device_eval_batch_size: 32
-  gradient_accumulation_steps: 3
+  # 48 x 2 = 96. Same EFFECTIVE batch as granite_qwen, so the projector LR
+  # transfers unchanged and the comparison holds -- but the per-device batch
+  # is maximised for the card instead of inherited from a recipe that had to
+  # carry fp32 master weights and 1.386B of optimizer state.
+  #
+  # 48 is the largest divisor of 96 that fits. Sized for an A100 80GB
+  # (79.15 GiB usable) with the calibrated estimator in scripts/deploy/plan.py:
+  #   32 x 3   42.17 GiB   53%
+  #   48 x 2   60.10 GiB   76%   <- here
+  #   96 x 1  ~113    GiB   over the card (activations are ~1.12 GiB/sample)
+  #
+  # 76% is not the edge, and the benchmark for that claim is empirical rather
+  # than a safety factor: granite_qwen itself ran 32 x 3 at ~65 GiB, 82% of an
+  # 80 GB card, for all 32,922 steps without OOM. This recipe asks for LESS
+  # than that run already survived on the same amount of VRAM. Note the
+  # planner's "recommended (x1.25)" line is margin stacked on top of an
+  # activation term that is already calibrated to a measured peak (nvidia-smi
+  # reserved, i.e. a high-water mark including allocator caching) -- reading
+  # that 75 GiB figure as the requirement double-counts conservatism.
+  #
+  # The win is throughput, not capacity: a third fewer micro-batches per
+  # optimizer step and larger GEMMs, which matters on an A100 (~1935 GB/s
+  # against an H100 SXM's ~3350) where this run is bandwidth-bound and already
+  # looking at ~4.5-5 days.
+  #
+  # Padding does not degrade at 48. granite_qwen.yaml's analysis applies: the
+  # collator pads each batch to its own longest row within an [0.8s, 19s]
+  # window, and multiasr puts enough mass near the ceiling that most 32-row
+  # batches already contain a near-ceiling row -- so E[max duration] is
+  # already saturated and per-sample cost stays flat rather than creeping up.
+  per_device_train_batch_size: 48
+  # Tracks the train batch. Eval runs under prediction_loss_only and therefore
+  # no_grad, so no activation tape is retained and memory is ~static plus one
+  # layer; 48 is comfortable either way, and with ASRModel.forward now passing
+  # skip_logits on eval the (B,T,248320) logits never materialise.
+  per_device_eval_batch_size: 48
+  gradient_accumulation_steps: 2
 
   # ONE epoch, matching granite_qwen, so this is a like-for-like comparison.
   #

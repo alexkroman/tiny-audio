@@ -284,6 +284,11 @@ pip install --user flash-attn --no-build-isolation --quiet
 # transformers logs `causal_conv1d_fn` / `causal_conv1d_update` falling back to
 # a reference implementation it calls "correct but much slower".
 #
+# NOTE: this is now the SECOND choice, not the first. kernels-community/mamba-ssm
+# supplies the same two functions as a prebuilt Hub kernel and takes priority
+# when use_kernels=True -- see the pre-warm block further down for the full
+# resolution order. Kept because it is the fallback when Hub resolution fails.
+#
 # Installed here rather than as a project dependency for two reasons. It only
 # publishes an sdist, so it compiles against nvcc and torch at install time and
 # needs --no-build-isolation for the same reason flash-attn above does. And the
@@ -301,8 +306,13 @@ pip install --user ninja packaging --quiet
 pip install --user causal-conv1d --no-build-isolation --quiet \
   || echo "WARN: causal-conv1d build failed; Qwen3.5 conv falls back to the slower reference path"
 
-# flash-linear-attention is the fast path for the gated delta rule in those
-# same layers, but it is only safe when paired with tilelang. On Hopper with
+# flash-linear-attention is *a* fast path for the gated delta rule in those
+# same layers -- the fallback one, since kernels-community/fla now supplies
+# chunk_gated_delta_rule / fused_recurrent_gated_delta_rule as prebuilt Hub
+# kernels that take priority (see the pre-warm block below). It is only safe
+# when paired with tilelang, which is exactly why it is still verified here:
+# when Hub resolution fails at runtime this package is what gets used next.
+# On Hopper with
 # Triton >=3.4.0 and <3.7.1 fla's Triton kernel for gated chunk_bwd_dqkwg is
 # known-wrong (fla-org#640), so fla raises instead of producing bad gradients.
 # Its TileLang backend is auto-enabled on exactly that combination but needs
@@ -337,6 +347,101 @@ print(
 )
 sys.exit(1)
 FLA_CHECK
+
+# Pre-warm the Hub kernels. As of the `kernels` dependency + use_kernels=True
+# in _load_language_model, the two blocks above are no longer the PRIMARY fast
+# path for Qwen3.5's linear-attention layers -- they are the fallback.
+# transformers' @use_kernel_func_from_hub_with_fallback resolves in the order
+#   Hub kernels (when use_kernels=True) -> original package -> torch reference
+# and ships default mappings for exactly the four functions those blocks
+# install: chunk_gated_delta_rule / fused_recurrent_gated_delta_rule ->
+# kernels-community/fla, causal_conv1d_fn / causal_conv1d_update ->
+# kernels-community/mamba-ssm. Prebuilt binaries, so no nvcc and no tilelang.
+#
+# Keep the fla/tilelang/causal-conv1d dance anyway: Hub resolution can fail at
+# RUNTIME (HF unreachable, rate limit, an unsupported torch/CUDA combination),
+# and when it does the next thing in the chain is the fla package. The
+# verification above is what makes that fallback slow-but-correct rather than
+# a first-backward crash.
+#
+# Fetching here rather than letting the first model load do it lazily: a
+# download failure at step 0 of a multi-day run degrades silently to the
+# reference path, and this is the last moment anyone is watching. Lands in
+# HF_HOME, which is redirected to the network volume below, so this is a
+# one-time cost per volume rather than per pod.
+#
+# Non-fatal by design -- an unreachable Hub should train slower, not block the
+# deploy. A miss here is also survivable at runtime: resolution is retried on
+# the first cuda-side kernelize, and ASRModel.train catches the failure,
+# disables use_kernels and carries on with the torch reference path. What this
+# block buys is the warning arriving while someone is still watching the
+# deploy, instead of a WARNING line buried in step 0 of a multi-day run.
+# Install `kernels` at the version the INSTALLED transformers accepts, not a
+# version we guessed. transformers gates on a window
+# (KERNELS_MIN_VERSION <= v < KERNELS_MAX_VERSION) and
+# PreTrainedModel.set_use_kernels RAISES rather than warning when the
+# installed version falls outside it:
+#     ValueError: Kernels are not available. Please install a compatible
+#     version (0.16.0 <= version < 0.17.0)
+# That is a hard crash inside from_pretrained, i.e. the run dies at model
+# construction. It is exactly what happened when `kernels` was briefly a main
+# dependency pinned ">=0.6.0": poetry resolved 0.17.1 and every pod died.
+#
+# Reading the window off transformers keeps this correct across upgrades
+# instead of re-pinning by hand. Runs after the requirements install above so
+# it overrides whatever poetry resolved.
+# `set -eo pipefail` is active, and a failing command substitution inside an
+# assignment DOES abort the script -- unlike every other `python` call here,
+# which is wrapped in `|| ...` and so fails safe. Disable errexit across just
+# this assignment so a missing interpreter, a slow/failed transformers import
+# or an older transformers without these constants degrades to "skip the
+# install" instead of killing the whole bootstrap.
+set +e
+KERNELS_SPEC=$(python3 - <<'KERNELS_SPEC_PY' 2>/dev/null
+try:
+    from transformers.utils.import_utils import KERNELS_MAX_VERSION, KERNELS_MIN_VERSION
+
+    print(f"kernels>={KERNELS_MIN_VERSION},<{KERNELS_MAX_VERSION}")
+except Exception:
+    pass
+KERNELS_SPEC_PY
+)
+set -e
+if [ -n "$KERNELS_SPEC" ]; then
+  echo "Installing $KERNELS_SPEC (window declared by the installed transformers)"
+  pip install --user "$KERNELS_SPEC" --quiet \
+    || echo "WARN: kernels install failed; hybrid layers fall back to the torch reference path"
+else
+  echo "WARN: could not read the transformers kernels window; skipping kernels install"
+fi
+
+python - <<'KERNEL_WARM' || echo "WARN: Hub kernel pre-warm incomplete; those layers use the torch reference path"
+import sys
+
+try:
+    from kernels import get_kernel
+except ImportError as e:
+    print(f"kernels not importable ({e}); skipping pre-warm")
+    sys.exit(0)
+
+# Every repo is attempted even after one fails. They back different layers --
+# fla the gated delta rule, mamba-ssm the causal conv and chunk scan -- so a
+# repo without a build for this torch/CUDA/arch says nothing about the next
+# one, and stopping at the first failure both skips a cache that would have
+# worked and hides the second repo's status from the deploy log. This is the
+# check that would have named kernels-community/mamba-ssm (torch 2.11+ wheels
+# only) before a torch 2.8 pod reached step 0.
+failed = []
+for repo in ("kernels-community/fla", "kernels-community/mamba-ssm"):
+    try:
+        get_kernel(repo)
+        print(f"hub kernel cached: {repo}")
+    except Exception as e:  # noqa: BLE001 - any failure here is non-fatal
+        print(f"hub kernel unavailable: {repo} ({type(e).__name__}: {e})")
+        failed.append(repo)
+
+sys.exit(1 if failed else 0)
+KERNEL_WARM
 
 # liger-kernel provides the fused linear cross-entropy used by
 # apply_liger_kernel_to_qwen3() in scripts/train.py. poetry export already
@@ -400,10 +505,16 @@ echo "Dependencies verified for $TA_PYTHON"
 @app.command(name="plan")
 def plan(
     experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
-    seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
+    # 320, not 512: the measured granite_qwen sequence is 237 audio tokens at
+    # the 19s collator ceiling plus prompt and transcript. This default
+    # shadows plan_command's own, so the two have to be kept in sync -- it was
+    # 512 here while plan.py said 320, which silently inflated every estimate
+    # by 1.6x. Same shape of bug as `attn_implementation` being set under
+    # `model:` while `training:` quietly won.
+    seq_len: int = typer.Option(320, "--seq-len", help="Assumed tokens per sample"),
     # No default: plan_command picks the cheapest listed GPU that actually
     # fits the estimate. Hardcoding an H100 here meant every plan recommended
-    # an 80 GB card regardless of need -- granite_qwen_lora wants ~36 GiB.
+    # an 80 GB card regardless of need.
     gpu: str | None = typer.Option(
         None, "--gpu", help="Override the GPU id (default: cheapest that fits)"
     ),

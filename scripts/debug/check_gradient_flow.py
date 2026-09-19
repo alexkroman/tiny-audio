@@ -315,13 +315,24 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
 
     print("[2] Forward pass...")
     model.train()
+    # Ask for the logits back. A labelled forward normally skips the lm_head
+    # projection entirely (see ASRModel.forward), which is right for training
+    # -- the tensor is vocab-sized -- but this probe exists to find NaNs, and
+    # the logits are where a bad projector output shows up first. The kwarg
+    # only exists on liger's patched forward, so it is gated on the same flag
+    # ASRModel uses.
+    if model._lm_accepts_skip_logits:
+        batch["skip_logits"] = False
     outputs = model(**batch)
     loss = outputs.loss
     print(f"    loss = {loss.item():.4f}  finite={torch.isfinite(loss).item()}")
-    print(
-        f"    logits: shape={tuple(outputs.logits.shape)}  "
-        f"finite={torch.isfinite(outputs.logits).all().item()}"
-    )
+    if outputs.logits is None:
+        print("    logits: skipped (fused cross-entropy, no lm_head projection)")
+    else:
+        print(
+            f"    logits: shape={tuple(outputs.logits.shape)}  "
+            f"finite={torch.isfinite(outputs.logits).all().item()}"
+        )
     print()
 
     print("[3] Backward pass...")

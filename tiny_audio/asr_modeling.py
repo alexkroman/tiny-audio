@@ -1,4 +1,5 @@
 import functools
+import inspect
 import json
 import logging
 import math
@@ -19,6 +20,7 @@ from transformers import (
 )
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.utils import is_kernels_available
 
 try:
     from .asr_config import ASRConfig, compute_encoder_output_length
@@ -435,6 +437,30 @@ def _assert_projector_loaded(incompatible_keys, projector_type: str) -> None:
     )
 
 
+def disable_hub_kernels(root: nn.Module) -> list[str]:
+    """Switch off transformers' Hub-kernel dispatch everywhere it is enabled.
+
+    Returns the names of the submodules that were carrying it, so a caller can
+    tell "kernels were on, now they are off" from "kernels had nothing to do
+    with this failure" and re-raise in the second case.
+
+    Writes `_use_kernels` directly instead of going through the public
+    `use_kernels` setter. The setter does the same assignment but first logs
+    "Disabling kernels at runtime is a no-op as there is no 'unkernelize'
+    routine; keeping current kernels active" -- true of the layers already
+    swapped, misleading as an explanation of what this call accomplishes. What
+    it accomplishes is stopping the *next* kernelize: `PreTrainedModel.train`
+    re-runs `set_use_kernels(True)` on every mode flip, and that is the call
+    that raises.
+    """
+    disabled = []
+    for name, module in root.named_modules():
+        if getattr(module, "_use_kernels", False):
+            module._use_kernels = False
+            disabled.append(name or type(module).__name__)
+    return disabled
+
+
 class ASRModel(PreTrainedModel, GenerationMixin):
     """Audio-to-text model combining an audio encoder, projector, and language model."""
 
@@ -532,6 +558,34 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Language model (frozen)
         self.language_model = self._load_language_model(config, target_dtype)
+
+        # Does the decoder's forward take `skip_logits`? Only liger's patched
+        # `lce_forward` declares it; the stock transformers forward does not.
+        # Resolved once here rather than per-step, and read in forward() to
+        # skip the lm_head projection on any labelled forward, train or eval
+        # (see the comment there). Checked
+        # on the class rather than the instance because liger patches the
+        # class. scripts/train.py applies liger BEFORE constructing ASRModel,
+        # so this sees the patched state.
+        self._lm_accepts_skip_logits = (
+            "skip_logits" in inspect.signature(type(self.language_model).forward).parameters
+        )
+        if not self._lm_accepts_skip_logits:
+            # Say so once, loudly. Without the fused path every labelled
+            # forward builds a (B, T, vocab) tensor plus its fp32 upcast and
+            # its gradient, which on a large-vocab decoder is the difference
+            # between fitting on the card and not -- and the ways to end up
+            # here are all quiet: no liger patcher mapped for this
+            # text_model_id, liger missing (it is linux-only), or a patcher
+            # that patched a different class than the one that got loaded.
+            logger.warning(
+                "%s's forward does not accept `skip_logits` — liger's fused "
+                "linear cross-entropy is NOT active, so every training step "
+                "materializes a (batch, seq, %s) logits tensor. Check for an "
+                "'Applied liger kernels via ...' line earlier in the log.",
+                type(self.language_model).__name__,
+                getattr(self.language_model.config, "vocab_size", None) or "vocab",
+            )
 
         # Initialize tokenizer and special tokens
         self._init_tokenizer(config)
@@ -761,6 +815,45 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
+
+        # Opt into transformers' hub-kernel dispatch. For Qwen3.5 this is the
+        # difference between the gated-delta-net fast path and the torch
+        # reference: 18 of its 24 layers are linear_attention, and upstream
+        # measures "more than an order of magnitude on an H100" for
+        # chunk_gated_delta_rule alone. Numerics are unaffected -- the
+        # decorator's fallback chain (hub -> original package -> torch) picks
+        # an implementation, not a different computation.
+        #
+        # Gated rather than unconditional: the kernels are CUDA binaries, so
+        # asking for them on mps/cpu only buys resolution failures and log
+        # noise. Absent `kernels`, from_pretrained pops the flag and proceeds.
+        # Gate on transformers' OWN predicate, not on whether the package
+        # imports. transformers accepts `kernels` only inside a version window
+        # (KERNELS_MIN_VERSION <= v < KERNELS_MAX_VERSION) and
+        # set_use_kernels RAISES inside from_pretrained when the installed
+        # version is outside it -- so a presence check like find_spec() turns a
+        # would-be speedup into a hard crash at model construction. That is
+        # precisely what an earlier revision did: it saw kernels 0.17.1
+        # installed, asked for them, and died against a transformers wanting
+        # <0.17.0. is_kernels_available() checks presence AND the window, so a
+        # mismatch now degrades to the torch reference path.
+        #
+        # The gate is necessary but not sufficient: it says the `kernels`
+        # PACKAGE is usable, not that the Hub has a build of each mapped repo
+        # for this torch/CUDA/arch. That second failure cannot be checked here
+        # -- resolution happens lazily on the first cuda-side kernelize, which
+        # is the first `train()` -- so it is handled there, in `ASRModel.train`.
+        kernels_ok = is_kernels_available()
+        if torch.cuda.is_available() and kernels_ok:
+            decoder_kwargs["use_kernels"] = True
+        else:
+            logger.info(
+                "Hub kernels not requested (cuda=%s, kernels usable=%s) — "
+                "Qwen3.5-style linear-attention layers will use the slower "
+                "torch reference path.",
+                torch.cuda.is_available(),
+                kernels_ok,
+            )
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
 
@@ -1096,13 +1189,63 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         on modules with `requires_grad_(False)`. The frozen encoder (and the LM
         when `freeze_language_model=True`) should always run deterministically;
         train-mode dropout only adds noise that can't improve a frozen network.
+
+        Also the place where Hub-kernel dispatch is caught and switched off.
+        `use_kernels=True` (see `_load_language_model`) is resolved lazily, per
+        device and per mode: `from_pretrained` kernelizes while the decoder is
+        still on CPU, where the mapping has no entry and the pass no-ops, so a
+        load that "succeeded" proves nothing. Trainer then moves the model to
+        CUDA and calls this method, `PreTrainedModel.train` re-runs
+        `set_use_kernels(True)`, and only now does `kernels` go and fetch the
+        repo the mapping names for (cuda, TRAINING). A repo with no build
+        variant for this box raises FileNotFoundError there -- step 0 of the
+        run, after the dataset and the model are already up. Qwen3.5's conv
+        functions hit exactly this: they map to kernels-community/mamba-ssm,
+        and NO branch of that repo has a torch 2.8 build -- v2 (the version
+        transformers pins) starts at torch 2.11, v3 at 2.13, main at 2.10 --
+        while the RunPod base image is on torch 2.8. Checked on the Hub rather
+        than inferred from one error message: there is no newer version to
+        move to, so the fallback below is the outcome until the base image's
+        torch moves.
+
+        `kernels`' own `use_fallback=True` does not cover this. It guards the
+        mapping lookups only; once a repo is selected, `_get_layer_memoize` ->
+        `repo.load()` is unguarded and a missing variant is fatal. Nor can the
+        `is_kernels_available()` gate see it -- that checks the `kernels`
+        package version window, not what the Hub built.
+
+        So catch it here, at the one call site that triggers it, and retry with
+        kernels off. Layers swapped before the raise keep their kernels: they
+        resolved for the mode being requested and are drop-in equivalents, so a
+        partial swap is slower-in-places, never wrong. The retry is safe
+        because `super().train(mode)` is idempotent, and it terminates because
+        the flag that drives the kernelize is now False.
         """
+        try:
+            self._apply_train_mode(mode)
+        except Exception as exc:  # re-raised below unless kernels explain it
+            disabled = disable_hub_kernels(self)
+            if not disabled:
+                raise
+            logger.warning(
+                "Hub kernel dispatch failed switching to %s mode (%s: %s). "
+                "Disabled it on %s; the run continues on the torch reference "
+                "path -- same numerics, slower hybrid/linear-attention layers.",
+                "train" if mode else "eval",
+                type(exc).__name__,
+                exc,
+                ", ".join(disabled),
+            )
+            self._apply_train_mode(mode)
+        return self
+
+    def _apply_train_mode(self, mode: bool) -> None:
+        """The actual mode switch, factored out so `train` can retry it."""
         super().train(mode)
         if getattr(self.config, "freeze_audio_encoder", True):
             self.audio_tower.train(False)
         if getattr(self.config, "freeze_language_model", True):
             self.language_model.train(False)
-        return self
 
     def _set_gradient_checkpointing(
         self,
@@ -1578,6 +1721,46 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # `return_dict` instead!". Supplying the value means the fallback never
         # runs.
         kwargs.setdefault("return_dict", True)
+
+        # Skip the lm_head projection whenever the loss is all that is wanted.
+        # Nothing in this repo reads `outputs.logits` on a labelled forward --
+        # not the Trainer (no compute_metrics), not the custom metrics -- so
+        # the (B, T, V) tensor is pure cost on both train and eval.
+        #
+        # Requesting it EXPLICITLY on both, rather than leaning on liger's
+        # default, because that default is wrong here in both directions:
+        #
+        #   skip_logits = self.training and labels is not None
+        #
+        # where `self` is the LANGUAGE MODEL. Two ways that misfires:
+        #
+        #   eval  -- runs under model.eval(), so the default is False and the
+        #            full tensor gets built. granite_qwen.yaml's claim that
+        #            "the logits never materialize past liger's fused CE" was
+        #            not true as configured: Trainer injects skip_logits only
+        #            when `args.use_liger_kernel` is set (trainer.py:3135),
+        #            and this repo patches liger by hand and leaves that flag
+        #            False. At B=32, T~320, V=248320 that is ~5.1 GiB in bf16
+        #            plus the fp32 upcast inside the loss.
+        #
+        #   train -- `train()` above forces the decoder into eval mode when
+        #            `freeze_language_model=True`, so the LM's `training` flag
+        #            is False WHILE THE RUN IS TRAINING and the default turns
+        #            the fused CE off exactly where it matters most. That is
+        #            an OOM, not a slowdown: granite_qwen_lora at B=48, T=557
+        #            died on a 12.37 GiB allocation in backward, which is
+        #            48*557*248320*2 bytes to the byte. The full-FT recipe
+        #            never saw it -- its decoder stayed in train mode, so the
+        #            default happened to be right.
+        #
+        # Done here rather than via `use_liger_kernel: true` because that flag
+        # makes transformers call apply_liger_kernel(), which *raises* when
+        # liger-kernel is unavailable -- and liger is a linux-only dependency
+        # (pyproject.toml), so it would break every mps_smoke run on a mac.
+        # Gating on the patched signature is equivalent where it matters and
+        # inert everywhere else.
+        if labels is not None and self._lm_accepts_skip_logits:
+            kwargs.setdefault("skip_logits", True)
 
         return self.language_model(
             attention_mask=attention_mask,
