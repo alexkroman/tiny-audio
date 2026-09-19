@@ -4,16 +4,24 @@
 from pathlib import Path
 
 import typer
-from huggingface_hub import HfApi, upload_folder
+from huggingface_hub import HfApi, RepoUrl, upload_folder
 
 app = typer.Typer(help="Deploy demo to Hugging Face Space")
 
 
 def extract_repo_id(repo_id_or_url: str) -> str:
-    """Extract repo_id from a URL or return as-is if already a repo_id."""
-    if repo_id_or_url.startswith("https://huggingface.co/spaces/"):
-        return repo_id_or_url.replace("https://huggingface.co/spaces/", "").rstrip("/")
-    return repo_id_or_url
+    """Return the `owner/name` Space id for a plain id or any huggingface.co Space URL.
+
+    `RepoUrl` handles trailing slashes, `/tree/<branch>` suffixes and custom
+    `HF_ENDPOINT` hosts; a URL that points at a model or dataset is rejected
+    instead of being passed through to a Space API call that would fail later.
+    """
+    if "://" not in repo_id_or_url:
+        return repo_id_or_url.strip("/")
+    parsed = RepoUrl(repo_id_or_url)
+    if parsed.repo_type != "space":
+        raise typer.BadParameter(f"Not a Space: {repo_id_or_url}")
+    return parsed.repo_id
 
 
 @app.command()
@@ -54,18 +62,15 @@ def deploy(
     typer.echo(f"\nDeploying to Hugging Face Space: {repo_id}")
     typer.echo(f"Demo directory: {demo_dir.absolute()}")
 
-    api = HfApi()
-    try:
-        api.repo_info(repo_id=repo_id, repo_type="space")
-        typer.echo(f"Space '{repo_id}' exists, uploading files...")
-    except Exception:
-        typer.echo(f"Creating new Space '{repo_id}'...")
-        api.create_repo(
-            repo_id=repo_id,
-            repo_type="space",
-            space_sdk="gradio",
-            private=private,
-        )
+    # `exist_ok` makes this a no-op on an existing Space; a real auth or
+    # network failure surfaces here instead of being swallowed.
+    HfApi().create_repo(
+        repo_id=repo_id,
+        repo_type="space",
+        space_sdk="gradio",
+        private=private,
+        exist_ok=True,
+    )
 
     typer.echo("\nUploading files...")
     upload_folder(

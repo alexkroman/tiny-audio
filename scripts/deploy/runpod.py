@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Unified CLI for RunPod operations."""
 
+import io
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -12,6 +14,7 @@ from typing import Annotated
 import typer
 from fabric import Connection
 from invoke import UnexpectedExit
+from rich.prompt import Prompt
 
 from scripts.utils import get_project_root
 
@@ -35,9 +38,13 @@ def _start_remote_tmux_script(
     no_attach: bool,
 ) -> None:
     """Upload a script to /tmp, start it in a tmux session, optionally attach."""
-    conn.run(f"cat > {script_path} << 'EOF'\n{script_content}\nEOF", hide=True)
-    conn.run(f"chmod +x {script_path}", hide=True)
-    result = conn.run(f"tmux new-session -d -s {session_name} {script_path}", warn=True)
+    # SFTP upload: no shell in the path, so the script body needs no quoting.
+    conn.put(io.StringIO(script_content), remote=script_path)
+    conn.sftp().chmod(script_path, 0o700)
+    result = conn.run(
+        f"tmux new-session -d -s {shlex.quote(session_name)} {shlex.quote(script_path)}",
+        warn=True,
+    )
     if not result.ok:
         print(f"Failed to start tmux session: {result.stderr}")
         sys.exit(1)
@@ -88,7 +95,7 @@ def list_tmux_sessions(conn: Connection) -> list[str]:
 
 def kill_tmux_session(conn: Connection, session_name: str) -> bool:
     """Kill a tmux session by name. Returns True if killed, False if not found."""
-    result = conn.run(f"tmux kill-session -t {session_name}", hide=True, warn=True)
+    result = conn.run(f"tmux kill-session -t {shlex.quote(session_name)}", hide=True, warn=True)
     return result.ok
 
 
@@ -96,7 +103,7 @@ def get_tmux_logs(conn: Connection, session_name: str, lines: int = 100) -> str 
     """Capture recent output from a tmux session."""
     try:
         result = conn.run(
-            f"tmux capture-pane -t '{session_name}' -p -S -{lines}",
+            f"tmux capture-pane -t {shlex.quote(session_name)} -p -S -{lines}",
             hide=True,
             warn=True,
         )
@@ -116,11 +123,21 @@ def attach_tmux_session(host: str, port: int, session_name: str) -> None:
     print("  - Scroll Mode:              Ctrl+B then [ (use arrows, q to exit)")
     print("=" * 50)
 
-    cmd = (
-        f"ssh -i {SSH_KEY_PATH} -p {port} -o StrictHostKeyChecking=no "
-        f"-t root@{host} \"tmux attach-session -t '{session_name}'\""
+    subprocess.run(
+        [
+            "ssh",
+            "-i",
+            str(Path(SSH_KEY_PATH).expanduser()),
+            "-p",
+            str(port),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-t",
+            f"root@{host}",
+            f"tmux attach-session -t {shlex.quote(session_name)}",
+        ],
+        check=False,
     )
-    subprocess.run(cmd, shell=True, check=False)
     print(f"\nDetached from session '{session_name}'.")
 
 
@@ -147,18 +164,10 @@ def _gitignore_aware_file_list(project_root: Path) -> str:
     )
     # Drop tracked-but-deleted paths — they're in --cached but missing on disk,
     # so rsync --files-from would skip them and exit 23.
-    deleted = subprocess.run(
-        ["git", "ls-files", "--deleted"],
-        cwd=project_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    deleted_set = set(deleted.stdout.splitlines())
     lines = [
         line
         for line in result.stdout.splitlines()
-        if line and line not in deleted_set and not line.endswith(RSYNC_SUFFIX_BLOCKLIST)
+        if line and not line.endswith(RSYNC_SUFFIX_BLOCKLIST) and (project_root / line).exists()
     ]
     return "\n".join(lines) + ("\n" if lines else "")
 
@@ -197,13 +206,27 @@ def sync_project(conn: Connection, project_root: Path) -> None:
     if not file_list.strip():
         raise RuntimeError(f"git ls-files returned no files under {project_root}")
 
-    rsync_cmd = (
-        f"rsync -avz --no-owner --no-group --files-from=- "
-        f'-e "ssh -i ~/.ssh/id_ed25519 -p {conn.port} -o StrictHostKeyChecking=no" '
-        f"{project_root}/ root@{conn.host}:/workspace/"
+    # argv form: nothing here needs a shell. rsync splits the `-e` command on
+    # whitespace itself, so it stays one argument.
+    ssh_command = (
+        f"ssh -i {Path(SSH_KEY_PATH).expanduser()} -p {conn.port} -o StrictHostKeyChecking=no"
     )
-
-    subprocess.run(rsync_cmd, shell=True, check=True, input=file_list, text=True)
+    subprocess.run(
+        [
+            "rsync",
+            "-avz",
+            "--no-owner",
+            "--no-group",
+            "--files-from=-",
+            "-e",
+            ssh_command,
+            f"{project_root}/",
+            f"root@{conn.host}:/workspace/",
+        ],
+        check=True,
+        input=file_list,
+        text=True,
+    )
     print("Project synced successfully!")
 
 
@@ -373,15 +396,11 @@ fi
 echo "Dependencies verified for $TA_PYTHON"
 """
 
-    # Upload the script via a single-quoted heredoc so apostrophes, dollar
-    # signs, and other shell metachars in the body are preserved verbatim.
-    # This avoids the entire class of `bash -c '...'` quoting bugs.
+    # Upload over SFTP so apostrophes, dollar signs, and other shell metachars
+    # in the body are preserved verbatim without any quoting.
     script_path = "/tmp/tiny_audio_install_deps.sh"
     log_path = "/tmp/tiny_audio_install.log"
-    conn.run(
-        f"cat > {script_path} << 'INSTALL_DEPS_EOF'\n{setup_script}\nINSTALL_DEPS_EOF",
-        hide=True,
-    )
+    conn.put(io.StringIO(setup_script), remote=script_path)
     # Capture all output to a log file silently rather than streaming live.
     # Pip's progress bars + ANSI color codes corrupt the local TTY when piped
     # through Fabric. On failure we fetch the tail and print it as plain text.
@@ -796,19 +815,7 @@ def attach(
             print(f"\nFound one active session: '{session_name}'. Proceeding automatically.")
         else:
             print("\nMultiple active sessions found. Please choose one:")
-            for i, session in enumerate(sessions, 1):
-                print(f"  {i}. {session}")
-            try:
-                choice = input(f"Enter number (1-{len(sessions)}): ")
-                idx = int(choice) - 1
-                if 0 <= idx < len(sessions):
-                    session_name = sessions[idx]
-                else:
-                    print("Invalid selection. Exiting.")
-                    sys.exit(1)
-            except (KeyboardInterrupt, ValueError):
-                print("\nSelection cancelled. Exiting.")
-                sys.exit(0)
+            session_name = Prompt.ask("Session", choices=sessions, default=sessions[0])
 
     if logs:
         log_content = get_tmux_logs(conn, session_name, lines)
