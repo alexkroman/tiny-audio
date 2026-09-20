@@ -4,7 +4,6 @@ Module-level functions are called directly; instance methods that only touch
 the tokenizer or projector are invoked unbound against a stand-in `self`.
 """
 
-import importlib.util
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -36,12 +35,12 @@ class TestResolveAttnImplementation:
 
     def test_fa2_with_cuda_but_no_flash_attn_is_sdpa(self, monkeypatch):
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+        monkeypatch.setattr("transformers.utils.is_flash_attn_2_available", lambda: False)
         assert _resolve_attn_implementation("flash_attention_2") == "sdpa"
 
     def test_fa2_with_cuda_and_flash_attn_is_kept(self, monkeypatch):
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+        monkeypatch.setattr("transformers.utils.is_flash_attn_2_available", lambda: True)
         assert _resolve_attn_implementation("flash_attention_2") == "flash_attention_2"
 
     @pytest.mark.parametrize("requested", [None, "sdpa", "flash_attention_2"])

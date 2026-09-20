@@ -22,22 +22,18 @@ usually ~3-5 min total.
 
 from __future__ import annotations
 
-import argparse
 import re
 import statistics
-import sys
 import unicodedata
 from collections import Counter, defaultdict
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
+import typer
 from datasets import Audio, load_dataset
 
-SCRIPTS = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(SCRIPTS))
-from train import _normalize_label  # noqa: E402
+from scripts.train import _normalize_label
+from scripts.utils import load_data_config
 
 SAMPLE_RATE = 16_000
 MIN_AUDIO_S = 0.8
@@ -175,13 +171,6 @@ def analyze_sample(raw_text: str, audio_array: np.ndarray | None, sample_rate: i
     return out
 
 
-def load_multiasr_config() -> list[dict]:
-    cfg_path = Path(__file__).resolve().parents[2] / "configs" / "data" / "multiasr.yaml"
-    with cfg_path.open() as f:
-        cfg = yaml.safe_load(f)
-    return cfg["datasets"]
-
-
 def sample_dataset(d_cfg: dict, n: int):
     path = d_cfg["path"]
     name = d_cfg.get("name")
@@ -272,18 +261,14 @@ def report(label: str, samples: list[dict[str, Any]]):
                 print(f"      norm: {norm!r}")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("-n", "--per-dataset", type=int, default=30)
-    args = ap.parse_args()
-
-    datasets_cfg = load_multiasr_config()
-    for d_cfg in datasets_cfg:
+def main(per_dataset: int = typer.Option(30, "-n", "--per-dataset")):
+    """Sample every dataset in multiasr.yaml and report label-quality issues."""
+    for d_cfg in load_data_config():
         splits = d_cfg.get("train_splits") or d_cfg.get("eval_splits") or ["train"]
         split = splits[0] if splits else "train"
         label = f"{d_cfg['path']}::{d_cfg.get('name', '-')}::{split}"
         try:
-            samples = sample_dataset(d_cfg, args.per_dataset)
+            samples = sample_dataset(d_cfg, per_dataset)
         except Exception as e:
             print(f"\n=== {label} ===\n  !! LOAD FAILED: {type(e).__name__}: {e}")
             continue
@@ -291,4 +276,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    typer.run(main)

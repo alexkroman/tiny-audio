@@ -3,6 +3,7 @@
 
 import json
 import time
+from importlib import resources
 from pathlib import Path
 from typing import Annotated
 
@@ -18,27 +19,26 @@ def find_latest_model(base_dir: str = "outputs") -> str | None:
     outputs_path = Path(base_dir)
     if not outputs_path.exists():
         return None
-    model_files = sorted(
-        outputs_path.glob("**/model.safetensors"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+    latest = max(
+        outputs_path.glob("**/model.safetensors"), key=lambda p: p.stat().st_mtime, default=None
     )
-    return str(model_files[0].parent) if model_files else None
+    return str(latest.parent) if latest else None
 
 
 def find_test_audio() -> str | None:
     """Find a test audio file in the project."""
     base_dir = get_project_root()
 
-    # Gradio ships sample audio; glob the python version out of the path so
-    # this keeps working across interpreter upgrades (was hardcoded to 3.11).
-    for pattern in (
-        ".venv/lib/python3.*/site-packages/gradio/test_data/test_audio.wav",
-        ".venv/lib/python3.*/site-packages/gradio/media_assets/audio/cantina.wav",
-    ):
-        match = next(iter(sorted(base_dir.glob(pattern))), None)
-        if match:
-            return str(match)
+    # Gradio ships sample audio as package data; resolve it through
+    # importlib.resources so it works for any interpreter version, venv
+    # location or editable install (this used to glob a hardcoded 3.11 path).
+    for relative in ("test_data/test_audio.wav", "media_assets/audio/cantina.wav"):
+        try:
+            candidate = resources.files("gradio").joinpath(relative)
+        except ModuleNotFoundError:
+            break
+        if candidate.is_file():
+            return str(candidate)
 
     for test_path in ("demo/sample.wav", "tests/test_audio.wav"):
         full_path = base_dir / test_path

@@ -504,9 +504,7 @@ def collect_model_metrics(
             output = jiwer.process_words(ds_metrics["refs"], ds_metrics["preds"])
             total = output.hits + output.substitutions + output.deletions
             if total > 0:
-                ds_metrics["wer_calculated"] = (
-                    (output.substitutions + output.deletions + output.insertions) / total * 100
-                )
+                ds_metrics["wer_calculated"] = output.wer * 100
                 ds_metrics["ins_rate"] = output.insertions / total * 100
                 ds_metrics["del_rate"] = output.deletions / total * 100
                 ds_metrics["sub_rate"] = output.substitutions / total * 100
@@ -517,9 +515,7 @@ def collect_model_metrics(
         output = jiwer.process_words(all_refs, all_preds)
         total = output.hits + output.substitutions + output.deletions
         if total > 0:
-            metrics["corpus_wer"] = (
-                (output.substitutions + output.deletions + output.insertions) / total * 100
-            )
+            metrics["corpus_wer"] = output.wer * 100
             metrics["corpus_ins_rate"] = output.insertions / total * 100
 
     if all_latencies:

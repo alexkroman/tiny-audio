@@ -28,7 +28,7 @@ from typing import Annotated
 
 import torch
 import typer
-import yaml
+from omegaconf import OmegaConf
 
 from scripts.utils import get_project_root
 from tiny_audio.asr_config import ASRConfig
@@ -52,8 +52,7 @@ def load_embedded_training_knobs() -> dict[str, float | None]:
             "weight_decay": None,
             "projector_weight_decay": None,
         }
-    with yaml_path.open() as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = OmegaConf.to_container(OmegaConf.load(yaml_path)) or {}
     training = cfg.get("training") or {}
 
     def _to_float(v):

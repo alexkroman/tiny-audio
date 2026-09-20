@@ -1,4 +1,4 @@
-"""Tests for ForcedAligner — Viterbi trellis, backtrack, and align()."""
+"""Tests for ForcedAligner — token alignment, word pairing, and align()."""
 
 from typing import ClassVar
 from unittest.mock import MagicMock
@@ -8,45 +8,14 @@ import pytest
 import torch
 
 
-class TestGetTrellis:
-    """_get_trellis builds a forward-DP trellis."""
+class TestAlignTokens:
+    """_align_tokens wraps torchaudio's CTC forced_align and returns one span per token."""
 
-    def test_trellis_shape(self):
+    def test_returns_one_span_per_token_in_order(self):
         from tiny_audio.alignment import ForcedAligner
 
-        # 5 frames, 3-class emission (blank=0, char_a=1, char_b=2)
-        emission = torch.tensor(
-            [
-                [0.0, -1.0, -1.0],  # mostly blank
-                [-1.0, 0.0, -1.0],  # mostly 'a'
-                [-1.0, 0.0, -1.0],  # mostly 'a'
-                [-1.0, -1.0, 0.0],  # mostly 'b'
-                [0.0, -1.0, -1.0],  # mostly blank
-            ]
-        )
-        tokens = [1, 2]  # Target: emit token 1 (a), then token 2 (b)
-        trellis = ForcedAligner._get_trellis(emission, tokens, blank_id=0)
-        # shape: (num_frames + 1, num_tokens + 1)
-        assert trellis.shape == (6, 3)
-
-    def test_trellis_starts_at_zero(self):
-        from tiny_audio.alignment import ForcedAligner
-
-        emission = torch.zeros(3, 3)
-        tokens = [1, 2]
-        trellis = ForcedAligner._get_trellis(emission, tokens, blank_id=0)
-        assert trellis[0, 0].item() == 0.0
-        # All other initial cells are -inf (only [0,0] is reachable at frame 0)
-        assert trellis[0, 1].item() == float("-inf")
-
-
-class TestBacktrack:
-    """_backtrack returns one (token_id, start_frame, end_frame) per token."""
-
-    def test_backtrack_returns_one_span_per_token(self):
-        from tiny_audio.alignment import ForcedAligner
-
-        # Same emissions as the trellis test: token 'a' (1) at frames 1-2, 'b' (2) at frame 3
+        # 5 frames, 3-class emission (blank=0, char_a=1, char_b=2):
+        # 'a' at frames 1-2, 'b' at frame 3, blank elsewhere.
         emission = torch.tensor(
             [
                 [0.0, -1.0, -1.0],
@@ -56,37 +25,46 @@ class TestBacktrack:
                 [0.0, -1.0, -1.0],
             ]
         )
-        tokens = [1, 2]
-        trellis = ForcedAligner._get_trellis(emission, tokens, blank_id=0)
-        spans = ForcedAligner._backtrack(trellis, emission, tokens, blank_id=0)
-        assert len(spans) == 2
-        # First span = token 1, second span = token 2
-        assert spans[0][0] == 1
-        assert spans[1][0] == 2
-        # Token 1 should come before token 2 (monotonic)
-        assert spans[0][1] <= spans[1][1]
+        spans = ForcedAligner._align_tokens(emission, [1, 2], blank_id=0)
+        assert [s[0] for s in spans] == [1, 2]
+        # 'a' spans both of its frames; 'b' its single frame; ends are exclusive.
+        assert spans[0][1:] == (1.0, 3.0)
+        assert spans[1][1:] == (3.0, 4.0)
 
-    def test_backtrack_empty_tokens(self):
+    def test_repeated_tokens_are_separated_by_blank(self):
+        """CTC needs a blank between identical consecutive targets ("LL")."""
         from tiny_audio.alignment import ForcedAligner
 
-        emission = torch.zeros(5, 3)
-        trellis = ForcedAligner._get_trellis(emission, [], blank_id=0)
-        spans = ForcedAligner._backtrack(trellis, emission, [], blank_id=0)
-        assert spans == []
+        emission = torch.full((5, 2), -5.0)
+        emission[0, 1] = 0.0  # L
+        emission[1, 0] = 0.0  # blank
+        emission[2, 1] = 0.0  # L
+        emission[3:, 0] = 0.0
+        spans = ForcedAligner._align_tokens(emission, [1, 1], blank_id=0)
+        assert [(s[0], s[1], s[2]) for s in spans] == [(1, 0.0, 1.0), (1, 2.0, 3.0)]
 
-    def test_backtrack_falls_back_when_alignment_fails(self):
-        """When trellis is all -inf at the end, falls back to uniform distribution."""
+    def test_empty_tokens(self):
         from tiny_audio.alignment import ForcedAligner
 
-        # All -inf emission means no path can reach the end of token sequence
+        assert ForcedAligner._align_tokens(torch.zeros(5, 3), [], blank_id=0) == []
+
+    def test_falls_back_to_uniform_when_no_path_has_probability(self):
+        """An all -inf emission leaves no valid path; spread tokens uniformly."""
+        from tiny_audio.alignment import ForcedAligner
+
         emission = torch.full((4, 3), float("-inf"))
-        tokens = [1, 2]
-        trellis = ForcedAligner._get_trellis(emission, tokens, blank_id=0)
-        spans = ForcedAligner._backtrack(trellis, emission, tokens, blank_id=0)
-        # Should fall back to uniform: 4 frames / 2 tokens = 2 frames each
-        assert len(spans) == 2
-        assert spans[0] == (1, 0.0, 2.0)
-        assert spans[1] == (2, 2.0, 4.0)
+        spans = ForcedAligner._align_tokens(emission, [1, 2], blank_id=0)
+        assert spans == [(1, 0.0, 2.0), (2, 2.0, 4.0)]
+
+    def test_falls_back_to_uniform_when_more_tokens_than_frames(self):
+        """torchaudio raises when the targets cannot fit; align must not."""
+        from tiny_audio.alignment import ForcedAligner
+
+        emission = torch.log_softmax(torch.zeros(2, 4), dim=-1)
+        spans = ForcedAligner._align_tokens(emission, [1, 2, 3], blank_id=0)
+        assert [s[0] for s in spans] == [1, 2, 3]
+        assert spans[0][1] == 0.0
+        assert spans[-1][2] == 2.0
 
 
 @pytest.fixture

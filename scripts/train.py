@@ -36,6 +36,7 @@ from datasets import (
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
+from torch.nn.utils import get_total_norm
 from tqdm.auto import tqdm
 from transformers import (
     Trainer,
@@ -486,20 +487,48 @@ class DatasetLoader:
                     f"exclude_where column {column!r} not in {dataset_path} "
                     f"(available: {sorted(ds.column_names)})"
                 )
+            # Resolve ClassLabel columns to their integer codes. Gigaspeech's
+            # `source` is ClassLabel(names=['audiobook','podcast','youtube']),
+            # so rows hold 0/1/2 and a naive `v not in {"audiobook"}` compares
+            # int against str, matches nothing, and silently drops 0 rows --
+            # which is exactly what it did before this was fixed.
+            feature = ds.features.get(column)
+            wanted = set(values)
+            if hasattr(feature, "str2int") and hasattr(feature, "names"):
+                unknown = sorted(v for v in values if v not in feature.names)
+                if unknown:
+                    raise ValueError(
+                        f"exclude_where values {unknown} are not valid labels for "
+                        f"{column!r} on {dataset_path} (valid: {feature.names})"
+                    )
+                wanted = {feature.str2int(v) for v in values}
+
             before = len(ds)
             ds = ds.filter(
-                lambda v: v not in values,
+                lambda v: v not in wanted,
                 num_proc=self.num_proc,
                 input_columns=column,
             )
+            dropped = before - len(ds)
             logger.info(
                 "exclude_where on %s: dropped %d/%d rows where %s in %s",
                 dataset_path,
-                before - len(ds),
+                dropped,
                 before,
                 column,
                 sorted(values),
             )
+            # A filter that matches nothing is a configuration bug, not a
+            # legitimate no-op: you asked to exclude something that is not
+            # there. Failing here costs seconds; not failing means training a
+            # full run on the mix you thought you had excluded, and only
+            # finding out from the eval.
+            if dropped == 0:
+                raise ValueError(
+                    f"exclude_where on {dataset_path} matched 0 of {before} rows "
+                    f"({column} in {sorted(values)}). Check the column's value type "
+                    f"and spelling -- feature is {feature!r}."
+                )
 
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
@@ -1021,13 +1050,8 @@ class ASRTrainer(Trainer):
             metrics = {}
             for group, grads in groups.items():
                 if grads:
-                    stacked = torch.stack(
-                        [
-                            torch.linalg.vector_norm(g.detach(), 2, dtype=torch.float32)
-                            for g in grads
-                        ]
-                    )
-                    metrics[f"grad_norm/{group}"] = stacked.norm(2).item()
+                    # Global L2 over the group's gradients (`foreach` fast path).
+                    metrics[f"grad_norm/{group}"] = get_total_norm(grads, norm_type=2.0).item()
             if metrics:
                 total = math.sqrt(sum(v * v for v in metrics.values()))
                 if self.args.max_grad_norm > 0 and total > 0:

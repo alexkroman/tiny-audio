@@ -268,7 +268,7 @@ pairing as `[env var: ...]`. Pass the flag to override the environment for one r
 | CUDA out of memory | Lower `per_device_train_batch_size`, raise `gradient_accumulation_steps`, or add `training.use_lora=true` |
 | Pod out of disk | `ta runpod plan` before renting; data caches at ~2× download size |
 | `HF_TOKEN` warning at launch | Export a write token (or pass `--hf-token`) before `ta runpod train` |
-| `Missing option '--hf-token'` from `ta push` | Export `HF_TOKEN` or pass `--hf-token`; the push needs a write token |
+| `not logged in` from `ta push` | Run `hf auth login`, export `HF_TOKEN`, or pass `--hf-token`; the push needs a write token |
 | W&B prompts for login | Paste your key, or pass `training.report_to=none` |
 | Hydra "could not override" | Use `key=value`; check the key exists in `config.yaml` or `production.yaml` |
 | `analysis` finds no results | Use the short model name (after the last `/`); it must match exactly |

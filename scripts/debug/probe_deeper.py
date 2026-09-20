@@ -24,18 +24,14 @@ my earlier probes already covered.
 
 from __future__ import annotations
 
-import argparse
 import re
-import sys
 from collections import Counter, defaultdict
-from pathlib import Path
 
-import yaml
+import typer
 from datasets import load_dataset
 
-SCRIPTS = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(SCRIPTS))
-from train import _normalize_label  # noqa: E402
+from scripts.train import _normalize_label
+from scripts.utils import load_data_config
 
 # Detectors
 DUPLICATE_WORD_RE = re.compile(r"\b(\w+)\s+\1\b", re.IGNORECASE)
@@ -173,12 +169,6 @@ def analyze(raw: str, norm: str) -> list[str]:
     return issues
 
 
-def load_multiasr_config():
-    cfg_path = Path(__file__).resolve().parents[2] / "configs" / "data" / "multiasr.yaml"
-    with cfg_path.open() as f:
-        return yaml.safe_load(f)["datasets"]
-
-
 def sample(d_cfg, skip_n, take_n):
     path = d_cfg["path"]
     name = d_cfg.get("name")
@@ -193,19 +183,18 @@ def sample(d_cfg, skip_n, take_n):
     return rows
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--skip", type=int, default=500, help="rows to skip (head was audited earlier)")
-    ap.add_argument("--take", type=int, default=200, help="rows to analyze per dataset")
-    args = ap.parse_args()
-
-    for d_cfg in load_multiasr_config():
+def main(
+    skip: int = typer.Option(500, help="rows to skip (head was audited earlier)"),
+    take: int = typer.Option(200, help="rows to analyze per dataset"),
+):
+    """Audit label normalization on rows past the already-audited head."""
+    for d_cfg in load_data_config():
         splits = d_cfg.get("train_splits") or d_cfg.get("eval_splits") or ["train"]
         split = splits[0] if splits else "train"
         label = f"{d_cfg['path']}::{d_cfg.get('name', '-')}::{split}"
-        print(f"\n=== {label} (skip={args.skip}, take={args.take}) ===", flush=True)
+        print(f"\n=== {label} (skip={skip}, take={take}) ===", flush=True)
         try:
-            rows = sample(d_cfg, args.skip, args.take)
+            rows = sample(d_cfg, skip, take)
         except Exception as e:
             print(f"  !! LOAD FAILED: {type(e).__name__}: {e}")
             continue
@@ -232,4 +221,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    typer.run(main)
