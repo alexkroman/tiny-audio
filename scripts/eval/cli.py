@@ -23,6 +23,7 @@ from scripts.eval.evaluators import (
     ElevenLabsEvaluator,
     EndpointEvaluator,
     EvalResult,
+    Evaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
     SwiftSDKEvaluator,
@@ -179,6 +180,128 @@ def expand_datasets(datasets: list[str]) -> list[str]:
     return datasets
 
 
+def _build_evaluator(
+    *,
+    model: str,
+    endpoint: bool,
+    streaming: bool,
+    assemblyai_model: AssemblyAIModel,
+    assemblyai_api_key: str | None,
+    deepgram_api_key: str | None,
+    elevenlabs_api_key: str | None,
+    base_url: str | None,
+    locale: str,
+    num_workers: int,
+    user_prompt: str | None,
+) -> tuple[str, Evaluator]:
+    """Construct the evaluator once for a whole sweep. Returns (model_id, evaluator).
+
+    Takes no dataset argument, deliberately. This used to run inside the
+    per-dataset loop because `audio_field` / `text_field` are constructor
+    state and vary by corpus (`wav` for Loquacious, `sentence` for
+    Earnings22, `transcript` for SPGISpeech) -- which welded a few bytes of
+    per-dataset config to a very expensive per-model setup. `ta eval -d all`
+    therefore paid that setup 12 times: 12 full `from_pretrained` loads for a
+    local model, 12 `swift build` + subprocess spawns + warmups for
+    `swift://`, 12 SFSpeechRecognizer authorizations for `apple-speech`.
+
+    The column names now ride on `Evaluator.evaluate(...)` instead, so one
+    instance serves every dataset. Anything an evaluator accumulates across
+    `transcribe` calls must be cleared in `_reset_run_state`.
+    """
+    if model == "assemblyai":
+        api_key = _require_api_key(assemblyai_api_key, "--assemblyai-api-key", "ASSEMBLYAI_API_KEY")
+
+        if streaming:
+            model_id = "universal-streaming"
+            evaluator = AssemblyAIStreamingEvaluator(
+                api_key=api_key,
+                num_workers=num_workers,
+            )
+        else:
+            model_id = assemblyai_model.value
+            evaluator = AssemblyAIEvaluator(
+                api_key=api_key,
+                model=assemblyai_model.value,
+                base_url=base_url,
+                num_workers=num_workers,
+            )
+    elif model == "deepgram":
+        api_key = _require_api_key(deepgram_api_key, "--deepgram-api-key", "DEEPGRAM_API_KEY")
+        model_id = "nova-3"
+        evaluator = DeepgramEvaluator(
+            api_key=api_key,
+            num_workers=num_workers,
+        )
+    elif model == "elevenlabs":
+        api_key = _require_api_key(elevenlabs_api_key, "--elevenlabs-api-key", "ELEVENLABS_API_KEY")
+        model_id = "scribe-v2"
+        evaluator = ElevenLabsEvaluator(
+            api_key=api_key,
+            num_workers=num_workers,
+        )
+    elif model == "apple-speech":
+        model_id = "apple-speech"
+        evaluator = AppleSpeechEvaluator(
+            locale=locale,
+        )
+    elif model == "swift" or model.startswith("swift://"):
+        suffix = model[len("swift://") :] if model.startswith("swift://") else ""
+        # Path-like suffix → load that local bundle (TINY_AUDIO_LOCAL_MODEL_DIR
+        # path: the Swift binary actually honors this).
+        # Empty suffix → load the Swift SDK's pinned default bundle.
+        # Anything else (a repo id) is rejected — the Swift binary ignores
+        # `repo_id`, which previously produced output dirs labeled with a
+        # model that was never actually evaluated.
+        if suffix.startswith(("/", "~", "./", "../")):
+            model_dir = Path(suffix).expanduser().resolve()
+            if not model_dir.is_dir():
+                raise typer.BadParameter(
+                    f"swift:// path does not resolve to a directory: {model_dir}"
+                )
+            model_id = f"swift-local-{model_dir.name}"
+            evaluator = SwiftSDKEvaluator(
+                model_dir=model_dir,
+            )
+        elif suffix == "":
+            model_id = "swift-default-bundle"
+            evaluator = SwiftSDKEvaluator()
+        else:
+            raise typer.BadParameter(
+                f"swift://{suffix!r} is not supported — the Swift binary loads "
+                "the SDK-pinned bundle and ignores arbitrary repo ids, so this "
+                "form would silently evaluate the default bundle while labeling "
+                "outputs with your repo id (see asr_pipeline.py docstring).\n\n"
+                "To evaluate that model via the Swift SDK, build a local bundle "
+                "from it first:\n"
+                "  cd ~/Code/ios/tiny-audio-swift\n"
+                f"  poetry run python -m scripts.bundle.cli build-bundle --projector {suffix}\n"
+                "  cd -\n"
+                "  ta eval -m swift://~/Code/ios/tiny-audio-swift/swift/Sources/TinyAudio/Resources/Model -d ...\n\n"
+                "Or evaluate the HF checkpoint directly (PyTorch path, no Swift):\n"
+                f"  ta eval -m {suffix} -d ..."
+            )
+    elif endpoint:
+        model_id = get_model_name(model)
+        evaluator = EndpointEvaluator(
+            endpoint_url=model,
+        )
+    elif streaming:
+        model_id = get_model_name(model)
+        evaluator = LocalStreamingEvaluator(
+            model_path=model,
+            user_prompt=user_prompt,
+        )
+    else:
+        model_id = get_model_name(model)
+        evaluator = LocalEvaluator(
+            model_path=model,
+            user_prompt=user_prompt,
+        )
+
+    return model_id, evaluator
+
+
 @app.command()
 def main(
     model: Annotated[
@@ -262,128 +385,34 @@ def main(
     ] = None,
 ):
     """Evaluate ASR models on standard datasets."""
+    # Built once, before the loop: model load / Swift build / API client setup
+    # is per-model, not per-dataset. See _build_evaluator.
+    model_id, evaluator = _build_evaluator(
+        model=model,
+        endpoint=endpoint,
+        streaming=streaming,
+        assemblyai_model=assemblyai_model,
+        assemblyai_api_key=assemblyai_api_key,
+        deepgram_api_key=deepgram_api_key,
+        elevenlabs_api_key=elevenlabs_api_key,
+        base_url=base_url,
+        locale=locale,
+        num_workers=num_workers,
+        user_prompt=user_prompt,
+    )
+
     for dataset_name in expand_datasets([d.value for d in datasets]):
         console.print(f"\n[bold blue]Evaluating on: {dataset_name}[/bold blue]")
 
         cfg = DATASET_REGISTRY[dataset_name]
         dataset = load_eval_dataset(dataset_name, split or cfg.default_split, config)
 
-        if model == "assemblyai":
-            api_key = _require_api_key(
-                assemblyai_api_key, "--assemblyai-api-key", "ASSEMBLYAI_API_KEY"
-            )
-
-            if streaming:
-                model_id = "universal-streaming"
-                evaluator = AssemblyAIStreamingEvaluator(
-                    api_key=api_key,
-                    audio_field=cfg.audio_field,
-                    text_field=cfg.text_field,
-                    num_workers=num_workers,
-                )
-            else:
-                model_id = assemblyai_model.value
-                evaluator = AssemblyAIEvaluator(
-                    api_key=api_key,
-                    model=assemblyai_model.value,
-                    base_url=base_url,
-                    audio_field=cfg.audio_field,
-                    text_field=cfg.text_field,
-                    num_workers=num_workers,
-                )
-        elif model == "deepgram":
-            api_key = _require_api_key(deepgram_api_key, "--deepgram-api-key", "DEEPGRAM_API_KEY")
-            model_id = "nova-3"
-            evaluator = DeepgramEvaluator(
-                api_key=api_key,
-                audio_field=cfg.audio_field,
-                text_field=cfg.text_field,
-                num_workers=num_workers,
-            )
-        elif model == "elevenlabs":
-            api_key = _require_api_key(
-                elevenlabs_api_key, "--elevenlabs-api-key", "ELEVENLABS_API_KEY"
-            )
-            model_id = "scribe-v2"
-            evaluator = ElevenLabsEvaluator(
-                api_key=api_key,
-                audio_field=cfg.audio_field,
-                text_field=cfg.text_field,
-                num_workers=num_workers,
-            )
-        elif model == "apple-speech":
-            model_id = "apple-speech"
-            evaluator = AppleSpeechEvaluator(
-                locale=locale,
-                audio_field=cfg.audio_field,
-                text_field=cfg.text_field,
-            )
-        elif model == "swift" or model.startswith("swift://"):
-            suffix = model[len("swift://") :] if model.startswith("swift://") else ""
-            # Path-like suffix → load that local bundle (TINY_AUDIO_LOCAL_MODEL_DIR
-            # path: the Swift binary actually honors this).
-            # Empty suffix → load the Swift SDK's pinned default bundle.
-            # Anything else (a repo id) is rejected — the Swift binary ignores
-            # `repo_id`, which previously produced output dirs labeled with a
-            # model that was never actually evaluated.
-            if suffix.startswith(("/", "~", "./", "../")):
-                model_dir = Path(suffix).expanduser().resolve()
-                if not model_dir.is_dir():
-                    raise typer.BadParameter(
-                        f"swift:// path does not resolve to a directory: {model_dir}"
-                    )
-                model_id = f"swift-local-{model_dir.name}"
-                evaluator = SwiftSDKEvaluator(
-                    model_dir=model_dir,
-                    audio_field=cfg.audio_field,
-                    text_field=cfg.text_field,
-                )
-            elif suffix == "":
-                model_id = "swift-default-bundle"
-                evaluator = SwiftSDKEvaluator(
-                    audio_field=cfg.audio_field,
-                    text_field=cfg.text_field,
-                )
-            else:
-                raise typer.BadParameter(
-                    f"swift://{suffix!r} is not supported — the Swift binary loads "
-                    "the SDK-pinned bundle and ignores arbitrary repo ids, so this "
-                    "form would silently evaluate the default bundle while labeling "
-                    "outputs with your repo id (see asr_pipeline.py docstring).\n\n"
-                    "To evaluate that model via the Swift SDK, build a local bundle "
-                    "from it first:\n"
-                    "  cd ~/Code/ios/tiny-audio-swift\n"
-                    f"  poetry run python -m scripts.bundle.cli build-bundle --projector {suffix}\n"
-                    "  cd -\n"
-                    "  ta eval -m swift://~/Code/ios/tiny-audio-swift/swift/Sources/TinyAudio/Resources/Model -d ...\n\n"
-                    "Or evaluate the HF checkpoint directly (PyTorch path, no Swift):\n"
-                    f"  ta eval -m {suffix} -d ..."
-                )
-        elif endpoint:
-            model_id = get_model_name(model)
-            evaluator = EndpointEvaluator(
-                endpoint_url=model,
-                audio_field=cfg.audio_field,
-                text_field=cfg.text_field,
-            )
-        elif streaming:
-            model_id = get_model_name(model)
-            evaluator = LocalStreamingEvaluator(
-                model_path=model,
-                audio_field=cfg.audio_field,
-                text_field=cfg.text_field,
-                user_prompt=user_prompt,
-            )
-        else:
-            model_id = get_model_name(model)
-            evaluator = LocalEvaluator(
-                model_path=model,
-                audio_field=cfg.audio_field,
-                text_field=cfg.text_field,
-                user_prompt=user_prompt,
-            )
-
-        results = evaluator.evaluate(dataset, max_samples)
+        results = evaluator.evaluate(
+            dataset,
+            max_samples,
+            audio_field=cfg.audio_field,
+            text_field=cfg.text_field,
+        )
         metrics = evaluator.compute_metrics()
         save_results(
             model_name or model_id, dataset_name, results, metrics, str(output_dir), base_url

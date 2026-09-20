@@ -479,8 +479,21 @@ def collect_model_metrics(
             if gt_unnorm is not None and pred_unnorm is not None:
                 metrics["itn_raw_samples"] += 1
                 merge_scores(metrics["itn"], score_sample(gt_unnorm, pred_unnorm))
-            ref = normalize_text(gt_raw)
-            pred = normalize_text(pred_raw)
+            # Scored AS-IS, deliberately. `Ground Truth:` / `Prediction:` in
+            # results.txt are already the Whisper `EnglishTextNormalizer`
+            # pair that `ta eval` scored and wrote to metrics.txt (see
+            # scripts/eval/cli.save_results). Running them through
+            # `normalize_text` a second time made every number in this table
+            # disagree with the one `ta eval` printed: it expands "%" to
+            # " percent" (so "25%" becomes two tokens, inflating the
+            # reference word count) and strips currency symbols. On
+            # earnings22 that was 11.67% here vs 11.89% from the harness,
+            # off a denominator of 1585 vs 1581 words. Whisper's normalizer
+            # is the benchmark standard and the single source of truth;
+            # `normalize_text` stays for entity matching, where a looser
+            # comparison is what's wanted.
+            ref = gt_raw
+            pred = pred_raw
 
             if ref:
                 ds_metrics["refs"].append(ref)

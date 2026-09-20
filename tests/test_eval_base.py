@@ -176,3 +176,68 @@ class TestAssemblyAIModels:
     def test_model_count(self):
         """Test number of available models."""
         assert len(ASSEMBLYAI_MODELS) == 4
+
+
+class TestEvaluatorReuseAcrossDatasets:
+    """One evaluator instance must serve a whole `ta eval -d a -d b` sweep.
+
+    `scripts/eval/cli._build_evaluator` now runs once before the dataset
+    loop, so the model / Swift subprocess / API client is set up a single
+    time. That only works if per-dataset state travels through `evaluate`.
+    """
+
+    class MockEvaluator(Evaluator):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.setup_count = 1  # stands in for a model load
+
+        def transcribe(self, audio):
+            return str(audio), 0.1, None
+
+    def test_field_overrides_apply_per_call(self):
+        """Differently-shaped corpora work without rebuilding the evaluator."""
+        evaluator = self.MockEvaluator()
+
+        loquacious_like = [{"wav": "hello", "text": "hello"}]
+        earnings_like = [{"audio": "world", "sentence": "world"}]
+
+        first = evaluator.evaluate(loquacious_like, audio_field="wav", text_field="text")
+        second = evaluator.evaluate(earnings_like, audio_field="audio", text_field="sentence")
+
+        assert [r.reference for r in first] == ["hello"]
+        assert [r.reference for r in second] == ["world"]
+        assert evaluator.setup_count == 1
+
+    def test_omitted_overrides_keep_constructor_fields(self):
+        evaluator = self.MockEvaluator(audio_field="wav", text_field="transcript")
+        evaluator.evaluate([{"wav": "a", "transcript": "a"}])
+        assert evaluator.audio_field == "wav"
+        assert evaluator.text_field == "transcript"
+
+    def test_results_do_not_pool_across_datasets(self):
+        """Second dataset's metrics must not include the first dataset's rows."""
+        evaluator = self.MockEvaluator()
+        evaluator.evaluate([{"audio": "a", "text": "a"} for _ in range(3)])
+        evaluator.evaluate([{"audio": "b", "text": "b"}])
+        assert evaluator.compute_metrics()["num_samples"] == 1
+
+    def test_subclass_accumulators_are_reset(self):
+        """`_reset_run_state` is the hook subclasses extend; verify it fires."""
+
+        class TimingEvaluator(TestEvaluatorReuseAcrossDatasets.MockEvaluator):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.ttfb_times: list[float] = []
+
+            def _reset_run_state(self) -> None:
+                super()._reset_run_state()
+                self.ttfb_times = []
+
+            def transcribe(self, audio):
+                self.ttfb_times.append(0.2)
+                return str(audio), 0.1, None
+
+        evaluator = TimingEvaluator()
+        evaluator.evaluate([{"audio": "a", "text": "a"} for _ in range(3)])
+        evaluator.evaluate([{"audio": "b", "text": "b"}])
+        assert evaluator.ttfb_times == [0.2]

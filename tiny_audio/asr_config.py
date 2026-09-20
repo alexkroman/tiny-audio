@@ -171,6 +171,27 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_alpha: int = 32,  # SALMONN default (scaling factor 4.0)
         lora_dropout: float = 0.0,
         lora_target_modules: list | None = None,  # Default: all linear layers
+        # Per-module rank/alpha overrides, keyed by the module's leaf name and
+        # matched by PEFT as `(.*\.)?<key>$` against the full module path.
+        #
+        # These exist because `all-linear` is blind to a matrix's shape. On
+        # Qwen3.5 the gated-DeltaNet gates `in_proj_a` / `in_proj_b` are
+        # (16, 2048) -- one scalar per value head -- so a rank-64 adapter on
+        # them is capped at rank 16 by the output dimension and spends
+        # 64*2048 + 16*64 = 132K parameters to express an update that a full
+        # fine-tune of the same matrix would carry in 32K. Measured on the
+        # step-20000 granite_qwen_top4 checkpoint: 4.76M LoRA params across the
+        # 36 gate matrices, 4.03x what full fine-tuning them costs, and the
+        # realised update's effective rank was 6.3 / 7.3 against the 64
+        # allocated.
+        #
+        # PEFT looks up rank_pattern and alpha_pattern INDEPENDENTLY, each
+        # falling back to `r` / `lora_alpha`. Overriding rank alone therefore
+        # changes the scale: alpha/r goes 128/64 = 2.0 to 128/16 = 8.0. Always
+        # set both, and keep the ratio equal to the global one unless the
+        # scale change is the point.
+        lora_rank_pattern: dict | None = None,
+        lora_alpha_pattern: dict | None = None,
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
         freeze_text_embed_tokens: bool = False,
@@ -273,6 +294,10 @@ class ASRConfig(transformers.PretrainedConfig):
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
+        # Plain dicts, never None: PEFT's LoraConfig defaults them to {} and
+        # `get_pattern_key` iterates the keys unconditionally.
+        self.lora_rank_pattern = dict(lora_rank_pattern or {})
+        self.lora_alpha_pattern = dict(lora_alpha_pattern or {})
         self.lora_target_modules = lora_target_modules or [
             "q_proj",
             "k_proj",

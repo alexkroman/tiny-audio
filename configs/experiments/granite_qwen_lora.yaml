@@ -3,10 +3,25 @@
 #
 #   ibm-granite/granite-speech-5.0-470m-turboctc  (FROZEN)
 #     -> MLP projector (fresh init, 12.6M, lr 1e-3)
-#     -> Qwen/Qwen3.5-2B, base weights FROZEN + LoRA all-linear r=64 (67.3M, lr 2e-4)
+#     -> Qwen/Qwen3.5-2B, base weights FROZEN + LoRA all-linear r=64 (67.3M, lr 1e-4)
 #
-# Trainable drops 1.3859B -> 0.0799B (5.8%). Everything else is held at the
-# granite_qwen values so the comparison is single-variable.
+# Trainable drops 1.3859B -> 0.0799B (5.8%).
+#
+# THE CONTROL. This is the only recipe here that holds the encoder frozen, and
+# it is the one that answers the question the file was built for: does LoRA
+# match full fine-tuning on the decoder? granite_qwen_top4 and
+# granite_qwen_encoder both train the encoder, so neither can. An earlier
+# revision briefly turned this file into a third encoder-training arm, which
+# left the matrix with no control at all.
+#
+# NOT single-variable against granite_qwen, despite what this header used to
+# claim -- measured, not assumed. Beyond LoRA the two differ in data mix
+# (#80 dropped earnings22 and peoples:clean_sa, so granite_qwen's 6.48%
+# Earnings22 is scored on calls it trained on and is NOT comparable),
+# model_dtype (bf16 vs fp32), attn_implementation (sdpa vs the
+# flash_attention_2 that silently won granite_qwen's TRAINING_MODEL_PARAMS
+# merge), batch shape, and projector_weight_decay. Compare on the ten
+# uncontaminated datasets and treat the rest as confounded.
 #
 #   poetry run python scripts/train.py +experiments=granite_qwen_lora
 #
@@ -84,11 +99,19 @@ model:
   # Left as `auto` for this run anyway, deliberately:
   #   - It is not a regression. The same drift happened under the previous
   #     recipe, so keeping it holds the comparison single-variable.
-  #   - The fix is not obvious. A trailing weightless RMSNorm times the fixed
-  #     scale would pin it every forward (Gemma3n does exactly this in
-  #     Gemma3nMultimodalEmbedder), but the author built `_maybe_probe_scale_
-  #     gradient` precisely to test whether the loss WANTS the hot scale, and
-  #     its sign is wandb-only. Check `scale_grad` before "fixing" this.
+  #   - The obvious fix was tried and is WRONG. A trailing weightless RMSNorm
+  #     times the fixed scale (Gemma3n does this in
+  #     Gemma3nMultimodalEmbedder) pins the scale perfectly -- and collapses
+  #     training: step-300 loss 3.166 against 0.319 for the same recipe
+  #     without it. It pins every TOKEN to one magnitude, not the aggregate,
+  #     and the per-token spread it deletes is real signal (CV 0.373,
+  #     p95/p5 3.67x). See MLPAudioProjector's docstring.
+  #   - The drift also has no measured cost: dL/d(log c) came back
+  #     +0.0005 +/- 0.0273 (|t| = 0.05), a line search was flat from 2x to 8x,
+  #     and the completed granite_qwen run reached ~48x while producing the
+  #     best WER on record here. If a brake is ever wanted, lower the
+  #     projector LR -- equilibrium ||W|| scales with lr -- rather than
+  #     clamping the output.
   #   - Note this run frets less about it than the last one: the decoder base
   #     is frozen, so the compensation that layers 0-2 were doing now has to
   #     come from LoRA instead. If the hot prefix is genuinely costly, this run
@@ -111,13 +134,14 @@ model:
   # decoder, and optimizer state over 80M params instead of 1.386B.
   model_dtype: bfloat16
   projector_dtype: float32
-  # REQUIRED by encoder_trainable_top_layers > 0 below, not a preference.
-  # Granite's weights have RMS 0.0868, where one bfloat16 ULP is 4.88e-4;
-  # Adam's step at encoder_learning_rate=1e-5 is ~1e-5, i.e. 49x below a single
-  # ULP, so every encoder update would round to zero and the unfreeze would be
-  # a silent no-op paying full optimizer state. fp32 for the whole 472.9M
-  # encoder costs +0.95 GB over bfloat16; the decoder stays bfloat16.
-  encoder_dtype: float32
+  # No `encoder_dtype` here: the encoder is frozen, so it has no optimizer
+  # state and no update to round away, and fp32 would cost +0.95 GB for
+  # nothing. ANY recipe that unfreezes it MUST set `encoder_dtype: float32` --
+  # Granite's weights have RMS 0.0868 where one bf16 ULP is 4.88e-4, so Adam's
+  # step at 1e-5 is 49x below a single ULP. Measured: bfloat16 moved 3.4% of
+  # elements and retained 26.4% of the fp32 update norm, and the survivors are
+  # the smallest-magnitude weights, so no LR change corrects it. See
+  # granite_qwen_top4.yaml.
 
   use_lora: true
   # r=64 with alpha=128 (scale 2.0). Canary-Qwen uses r=128/alpha=256 on a
@@ -193,55 +217,24 @@ training:
   #     top 6 -> 198.21M (41.9%), each including `out`/`out_mid` and never
   #     `input_linear`.
   #
-  # FULL ENCODER. All 16 blocks plus input_linear and out/out_mid -- 472.9M,
-  # not a top-N slice.
+  # ENCODER FROZEN. That is this file's whole point -- it is the control that
+  # granite_qwen_top4 (top-4 blocks @ 1e-5) and granite_qwen_encoder (all 16 @
+  # 1e-4) are measured against.
   #
-  # This replaces an earlier top-4 selection (143.33M, then 109.76M with
-  # out/out_mid suppressed) that was chosen from a per-block gradient profile
-  # measured on LibriSpeech-clean. Two things overturned it:
+  # Both of those are worth running; the evidence for training the encoder is
+  # good (Ultravox ships audio_tower + projector and no LLM at all, its encoder
+  # 14.74% drifted from whisper-large-v3-turbo across all 32 layers; the frozen
+  # encoder's own CTC head already beats this full stack on 7 of 12 eval sets;
+  # per-block gradient profiling put 29% of the model's total ||g||^2 inside
+  # the frozen encoder, computed and discarded every step). But "train the
+  # encoder" and "does the decoder need full fine-tuning" are different
+  # questions, and this file asks the second one.
   #
-  #   1. PRECEDENT. Neither of the two closest published recipes does a
-  #      partial encoder unfreeze. fixie-ai/ultravox-v0_5-llama-3_2-1b ships
-  #      audio_tower + projector and NO language_model at all -- its LLM loads
-  #      unmodified from meta-llama/Llama-3.2-1B-Instruct. nvidia/
-  #      canary-qwen-2.5b freezes only ['^llm\..+$', '^embed_tokens\..+$'].
-  #      Both train the whole encoder.
-  #
-  #   2. THE PROFILE POINTED THE WRONG WAY. Ultravox's encoder drift against
-  #      openai/whisper-large-v3-turbo is 14.74% overall, and it peaks in the
-  #      MIDDLE of the stack -- layer 12 at 49.4%, layers 8-16 all above 44%,
-  #      against 28-38% at the top. A top-N selection would have frozen
-  #      exactly the region that moved most. Our own profile rose toward the
-  #      top, but that was an instantaneous gradient on the easiest dataset in
-  #      the suite; Ultravox's is the endpoint of a completed run.
-  #
-  # `encoder_trainable_top_layers` and `encoder_trainable_post_projections`
-  # are both inert while freeze_audio_encoder is false -- those fields only
-  # ever re-enable layers the freeze path turned off. Left unset rather than
-  # set to misleading values.
-  #
-  # NOTE this puts the encoder into TRAIN mode during training (see
-  # _apply_train_mode), so Granite's 16 BatchNorm1d modules now use batch
-  # statistics and update their running stats -- unlike the partial-unfreeze
-  # path, which kept them frozen. That is handled: save_pretrained serializes
-  # the full encoder state_dict including those buffers when it is fully
-  # unfrozen (verified: 550 tensors, 48 of them BN buffers), so they
-  # round-trip. Inference still needs model.eval(), which LocalEvaluator now
-  # calls explicitly.
-  freeze_audio_encoder: false
-  # 1e-4, matching granite_qwen_encoder.yaml exactly. Holding the encoder
-  # settings identical across the two files is the point: they are meant to
-  # isolate ONE variable -- LoRA decoder here vs fully frozen decoder there --
-  # and a different encoder LR would confound that.
-  #
-  # Raised from the 1e-5 the top-4 selection used, which was deliberately
-  # conservative for a cautious partial unfreeze. Sized against the target:
-  # 0.357% drift measured at 2,000 steps with lr 1e-5 on 4 blocks, scaled 10x
-  # in LR and 15x in steps, gives ~14% under a diffusive walk -- Ultravox's
-  # measured 14.74% endpoint. Check the drift at the 2k checkpoint: ~3.6% is
-  # on track, materially above ~6% means the walk is linear rather than
-  # diffusive and this should drop to 3e-5.
-  encoder_learning_rate: 1e-4
+  # No `encoder_learning_rate` either: there is no trainable encoder parameter
+  # for it to apply to, and ASRTrainer.create_optimizer builds its groups from
+  # requires_grad, so the group would simply be empty.
+  freeze_audio_encoder: true
+  encoder_trainable_top_layers: 0
 
   # Projector unchanged at 1e-3 (fresh init, same job as before). LoRA lowered
   # from 2e-4 to 1e-4 -- the measurement this comment used to ask for has now
@@ -364,29 +357,15 @@ training:
   # window, and multiasr puts enough mass near the ceiling that most 32-row
   # batches already contain a near-ceiling row -- so E[max duration] is
   # already saturated and per-sample cost stays flat rather than creeping up.
-  # 32 x 3 = 96, NOT the 48 x 2 this file shipped with. 48 OOMed on an 80 GB
-  # card: the process reached 79.16 GiB of 79.25 and died asking for 190 MiB.
-  #
-  # The cause was an activation term nobody was counting. While the encoder is
-  # frozen ASRModel.forward runs it under no_grad and retains nothing; unfreeze
-  # it and 16 conformer blocks at ~237 frames x 1024 dims keep their full tape.
-  # Backing it out of the observed peak: 79.4 GiB needed - 12.5 static = ~66.9
-  # GiB of activations at batch 48, i.e. ~1.39 GiB/sample against the ~1.12
-  # the frozen-encoder recipe measured. scripts/deploy/plan.py models this now
-  # (it reported 61.78 GiB for the frozen version and reports 83.88 here).
-  #
-  # Scaling the measured peak: 32 -> ~57 GiB (72%), 24 -> ~46 GiB (58%).
-  # 32 keeps the effective batch at 96 with one extra micro-step and lands at
-  # the utilization granite_qwen already survived a full run at (82%). Drop to
-  # 24 x 4 if it OOMs again; gradient_checkpointing: true is the other lever
-  # and now reaches the encoder too, at ~30% wall-clock.
-  per_device_train_batch_size: 32
-  # Tracks the train batch. Eval runs under prediction_loss_only and therefore
-  # no_grad, so no activation tape is retained and memory is ~static plus one
-  # layer; 48 is comfortable either way, and with ASRModel.forward now passing
-  # skip_logits on eval the (B,T,248320) logits never materialise.
-  per_device_eval_batch_size: 32
-  gradient_accumulation_steps: 3
+  # 48 x 2 = 96, measured rather than estimated: run 1995 ran exactly this
+  # configuration at 55.4 GiB of 79.25 (69%). The 32 x 3 an earlier revision
+  # used was forced by the full-encoder unfreeze, which retains ~24 GiB more
+  # activation tape at batch 48 and OOMed at 79.16; with the encoder frozen
+  # ASRModel.forward runs it under no_grad and retains nothing, so that
+  # pressure is gone.
+  per_device_train_batch_size: 48
+  per_device_eval_batch_size: 48
+  gradient_accumulation_steps: 2
 
   # ONE epoch, matching granite_qwen, so this is a like-for-like comparison.
   #

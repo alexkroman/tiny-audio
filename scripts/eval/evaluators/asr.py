@@ -181,6 +181,17 @@ class LocalStreamingEvaluator(Evaluator):
         # Print generation config
         print_generation_config(self.model, model_path)
 
+    def _reset_run_state(self) -> None:
+        """Also clear the TTFB / processing accumulators.
+
+        `compute_metrics` averages these, and the CLI reuses one evaluator
+        for every dataset in a sweep, so without this the second dataset's
+        avg_ttfb would include the first dataset's samples.
+        """
+        super()._reset_run_state()
+        self.ttfb_times = []
+        self.processing_times = []
+
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
         from transformers import TextIteratorStreamer
 

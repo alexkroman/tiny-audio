@@ -1091,6 +1091,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             lora_alpha=config.lora_alpha,
             target_modules=config.lora_target_modules,
             lora_dropout=config.lora_dropout,
+            # Per-module overrides for targets whose shape makes the global
+            # rank wrong -- see ASRConfig.lora_rank_pattern. PEFT resolves the
+            # two patterns independently, so a recipe that sets one and not the
+            # other silently changes that module's alpha/r scale; the config
+            # field's docstring spells out the arithmetic.
+            rank_pattern=dict(getattr(config, "lora_rank_pattern", None) or {}),
+            alpha_pattern=dict(getattr(config, "lora_alpha_pattern", None) or {}),
             bias="none",
             task_type="CAUSAL_LM",
         )

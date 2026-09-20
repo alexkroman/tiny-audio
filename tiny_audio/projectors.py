@@ -34,6 +34,28 @@ class MLPAudioProjector(nn.Module):
     the one design in the tree that deliberately pins the injected magnitude at
     ~1x its text-embedding scale, and it pays that degeneracy to do it.
 
+    TRIED AND REJECTED, with numbers, so nobody spends another launch on it.
+    Adding Gemma3n's trailing weightless RMSNorm here (``Qwen3_5RMSNorm`` with
+    ``with_scale`` off, so no parameter and no state_dict key) does pin the
+    scale perfectly -- ``output_rms_over_embed`` logs 1.0000000 for the whole
+    run instead of climbing to 28x. It also destroys training: loss at step
+    300 was **3.166 against 0.319** for the identical recipe without it, and
+    the projector's noise->signal cliff never fired at all.
+    Because a trailing norm does not pin the AGGREGATE scale, which is what
+    drifts -- it pins EVERY TOKEN to the same magnitude. A trained projector's
+    output carries per-token RMS with CV 0.373, p95/p5 = 3.67x and
+    max/min = 9.4x, against CV 0.102 / 1.40x for the decoder's own
+    ``embed_tokens`` rows. That spread is signal: silence against speech,
+    confident frames against ambiguous ones. Normalising per token deletes it
+    and leaves only direction.
+    ``output_scale`` -- one scalar -- is the right SHAPE of intervention for
+    this reason: it fixes the aggregate and leaves relative magnitudes alone.
+    Its only weakness is being applied once at init. If the drift ever needs a
+    brake, lower the projector LR (equilibrium ||W|| scales with lr) rather
+    than clamping the output; and note the drift has no measured cost --
+    dL/d(log c) came back +0.0005 +/- 0.0273, |t| = 0.05, and the completed
+    granite_qwen run reached ~48x while producing the best WER on record here.
+
     A trailing ``norm_2`` RMSNorm used to follow ``linear_2``, with the other
     RMSNorm between ``linear_1`` and the activation. Both made the linear
     feeding them scale-invariant -- RMSNorm erases whatever magnitude a linear
