@@ -177,7 +177,8 @@ so the repo already contains:
 - Tokenizer and feature-extractor files
 
 Two things it does *not* have yet: a model card, and any code fixes you made after training
-started. `ta push` uploads exactly those:
+started. `ta push` uploads exactly those. It needs a Hub write token, read from `HF_TOKEN` or
+passed as `--hf-token`:
 
 ```bash
 poetry run ta push --repo-id $MODEL

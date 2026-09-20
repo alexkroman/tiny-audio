@@ -102,12 +102,11 @@ def test_short_flags_mean_one_thing():
         for option in _options(command):
             longs = [o for o in option.opts if o.startswith("--")]
             for short in (o for o in option.opts if not o.startswith("--")):
-                assert (
-                    short in RESERVED_SHORT_FLAGS
-                ), f"{' '.join(path)}: {short} is not in RESERVED_SHORT_FLAGS"
-                assert (
-                    RESERVED_SHORT_FLAGS[short] in longs
-                ), f"{' '.join(path)}: {short} means {RESERVED_SHORT_FLAGS[short]}, not {longs}"
+                where = " ".join(path)
+                unknown = f"{where}: {short} is not in RESERVED_SHORT_FLAGS"
+                assert short in RESERVED_SHORT_FLAGS, unknown
+                wrong = f"{where}: {short} means {RESERVED_SHORT_FLAGS[short]}, not {longs}"
+                assert RESERVED_SHORT_FLAGS[short] in longs, wrong
                 seen[short].update(longs)
     assert all(len(longs) == 1 for longs in seen.values()), dict(seen)
 
@@ -135,8 +134,8 @@ def test_runpod_pod_commands_take_host_and_port_first():
 def test_analysis_and_debug_commands_take_the_model_positionally():
     for path, command in _LEAVES:
         if path[0] in {"analysis", "debug"}:
+            where = " ".join(path)
             first = _arguments(command)[0].name
-            assert first in {"model", "models"}, f"{' '.join(path)}: first argument is {first}"
-            assert not any(
-                "--model" in o.opts for o in _options(command)
-            ), f"{' '.join(path)}: --model duplicates the positional"
+            assert first in {"model", "models"}, f"{where}: first argument is {first}"
+            has_model_option = any("--model" in o.opts for o in _options(command))
+            assert not has_model_option, f"{where}: --model duplicates the positional"

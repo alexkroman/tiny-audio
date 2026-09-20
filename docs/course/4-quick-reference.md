@@ -247,13 +247,16 @@ Override syntax is `key=value` (Hydra), never `--key value`. Experiment files st
 
 ## Environment Variables
 
-| Variable | Purpose |
-|----------|---------|
-| `HF_TOKEN` | Hub downloads and checkpoint uploads (write token for training) |
-| `WANDB_API_KEY` | Weights & Biases login |
-| `WANDB_RUN_ID`, `WANDB_RESUME` | Resume a W&B run (`ta runpod train --wandb-run-id`) |
-| `MODEL_ID` | Model served by the Gradio demo / Space |
-| `ASSEMBLYAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | Commercial API baselines |
+Every variable below also has a flag on the command that reads it, and `--help` shows the
+pairing as `[env var: ...]`. Pass the flag to override the environment for one run.
+
+| Variable | Purpose | Flag |
+|----------|---------|------|
+| `HF_TOKEN` | Hub downloads and checkpoint uploads (write token for training) | `ta push --hf-token`, `ta runpod train/eval --hf-token` |
+| `WANDB_API_KEY` | Weights & Biases login | — |
+| `WANDB_RUN_ID`, `WANDB_RESUME` | Resume a W&B run | `ta runpod train --wandb-run-id / --wandb-resume` |
+| `MODEL_ID` | Model served by the Gradio demo / Space | `ta demo --model` |
+| `ASSEMBLYAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | Commercial API baselines | `ta eval --assemblyai-api-key / --deepgram-api-key / --elevenlabs-api-key` |
 
 ---
 
@@ -264,7 +267,8 @@ Override syntax is `key=value` (Hydra), never `--key value`. Experiment files st
 | Poetry refuses the Python version | Install 3.12; `poetry env use python3.12` |
 | CUDA out of memory | Lower `per_device_train_batch_size`, raise `gradient_accumulation_steps`, or add `training.use_lora=true` |
 | Pod out of disk | `ta runpod plan` before renting; data caches at ~2× download size |
-| `HF_TOKEN` warning at launch | Export a write token before `ta runpod train` |
+| `HF_TOKEN` warning at launch | Export a write token (or pass `--hf-token`) before `ta runpod train` |
+| `Missing option '--hf-token'` from `ta push` | Export `HF_TOKEN` or pass `--hf-token`; the push needs a write token |
 | W&B prompts for login | Paste your key, or pass `training.report_to=none` |
 | Hydra "could not override" | Use `key=value`; check the key exists in `config.yaml` or `production.yaml` |
 | `analysis` finds no results | Use the short model name (after the last `/`); it must match exactly |

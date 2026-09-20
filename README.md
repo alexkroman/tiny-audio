@@ -177,12 +177,12 @@ poetry run ta eval -m mazesmazes/tiny-audio -n 100
 # Evaluate on specific dataset
 poetry run ta eval -m mazesmazes/tiny-audio -d loquacious -n 1000
 
-# Compare with other models
+# Compare with other models (reads ASSEMBLYAI_API_KEY, or pass --assemblyai-api-key)
 poetry run ta eval -m assemblyai --assemblyai-model universal -d loquacious -n 100
 
-# WER analysis
-poetry run ta analysis high-wer mazesmazes/tiny-audio --threshold 30
-poetry run ta analysis compare model1 model2
+# WER analysis: analysis commands take the model's short name (after the last "/")
+poetry run ta analysis high-wer tiny-audio --threshold 30
+poetry run ta analysis compare tiny-audio universal
 ```
 
 ### Apple SFSpeechRecognizer (macOS, on-device)
