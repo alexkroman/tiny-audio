@@ -4,6 +4,7 @@ from typing import ClassVar, Union
 
 import torch
 import transformers
+from torch.nn.utils.rnn import pad_sequence
 from transformers import ProcessorMixin
 
 try:
@@ -94,19 +95,17 @@ class ASRProcessor(ProcessorMixin):
         `ASRModel._left_pad_prompt_rows`; pad positions never carry
         `audio_token_id`, so the model's masked_scatter is unaffected.
         """
-        max_len = max(row.shape[0] for row in rows)
-        if all(row.shape[0] == max_len for row in rows):
-            input_ids = torch.stack(rows)
-            return input_ids, torch.ones_like(input_ids)
-
         pad_id = self.tokenizer.pad_token_id
         if pad_id is None:
             pad_id = self.tokenizer.eos_token_id or 0
-        input_ids = torch.full((len(rows), max_len), int(pad_id), dtype=torch.long)
-        attention_mask = torch.zeros((len(rows), max_len), dtype=torch.long)
-        for i, row in enumerate(rows):
-            input_ids[i, max_len - row.shape[0] :] = row
-            attention_mask[i, max_len - row.shape[0] :] = 1
+        input_ids = pad_sequence(
+            rows, batch_first=True, padding_value=int(pad_id), padding_side="left"
+        )
+        # Padded from ones rather than `input_ids != pad_id`: a real token may
+        # equal `pad_id` when pad falls back to eos.
+        attention_mask = pad_sequence(
+            [torch.ones_like(row) for row in rows], batch_first=True, padding_side="left"
+        )
         return input_ids, attention_mask
 
     def __call__(

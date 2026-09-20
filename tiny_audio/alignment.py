@@ -16,7 +16,9 @@ def _get_device() -> str:
 class ForcedAligner:
     """Lazy-loaded forced aligner for word-level timestamps using torchaudio wav2vec2.
 
-    Uses Viterbi trellis algorithm for optimal alignment path finding.
+    The CTC Viterbi search itself is `torchaudio.functional.forced_align`; this
+    class owns the model singleton, the word-level tokenization and the
+    frame-to-seconds conversion around it.
     """
 
     _bundle = None
@@ -45,112 +47,56 @@ class ForcedAligner:
         return cls._model, cls._labels, cls._dictionary
 
     @staticmethod
-    def _get_trellis(emission: torch.Tensor, tokens: list[int], blank_id: int = 0) -> torch.Tensor:
-        """Build trellis for forced alignment using forward algorithm.
+    def _align_tokens(
+        emission: torch.Tensor, tokens: list[int], blank_id: int = 0
+    ) -> list[tuple[int, float, float]]:
+        """Viterbi-align `tokens` to `emission` and return one span per token.
 
-        The trellis[t, j] represents the log probability of the best path that
-        aligns the first j tokens to the first t frames.
+        Delegates to `torchaudio.functional.forced_align` (a C++/CUDA CTC
+        Viterbi) and `merge_tokens`, which collapse the per-frame path into
+        `(token_id, start_frame, end_frame)` spans with `end_frame` exclusive.
+
+        Guarantees:
+        - All tokens are emitted exactly once, in order (strictly monotonic).
+        - When no valid path exists -- more tokens than frames, or an emission
+          that assigns every path zero probability -- the tokens are spread
+          uniformly over the frames instead of raising, so a timestamp request
+          degrades to coarse timings rather than failing the transcription.
 
         Args:
             emission: Log-softmax emission matrix of shape (num_frames, num_classes)
-            tokens: List of target token indices
-            blank_id: Index of the blank/CTC token (default 0)
-
-        Returns:
-            Trellis matrix of shape (num_frames + 1, num_tokens + 1)
+            tokens: Target token indices
+            blank_id: Index of the CTC blank (default 0)
         """
+        import torchaudio.functional as F  # noqa: N812
+
         num_frames = emission.size(0)
         num_tokens = len(tokens)
-
-        trellis = torch.full((num_frames + 1, num_tokens + 1), -float("inf"))
-        trellis[0, 0] = 0
-
-        # Each row depends only on the previous row, so the token axis vectorizes.
-        # blank[t] is the stay cost; emit[t, j] the cost of emitting tokens[j].
-        blank = emission[:, blank_id]
-        emit = emission.index_select(1, torch.as_tensor(tokens, dtype=torch.long))
-
-        for t in range(num_frames):
-            # j == 0: only staying on blank is reachable.
-            trellis[t + 1, 0] = trellis[t, 0] + blank[t]
-            if num_tokens:
-                # Viterbi over j >= 1: best of staying at j or advancing from j-1.
-                trellis[t + 1, 1:] = torch.maximum(
-                    trellis[t, 1:] + blank[t], trellis[t, :-1] + emit[t]
-                )
-
-        return trellis
-
-    @staticmethod
-    def _backtrack(
-        trellis: torch.Tensor, emission: torch.Tensor, tokens: list[int], blank_id: int = 0
-    ) -> list[tuple[int, float, float]]:
-        """Backtrack through trellis to find optimal forced monotonic alignment.
-
-        Guarantees:
-        - All tokens are emitted exactly once
-        - Strictly monotonic: each token's frames come after previous token's
-        - No frame skipping or token teleporting
-
-        Returns list of (token_id, start_frame, end_frame) for each token.
-        """
-        num_frames = emission.size(0)
-        num_tokens = len(tokens)
-
         if num_tokens == 0:
             return []
 
-        # Find the best ending point (should be at num_tokens)
-        # But verify trellis reached a valid state
-        if trellis[num_frames, num_tokens] == -float("inf"):
-            # Alignment failed - fall back to uniform distribution
+        def _uniform() -> list[tuple[int, float, float]]:
             frames_per_token = num_frames / num_tokens
             return [
                 (tokens[i], i * frames_per_token, (i + 1) * frames_per_token)
                 for i in range(num_tokens)
             ]
 
-        # Backtrack: find where each token transition occurred
-        # path[i] = frame where token i was first emitted
-        token_frames: list[list[int]] = [[] for _ in range(num_tokens)]
+        log_probs = emission.detach().float().unsqueeze(0)
+        targets = torch.tensor([tokens], dtype=torch.int32, device=log_probs.device)
+        try:
+            aligned, scores = F.forced_align(log_probs, targets, blank=blank_id)
+        except RuntimeError:
+            # "targets length is too long for CTC": no monotonic path fits.
+            return _uniform()
+        if not torch.isfinite(scores).all():
+            # Every path has -inf log-probability; the returned path is junk.
+            return _uniform()
 
-        t = num_frames
-        j = num_tokens
-
-        while t > 0 and j > 0:
-            # Check: did we transition from j-1 to j at frame t-1?
-            stay_score = trellis[t - 1, j] + emission[t - 1, blank_id]
-            move_score = trellis[t - 1, j - 1] + emission[t - 1, tokens[j - 1]]
-
-            if move_score >= stay_score:
-                # Token j-1 was emitted at frame t-1
-                token_frames[j - 1].append(t - 1)
-                j -= 1
-            t -= 1
-
-        # Handle any remaining tokens at the start (edge case)
-        while j > 0:
-            token_frames[j - 1].append(0)
-            j -= 1
-
-        # We appended in reverse-time order; restore monotonic order
-        for frames in token_frames:
-            frames.reverse()
-
-        # Convert to spans
-        token_spans: list[tuple[int, float, float]] = []
-        for token_idx, emitted_frames in enumerate(token_frames):
-            frames = emitted_frames
-            if not frames:
-                # Token never emitted - assign minimal span after previous
-                frames = [int(token_spans[-1][2])] if token_spans else [0]
-
-            token_id = tokens[token_idx]
-            start_frame = float(min(frames))
-            end_frame = float(max(frames)) + 1.0
-            token_spans.append((token_id, start_frame, end_frame))
-
-        return token_spans
+        spans = F.merge_tokens(aligned[0], scores[0].exp(), blank=blank_id)
+        if len(spans) != num_tokens:
+            return _uniform()
+        return [(int(span.token), float(span.start), float(span.end)) for span in spans]
 
     # Offset compensation for Wav2Vec2-BASE systematic bias (in seconds)
     # Calibrated on librispeech-alignments dataset
@@ -182,7 +128,7 @@ class ForcedAligner:
         "hello -- world" returned `hello, --` with `--` carrying WORLD's frames.
 
         `blank_id` defaults to 0 to match the `blank_id=0` that `align` passes
-        to `_get_trellis` and `_backtrack`.
+        to `_align_tokens`.
         """
         separator_id = dictionary.get("|", dictionary.get(" ", 0))
         # Neither may appear as a target token: the separator would split the
@@ -213,8 +159,6 @@ class ForcedAligner:
         sample_rate: int = 16000,
     ) -> list[dict]:
         """Align transcript to audio and return word-level timestamps.
-
-        Uses Viterbi trellis algorithm for optimal forced alignment.
 
         Args:
             audio: Audio waveform as a numpy array or torch tensor
@@ -262,61 +206,36 @@ class ForcedAligner:
         if not tokens:
             return []
 
-        # Build Viterbi trellis and backtrack for optimal path
-        trellis = cls._get_trellis(emission, tokens, blank_id=0)
-        alignment_path = cls._backtrack(trellis, emission, tokens, blank_id=0)
+        alignment_path = cls._align_tokens(emission, tokens, blank_id=0)
 
         # Convert frame indices to time (model stride is 320 samples at 16kHz = 20ms)
         frame_duration = 320 / cls._bundle.sample_rate
 
-        # Apply separate offset compensation for start/end (Wav2Vec2 systematic bias)
-        start_offset = cls.START_OFFSET
-        end_offset = cls.END_OFFSET
-
-        # Group aligned tokens into words based on pipe separator
-        word_timestamps = []
-        current_word_start = None
-        current_word_end = None
-        word_idx = 0
+        # Group token spans into words on the separator token. `_tokenize_words`
+        # guarantees one non-empty group per entry in `words`, so the groups
+        # zip 1:1 with the word list.
         separator_id = dictionary.get("|", dictionary.get(" ", 0))
-
+        groups: list[list[tuple[float, float]]] = []
+        current: list[tuple[float, float]] = []
         for token_id, start_frame, end_frame in alignment_path:
-            if token_id == separator_id:  # Word separator
-                if (
-                    current_word_start is not None
-                    and current_word_end is not None
-                    and word_idx < len(words)
-                ):
-                    start_time = max(0.0, current_word_start * frame_duration - start_offset)
-                    end_time = max(0.0, current_word_end * frame_duration - end_offset)
-                    word_timestamps.append(
-                        {
-                            "word": words[word_idx],
-                            "start": start_time,
-                            "end": end_time,
-                        }
-                    )
-                    word_idx += 1
-                current_word_start = None
-                current_word_end = None
+            if token_id == separator_id:
+                if current:
+                    groups.append(current)
+                    current = []
             else:
-                if current_word_start is None:
-                    current_word_start = start_frame
-                current_word_end = end_frame
+                current.append((start_frame, end_frame))
+        if current:
+            groups.append(current)
 
-        # Don't forget the last word
-        if (
-            current_word_start is not None
-            and current_word_end is not None
-            and word_idx < len(words)
-        ):
-            start_time = max(0.0, current_word_start * frame_duration - start_offset)
-            end_time = max(0.0, current_word_end * frame_duration - end_offset)
+        # Apply separate offset compensation for start/end (Wav2Vec2 systematic bias)
+        word_timestamps = []
+        for word, frames in zip(words, groups):
+            start_frame, end_frame = frames[0][0], frames[-1][1]
             word_timestamps.append(
                 {
-                    "word": words[word_idx],
-                    "start": start_time,
-                    "end": end_time,
+                    "word": word,
+                    "start": max(0.0, start_frame * frame_duration - cls.START_OFFSET),
+                    "end": max(0.0, end_frame * frame_duration - cls.END_OFFSET),
                 }
             )
 

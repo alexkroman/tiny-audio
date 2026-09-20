@@ -36,6 +36,7 @@ from datasets import (
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
+from torch.nn.utils import get_total_norm
 from tqdm.auto import tqdm
 from transformers import (
     Trainer,
@@ -1049,13 +1050,8 @@ class ASRTrainer(Trainer):
             metrics = {}
             for group, grads in groups.items():
                 if grads:
-                    stacked = torch.stack(
-                        [
-                            torch.linalg.vector_norm(g.detach(), 2, dtype=torch.float32)
-                            for g in grads
-                        ]
-                    )
-                    metrics[f"grad_norm/{group}"] = stacked.norm(2).item()
+                    # Global L2 over the group's gradients (`foreach` fast path).
+                    metrics[f"grad_norm/{group}"] = get_total_norm(grads, norm_type=2.0).item()
             if metrics:
                 total = math.sqrt(sum(v * v for v in metrics.values()))
                 if self.args.max_grad_norm > 0 and total > 0:

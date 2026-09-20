@@ -21,12 +21,12 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
 import math
 from collections import defaultdict
 
 import torch
-import yaml
+import typer
+from omegaconf import OmegaConf
 
 from scripts.utils import get_project_root
 from tiny_audio.asr_config import ASRConfig
@@ -50,8 +50,7 @@ def load_embedded_training_knobs() -> dict[str, float | None]:
             "weight_decay": None,
             "projector_weight_decay": None,
         }
-    with yaml_path.open() as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = OmegaConf.to_container(OmegaConf.load(yaml_path)) or {}
     training = cfg.get("training") or {}
 
     def _to_float(v):
@@ -567,18 +566,5 @@ def main(
     report(model, torch_dtype, device)
 
 
-def _argparse_main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model-id",
-        default=None,
-        help="Hub repo id or local path; omit to build a fresh model.",
-    )
-    parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"])
-    parser.add_argument("--device", default="cpu")
-    args = parser.parse_args()
-    main(model_id=args.model_id, dtype=args.dtype, device=args.device)
-
-
 if __name__ == "__main__":
-    _argparse_main()
+    typer.run(main)
