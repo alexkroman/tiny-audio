@@ -121,7 +121,7 @@
 #
 #   To wire it up once access lands: add an entry with text_column `text`,
 #   text_case `mono` (inferred from the LDC97S62 lowercase/no-punct
-#   convention -- UNVERIFIED, confirm with `ta debug inspect-datasets`,
+#   convention -- UNVERIFIED, confirm with `python -m scripts.debug.inspect_datasets`,
 #   because if the mirror ships cased text then `mono` pushes it through
 #   truecase and flattens proper nouns), train_splits [train], eval_splits []
 #   since only a train split exists, and target_samples 185000 to restore the

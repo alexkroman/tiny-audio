@@ -10,6 +10,7 @@ from threading import Thread
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
+from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -289,16 +290,17 @@ def _resolve_attn_implementation(requested: str | None) -> str | None:
     if not torch.cuda.is_available():
         return "sdpa"
     # CUDA alone isn't enough -- the flash_attn package must actually be
-    # importable. It is a source build that routinely fails on RunPod images
-    # (its metadata hook imports torch, so any broken torch install takes it
-    # down with it). Without this check a CUDA box with no flash-attn raises
-    # at from_pretrained instead of quietly using sdpa, which is the same
-    # numerics at lower throughput.
-    from importlib.util import find_spec
+    # importable, and new enough for transformers. It is a source build that
+    # routinely fails on RunPod images (its metadata hook imports torch, so any
+    # broken torch install takes it down with it). Without this check a CUDA
+    # box with no flash-attn raises at from_pretrained instead of quietly
+    # using sdpa, which is the same numerics at lower throughput.
+    from transformers.utils import is_flash_attn_2_available
 
-    if find_spec("flash_attn") is None:
+    if not is_flash_attn_2_available():
         logger.warning(
-            "flash_attention_2 requested but flash_attn is not installed; falling back to sdpa."
+            "flash_attention_2 requested but flash_attn is not installed or too old; "
+            "falling back to sdpa."
         )
         return "sdpa"
     return requested
@@ -1927,12 +1929,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         pad_id = self.tokenizer.pad_token_id
         if pad_id is None:
             pad_id = self.tokenizer.eos_token_id or 0
-        max_len = max(row.shape[0] for row in rows)
-        input_ids = torch.full((len(rows), max_len), int(pad_id), dtype=torch.long)
-        attention_mask = torch.zeros((len(rows), max_len), dtype=torch.long)
-        for i, row in enumerate(rows):
-            input_ids[i, max_len - row.shape[0] :] = row
-            attention_mask[i, max_len - row.shape[0] :] = 1
+        input_ids = pad_sequence(
+            rows, batch_first=True, padding_value=int(pad_id), padding_side="left"
+        )
+        # The mask is padded from ones rather than derived from `input_ids !=
+        # pad_id`: a real token may equal `pad_id` when pad falls back to eos.
+        attention_mask = pad_sequence(
+            [torch.ones_like(row) for row in rows], batch_first=True, padding_side="left"
+        )
         return input_ids.to(device), attention_mask.to(device)
 
     def _prepare_audio_inputs(

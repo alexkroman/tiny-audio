@@ -26,7 +26,7 @@ import torch
 import typer
 from transformers import pipeline
 
-app = typer.Typer(help="ASR Gradio Demo")
+app = typer.Typer(add_completion=False)
 
 
 def format_timestamp(seconds):
@@ -172,23 +172,19 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
     return demo
 
 
-@app.callback(invoke_without_command=True)
+@app.command()
 def main(
-    ctx: typer.Context,
     model: Annotated[
         str,
-        typer.Option("--model", "-m", help="HuggingFace Hub model ID"),
-    ] = os.environ.get("MODEL_ID", "mazesmazes/tiny-audio"),
+        typer.Option("--model", "-m", envvar="MODEL_ID", help="HuggingFace Hub model ID"),
+    ] = "mazesmazes/tiny-audio",
     port: Annotated[int, typer.Option("--port", "-p", help="Server port")] = 7860,
-    share: Annotated[bool, typer.Option("--share", "-s", help="Create public share link")] = False,
+    share: Annotated[bool, typer.Option("--share", help="Create public share link")] = False,
 ):
     """Launch ASR Gradio demo."""
-    if ctx.invoked_subcommand is not None:
-        return
     demo = create_demo(model)
     demo.launch(server_port=port, share=share, server_name="0.0.0.0")
 
 
 if __name__ == "__main__":
     app()
-

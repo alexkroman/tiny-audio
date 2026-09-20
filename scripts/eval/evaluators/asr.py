@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 import torch
+from rich.table import Table
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from scripts.eval.audio import as_16k_array, prepare_wav_bytes
 
@@ -37,21 +39,20 @@ except ImportError:
 def print_generation_config(model, model_path: str):
     """Print generation config in a visible format."""
     gen_config = model.generation_config
-    console.print(
-        "\n[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]"
-    )
-    console.print(f"[bold]Model:[/bold] {model_path}")
-    console.print("[bold cyan]Generation Config:[/bold cyan]")
-    console.print(f"  max_new_tokens:      {gen_config.max_new_tokens}")
-    console.print(f"  min_new_tokens:      {gen_config.min_new_tokens}")
-    console.print(f"  num_beams:           {gen_config.num_beams}")
-    console.print(f"  do_sample:           {gen_config.do_sample}")
-    console.print(f"  repetition_penalty:  {gen_config.repetition_penalty}")
-    console.print(f"  length_penalty:      {gen_config.length_penalty}")
-    console.print(f"  no_repeat_ngram_size: {gen_config.no_repeat_ngram_size}")
-    console.print(
-        "[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]\n"
-    )
+    table = Table(title=f"Generation config: {model_path}", show_header=False, title_style="bold")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value")
+    for key in (
+        "max_new_tokens",
+        "min_new_tokens",
+        "num_beams",
+        "do_sample",
+        "repetition_penalty",
+        "length_penalty",
+        "no_repeat_ngram_size",
+    ):
+        table.add_row(key, str(getattr(gen_config, key)))
+    console.print(table)
 
 
 def _resolve_local_runtime() -> tuple[int | str, str]:
@@ -336,27 +337,30 @@ class AssemblyAIStreamingEvaluator(Evaluator):
                 cap = int(os.environ.get("ASSEMBLYAI_STREAM_CONCURRENCY", cls._DEFAULT_CONCURRENCY))
                 cls._stream_semaphore = threading.Semaphore(cap)
 
+    @staticmethod
+    def _is_retryable(exc: BaseException) -> bool:
+        return (
+            isinstance(exc, RuntimeError)
+            and getattr(exc, "streaming_code", None)
+            in AssemblyAIStreamingEvaluator._RETRYABLE_CODES
+        )
+
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
-        import random
-
         pcm_data = self._prepare_pcm(audio)
+        text, elapsed = self._run_session_with_retry(pcm_data)
+        return text, elapsed, None
 
-        last_err = None
-        for attempt in range(self._MAX_RETRIES + 1):
-            try:
-                assert self._stream_semaphore is not None
-                with self._stream_semaphore:
-                    text, elapsed = self._run_session(pcm_data)
-                    return text, elapsed, None
-            except RuntimeError as e:
-                last_err = e
-                code = getattr(e, "streaming_code", None)
-                if code not in self._RETRYABLE_CODES or attempt == self._MAX_RETRIES:
-                    raise
-                # Exponential backoff with jitter, capped to keep latency bounded.
-                delay = min(self._BACKOFF_CAP, 0.5 * (2**attempt)) * (1 + random.random())
-                time.sleep(delay)
-        raise last_err  # unreachable; appeases type checker
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        stop=stop_after_attempt(_MAX_RETRIES + 1),
+        # Exponential backoff with jitter, capped to keep latency bounded.
+        wait=wait_exponential_jitter(initial=0.5, max=_BACKOFF_CAP),
+        reraise=True,
+    )
+    def _run_session_with_retry(self, pcm_data: bytes) -> tuple[str, float]:
+        assert self._stream_semaphore is not None
+        with self._stream_semaphore:
+            return self._run_session(pcm_data)
 
     def _prepare_pcm(self, audio) -> bytes:
         audio_array = as_16k_array(audio)

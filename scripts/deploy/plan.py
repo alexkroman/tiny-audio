@@ -976,7 +976,10 @@ def provision_command(
         print("\nNext:")
         print(f"  poetry run ta runpod wait {pod_id}          # prints <ip> <port>")
         print("  poetry run ta runpod deploy <ip> <port>")
-        print(f"  poetry run ta runpod train <ip> <port> -e {experiment} --no-attach -s run1 -f")
+        print(
+            f"  poetry run ta runpod train <ip> <port> -e {experiment} "
+            "--no-attach --session-name run1 -f"
+        )
         print(f"  runpodctl pod delete {pod_id}               # when finished\n")
         return pod_id
 

@@ -20,6 +20,23 @@ def _get_device() -> torch.device:
     return torch.device("cpu")
 
 
+def _label_runs(labels: np.ndarray) -> list[tuple[int, int, int]]:
+    """Split a 1-D label array into maximal constant runs.
+
+    Returns `(value, start, end)` triples with `end` exclusive, in order. This
+    is the frames-to-segments step for both the VAD decisions and the voting
+    grid: a boundary is wherever the label changes, and the last run always
+    closes at `len(labels)`, so a trailing run needs no special case.
+    """
+    labels = np.asarray(labels)
+    if labels.size == 0:
+        return []
+    change = np.flatnonzero(labels[1:] != labels[:-1]) + 1
+    starts = np.concatenate(([0], change))
+    ends = np.concatenate((change, [labels.size]))
+    return [(labels[s].item(), int(s), int(e)) for s, e in zip(starts, ends)]
+
+
 class SpectralCluster:
     """Spectral clustering using unnormalized Laplacian of affinity matrix.
 
@@ -203,26 +220,23 @@ class SpeakerClusterer:
 
     def _merge_by_cos(self, labels: np.ndarray, embs: np.ndarray, cos_thr: float) -> np.ndarray:
         """Merge similar speakers by cosine similarity of centroids."""
-        from scipy.cluster.hierarchy import fcluster, linkage
-        from scipy.spatial.distance import pdist
+        from sklearn.cluster import AgglomerativeClustering
         from sklearn.preprocessing import normalize
 
-        unique_labels = np.unique(labels)
+        unique_labels, inverse = np.unique(labels, return_inverse=True)
         if len(unique_labels) <= 1:
             return labels
 
-        # Compute normalized speaker centroids
-        centroids = np.array([embs[labels == lbl].mean(0) for lbl in unique_labels])
-        centroids = normalize(centroids)
-
-        # Hierarchical clustering with cosine distance
-        distances = pdist(centroids, metric="cosine")
-        linkage_matrix = linkage(distances, method="average")
-        merged_labels = fcluster(linkage_matrix, t=1.0 - cos_thr, criterion="distance") - 1
-
-        # Map original labels to merged labels
-        label_map = dict(zip(unique_labels, merged_labels))
-        return np.array([label_map[lbl] for lbl in labels])
+        # Average-linkage agglomeration over the normalized speaker centroids,
+        # cut where centroids are closer than `1 - cos_thr` in cosine distance.
+        centroids = normalize(np.array([embs[labels == lbl].mean(0) for lbl in unique_labels]))
+        merged = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=1.0 - cos_thr,
+            metric="cosine",
+            linkage="average",
+        ).fit_predict(centroids)
+        return merged[inverse]
 
 
 class SpeakerDiarizer:
@@ -402,32 +416,13 @@ class SpeakerDiarizer:
             _, is_speech = vad_model.process(frame)
             speech_frames.append(is_speech)
 
-        # Convert frame-level decisions to segments
+        # Convert frame-level decisions to segments: one per run of speech frames.
         segments = []
-        in_speech = False
-        start_idx = 0
-
-        for i, is_speech in enumerate(speech_frames):
-            if is_speech and not in_speech:
-                start_idx = i
-                in_speech = True
-            elif not is_speech and in_speech:
-                start_time = start_idx * frame_duration
-                end_time = i * frame_duration
-                segments.append(
-                    {
-                        "start": start_time,
-                        "end": end_time,
-                        "start_sample": int(start_time * sample_rate),
-                        "end_sample": int(end_time * sample_rate),
-                    }
-                )
-                in_speech = False
-
-        # Handle trailing speech
-        if in_speech:
+        for is_speech, start_idx, end_idx in _label_runs(np.array(speech_frames, dtype=bool)):
+            if not is_speech:
+                continue
             start_time = start_idx * frame_duration
-            end_time = len(speech_frames) * frame_duration
+            end_time = end_idx * frame_duration
             segments.append(
                 {
                     "start": start_time,
@@ -486,44 +481,38 @@ class SpeakerDiarizer:
             for seg in segments:
                 seg_start = seg["start_sample"]
                 seg_end = seg["end_sample"]
-                seg_len = seg_end - seg_start
+                chunk = audio_array[seg_start:seg_end]
 
-                # Generate window positions
-                if seg_len <= window_samples:
+                if len(chunk) <= window_samples:
+                    # Pad short segments with reflection to a full window.
                     starts = [seg_start]
-                    ends = [seg_end]
+                    padded = np.pad(chunk, (0, window_samples - len(chunk)), mode="reflect")
+                    windows = torch.from_numpy(padded).float().unsqueeze(0)
                 else:
-                    starts = list(range(seg_start, seg_end - window_samples + 1, step_samples))
-                    ends = [s + window_samples for s in starts]
+                    chunk = torch.from_numpy(chunk).float()
+                    # `unfold` is the sliding window: row i covers
+                    # [i * step, i * step + window), as far as a full window fits.
+                    windows = chunk.unfold(0, window_samples, step_samples)
+                    starts = [seg_start + i * step_samples for i in range(windows.shape[0])]
 
                     # Cover tail if > TAIL_COVERAGE_RATIO of window remains
-                    if ends and ends[-1] < seg_end:
-                        remainder = seg_end - ends[-1]
-                        if remainder > (window_samples * cls.TAIL_COVERAGE_RATIO):
-                            starts.append(seg_end - window_samples)
-                            ends.append(seg_end)
+                    remainder = seg_end - (starts[-1] + window_samples)
+                    if remainder > (window_samples * cls.TAIL_COVERAGE_RATIO):
+                        windows = torch.cat([windows, chunk[-window_samples:].unsqueeze(0)])
+                        starts.append(seg_end - window_samples)
 
-                for c_start, c_end in zip(starts, ends):
-                    chunk = audio_array[c_start:c_end]
+                # One batched forward per segment: every window is exactly
+                # `window_samples` long, so no length masking is needed.
+                batch = speaker_model.encode_batch(windows).reshape(len(starts), -1).cpu().numpy()
 
-                    # Pad short chunks with reflection
-                    if len(chunk) < window_samples:
-                        pad_width = window_samples - len(chunk)
-                        chunk = np.pad(chunk, (0, pad_width), mode="reflect")
-
-                    # Extract embedding using SpeechBrain's encode_batch
-                    chunk_tensor = torch.from_numpy(chunk).float().unsqueeze(0)
-                    embedding = (
-                        speaker_model.encode_batch(chunk_tensor).squeeze(0).squeeze(0).cpu().numpy()
-                    )
-
+                for c_start, embedding in zip(starts, batch):
                     # Validate embedding
                     if np.isfinite(embedding).all() and np.linalg.norm(embedding) > 1e-8:
                         embeddings.append(embedding)
                         window_segments.append(
                             {
                                 "start": c_start / sample_rate,
-                                "end": c_end / sample_rate,
+                                "end": min(c_start + window_samples, seg_end) / sample_rate,
                             }
                         )
 
@@ -566,9 +555,7 @@ class SpeakerDiarizer:
             return []
 
         # Correct labels to be contiguous
-        unique_labels = np.unique(labels)
-        label_map = {old: new for new, old in enumerate(unique_labels)}
-        clean_labels = np.array([label_map[lbl] for lbl in labels])
+        unique_labels, clean_labels = np.unique(labels, return_inverse=True)
         num_speakers = len(unique_labels)
 
         if num_speakers == 0:
@@ -593,40 +580,19 @@ class SpeakerDiarizer:
         # Resample VAD to voting grid resolution for silence-aware voting
         vad_resampled = cls._resample_vad(vad_frames, num_frames)
 
-        # Convert frames to segments
-        final_segments = []
-        current_speaker = -1
-        seg_start = 0.0
+        # Force silence (-1) where VAD says no speech or no window voted.
+        frame_speakers = np.where((max_votes > 0) & vad_resampled, frame_speakers, -1)
 
-        for f in range(num_frames):
-            speaker = int(frame_speakers[f])
-            score = max_votes[f]
-
-            # Force silence if VAD says no speech OR no votes
-            if score == 0 or not vad_resampled[f]:
-                speaker = -1
-
-            if speaker != current_speaker:
-                if current_speaker != -1:
-                    final_segments.append(
-                        {
-                            "speaker": f"SPEAKER_{current_speaker}",
-                            "start": seg_start,
-                            "end": f * cls.VOTING_RATE,
-                        }
-                    )
-                current_speaker = speaker
-                seg_start = f * cls.VOTING_RATE
-
-        # Close last segment
-        if current_speaker != -1:
-            final_segments.append(
-                {
-                    "speaker": f"SPEAKER_{current_speaker}",
-                    "start": seg_start,
-                    "end": num_frames * cls.VOTING_RATE,
-                }
-            )
+        # Convert frames to segments: one per run of the same speaker.
+        final_segments = [
+            {
+                "speaker": f"SPEAKER_{speaker}",
+                "start": start * cls.VOTING_RATE,
+                "end": end * cls.VOTING_RATE,
+            }
+            for speaker, start, end in _label_runs(frame_speakers)
+            if speaker != -1
+        ]
 
         return cls._merge_short_segments(final_segments)
 

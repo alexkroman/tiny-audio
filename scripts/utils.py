@@ -115,3 +115,16 @@ def find_model_dirs(
 def get_project_root() -> Path:
     """Get the project root directory."""
     return Path(__file__).resolve().parent.parent
+
+
+def load_data_config(name: str = "multiasr") -> list[dict]:
+    """Return the `datasets` list from `configs/data/<name>.yaml`.
+
+    Loaded through OmegaConf, the same parser Hydra uses for the training
+    configs, so the debug probes read the file exactly as `ta train` does.
+    Interpolations elsewhere in the file are left unresolved.
+    """
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.load(get_project_root() / "configs" / "data" / f"{name}.yaml")
+    return OmegaConf.to_container(cfg["datasets"])

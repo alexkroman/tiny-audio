@@ -490,45 +490,47 @@ class DatasetLoader:
             # Gigaspeech's `source` is a ClassLabel, so its rows hold ints
             # (0=audiobook, 1=podcast, 2=youtube), NOT the label strings the
             # datasets-server `statistics` endpoint renders. Comparing rows
-            # against the human-readable names matches nothing and drops zero
-            # rows. Resolve names -> ids so the config stays readable, and let
-            # str2int reject a name the column does not define.
+            # against the human-readable names matches nothing and silently
+            # dropped 0 of 910,140 rows. Resolve names -> ids so the config
+            # stays readable, and reject a name the column does not define.
             feature = (ds.features or {}).get(column)
             if isinstance(feature, ClassLabel):
-                try:
-                    values = {feature.str2int(n) for n in names}
-                except ValueError as exc:
+                # Report every bad name at once rather than dying on the first.
+                unknown = sorted(n for n in names if n not in feature.names)
+                if unknown:
                     raise ValueError(
-                        f"exclude_where value not a label of {column!r} in "
+                        f"exclude_where value {unknown} not a label of {column!r} in "
                         f"{dataset_path} (defined: {feature.names})"
-                    ) from exc
+                    )
+                wanted = {feature.str2int(n) for n in names}
             else:
-                values = set(names)
+                wanted = set(names)
             before = len(ds)
             ds = ds.filter(
-                lambda v: v not in values,
+                lambda v: v not in wanted,
                 num_proc=self.num_proc,
                 input_columns=column,
             )
-            if before == len(ds):
-                # Matching nothing is the failure mode this filter had for its
-                # whole first run: it is far more likely a type/name mismatch
-                # than a split that genuinely carries none of these rows.
-                logger.warning(
-                    "exclude_where on %s matched NO rows -- check that %s values "
-                    "%s exist in this split",
-                    dataset_path,
-                    column,
-                    names,
-                )
+            dropped = before - len(ds)
             logger.info(
                 "exclude_where on %s: dropped %d/%d rows where %s in %s",
                 dataset_path,
-                before - len(ds),
+                dropped,
                 before,
                 column,
                 names,
             )
+            # A filter that matches nothing is a configuration bug, not a
+            # legitimate no-op: you asked to exclude something that is not
+            # there. Failing here costs seconds; not failing means training a
+            # full run on the mix you thought you had excluded, and only
+            # finding out from the eval.
+            if dropped == 0:
+                raise ValueError(
+                    f"exclude_where on {dataset_path} matched 0 of {before} rows "
+                    f"({column} in {sorted(names)}). Check the column's value type "
+                    f"and spelling -- feature is {feature!r}."
+                )
 
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
@@ -1123,6 +1125,8 @@ TRAINING_MODEL_PARAMS = [
     "lora_alpha",
     "lora_dropout",
     "lora_target_modules",
+    "lora_rank_pattern",
+    "lora_alpha_pattern",
     "freeze_projector",
     "freeze_language_model",
     "freeze_text_embed_tokens",

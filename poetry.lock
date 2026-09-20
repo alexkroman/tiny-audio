@@ -6920,6 +6920,22 @@ files = [
 ]
 
 [[package]]
+name = "tenacity"
+version = "9.1.4"
+description = "Retry code until it succeeds"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55"},
+    {file = "tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a"},
+]
+
+[package.extras]
+doc = ["reno", "sphinx"]
+test = ["pytest", "tornado (>=4.5)", "typeguard"]
+
+[[package]]
 name = "thinc"
 version = "8.3.13"
 description = "A refreshing functional take on deep learning, compatible with your favorite libraries"
@@ -8287,4 +8303,4 @@ local = ["pyaudio"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.13"
-content-hash = "dedcefc785808decd3ed89bd08f93f16243c1abc93135e4d5b0033b32d6f9cd8"
+content-hash = "543141c0e1e373dbb3cba91916c9215853a174c9d1c599c84fda3709bffb96db"

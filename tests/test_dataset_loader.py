@@ -1,5 +1,6 @@
 """Tests for DatasetLoader column normalization."""
 
+from typing import ClassVar
 from unittest.mock import patch
 
 import numpy as np
@@ -103,8 +104,14 @@ class TestExcludeWhere:
 
     @staticmethod
     def _ds(sources, class_label: bool):
-        """Four rows tagged by `source`, as a plain string column or — like
-        real Gigaspeech — as a ClassLabel whose rows are integer ids."""
+        """Rows tagged by `source`, as a plain string column or — like real
+        Gigaspeech — as a ClassLabel whose rows are integer ids.
+
+        `class_label=True` is the case that made the original bug silent: the
+        column holds integer codes, not the label strings the datasets-server
+        statistics endpoint renders, so comparing the configured strings
+        straight against them matched nothing and dropped 0 of 910,140 rows.
+        """
         n = 16000
         ds = Dataset.from_dict(
             {
@@ -118,6 +125,29 @@ class TestExcludeWhere:
             # Real Gigaspeech label order; ids are 0/1/2, not the names.
             ds = ds.cast_column("source", ClassLabel(names=["audiobook", "podcast", "youtube"]))
         return ds
+
+    _GS_ROWS: ClassVar[list[str]] = ["youtube", "audiobook", "podcast", "audiobook"]
+
+    def test_classlabel_column_holds_ints_not_strings(self):
+        """The property that made the original bug silent."""
+        ds = self._ds(self._GS_ROWS, class_label=True)
+        assert ds["source"] == [2, 0, 1, 0]
+        assert ds.features["source"].str2int("audiobook") == 0
+
+    def test_classlabel_values_resolve_before_filtering(self):
+        ds = self._ds(self._GS_ROWS, class_label=True)
+        feature = ds.features["source"]
+        wanted = {feature.str2int(v) for v in ["audiobook"]}
+        assert wanted == {0}
+        out = ds.filter(lambda v: v not in wanted, input_columns="source")
+        assert len(out) == 2
+        assert out["text"] == ["a", "c"]
+
+    def test_naive_string_compare_on_classlabel_drops_nothing(self):
+        """Regression guard: this is precisely what used to happen."""
+        ds = self._ds(self._GS_ROWS, class_label=True)
+        out = ds.filter(lambda v: v not in {"audiobook", "podcast"}, input_columns="source")
+        assert len(out) == len(ds), "if this passes, the int/str mismatch is real"
 
     @staticmethod
     def _cfg(values=("audiobook",)):
@@ -139,12 +169,18 @@ class TestExcludeWhere:
 
         assert ds["text"] == ["a", "c"], "audiobook rows survived the filter"
 
-    def test_keeps_everything_when_no_match(self):
+    def test_no_match_fails_loudly(self):
+        """Excluding something that is not there is a config bug, not a no-op.
+
+        Was a warning on this branch; `main` made it raise, which is the
+        stronger reading of the same argument -- failing costs seconds, while
+        passing means a full training run on the mix you thought you had
+        filtered, discovered only at eval.
+        """
         fake = self._ds(["youtube", "podcast"], class_label=False)
         cfg = self._cfg(values=["nonexistent-tier"])
-        ds = _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
-
-        assert len(ds) == 2
+        with pytest.raises(ValueError, match="matched 0 of"):
+            _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
 
     def test_unknown_class_label_fails_loudly(self):
         """A name the ClassLabel does not define can only ever match nothing,

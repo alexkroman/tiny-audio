@@ -109,6 +109,7 @@ liger-kernel = {version = ">=0.8.0", markers = "sys_platform == 'linux'"}
 # packages specifically.
 pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
 fabric = ">=3.0.0"
+tenacity = ">=8.2"  # Retry/backoff policy for the AssemblyAI streaming evaluator
 pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
 spacy = "^3.8.11"
 # spaCy ships the library on PyPI but not its pipelines, so `spacy` alone
@@ -119,7 +120,6 @@ spacy = "^3.8.11"
 en-core-web-sm = {url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"}
 ten-vad = ">=1.0.6"
 speechbrain = {git = "https://github.com/speechbrain/speechbrain.git"}
-pytz = "*"
 truecase = ">=0.0.14"  # Statistical re-casing for ASR label normalization
 ftfy = ">=6.0"  # Unicode cleanup (mojibake, smart quotes) + NFKC before normalize
 # nltk 3.10 tokenizes a leading apostrophe as its own token ("'em" -> "'", "em"),

@@ -16,26 +16,23 @@ Checks per sample:
 
 from __future__ import annotations
 
-import argparse
 import re
-import sys
 from collections import Counter, defaultdict
-from pathlib import Path
 from typing import Any
 
-import yaml
+import typer
 from datasets import load_dataset
 
-# Re-use train.py's normalization
-SCRIPTS = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(SCRIPTS))
-from train import (  # noqa: E402
+from scripts.train import (
     _GIGASPEECH_PUNCT_RE,
     _RESIDUAL_ANGLE_TAG_RE,
     _TEDLIUM_BRACKET_RE,
     _needs_truecase,
     _normalize_label,
 )
+
+# Re-use train.py's normalization
+from scripts.utils import load_data_config
 
 # Heuristic "leftover" detectors. These are intentionally broad — anything they
 # match is something we should manually eyeball, even if some matches are
@@ -143,13 +140,6 @@ def _pre_truecase(raw_text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def load_multiasr_config() -> list[dict]:
-    cfg_path = Path(__file__).resolve().parents[2] / "configs" / "data" / "multiasr.yaml"
-    with cfg_path.open() as f:
-        cfg = yaml.safe_load(f)
-    return cfg["datasets"]
-
-
 def sample_dataset(d_cfg: dict, n: int) -> list[dict]:
     """Stream n samples from a dataset, returning just the text column."""
     path = d_cfg["path"]
@@ -175,7 +165,7 @@ def sample_dataset(d_cfg: dict, n: int) -> list[dict]:
 
 
 def run(per_dataset: int, verbose: bool):
-    datasets_cfg = load_multiasr_config()
+    datasets_cfg = load_data_config()
     summary: dict[str, dict] = {}
 
     for d_cfg in datasets_cfg:
@@ -250,13 +240,13 @@ def run(per_dataset: int, verbose: bool):
         print(f"  {label}: n={info['samples']} tc={info['truecase_fired']} | {issues_str}")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("-n", "--per-dataset", type=int, default=20)
-    ap.add_argument("-v", "--verbose", action="store_true")
-    args = ap.parse_args()
-    run(args.per_dataset, args.verbose)
+def main(
+    per_dataset: int = typer.Option(20, "-n", "--per-dataset"),
+    verbose: bool = typer.Option(False, "-v", "--verbose"),
+):
+    """Check which label-cleaning regexes fire on freshly sampled rows."""
+    run(per_dataset, verbose)
 
 
 if __name__ == "__main__":
-    main()
+    typer.run(main)

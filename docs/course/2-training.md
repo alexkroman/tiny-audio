@@ -254,7 +254,7 @@ poetry run ta runpod train <HOST> <PORT> --experiment my_run training.per_device
 
 ```bash
 poetry run ta runpod attach <HOST> <PORT>
-poetry run ta runpod attach <HOST> <PORT> --logs -n 200   # just print recent output
+poetry run ta runpod attach <HOST> <PORT> --logs --lines 200   # just print recent output
 poetry run ta runpod checkpoint <HOST> <PORT>              # path of the newest checkpoint
 ```
 

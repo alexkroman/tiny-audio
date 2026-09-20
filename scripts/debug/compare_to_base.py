@@ -2,7 +2,6 @@
 """Compare a fine-tuned model's weights against its base to measure drift."""
 
 import re
-import sys
 from collections import defaultdict
 from typing import Annotated
 
@@ -49,12 +48,6 @@ COMPONENT_PATTERNS: dict[str, re.Pattern[str]] = {
 }
 
 LAYER_INDEX_RE = re.compile(r"\.layers\.(\d+)\.")
-
-
-def _section(title: str, width: int = 70) -> None:
-    console.print("\n" + "=" * width)
-    console.print(f"[bold]{title}[/bold]")
-    console.print("=" * width)
 
 
 def classify_component(base_key: str) -> str:
@@ -116,7 +109,7 @@ def compare_to_base(
     show_per_layer: bool = False,
     top_k: int = 15,
 ) -> bool:
-    _section(f"Drift Comparison: {trained_id} vs {base_id}")
+    console.rule(f"[bold]Drift Comparison: {trained_id} vs {base_id}[/bold]")
 
     try:
         trained_path = hf_hub_download(repo_id=trained_id, filename="model.safetensors")
@@ -168,7 +161,7 @@ def compare_to_base(
         console.print("[red]No matched tensors — abort.[/red]")
         return False
 
-    _section("OVERALL DRIFT (parameter-weighted)")
+    console.rule("[bold]OVERALL DRIFT (parameter-weighted)[/bold]")
 
     total_params = sum(s["numel"] for s in matched.values())
     weighted_rel = sum(s["rel_change"] * s["numel"] for s in matched.values()) / total_params
@@ -184,7 +177,7 @@ def compare_to_base(
     console.print(f"  Max per-tensor drift:    {max_rel:>7.2%}")
     console.print(f"  Min per-tensor cosine:   {min_cos:>7.4f}")
 
-    _section("DRIFT BY COMPONENT")
+    console.rule("[bold]DRIFT BY COMPONENT[/bold]")
 
     by_comp: dict[str, list[dict]] = defaultdict(list)
     for bk, stats in matched.items():
@@ -222,7 +215,7 @@ def compare_to_base(
 
     console.print(table)
 
-    _section(f"TOP {top_k} MOST-DRIFTED TENSORS")
+    console.rule(f"[bold]TOP {top_k} MOST-DRIFTED TENSORS[/bold]")
 
     ranked = sorted(matched.items(), key=lambda kv: -kv[1]["rel_change"])[:top_k]
     table = Table(show_header=True, header_style="bold")
@@ -244,7 +237,7 @@ def compare_to_base(
     console.print(table)
 
     if show_per_layer:
-        _section("PER-LAYER DRIFT (attention vs MLP, weighted by params)")
+        console.rule("[bold]PER-LAYER DRIFT (attention vs MLP, weighted by params)[/bold]")
         by_layer: dict[int, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
         for bk, stats in matched.items():
             li = layer_index(bk)
@@ -290,7 +283,7 @@ def compare_to_base(
             table.add_row(*cells)
         console.print(table)
 
-    _section("VERDICT")
+    console.rule("[bold]VERDICT[/bold]")
 
     if weighted_rel < 0.02:
         console.print("  [yellow]🟡 LM barely moved (<2% weighted drift).[/yellow]")
@@ -312,17 +305,17 @@ def compare_to_base(
 
 @app.command()
 def main(
-    trained_id: Annotated[
+    model: Annotated[
         str,
-        typer.Argument(help="Fine-tuned HuggingFace model ID"),
+        typer.Argument(help="Fine-tuned HuggingFace model ID (or local path)"),
     ] = "mazesmazes/tiny-audio-embedded-2",
-    base_id: Annotated[
+    base_model: Annotated[
         str,
-        typer.Option("--base", "-b", help="Base model ID to compare against"),
+        typer.Option("--base-model", help="Base model ID to compare against"),
     ] = "Qwen/Qwen3-0.6B",
     per_layer: Annotated[
         bool,
-        typer.Option("--per-layer", "-l", help="Show per-layer attn/mlp/norm drift table"),
+        typer.Option("--per-layer", help="Show per-layer attn/mlp/norm drift table"),
     ] = False,
     top_k: Annotated[
         int,
@@ -330,8 +323,8 @@ def main(
     ] = 15,
 ):
     """Compare a fine-tuned model against its base, reporting drift metrics."""
-    success = compare_to_base(trained_id, base_id, show_per_layer=per_layer, top_k=top_k)
-    sys.exit(0 if success else 1)
+    success = compare_to_base(model, base_model, show_per_layer=per_layer, top_k=top_k)
+    raise typer.Exit(0 if success else 1)
 
 
 if __name__ == "__main__":
