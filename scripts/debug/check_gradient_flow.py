@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from enum import StrEnum
+from typing import Annotated
 
 import torch
 import typer
@@ -542,28 +544,35 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         print("         - optimizer groups route every trainable param exactly once")
 
 
-def main(
-    model_id: str | None = None,
-    dtype: str = "float32",
-    device: str = "cpu",
-) -> None:
-    """Run gradient-flow probe.
+class Dtype(StrEnum):
+    """Torch dtypes the probe can run in."""
 
-    Args:
-        model_id: Hub repo id or local path to a trained checkpoint. If
-            omitted, build a fresh model from base-LM weights + randomly-
-            initialized projector (verifies plumbing, not training state).
-        dtype: float32 / bfloat16 / float16.
-        device: cpu / cuda / mps.
-    """
+    float32 = "float32"
+    bfloat16 = "bfloat16"
+    float16 = "float16"
+
+
+def main(
+    model: Annotated[
+        str | None,
+        typer.Argument(
+            help="HuggingFace model ID (or local path) of a trained checkpoint; "
+            "omit to build a fresh model from base-LM weights + a random projector "
+            "(verifies plumbing, not training state)"
+        ),
+    ] = None,
+    dtype: Annotated[Dtype, typer.Option("--dtype", help="Torch dtype to run in")] = Dtype.float32,
+    device: Annotated[str, typer.Option("--device", help="cpu / cuda / mps")] = "cpu",
+) -> None:
+    """Probe gradient flow on a checkpoint (per-component grad norms)."""
     torch_dtype = {
-        "float32": torch.float32,
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-    }[dtype]
+        Dtype.float32: torch.float32,
+        Dtype.bfloat16: torch.bfloat16,
+        Dtype.float16: torch.float16,
+    }[Dtype(dtype)]
     torch.manual_seed(0)
-    model = build_model(torch_dtype, device, model_id=model_id)
-    report(model, torch_dtype, device)
+    built = build_model(torch_dtype, device, model_id=model)
+    report(built, torch_dtype, device)
 
 
 if __name__ == "__main__":

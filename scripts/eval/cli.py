@@ -1,8 +1,8 @@
 """CLI for ASR evaluation."""
 
-import os
 import re
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -28,12 +28,15 @@ from scripts.eval.evaluators import (
     SwiftSDKEvaluator,
 )
 
-app = typer.Typer(help="Evaluate ASR models on standard datasets")
+app = typer.Typer(add_completion=False)
 console = Console()
 
 
-# Valid dataset choices
-VALID_DATASETS = ["all", *list(DATASET_REGISTRY.keys())]
+# `--datasets` choices, built from the registry so Click validates them and the
+# help text lists them. "all" expands to every ASR dataset (expresso is
+# TTS-style, opt in by name).
+Dataset = StrEnum("Dataset", {name: name for name in ("all", *DATASET_REGISTRY)})
+ALL_DATASETS = [name for name in DATASET_REGISTRY if name != "expresso"]
 
 
 def get_model_name(model_path: str) -> str:
@@ -46,12 +49,10 @@ def get_model_name(model_path: str) -> str:
     return model_path.rstrip("/").split("/")[-1]
 
 
-def _require_api_key(env_var: str) -> str:
-    """Read an API key from the environment or exit with an error."""
-    api_key = os.environ.get(env_var, "")
+def _require_api_key(api_key: str | None, option: str, env_var: str) -> str:
+    """Return a provider API key or fail like any other missing option."""
     if not api_key:
-        console.print(f"[red]Error: {env_var} environment variable not set[/red]")
-        raise typer.Exit(1)
+        raise typer.BadParameter(f"set {env_var} or pass {option}", param_hint=option)
     return api_key
 
 
@@ -171,60 +172,55 @@ def print_asr_metrics(dataset_name: str, metrics: dict):
     console.print(table)
 
 
-def validate_datasets(datasets: list[str]) -> list[str]:
-    """Validate and expand dataset names."""
-    for ds in datasets:
-        if ds not in VALID_DATASETS:
-            console.print(f"[red]Error: Invalid dataset '{ds}'[/red]")
-            console.print(f"Valid choices: {', '.join(VALID_DATASETS)}")
-            raise typer.Exit(1)
-
-    # Expand "all" to the ASR datasets (expresso is TTS-style, opt in by name)
+def expand_datasets(datasets: list[str]) -> list[str]:
+    """Expand the "all" choice; Click has already validated every name."""
     if "all" in datasets:
-        return [k for k in DATASET_REGISTRY if k != "expresso"]
-
+        return ALL_DATASETS
     return datasets
 
 
-@app.callback(invoke_without_command=True)
+@app.command()
 def main(
-    ctx: typer.Context,
     model: Annotated[
-        str | None,
+        str,
         typer.Option(
             "--model",
             "-m",
             help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', or 'apple-speech'",
         ),
-    ] = None,
+    ],
     datasets: Annotated[
-        list[str] | None,
+        list[Dataset],
         typer.Option(
             "--datasets",
             "-d",
             help="Datasets to evaluate on ('all' for every ASR dataset)",
         ),
+    ] = (Dataset.loquacious,),
+    split: Annotated[
+        str | None, typer.Option("--split", help="Dataset split (default: the dataset's own)")
     ] = None,
-    split: Annotated[str, typer.Option(help="Dataset split")] = "test",
     max_samples: Annotated[
-        int | None, typer.Option("--max-samples", "-n", help="Maximum samples to evaluate")
+        int | None,
+        typer.Option("--max-samples", "-n", help="Maximum samples to evaluate per dataset"),
     ] = None,
     endpoint: Annotated[
-        bool, typer.Option("--endpoint", "-e", help="Use HF Inference Endpoint")
+        bool, typer.Option("--endpoint", help="Treat --model as an HF Inference Endpoint URL")
     ] = False,
     assemblyai_model: Annotated[
         AssemblyAIModel, typer.Option("--assemblyai-model", help="AssemblyAI model")
     ] = AssemblyAIModel.universal_3_pro,
     streaming: Annotated[
-        bool, typer.Option("--streaming", "-s", help="Use streaming evaluation (for local or AAI)")
+        bool,
+        typer.Option("--streaming", "-s", help="Use streaming evaluation (local or AssemblyAI)"),
     ] = False,
     config: Annotated[
         str | None,
         typer.Option("--config", "-c", help="Dataset config override (e.g., 'en' for CommonVoice)"),
     ] = None,
     output_dir: Annotated[
-        str, typer.Option("--output-dir", "-o", help="Output directory for results")
-    ] = "outputs",
+        Path, typer.Option("--output-dir", "-o", help="Directory to write eval results to")
+    ] = Path("outputs"),
     user_prompt: Annotated[
         str | None, typer.Option("--user-prompt", help="Custom user prompt for the model")
     ] = None,
@@ -232,12 +228,25 @@ def main(
         str | None,
         typer.Option("--base-url", help="Custom API base URL (for AssemblyAI sandbox)"),
     ] = None,
+    assemblyai_api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--assemblyai-api-key", envvar="ASSEMBLYAI_API_KEY", help="AssemblyAI API key"
+        ),
+    ] = None,
+    deepgram_api_key: Annotated[
+        str | None,
+        typer.Option("--deepgram-api-key", envvar="DEEPGRAM_API_KEY", help="Deepgram API key"),
+    ] = None,
+    elevenlabs_api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--elevenlabs-api-key", envvar="ELEVENLABS_API_KEY", help="ElevenLabs API key"
+        ),
+    ] = None,
     locale: Annotated[
         str,
-        typer.Option(
-            "--locale",
-            help="Locale for apple-speech (e.g. en-US, es-ES, fr-FR)",
-        ),
+        typer.Option("--locale", help="Locale for apple-speech (e.g. en-US, es-ES, fr-FR)"),
     ] = "en-US",
     num_workers: Annotated[
         int,
@@ -253,34 +262,16 @@ def main(
     ] = None,
 ):
     """Evaluate ASR models on standard datasets."""
-    # If a subcommand was invoked, skip
-    if ctx.invoked_subcommand is not None:
-        return
-
-    # Require model when running directly
-    if model is None:
-        console.print("[red]Error: --model / -m is required[/red]")
-        console.print("Example: ta eval -m assemblyai -d loquacious")
-        raise typer.Exit(1)
-
-    # Default to loquacious if no datasets specified
-    if datasets is None:
-        datasets = ["loquacious"]
-
-    # Validate and expand datasets
-    datasets = validate_datasets(datasets)
-
-    for dataset_name in datasets:
+    for dataset_name in expand_datasets([d.value for d in datasets]):
         console.print(f"\n[bold blue]Evaluating on: {dataset_name}[/bold blue]")
 
         cfg = DATASET_REGISTRY[dataset_name]
-        actual_split = cfg.default_split if split == "test" else split
-
-        # ASR evaluation
-        dataset = load_eval_dataset(dataset_name, actual_split, config)
+        dataset = load_eval_dataset(dataset_name, split or cfg.default_split, config)
 
         if model == "assemblyai":
-            api_key = _require_api_key("ASSEMBLYAI_API_KEY")
+            api_key = _require_api_key(
+                assemblyai_api_key, "--assemblyai-api-key", "ASSEMBLYAI_API_KEY"
+            )
 
             if streaming:
                 model_id = "universal-streaming"
@@ -301,7 +292,7 @@ def main(
                     num_workers=num_workers,
                 )
         elif model == "deepgram":
-            api_key = _require_api_key("DEEPGRAM_API_KEY")
+            api_key = _require_api_key(deepgram_api_key, "--deepgram-api-key", "DEEPGRAM_API_KEY")
             model_id = "nova-3"
             evaluator = DeepgramEvaluator(
                 api_key=api_key,
@@ -310,7 +301,9 @@ def main(
                 num_workers=num_workers,
             )
         elif model == "elevenlabs":
-            api_key = _require_api_key("ELEVENLABS_API_KEY")
+            api_key = _require_api_key(
+                elevenlabs_api_key, "--elevenlabs-api-key", "ELEVENLABS_API_KEY"
+            )
             model_id = "scribe-v2"
             evaluator = ElevenLabsEvaluator(
                 api_key=api_key,
@@ -392,7 +385,9 @@ def main(
 
         results = evaluator.evaluate(dataset, max_samples)
         metrics = evaluator.compute_metrics()
-        save_results(model_name or model_id, dataset_name, results, metrics, output_dir, base_url)
+        save_results(
+            model_name or model_id, dataset_name, results, metrics, str(output_dir), base_url
+        )
         print_asr_metrics(dataset_name, metrics)
 
 

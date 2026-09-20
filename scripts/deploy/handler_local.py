@@ -2,10 +2,10 @@
 """Local runner to test the HuggingFace inference endpoint handler."""
 
 import json
-import sys
 import time
 from importlib import resources
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -55,58 +55,48 @@ def find_test_audio() -> str | None:
 
 @app.command()
 def test(
-    model: str = typer.Option(
-        None,
-        "--model",
-        "-m",
-        help="Path to model directory or HuggingFace model ID (default: mazesmazes/tiny-audio)",
-    ),
-    audio: Path | None = typer.Option(
-        None,
-        "--audio",
-        "-a",
-        help="Path to audio file for transcription (default: auto-detect test audio)",
-    ),
-    max_new_tokens: int = typer.Option(
-        200,
-        "--max-new-tokens",
-        help="Maximum number of tokens to generate",
-    ),
-    num_beams: int = typer.Option(
-        1,
-        "--num-beams",
-        help="Number of beams for beam search (1 for greedy)",
-    ),
-    temperature: float = typer.Option(
-        1.0,
-        "--temperature",
-        help="Temperature for sampling",
-    ),
-    do_sample: bool = typer.Option(
-        False,
-        "--do-sample",
-        help="Use sampling instead of greedy/beam search",
-    ),
-    batch_test: bool = typer.Option(
-        False,
-        "--batch-test",
-        help="Test batch processing with multiple audio files",
-    ),
+    model: Annotated[
+        str,
+        typer.Option("--model", "-m", help="Model path/ID to load"),
+    ] = "mazesmazes/tiny-audio",
+    audio: Annotated[
+        Path | None,
+        typer.Option(
+            "--audio",
+            "-a",
+            exists=True,
+            dir_okay=False,
+            help="Audio file to transcribe (default: auto-detect a test clip)",
+        ),
+    ] = None,
+    max_new_tokens: Annotated[
+        int, typer.Option("--max-new-tokens", help="Maximum number of tokens to generate")
+    ] = 200,
+    num_beams: Annotated[
+        int, typer.Option("--num-beams", help="Number of beams for beam search (1 for greedy)")
+    ] = 1,
+    temperature: Annotated[
+        float, typer.Option("--temperature", help="Temperature for sampling")
+    ] = 1.0,
+    do_sample: Annotated[
+        bool, typer.Option("--do-sample", help="Use sampling instead of greedy/beam search")
+    ] = False,
+    batch_test: Annotated[
+        bool, typer.Option("--batch-test", help="Test batch processing with multiple audio files")
+    ] = False,
 ):
-    """Test the EndpointHandler with various configurations."""
+    """Test the inference endpoint handler locally."""
     # Imported here, not at module scope: it pulls in transformers + torch
     # (~2.8s), which every other `ta dev` command would otherwise pay because
     # scripts/dev.py imports this module to register the command.
     try:
         from tiny_audio.handler import EndpointHandler
     except ImportError as e:
-        print(f"Failed to import handler: {e}")
-        print("   Make sure tiny_audio package is installed")
-        sys.exit(1)
+        typer.echo(f"Failed to import handler: {e}", err=True)
+        typer.echo("   Make sure tiny_audio package is installed", err=True)
+        raise typer.Exit(1) from None
 
-    model_path = model or "mazesmazes/tiny-audio"
-    if model is None:
-        typer.echo(f"No model specified, using default: {model_path}")
+    model_path = model
 
     typer.echo("=" * 80)
     typer.echo("HuggingFace Inference Endpoint Handler - Local Test Runner")
@@ -133,13 +123,9 @@ def test(
         if audio_path:
             typer.echo(f"   Found test audio: {audio_path}")
         else:
-            typer.echo("No test audio found. Please provide an audio file path.")
-            typer.echo("   Usage: run-handler --audio path/to/audio.wav")
-            raise typer.Exit(1)
-
-    if not Path(audio_path).exists():
-        typer.echo(f"Audio file not found: {audio_path}")
-        raise typer.Exit(1)
+            raise typer.BadParameter(
+                "no test audio found; pass one explicitly", param_hint="--audio"
+            )
 
     typer.echo(f"\nUsing audio file: {audio_path}")
     typer.echo("\nPreparing inference request...")

@@ -2,7 +2,6 @@
 """Unified CLI for RunPod operations."""
 
 import io
-import os
 import shlex
 import subprocess
 import sys
@@ -16,11 +15,28 @@ from fabric import Connection
 from invoke import UnexpectedExit
 from rich.prompt import Prompt
 
+from scripts.eval.constants import AssemblyAIModel
 from scripts.utils import get_project_root
 
-app = typer.Typer(help="RunPod remote operations CLI")
+app = typer.Typer(help="Train and evaluate on remote RunPod pods.", add_completion=False)
 
 SSH_KEY_PATH = "~/.ssh/id_ed25519"
+
+# Every command that talks to a pod takes the same two positionals, spelled and
+# described identically, so `ta runpod <cmd> <HOST> <PORT>` always works.
+HostArg = Annotated[str, typer.Argument(help="RunPod instance IP address or hostname")]
+PortArg = Annotated[int, typer.Argument(help="SSH port for the RunPod instance")]
+
+# Shared option help, so sibling commands describe the same flag the same way.
+EXPERIMENT_HELP = "Experiment config under configs/experiments/ to run"
+SEQ_LEN_HELP = "Assumed tokens per sample when sizing memory"
+IMAGE_HELP = "RunPod container image"
+OVERRIDES_HELP = "Extra Hydra overrides (key=value)"
+SESSION_NAME_HELP = "tmux session name (default: derived from the command)"
+NO_ATTACH_HELP = "Start the session but don't attach to it"
+FORCE_HELP = "Kill an existing session with the same name first"
+HF_TOKEN_HELP = "Hugging Face token exported to the pod as HF_TOKEN"
+DEFAULT_IMAGE = "runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404"
 
 
 def _auto_session_name(prefix: str) -> str:
@@ -47,7 +63,7 @@ def _start_remote_tmux_script(
     )
     if not result.ok:
         print(f"Failed to start tmux session: {result.stderr}")
-        sys.exit(1)
+        raise typer.Exit(1)
     print(f"\nSession '{session_name}' started.")
     print(f"To re-attach later: ssh -p {port} root@{host} -t 'tmux attach -t {session_name}'")
     if not no_attach:
@@ -80,6 +96,14 @@ def test_connection(conn: Connection) -> bool:
         return False
     print("SSH connection successful!")
     return True
+
+
+def connect(host: str, port: int) -> Connection:
+    """Open and verify the SSH connection every pod command starts with."""
+    conn = get_connection(host, port)
+    if not test_connection(conn):
+        raise typer.Exit(1)
+    return conn
 
 
 def list_tmux_sessions(conn: Connection) -> list[str]:
@@ -418,17 +442,19 @@ echo "Dependencies verified for $TA_PYTHON"
 
 @app.command(name="plan")
 def plan(
-    experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
-    seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
+    experiment: Annotated[
+        str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
+    ] = "granite_qwen",
+    seq_len: Annotated[int, typer.Option("--seq-len", help=SEQ_LEN_HELP)] = 512,
     # No default: plan_command picks the cheapest listed GPU that actually
     # fits the estimate. Hardcoding an H100 here meant every plan recommended
     # an 80 GB card regardless of need -- granite_qwen_lora wants ~36 GiB.
-    gpu: str | None = typer.Option(
-        None, "--gpu", help="Override the GPU id (default: cheapest that fits)"
-    ),
-    image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
-    as_json: bool = typer.Option(False, "--json", help="Machine-readable output"),
-    overrides: list[str] = typer.Argument(None, help="Extra Hydra overrides"),
+    gpu: Annotated[
+        str | None, typer.Option("--gpu", help="Override the GPU id (default: cheapest that fits)")
+    ] = None,
+    image: Annotated[str, typer.Option("--image", help=IMAGE_HELP)] = DEFAULT_IMAGE,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output")] = False,
+    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
 ):
     """Estimate GPU memory + disk for a config and emit a pod create command."""
     from scripts.deploy.plan import plan_command
@@ -445,13 +471,21 @@ def plan(
 
 @app.command(name="up")
 def up(
-    experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
-    seq_len: int = typer.Option(512, "--seq-len"),
-    name: str | None = typer.Option(None, "--name"),
-    image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
-    max_attempts: int = typer.Option(6, "--max-attempts"),
-    dry_run: bool = typer.Option(False, "--dry-run"),
-    overrides: list[str] = typer.Argument(None),
+    experiment: Annotated[
+        str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
+    ] = "granite_qwen",
+    seq_len: Annotated[int, typer.Option("--seq-len", help=SEQ_LEN_HELP)] = 512,
+    name: Annotated[
+        str | None, typer.Option("--name", help="Pod name (default: derived from the experiment)")
+    ] = None,
+    image: Annotated[str, typer.Option("--image", help=IMAGE_HELP)] = DEFAULT_IMAGE,
+    max_attempts: Annotated[
+        int, typer.Option("--max-attempts", help="GPU types to try before giving up")
+    ] = 6,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print the pod create command without running it")
+    ] = False,
+    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
 ):
     """Size a config, then create a pod on the first GPU type with capacity."""
     from scripts.deploy.plan import provision_command
@@ -469,30 +503,31 @@ def up(
 
 @app.command(name="wait")
 def wait(
-    pod_id: str = typer.Argument(..., help="Pod id from `ta runpod up`"),
-    timeout_s: int = typer.Option(900, "--timeout"),
+    pod_id: Annotated[str, typer.Argument(help="Pod id from `ta runpod up`")],
+    timeout: Annotated[
+        int, typer.Option("--timeout", help="Give up after this many seconds")
+    ] = 900,
 ):
     """Block until a pod exposes SSH, then print `<ip> <port>`."""
     from scripts.deploy.plan import wait_command
 
-    wait_command(pod_id=pod_id, timeout_s=timeout_s)
+    wait_command(pod_id=pod_id, timeout_s=timeout)
 
 
 @app.command()
 def deploy(
-    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
-    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
-    skip_setup: bool = typer.Option(False, "--skip-setup", help="Skip remote environment setup"),
-    skip_sync: bool = typer.Option(False, "--skip-sync", help="Skip project file sync"),
-    skip_deps: bool = typer.Option(
-        False, "--skip-deps", help="Skip Python dependency installation"
-    ),
+    host: HostArg,
+    port: PortArg,
+    skip_setup: Annotated[
+        bool, typer.Option("--skip-setup", help="Skip remote environment setup")
+    ] = False,
+    skip_sync: Annotated[bool, typer.Option("--skip-sync", help="Skip project file sync")] = False,
+    skip_deps: Annotated[
+        bool, typer.Option("--skip-deps", help="Skip Python dependency installation")
+    ] = False,
 ):
     """Deploy ASR project to a RunPod instance."""
-    conn = get_connection(host, port)
-
-    if not test_connection(conn):
-        sys.exit(1)
+    conn = connect(host, port)
 
     project_root = get_project_root()
 
@@ -719,37 +754,41 @@ def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) 
 
 @app.command()
 def train(
-    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
-    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
-    experiment: str = typer.Option(
-        "granite_qwen", "--experiment", "-e", help="Experiment config to run"
-    ),
-    session_name: str | None = typer.Option(
-        None, "--session-name", "-s", help="Custom tmux session name"
-    ),
-    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
-    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
-    skip_disk_check: bool = typer.Option(
-        False, "--skip-disk-check", help="Start even if /workspace looks too small"
-    ),
-    wandb_run_id: str | None = typer.Option(None, "--wandb-run-id", help="W&B run ID to resume"),
+    host: HostArg,
+    port: PortArg,
+    experiment: Annotated[
+        str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
+    ] = "granite_qwen",
+    session_name: Annotated[
+        str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
+    ] = None,
+    no_attach: Annotated[bool, typer.Option("--no-attach", help=NO_ATTACH_HELP)] = False,
+    force: Annotated[bool, typer.Option("--force", "-f", help=FORCE_HELP)] = False,
+    skip_disk_check: Annotated[
+        bool,
+        typer.Option("--skip-disk-check", help="Start even if /workspace looks too small"),
+    ] = False,
+    wandb_run_id: Annotated[
+        str | None,
+        typer.Option("--wandb-run-id", envvar="WANDB_RUN_ID", help="W&B run ID to resume"),
+    ] = None,
     wandb_resume: Annotated[
         str | None,
-        typer.Option("--wandb-resume", help="W&B resume mode: must, allow, or never"),
+        typer.Option(
+            "--wandb-resume", envvar="WANDB_RESUME", help="W&B resume mode: must, allow, or never"
+        ),
     ] = None,
-    extra_args: Annotated[
-        list[str] | None,
-        typer.Argument(help="Extra Hydra overrides passed to training script"),
-    ] = None,
+    hf_token: Annotated[
+        str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
+    ] = "",
+    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
 ):
     """Start training on a remote RunPod instance in a tmux session."""
-    conn = get_connection(host, port)
+    conn = connect(host, port)
 
-    if not test_connection(conn):
-        sys.exit(1)
-
+    overrides = list(overrides or [])
     if not skip_disk_check:
-        _check_remote_disk(conn, experiment, list(extra_args or []))
+        _check_remote_disk(conn, experiment, overrides)
 
     if session_name is None:
         session_name = _auto_session_name(f"train_{experiment}")
@@ -758,23 +797,19 @@ def train(
         print(f"Killing existing session '{session_name}' if present...")
         kill_tmux_session(conn, session_name)
 
-    hf_token = os.environ.get("HF_TOKEN", "")
-    wandb_run_id = wandb_run_id or os.environ.get("WANDB_RUN_ID")
-    wandb_resume = wandb_resume or os.environ.get("WANDB_RESUME")
-
     if not hf_token:
-        print("Warning: HF_TOKEN environment variable not set.")
+        print("Warning: HF_TOKEN is not set; the pod will not be able to pull gated repos.")
 
     print(f"\nStarting training session '{session_name}' with experiment '{experiment}'...")
-    if extra_args:
-        print(f"Extra args: {' '.join(extra_args)}")
+    if overrides:
+        print(f"Hydra overrides: {' '.join(overrides)}")
 
     _start_remote_tmux_script(
         conn,
         host,
         port,
         session_name,
-        build_training_script(experiment, hf_token, wandb_run_id, wandb_resume, extra_args or []),
+        build_training_script(experiment, hf_token, wandb_run_id, wandb_resume, overrides),
         f"/tmp/train_{session_name}.sh",
         no_attach,
     )
@@ -782,18 +817,22 @@ def train(
 
 @app.command()
 def attach(
-    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
-    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
-    session_name: str | None = typer.Option(None, "--session-name", "-s", help="Tmux session name"),
-    list_sessions: bool = typer.Option(False, "--list", "-l", help="List all sessions and exit"),
-    logs: bool = typer.Option(False, "--logs", help="Show recent logs instead of attaching"),
-    lines: int = typer.Option(100, "--lines", "-n", help="Number of log lines to show"),
+    host: HostArg,
+    port: PortArg,
+    session_name: Annotated[
+        str | None,
+        typer.Option("--session-name", help="tmux session name (default: prompt if several)"),
+    ] = None,
+    list_sessions: Annotated[
+        bool, typer.Option("--list", "-l", help="List all sessions and exit")
+    ] = False,
+    logs: Annotated[
+        bool, typer.Option("--logs", help="Show recent logs instead of attaching")
+    ] = False,
+    lines: Annotated[int, typer.Option("--lines", help="Number of log lines to show")] = 100,
 ):
     """Attach to, list, or view logs from a tmux session on a remote RunPod instance."""
-    conn = get_connection(host, port)
-
-    if not test_connection(conn):
-        sys.exit(1)
+    conn = connect(host, port)
 
     sessions = list_tmux_sessions(conn)
 
@@ -809,8 +848,8 @@ def attach(
     if not session_name:
         if not sessions:
             print("\nNo active tmux sessions found. Start a training session first.")
-            sys.exit(1)
-        elif len(sessions) == 1:
+            raise typer.Exit(1)
+        if len(sessions) == 1:
             session_name = sessions[0]
             print(f"\nFound one active session: '{session_name}'. Proceeding automatically.")
         else:
@@ -880,45 +919,58 @@ python -m scripts.eval.cli \\
 
 @app.command("eval")
 def eval_model(
-    host: str = typer.Argument(..., help="RunPod instance IP address or hostname"),
-    port: int = typer.Argument(..., help="SSH port for the RunPod instance"),
-    model: str = typer.Option(..., "--model", "-m", help="Model path/ID or 'assemblyai'"),
+    host: HostArg,
+    port: PortArg,
+    model: Annotated[str, typer.Option("--model", "-m", help="Model path/ID or 'assemblyai'")],
     datasets: Annotated[
         list[str] | None,
-        typer.Option("--datasets", "-d", help="Datasets to evaluate on"),
+        typer.Option(
+            "--datasets", "-d", help="Datasets to evaluate on ('all' for every ASR dataset)"
+        ),
     ] = None,
-    max_samples: int | None = typer.Option(
-        None, "--max-samples", "-n", help="Max samples per dataset"
-    ),
-    assemblyai_model: str = typer.Option(
-        "universal-3-pro",
-        "--assemblyai-model",
-        help="AssemblyAI model (best, universal, universal-3-pro)",
-    ),
-    num_workers: int = typer.Option(
-        1, "--num-workers", "-w", help="Number of parallel workers for API evaluations"
-    ),
-    streaming: bool = typer.Option(False, "--streaming", "-s", help="Use streaming evaluation"),
-    session_name: str | None = typer.Option(
-        None, "--session-name", help="Custom tmux session name"
-    ),
-    no_attach: bool = typer.Option(False, "--no-attach", help="Start session but don't attach"),
-    force: bool = typer.Option(False, "--force", "-f", help="Kill existing session with same name"),
+    max_samples: Annotated[
+        int | None,
+        typer.Option("--max-samples", "-n", help="Maximum samples to evaluate per dataset"),
+    ] = None,
+    assemblyai_model: Annotated[
+        AssemblyAIModel, typer.Option("--assemblyai-model", help="AssemblyAI model")
+    ] = AssemblyAIModel.universal_3_pro,
+    num_workers: Annotated[
+        int,
+        typer.Option("--num-workers", "-w", help="Number of parallel workers for API evaluations"),
+    ] = 1,
+    streaming: Annotated[
+        bool,
+        typer.Option("--streaming", "-s", help="Use streaming evaluation (local or AssemblyAI)"),
+    ] = False,
+    session_name: Annotated[
+        str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
+    ] = None,
+    no_attach: Annotated[bool, typer.Option("--no-attach", help=NO_ATTACH_HELP)] = False,
+    force: Annotated[bool, typer.Option("--force", "-f", help=FORCE_HELP)] = False,
+    hf_token: Annotated[
+        str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
+    ] = "",
+    assemblyai_api_key: Annotated[
+        str,
+        typer.Option(
+            "--assemblyai-api-key",
+            envvar="ASSEMBLYAI_API_KEY",
+            help="AssemblyAI API key (required when --model assemblyai)",
+        ),
+    ] = "",
     extra_args: Annotated[
         list[str] | None,
-        typer.Argument(help="Extra arguments passed to eval script"),
+        typer.Argument(help="Extra arguments passed through to `ta eval` on the pod"),
     ] = None,
 ):
     """Run ASR evaluation on a remote RunPod instance.
 
     Examples:
-        runpod eval host port -m mazesmazes/tiny-audio -d loquacious
-        runpod eval host port -m assemblyai --assemblyai-model universal-3-pro -d loquacious -w 4
+        ta runpod eval <HOST> <PORT> -m mazesmazes/tiny-audio -d loquacious
+        ta runpod eval <HOST> <PORT> -m assemblyai --assemblyai-model universal -d loquacious -w 4
     """
-    conn = get_connection(host, port)
-
-    if not test_connection(conn):
-        sys.exit(1)
+    conn = connect(host, port)
 
     if session_name is None:
         model_short = model.rsplit("/", maxsplit=1)[-1] if "/" in model else model
@@ -928,14 +980,12 @@ def eval_model(
         print(f"Killing existing session '{session_name}' if present...")
         kill_tmux_session(conn, session_name)
 
-    hf_token = os.environ.get("HF_TOKEN", "")
-    assemblyai_api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
-
     if not hf_token:
-        print("Warning: HF_TOKEN environment variable not set.")
+        print("Warning: HF_TOKEN is not set; the pod will not be able to pull gated repos.")
     if model == "assemblyai" and not assemblyai_api_key:
-        print(
-            "Warning: ASSEMBLYAI_API_KEY environment variable not set (required for assemblyai model)."
+        raise typer.BadParameter(
+            "set ASSEMBLYAI_API_KEY or pass --assemblyai-api-key when --model is assemblyai",
+            param_hint="--assemblyai-api-key",
         )
 
     if datasets is None:
@@ -962,7 +1012,7 @@ def eval_model(
             datasets,
             max_samples,
             assemblyai_api_key,
-            assemblyai_model,
+            assemblyai_model.value,
             num_workers,
             streaming,
             extra_args,
@@ -973,15 +1023,9 @@ def eval_model(
 
 
 @app.command()
-def checkpoint(
-    host: str = typer.Argument(..., help="Remote server IP or hostname"),
-    port: int = typer.Argument(22, help="SSH port"),
-):
+def checkpoint(host: HostArg, port: PortArg):
     """Find the latest checkpoint on a remote training server."""
-    conn = get_connection(host, port)
-
-    if not test_connection(conn):
-        sys.exit(1)
+    conn = connect(host, port)
 
     result = conn.run(
         "find /workspace/outputs -name 'checkpoint-*' -type d 2>/dev/null | sort -V | tail -1",
@@ -990,14 +1034,14 @@ def checkpoint(
     )
 
     if not result.ok:
-        print(f"Error: {result.stderr}", file=sys.stderr)
+        typer.echo(f"Error: {result.stderr}", err=True)
         raise typer.Exit(1)
 
     ckpt = result.stdout.strip()
     if ckpt:
         print(ckpt)
     else:
-        print("No checkpoints found", file=sys.stderr)
+        typer.echo("No checkpoints found", err=True)
         raise typer.Exit(1)
 
 

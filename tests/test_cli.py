@@ -56,11 +56,11 @@ class TestSubcommandHelp:
         [
             (["eval"], ["--model", "-m"]),
             (["analysis"], ["high-wer", "compare"]),
-            (["deploy"], ["repo-id"]),  # Now a direct command
-            (["push"], ["repo-id"]),  # Now a direct command
-            (["runpod"], ["deploy", "train", "attach"]),  # Top-level command
-            (["debug"], ["analyze-weights", "analyze-lora"]),
-            (["demo"], ["model", "port"]),
+            (["deploy"], ["--repo-id", "-r"]),
+            (["push"], ["--repo-id", "-r"]),
+            (["runpod"], ["deploy", "train", "attach"]),
+            (["debug"], ["analyze-weights", "analyze-lora", "check-gradient-flow"]),
+            (["demo"], ["--model", "-m", "--port", "-p"]),
             (["dev"], ["lint", "format", "test", "handler"]),
         ],
     )
@@ -85,10 +85,13 @@ class TestNestedCommands:
             (["runpod", "attach"], "host"),
             (["runpod", "checkpoint"], "host"),
             # Debug subcommands
-            (["debug", "analyze-lora"], "repo"),
+            (["debug", "analyze-lora"], "model"),
+            (["debug", "check-gradient-flow"], "model"),
+            (["debug", "compare-to-base"], "--base-model"),
             # Analysis subcommands
             (["analysis", "high-wer"], "threshold"),
             (["analysis", "compare"], "models"),
+            (["analysis", "entity-errors"], "--entity-type"),
             # Dev subcommands
             (["dev", "lint"], "linter"),
             (["dev", "format"], "format"),
@@ -136,10 +139,23 @@ class TestEvalCommand:
     """Tests specific to eval command behavior."""
 
     def test_eval_no_args_shows_error(self):
-        """Test that eval without model shows helpful error."""
+        """`--model` is required, so Click reports it before anything runs."""
         result = runner.invoke(app, ["eval"])
+        assert result.exit_code == 2
         output = _clean(result.output)
         assert "--model" in output or "-m" in output
+
+    def test_eval_rejects_unknown_dataset(self):
+        """Dataset names are a Click choice built from the registry."""
+        result = runner.invoke(app, ["eval", "-m", "x", "-d", "not-a-dataset"])
+        assert result.exit_code == 2
+        assert "not-a-dataset" in _clean(result.output)
+
+    def test_subcommands_do_not_install_completion(self):
+        """Only the root app owns shell completion."""
+        for cmd in (["eval"], ["dev"], ["runpod", "train"]):
+            output = _clean(runner.invoke(app, [*cmd, "--help"]).output)
+            assert "--install-completion" not in output, cmd
 
 
 class TestCLIStructure:

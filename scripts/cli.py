@@ -2,70 +2,64 @@
 """Unified CLI for Tiny Audio."""
 
 import importlib
-import sys
 
 import typer
+import typer.core
+import typer.main
 
-app = typer.Typer(
-    name="tiny-audio",
-    help="Tiny Audio - ASR model training, evaluation, and deployment",
-    no_args_is_help=True,
-)
-
-# Subcommand groups, as (module, attribute, help). Importing every one of these
-# eagerly costs ~4.5s per invocation -- demo.app alone pulls in gradio, torch,
-# transformers, torchvision and sklearn -- which pure-shell commands like
-# `ta dev lint` would otherwise pay in full. Registration is therefore deferred
-# to whichever group the command line actually names (see _register_for_argv).
-_GROUPS: dict[str, tuple[str, str, str]] = {
-    "eval": ("scripts.eval.cli", "app", "Evaluate ASR models on datasets"),
-    "analysis": ("scripts.analysis", "app", "WER analysis and comparison tools"),
-    "runpod": ("scripts.deploy.runpod", "app", "Remote training on RunPod"),
-    "debug": ("scripts.debug.cli", "app", "Debug and analysis tools"),
-    "demo": ("demo.app", "app", "Launch Gradio demo"),
-    "dev": ("scripts.dev", "app", "Development commands"),
-}
-
-# Single commands rather than groups.
-_COMMANDS: dict[str, tuple[str, str, str]] = {
-    "deploy": ("scripts.deploy.hf_space", "deploy", "Deploy demo to HuggingFace Space"),
-    "push": ("scripts.hub.push", "main", "Push model to HuggingFace Hub"),
+# Subcommands, as name -> module. Each module exposes a Typer named `app`: a
+# multi-command module (analysis, runpod, debug, dev) mounts as a group, and a
+# module with one `@app.command()` (eval, demo, deploy, push) mounts as a plain
+# command. Help text comes from the module itself, so it is written once.
+#
+# Importing every one of these eagerly costs ~4.5s per invocation -- demo.app
+# alone pulls in gradio, torch, transformers, torchvision and sklearn -- which
+# pure-shell commands like `ta dev lint` would otherwise pay in full. LazyGroup
+# therefore imports a module only when its command is looked up.
+SUBCOMMANDS: dict[str, str] = {
+    "eval": "scripts.eval.cli",
+    "analysis": "scripts.analysis",
+    "deploy": "scripts.deploy.hf_space",
+    "push": "scripts.hub.push",
+    "runpod": "scripts.deploy.runpod",
+    "debug": "scripts.debug.cli",
+    "demo": "demo.app",
+    "dev": "scripts.dev",
 }
 
 
-def _register(name: str) -> None:
-    """Import and attach one subcommand group or command."""
-    if name in _GROUPS:
-        module, attr, help_text = _GROUPS[name]
-        sub_app = getattr(importlib.import_module(module), attr)
-        app.add_typer(sub_app, name=name, help=help_text)
-    else:
-        module, attr, help_text = _COMMANDS[name]
-        command = getattr(importlib.import_module(module), attr)
-        app.command(name=name, help=help_text)(command)
+class LazyGroup(typer.core.TyperGroup):
+    """Click's lazy-loading group pattern, applied to Typer sub-apps.
 
-
-def register_subcommands(only: str | None = None) -> None:
-    """Register subcommand groups, or just `only` when given."""
-    names = [only] if only is not None else [*_GROUPS, *_COMMANDS]
-    for name in names:
-        _register(name)
-
-
-def _register_for_argv(argv: list[str]) -> None:
-    """Register only the group named on the command line, else everything.
-
-    `ta --help` and any programmatic use (tests import `app` directly) fall
-    through to registering everything, so the full command list stays visible.
+    `list_commands` answers from `SUBCOMMANDS` without importing anything;
+    `get_command` imports a module the first time its name is resolved and
+    caches the resulting Click command. `ta --help` still loads every module,
+    because rendering the command table needs each one's help text.
     """
-    requested = next((arg for arg in argv if not arg.startswith("-")), None)
-    if requested in _GROUPS or requested in _COMMANDS:
-        register_subcommands(only=requested)
-    else:
-        register_subcommands()
+
+    def list_commands(self, _ctx: typer.Context) -> list[str]:
+        """Registration order, without importing any module."""
+        return [*self.commands, *(name for name in SUBCOMMANDS if name not in self.commands)]
+
+    def get_command(self, _ctx: typer.Context, cmd_name: str):
+        """Import the module behind `cmd_name` on first use and cache its command."""
+        if cmd_name not in self.commands and cmd_name in SUBCOMMANDS:
+            sub_app = importlib.import_module(SUBCOMMANDS[cmd_name]).app
+            command = typer.main.get_command(sub_app)
+            command.name = cmd_name
+            self.add_command(command, cmd_name)
+        return self.commands.get(cmd_name)
 
 
-_register_for_argv(sys.argv[1:])
+app = typer.Typer(name="tiny-audio", cls=LazyGroup, no_args_is_help=True)
+
+
+@app.callback()
+def main() -> None:
+    """Tiny Audio - ASR model training, evaluation, and deployment."""
+    # Typer builds a Group (rather than a single Command) only when the app has
+    # a callback or eagerly registered sub-apps; ours are all lazy.
+
 
 if __name__ == "__main__":
     app()

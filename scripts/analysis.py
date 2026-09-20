@@ -7,6 +7,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -15,10 +16,21 @@ from rich.table import Table
 from scripts.itn import ITN_CLASSES, contains_subsequence, merge_scores, score_sample
 from scripts.utils import _extract_model_from_dir, find_model_dirs, parse_results_file
 
-app = typer.Typer(help="Analysis tools for ASR evaluation results")
+app = typer.Typer(help="Analyze and compare `ta eval` results.", add_completion=False)
 console = Console()
 
 KEYWORDS_FILE = "outputs/keywords.json"
+
+# Shared help text: every analysis command reads the same run-directory layout,
+# so the flags that select runs are spelled and described identically.
+MODEL_ARG_HELP = "Model short name to analyze (text after the last '/', matched exactly)"
+OUTPUT_DIR_HELP = "Directory containing `ta eval` results"
+OutputDirOption = Annotated[
+    Path,
+    typer.Option("--output-dir", "-o", exists=True, file_okay=False, help=OUTPUT_DIR_HELP),
+]
+EXCLUDE_HELP = "Model name pattern to exclude (repeatable)"
+LATEST_HELP = "Only use the most recent run per dataset"
 
 # OntoNotes' seven numeric labels. The ITN table scores these spans off the raw
 # reference, covers classes NER never labels at all (phone numbers, URLs,
@@ -78,16 +90,16 @@ def entity_in_text(entity_text: str, text: str) -> bool:
 
 @app.command("high-wer")
 def high_wer(
-    model: str = typer.Argument(..., help="Model pattern to analyze"),
-    threshold: float = typer.Option(50.0, "--threshold", "-t", help="WER threshold (percent)"),
-    output_dir: Path = typer.Option(
-        Path("outputs"), "--output-dir", help="Directory containing eval results"
-    ),
-    exclude: list[str] = typer.Option([], help="Patterns to exclude"),
-    latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
-    output_file: Path | None = typer.Option(
-        None, "--output", "-o", help="Output file (default: stdout)"
-    ),
+    model: Annotated[str, typer.Argument(help=MODEL_ARG_HELP)],
+    threshold: Annotated[
+        float, typer.Option("--threshold", "-t", help="WER threshold (percent)")
+    ] = 50.0,
+    output_dir: OutputDirOption = Path("outputs"),
+    exclude: Annotated[list[str] | None, typer.Option("--exclude", help=EXCLUDE_HELP)] = None,
+    latest: Annotated[bool, typer.Option("--latest", help=LATEST_HELP)] = False,
+    output_file: Annotated[
+        Path | None, typer.Option("--output-file", help="Write the report here instead of stdout")
+    ] = None,
 ):
     """Output ground truth and predictions for samples with WER above threshold."""
     model_dirs = find_model_dirs(output_dir, model, exclude, latest=latest)
@@ -149,18 +161,16 @@ def high_wer(
 
 @app.command("entity-errors")
 def entity_errors(
-    model: str = typer.Argument(..., help="Model pattern to analyze"),
-    output_dir: Path = typer.Option(
-        Path("outputs"), "--output-dir", help="Directory containing eval results"
-    ),
-    exclude: list[str] = typer.Option([], help="Patterns to exclude"),
-    latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
-    entity_type: str = typer.Option(
-        "", "--type", "-t", help="Filter by entity type (e.g., PERSON, ORG)"
-    ),
-    output_file: Path | None = typer.Option(
-        None, "--output", "-o", help="Output file (default: stdout)"
-    ),
+    model: Annotated[str, typer.Argument(help=MODEL_ARG_HELP)],
+    output_dir: OutputDirOption = Path("outputs"),
+    exclude: Annotated[list[str] | None, typer.Option("--exclude", help=EXCLUDE_HELP)] = None,
+    latest: Annotated[bool, typer.Option("--latest", help=LATEST_HELP)] = False,
+    entity_type: Annotated[
+        str, typer.Option("--entity-type", help="Filter by entity type (e.g., PERSON, ORG)")
+    ] = "",
+    output_file: Annotated[
+        Path | None, typer.Option("--output-file", help="Write the report here instead of stdout")
+    ] = None,
 ):
     """Output samples where entities were missed in the prediction."""
     # Load keywords file
@@ -241,13 +251,13 @@ def entity_errors(
 
 @app.command("extract-entities")
 def extract_entities(
-    model: str = typer.Option("", help="Model pattern to extract from (empty for all)"),
-    output_dir: Path = typer.Option(
-        Path("outputs"), "--output-dir", help="Directory containing eval results"
-    ),
-    exclude: list[str] = typer.Option([], help="Patterns to exclude"),
-    min_count: int = typer.Option(20, help="Minimum entity count to include a type"),
-    latest: bool = typer.Option(False, "--latest", help="Only use most recent run per dataset"),
+    model: Annotated[str, typer.Argument(help=f"{MODEL_ARG_HELP} (omit to use every model)")] = "",
+    output_dir: OutputDirOption = Path("outputs"),
+    exclude: Annotated[list[str] | None, typer.Option("--exclude", help=EXCLUDE_HELP)] = None,
+    min_count: Annotated[
+        int, typer.Option("--min-count", help="Minimum entity count to include a type")
+    ] = 20,
+    latest: Annotated[bool, typer.Option("--latest", help=LATEST_HELP)] = False,
 ):
     """Extract named entities from reference texts and save to keywords.json.
 
@@ -385,7 +395,9 @@ def parse_metrics_file(metrics_file: Path) -> dict:
     return result
 
 
-def collect_model_metrics(model_pattern: str, outputs_dir: Path, exclude: list[str]) -> dict:
+def collect_model_metrics(
+    model_pattern: str, outputs_dir: Path, exclude: list[str] | None = None
+) -> dict:
     """Collect all metrics for a model across datasets."""
     import jiwer
 
@@ -564,18 +576,11 @@ def _dataset_wer(ds_data: dict) -> float | None:
 
 @app.command("compare")
 def compare(
-    models: list[str] = typer.Argument(..., help="Model patterns to compare"),
-    output_dir: Path = typer.Option(
-        Path("outputs"), "--output-dir", help="Directory containing eval results"
-    ),
-    exclude: list[str] = typer.Option([], help="Patterns to exclude from matching"),
+    models: Annotated[list[str], typer.Argument(help=f"{MODEL_ARG_HELP}s to compare")],
+    output_dir: OutputDirOption = Path("outputs"),
+    exclude: Annotated[list[str] | None, typer.Option("--exclude", help=EXCLUDE_HELP)] = None,
 ):
     """Generate comprehensive comparison tables for multiple models."""
-
-    if not models:
-        console.print("[red]Please provide at least one model pattern[/red]")
-        raise typer.Exit(1)
-
     # Collect metrics for all models
     model_metrics = {}
     for model in models:

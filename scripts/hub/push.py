@@ -8,7 +8,7 @@ import typer
 from huggingface_hub import CommitOperationAdd, HfApi, get_token
 from rich.console import Console
 
-app = typer.Typer(help="Push model files to Hugging Face Hub")
+app = typer.Typer(add_completion=False)
 console = Console()
 
 
@@ -23,20 +23,31 @@ def main(
         typer.Option("--branch", "-b", help="Branch to push to"),
     ] = "main",
     checkpoint_dir: Annotated[
-        str | None,
+        Path | None,
         typer.Option(
             "--checkpoint-dir",
-            "-c",
-            help="Path to checkpoint directory to copy tokenizer files from",
+            exists=True,
+            file_okay=False,
+            help="Checkpoint directory to copy tokenizer files from",
+        ),
+    ] = None,
+    hf_token: Annotated[
+        str | None,
+        typer.Option(
+            "--hf-token",
+            envvar="HF_TOKEN",
+            help="Hugging Face write token (default: the `hf auth login` cache)",
         ),
     ] = None,
 ):
     """Push model files to Hugging Face Hub."""
-    # HfApi resolves HF_TOKEN and the `hf auth login` cache itself; fail early
-    # with a clear message rather than on the first authenticated call.
-    if get_token() is None:
-        console.print("[red]Error: not logged in (set HF_TOKEN or run `hf auth login`)[/red]")
-        raise typer.Exit(1)
+    # HfApi resolves the `hf auth login` cache itself when no token is passed;
+    # fail early with a clear message rather than on the first authenticated call.
+    if hf_token is None and get_token() is None:
+        raise typer.BadParameter(
+            "not logged in: set HF_TOKEN, pass --hf-token, or run `hf auth login`",
+            param_hint="--hf-token",
+        )
 
     # One atomic commit built from CommitOperationAdd entries. `path_in_repo`
     # is independent of the local path, so MODEL_CARD.md publishes as
@@ -90,10 +101,10 @@ def main(
             "special_tokens_map.json",
             "added_tokens.json",
         ):
-            _add(Path(checkpoint_dir) / filename)
+            _add(checkpoint_dir / filename)
 
     console.print(f"\nUploading to {repo_id}...")
-    HfApi().create_commit(
+    HfApi(token=hf_token).create_commit(
         repo_id=repo_id,
         repo_type="model",
         revision=branch,

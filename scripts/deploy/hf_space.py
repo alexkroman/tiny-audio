@@ -2,11 +2,12 @@
 """Deploy the demo application to a Hugging Face Space."""
 
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from huggingface_hub import HfApi, RepoUrl, upload_folder
 
-app = typer.Typer(help="Deploy demo to Hugging Face Space")
+app = typer.Typer(add_completion=False)
 
 
 def extract_repo_id(repo_id_or_url: str) -> str:
@@ -26,38 +27,37 @@ def extract_repo_id(repo_id_or_url: str) -> str:
 
 @app.command()
 def deploy(
-    repo_id: str = typer.Option(
-        "mazesmazes/tiny-audio",
-        "--repo-id",
-        "-r",
-        help="HuggingFace Space repo ID (e.g., username/space-name)",
-    ),
-    demo_dir: Path = typer.Option(
-        Path("demo"),
-        "--demo-dir",
-        help="Path to demo directory",
-    ),
-    delete_existing: bool = typer.Option(
-        False,
-        "--delete-existing",
-        help="Delete files in Space that are not in demo_dir",
-    ),
-    private: bool = typer.Option(
-        False,
-        "--private",
-        help="Create Space as private (if creating new)",
-    ),
+    repo_id: Annotated[
+        str,
+        typer.Option(
+            "--repo-id", "-r", help="HuggingFace Space repo ID (e.g., username/space-name)"
+        ),
+    ] = "mazesmazes/tiny-audio",
+    demo_dir: Annotated[
+        Path,
+        typer.Option(
+            "--demo-dir", exists=True, file_okay=False, help="Path to the demo directory to upload"
+        ),
+    ] = Path("demo"),
+    delete_existing: Annotated[
+        bool,
+        typer.Option(
+            "--delete-existing", help="Delete files in the Space that are not in --demo-dir"
+        ),
+    ] = False,
+    private: Annotated[
+        bool, typer.Option("--private", help="Create the Space as private (if creating new)")
+    ] = False,
 ):
     """Deploy demo files to a Hugging Face Space."""
     repo_id = extract_repo_id(repo_id)
 
-    if not demo_dir.exists():
-        raise typer.BadParameter(f"Demo directory not found: {demo_dir}")
-
     required_files = ["app.py", "requirements.txt", "README.md"]
     missing = [f for f in required_files if not (demo_dir / f).exists()]
     if missing:
-        raise typer.BadParameter(f"Required files not found: {', '.join(missing)}")
+        raise typer.BadParameter(
+            f"required files not found: {', '.join(missing)}", param_hint="--demo-dir"
+        )
 
     typer.echo(f"\nDeploying to Hugging Face Space: {repo_id}")
     typer.echo(f"Demo directory: {demo_dir.absolute()}")
@@ -84,11 +84,6 @@ def deploy(
     typer.echo("\nSuccessfully deployed to Hugging Face Space!")
     typer.echo(f"Your Space is available at: https://huggingface.co/spaces/{repo_id}")
     typer.echo("\nNote: The Space may take a few minutes to build and become available.")
-
-
-def main():
-    """Entry point for pyproject.toml scripts."""
-    app()
 
 
 if __name__ == "__main__":

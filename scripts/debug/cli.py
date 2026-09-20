@@ -10,21 +10,15 @@ from scripts.debug.compare_to_base import main as compare_to_base_command
 
 app = typer.Typer(
     name="debug",
-    help="Debug and analysis tools",
+    help="Inspect the weights and gradients of a checkpoint.",
     no_args_is_help=True,
+    add_completion=False,
 )
 
-app.command(name="analyze-lora", help="Analyze LoRA adapter weights")(analyze_lora_command)
-app.command(name="analyze-weights", help="Analyze model weights for training health")(
-    analyze_weights_command
-)
-app.command(name="compare-to-base", help="Compare fine-tuned weights against base model")(
-    compare_to_base_command
-)
-app.command(
-    name="check-gradient-flow",
-    help="Probe gradient flow on a checkpoint (per-component grad norms)",
-)(check_gradient_flow_command)
+app.command(name="analyze-lora")(analyze_lora_command)
+app.command(name="analyze-weights")(analyze_weights_command)
+app.command(name="compare-to-base")(compare_to_base_command)
+app.command(name="check-gradient-flow")(check_gradient_flow_command)
 
 if __name__ == "__main__":
     app()

@@ -177,12 +177,12 @@ poetry run ta eval -m mazesmazes/tiny-audio -n 100
 # Evaluate on specific dataset
 poetry run ta eval -m mazesmazes/tiny-audio -d loquacious -n 1000
 
-# Compare with other models
+# Compare with other models (reads ASSEMBLYAI_API_KEY, or pass --assemblyai-api-key)
 poetry run ta eval -m assemblyai --assemblyai-model universal -d loquacious -n 100
 
-# WER analysis
-poetry run ta analysis high-wer mazesmazes/tiny-audio --threshold 30
-poetry run ta analysis compare model1 model2
+# WER analysis: analysis commands take the model's short name (after the last "/")
+poetry run ta analysis high-wer tiny-audio --threshold 30
+poetry run ta analysis compare tiny-audio universal
 ```
 
 ### Apple SFSpeechRecognizer (macOS, on-device)
@@ -216,15 +216,42 @@ poetry run ta --help  # Show all commands
 | `ta runpod` | Remote training on RunPod (plan, up, wait, deploy, train, attach, eval, checkpoint) |
 | `ta dev` | Development tools (lint, format, type-check, test, check, precommit, ...) |
 
-### Common Options
+### CLI conventions
+
+Every command follows the same rules, and `tests/test_cli_conventions.py` checks them against
+the built command tree:
+
+- Commands that *run* something (`eval`, `demo`, `runpod eval`, `dev handler`) take the model as
+  `--model/-m`. Commands that *inspect* a model or its eval runs (`analysis *`, `debug *`) take it
+  as the first positional argument.
+- `ta runpod` commands that talk to a pod take `<HOST> <PORT>` as their first two arguments.
+- Every option has an explicit `--long-name` and help text. Secrets and IDs that usually come from
+  the environment (`HF_TOKEN`, `ASSEMBLYAI_API_KEY`, `WANDB_RUN_ID`, `MODEL_ID`, ...) are options
+  with an `[env var: ...]` fallback, so `--help` shows where each value comes from.
+- Choices (`--datasets`, `--assemblyai-model`, `--component`, `--dtype`) are validated by the CLI
+  and listed in `--help`; paths passed with `--output-dir`, `--demo-dir`, `--checkpoint-dir` and
+  `--audio` are checked before the command runs.
+- A short flag means one thing everywhere, and a long flag keeps the same short flag everywhere:
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--model` | `-m` | HuggingFace model ID |
-| `--datasets` | `-d` | Datasets to evaluate |
-| `--max-samples` | `-n` | Maximum samples |
-| `--output-dir` | `-o` | Output directory |
-| `--num-workers` | `-w` | Parallel workers |
+| `--model` | `-m` | Model path or Hub ID |
+| `--datasets` | `-d` | Datasets to evaluate (repeatable, `all` expands) |
+| `--max-samples` | `-n` | Maximum samples per dataset |
+| `--output-dir` | `-o` | Directory eval results are written to / read from |
+| `--num-workers` | `-w` | Parallel workers for API evaluations |
+| `--streaming` | `-s` | Streaming evaluation |
+| `--config` | `-c` | Dataset config override |
+| `--experiment` | `-e` | Experiment config (`ta runpod`) |
+| `--force` | `-f` | Kill an existing tmux session first (`ta runpod`) |
+| `--repo-id` | `-r` | Hub repo to push or deploy to |
+| `--branch` | `-b` | Hub branch (`ta push`) |
+| `--threshold` | `-t` | WER threshold (`ta analysis high-wer`) |
+| `--top-k` | `-k` | Most-drifted tensors (`ta debug compare-to-base`) |
+| `--list` | `-l` | List tmux sessions (`ta runpod attach`) |
+| `--port` | `-p` | Server port (`ta demo`) |
+| `--audio` | `-a` | Audio file (`ta dev handler`) |
+| `--verbose` | `-v` | Verbose output (`ta debug analyze-weights`) |
 
 ## Configuration
 

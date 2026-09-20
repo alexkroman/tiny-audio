@@ -52,7 +52,7 @@ export HF_TOKEN='hf_...'                                # write token
 poetry run ta runpod train <HOST> <PORT> --experiment my_run [hydra overrides...]
 
 poetry run ta runpod attach <HOST> <PORT>               # reattach to tmux
-poetry run ta runpod attach <HOST> <PORT> --logs -n 200 # print recent output
+poetry run ta runpod attach <HOST> <PORT> --logs --lines 200   # print recent output
 poetry run ta runpod checkpoint <HOST> <PORT>           # newest checkpoint path
 poetry run ta runpod eval <HOST> <PORT> -m <model> -d loquacious -n 500
 
@@ -81,14 +81,14 @@ Results: `outputs/<timestamp>_<short-name>_<dataset>/{results.txt,metrics.txt}`
 The model argument is the **short name** (text after the last `/`), matched exactly.
 
 ```bash
-poetry run ta analysis high-wer <short-name> --threshold 50 [--latest] [-o file.md]
+poetry run ta analysis high-wer <short-name> --threshold 50 [--latest] [--output-file file.md]
 poetry run ta analysis compare <short-name> tiny-audio assemblyai
 poetry run ta analysis extract-entities               # build outputs/keywords.json first
-poetry run ta analysis entity-errors <short-name> [--type PERSON]
+poetry run ta analysis entity-errors <short-name> [--entity-type PERSON]
 
 poetry run ta debug analyze-weights <model>
 poetry run ta debug compare-to-base <model> [--per-layer]
-poetry run ta debug analyze-lora -r <model>
+poetry run ta debug analyze-lora <model>
 poetry run ta debug check-gradient-flow <model>
 ```
 
@@ -247,13 +247,16 @@ Override syntax is `key=value` (Hydra), never `--key value`. Experiment files st
 
 ## Environment Variables
 
-| Variable | Purpose |
-|----------|---------|
-| `HF_TOKEN` | Hub downloads and checkpoint uploads (write token for training) |
-| `WANDB_API_KEY` | Weights & Biases login |
-| `WANDB_RUN_ID`, `WANDB_RESUME` | Resume a W&B run (`ta runpod train --wandb-run-id`) |
-| `MODEL_ID` | Model served by the Gradio demo / Space |
-| `ASSEMBLYAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | Commercial API baselines |
+Every variable below also has a flag on the command that reads it, and `--help` shows the
+pairing as `[env var: ...]`. Pass the flag to override the environment for one run.
+
+| Variable | Purpose | Flag |
+|----------|---------|------|
+| `HF_TOKEN` | Hub downloads and checkpoint uploads (write token for training) | `ta push --hf-token`, `ta runpod train/eval --hf-token` |
+| `WANDB_API_KEY` | Weights & Biases login | — |
+| `WANDB_RUN_ID`, `WANDB_RESUME` | Resume a W&B run | `ta runpod train --wandb-run-id / --wandb-resume` |
+| `MODEL_ID` | Model served by the Gradio demo / Space | `ta demo --model` |
+| `ASSEMBLYAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | Commercial API baselines | `ta eval --assemblyai-api-key / --deepgram-api-key / --elevenlabs-api-key` |
 
 ---
 
@@ -264,7 +267,8 @@ Override syntax is `key=value` (Hydra), never `--key value`. Experiment files st
 | Poetry refuses the Python version | Install 3.12; `poetry env use python3.12` |
 | CUDA out of memory | Lower `per_device_train_batch_size`, raise `gradient_accumulation_steps`, or add `training.use_lora=true` |
 | Pod out of disk | `ta runpod plan` before renting; data caches at ~2× download size |
-| `HF_TOKEN` warning at launch | Export a write token before `ta runpod train` |
+| `HF_TOKEN` warning at launch | Export a write token (or pass `--hf-token`) before `ta runpod train` |
+| `not logged in` from `ta push` | Run `hf auth login`, export `HF_TOKEN`, or pass `--hf-token`; the push needs a write token |
 | W&B prompts for login | Paste your key, or pass `training.report_to=none` |
 | Hydra "could not override" | Use `key=value`; check the key exists in `config.yaml` or `production.yaml` |
 | `analysis` finds no results | Use the short model name (after the last `/`); it must match exactly |
