@@ -1,11 +1,11 @@
 # @package _global_
-# FROZEN ENCODER + PROJECTOR + LoRA, two epochs.
+# FROZEN ENCODER + PROJECTOR + LoRA, one epoch.
 #
 #   ibm-granite/granite-speech-5.0-470m-turboctc   FULLY FROZEN (0 trainable)
 #   -> MLP projector (fresh init, 12.6M, lr 1e-3)
-#   -> Qwen/Qwen3.5-2B, base FROZEN + LoRA all-linear r=64 (63.4M, lr 1e-4)
+#   -> Qwen/Qwen3.5-2B, base FROZEN + LoRA all-linear r=64 (67.3M, lr 1e-4)
 #
-# Trainable: 76.0M of 2.434B (3.1%) -- the smallest allocation tried here.
+# Trainable: 79.9M of 2.434B (3.3%) -- the smallest allocation tried here.
 #
 #   poetry run python scripts/train.py +experiments=granite_qwen_frozen
 #
@@ -59,49 +59,38 @@
 #     is the expected sign of displacing a converged pretrained encoder in a
 #     direction with no gradient signal.
 #
-# SECOND EPOCH. Every run on this stack that got far enough to say anything
-# ended with eval/loss still descending: granite_qwen reached eval-best at
-# step 32,000 of 32,922 (97.2% through) with the 12-set mean still falling
-# 8.997 -> 8.973 -> 8.868, and the long top4 run (jscyrgkt) was still falling
-# when it stopped at 20,000 of ~27,400. Nobody has observed the end of a
-# training curve here. Under num_train_epochs: 1 every example is seen at
-# most once, so "more data" and "train longer" are the same lever and the
-# cheapest version is a second pass over rows already downloaded.
+# ONE EPOCH, and where the extra training comes from. Every run on this stack
+# that got far enough to say anything ended with eval/loss still descending:
+# granite_qwen reached eval-best at step 32,000 of 32,922 (97.2% through)
+# with the 12-set mean still falling 8.997 -> 8.973 -> 8.868, and the long
+# top4 run (jscyrgkt) was still falling when it stopped at 20,000 of
+# ~27,400. Nobody has observed the end of a training curve here.
 #
-# Overfitting risk is real but low for THIS allocation: the earlier
-# epoch-2 overfit (ppbo0oqn) was a fully fine-tuned 0.6B decoder. Here the
-# base decoder is frozen and only 3.1% of the model trains. The top4 run held
-# an absolute train/eval gap of 0.199 +/- 0.005 across 10 evals while both
-# curves descended. Watch that gap at the epoch boundary; if it starts
-# opening in epoch 2, stop and keep the epoch-1 checkpoint.
+# This file used to answer that with a second pass over the data. It now
+# stays at ONE pass (data.epoch_expansion: 1, num_train_epochs: 1) and takes
+# the extra optimisation from the same pass instead: gradient accumulation
+# drops 2 -> 1, so the identical set of forward/backward passes yields ~2x
+# the optimizer steps (~44.6k against top4's ~27.4k) at identical GPU cost.
+# See `gradient_accumulation_steps` for the argument and its failure mode.
+# A second pass is still one line away if this run also ends mid-descent:
+# `data.epoch_expansion: 2`, documented at that key.
 # ---------------------------------------------------------------------------
 
 defaults:
   - override /data: multiasr
 
 data:
-  # Two logical epochs folded into one physical pass, so that the capped
-  # sources spend the second pass on ROWS THEY HAVE NOT SEEN instead of
-  # replaying the first 600K.
+  # ONE physical pass, exactly the rows the mix table in multiasr.yaml
+  # describes (~2.85M loader rows, ~2.68M after the collator's drops).
   #
-  # Why it was needed: _resample_to_target runs once inside DatasetLoader.load(),
-  # so `num_train_epochs: 2` iterates the identical 600K subset twice. Measured
-  # against the current pools, that wastes real data:
-  #
-  #                  eligible pool     cap    never seen
-  #     LibriHeavy        ~885,000   600,000   ~285,000 (32%)
-  #     CommonVoice        938,087   600,000   ~338,000 (36%)
-  #     Gigaspeech         656,893   600,000    ~57,000 ( 9%)
-  #
-  # With expansion=2 each capped source targets 1,200,000, draws every
-  # eligible row first and repeat-pads only the shortfall (LibriHeavy 1.36x,
-  # CommonVoice 1.28x, Gigaspeech 1.83x -- each logged). Uncapped sources
-  # (SPGI, TEDLIUM, VoxPopuli, AMI) are already at natural size and are simply
-  # repeated 2x, exactly as a second Trainer epoch would have.
-  #
-  # Per-step mix share is UNCHANGED -- every source is multiplied by the same
-  # factor -- and total steps are unchanged. Unique rows seen over the run go
-  # from ~2.68M to ~3.36M (+25%).
+  # Set to 2 for a second pass. It is the right way to get one -- NOT
+  # `num_train_epochs: 2`: _resample_to_target runs once inside
+  # DatasetLoader.load(), so a Trainer epoch replays the identical 600K
+  # subsets while ~285K eligible LibriHeavy rows and ~338K CommonVoice rows
+  # are never touched. With expansion=2 each capped source targets 1.2M,
+  # draws every eligible row first and repeat-pads only the shortfall;
+  # uncapped sources are repeated 2x, as a second epoch would have. Per-step
+  # mix share is unchanged. The loader raises if both are set.
   epoch_expansion: 1
 
 model:
@@ -135,6 +124,25 @@ model:
   projector_output_rms: auto
   model_dtype: bfloat16
   projector_dtype: float32
+
+  # PROJECTOR, surveyed against transformers 5.17 (2026-09-21) and left
+  # alone. The shape here -- RMSNorm(in) -> Linear(1024, 4096) -> GELU ->
+  # Linear(4096, 2048) with biases, a fixed output scale, no dropout, no
+  # trailing norm -- is the tree's majority design: GLM-ASR is exactly
+  # Linear(enc, 2*llm) -> GELU -> Linear(2*llm, llm); Voxtral, AudioFlamingo3
+  # and Qwen3-ASR are two-layer GELU MLPs; Qwen2-Audio and Canary-Qwen use a
+  # single linear; Granite Speech uses a 2-layer Q-Former and Fun-ASR-Nano a
+  # 2-layer Transformer adaptor, both heavier with no evidence they buy WER
+  # on a frozen LLM. Nothing in the tree puts dropout in the projector.
+  #
+  # Frame rate stays at Granite's native 12.5 Hz (`projector_pool_stride: 1`,
+  # ~237 tokens for a 19s clip). That is Canary-Qwen's rate (80 ms) and
+  # Phi-4-MM's (8x on 100 Hz); Ultravox goes to 6.25 Hz. Stride 2 would
+  # halve the decoder's audio tokens and cut per-step decoder cost by
+  # roughly a third, but Granite's top layers were CTC-trained at 12.5 Hz so
+  # a frame is already ~one BPE unit; merging pairs is a quality bet, not an
+  # efficiency freebie, and it would make the top4 comparison unreadable.
+  # It is the next efficiency experiment after this one, not part of it.
 
   # Two more keys the sweep above missed, both confirmed against the shipped
   # granite-qwen-frozen config.json rather than assumed.
@@ -191,9 +199,9 @@ model:
   # check comes back hot". It came back hot. Scale 1.0 halves the expected
   # perturbation to ~9.2%, under full fine-tuning's 13.31% and in the
   # neighbourhood of Granite Speech 3.3 (scale 0.5, the closest published
-  # frozen-base + LoRA analogue). A second epoch doubles the exposure that
-  # produced 18.39% in two-thirds of one epoch, so this is the wrong run to
-  # leave it hot on.
+  # frozen-base + LoRA analogue). This run takes ~2.2x the optimizer steps
+  # that produced 18.39% in two-thirds of one epoch, so this is the wrong
+  # run to leave it hot on.
   #
   # RANK STAYS AT 64 -- checked, not assumed. Singular spectrum of the same
   # updates: rank needed for 90% of update energy is 41.8-46.5 on gate/up/
@@ -202,6 +210,27 @@ model:
   # value and understates usable capacity.) The exception is the DeltaNet
   # gates below, which need ~4.
   lora_alpha: 64
+  # 0.0. Surveyed against the published frozen-base + LoRA speech recipes
+  # (2026-09-21) rather than assumed:
+  #
+  #     Granite Speech 3.3 (adapter_config)   r=64   alpha=32   dropout 0.0    q,v
+  #     Canary-Qwen-2.5B   (config.json)      r=128  alpha=256  dropout 0.01   q,v
+  #     Phi-4-multimodal   (speech_lora)      r=320  alpha=640  dropout 0.01   qkv,o,gate_up,down
+  #     Fun-ASR-Nano       (lora_conf, off)   r=16   alpha=32   dropout 0.05   q,v
+  #     SLAM-LLM           (peft default)     r=8    alpha=32   dropout 0.05   q,v
+  #     Ultravox                              no LoRA (r=0); unfreezes modules instead
+  #
+  # The large-data recipes (Granite, Canary-Qwen, Phi-4: 10^4-10^5 hours) sit
+  # at 0.0-0.01; the 0.05s are small-data academic defaults. This run sees
+  # ~2.7M unique utterances once, with 3.3% of the model trainable and a flat
+  # train/eval gap on record (top4: 0.199 +/- 0.005), so there is nothing for
+  # dropout to regularise yet. 0.0 also keeps the adapter identical in shape
+  # and noise to top4, which is what the WER comparison needs. Revisit only
+  # if the gap opens.
+  #
+  # Same survey on scale: alpha/r runs 0.5 (Granite) to 2.0 (Canary-Qwen,
+  # Phi-4), so top4's 2.0 was mainstream; the 1.0 above is not a convention
+  # call but the ||dW||/||W|| measurement on the shipped top4 adapter.
   lora_dropout: 0.0
   # all-linear, VERIFIED against the shipped top4 adapter (2026-09-20) rather
   # than inherited. Per-layer mean ||dW||_F/||W||_F across all 186 adapted
@@ -225,100 +254,33 @@ model:
   # first honest evidence for narrowing the target set.
   lora_target_modules: all-linear
 
-  # CARRIED OVER from granite_qwen_full_encoder -- a shape-driven efficiency
-  # fix, measured on the top4 step-20000 checkpoint, that cannot interact with
-  # the encoder or epoch changes.
+  # NO per-module rank override on the DeltaNet gates (`in_proj_a` /
+  # `in_proj_b`, shape (16, 2048)). Earlier revisions of this file carried
+  # `lora_rank_pattern` / `lora_alpha_pattern` for them at 16, then 8, then
+  # 12 -- three values in three revisions, none measured. Costed honestly,
+  # the override does not earn its keep:
   #
-  # `all-linear` is blind to matrix shape, and on Qwen3.5 that misfires on the
-  # gated-DeltaNet gates. `in_proj_a` (per-head decay) and `in_proj_b` (delta-
-  # rule write strength) are (16, 2048) -- 16 output rows -- so a rank-64
-  # adapter is capped at rank 16 by geometry no matter what is configured. The
-  # realised update's effective rank was 6.29 and 7.34 against the 64
-  # allocated, and those 36 gate matrices consumed 4,755,456 LoRA params:
-  # 4.03x what fully fine-tuning the same matrices would cost (1,179,648), for
-  # 7.1% of the adapter budget.
+  #   saves    3.86M adapter params (5.7% of 67.3M), ~62 MB of fp32 master +
+  #            Adam state, and no measurable step time (36 matrices with 16
+  #            output rows, against 150 that are 2048-6144 wide)
+  #   costs    two config keys that must be kept equal or PEFT silently
+  #            rescales the hottest modules in the adapter (see
+  #            ASRConfig.lora_rank_pattern), ~90 lines of rationale, and one
+  #            more uncontrolled difference from the top4 adapter this run is
+  #            scored against
   #
-  # 8, NOT the 16 this file used to carry. 16 was picked as "the geometric
-  # ceiling imposed by their (16, 2048) shape", but the ceiling is precisely
-  # the one value where LoRA stops being low-rank: a rank-16 factorisation of
-  # a rank-<=16 matrix imposes NO constraint, and it costs
-  # 16*2048 + 16*16 = 33,024 params against the 16*2048 = 32,768 that fully
-  # fine-tuning the same matrix would -- 1.008x MORE than full FT, for an
-  # over-parameterised reparametrisation with a different init. (The 1,179,648
-  # full-FT figure was already computed above to argue against r=64; it just
-  # was not re-applied at 16.)
-  #
-  # 12, NOT the 8 this file used to carry, and the correction is about
-  # applying ONE criterion consistently rather than about these modules.
-  #
-  # 8 was read off the 90%-energy rank (measured again on the shipped top4
-  # adapter: in_proj_a 3.8, in_proj_b 4.8), which gives 1.7-2.1x headroom and
-  # looks generous. But r=64 above was NOT chosen on 90%-energy -- the
-  # 41.2-46.6 figures it cites leave 64 sitting at 1.03-1.15x of each family's
-  # 99%-energy rank (55.8-62.0). Re-measuring the gates on the same 99% basis:
-  #
-  #                     r90    r99   allocated   alloc / r99
-  #     in_proj_b       4.8   11.8       8          0.68
-  #     in_proj_a       3.8   11.3       8          0.71
-  #     up_proj        46.6   62.0      64          1.03
-  #     k_proj         28.0   55.8      64          1.15
-  #
-  # Every other family in the adapter clears its own r99; rank 8 would be the
-  # single tightest allocation in the model, applied to the family with the
-  # LARGEST relative perturbation (in_proj_b, 27.6%). That is the opposite of
-  # what the 8 was meant to do.
-  #
-  # The framing this file inherited also had it backwards. "4.03x the cost of
-  # full FT" is true on parameter count and misleading on capacity: these
-  # updates reach r99 = 11.8 against a geometric ceiling of 16, i.e. they fill
-  # 74% of the rank available to them, where the 2048-wide families fill ~3%.
-  # On rank UTILISATION the gates are the most constrained matrices in the
-  # adapter, not the most over-provisioned.
-  #
-  # 12 clears r99 (12/11.8 = 1.02, matching the global 1.03-1.15 band), still
-  # sits under the ceiling so it genuinely constrains the update -- which was
-  # the whole objection to 16 -- and costs 24,768/module, 0.76x what fully
-  # fine-tuning the same matrix would. Exact counts, computed from the shipped
-  # adapter rather than estimated:
-  #
-  #     r=64  132,096/module   4,755,456 total   adapter 67,276,800
-  #     r=16   33,024/module   1,188,864 total   adapter 63,710,208  (1.01x full FT)
-  #     r=12   24,768/module     891,648 total   adapter 63,412,992  (0.76x full FT)
-  #     r=8    16,512/module     594,432 total   adapter 63,115,776  (0.50x full FT)
-  #
-  # 12 over 8 costs 297,216 params, 0.47% of the adapter.
-  #
-  # CAVEAT, and the reason criterion #4 still has to re-measure this: every
-  # rank above comes from an update trained at r=64 / scale 2.0. A rank-12
-  # parameterisation cannot produce that spectrum, and at scale 1.0 the whole
-  # adapter re-equilibrates. This locates where rank binds; it does not prove
-  # 12 is optimal. If the gates come back at r99 well under 12 on this run's
-  # final checkpoint, 8 was right after all and this should go back.
-  #
-  # BOTH patterns are required. PEFT resolves rank_pattern and alpha_pattern
-  # with independent lookups, each falling back to r / lora_alpha, so setting
-  # rank alone would move these modules from alpha/r = 64/64 = 1.0 to
-  # 64/12 = 5.33 -- 5.3x HOTTER, the opposite of the intent. 12/12 holds them
-  # at the global 1.0. Verified end-to-end against peft 0.20.0 on the real
-  # Qwen3.5-2B: `get_pattern_key` matches these bare keys by suffix regex
-  # (`(.*\.)?(in_proj_a)$`), so all 36 gates resolve to the pattern and every
-  # one of the 186 adapted matrices comes out at scaling == 1.0 exactly.
-  lora_rank_pattern:
-    in_proj_a: 12
-    in_proj_b: 12
-  # Tracks lora_rank_pattern exactly, so the gates run at the GLOBAL alpha/r
-  # of 1.0. PEFT looks rank_pattern and alpha_pattern up independently, so any
-  # mismatch here silently rescales these modules -- and they are already the
-  # hottest in the model (in_proj_b at 27.93% mean / 55.46% max relative
-  # perturbation), so they are the worst place to let scale drift upward.
-  lora_alpha_pattern:
-    in_proj_a: 12
-    in_proj_b: 12
+  # At r=64 the gates are over-parameterised (geometry caps the realised
+  # update at rank 16) but not mis-scaled: alpha/r = 1.0 holds for every one
+  # of the 186 matrices. Over-parameterised LoRA is harmless; a wrong scale
+  # is not. So the adapter goes back to top4's shape and the only decoder-
+  # side change left is alpha 128 -> 64. If the gates ever need attention,
+  # the cheaper experiment is dropping them from `lora_target_modules`
+  # entirely, not tuning their rank.
 
   # Off. With the encoder frozen and 3.1% of the model training, the
   # overfitting surface is the smallest of any recipe here, and the top4 run
   # showed a flat train/eval gap with eval/loss still descending -- there is
-  # nothing to regularise yet. Revisit only if epoch 2 opens that gap.
+  # nothing to regularise yet. Revisit only if the train/eval gap opens.
   apply_spec_augment: false
 
 training:
@@ -363,7 +325,7 @@ training:
   # they route to the decoder group and survive every no-decay filter (not a
   # bias, not a *Norm* gain, not SSM, not an nn.Embedding). The other two
   # groups set their decay explicitly below, so this change isolates cleanly
-  # to the 63.4M adapter.
+  # to the 67.3M adapter.
   #
   # Two reasons. Standard LoRA practice is 0.0 (QLoRA, the HF alignment
   # handbook, PEFT's own examples), because decoupled decay hits BOTH factors
@@ -412,7 +374,18 @@ training:
   # omitted key here inherits it, and plain `cosine` does not accept
   # min_lr_rate, so get_scheduler() would raise at construction.
   lr_scheduler_kwargs: null
-  max_grad_norm: 2.5
+  # 1.0, the HF Trainer default, DOWN from the 2.5 every sibling recipe
+  # carries. 2.5 was derived on a full-decoder run (xxy2327u: median 1.18 /
+  # p99 2.19) where 1.0 clipped 90% of steps; this stack is different --
+  # top4's post-warmup grad norm ran median 0.634 / max 2.268 at batch 96,
+  # so 1.0 clips the tail here, not the median, and at effective batch 64
+  # (below) the noisier per-step gradient is exactly where a tighter cap
+  # earns its keep. 1.0 is also what the LoRA recipes surveyed above run or
+  # inherit (Trainer/TRL default); Fun-ASR is the outlier at 5. Read the
+  # clip fraction off `grad_norm` over the first 2k post-warmup steps: if
+  # the MEDIAN sits above 1.0 the cap is scaling the signal, not the spikes,
+  # and 2.5 was right for this batch.
+  max_grad_norm: 1.0
 
   seed: 44
   # Deliberately false. HF's auto_find_batch_size halves
@@ -421,10 +394,10 @@ training:
   # and makes the run non-comparable to anything.
   auto_find_batch_size: false
 
-  # 64 x 2 = 128 effective, sized against the measured frozen-encoder anchor
-  # rather than guessed: granite_qwen_top4 records a frozen baseline peaking
-  # at 55.4 GiB of 79.25 at batch 48 (the top-4 unfreeze added +5.2 GiB to
-  # reach 60.6, and unfreezing all 16 blocks OOMed at 79.16).
+  # 64 per device, sized against the measured frozen-encoder anchor rather
+  # than guessed: granite_qwen_top4 records a frozen baseline peaking at 55.4
+  # GiB of 79.25 at batch 48 (the top-4 unfreeze added +5.2 GiB to reach
+  # 60.6, and unfreezing all 16 blocks OOMed at 79.16).
   #
   # Backing out the fixed cost at batch 48 -- encoder 1.89 GB fp32 + decoder
   # bf16 2.74 + LoRA master/moments/grads ~1.08 + projector ~0.20 = ~5.9 GB --
@@ -433,33 +406,64 @@ training:
   #     batch 64 -> 5.0 + 66.0 = ~71 GiB of 79.25 (~90%),
   # leaving ~8 GiB of headroom. Sequence length is bounded by the collator's
   # 19.0s cap, so activation memory is near-linear in batch with no O(L^2)
-  # surprise.
+  # surprise. Restoring the gates to r=64 adds ~62 MB and does not move this.
   #
   # VERIFY ON THE FIRST RUN: if it OOMs, step to 56 (~63 GiB) rather than
   # re-enabling auto_find_batch_size. Do not spend the headroom on gradient
-  # checkpointing -- it would buy a much larger batch at ~30% slower steps,
-  # which is the wrong trade when the run is already paying 2x for a second
-  # epoch.
+  # checkpointing -- it buys a larger batch at ~30% slower steps, and a
+  # larger batch is the opposite of what this recipe wants (below).
   per_device_train_batch_size: 64
   per_device_eval_batch_size: 64
-  gradient_accumulation_steps: 2
-
-  # ONE physical epoch, worth two logical ones -- see `data.epoch_expansion`
-  # below. num_train_epochs MUST stay 1 here; the loader raises if both are
-  # set, because they compound to 4 epochs of exposure.
+  # 1, DOWN from 2, so the effective batch is 64 rather than 128. This is
+  # the efficiency lever for a one-pass run. The GPU cost of an epoch is the
+  # forward/backward passes, and the data fixes that; what the run gets OUT
+  # of them is optimizer steps, and accumulation halves those for nothing.
+  # At a single pass over ~2.85M loader rows:
   #
-  # ~5,368,688 rows at effective batch 128 is ~41,943 steps. That already
-  # exceeds every run on record -- jscyrgkt stopped at 20,000 and
-  # granite_qwen's full epoch was 32,922 -- so step count is no longer the
-  # binding constraint; the earlier runs were under-trained because they ran
-  # a single pass, not because their batches were small. Warmup 1,000 is
-  # ~2.4% of the schedule, and is the modal published value for this
-  # architecture class (Granite Speech 1000, Ultravox 1000, SLAM-ASR 1000);
-  # 700 was not measured here and nothing was broken at it.
+  #     effective batch 128   ~22.3k steps   (this file, previously)
+  #     effective batch  96   ~29.7k steps   (top4's setting)
+  #     effective batch  64   ~44.6k steps   <- this file
+  #
+  # An 80M-param AdamW step is negligible next to a 2.4B-param forward, so
+  # the wall clock is the same to within logging noise. Every run on this
+  # stack has ended with eval/loss still falling; the header used to buy
+  # more steps with a second data pass at 2x the cost, this buys ~2x the
+  # steps at 1x. Below the critical batch size, more and smaller updates are
+  # the compute-efficient regime (McCandlish et al. 2018), and 64 is an
+  # ordinary LoRA fine-tuning batch. Learning rates are unchanged: Adam's
+  # per-step update magnitude is set by lr, not by batch, so this does not
+  # need a rescale.
+  #
+  # FAILURE MODE to watch: per-step gradient noise rises ~sqrt(2). grad norm
+  # on top4 ran median 0.634 post-warmup at batch 96; expect ~0.75 here with
+  # `max_grad_norm: 1.0` engaging on a minority of steps rather than never.
+  # If train/loss is visibly noisier AND eval/loss is not below the top4
+  # curve at matched step count by step ~10k, put this back to 2 -- a
+  # one-line revert that touches nothing else here.
+  gradient_accumulation_steps: 1
+
+  # ONE pass. `data.epoch_expansion` stays 1; the loader raises if both it
+  # and this are >1, because they compound.
+  #
+  # ~2.85M loader rows at effective batch 64 is ~44.6k optimizer steps, more
+  # than any run on record (jscyrgkt stopped at 20,000; granite_qwen's full
+  # epoch was 32,922) without showing any row twice. Warmup 1,000 is ~2.2%
+  # of the schedule and the modal published value for this architecture
+  # class (Granite Speech 1000, Canary-Qwen 1000, SLAM-ASR 1000; Ultravox's
+  # default is 0, not the 1000 this file used to cite); 700 was not measured
+  # here and nothing was broken at it.
   num_train_epochs: 1
   save_steps: 2000
   eval_steps: 2000
 
+  # THE REMAINING EFFICIENCY LEVER IS NOT IN THIS FILE. Batches are drawn at
+  # random from a 0.8-19.0s duration range and padded to the longest row, so
+  # a large share of encoder and decoder compute goes to padding. Length-
+  # grouped batching (`group_by_length` over a duration column) was wired in
+  # #47 and removed in #72 with the config-unreachable code; Fun-ASR's
+  # token-bucketed `sort_size` sampler is the same idea. Bringing it back is
+  # a loader change, not a recipe change, and is the next thing to do for
+  # throughput once this run has a number.
   dataloader_num_workers: 16
   dataloader_prefetch_factor: 8
   torch_compile: false
@@ -476,17 +480,16 @@ training:
   #    snapshot SHA is fixed; run-to-run variation previously attributed to
   #    nondeterminism was 13 different checkpoints being published in a day.
   #
-  # 2. DOES THE SECOND PASS PAY? There is no Trainer epoch boundary any more
-  #    (epoch_expansion folds both passes into one shuffled stream, which
-  #    also removes the distribution step a hard boundary would create), so
-  #    read it off the eval curve: compare eval/loss around step ~21,000
-  #    against the end. Flat or rising while train/loss falls means the extra
-  #    exposure is overfitting and the mid-run checkpoint is the one to ship.
-  #    Note the replay is now interleaved rather than sequential, so any
-  #    overfitting should appear as a gradual divergence rather than a kink.
+  # 2. DOES THE STEP COUNT PAY? The optimisation-side change from top4 is
+  #    ~44.6k steps of batch 64 against ~27.4k of batch 96 over the same
+  #    data. Compare eval/loss against the top4 curve at MATCHED STEP (the
+  #    W&B x-axis), not matched epoch fraction: lower at 10k/20k means the
+  #    smaller batch is converting the pass into more learning; flat or
+  #    rising while train/loss falls means it is fitting noise, and
+  #    `gradient_accumulation_steps: 2` is the one-line revert.
   #
   # 3. PROJECTOR SCALE: `projector/output_rms_over_embed`. It reached ~48x on
-  #    the top4 run. If a second epoch pushes it materially past that, the
+  #    the top4 run. If the longer schedule pushes it materially past that, the
   #    audio prefix is drifting further off the decoder's native embedding
   #    scale and projector lr 3e-4 becomes the next lever.
   #
