@@ -34,7 +34,8 @@ def _run(pairs: list[tuple[str, str]], tmp_path: Path, dataset: str = "earnings2
         )
     evaluator.results = results
     metrics = evaluator.compute_metrics()
-    save_results("testmodel", dataset, evaluator.results, metrics, str(tmp_path))
+    # run_id is required: `_latest_sweep` only reads runs that declare a sweep.
+    save_results("testmodel", dataset, evaluator.results, metrics, str(tmp_path), run_id="testrun")
 
 
 def _both_wers(tmp_path: Path, dataset: str = "earnings22") -> tuple[float, float]:

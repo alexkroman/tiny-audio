@@ -4,7 +4,7 @@
 import functools
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
@@ -15,6 +15,11 @@ from rich.table import Table
 
 from scripts.itn import ITN_CLASSES, contains_subsequence, merge_scores, score_sample
 from scripts.utils import _extract_model_from_dir, find_model_dirs, parse_results_file
+
+# Minimum reference spans before an ITN class gets its own column. At n<15 a
+# single span is worth >6.7 points, so the cell reads as a measurement while
+# being dominated by sampling. Raise it as the eval set grows.
+MIN_CLASS_SUPPORT = 15
 
 app = typer.Typer(help="Analyze and compare `ta eval` results.", add_completion=False)
 console = Console()
@@ -395,6 +400,37 @@ def parse_metrics_file(metrics_file: Path) -> dict:
     return result
 
 
+def _latest_sweep(dirs: list[Path]) -> tuple[list[Path], str]:
+    """Keep only the newest sweep. Returns (dirs, run_id).
+
+    A sweep is one `ta eval` invocation; every dataset it writes shares a
+    `Run ID`. Selecting per DATASET instead -- which `find_model_dirs(
+    latest=True)` does -- silently pairs runs from different sweeps: a
+    partially re-run suite gave one model a corpus pool that was 53%
+    LibriSpeech by reference word against 18% for the other, and put an n=100
+    CommonVoice column next to an n=500 LibriSpeech column with nothing in the
+    table to show it.
+
+    Directories with no `Run ID` are dropped, not guessed at. Every number in
+    the output then comes from one invocation of one checkpoint, which is the
+    only basis on which the columns can be read together.
+    """
+    by_run: dict[str, list[Path]] = defaultdict(list)
+    for d in dirs:
+        mf = d / "metrics.txt"
+        if not mf.exists():
+            continue
+        rid = parse_metrics_file(mf).get("run_id")
+        if isinstance(rid, str) and rid:
+            by_run[rid].append(d)
+    if not by_run:
+        return [], ""
+    # Directory names start with a zero-padded UTC timestamp, so lexicographic
+    # max is chronological max.
+    newest = max(by_run.items(), key=lambda kv: max(d.name for d in kv[1]))
+    return newest[1], newest[0]
+
+
 def collect_model_metrics(
     model_pattern: str, outputs_dir: Path, exclude: list[str] | None = None
 ) -> dict:
@@ -402,11 +438,15 @@ def collect_model_metrics(
     import jiwer
 
     model_dirs = find_model_dirs(outputs_dir, model_pattern, exclude, latest=True)
+    # One sweep only -- see _latest_sweep. Mixing them is how the corpus WER
+    # ended up comparing different data between models.
+    model_dirs, sweep_label = _latest_sweep(model_dirs)
 
     display_name = extract_model_name(model_dirs[0].name) if model_dirs else model_pattern
 
     metrics = {
         "display_name": display_name,
+        "sweep": sweep_label,
         "datasets": {},
         "by_length": defaultdict(lambda: {"wers": []}),
         "diarization": None,
@@ -452,10 +492,11 @@ def collect_model_metrics(
         if not results_file.exists():
             continue
 
-        ds_metrics = {"refs": [], "preds": [], "avg_time": None, "wer": None}
+        ds_metrics = {"refs": [], "preds": [], "avg_time": None, "wer": None, "run_id": None}
 
         if metrics_file.exists():
             parsed = parse_metrics_file(metrics_file)
+            ds_metrics["run_id"] = parsed.get("run_id")
             avg_time = parsed.get("avg_time")
             if isinstance(avg_time, float):
                 ds_metrics["avg_time"] = avg_time
@@ -587,6 +628,66 @@ def _dataset_wer(ds_data: dict) -> float | None:
     return ds_data.get("wer") if wer is None else wer
 
 
+def _recompute_matched_corpus(model_metrics: dict) -> None:
+    """Rebuild each model's `corpus_wer` over a subset every model shares.
+
+    The per-model pooled WER is only meaningful when the models were scored on
+    the same audio. `find_model_dirs(latest=True)` picks the newest directory
+    PER DATASET, so a sweep that was re-run for some datasets and not others
+    yields a different mix per model. Measured case: one model's pool was 53%
+    LibriSpeech by reference word (its only two n=500 runs, and the two easiest
+    corpora) against 18% for the other, which made a 5.70% "corpus WER" look
+    like it beat 7.03% when neither number described the same data.
+
+    So: keep only datasets every model has, truncate each to the shared row
+    count, and require the references to match position-for-position. The eval
+    draw is a deterministic prefix of a fixed-seed shuffle, so an n=100 run is
+    the first 100 rows of the n=500 run of the same dataset -- truncation
+    yields a genuinely paired comparison rather than an approximate one. A
+    dataset whose references disagree after truncation is dropped rather than
+    silently pooled.
+
+    Sets `corpus_wer`, `corpus_ins_rate`, `corpus_datasets` and
+    `corpus_excluded` on each model in place.
+    """
+    import jiwer
+
+    if not model_metrics:
+        return
+    shared = set.intersection(*(set(m["datasets"]) for m in model_metrics.values()))
+
+    usable, excluded = [], {}
+    for ds in sorted(shared):
+        per_model = [m["datasets"][ds] for m in model_metrics.values()]
+        if any(not d["refs"] for d in per_model):
+            excluded[ds] = "no scored rows"
+            continue
+        n = min(len(d["refs"]) for d in per_model)
+        first = per_model[0]["refs"][:n]
+        if any(d["refs"][:n] != first for d in per_model):
+            excluded[ds] = "references differ (different eval pool)"
+            continue
+        usable.append((ds, n))
+
+    for m in model_metrics.values():
+        refs, preds = [], []
+        for ds, n in usable:
+            d = m["datasets"][ds]
+            refs += d["refs"][:n]
+            preds += d["preds"][:n]
+        m["corpus_datasets"] = [ds for ds, _ in usable]
+        m["corpus_excluded"] = excluded
+        m.pop("corpus_wer", None)
+        m.pop("corpus_ins_rate", None)
+        if not refs:
+            continue
+        out = jiwer.process_words(refs, preds)
+        denom = out.hits + out.substitutions + out.deletions
+        if denom:
+            m["corpus_wer"] = out.wer * 100
+            m["corpus_ins_rate"] = out.insertions / denom * 100
+
+
 @app.command("compare")
 def compare(
     models: Annotated[list[str], typer.Argument(help=f"{MODEL_ARG_HELP}s to compare")],
@@ -599,6 +700,44 @@ def compare(
     for model in models:
         console.print(f"Collecting metrics for '{model}'...")
         model_metrics[model] = collect_model_metrics(model, output_dir, exclude)
+
+    # Every model must have contributed a sweep, or the table has nothing
+    # coherent to show. Runs predating Run IDs are excluded by _latest_sweep.
+    stale = [m for m, d in model_metrics.items() if not d["datasets"]]
+    if stale:
+        console.print(
+            f"[red]No Run ID found for: {', '.join(stale)}[/red]\n"
+            "[yellow]`ta analysis compare` only reads runs that carry a Run ID, so that "
+            "every column comes from one sweep of one checkpoint. Re-run "
+            "`ta eval -m <model> -d all -n <N>` to produce one.[/yellow]"
+        )
+        raise typer.Exit(1)
+    for model, data in model_metrics.items():
+        console.print(
+            f"[dim]{data.get('display_name', model)}: sweep {data.get('sweep')} "
+            f"({len(data['datasets'])} datasets)[/dim]"
+        )
+
+    # Corpus WER is only comparable across models scored on the same rows;
+    # the per-dataset columns below are fine as-is.
+    _recompute_matched_corpus(model_metrics)
+    sample = next(iter(model_metrics.values()), {})
+    if sample.get("corpus_excluded"):
+        for ds, why in sorted(sample["corpus_excluded"].items()):
+            console.print(f"[yellow]Corpus excludes {ds}: {why}[/yellow]")
+    mixed = {
+        ds: sorted(
+            {len(m["datasets"][ds]["refs"]) for m in model_metrics.values() if ds in m["datasets"]}
+        )
+        for ds in sample.get("corpus_datasets", [])
+    }
+    ragged = {ds: ns for ds, ns in mixed.items() if len(ns) > 1}
+    if ragged:
+        console.print(
+            "[yellow]Corpus truncated to the shared row count on: "
+            + ", ".join(f"{ds} {ns}" for ds, ns in sorted(ragged.items()))
+            + "[/yellow]"
+        )
 
     # Get all datasets present across models (excluding certain datasets)
     all_datasets = set()
@@ -905,8 +1044,22 @@ def compare(
 
     if scored:
         class_order = [name for name, _ in ITN_CLASSES]
-        present = {c for d in scored.values() for c, st in d["itn"].items() if st["total"]}
-        ordered = [c for c in class_order if c in present]
+        # Drop classes with too few reference spans to carry a percentage.
+        # Below the threshold a single span moves the number by >6 points, so
+        # the column reads like a measurement while being noise: `fraction`
+        # had n=1 (rendering one sample as "0.0%"), `title_abbrev` and
+        # `acronym_dotted` n=4. Support is pooled across models because every
+        # model is scored on the same references, so the count is a property
+        # of the eval set rather than of any one system.
+        support = Counter()
+        for d in scored.values():
+            for c, st in d["itn"].items():
+                support[c] = max(support[c], st["total"])
+        ordered = [c for c in class_order if support[c] >= MIN_CLASS_SUPPORT]
+        dropped = sorted(
+            (c for c in class_order if 0 < support[c] < MIN_CLASS_SUPPORT),
+            key=lambda c: -support[c],
+        )
 
         console.print("\n")
         itn_table = Table(
@@ -948,6 +1101,17 @@ def compare(
             "Fmt-only err = value present, formatting differs (e.g. '1250' for '1,250'). "
             "The remainder is recognition error.[/dim]"
         )
+        console.print(
+            "[dim]Reference spans per class: "
+            + ", ".join(f"{c}={support[c]}" for c in ordered)
+            + "[/dim]"
+        )
+        if dropped:
+            console.print(
+                f"[dim]Hidden (fewer than {MIN_CLASS_SUPPORT} reference spans): "
+                + ", ".join(f"{c}={support[c]}" for c in dropped)
+                + "[/dim]"
+            )
 
     if skipped:
         console.print(

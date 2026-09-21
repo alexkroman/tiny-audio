@@ -22,7 +22,6 @@ class TestFindItnSpans:
             "fraction": "roughly 3/4 done",
             "range_score": "a 5-3 vote",
             "decimal": "exactly 22.5 points",
-            "ordinal": "the 21st of June",
             "acronym_dotted": "back in the U.S.A.",
             "title_abbrev": "Dr. Smith arrived",
             "alphanum_id": "the B737 fleet",
@@ -34,6 +33,21 @@ class TestFindItnSpans:
         for expected_class, text in cases.items():
             found = {name for _, _, name, _ in find_itn_spans(text)}
             assert expected_class in found, f"{expected_class!r} missed in {text!r} (got {found})"
+
+    def test_ordinals_are_deliberately_unclaimed(self):
+        """`ordinal` was removed: word<->digit is unscoreable by `_loose_tokens`.
+
+        Guard that nothing else silently picks the span up -- `integer`
+        (`\\b\\d+\\b`) does not match "1st" because a word character follows the
+        digit, and `alphanum_id` requires a leading letter. If a future class
+        claims it, `loose - exact` starts reporting recognition errors for
+        what is only a formatting choice.
+        """
+        for text in ("january 1st through december 31st", "the 21st of June"):
+            claimed = {name for _, _, name, _ in find_itn_spans(text)}
+            assert "ordinal" not in claimed
+            reclaimed = {"integer", "alphanum_id"} & claimed
+            assert not reclaimed, f"ordinal span re-claimed in {text!r} by {reclaimed}"
 
     def test_spans_do_not_overlap(self):
         """A specific class claims the span; later classes cannot re-count it."""

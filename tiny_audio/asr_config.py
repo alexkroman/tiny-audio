@@ -192,6 +192,17 @@ class ASRConfig(transformers.PretrainedConfig):
         # scale change is the point.
         lora_rank_pattern: dict | None = None,
         lora_alpha_pattern: dict | None = None,
+        # Seconds of silence prepended to every clip at INFERENCE. Measured on
+        # Peoples (n=500, paired bootstrap): 20.51% -> 19.28% WER, delta -1.22
+        # CI [-1.83, -0.64], with utterances losing a leading reference word
+        # falling from 258/460 to 170/460. CommonVoice over the same protocol
+        # is +0.30 CI [-0.43, +1.17] -- not significant -- so this is a win
+        # where clips are cut mid-utterance and free where they are not.
+        #
+        # 0.25s, not more: the effect saturates there (0.50s gave no further
+        # onset recovery). Training does NOT apply this -- the collator feeds
+        # raw audio -- so it is an inference-only transform. Set 0.0 to disable.
+        inference_lead_in_seconds: float = 0.25,
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
         freeze_text_embed_tokens: bool = False,
@@ -298,6 +309,7 @@ class ASRConfig(transformers.PretrainedConfig):
         # `get_pattern_key` iterates the keys unconditionally.
         self.lora_rank_pattern = dict(lora_rank_pattern or {})
         self.lora_alpha_pattern = dict(lora_alpha_pattern or {})
+        self.inference_lead_in_seconds = float(inference_lead_in_seconds)
         self.lora_target_modules = lora_target_modules or [
             "q_proj",
             "k_proj",

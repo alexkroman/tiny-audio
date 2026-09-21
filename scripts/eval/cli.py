@@ -1,6 +1,7 @@
 """CLI for ASR evaluation."""
 
 import re
+import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -85,6 +86,7 @@ def save_results(
     metrics: dict,
     output_dir: str = "outputs",
     base_url: str | None = None,
+    run_id: str | None = None,
 ) -> Path:
     """Save evaluation results and metrics to a timestamped directory."""
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
@@ -141,6 +143,15 @@ def save_results(
         if base_url:
             f.write(f"Base URL: {base_url}\n")
         f.write(f"Timestamp: {timestamp}\n")
+        # Sweep identity. Every dataset of one `ta eval` invocation shares this,
+        # so a consumer can tell "these twelve numbers came from one sweep of
+        # one checkpoint" from "these twelve are whatever happened to be newest
+        # per dataset". Without it, `find_model_dirs(latest=True)` silently
+        # mixed a 19:54 n=500 LibriSpeech run with a 23:42 n=100 CommonVoice
+        # run, and the pooled corpus WER became 53% LibriSpeech by word count
+        # for one model against 18% for the other -- not a comparison.
+        if run_id:
+            f.write(f"Run ID: {run_id}\n")
         f.write("-" * 40 + "\n")
         for key, value in metrics.items():
             if isinstance(value, float):
@@ -385,6 +396,10 @@ def main(
     ] = None,
 ):
     """Evaluate ASR models on standard datasets."""
+    # One id for the whole sweep, written into every dataset's metrics.txt.
+    # See save_results for why `ta analysis` needs it.
+    run_id = uuid.uuid4().hex[:12]
+
     # Built once, before the loop: model load / Swift build / API client setup
     # is per-model, not per-dataset. See _build_evaluator.
     model_id, evaluator = _build_evaluator(
@@ -415,7 +430,13 @@ def main(
         )
         metrics = evaluator.compute_metrics()
         save_results(
-            model_name or model_id, dataset_name, results, metrics, str(output_dir), base_url
+            model_name or model_id,
+            dataset_name,
+            results,
+            metrics,
+            str(output_dir),
+            base_url,
+            run_id=run_id,
         )
         print_asr_metrics(dataset_name, metrics)
 
