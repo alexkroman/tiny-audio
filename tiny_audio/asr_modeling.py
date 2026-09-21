@@ -1638,7 +1638,25 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         _assert_audio_token_counts(
             audio_embeds, token_counts, self.projector, encoder_valid_lengths, max_tokens
         )
-        return _gather_audio_embeds(audio_embeds, token_counts, max_tokens)
+        packed = _gather_audio_embeds(audio_embeds, token_counts, max_tokens)
+
+        # On-data companion to `measure_output_rms`'s synthetic probe. The
+        # probe draws isotropic noise, but Granite's Conformer output is
+        # strongly directional (DC alone carries ~32% of its energy), and a
+        # TRAINED linear_1 aligns its large singular directions with that
+        # subspace -- so real features excite the projector harder than random
+        # ones. Measured on the shipped top4 checkpoint the gap is 1.46x:
+        # probe 45.30x embed vs 66.10x on real encoder output. At init the two
+        # agree to 2.4%, which is why the calibration in _calibrate_output_scale
+        # is still sound and only the drift SERIES was biased.
+        #
+        # Measured on the packed tensor, so padding frames are excluded and
+        # this is exactly what lands in the residual stream. Kept as a 0-dim
+        # tensor rather than a float: `.item()` here would force a host-device
+        # sync every step, so the trainer pays it only when it logs.
+        if self.training:
+            self._last_audio_embed_rms = packed.detach().float().pow(2).mean().sqrt()
+        return packed
 
     def _mask_input_features(
         self,

@@ -475,6 +475,42 @@ class DatasetLoader:
             trust_remote_code=True,
         )
 
+        # Constant per-source provenance columns. These MUST be added here,
+        # before any filter() below, and not down next to the other column
+        # surgery. Dataset.add_column calls flatten_indices() whenever the
+        # dataset carries an indices mapping, and every filter() attaches one --
+        # so adding them post-filter rewrites the entire source, audio bytes
+        # included, through a single-process "Flattening the indices" map.
+        # Pre-filter the table has no indices mapping, so add_column is a
+        # zero-copy horizontal concat and the filters below simply carry the
+        # new columns along. Same rows, same values, nothing written.
+        # text_case: declares whether this source's transcripts already carry
+        # case ("cased") or arrive mono-case and need recasing ("mono").
+        # Stored per row so _normalize_label does not have to re-derive a
+        # source property from a single row's characters.
+        # Omit it to keep the legacy per-row heuristic.
+        text_case = dataset_cfg.get("text_case")
+        if text_case is not None:
+            if text_case not in (TEXT_CASE_MONO, TEXT_CASE_CASED):
+                raise ValueError(
+                    f"text_case must be {TEXT_CASE_MONO!r} or {TEXT_CASE_CASED!r}, "
+                    f"got {text_case!r} for {dataset_path}"
+                )
+            ds = ds.add_column("_text_case", [text_case] * len(ds))
+
+        # text_punct: declares whether this source's transcripts carry
+        # punctuation. Deliberately separate from text_case -- they are not the
+        # same axis, and conflating them gets Gigaspeech wrong, which is
+        # ALL-CAPS (text_case: mono) yet natively punctuated. Omit it and the
+        # row gets the plain prompt, i.e. today's behaviour.
+        text_punct = dataset_cfg.get("text_punct")
+        if text_punct is not None:
+            if not isinstance(text_punct, bool):
+                raise ValueError(
+                    f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
+                )
+            ds = ds.add_column("_text_punct", [text_punct] * len(ds))
+
         # CommonVoice strict-validated filter: Mozilla's `train` split is
         # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
         # but still admits clips with non-zero down_votes. Filtering to
@@ -598,33 +634,6 @@ class DatasetLoader:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
 
-        # text_case: declares whether this source's transcripts already carry
-        # case ("cased") or arrive mono-case and need recasing ("mono").
-        # Stored per row so _normalize_label does not have to re-derive a
-        # source property from a single row's characters.
-        # Omit it to keep the legacy per-row heuristic.
-        text_case = dataset_cfg.get("text_case")
-        if text_case is not None:
-            if text_case not in (TEXT_CASE_MONO, TEXT_CASE_CASED):
-                raise ValueError(
-                    f"text_case must be {TEXT_CASE_MONO!r} or {TEXT_CASE_CASED!r}, "
-                    f"got {text_case!r} for {dataset_path}"
-                )
-            ds = ds.add_column("_text_case", [text_case] * len(ds))
-
-        # text_punct: declares whether this source's transcripts carry
-        # punctuation. Deliberately separate from text_case -- they are not the
-        # same axis, and conflating them gets Gigaspeech wrong, which is
-        # ALL-CAPS (text_case: mono) yet natively punctuated. Omit it and the
-        # row gets the plain prompt, i.e. today's behaviour.
-        text_punct = dataset_cfg.get("text_punct")
-        if text_punct is not None:
-            if not isinstance(text_punct, bool):
-                raise ValueError(
-                    f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
-                )
-            ds = ds.add_column("_text_punct", [text_punct] * len(ds))
-
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
         keep_cols = {"audio", "text"}
@@ -696,10 +705,23 @@ class DatasetLoader:
         would have done. Capped sources go through _resample_to_target with a
         multiplied target instead, which spends the multiplier on FRESH rows
         first and only repeat-pads what the pool cannot cover.
+
+        Built with concatenate_datasets rather than the equivalent
+        `ds.select(list(range(len(ds))) * times)`. The two yield the identical
+        row sequence; they do not carry the identical disk cost. `select`
+        attaches an indices mapping, and the concatenate_datasets in load()
+        flattens any dataset carrying one -- materializing a full verbatim
+        copy, embedded audio bytes and all. At epoch_expansion=2 that wrote
+        roughly 620 GB of duplicate audio for the uncapped sources and is what
+        exhausted the network volume mid-run. Concatenating builds a
+        ConcatenationTable over the same memory-mapped blocks instead: same
+        rows, same order, nothing written. (A source that already has an
+        indices mapping from a _prepare_split filter still flattens once here,
+        but once rather than `times` over.)
         """
         if times <= 1:
             return ds
-        return ds.select(list(range(len(ds))) * times)
+        return concatenate_datasets([ds] * times)
 
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
@@ -1169,6 +1191,16 @@ class ASRTrainer(Trainer):
         full run and carried nothing extra -- `freeze_text_embed_tokens` pins
         the denominator, so the two series differed by a constant to sixteen
         significant figures.
+
+        Two series are emitted. `output_rms_over_embed` is the synthetic
+        standard-normal probe and is kept unchanged so the existing history
+        stays comparable. `output_rms_over_embed_ondata` is the same ratio
+        measured on the real audio tokens of the last training micro-batch
+        (stashed by `ASRModel._encode_audio`), and is the one to threshold
+        against: the probe UNDERSTATES a trained projector by ~1.46x, because
+        it draws isotropic noise while real encoder features are directional
+        and linear_1 learns to align with them. The "~48x" on record is really
+        ~66x on data.
         """
         model = self.model
         projector = getattr(model, "projector", None)
@@ -1191,7 +1223,14 @@ class ASRTrainer(Trainer):
 
         if emb_rms <= 0:
             return {}
-        return {"projector/output_rms_over_embed": out_rms / emb_rms}
+        metrics = {"projector/output_rms_over_embed": out_rms / emb_rms}
+
+        # Absent on the very first log (no training forward yet) and whenever
+        # the model is not an ASRModel; the probe series carries on alone.
+        on_data = getattr(model, "_last_audio_embed_rms", None)
+        if on_data is not None:
+            metrics["projector/output_rms_over_embed_ondata"] = on_data.item() / emb_rms
+        return metrics
 
 
 class PushToHubCallback(TrainerCallback):

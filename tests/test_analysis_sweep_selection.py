@@ -107,3 +107,102 @@ class TestMatchedCorpus:
         assert mm["a"]["corpus_datasets"] == []
         assert "ami" in mm["a"]["corpus_excluded"]
         assert "corpus_wer" not in mm["a"]
+
+
+def _write_drifted(root: Path, ts: str, model: str, ds: str, run_id: str, rows):
+    """Like `_write`, but the stored normalized line may disagree with the raw.
+
+    `rows` is (stored_ref, stored_pred, raw_ref, raw_pred) per sample. That is
+    the shape of a real sweep scored under an older normalizer: the raw
+    transcripts are the same text, the derived `Ground Truth:` line is not.
+    """
+    d = root / f"{ts}_{model}_{ds}"
+    d.mkdir(parents=True)
+    (d / "metrics.txt").write_text(
+        f"Model: {model}\nDataset: {ds}\nTimestamp: {ts}\nRun ID: {run_id}\n"
+        + "-" * 40
+        + f"\nnum_samples: {len(rows)}\n"
+    )
+    (d / "results.txt").write_text(
+        "".join(
+            f"Sample {i} - WER: 0.00%\nGround Truth: {sr}\nPrediction: {sp}\n"
+            f"Ground Truth Raw: {rr}\nPrediction Raw: {rp}\n" + "-" * 80 + "\n"
+            for i, (sr, sp, rr, rp) in enumerate(rows, 1)
+        )
+    )
+    return d
+
+
+class TestNormalizerDrift:
+    """Two sweeps scored under different normalizer versions must still pool.
+
+    The stored `Ground Truth:` line is whatever `scripts/eval/audio.
+    TextNormalizer` produced on the day the sweep ran. When f001a061 added
+    `\\bah\\b` removal, the two sides of a comparison disagreed
+    position-for-position on 5 of 7 shared datasets, every one was dropped, and
+    the "Corpus" cell became the two easiest corpora without saying so.
+    Collection re-derives both sides from the raw pair to keep that from
+    silently narrowing the pool again.
+    """
+
+    # Same audio, same reference text, scored three hours apart: the older
+    # sweep kept the `ah`, the newer one dropped it.
+    STALE = [("ah the sun is out", "the sun is out", "Ah, the sun is out.", "The sun is out.")] * 5
+    FRESH = [("the sun is out", "the sun is out", "Ah, the sun is out.", "The sun is out.")] * 5
+
+    def test_stale_sweep_is_renormalized_instead_of_dropped(self, tmp_path):
+        _write_drifted(tmp_path, "20260102_000000", "modelA", "ami", "ra", self.STALE)
+        _write_drifted(tmp_path, "20260102_010000", "modelB", "ami", "rb", self.FRESH)
+        mm = {
+            "a": collect_model_metrics("modelA", tmp_path, []),
+            "b": collect_model_metrics("modelB", tmp_path, []),
+        }
+        _recompute_matched_corpus(mm, {})
+        assert mm["a"]["corpus_excluded"] == {}
+        assert mm["a"]["corpus_datasets"] == ["ami"]
+        # The stale line scored the dropped `ah` as a deletion; the raw pair
+        # says the two transcripts agree.
+        assert mm["a"]["corpus_wer"] == pytest.approx(0.0, abs=0.01)
+        assert mm["b"]["corpus_wer"] == pytest.approx(0.0, abs=0.01)
+
+    def test_run_without_raw_transcripts_says_why_it_cannot_be_reconciled(self, tmp_path):
+        """No raw pair means the stale normalization is frozen -- drop, and say so."""
+        _write(tmp_path, "20260102_000000", "modelA", "ami", "ra", MATCH, 0.0)
+        stripped = _write(
+            tmp_path,
+            "20260102_010000",
+            "modelB",
+            "ami",
+            "rb",
+            [("ah alpha beta gamma", "alpha beta gamma")] * 5,
+            0.0,
+        )
+        results = stripped / "results.txt"
+        results.write_text(
+            "\n".join(line for line in results.read_text().splitlines() if " Raw:" not in line)
+            + "\n"
+        )
+        mm = {
+            "a": collect_model_metrics("modelA", tmp_path, []),
+            "b": collect_model_metrics("modelB", tmp_path, []),
+        }
+        _recompute_matched_corpus(mm, {})
+        assert "raw transcripts" in mm["a"]["corpus_excluded"]["ami"]
+
+    def test_genuinely_different_rows_still_report_a_different_draw(self, tmp_path):
+        _write(tmp_path, "20260102_000000", "modelA", "ami", "ra", MISS, 33.3)
+        _write(
+            tmp_path,
+            "20260102_010000",
+            "modelB",
+            "ami",
+            "rb",
+            [("totally different text here", "totally different text here")] * 5,
+            0.0,
+        )
+        mm = {
+            "a": collect_model_metrics("modelA", tmp_path, []),
+            "b": collect_model_metrics("modelB", tmp_path, []),
+        }
+        _recompute_matched_corpus(mm, {})
+        assert mm["a"]["corpus_excluded"]["ami"] == "references differ (different eval rows)"
