@@ -371,3 +371,86 @@ class TestEncoderIsNeverLeftInTrainMode:
         assert model.audio_tower.training is False
         model.eval()
         assert model.audio_tower.training is False
+
+
+class TestFullyUnfrozenEncoderStillPinsBatchNorm:
+    """A fully trainable encoder must still normalise on pretrained BN stats.
+
+    `freeze_audio_encoder: false` (granite_qwen_full) is the one path that
+    leaves the encoder in train mode, and Granite Speech 5.0 carries 16
+    BatchNorm1d modules. That matters more than the usual small-batch worry,
+    because the failure is bias rather than variance: for non-Whisper feature
+    extractors the collator pads to the batch longest, Granite's convolution
+    module zeroes the pad positions and THEN runs BatchNorm1d over the full
+    padded (B, C, T), and BN reduces over B*T -- so the pad frames are counted
+    as data at any batch size. At BN's default momentum=0.1 the running
+    statistics converge to those polluted values within ~30-50 steps, and
+    every later eval and checkpoint uses them.
+
+    The channel is also invisible to `encoder_learning_rate`: running stats
+    are buffers, so they carry no gradient and sit in no optimizer group.
+    Measured cost of wrong BN statistics on this encoder: Earnings22 WER
+    12.27% -> 37.44%.
+    """
+
+    def _model(self, base_asr_config):
+        import copy
+
+        from tiny_audio.asr_modeling import ASRModel
+
+        config = copy.deepcopy(base_asr_config)
+        config.freeze_audio_encoder = False
+        model = ASRModel(config)
+        # whisper-tiny has no BatchNorm of its own; add one so the branch is
+        # actually exercised on a real ASRModel rather than a stand-in.
+        model.audio_tower.add_module("probe_bn", nn.BatchNorm1d(4))
+        return model
+
+    def test_batchnorm_stays_in_eval_mode_under_train(self, base_asr_config):
+        model = self._model(base_asr_config)
+        model.train()
+        assert model.audio_tower.probe_bn.training is False
+
+    def test_the_rest_of_the_encoder_does_enter_train_mode(self, base_asr_config):
+        """Only the BN statistics are pinned -- this is not a backdoor freeze."""
+        model = self._model(base_asr_config)
+        model.train()
+        assert model.audio_tower.training is True
+        assert model.audio_tower.conv1.training is True
+
+    def test_batchnorm_affine_params_remain_trainable(self, base_asr_config):
+        model = self._model(base_asr_config)
+        model.train()
+        bn = model.audio_tower.probe_bn
+        assert bn.weight.requires_grad
+        assert bn.bias.requires_grad
+
+    def test_pinned_batchnorm_does_not_update_running_stats(self, base_asr_config):
+        model = self._model(base_asr_config)
+        model.train()
+        bn = model.audio_tower.probe_bn
+        before = bn.running_mean.clone()
+        # Heavily off-centre input: a train-mode BN would move running_mean.
+        bn(torch.randn(8, 4) + 10.0)
+        assert torch.equal(bn.running_mean, before)
+
+    def test_pinned_batchnorm_still_passes_gradient(self, base_asr_config):
+        model = self._model(base_asr_config)
+        model.train()
+        bn = model.audio_tower.probe_bn
+        x = torch.randn(8, 4, requires_grad=True)
+        bn(x).sum().backward()
+        assert x.grad is not None
+        assert bn.weight.grad is not None
+
+    def test_frozen_encoder_path_is_unchanged(self, base_asr_config):
+        """The `freeze_audio_encoder: true` branch must be untouched."""
+        import copy
+
+        from tiny_audio.asr_modeling import ASRModel
+
+        config = copy.deepcopy(base_asr_config)
+        config.freeze_audio_encoder = True
+        model = ASRModel(config)
+        model.train()
+        assert model.audio_tower.training is False

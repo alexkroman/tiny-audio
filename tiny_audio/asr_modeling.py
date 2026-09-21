@@ -1320,6 +1320,35 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         super().train(mode)
         if getattr(self.config, "freeze_audio_encoder", True):
             self.audio_tower.train(False)
+        elif mode:
+            # Fully-unfrozen encoder: keep BatchNorm on its pretrained running
+            # statistics anyway. Granite Speech 5.0 carries 16 BatchNorm1d and
+            # zero Dropout, and for non-Whisper extractors the collator pads to
+            # the batch longest (`DataCollator._audio_padding`) with
+            # group_by_length off, so clips spanning 0.8-19.0s leave a large
+            # pad fraction. Granite's conv module zeroes pad positions and THEN
+            # runs BatchNorm1d over the full padded (B, C, T); BN reduces over
+            # B*T, so those zeros are counted as data -- deflating the mean and
+            # shrinking the variance. At BN's default momentum=0.1 the running
+            # stats converge to the polluted values within ~30-50 steps, and
+            # every eval and checkpoint after that uses them.
+            #
+            # This channel is invisible to `encoder_learning_rate`: running
+            # stats are buffers, so they carry no gradient and sit in no
+            # optimizer group. See the measured 12.27% -> 37.44% Earnings22
+            # regression documented in `_load_audio_encoder` for what wrong BN
+            # statistics cost on this exact encoder.
+            #
+            # Pinning the statistics does not freeze the module: gradients
+            # still reach the conv weights and BN's own affine weight/bias
+            # through an eval-mode BN, and those params remain trainable at
+            # `encoder_learning_rate` (routed to the no-decay group, since
+            # create_optimizer matches any module whose class name contains
+            # "Norm"). This mirrors what the partial-unfreeze path already gets
+            # for free via the `freeze_audio_encoder: true` branch above.
+            for module in self.audio_tower.modules():
+                if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+                    module.eval()
         if getattr(self.config, "freeze_language_model", True):
             self.language_model.train(False)
 
