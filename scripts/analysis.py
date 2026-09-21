@@ -400,6 +400,28 @@ def parse_metrics_file(metrics_file: Path) -> dict:
     return result
 
 
+@functools.cache
+def _current_normalizer():
+    """The normalizer `ta eval` scores with today, or None if unavailable.
+
+    Built lazily and once: constructing it pulls the whisper-tiny tokenizer,
+    which an offline box may not have. On failure the caller falls back to the
+    normalized text stored in results.txt and says so, rather than quietly
+    comparing two normalizations.
+    """
+    try:
+        from scripts.eval.audio import TextNormalizer
+
+        return TextNormalizer()
+    except Exception as exc:  # any failure means "score as stored"
+        console.print(
+            f"[yellow]Could not build the eval normalizer ({exc}); scoring the stored "
+            "normalized text instead. Sweeps made under different normalizer versions "
+            "will not match.[/yellow]"
+        )
+        return None
+
+
 def _latest_sweep(dirs: list[Path]) -> tuple[list[Path], str]:
     """Keep only the newest sweep. Returns (dirs, run_id).
 
@@ -518,23 +540,37 @@ def collect_model_metrics(
 
             gt_unnorm = sample.get("ground_truth_raw")
             pred_unnorm = sample.get("prediction_raw")
-            if gt_unnorm is not None and pred_unnorm is not None:
+            has_raw = gt_unnorm is not None and pred_unnorm is not None
+            if has_raw:
                 ds_metrics["raw_pairs"].append((gt_unnorm, pred_unnorm))
-            # Scored AS-IS, deliberately. `Ground Truth:` / `Prediction:` in
-            # results.txt are already the Whisper `EnglishTextNormalizer`
-            # pair that `ta eval` scored and wrote to metrics.txt (see
-            # scripts/eval/cli.save_results). Running them through
-            # `normalize_text` a second time made every number in this table
-            # disagree with the one `ta eval` printed: it expands "%" to
-            # " percent" (so "25%" becomes two tokens, inflating the
-            # reference word count) and strips currency symbols. On
-            # earnings22 that was 11.67% here vs 11.89% from the harness,
-            # off a denominator of 1585 vs 1581 words. Whisper's normalizer
-            # is the benchmark standard and the single source of truth;
-            # `normalize_text` stays for entity matching, where a looser
-            # comparison is what's wanted.
-            ref = gt_raw
-            pred = pred_raw
+
+            # Re-normalized here from the raw pair, NOT read off the
+            # `Ground Truth:` / `Prediction:` lines: those carry whatever
+            # scripts/eval/audio.TextNormalizer did on the day that sweep ran.
+            # Two sweeps three hours apart straddled f001a061, which added
+            # `\bah\b` removal and whitespace collapse. Their stored
+            # references then disagreed position-for-position on 5 of the 7
+            # shared datasets, _recompute_matched_corpus dropped all 5, and the
+            # "Corpus" cell quietly became tedlium+spgispeech alone -- the two
+            # easiest corpora -- reading 2.50% beside per-dataset columns of
+            # 9-30%. Re-normalizing reconciled all 7 exactly and moved the
+            # older sweep's GigaSpeech WER 9.30 -> 8.41, the `ah` credit the
+            # newer sweep had already been given.
+            #
+            # This is the same class `ta eval` scores with, so a run made under
+            # today's code reproduces the harness number and a stale one is
+            # carried onto today's convention instead of being dropped. Do NOT
+            # reach for `normalize_text` instead: that is the looser
+            # entity-matching normalizer, it expands "%" to " percent" (so
+            # "25%" becomes two reference tokens) and strips currency, and it
+            # disagreed with the harness by 0.22 WER on earnings22.
+            normalizer = _current_normalizer() if has_raw else None
+            if normalizer is not None:
+                ref = normalizer.normalize(gt_unnorm)
+                pred = normalizer.normalize(pred_unnorm)
+            else:
+                ref = gt_raw
+                pred = pred_raw
 
             if ref:
                 ds_metrics["refs"].append(ref)
@@ -543,7 +579,14 @@ def collect_model_metrics(
                 all_preds.append(pred)
 
                 word_count = len(ref.split())
-                metrics["by_length"][word_count]["wers"].append(sample.get("wer", 0))
+                # The file's per-sample WER belongs to the stored pair, so it
+                # is only usable when that is what we scored.
+                sample_wer = (
+                    jiwer.process_words([ref], [pred]).wer * 100
+                    if normalizer is not None
+                    else sample.get("wer", 0)
+                )
+                metrics["by_length"][word_count]["wers"].append(sample_wer)
 
         if ds_metrics["refs"]:
             output = jiwer.process_words(ds_metrics["refs"], ds_metrics["preds"])
@@ -685,7 +728,15 @@ def _recompute_matched_corpus(model_metrics: dict, ref_entities: dict | None = N
         n = min(len(d["refs"]) for d in per_model)
         first = per_model[0]["refs"][:n]
         if any(d["refs"][:n] != first for d in per_model):
-            excluded[ds] = "references differ (different eval pool)"
+            # References are re-normalized from the raw pair at collection
+            # time, so a mismatch here is a genuinely different draw -- unless
+            # a run predates raw transcripts, in which case its normalization
+            # is frozen at whatever shipped then and cannot be reconciled.
+            excluded[ds] = (
+                "a run has no raw transcripts, so its normalization cannot be reconciled"
+                if any(len(d["raw_pairs"]) < len(d["refs"]) for d in per_model)
+                else "references differ (different eval rows)"
+            )
             continue
         usable.append((ds, n))
 
@@ -954,15 +1005,27 @@ def compare(
         lambda ds: ds.get("avg_time"),
         lambda v: f"{v * 1000:.0f}",
     )
+    # The corpus column pools only the datasets every model shares on identical
+    # rows, which can be far fewer than the columns beside it. Spelling the
+    # coverage into the title keeps a 2-of-12 pool from reading as a
+    # whole-suite number: the excluded corpora were the hard ones, so the cell
+    # came out below every dataset in its own table.
+    pooled = sample.get("corpus_datasets", [])
+    names = ", ".join(DATASET_SHORT_NAMES.get(ds, ds) for ds in pooled)
+    coverage = (
+        f"corpus = {len(pooled)}/{len(ordered_datasets)} datasets"
+        f"{f' ({names})' if 0 < len(pooled) <= 4 else ''}"
+        f", {len(sample.get('corpus_utt_errors', [])):,} rows"
+    )
     print_dataset_table(
-        "Accuracy by WER",
+        f"Accuracy by WER ({coverage})",
         "Corpus",
         "corpus_wer",
         _dataset_wer,
         lambda v: f"{v:.2f}%",
     )
     print_dataset_table(
-        "Insertion Rate (Hallucination Proxy)",
+        f"Insertion Rate (Hallucination Proxy) ({coverage})",
         "Corpus",
         "corpus_ins_rate",
         lambda ds: ds.get("ins_rate"),

@@ -367,3 +367,64 @@ class TestEpochExpansion:
         }
         train = self._load(fake, entry, expansion=None)
         assert len(train) == 9
+
+
+class TestNoFullRewrite:
+    """_prepare_split must not flatten a source's indices mapping.
+
+    `Dataset.add_column` calls `flatten_indices()` whenever the dataset
+    carries an indices mapping, and every `filter()` attaches one. Adding the
+    `_text_case` / `_text_punct` provenance columns after the filters
+    therefore rewrote each filtered source end to end -- embedded audio bytes
+    and all -- through a single-process "Flattening the indices" map. On the
+    real mix that is LibriHeavy, Gigaspeech and CommonVoice (~2.6M rows of
+    audio) copied to the cache for two constant columns.
+
+    The columns are added before any filter instead, where the table has no
+    indices mapping and add_column is a zero-copy horizontal concat. Nothing
+    downstream re-introduces the rewrite: select/shuffle compose indices
+    mappings lazily, and concatenate_datasets(axis=0) concatenates the
+    indices tables rather than flattening them.
+    """
+
+    @staticmethod
+    def _rows(durations):
+        n = 16000
+        return Dataset.from_dict(
+            {
+                "audio": [{"array": np.zeros(n, dtype=np.float32), "sampling_rate": 16000}]
+                * len(durations),
+                "text": list("abcdefghij")[: len(durations)],
+                "audio_duration": list(durations),
+            }
+        ).cast_column("audio", Audio(sampling_rate=16000))
+
+    _CFG: ClassVar[dict] = {
+        "path": "fake/libriheavy",
+        "audio_column": "audio",
+        "text_column": "text",
+        "text_case": "cased",
+        "text_punct": True,
+        "exclude_where": {"column": "audio_duration", "above": 19.0},
+    }
+
+    def test_filtered_source_with_provenance_columns_is_never_flattened(self):
+        flattens = []
+        original = Dataset.flatten_indices
+
+        def counted(self, *args, **kwargs):
+            flattens.append(1)
+            return original(self, *args, **kwargs)
+
+        fake = self._rows([1.0, 25.0, 2.0])
+        with patch.object(Dataset, "flatten_indices", counted):
+            ds = _prepare(DatasetLoader(_make_cfg([self._CFG])), self._CFG, fake)
+
+        assert not flattens, (
+            "flatten_indices() rewrote the source; add_column must run before "
+            "the filters, not after"
+        )
+        # Same result as the rewriting order produced.
+        assert ds["text"] == ["a", "c"]
+        assert ds["_text_case"] == ["cased", "cased"]
+        assert ds["_text_punct"] == [True, True]

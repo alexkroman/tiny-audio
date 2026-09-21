@@ -3,9 +3,9 @@
 #
 #   ibm-granite/granite-speech-5.0-470m-turboctc   FULLY FROZEN (0 trainable)
 #   -> MLP projector (fresh init, 12.6M, lr 1e-3)
-#   -> Qwen/Qwen3.5-2B, base FROZEN + LoRA all-linear r=64 (63.7M, lr 1e-4)
+#   -> Qwen/Qwen3.5-2B, base FROZEN + LoRA all-linear r=64 (63.4M, lr 1e-4)
 #
-# Trainable: 76.3M of 2.434B (3.1%) -- the smallest allocation tried here.
+# Trainable: 76.0M of 2.434B (3.1%) -- the smallest allocation tried here.
 #
 #   poetry run python scripts/train.py +experiments=granite_qwen_frozen
 #
@@ -102,10 +102,61 @@ data:
   # Per-step mix share is UNCHANGED -- every source is multiplied by the same
   # factor -- and total steps are unchanged. Unique rows seen over the run go
   # from ~2.68M to ~3.36M (+25%).
-  epoch_expansion: 2
+  epoch_expansion: 1
 
 model:
   audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc
+
+  # Everything from here to `encoder_dtype` was previously UNSET and silently
+  # inherited from configs/config.yaml -- which is the GLM-ASR + Qwen3-0.6B
+  # recipe, not this one. Hydra experiments inherit from config.yaml only,
+  # never from a sibling experiment, so "same as granite_qwen_lora" has to be
+  # written out. Same failure class as the three step-0 bugs in f001a061.
+  #
+  # What the inherited defaults actually did:
+  #   text_model_id         Qwen3-0.6B, not the Qwen3.5-2B this recipe is
+  #                         built around and measures dW against (line 122)
+  #   encoder_conv_layers   Whisper's [(1,3,1),(1,3,2)] (~M/2) instead of
+  #                         Granite's ~M/4, so the collator wrote 2x the
+  #                         <audio> placeholders the projector emits and
+  #                         _assert_audio_token_counts raised at step 0
+  #   projector_pool_stride 4, on top of Granite's own 4x conv subsampling
+  #   projector_hidden_dim  1024 instead of 4096
+  #   model_dtype           float32 instead of bfloat16
+  #
+  # Values copied from granite_qwen_lora (closest recipe: same encoder, same
+  # LoRA-on-frozen-decoder shape). The deliberate divergences from it --
+  # encoder_dtype, lora_rank, lora_alpha -- are documented at their own keys.
+  text_model_id: Qwen/Qwen3.5-2B
+  projector_type: mlp
+  projector_pool_stride: 1
+  encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
+  projector_hidden_dim: 4096
+  projector_output_rms: auto
+  model_dtype: bfloat16
+  projector_dtype: float32
+
+  # Two more keys the sweep above missed, both confirmed against the shipped
+  # granite-qwen-frozen config.json rather than assumed.
+  #
+  # label_smoothing: config.yaml defaults it to 0.1, and every sibling granite
+  # recipe sets 0.0. asr_modeling.py:1863 gates it on `self.training`, so it
+  # rides train/loss and is zeroed for eval -- which is why run zrvrjt5l logs
+  # train/loss 1.78 against eval/loss 0.50, a 3.5x inversion. The offset is
+  # eps*mean_k(-log p_k), floored at 0.1*log(248192) = 1.24 nats; measured gap
+  # is ~1.33. It is not only a reporting artifact: the smoothing is in the
+  # gradient, so the frozen run was carrying a regularizer top4 and
+  # granite_qwen did not, which contaminates the eval/loss comparison this
+  # file exists to make. stage_1.yaml:74 already retired 0.1 -> 0.0 on this
+  # stack after qmzim6ia/84w5zjhj.
+  label_smoothing: 0.0
+  # transcribe_prompt: unset resolves to None, which falls back to
+  # ASRModel.TRANSCRIBE_PROMPT ("Transcribe the speech to text") rather than
+  # the instruction the sibling recipes train on. Self-consistent between
+  # train and inference, so nothing breaks -- but the inherited default drops
+  # the punctuation-and-capitalization cue on a stack where formatting is a
+  # live concern, and it is one more uncontrolled difference from top4.
+  transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
 
   # bfloat16, NOT the float32 the top4 recipe uses. That fp32 choice existed
   # for exactly one reason -- an Adam step of ~1e-5 at encoder lr 1e-5 is 49x
@@ -185,28 +236,84 @@ model:
   # realised update's effective rank was 6.29 and 7.34 against the 64
   # allocated, and those 36 gate matrices consumed 4,755,456 LoRA params:
   # 4.03x what fully fine-tuning the same matrices would cost (1,179,648), for
-  # 7.1% of the adapter budget. Rank 16 is the honest allocation. Saves 3.57M
-  # of 67.28M, taking the adapter to ~63.7M.
+  # 7.1% of the adapter budget.
+  #
+  # 8, NOT the 16 this file used to carry. 16 was picked as "the geometric
+  # ceiling imposed by their (16, 2048) shape", but the ceiling is precisely
+  # the one value where LoRA stops being low-rank: a rank-16 factorisation of
+  # a rank-<=16 matrix imposes NO constraint, and it costs
+  # 16*2048 + 16*16 = 33,024 params against the 16*2048 = 32,768 that fully
+  # fine-tuning the same matrix would -- 1.008x MORE than full FT, for an
+  # over-parameterised reparametrisation with a different init. (The 1,179,648
+  # full-FT figure was already computed above to argue against r=64; it just
+  # was not re-applied at 16.)
+  #
+  # 12, NOT the 8 this file used to carry, and the correction is about
+  # applying ONE criterion consistently rather than about these modules.
+  #
+  # 8 was read off the 90%-energy rank (measured again on the shipped top4
+  # adapter: in_proj_a 3.8, in_proj_b 4.8), which gives 1.7-2.1x headroom and
+  # looks generous. But r=64 above was NOT chosen on 90%-energy -- the
+  # 41.2-46.6 figures it cites leave 64 sitting at 1.03-1.15x of each family's
+  # 99%-energy rank (55.8-62.0). Re-measuring the gates on the same 99% basis:
+  #
+  #                     r90    r99   allocated   alloc / r99
+  #     in_proj_b       4.8   11.8       8          0.68
+  #     in_proj_a       3.8   11.3       8          0.71
+  #     up_proj        46.6   62.0      64          1.03
+  #     k_proj         28.0   55.8      64          1.15
+  #
+  # Every other family in the adapter clears its own r99; rank 8 would be the
+  # single tightest allocation in the model, applied to the family with the
+  # LARGEST relative perturbation (in_proj_b, 27.6%). That is the opposite of
+  # what the 8 was meant to do.
+  #
+  # The framing this file inherited also had it backwards. "4.03x the cost of
+  # full FT" is true on parameter count and misleading on capacity: these
+  # updates reach r99 = 11.8 against a geometric ceiling of 16, i.e. they fill
+  # 74% of the rank available to them, where the 2048-wide families fill ~3%.
+  # On rank UTILISATION the gates are the most constrained matrices in the
+  # adapter, not the most over-provisioned.
+  #
+  # 12 clears r99 (12/11.8 = 1.02, matching the global 1.03-1.15 band), still
+  # sits under the ceiling so it genuinely constrains the update -- which was
+  # the whole objection to 16 -- and costs 24,768/module, 0.76x what fully
+  # fine-tuning the same matrix would. Exact counts, computed from the shipped
+  # adapter rather than estimated:
+  #
+  #     r=64  132,096/module   4,755,456 total   adapter 67,276,800
+  #     r=16   33,024/module   1,188,864 total   adapter 63,710,208  (1.01x full FT)
+  #     r=12   24,768/module     891,648 total   adapter 63,412,992  (0.76x full FT)
+  #     r=8    16,512/module     594,432 total   adapter 63,115,776  (0.50x full FT)
+  #
+  # 12 over 8 costs 297,216 params, 0.47% of the adapter.
+  #
+  # CAVEAT, and the reason criterion #4 still has to re-measure this: every
+  # rank above comes from an update trained at r=64 / scale 2.0. A rank-12
+  # parameterisation cannot produce that spectrum, and at scale 1.0 the whole
+  # adapter re-equilibrates. This locates where rank binds; it does not prove
+  # 12 is optimal. If the gates come back at r99 well under 12 on this run's
+  # final checkpoint, 8 was right after all and this should go back.
   #
   # BOTH patterns are required. PEFT resolves rank_pattern and alpha_pattern
   # with independent lookups, each falling back to r / lora_alpha, so setting
-  # rank alone would move these modules from alpha/r = 128/64 = 2.0 to
-  # 128/16 = 8.0 -- 4x HOTTER, the opposite of the intent. 32/16 holds them at
-  # the global 2.0.
+  # rank alone would move these modules from alpha/r = 64/64 = 1.0 to
+  # 64/12 = 5.33 -- 5.3x HOTTER, the opposite of the intent. 12/12 holds them
+  # at the global 1.0. Verified end-to-end against peft 0.20.0 on the real
+  # Qwen3.5-2B: `get_pattern_key` matches these bare keys by suffix regex
+  # (`(.*\.)?(in_proj_a)$`), so all 36 gates resolve to the pattern and every
+  # one of the 186 adapted matrices comes out at scaling == 1.0 exactly.
   lora_rank_pattern:
-    in_proj_a: 16
-    in_proj_b: 16
-  # 16, not 32: these track the GLOBAL alpha/r, which is now 1.0 rather than
-  # 2.0. PEFT looks rank_pattern and alpha_pattern up independently, so if
-  # this is left at 32 the gates run at 32/16 = 2.0 while everything else runs
-  # at 1.0 -- and the gates are already the hottest modules in the model
-  # (in_proj_b at 27.93% mean / 55.46% max relative perturbation). Measured
-  # 90%-energy rank on these is 3.9-4.8, so even 16 is generous; it is kept
-  # because 16 is the geometric ceiling imposed by their (16, 2048) shape and
-  # going lower is a separate experiment.
+    in_proj_a: 12
+    in_proj_b: 12
+  # Tracks lora_rank_pattern exactly, so the gates run at the GLOBAL alpha/r
+  # of 1.0. PEFT looks rank_pattern and alpha_pattern up independently, so any
+  # mismatch here silently rescales these modules -- and they are already the
+  # hottest in the model (in_proj_b at 27.93% mean / 55.46% max relative
+  # perturbation), so they are the worst place to let scale drift upward.
   lora_alpha_pattern:
-    in_proj_a: 16
-    in_proj_b: 16
+    in_proj_a: 12
+    in_proj_b: 12
 
   # Off. With the encoder frozen and 3.1% of the model training, the
   # overfitting surface is the smallest of any recipe here, and the top4 run
@@ -249,16 +356,46 @@ training:
   encoder_learning_rate: 1e-5
 
   label_smoothing_factor: 0.0
-  weight_decay: 0.01
-  # The projector is the only group where decoupled decay does real work
-  # (~15% shrink over this schedule at lr 1e-3), and it is the only force
-  # opposing the projector's output-scale growth -- which reached ~48x
-  # embed_tokens RMS by step 13k on the top4 run and plateaued. Keep watching
-  # `projector/output_rms_over_embed`; a second epoch doubles the exposure.
+  # 0.0, DOWN from 0.01, and this key is effectively "the LoRA weight decay".
+  # scripts/train.py:1113 hardcodes `dec_wd = base_wd` -- there is no
+  # `decoder_weight_decay` knob the way there is for the encoder and the
+  # projector -- and LoRA tensors are named `language_model.base_model...`, so
+  # they route to the decoder group and survive every no-decay filter (not a
+  # bias, not a *Norm* gain, not SSM, not an nn.Embedding). The other two
+  # groups set their decay explicitly below, so this change isolates cleanly
+  # to the 63.4M adapter.
+  #
+  # Two reasons. Standard LoRA practice is 0.0 (QLoRA, the HF alignment
+  # handbook, PEFT's own examples), because decoupled decay hits BOTH factors
+  # of B@A and the pull on the realised dW is roughly 2x nominal. And this
+  # file's own header argues that decay at lr*wd = 1e-5 * 0.01 = 1e-7/step
+  # pinned the encoder at a "weight-decay equilibrium radius" and stopped it
+  # learning -- the LoRA group was running at 1e-4 * 0.01 = 1e-6/step, TEN
+  # TIMES that force, which the header never applied to the adapter it is
+  # trying to hold at ~9% perturbation. Success criterion #4 would have been
+  # reading a number weight decay was partly setting.
+  #
+  # This makes alpha the only thing controlling adapter magnitude, which is
+  # the point of criterion #4. If dW comes back hot anyway, the levers are
+  # decoder_learning_rate 1e-4 -> 5e-5 (already nominated) or wiring up a real
+  # `decoder_weight_decay` -- not putting this back silently.
+  weight_decay: 0.0
+  # The projector is now the ONLY group carrying decay (the decoder is 0.0
+  # above, the encoder 0.0 below and inert under the freeze). ~15% shrink over
+  # this schedule at lr 1e-3, and it is the only force opposing the
+  # projector's output-scale growth -- which reached ~48x embed_tokens RMS by
+  # step 13k on the top4 run and plateaued.
+  #
+  # Watch `projector/output_rms_over_embed_ondata`, NOT the bare
+  # `output_rms_over_embed`. The latter is a synthetic isotropic probe and
+  # understates a trained projector by ~1.46x (45.30x vs 66.10x measured on
+  # the shipped top4 checkpoint), because real Granite features are
+  # directional and linear_1 learns to align with them. The "~48x" on record
+  # is really ~66x on data; criterion #3 should be read off the on-data series.
   projector_weight_decay: 0.01
   encoder_weight_decay: 0.0
 
-  warmup_steps: 700
+  warmup_steps: 1000
   # Plain cosine to ZERO. Dropping min_lr_rate: 0.05 also means dropping
   # `cosine_with_min_lr`, which exists only to consume that kwarg -- with no
   # floor the two schedulers differ solely in the tail, so `cosine` is the
@@ -315,8 +452,10 @@ training:
   # exceeds every run on record -- jscyrgkt stopped at 20,000 and
   # granite_qwen's full epoch was 32,922 -- so step count is no longer the
   # binding constraint; the earlier runs were under-trained because they ran
-  # a single pass, not because their batches were small. Warmup 700 is ~1.7%
-  # of the schedule.
+  # a single pass, not because their batches were small. Warmup 1,000 is
+  # ~2.4% of the schedule, and is the modal published value for this
+  # architecture class (Granite Speech 1000, Ultravox 1000, SLAM-ASR 1000);
+  # 700 was not measured here and nothing was broken at it.
   num_train_epochs: 1
   save_steps: 2000
   eval_steps: 2000
