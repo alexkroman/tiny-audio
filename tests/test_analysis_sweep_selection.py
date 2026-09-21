@@ -68,7 +68,7 @@ class TestMatchedCorpus:
             "a": collect_model_metrics("modelA", tmp_path, []),
             "b": collect_model_metrics("modelB", tmp_path, []),
         }
-        _recompute_matched_corpus(mm)
+        _recompute_matched_corpus(mm, {})
         assert mm["a"]["corpus_datasets"] == ["ami"], "tedlium is not in modelB's sweep"
         assert mm["a"]["corpus_wer"] == pytest.approx(33.3, abs=0.2)
         assert mm["b"]["corpus_wer"] == pytest.approx(0.0, abs=0.2)
@@ -81,7 +81,7 @@ class TestMatchedCorpus:
             "a": collect_model_metrics("modelA", tmp_path, []),
             "b": collect_model_metrics("modelB", tmp_path, []),
         }
-        _recompute_matched_corpus(mm)
+        _recompute_matched_corpus(mm, {})
         assert len(mm["a"]["datasets"]["ami"]["refs"]) == 20
         assert mm["a"]["corpus_datasets"] == ["ami"]
         # Both corpora scored over the shared first 5 rows.
@@ -103,7 +103,7 @@ class TestMatchedCorpus:
             "a": collect_model_metrics("modelA", tmp_path, []),
             "b": collect_model_metrics("modelB", tmp_path, []),
         }
-        _recompute_matched_corpus(mm)
+        _recompute_matched_corpus(mm, {})
         assert mm["a"]["corpus_datasets"] == []
         assert "ami" in mm["a"]["corpus_excluded"]
         assert "corpus_wer" not in mm["a"]

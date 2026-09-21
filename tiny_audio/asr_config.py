@@ -253,6 +253,7 @@ class ASRConfig(transformers.PretrainedConfig):
         mask_time_min_masks: int = 2,
         max_new_tokens: int | None = None,
         use_cache: bool | None = None,
+        no_repeat_ngram_size: int | None = None,
         **kwargs,
     ):
         """Initialize ASR model configuration.
@@ -268,9 +269,25 @@ class ASRConfig(transformers.PretrainedConfig):
         # Set default generation parameters (greedy decoding only).
         # Applied via setattr below — keeping these out of kwargs so they
         # don't get re-overwritten by super().__init__(**kwargs) at the end.
+        # `no_repeat_ngram_size` is the only non-greedy-neutral default here and
+        # it is a guard, not a decoding strategy. Greedy decoding with
+        # repetition_penalty=1.0 has no loop protection at all: one CommonVoice
+        # sample emitted a correct transcript then repeated a 21-word phrase
+        # four times until max_new_tokens cut it off, scoring 1513% on that row
+        # and moving the 100-sample corpus WER from 8.30 to 31.83. The shipped
+        # `_truncate_repetitions` postprocess missed it because its regex is
+        # anchored to end-of-string and the loop was truncated mid-phrase.
+        #
+        # 12 is chosen to be inert on real speech: it blocks only exact 12-gram
+        # repeats, and natural English -- including genuine stutters, list
+        # recitation and "very very very" -- effectively never repeats a
+        # 12-token span verbatim. Measured rate of runaway loops is 1 in 10,630
+        # rows, so this should fire almost never; it bounds the tail rather
+        # than changing normal output.
         generation_defaults = {
             "max_new_tokens": 128,
             "use_cache": True,
+            "no_repeat_ngram_size": 12,
         }
 
         self.audio_model_id = audio_model_id
@@ -333,6 +350,7 @@ class ASRConfig(transformers.PretrainedConfig):
         explicit_generation_args = {
             "max_new_tokens": max_new_tokens,
             "use_cache": use_cache,
+            "no_repeat_ngram_size": no_repeat_ngram_size,
         }
         for key, default in generation_defaults.items():
             value = explicit_generation_args[key]

@@ -2,6 +2,7 @@
 
 import functools
 import io
+import re
 from typing import ClassVar
 
 import numpy as np
@@ -104,12 +105,28 @@ class TextNormalizer:
         "kinda": "kind of",
     }
 
+    # Whisper's normalizer drops `uh`, `um` and `hmm` but NOT `ah`, which is an
+    # inconsistency rather than a decision: GigaSpeech references carry 125 `ah`
+    # tokens per 500 rows and both our model and AssemblyAI's delete ~82% of
+    # them, costing 0.86 and 0.91 WER points respectively -- ~9% of GigaSpeech
+    # WER, scored as recognition error on both systems when it is a filler-token
+    # convention mismatch.
+    #
+    # This is a regex, not a `_SPELLING_FIXES` entry, because that dict does raw
+    # substring replacement: `"ah": ""` would turn `ahead` into `ed` and `ahmed`
+    # into `med`. Word-bounded is the only safe form.
+    _FILLER_RE: ClassVar[re.Pattern[str]] = re.compile(r"\bah\b")
+
     def normalize(self, text: str) -> str:
         """Normalize text for WER calculation."""
         text = self._normalizer(text)
         for src, dst in self._SPELLING_FIXES.items():
             text = text.replace(src, dst)
-        return text
+        # Applied after Whisper's pass so it sees the already-lowercased,
+        # punctuation-stripped surface. Collapse whitespace so a removed token
+        # does not leave a double space that shifts tokenisation.
+        text = self._FILLER_RE.sub(" ", text)
+        return " ".join(text.split())
 
 
 @functools.cache

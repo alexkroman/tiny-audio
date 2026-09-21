@@ -458,25 +458,91 @@ training:
   # core transformers. Without the kernels both the forward and the decode
   # step log `chunk_gated_delta_rule` / `causal_conv1d_fn` fallbacks, which
   # transformers calls "correct but much slower" -- wall-clock, not quality.
-  # flash-linear-attention is a regular linux dependency; causal-conv1d is an
-  # nvcc source build in an optional group:
-  #   poetry install --with hybrid-kernels
+  # Budget 1.5-3x end-to-end if they are missing, i.e. most of this run's
+  # cost. On a 32,909-step run that is worth checking before you start.
+  #
+  # GET THEM FROM `ta runpod deploy`, WHICH IS THE ONLY PATH THAT VERIFIES
+  # THEM. This block used to end with `poetry install --with hybrid-kernels`,
+  # and that instruction is actively worse than doing nothing:
+  #   - It is not the documented install. All three packages
+  #     (causal-conv1d, flash-linear-attention, tilelang) sit in an
+  #     `optional = true` group, and pyproject's own comment on it warns the
+  #     group "can turn a slow run into a crashed one". The older claim here
+  #     that flash-linear-attention is "a regular linux dependency" was wrong.
+  #   - fla does not degrade gracefully. On Hopper with Triton in
+  #     [3.4.0, 3.7.1) its gated `chunk_bwd_dqkwg` is known-wrong
+  #     (fla-org#640) and fla RAISES rather than compute bad gradients. The
+  #     TileLang escape hatch needs both the tilelang package and a usable
+  #     nvcc. On an image without nvcc you get either a failed causal-conv1d
+  #     sdist build that aborts the whole poetry install, or fla installed
+  #     with tilelang unusable and training dead at the first backward.
+  #   - `ta runpod deploy` does the dance that avoids both: install tilelang,
+  #     install fla, evaluate fla's own IS_NVIDIA_HOPPER / TRITON_ABOVE_*
+  #     predicates, and uninstall fla when the gated path would raise
+  #     (scripts/deploy/runpod.py). Hub kernels take priority at runtime.
+  #
+  # Nothing currently GATES the run on kernel availability -- every outcome in
+  # deploy is a WARN scrolling past in tmux and the runtime fallbacks are
+  # logger.warning, so there is no single "fast path: ON/OFF" line to read.
+  # Check the deploy log before launching rather than discovering it from the
+  # step time.
 
-  # SUCCESS CRITERIA, written before the run. This is the ceiling probe, so
-  # the bar is comparative, not absolute.
-  #   PASS  beats granite_qwen_top4 on BOTH corpus WER (11.95% Earnings22 @ 2k,
-  #         eval/loss 0.42095) and orthographic WER / punctuation F1 (10.14 /
-  #         77.07 on the 270 cased+punctuated samples, from granite_qwen).
-  #         Capacity was the binding constraint; full FT is the recipe.
-  #   MIXED beats the 7.8% recipe by less than the ladder's own step size.
-  #         1.86B trainable params bought a rounding error -- the constraint
-  #         is the data, and the next work is the corpus, not the freeze
-  #         policy.
-  #   FAIL  regresses against granite_qwen_top4. Check encoder AND decoder
-  #         drift before concluding anything: with no frozen anchor, the two
-  #         towers can co-adapt into a configuration that fits multiasr and
-  #         generalizes worse, and the loss curve will look fine while it
-  #         happens.
-  # The frozen-encoder CTC baseline (7.56 pooled) remains the floor: a stack
-  # that does not clearly beat it is not earning its parameters, and this one
-  # is spending 1.8587B of them.
+  # SUCCESS CRITERIA, written before the run.
+  #
+  # READ THIS FIRST: the previous version of this block compared against two
+  # baselines of different provenance and said nothing about measurement
+  # error. Both problems have to be fixed before a result here means anything.
+  #
+  #   - THE FORMATTING BASELINE WAS CONTAMINATED. It cited "orthographic WER /
+  #     punctuation F1 10.14 / 77.07 on the 270 cased+punctuated samples, from
+  #     granite_qwen". granite_qwen trained on BOTH Earnings22 and Peoples
+  #     clean_sa, which #80 later removed, and it was scored on the old
+  #     unshuffled first-N pool. Of those ~269 orthographic-scorable samples,
+  #     earnings22 is 96 -- 36% of the baseline's sample is the corpus that
+  #     model memorised. Its Earnings22 WER was 5.88 against top4's 11.76, a
+  #     2x gap the ~1.1pt shuffle effect cannot explain. Do not use it.
+  #     granite_qwen's "0.189 +/- 0.004 train/eval gap" is void for the same
+  #     reason, as is the 7.56 pooled CTC floor (measured pre-shuffle, over a
+  #     pool including Earnings22, paired with that same contaminated run).
+  #   - THE WER BASELINE IS FINE. granite_qwen_top4 (run 1996) ran AFTER #80
+  #     on the cleaned mixture, so 11.95% Earnings22 @ 2k and eval/loss
+  #     0.42095 are legitimate -- but they are n=100 point estimates, and the
+  #     same checkpoint re-scored 11.95 / 11.76 / 10.94 / 10.50 across later
+  #     sweeps. A ~1.5pt spread is wider than any margin a PASS/MIXED split
+  #     was meant to resolve, so the old criteria were not measurable as
+  #     written.
+  #
+  # `ta analysis compare` now reports a paired-bootstrap 95% CI on the corpus
+  # WER delta (scripts/analysis.py:_paired_bootstrap_delta), so the bar below
+  # is stated in terms of that interval rather than of point estimates.
+  #
+  #   PASS  corpus WER at n=500 beats granite_qwen_top4 with a 95% CI that
+  #         EXCLUDES ZERO ("separated" in the compare table), and does not
+  #         regress on ami / ami-sdm / peoples. Capacity was the binding
+  #         constraint; full FT is the recipe.
+  #   MIXED the delta's CI straddles zero. 1.8587B trainable params bought
+  #         something this sweep cannot distinguish from noise -- which is
+  #         itself the answer: the constraint is the data, and the next work
+  #         is the corpus (the 19s cap silently dropping ~21% of LibriHeavy,
+  #         the 23.2% of truecased utterances carrying a synthetic casing
+  #         error, the missing telephony register), not the freeze policy.
+  #   FAIL  regresses with the CI excluding zero the other way. Check encoder
+  #         AND decoder drift before concluding anything: with no frozen
+  #         anchor the two towers can co-adapt into a configuration that fits
+  #         multiasr and generalizes worse, and the loss curve will look fine
+  #         while it happens. `ta debug compare-to-base <ckpt> --base-model
+  #         <base> --previous <earlier ckpt>` now covers the encoder and
+  #         reports the segment cosine.
+  #
+  # BEFORE YOU CAN GRADE ANY OF THAT, re-measure the two baselines on the
+  # CURRENT shuffled pool at n=500, not n=100:
+  #   1. re-score top4's step-2000 checkpoint for orthographic WER and
+  #      punct F1 (~1371 scorable samples instead of 269, or ~878 excluding
+  #      earnings22). The per-dataset numbers already exist where a sweep was
+  #      run -- e.g. outputs/20260920_011323_*_top4_earnings22/metrics.txt
+  #      carries orthographic_wer 23.4069 / punct_f1 70.7547.
+  #   2. re-measure the frozen-encoder CTC floor with a committed evaluator.
+  #      There is no CTC evaluator in the repo and _load_audio_encoder drops
+  #      the CTC head, so 7.56 is folklore until something reproduces it.
+  # Exclude earnings22 from the POOLED figure either way: its test split is
+  # still scored and its train/test overlap predates the fix.

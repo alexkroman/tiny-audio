@@ -57,6 +57,16 @@ class TestTokenizerInit:
         eos_ids = base_asr_model.generation_config.eos_token_id
         assert eos_ids is None or all(e is not None for e in eos_ids)
 
+    def test_generation_config_carries_no_repeat_ngram_size(self, base_asr_model):
+        # `generate()` consults the GenerationConfig only; a value that lives
+        # on ASRConfig alone is inert, which is how the loop guard shipped
+        # disabled to the Hub.
+        assert (
+            base_asr_model.generation_config.no_repeat_ngram_size
+            == base_asr_model.config.no_repeat_ngram_size
+        )
+        assert base_asr_model.generation_config.no_repeat_ngram_size == 12
+
 
 class TestEmbeddings:
     """get_input_embeddings / set_input_embeddings / get_output_embeddings."""

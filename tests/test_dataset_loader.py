@@ -11,18 +11,16 @@ from omegaconf import OmegaConf
 from scripts.train import DatasetLoader
 
 
-def _make_cfg(datasets, sample_rate=16000, num_proc=1):
-    return OmegaConf.create(
-        {
-            "data": {
-                "datasets": datasets,
-                "sample_rate": sample_rate,
-                "dataset_cache_dir": None,
-                "num_proc": num_proc,
-            },
-            "training": {"seed": 42},
-        }
-    )
+def _make_cfg(datasets, sample_rate=16000, num_proc=1, epoch_expansion=None, epochs=1):
+    data = {
+        "datasets": datasets,
+        "sample_rate": sample_rate,
+        "dataset_cache_dir": None,
+        "num_proc": num_proc,
+    }
+    if epoch_expansion is not None:
+        data["epoch_expansion"] = epoch_expansion
+    return OmegaConf.create({"data": data, "training": {"seed": 42, "num_train_epochs": epochs}})
 
 
 def _fake_dataset(audio_seconds: float, **extra_cols):
@@ -101,6 +99,21 @@ class TestExcludeWhere:
     The filter must run BEFORE _prepare_split prunes to
     audio/text/_text_case/_text_punct, or the column it keys on is gone.
     """
+
+    @staticmethod
+    def _durations(seconds):
+        """Fake rows carrying a float `audio_duration` column, as
+        mythicinfinity/libriheavy ships. Text is a/b/c/... so assertions can
+        name surviving rows after _prepare prunes the bound column away."""
+        n = 16000
+        return Dataset.from_dict(
+            {
+                "audio": [{"array": np.zeros(n, dtype=np.float32), "sampling_rate": 16000}]
+                * len(seconds),
+                "text": list("abcdefghij")[: len(seconds)],
+                "audio_duration": list(seconds),
+            }
+        ).cast_column("audio", Audio(sampling_rate=16000))
 
     @staticmethod
     def _ds(sources, class_label: bool):
@@ -204,5 +217,153 @@ class TestExcludeWhere:
         fake = self._ds(["youtube", "audiobook"], class_label=False)
         cfg = self._cfg()
         cfg["exclude_where"] = bad
-        with pytest.raises(ValueError, match="needs both"):
+        with pytest.raises(ValueError, match="needs 'column' plus at least one of"):
             _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
+
+    def test_numeric_above_bound_excludes_long_rows(self):
+        """`above` drops rows EXCEEDING the bound -- an exclusion bound, not a
+        keep-ceiling. Added for LibriHeavy, where 19.6% of rows exceed the
+        collator's 19.0s cap and were discarded *after* the 600K
+        target_samples cap had already been applied, so the source delivered
+        482K rows against a nominal 600K."""
+        fake = self._durations([0.5, 5.0, 14.0, 19.0, 19.5, 30.0])
+        cfg = self._cfg()
+        cfg["exclude_where"] = {"column": "audio_duration", "above": 19.0}
+        out = _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
+        # Asserted on `text`, not `audio_duration`: _prepare prunes to
+        # keep_cols after filtering, so the bound column is gone by then.
+        assert out["text"] == ["a", "b", "c", "d"], "19.0 is inclusive; >19.0 drops"
+
+    def test_numeric_below_bound_excludes_short_rows(self):
+        fake = self._durations([0.5, 5.0, 14.0])
+        cfg = self._cfg()
+        cfg["exclude_where"] = {"column": "audio_duration", "below": 0.8}
+        out = _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
+        assert out["text"] == ["b", "c"]
+
+    def test_numeric_bound_matching_nothing_still_fails_loudly(self):
+        """Same contract as the values path: a filter that drops nothing is a
+        config bug, not a legitimate no-op."""
+        fake = self._durations([1.0, 2.0])
+        cfg = self._cfg()
+        cfg["exclude_where"] = {"column": "audio_duration", "above": 99.0}
+        with pytest.raises(ValueError, match="matched 0 of 2 rows"):
+            _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
+
+
+class TestEpochExpansion:
+    """`epoch_expansion: N` folds N logical epochs into one physical pass so
+    that CAPPED sources spend the extra budget on rows they have not seen,
+    instead of replaying the same subset N times.
+
+    The bug it fixes: _resample_to_target runs once inside load(), so
+    `num_train_epochs: 2` iterates an identical 600K subset twice while the
+    rest of the pool is never touched -- measured at ~285K unused LibriHeavy
+    rows and ~338K unused CommonVoice rows on the real mix.
+    """
+
+    @staticmethod
+    def _rows(n, prefix="r"):
+        return Dataset.from_dict(
+            {
+                "audio": [{"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000}] * n,
+                "text": [f"{prefix}{i}" for i in range(n)],
+            }
+        ).cast_column("audio", Audio(sampling_rate=16000))
+
+    def _load(self, fake, cfg_entry, expansion, epochs=1):
+        cfg = _make_cfg([cfg_entry], epoch_expansion=expansion, epochs=epochs)
+        loader = DatasetLoader(cfg)
+        with patch("scripts.train.load_dataset", return_value=fake):
+            train, _ = loader.load()
+        return train
+
+    def test_capped_source_spends_expansion_on_fresh_rows_first(self):
+        """Pool 80, cap 50, expansion 2 -> target 100. All 80 unique rows are
+        drawn before any repeat-padding; without expansion only 50 are."""
+        fake = self._rows(80)
+        entry = {
+            "path": "fake/big",
+            "audio_column": "audio",
+            "text_column": "text",
+            "target_samples": 50,
+            "train_splits": ["train"],
+            "eval_splits": [],
+        }
+        train = self._load(fake, entry, expansion=2)
+        assert len(train) == 100, "total rows should equal cap x expansion"
+        assert len(set(train["text"])) == 80, "every eligible row should appear"
+
+        baseline = self._load(fake, entry, expansion=1)
+        assert len(baseline) == 50
+        assert len(set(baseline["text"])) == 50
+
+    def test_uncapped_source_is_repeated_verbatim(self):
+        """A source already at natural size has no unused rows, so repeating
+        is exactly what a second Trainer epoch would have done."""
+        fake = self._rows(7)
+        entry = {
+            "path": "fake/small",
+            "audio_column": "audio",
+            "text_column": "text",
+            "train_splits": ["train"],
+            "eval_splits": [],
+        }
+        train = self._load(fake, entry, expansion=3)
+        assert len(train) == 21
+        assert len(set(train["text"])) == 7
+
+    def test_expansion_preserves_relative_mix_share(self):
+        """Every source is multiplied by the same factor, so per-step mix
+        share is unchanged -- that is what makes this safe to do without
+        re-deriving the caps."""
+        fake = self._rows(80)
+        capped = {
+            "path": "fake/big",
+            "audio_column": "audio",
+            "text_column": "text",
+            "target_samples": 50,
+            "train_splits": ["train"],
+            "eval_splits": [],
+        }
+        uncapped = {
+            "path": "fake/small",
+            "audio_column": "audio",
+            "text_column": "text",
+            "train_splits": ["train"],
+            "eval_splits": [],
+        }
+        sizes = {}
+        for exp in (1, 2):
+            cfg = _make_cfg([capped, uncapped], epoch_expansion=exp)
+            loader = DatasetLoader(cfg)
+            with patch("scripts.train.load_dataset", side_effect=[fake, self._rows(20, "s")]):
+                train, _ = loader.load()
+            sizes[exp] = len(train)
+        assert sizes[2] == 2 * sizes[1], "both sources must scale together"
+
+    def test_expansion_with_multiple_epochs_is_rejected(self):
+        """They compound: expansion 2 x num_train_epochs 2 is four epochs of
+        exposure, which is worse than either intent and silent."""
+        fake = self._rows(10)
+        entry = {
+            "path": "fake/x",
+            "audio_column": "audio",
+            "text_column": "text",
+            "train_splits": ["train"],
+            "eval_splits": [],
+        }
+        with pytest.raises(ValueError, match="compound"):
+            self._load(fake, entry, expansion=2, epochs=2)
+
+    def test_default_is_inert(self):
+        fake = self._rows(9)
+        entry = {
+            "path": "fake/x",
+            "audio_column": "audio",
+            "text_column": "text",
+            "train_splits": ["train"],
+            "eval_splits": [],
+        }
+        train = self._load(fake, entry, expansion=None)
+        assert len(train) == 9

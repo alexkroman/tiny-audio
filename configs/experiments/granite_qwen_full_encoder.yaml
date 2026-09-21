@@ -214,7 +214,19 @@ training:
   label_smoothing_factor: 0.0
   weight_decay: 0.01
   projector_weight_decay: 0.01
-  encoder_weight_decay: 0.01
+  # 0.0, not 0.01. top4's encoder did not fail to learn because 4 blocks was
+  # too few -- it reached a weight-decay equilibrium radius and stopped.
+  # Evidence: drift ran 0.366% -> 0.954% over 2k->20k steps and gained 0.012pp
+  # in the last 2,000 (measured independently today against the base IBM
+  # weights: 0.9959%). A free random walk grows as sqrt(t), i.e. 3.16x over a
+  # 10x step increase; observed growth was 2.61x -- SUB-diffusive, which is the
+  # signature of a restoring force, not of slow learning. The arithmetic fits:
+  # decoupled AdamW shrinks by lr*wd = 1e-5 * 0.01 = 1e-7 per step, ~0.2% pull
+  # toward the origin over 20k steps against 0.95% of observed displacement.
+  # Raising encoder lr to 1e-4 without removing the restoring force just moves
+  # the equilibrium radius (~sqrt(lr/wd), so ~3x) and buys another, larger
+  # random walk. Canary-Qwen runs wd=0.001 across every group.
+  encoder_weight_decay: 0.0
 
   warmup_steps: 700
   lr_scheduler_type: cosine_with_min_lr

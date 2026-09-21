@@ -60,11 +60,24 @@ TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 # "<|audio|>transcribe the speech with proper punctuation and capitalization."
 # Qwen3-ASR does the equivalent through a system turn plus an assistant prefill.
 #
-# Without the split, the ~25% of multiasr that is truecased-but-unpunctuated
-# (TEDLIUM, Peoples, AMI, Switchboard) trains the model to SUPPRESS punctuation
-# under the same prompt the punctuated ~75% uses to produce it. Identical
-# conditioning, contradictory targets: the model can only learn a hedge, and
-# every dropped mark scores as an error against punctuated references.
+# Without the split, the unpunctuated share of multiasr trains the model to
+# SUPPRESS punctuation under the same prompt the punctuated share uses to
+# produce it. Identical conditioning, contradictory targets: the model can
+# only learn a hedge, and every dropped mark scores as an error against
+# punctuated references.
+#
+# Share re-measured 2026-09-20: 12.1% plain-prompt (TEDLIUM ~194,900 + AMI
+# 147,504) against 87.9% punct-prompt, NOT the ~25%/~75% this comment used to
+# claim. Two of the four sources it named -- Peoples and Switchboard -- have
+# left the mix entirely, and the TEDLIUM leading-<unk> filter shrank a third.
+# The split still earns its keep at 12.1%, but the real format heterogeneity
+# now lives INSIDE the punct-prompt majority: 39.5% of SPGISpeech rows start
+# lowercase and 41.5% end without terminal punctuation (mid-stream 5-15s
+# window cuts), i.e. ~6% of the whole mix teaching "begin mid-sentence, no
+# final period" under the punctuation prompt. That is invisible to WER -- the
+# eval normalizer strips case and punctuation from both sides -- and shows up
+# only in orthographic_wer, the same blind spot that hid the %-stripping bug.
+# Measure before acting.
 TRANSCRIBE_PROMPT_PUNCT = "Transcribe the speech with proper punctuation and capitalization"
 
 # Gigaspeech ships inline punctuation as angle-bracket tags so we restore
@@ -162,9 +175,26 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # earns its keep over the frozen encoder (+6.18 WER). Edge position is also
 # what the eval evidence actually implicates: a positional prior is learnable,
 # a scattered mid-sentence omission is closer to label noise.
-_EDGE_CONTENT_TAG_RE = re.compile(
-    r"^\s*<(?:unk|foreign|overlap)>|<(?:unk|foreign|overlap)>\s*$", re.IGNORECASE
-)
+# LEADING ONLY as of 2026-09-20. The trailing alternation was dropped after
+# measuring what the two halves actually cost: on the 25,550-row TEDLIUM index,
+# 27.3% of rows start with a stripped tag and 20.3% end with one, union 41.2%
+# (the prior "roughly half" estimate summed the two and double-counted the
+# 1,652 rows that do both). Leading-only drops 27.3%, recovering ~13.9% of
+# TEDLIUM, about +37,300 rows.
+#
+# The evidence base only ever supported the leading half. It came from the
+# Peoples eval -- a *leading*-word deletion prior, measured as >=1 dropped
+# leading reference word on 52/100 samples. Trailing truncation was never
+# measured separately, and Peoples has since left the training mix, so the
+# trailing half rested on argument-by-analogy to a corpus that is no longer
+# there. Meanwhile TEDLIUM is the one dataset where the decoder measurably
+# beats the frozen encoder (+6.18 WER), and this filter was cutting it 41%.
+#
+# To re-justify the trailing half, run the leading/trailing-deletion-run
+# analysis in scripts/analysis.py against the TEDLIUM eval; if trailing runs
+# are elevated over baseline, restore the `|<(?:unk|foreign|overlap)>\s*$`
+# alternation.
+_EDGE_CONTENT_TAG_RE = re.compile(r"^\s*<(?:unk|foreign|overlap)>", re.IGNORECASE)
 
 
 def _has_edge_content_tag(raw_text: str) -> bool:
@@ -427,6 +457,9 @@ class DatasetLoader:
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
         self.num_proc = self.config.get("num_proc", 16)
+        self.num_train_epochs = config.training.get("num_train_epochs", 1)
+        # See _expand_epochs / load() for what this does and why it exists.
+        self.epoch_expansion = int(self.config.get("epoch_expansion", 1) or 1)
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
         dataset_path = dataset_cfg.get("path")
@@ -459,6 +492,7 @@ class DatasetLoader:
 
         # Declarative row filter on a source-metadata column, e.g.
         #   exclude_where: {column: source, values: [audiobook]}
+        #   exclude_where: {column: audio_duration, above: 19.0}
         # It must run HERE, before the keep_cols pruning below drops every
         # column that is not audio/text/_text_case/_text_punct -- by then the
         # column you want to filter on no longer exists.
@@ -475,10 +509,16 @@ class DatasetLoader:
         if exclude_where is not None:
             column = exclude_where.get("column")
             names = list(exclude_where.get("values") or [])
-            if not column or not names:
+            # Numeric bounds, added 2026-09-20 for LibriHeavy. Semantics follow
+            # the key's name: this EXCLUDES rows, so `above: 19.0` drops rows
+            # whose value exceeds 19.0 (it is not a keep-ceiling).
+            above = exclude_where.get("above")
+            below = exclude_where.get("below")
+            if not column or (not names and above is None and below is None):
                 raise ValueError(
-                    f"exclude_where needs both 'column' and non-empty 'values', "
-                    f"got {exclude_where!r} for {dataset_path}"
+                    f"exclude_where needs 'column' plus at least one of "
+                    f"'values' / 'above' / 'below', got {exclude_where!r} "
+                    f"for {dataset_path}"
                 )
             if column not in ds.column_names:
                 # Fail loudly: a silently-ignored filter would train on the
@@ -494,31 +534,47 @@ class DatasetLoader:
             # dropped 0 of 910,140 rows. Resolve names -> ids so the config
             # stays readable, and reject a name the column does not define.
             feature = (ds.features or {}).get(column)
-            if isinstance(feature, ClassLabel):
-                # Report every bad name at once rather than dying on the first.
-                unknown = sorted(n for n in names if n not in feature.names)
-                if unknown:
-                    raise ValueError(
-                        f"exclude_where value {unknown} not a label of {column!r} in "
-                        f"{dataset_path} (defined: {feature.names})"
-                    )
-                wanted = {feature.str2int(n) for n in names}
-            else:
-                wanted = set(names)
+            wanted: set | None = None
+            if names:
+                if isinstance(feature, ClassLabel):
+                    # Report every bad name at once rather than dying on the first.
+                    unknown = sorted(n for n in names if n not in feature.names)
+                    if unknown:
+                        raise ValueError(
+                            f"exclude_where value {unknown} not a label of {column!r} in "
+                            f"{dataset_path} (defined: {feature.names})"
+                        )
+                    wanted = {feature.str2int(n) for n in names}
+                else:
+                    wanted = set(names)
+
+            def _keep(v, _wanted=wanted, _above=above, _below=below):
+                excluded = (
+                    (_wanted is not None and v in _wanted)
+                    or (v is not None and _above is not None and v > _above)
+                    or (v is not None and _below is not None and v < _below)
+                )
+                return not excluded
+
             before = len(ds)
+            # `input_columns` keeps this from materialising the audio column --
+            # it matters for a duration filter over ~1.1M rows, which would
+            # otherwise decode every clip to answer a float comparison.
             ds = ds.filter(
-                lambda v: v not in wanted,
+                _keep,
                 num_proc=self.num_proc,
                 input_columns=column,
             )
             dropped = before - len(ds)
             logger.info(
-                "exclude_where on %s: dropped %d/%d rows where %s in %s",
+                "exclude_where on %s: dropped %d/%d rows (%s in %s, above=%s, below=%s)",
                 dataset_path,
                 dropped,
                 before,
                 column,
-                names,
+                names or "-",
+                above,
+                below,
             )
             # A filter that matches nothing is a configuration bug, not a
             # legitimate no-op: you asked to exclude something that is not
@@ -528,8 +584,8 @@ class DatasetLoader:
             if dropped == 0:
                 raise ValueError(
                     f"exclude_where on {dataset_path} matched 0 of {before} rows "
-                    f"({column} in {sorted(names)}). Check the column's value type "
-                    f"and spelling -- feature is {feature!r}."
+                    f"({column}: values={sorted(names)} above={above} below={below}). "
+                    f"Check the column's value type and spelling -- feature is {feature!r}."
                 )
 
         col_map = {
@@ -631,8 +687,62 @@ class DatasetLoader:
         indices = list(range(current)) * repeats
         return ds.select(indices[:target])
 
+    @staticmethod
+    def _expand_epochs(ds: Dataset, times: int) -> Dataset:
+        """Repeat an uncapped source `times` over, verbatim.
+
+        Only for sources already at their natural size: there are no unused
+        rows to draw, so repeating is exactly what a second Trainer epoch
+        would have done. Capped sources go through _resample_to_target with a
+        multiplied target instead, which spends the multiplier on FRESH rows
+        first and only repeat-pads what the pool cannot cover.
+        """
+        if times <= 1:
+            return ds
+        return ds.select(list(range(len(ds))) * times)
+
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
+
+        # epoch_expansion: build ONE physical epoch that is worth N logical
+        # ones, so that capped sources contribute fresh rows instead of
+        # replaying the same subset.
+        #
+        # The problem it fixes: _resample_to_target runs once, here in load(),
+        # so `num_train_epochs: 2` iterates the IDENTICAL 600K subset twice
+        # while the rest of the pool is never touched. Measured on the current
+        # mix, that leaves ~285K eligible LibriHeavy rows and ~338K eligible
+        # CommonVoice rows unseen while their siblings are shown twice.
+        #
+        # Why this shape rather than a per-epoch sampler: the uncapped sources
+        # (SPGI, TEDLIUM, VoxPopuli, AMI) are already at natural size, so the
+        # only place extra unique data can come from is the capped ones --
+        # and raising their caps alone would change per-step mix share, which
+        # is the one thing the caps exist to control. Multiplying EVERY
+        # source by N holds per-step share exactly where it was while letting
+        # the capped sources spend their larger budget on unseen rows. What
+        # the model sees per step is unchanged; what it sees over the run is
+        # strictly more diverse.
+        #
+        # Mutually exclusive with num_train_epochs > 1 -- the two multiply,
+        # and silently training 4 epochs' worth would be worse than either.
+        expansion = self.epoch_expansion
+        if expansion > 1 and self.num_train_epochs > 1:
+            raise ValueError(
+                f"epoch_expansion={expansion} and num_train_epochs="
+                f"{self.num_train_epochs} would compound to "
+                f"{expansion * self.num_train_epochs} epochs of exposure. "
+                f"epoch_expansion already folds the repeats into one physical "
+                f"epoch, so set num_train_epochs: 1 when using it."
+            )
+        if expansion > 1:
+            logger.info(
+                "epoch_expansion=%d: building one physical epoch worth %d "
+                "logical epochs; capped sources draw fresh rows up to their "
+                "pool before any repeat-padding",
+                expansion,
+                expansion,
+            )
 
         for d_cfg in tqdm(self.config.datasets, desc="Loading datasets"):
             train_splits = d_cfg.get("train_splits", ["train"])
@@ -642,7 +752,13 @@ class DatasetLoader:
             for train_split in train_splits:
                 ds = self._prepare_split(d_cfg, train_split)
                 if target_samples:
-                    ds = self._resample_to_target(ds, target_samples)
+                    # Multiply the cap, not the dataset: _resample_to_target
+                    # shuffles then takes the first target*N, so the extra
+                    # budget is spent on unseen rows first and only
+                    # repeat-pads (with a warning) once the pool runs out.
+                    ds = self._resample_to_target(ds, target_samples * expansion)
+                else:
+                    ds = self._expand_epochs(ds, expansion)
                 train_datasets.append(ds)
 
             # Per-dataset eval cap applied here (pre-concat) so each eval
@@ -713,9 +829,18 @@ class DataCollator:
     # training the model to transcribe content it never sees. Drop those rows.
     # Lowered from 30s to 19s to reduce batch-memory pressure: with
     # group_by_length disabled, a single long sample forces the whole batch
-    # to its length. 19s sits just under the ~20s production-norm cap for
-    # ASR fine-tunes and drops the long-form tail of TEDLIUM / Earnings22 /
-    # Peoples / VoxPopuli (roughly 3-8% of rows in those sources). In
+    # to its length. 19s sits just under the ~20s production-norm cap
+    # for ASR fine-tunes.
+    #
+    # Per-source loss re-measured 2026-09-20 -- the old "TEDLIUM / Earnings22
+    # / Peoples / VoxPopuli, roughly 3-8%" was wrong in every particular:
+    # LibriHeavy 19.6% (the source it hits hardest was not even named, and is
+    # now pre-filtered at prep time via exclude_where so the 600K cap
+    # delivers a true 600K), VoxPopuli 13.7%, TEDLIUM 0.07%, SPGISpeech 0.0%;
+    # Earnings22 and Peoples have left the mix. Because these drops run at
+    # COLLATE time -- after target_samples -- a capped source silently
+    # delivers fewer rows than its cap, which is how the mix table came to
+    # overstate the corpus by 235K rows. In
     # exchange, mel-spec peak memory drops ~37% vs the 30s default, freeing
     # headroom for auto_find_batch_size (observed batch=70 at max=30s →
     # expected ~100+ at max=19s for the same mix without WHAM).
@@ -1478,7 +1603,15 @@ def main(cfg: DictConfig) -> None:
     )
 
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
-    trainer.save_model()
+    # `_internal_call=True` suppresses Trainer's own hub push, which
+    # `upload_folder`s the entire output_dir. The explicit push below is the
+    # one that matters: it runs through `ASRModel.push_to_hub`, which sets
+    # `base_model_name_or_path` in adapter_config.json so the HF pipeline can
+    # load the repo. Letting both fire uploads the same multi-GB checkpoint
+    # twice. Only suppress it when we are the ones pushing -- a config with
+    # `push_to_hub: true` but no `hub_model_id` still gets Trainer's push to
+    # its output_dir-derived repo.
+    trainer.save_model(_internal_call=bool(push_to_hub))
 
     if push_to_hub:
         trainer.model.push_to_hub(

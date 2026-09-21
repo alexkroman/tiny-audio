@@ -187,9 +187,15 @@ class TestTedliumNormalization:
 
 class TestEdgeContentTagFilter:
     """<unk>/<foreign>/<overlap> stand in for spoken words the audio still
-    contains. At the START or END of a label, stripping them supervises
-    onset/offset truncation, which was the measured root cause of this
-    recipe's Peoples Speech regression. The collator drops those rows.
+    contains. At the START of a label, stripping them supervises onset
+    truncation, which was the measured root cause of this recipe's Peoples
+    Speech regression. The collator drops those rows.
+
+    LEADING ONLY as of 2026-09-20. Trailing tags are kept: the supporting
+    measurement was a leading-word-deletion prior (>=1 dropped leading
+    reference word on 52/100 Peoples samples), the trailing half was never
+    measured on its own, and together they were cutting 41.2% of TEDLIUM --
+    the one corpus where the decoder beats the frozen encoder.
 
     Non-speech tags (<noise>/<music>/<sil>/<laugh>/<breath>) are NOT
     content-bearing — no word was uttered — so they must not trigger the drop.
@@ -203,13 +209,9 @@ class TestEdgeContentTagFilter:
         [
             "<unk> i thought i would read poems",
             "<unk> called dirt",
-            "health <unk>",
-            "washing my mouth out with soap <unk>",
             "<UNK> case insensitive",
             "  <unk> leading whitespace before tag",
-            "trailing whitespace after tag <unk>   ",
             "<foreign> hola there",
-            "and then <overlap>",
             "<unk> both ends <unk>",
         ],
     )
@@ -219,6 +221,14 @@ class TestEdgeContentTagFilter:
     @pytest.mark.parametrize(
         "text",
         [
+            # Trailing content tags are KEPT as of 2026-09-20 (leading-only
+            # filter). The drop rule's evidence was a *leading*-deletion prior
+            # measured on the Peoples eval; the trailing half was never
+            # measured separately and cost TEDLIUM 13.9% of its rows.
+            "health <unk>",
+            "washing my mouth out with soap <unk>",
+            "trailing whitespace after tag <unk>   ",
+            "and then <overlap>",
             "hello <unk> world",  # medial — kept
             "she said <foreign> in reply",  # medial — kept
             "<noise> hello",  # non-speech at edge — kept

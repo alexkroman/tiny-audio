@@ -624,6 +624,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.generation_config = self.language_model.generation_config
         self.generation_config.max_new_tokens = config.max_new_tokens
         self.generation_config.use_cache = config.use_cache
+        # `generate()` reads the GenerationConfig and nothing else, so every
+        # decoding knob ASRConfig owns has to be copied across here. Omitting
+        # this line left ASRConfig's 12-gram loop guard inert: the value was
+        # set on the config, serialized into config.json, and never consulted.
+        self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
         # Set EOS tokens, filtering out any that don't exist in the tokenizer.
         # `convert_tokens_to_ids` reports "not in vocab" inconsistently: Qwen-
         # style tokenizers return None, while Gemma's returns unk_token_id.
@@ -2274,6 +2279,28 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         shutil.copy(src_dir / "alignment.py", save_dir / "alignment.py")
         # Copy diarization module
         shutil.copy(src_dir / "diarization.py", save_dir / "diarization.py")
+
+    def create_or_update_model_card(self, output_dir: str | Path) -> None:
+        """Re-apply the PEFT card metadata to `output_dir/README.md`.
+
+        This is a PEFT method, not a transformers one, and it exists here only
+        because `Trainer` calls it on the unwrapped model. `create_model_card`
+        overwrites the README with its own training summary, and if the card it
+        replaced declared `library_name: peft` it then asks the model to put the
+        adapter metadata back. On a LoRA run that branch always fires: the
+        `language_model.save_pretrained` call above writes the adapter through
+        `PeftModel.save_pretrained`, which stamps a peft card into the same
+        directory the trainer is about to overwrite. `PreTrainedModel` has no
+        such method, so without this delegation the final `trainer.save_model()`
+        dies with AttributeError *after* the run has finished training.
+
+        Delegating to the language model is a no-op when there is no adapter
+        (a stale peft README left in `output_dir` by an earlier LoRA run in the
+        same directory is enough to reach here on a run with LoRA disabled).
+        """
+        card_fn = getattr(self.language_model, "create_or_update_model_card", None)
+        if card_fn is not None:
+            card_fn(str(output_dir))
 
     def push_to_hub(self, repo_id: str, **kwargs) -> str:
         """Push model to HuggingFace Hub, ensuring adapter_config points to repo.

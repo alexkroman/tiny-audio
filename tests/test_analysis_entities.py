@@ -160,8 +160,14 @@ class TestEntityTableColumns:
     """The table reports semantic recall; numeric types belong to the ITN table."""
 
     @pytest.fixture
-    def compared(self, outputs):
-        """Run `compare` against a keywords file holding both type families."""
+    def compared(self, outputs, monkeypatch):
+        """Run `compare` against a keywords file holding both type families.
+
+        `MIN_CLASS_SUPPORT` is lowered because these assert on which COLUMNS
+        appear, not on whether a handful of entities is enough to report --
+        the support floor is covered by its own tests.
+        """
+        monkeypatch.setattr("scripts.analysis.MIN_CLASS_SUPPORT", 1)
         (outputs / "keywords.json").write_text(
             json.dumps(
                 {

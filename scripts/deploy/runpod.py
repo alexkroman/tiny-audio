@@ -44,6 +44,20 @@ def _auto_session_name(prefix: str) -> str:
     return f"{prefix}_{timestamp}"
 
 
+def _put_text(conn: Connection, text: str, remote: str) -> None:
+    """Upload a string to `remote` over SFTP.
+
+    Encode to bytes ourselves rather than handing `put` an `io.StringIO`.
+    Paramiko's `putfo` sizes the transfer by summing `len(chunk)` over reads
+    from the file object, then (with confirm=True) stats the remote path and
+    compares. Reading from a StringIO yields *characters* while the wire
+    carries *UTF-8 bytes*, so a single non-ASCII character in a script body --
+    one em dash in a comment is enough -- makes the two disagree and raises
+    "size mismatch in put!" on a transfer that in fact succeeded.
+    """
+    conn.put(io.BytesIO(text.encode("utf-8")), remote=remote)
+
+
 def _start_remote_tmux_script(
     conn: Connection,
     host: str,
@@ -55,7 +69,7 @@ def _start_remote_tmux_script(
 ) -> None:
     """Upload a script to /tmp, start it in a tmux session, optionally attach."""
     # SFTP upload: no shell in the path, so the script body needs no quoting.
-    conn.put(io.StringIO(script_content), remote=script_path)
+    _put_text(conn, script_content, script_path)
     conn.sftp().chmod(script_path, 0o700)
     result = conn.run(
         f"tmux new-session -d -s {shlex.quote(session_name)} {shlex.quote(script_path)}",
@@ -529,7 +543,7 @@ echo "Dependencies verified for $TA_PYTHON"
     # in the body are preserved verbatim without any quoting.
     script_path = "/tmp/tiny_audio_install_deps.sh"
     log_path = "/tmp/tiny_audio_install.log"
-    conn.put(io.StringIO(setup_script), remote=script_path)
+    _put_text(conn, setup_script, script_path)
     # Capture all output to a log file silently rather than streaming live.
     # Pip's progress bars + ANSI color codes corrupt the local TTY when piped
     # through Fabric. On failure we fetch the tail and print it as plain text.

@@ -61,37 +61,47 @@
 # natural train-split size, so each example is seen at most once per
 # epoch.
 #
-# Two columns: the raw load_dataset() row count (pre-filter), and the
-# count after the DataCollator drops (audio <0.8s, >30s, empty-norm
-# label) plus the CV down_votes filter. Audit (2026-05-15, 200–500
-# samples streamed per dataset) is the source for the loss-rate column;
-# percentages are of the post-filter total.
-# Shares below are AFTER two 2026-09-18 removals: Peoples clean_sa (311,000 /
-# 10.1%, grid-cut labels) and Earnings22 (~11,000 / 0.4%, eval contamination).
-# Every remaining source's share rose because the denominator shrank; no cap
-# changed. TEDLIUM's effective count also drops by roughly half from the new
-# edge-`<unk>` filter in scripts/train.py (30.4% of its rows start with a
-# stripped `<unk>`, 21.9% end with one), which is NOT yet reflected below --
-# re-measure on the next run.
+# MEASURED 2026-09-20 (datasets-server /filter, /statistics and /size, plus
+# the real _normalize_label and _has_edge_content_tag run over sampled rows).
+# The previous table was wrong by ~235,000 rows (9.3%) and wrong UNEVENLY.
+# Root cause: DataCollator._MAX_AUDIO_SECONDS is 19.0 (scripts/train.py), set
+# in 94d59598 on 2026-09-17, while every filter-loss figure here was derived
+# in d602fd97 (2026-05-20) against a 30s cap and never re-derived. The
+# collator's drops also run AFTER target_samples, so a capped source silently
+# delivers fewer rows than its cap and no log line reports it.
+#
+# Two counts: raw load_dataset() rows, and rows surviving every filter
+# (duration <0.8s / >19.0s, empty normalized label, CV down_votes, the
+# Gigaspeech audiobook exclusion, the TEDLIUM leading-<unk> drop, and the
+# LibriHeavy duration pre-filter added below).
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy med (cap 600K)│ ~1,067,000│   600,000 │   21.7% │
-# │ CommonVoice 17 en (600K) │ ~1,100,000│   600,000 │   21.7% │
-# │ Gigaspeech M (cap 600K)  │   ~910,000│   600,000 │   21.7% │
-# │ SPGISpeech M             │   385,000 │   385,000 │   13.9% │
-# │ TEDLIUM-3                │  ~268,000 │  ~268,000 │    9.7% │
-# │ VoxPopuli en             │  ~168,000 │  ~165,000 │    6.0% │
-# │ AMI IHM                  │   108,502 │   ~79,000 │    2.9% │
-# │ AMI SDM                  │   107,319 │   ~67,000 │    2.4% │
-# │ (Peoples clean_sa)       │   REMOVED │         0 │    0.0% │
-# │ (Earnings22)             │   REMOVED │         0 │    0.0% │
+# │ LibriHeavy med (cap 600K)│ 1,101,040 │   600,000 │   22.3% │
+# │ Gigaspeech M (cap 600K)  │   910,140 │   600,000 │   22.3% │
+# │ CommonVoice 17 en (600K) │ 1,101,170 │   599,940 │   22.3% │
+# │ SPGISpeech M             │   385,000 │   385,000 │   14.3% │
+# │ TEDLIUM-3                │   268,263 │  ~194,900 │    7.3% │
+# │ VoxPopuli en             │   182,482 │  ~157,000 │    5.9% │
+# │ AMI SDM                  │   107,319 │    74,265 │    2.8% │
+# │ AMI IHM                  │   108,502 │    73,239 │    2.7% │
 # └──────────────────────────┴───────────┴───────────┴─────────┘
-# Total raw: ~4,113,821  →  Total effective: ~2,764,000
-# 8 training sources. AMI combined is 5.3% and is still the entire
-# conversational share; the mix has zero 8 kHz telephony. Finance register is
-# now carried by SPGISpeech alone (13.9%), which has professionally
-# transcribed labels and no overlap with any eval split.
+# Total raw: ~4,163,916  →  Total effective: ~2,684,344
+#
+# 8 training sources. Big-3 combined 66.9%. AMI combined 5.5% and still the
+# entire conversational share; the mix has zero 8 kHz telephony. Finance is
+# carried by SPGISpeech alone (14.3%), professionally transcribed, no overlap
+# with any eval split.
+#
+# STATE PLAINLY, because it cuts against this file's own stated goal: the
+# Big-3 caps exist to hold single-speaker read speech down, and restoring
+# LibriHeavy to a true 600K RAISES Big-3 concentration (66.5% as actually
+# run before this revision -> 66.9% now). The 58.3% figure this file used to
+# quote was never achievable once Peoples and Earnings22 left -- 3x600K over
+# a ~2.7M denominator is ~67% by arithmetic. If a lower Big-3 share is
+# wanted, the lever is LOWERING the three caps, not leaving an unintended
+# shortfall in place. What changed here is that the caps now mean what they
+# say.
 #
 # SWITCHBOARD REMOVED (2026-09-17). `hhoangphuoc/switchboard` returns 404 /
 # RepositoryNotFoundError -- the repo is gone from the Hub, which is the
@@ -136,21 +146,10 @@
 #   the canonical telephony benchmark and would belong in
 #   scripts/eval/datasets.py rather than here).
 #
-# Big-3 (LibriHeavy + CV17 + GS) capped at 600K each with deterministic
-# shuffle (combined 58.3% mix share after the Switchboard removal, up
-# from 55.2% purely because the denominator shrank). AMI combined 4.7%,
-# which is now the entire conversational share (was 10.0% with
-# Switchboard).
-#
-# Big-3 (LibriHeavy + CV + GS) capped at 600K each to address structural
-# single-speaker dominance (was ~62% combined mix share, now 50.1%).
-# Raises AMI / Switchboard / VoxPopuli per-step gradient share without
-# upsampling them (which the natural-cap rationale documents as overfit-
-# prone for AMI). AMI combined goes 3.1% → 4.1%, Switchboard 3.8% → 5.0%.
-# Cost: ~1.7M rows of single-speaker data dropped — may modestly hurt
-# LS Clean / LS Other / CV / Gigaspeech per-eval WER, in exchange for
-# AMI / ami-sdm / Switchboard gradient share. Net direction unknown
-# until empirical eval.
+# (Two Switchboard-era share paragraphs were deleted here on 2026-09-20.
+# They claimed 58.3% and 50.1% Big-3 share, contradicted each other and the
+# table above, and both described a mix that still contained Switchboard,
+# Peoples and Earnings22. The measured table is the single source of truth.)
 #
 # Rebalance after run n18 (Peoples clean 1M cap) showed continued
 # conversational-eval regression at step 22K (AMI 26.26, ami-sdm 74.94
@@ -192,24 +191,27 @@
 # scores against (scripts/eval/datasets.py); the `train` split included
 # here is disjoint and safe to train on.
 #
-# Filter loss by source (measured 2026-05-15):
-# - CommonVoice down_votes filter (in scripts/train.py): drops ~13% of
-#   the raw train split. Prior estimate of 2–5% in the per-dataset
-#   comment block below was an underestimate. Filter behavior is
-#   correct — Mozilla's `train` split admits clips with non-zero
-#   down_votes despite up_votes>down_votes; we tighten to down_votes==0.
-# - AMI IHM/SDM <0.8s filter (DataCollator._MIN_AUDIO_SECONDS): drops
-#   ~27% (IHM) / ~30–37% (SDM) of rows. The filtered rows are isolated
-#   backchannels — "YEAH", "HMM", "OKAY", etc. — where the audio span
-#   and reference transcript don't actually align. Filter behavior is
-#   correct; the prior natural-cap rationale just didn't account for
-#   the loss. AMI's mix share is correspondingly smaller than the
-#   row-count alone suggests.
-# - LibriHeavy >30s filter (DataCollator._MAX_AUDIO_SECONDS): drops ~3%.
-#   Whisper's 30s window forces this — longer audio gets silently
-#   truncated while the label is kept whole.
-# - Switchboard pure-`<LAUGH>` rows: ~2.5% normalize to empty label.
-# - VoxPopuli >30s rows: ~1.5%.
+# Filter loss by source (re-measured 2026-09-20 against the REAL 19.0s cap;
+# the prior block was computed against 30.0s and understated every
+# duration-driven loss):
+# - LibriHeavy >19.0s: 19.6% (documented as ~3%, which is the 30s figure --
+#   this single error is most of the 235K-row discrepancy). Now pre-filtered
+#   at prep time via `exclude_where: {column: audio_duration, above: 19.0}`
+#   so the 600K cap selects from an ~885K eligible pool and actually delivers
+#   600K. Side effect, stated: it shifts LibriHeavy toward shorter segments
+#   (median was 14.05s).
+# - VoxPopuli >19.0s: ~13.7% (documented ~1.5% at 30s). Raw train is 182,482
+#   rows, not the ~168K stated elsewhere in this file.
+# - TEDLIUM leading-<unk>: 27.3% (see _EDGE_CONTENT_TAG_RE, now leading-only;
+#   the leading+trailing union was 41.2%, and the old "roughly half" estimate
+#   double-counted the 1,652 rows that do both). TEDLIUM >19.0s is 0.07%.
+# - CommonVoice down_votes != 0: 14.81% (documented ~13%).
+# - AMI <0.8s: IHM 32.3% (documented ~27%), SDM 30.8% (documented 30-37%).
+#   The filtered rows are isolated backchannels -- "YEAH", "HMM", "OKAY" --
+#   where audio span and reference do not align. Filter behaviour is correct.
+# - SPGISpeech: ZERO loss from both duration filters (min 5.01s, max 15.00s).
+# - Gigaspeech: audiobook exclusion drops 27.8%, leaving 656,893 -- still
+#   above the 600K cap, so its contribution is unchanged.
 #
 # Download-size choices: Gigaspeech uses speechcolab's official M tier
 # (~1,000hr / ~910K segments — curated subset of L/XL, natural cap,
@@ -267,6 +269,17 @@ datasets:
     text_punct: true
     train_splits: [train]
     eval_splits: []
+    # Drop the >19s tail BEFORE target_samples, not after. DataCollator's
+    # 19.0s cap silently removed 19.6% of LibriHeavy at collate time, i.e.
+    # after this cap had already picked 600K, so the source delivered 482,400
+    # rows against a nominal 600K -- most of the 235K-row error in the old
+    # mix table. Filtering here makes the cap select from the ~885K eligible
+    # rows and deliver a true 600K. `audio_duration` is a float column on the
+    # mythicinfinity mirror (verified via the datasets-server /info endpoint),
+    # and `input_columns` keeps the filter from decoding audio to answer it.
+    exclude_where:
+      column: audio_duration
+      above: 19.0
     # Big-3 cap (see the mix table above). Read by
     # scripts/train.py:_resample_to_target, which shuffles on self.seed
     # before selecting so the cap is a representative sample rather than
@@ -672,6 +685,7 @@ dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 # to make individual eval bumps clearly real vs noise. Eval cycle wall-
 # clock grows ~2× (still small relative to the 30+ minutes between evals
 # at step_eval=2000 with batch=100). Datasets with small eval splits
-# (TEDLIUM 591, AMI ~500, Peoples val) are now near-uncapped; the bump
+# (TEDLIUM 591) are near-uncapped; AMI validation is 13,098 rows so the
+# cap binds hard there; the bump
 # matters most for CV / Gigaspeech dev / SPGI where eval splits are huge.
 max_eval_samples_per_dataset: 500

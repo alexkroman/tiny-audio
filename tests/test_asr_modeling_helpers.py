@@ -185,3 +185,31 @@ class TestGetNumAudioTokens:
             projector=SimpleNamespace(get_output_length=lambda n: (n - 4) // 4 + 1),
         )
         assert ASRModel._get_num_audio_tokens(fake, torch.ones(2, 40)) == 5
+
+
+class TestCreateOrUpdateModelCard:
+    """`Trainer.create_model_card` calls this PEFT method on the unwrapped model.
+
+    It fires whenever the README in `output_dir` says `library_name: peft`,
+    which `save_pretrained` guarantees on a LoRA run. The outer model is a
+    plain `PreTrainedModel`, so the method has to exist here and forward to
+    the adapter-bearing language model.
+    """
+
+    def test_delegates_to_peft_language_model(self, tmp_path):
+        card_fn = MagicMock()
+        fake = SimpleNamespace(language_model=SimpleNamespace(create_or_update_model_card=card_fn))
+
+        ASRModel.create_or_update_model_card(fake, tmp_path)
+
+        card_fn.assert_called_once_with(str(tmp_path))
+
+    def test_no_adapter_is_a_noop(self, tmp_path):
+        """A stale peft README from an earlier run must not take the save down."""
+        fake = SimpleNamespace(language_model=SimpleNamespace())
+
+        ASRModel.create_or_update_model_card(fake, tmp_path)
+
+    def test_method_is_reachable_on_the_class(self):
+        """nn.Module.__getattr__ is what raised; guard the attribute itself."""
+        assert callable(getattr(ASRModel, "create_or_update_model_card", None))

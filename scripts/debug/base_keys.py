@@ -1,13 +1,34 @@
 #!/usr/bin/env python3
-"""Map tiny-audio decoder tensor names onto their base-LM counterparts.
+"""Map tiny-audio tensor names onto their base-checkpoint counterparts.
 
 Shared by analyze_weights and compare_to_base so the two cannot disagree about
-where a base checkpoint keeps its text stack.
+where a base checkpoint keeps its text stack -- or, since encoder support was
+added, its audio stack.
 """
 
 import torch
 
 TRAINED_LM_PREFIX = "language_model."
+TRAINED_ENCODER_PREFIX = "audio_tower."
+
+# Where a base checkpoint keeps the audio encoder that tiny-audio saves flat
+# under ``audio_tower.``. Verified against the shipped headers:
+#   ibm-granite/granite-speech-5.0-470m-turboctc -> ``encoder.`` (1,100
+#     tensors, all under that one prefix; GraniteSpeech5Encoder.from_pretrained
+#     pulls the encoder out of the ForCTC checkpoint and drops the CTC head)
+#   openai/whisper-*                             -> ``model.encoder.``
+#   GLM-ASR                                      -> ``audio_tower.`` flat, or
+#     ``model.audio_tower.`` under the 5.x composite layout
+# The empty string covers a base published as a bare encoder. Ordered most
+# specific first so a checkpoint carrying both ``encoder.`` and a bare copy
+# resolves to the qualified name.
+_ENCODER_BASE_PREFIXES = (
+    "encoder.",
+    "model.encoder.",
+    "audio_tower.",
+    "model.audio_tower.",
+    "",
+)
 
 
 def base_key_candidates(trained_key: str) -> tuple[str, ...]:
@@ -38,11 +59,36 @@ def base_key_candidates(trained_key: str) -> tuple[str, ...]:
     return (stripped,)
 
 
+def encoder_base_key_candidates(trained_key: str) -> tuple[str, ...]:
+    """Base names a tiny-audio ``audio_tower.*`` tensor could be stored under.
+
+    Mirrors `base_key_candidates` for the encoder half. Without this, every
+    encoder tensor fell through `compare_to_base`'s
+    ``if not base_key_candidates(tk): continue`` guard and the tool reported
+    "Matched tensors: 0" rather than failing -- so the encoder-drift check
+    that granite_qwen_full prescribes had no instrument behind it.
+    """
+    if not trained_key.startswith(TRAINED_ENCODER_PREFIX):
+        return ()
+    stripped = trained_key[len(TRAINED_ENCODER_PREFIX) :]
+    return tuple(prefix + stripped for prefix in _ENCODER_BASE_PREFIXES)
+
+
+def all_base_key_candidates(trained_key: str) -> tuple[str, ...]:
+    """Decoder and encoder candidates together.
+
+    The two are disjoint by construction -- each keys off a different trained
+    prefix -- so callers that handle both can use this and callers that only
+    ever see one half are unaffected.
+    """
+    return base_key_candidates(trained_key) or encoder_base_key_candidates(trained_key)
+
+
 def resolve_base_key(trained_key: str, base_weights) -> str | None:
     """First candidate name actually present in `base_weights`, else None."""
     if not base_weights:
         return None
-    for key in base_key_candidates(trained_key):
+    for key in all_base_key_candidates(trained_key):
         if key in base_weights:
             return key
     return None
