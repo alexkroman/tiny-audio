@@ -13,6 +13,8 @@ from safetensors.torch import load_file
 app = typer.Typer(help="Analyze LoRA adapter weights")
 console = Console()
 
+# Dense self-attention + MLP projections, as found in Llama/Qwen3-style
+# decoders.
 LORA_MODULE_TYPES = (
     "q_proj",
     "k_proj",
@@ -21,6 +23,16 @@ LORA_MODULE_TYPES = (
     "gate_proj",
     "up_proj",
     "down_proj",
+    # Hybrid (gated delta-net) linear-attention projections. Qwen3.5 carries 18
+    # linear_attn layers to every 6 full_attention ones, and `all-linear` adapts
+    # all of them -- 90 of 186 matrices and 35% of the adapter's parameters.
+    # Without these names every one was skipped by the `continue` below, and the
+    # totals reported a 67.28M adapter as 43.65M.
+    "in_proj_a",
+    "in_proj_b",
+    "in_proj_qkv",
+    "in_proj_z",
+    "out_proj",
 )
 
 
@@ -46,9 +58,14 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
     )
 
     lora_pairs: dict[str, dict] = {}
+    skipped: defaultdict[str, int] = defaultdict(int)
     for name, tensor in state_dict.items():
         module_type = next((p for p in name.split(".") if p in LORA_MODULE_TYPES), None)
         if module_type is None:
+            # Never drop silently. An unrecognized projection name means this
+            # decoder family has modules LORA_MODULE_TYPES does not know about,
+            # and every total below would quietly exclude them.
+            skipped[name.rsplit(".lora_", 1)[0].rsplit(".", 1)[-1]] += tensor.numel()
             continue
         for ab in ("A", "B"):
             marker = f".lora_{ab}.weight"
@@ -58,6 +75,14 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
                 pair[ab] = tensor
                 pair["module_type"] = module_type
                 break
+
+    if skipped:
+        console.print(
+            f"\n[bold yellow]WARNING:[/bold yellow] {sum(skipped.values()):,} adapter "
+            f"params across {len(skipped)} unrecognized module type(s) are EXCLUDED "
+            f"from every total below: {', '.join(sorted(skipped))}."
+        )
+        console.print("[yellow]Add them to LORA_MODULE_TYPES to include them.[/yellow]")
 
     console.rule("[bold]PER-LAYER ANALYSIS[/bold]")
 
@@ -143,8 +168,12 @@ def analyze_lora_adapter(repo_id: str = "mazesmazes/tiny-audio"):
     module_importance.sort(key=lambda x: x[2], reverse=True)
 
     console.print("\nModule importance (by norm per parameter):")
+    # Scaled to the largest module rather than a fixed 1e6 factor. Matrix sizes
+    # span ~70x across a hybrid decoder's projections, so a fixed scale either
+    # collapses every bar to nothing or runs one of them off the terminal.
+    max_npp = max((x[2] for x in module_importance), default=0.0)
     for module_type, _avg_norm, norm_per_param, _rank_util, _energy_conc in module_importance:
-        bar = "█" * int(norm_per_param * 1e6)
+        bar = "█" * round(30 * norm_per_param / max_npp) if max_npp > 0 else ""
         console.print(f"  {module_type:<12} {bar}")
 
     console.print(f"\nOverall effective rank utilization: {avg_rank_util:.1%}")

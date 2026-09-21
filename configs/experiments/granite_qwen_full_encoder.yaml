@@ -1,0 +1,277 @@
+# @package _global_
+# FULL-DEPTH ENCODER + PROJECTOR + LoRA -- the successor experiment to
+# granite_qwen_top4, derived from a weight-level audit of that run's
+# step-20000 checkpoint (wandb jscyrgkt / `mazesmazes/tiny-audio-granite-qwen-top4`).
+#
+#   ibm-granite/granite-speech-5.0-470m-turboctc
+#     all 16 blocks trainable (439.0M), input_linear + out/out_mid frozen, lr 1e-4
+#   -> MLP projector (fresh init, 12.6M, lr 1e-3)
+#   -> Qwen/Qwen3.5-2B, base FROZEN + LoRA all-linear r=64 (63.7M, lr 1e-4)
+#
+#   poetry run python scripts/train.py +experiments=granite_qwen_full_encoder
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS CHANGES AGAINST granite_qwen_top4, AND WHY
+#
+# That recipe is the control and keeps its 11.95% Earnings22. Nothing here is
+# a repudiation of it -- it is what the control's own checkpoint said to try
+# next. Three findings drove the diff; all are measurements on the shipped
+# weights, reproducible by diffing Hub revisions of the top4 repo.
+#
+# 1. THE TOP-4 ENCODER WAS DIFFUSING, NOT LEARNING.  Drift of blocks 12-15,
+#    ||W-W0||_F / ||W0||_F, across checkpoints:
+#
+#      step     2000    6000   10000   14000   18000   20000
+#      drift   0.366%  0.614%  0.793%  0.901%  0.942%  0.954%
+#      cos(seg, prev seg)  --   0.118   0.059   0.012   0.004
+#
+#    Successive 4,000-step displacement vectors are statistically orthogonal,
+#    and net displacement is 0.48x the total path travelled -- against 1/sqrt(5)
+#    = 0.447 for a five-segment random walk. That is gradient noise dominating
+#    gradient signal, which is what an LR below the useful band looks like.
+#    Drift gained 0.012 percentage points over the last 2,000 steps: it had
+#    stopped.
+#
+# 2. IT IS ~33x BELOW THE ONE PRODUCTION REFERENCE.  Diffing Ultravox v0.5's
+#    shipped `audio_tower` against openai/whisper-large-v3-turbo:
+#
+#      transformer layers (all 32)   629.6M params   35.88%
+#      its top-4 layers (28-31)                      31.82%
+#      embed_positions                 1.9M           0.13%
+#      conv1/conv2 stack               5.4M           0.17%
+#
+#    CORRECTION TO granite_qwen_top4.yaml's HEADER, which cites "Ultravox
+#    14.74% drift across all 32 layers" as the ceiling this recipe is
+#    conservative against. An independent measurement puts that aggregate at
+#    13.50% -- close -- but the aggregate is diluted by embed_positions and the
+#    conv stack, which barely moved. Transformer blocks only, the comparable
+#    quantity, is 35.9%. The control was being judged against a number 2.4x
+#    too low. 0.95% against 31.8% on the equivalent top-4 slice.
+#
+#    Ultravox's drift is also FLAT ACROSS DEPTH -- layer 0 moved 30.2%, layer
+#    16 43.5%, layer 31 37.1%. Restricting adaptation to the top of the stack
+#    assumes it is depth-local; the reference says it is not. That is the
+#    argument for 16 blocks rather than a bigger LR on 4.
+#
+# 3. NO PUBLISHED RECIPE SPLITS LRs THIS WIDELY.  nvidia/canary-qwen-2.5b
+#    ships its NeMo training config:
+#
+#      freeze_params:         ['^llm\..+$', '^embed_tokens\..+$']
+#      prevent_freeze_params: ['^.+\.lora_.+$']
+#      optimizer: AdamW lr=5e-4 betas=[0.9, 0.98] weight_decay=0.001
+#      lr_scheduler: CosineAnnealing max_steps=100000 warmup=1000 min_lr=1e-6
+#
+#    ONE learning rate, 5e-4, covering encoder + projector + LoRA. top4 runs
+#    1e-3 / 1e-4 / 1e-5, a 100x spread, with the encoder at 1/50th of
+#    Canary-Qwen's. This file narrows the spread to 10x; it does not go all
+#    the way to a single LR, because finding 4 below says the decoder side is
+#    already at its limit.
+# ---------------------------------------------------------------------------
+
+defaults:
+  - override /data: multiasr
+
+model:
+  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc
+  text_model_id: Qwen/Qwen3.5-2B
+  projector_type: mlp
+  attn_implementation: sdpa
+  projector_pool_stride: 1
+  encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
+  projector_hidden_dim: 4096
+  projector_output_rms: auto
+  transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
+  label_smoothing: 0.0
+  max_new_tokens: 256
+
+  model_dtype: bfloat16
+  projector_dtype: float32
+  # Unchanged from top4 and now covering 4x the parameters: AdamW allocates
+  # moments with zeros_like(param), so a bfloat16 encoder gets bfloat16
+  # moments. At the 1e-4 below the argument is weaker than it was at 1e-5
+  # (Granite's weight RMS is 0.0868, one bf16 ULP is 4.88e-4, so a 1e-4 step is
+  # ~5x under a ULP rather than 49x) -- weaker, not gone. fp32 for all 472.9M
+  # costs +0.95 GB and the VRAM table below already pays it.
+  encoder_dtype: float32
+
+  use_lora: true
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.0
+  lora_target_modules: all-linear
+
+  # `all-linear` is blind to matrix shape, and on Qwen3.5 that misfires on the
+  # gated-DeltaNet gates. `in_proj_a` (per-head decay) and `in_proj_b` (delta-
+  # rule write strength) are (16, 2048): 16 output rows, so a rank-64 adapter
+  # is capped at rank 16 by the geometry no matter what. Measured on the top4
+  # step-20000 checkpoint, the realised update's effective rank was 6.29 and
+  # 7.34 against the 64 allocated, and the 36 gate matrices consumed 4,755,456
+  # LoRA params -- 4.03x what full fine-tuning the same matrices would cost
+  # (1,179,648), for 7.1% of the adapter budget.
+  #
+  # Those same gates also carried the largest relative perturbation anywhere in
+  # the model: `in_proj_b` at 28.65% of base weight norm aggregate and 50.74%
+  # at its worst layer, against 10.50% for `v_proj`. Rank 16 is the honest
+  # allocation and incidentally stops overspending scale on the recurrence's
+  # decay and write gates.
+  #
+  # BOTH patterns are set on purpose. PEFT resolves rank_pattern and
+  # alpha_pattern with independent lookups, each falling back to r /
+  # lora_alpha, so setting rank alone would take these modules from
+  # alpha/r = 128/64 = 2.0 to 128/16 = 8.0 -- 4x HOTTER, the opposite of the
+  # intent. 32/16 keeps them at the global 2.0.
+  #
+  # Saves 3.57M of the 67.28M budget. This is an efficiency fix, not the
+  # experiment; it is bundled because it is shape-driven and cannot plausibly
+  # interact with the encoder change.
+  lora_rank_pattern:
+    in_proj_a: 16
+    in_proj_b: 16
+  lora_alpha_pattern:
+    in_proj_a: 32
+    in_proj_b: 32
+
+  # Still off, and now on evidence rather than convention. Across the top4 run
+  # the ABSOLUTE train/eval gap was flat at 0.199 +/- 0.005 over 10 evals
+  # (0.190 at step 2000, 0.203 at 20000) while both curves descended and
+  # eval/loss was still falling at 73% of one epoch. There is no overfitting to
+  # regularize; the binding constraint is capacity, which is what this file
+  # spends on. Revisit only if that gap starts opening.
+  apply_spec_augment: false
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-granite-qwen-full-encoder"
+
+  attn_implementation: sdpa
+
+  freeze_language_model: true
+  freeze_projector: false
+  freeze_text_embed_tokens: true
+
+  # DELIBERATELY the partial-unfreeze idiom at full depth, NOT
+  # `freeze_audio_encoder: false`. The two are not equivalent and the
+  # difference is not about which parameters get gradients -- with top_n = 16
+  # the trainable set is every block, identical either way.
+  #
+  # The difference is BatchNorm. `_apply_train_mode` keys the encoder's
+  # train/eval mode on `freeze_audio_encoder`, so flipping it to false puts
+  # Granite's 16 BatchNorm1d modules into TRAIN mode for the whole run: they
+  # normalise with per-utterance batch statistics and overwrite IBM's running
+  # statistics as they go. That is the same failure mode that scored 37.44% on
+  # Earnings22 against 12.27% -- see granite_qwen_top4.yaml's header -- reached
+  # by a different door. Frozen BN statistics are standard practice when
+  # fine-tuning a pretrained encoder, gradients still reach the conv weights
+  # and BN's own affine parameters through an eval-mode BN, and the running
+  # stats stay byte-identical to base so the partial-unfreeze checkpoint's
+  # parameters-only save round-trips exactly.
+  #
+  # granite_qwen_encoder.yaml and granite_qwen_lora.yaml use
+  # `freeze_audio_encoder: false`. Neither has finished a run. If either is
+  # revived, change it there too before reading its eval.
+  freeze_audio_encoder: true
+  encoder_trainable_top_layers: 16
+  # Unchanged from top4, and the reasoning survives the move to 16 blocks:
+  # `out`/`out_mid` are 33.57M params for 0.27% of the selection's squared
+  # gradient (RMS/param 1.14e-05 against 1.4-1.7e-04 in the blocks). They were
+  # not worth 23% of a top-4 budget and they are not worth 7% of this one.
+  # `input_linear` stays frozen either way -- it is the feature front-end, and
+  # Ultravox's conv/embed front-end moved 0.17% against its blocks' 35.9%,
+  # which is the same verdict from the reference model.
+  encoder_trainable_post_projections: false
+
+  learning_rate: 1e-3
+  # Unchanged at 1e-4, and this is a POSITIVE finding rather than an untouched
+  # default. The top4 adapter had saturated -- 16.16% of base weight norm at
+  # step 14000, 17.00% at 18000, 17.16% at 20000 -- and was oscillating rather
+  # than still climbing: cos(seg, prev_seg) ran -0.09 to -0.17 from step 10000
+  # on, cos(seg, accumulated) likewise negative, and it travelled 123 units of
+  # path to net 50 units of displacement. Raising this would buy more churn.
+  #
+  # Nor is it starved. Normalised against the WHOLE decoder weight norm so the
+  # number is comparable across architectures, ibm-granite/granite-speech-3.3-2b
+  # -- the closest published analogue, also frozen-base + LoRA on a 2B-class
+  # decoder -- lands at 25.96% against top4's 16.97%. Same order, ours the
+  # conservative side. Leave it.
+  decoder_learning_rate: 1e-4
+  # 1e-5 -> 1e-4. The single substantive change in this file, and the value
+  # granite_qwen_encoder.yaml independently arrived at. Still 5x under
+  # Canary-Qwen's 5e-4.
+  #
+  # Extrapolating the top4 measurement: 0.954% drift at 20000 steps. Even if
+  # drift scaled LINEARLY with LR -- the pessimistic case -- 10x lands near
+  # 9.5%, under Ultravox's 35.9% by 3.8x. It will not scale linearly: the
+  # trajectory is diffusive, which puts the scaling closer to sqrt(lr), and 16
+  # blocks rather than 4 spreads the same adaptation over 4x the parameters.
+  # The realistic landing zone is 3-10% block drift.
+  #
+  # WHAT TO CHECK AT THE FIRST EVAL. Drift is cheap to measure and is the
+  # tripwire: diff `audio_tower.*` against the base checkpoint at step 2000. If
+  # it is already past ~8%, the encoder is being rewritten rather than adapted
+  # and the eval will show it -- fall back to 3e-5. If it is under ~1%, this
+  # change did nothing and the problem is elsewhere.
+  encoder_learning_rate: 1e-4
+
+  label_smoothing_factor: 0.0
+  weight_decay: 0.01
+  projector_weight_decay: 0.01
+  # 0.0, not 0.01. top4's encoder did not fail to learn because 4 blocks was
+  # too few -- it reached a weight-decay equilibrium radius and stopped.
+  # Evidence: drift ran 0.366% -> 0.954% over 2k->20k steps and gained 0.012pp
+  # in the last 2,000 (measured independently today against the base IBM
+  # weights: 0.9959%). A free random walk grows as sqrt(t), i.e. 3.16x over a
+  # 10x step increase; observed growth was 2.61x -- SUB-diffusive, which is the
+  # signature of a restoring force, not of slow learning. The arithmetic fits:
+  # decoupled AdamW shrinks by lr*wd = 1e-5 * 0.01 = 1e-7 per step, ~0.2% pull
+  # toward the origin over 20k steps against 0.95% of observed displacement.
+  # Raising encoder lr to 1e-4 without removing the restoring force just moves
+  # the equilibrium radius (~sqrt(lr/wd), so ~3x) and buys another, larger
+  # random walk. Canary-Qwen runs wd=0.001 across every group.
+  encoder_weight_decay: 0.0
+
+  warmup_steps: 700
+  lr_scheduler_type: cosine_with_min_lr
+  lr_scheduler_kwargs:
+    min_lr_rate: 0.05
+  # Kept at 2.5 despite being very nearly inert on the control -- post-warmup,
+  # 1 of 417 logged steps exceeded it, median 0.467, p90 0.657. It is retained
+  # precisely BECAUSE the encoder LR went up 10x on 4x the parameters, which is
+  # the condition under which it might start engaging. If the post-warmup
+  # median climbs past ~1.5 or the clip fires on more than a few percent of
+  # steps, that is the encoder LR being too hot, not a reason to raise the cap.
+  max_grad_norm: 2.5
+
+  seed: 44
+  auto_find_batch_size: false
+  # 32 x 3 = 96, matching top4's effective batch exactly so the comparison is
+  # controlled. The per-device drop is forced: top4 peaked at 60.6 GiB of 79.25
+  # at 48 x 2 with 4 blocks retaining activation tape, and unfreezing all 16
+  # retains roughly 4x that increment (+5.2 GiB observed over the frozen
+  # baseline for 4 blocks, so ~+21 GiB for 16), which OOMs at 48.
+  # granite_qwen_encoder.yaml reached the same 32 x 3 from the same arithmetic
+  # and its estimate is inherited here rather than re-derived -- unlike top4's
+  # 48 x 2, this number has NOT been measured on a real run. Watch the first
+  # few hundred steps.
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 3
+
+  num_train_epochs: 1
+  save_steps: 2000
+  eval_steps: 2000
+
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 8
+  torch_compile: false
+
+  # SUCCESS CRITERIA.
+  #   Beat granite_qwen_top4 on BOTH of its step-2000 markers -- 11.95%
+  #   Earnings22 and eval/loss 0.42095 -- and then on the full-run numbers.
+  #   top4's completed reference points, measured on run jscyrgkt: eval/loss
+  #   0.36399 at step 20000, still descending at 73% of the epoch, with the
+  #   train/eval gap flat at 0.20.
+  #
+  #   CAVEAT ON THE EARNINGS22 MARKER: that eval is contaminated (train/test
+  #   share calls) and Earnings22 was removed from the training mix on
+  #   2026-09-18, so it is usable as a same-harness A/B against top4 and NOT as
+  #   an external baseline. Score the pooled set for anything else.
+  # Floor remains the frozen-encoder CTC baseline, 7.56 pooled.

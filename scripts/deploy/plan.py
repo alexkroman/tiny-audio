@@ -30,7 +30,49 @@ DTYPE_BYTES = {"float32": 4, "float16": 2, "bfloat16": 2}
 OPTIMIZER_STATES = 2
 # Headroom for fragmentation, cuBLAS workspaces, NCCL buffers and the CUDA
 # context. 1.25 is deliberately modest; raise it if runs OOM near the estimate.
+# NOTE: this used to be doing double duty, silently absorbing part of the
+# activation undercount described at ACTIVATION_CALIBRATION below. Now that the
+# activation term is calibrated against a real run, this is pure safety margin
+# again.
 OVERHEAD_FACTOR = 1.25
+# The analytical per-layer activation formula further down is a FLOOR, not an
+# estimate, and this reconciles it with reality.
+#
+# Measured, from the completed granite_qwen run on an H100 80GB (recorded in
+# configs/experiments/granite_qwen.yaml): per_device=32 sat at ~41.4 of the
+# 79.6 GiB nvidia-smi reports, against ~5.6 GiB of static for that recipe, so
+#     (41.4 - 5.6) / 32          = 1.12 GiB of activation tape per sample
+#     1.12 GiB / (320 tok * 24 layers) = 156,587 bytes / token / layer
+# The formula below yields 2 * (6*2048 + 3*6144) = 61,440 for the same model.
+#     156,587 / 61,440 = 2.55
+#
+# Where the missing 2.55x comes from, in rough order of size:
+#   - Qwen3.5 is HYBRID. 18 of its 24 layers are `linear_attention` (gated
+#     delta rule + causal depthwise conv), whose retained state is nothing
+#     like the `6*hidden + 3*inter` a standard transformer block implies.
+#     The formula has no notion of layer_types at all.
+#   - SwiGLU keeps the gate*up elementwise product, a fourth `inter` tensor.
+#   - Two RMSNorms per layer each save their input.
+#   - LoRA runs add an r-sized activation per targeted linear (186 of them at
+#     r=64 for granite_qwen_lora) -- real but only ~0.6% of the gap.
+#
+# Derived from ONE measurement on ONE recipe, so treat it as calibration, not
+# theory. It is conservative for a dense decoder (granite_gemma), which has no
+# gated-delta-net state -- over-provisioning there is the cheap direction.
+# Re-derive if a run's observed peak diverges: the inputs are all in the
+# wandb system metrics plus the static breakdown this script prints.
+ACTIVATION_CALIBRATION = 2.55
+# DataCollator._MAX_AUDIO_SECONDS -- every batch pads to its own longest row
+# and multiasr puts enough mass near the ceiling that the worst case is the
+# one to plan for.
+MAX_AUDIO_SECONDS = 19.0
+# Frames per second entering the encoder's block stack, before
+# `encoder_conv_layers` subsampling. Granite's feature extractor emits 100 Hz
+# log-mels and stacks adjacent pairs (its input dim is 160 = 80 mels x 2), so
+# the stack runs at 50 Hz. Whisper-family encoders are also 50 Hz after their
+# stride-2 conv front end, so this holds for both encoders this repo uses.
+ENCODER_FRAME_RATE_HZ = 50.0
+
 # Rough size of the installed python env + apt packages on the pod.
 ENV_DISK_GIB = 12.0
 # datasets keeps two persistent copies of every source, and neither is cleaned
@@ -73,12 +115,38 @@ class Plan:
     disk: dict[str, float] = field(default_factory=dict)
 
 
-def _safetensors_params(repo_id: str) -> tuple[int, str]:
-    """Exact parameter count from the safetensors header (no weight download)."""
+def _safetensors_params(repo_id: str, exclude_prefixes: tuple[str, ...] = ()) -> tuple[int, str]:
+    """Exact parameter count from the safetensors header (no weight download).
+
+    `exclude_prefixes` drops towers that live in the checkpoint but that the
+    loader never instantiates. Pass `_NON_LM_TOWER_PREFIXES` for a decoder:
+    `meta.parameter_count` is a whole-repo total, so without it Qwen3.5-2B is
+    charged 2.2741B where AutoModelForCausalLM builds 1.8818B -- the 0.3314B
+    `visual.` tower and the 0.0608B `mtp.` head are counted but never loaded.
+    That 0.3922B overstatement propagated into weights, gradients and
+    optimizer state, i.e. it was charged four times over.
+
+    Do NOT pass it for an audio encoder: `audio_tower.` is one of the
+    prefixes, and for a checkpoint that IS the audio tower that would zero out
+    the thing being measured.
+    """
     from huggingface_hub import get_safetensors_metadata
 
     meta = get_safetensors_metadata(repo_id)
-    counts = meta.parameter_count
+    if not exclude_prefixes:
+        counts = meta.parameter_count
+    else:
+        # parameter_count is pre-aggregated by dtype, so filtering by name
+        # means re-deriving it from the per-tensor headers.
+        counts: dict[str, int] = {}
+        for f in meta.files_metadata.values():
+            for name, info in f.tensors.items():
+                if any(name.startswith(p) or f".{p}" in name for p in exclude_prefixes):
+                    continue
+                numel = 1
+                for dim in info.shape:
+                    numel *= dim
+                counts[info.dtype] = counts.get(info.dtype, 0) + numel
     # Ignore integer buffers (rotary caches, position ids); they aren't params.
     total = sum(n for dtype, n in counts.items() if not dtype.startswith("I"))
     dominant = max(counts.items(), key=lambda kv: kv[1])[0] if counts else "?"
@@ -86,9 +154,14 @@ def _safetensors_params(repo_id: str) -> tuple[int, str]:
 
 
 # Towers that live in a multimodal checkpoint but that AutoModelForCausalLM
-# does not load, so LoRA never sees them. Qwen3.5-2B ships an `mtp.` multi-
-# token-prediction head; counting it added a phantom 25th layer and overstated
-# a rank-64 estimate by 2.55M.
+# does not load, so neither LoRA nor the memory model ever sees them.
+# Qwen3.5-2B ships an `mtp.` multi-token-prediction head (0.0608B) beside a
+# `visual.` tower (0.3314B); counting the former added a phantom 25th layer
+# and overstated a rank-64 estimate by 2.55M, and counting both overstated the
+# decoder's parameter count by 0.3922B.
+#
+# Applies to the DECODER only -- `audio_tower.` is in the list, so filtering an
+# audio-encoder repo with it would discard the encoder itself.
 _NON_LM_TOWER_PREFIXES = ("mtp.", "visual.", "audio_tower.", "vision_tower.")
 
 
@@ -210,19 +283,45 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
 
     # ---- encoder -----------------------------------------------------------
     enc_params, enc_dtype = _safetensors_params(audio_id)
-    enc_trainable = not train.get("freeze_audio_encoder", True)
+    enc_cfg_probe = AutoConfig.from_pretrained(audio_id)
+    enc_probe_inner = getattr(enc_cfg_probe, "encoder_config", None) or enc_cfg_probe
+    enc_depth = int(getattr(enc_probe_inner, "num_hidden_layers", 0) or 0)
+    enc_top_n = int(train.get("encoder_trainable_top_layers", 0) or 0)
+    enc_frozen_flag = bool(train.get("freeze_audio_encoder", True))
+
+    # A partial unfreeze is trainable too. `freeze_audio_encoder: true` PLUS
+    # `encoder_trainable_top_layers: N` is the documented idiom, so reading the
+    # flag alone reported 109.76M of trainable encoder as frozen and dropped
+    # its gradients and AdamW state (~1.3 GiB) from the estimate entirely.
+    # Split it the way the decoder's frozen vocabulary table is split.
+    if not enc_frozen_flag:
+        enc_trainable_params = enc_params
+    elif enc_top_n and enc_depth:
+        # Pro-rata by block. Approximate -- it charges the pre/post-stack
+        # projections at the same rate as a block, so for Granite's top-4 it
+        # says 118.2M against an actual 109.76M. Errs high, which is the safe
+        # direction for sizing a card.
+        enc_trainable_params = int(enc_params * min(enc_top_n, enc_depth) / enc_depth)
+    else:
+        enc_trainable_params = 0
+
     plan.components.append(
         Component(
             f"encoder ({audio_id})",
-            enc_params,
+            enc_params - enc_trainable_params,
             _repo_weight_bytes(audio_id),
-            enc_trainable,
+            False,
             f"checkpoint {enc_dtype}",
         )
     )
+    if enc_trainable_params:
+        label = "all blocks" if not enc_frozen_flag else f"top {enc_top_n} of {enc_depth} blocks"
+        plan.components.append(
+            Component(f"  encoder trainable ({label})", enc_trainable_params, 0, True, "")
+        )
 
     # ---- decoder -----------------------------------------------------------
-    dec_params, dec_dtype = _safetensors_params(text_id)
+    dec_params, dec_dtype = _safetensors_params(text_id, _NON_LM_TOWER_PREFIXES)
     dec_trainable = not train.get("freeze_language_model", True)
     dec_cfg = AutoConfig.from_pretrained(text_id)
     text_cfg = dec_cfg.get_text_config() if hasattr(dec_cfg, "get_text_config") else dec_cfg
@@ -339,28 +438,115 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     vocab = int(getattr(text_cfg, "vocab_size", 0) or 0)
     ckpt = bool(train.get("gradient_checkpointing", False))
 
+    # ACTIVATIONS ARE AUTOCAST'S DTYPE, NOT THE MASTER WEIGHTS'. Under
+    # `bf16: true` every matmul emits bf16, so the tape is 2 B/element even
+    # when model_dtype is float32. Charging it at `bytes_per` doubled the term
+    # on every fp32-master recipe, and it also silently contradicted
+    # ACTIVATION_CALIBRATION, which was fitted against a formula written as
+    # `2 * (6*hidden + 3*inter)` -- a hardcoded 2 -- on granite_qwen, itself a
+    # model_dtype: float32 run. Fit and use disagreed by exactly 2x, which is
+    # why this predicted 101.87 GiB for a run that completed on an 80 GB card
+    # and recommended an H200 for granite_qwen_full at ~76% of an H100.
+    act_bytes_per = 2 if (train.get("bf16") or train.get("fp16")) else bytes_per
+
     # Per token per layer: attention q/k/v/o + residual (~6*hidden) and the
     # MLP's gate/up/down (~3*intermediate). Coarse but the right order.
-    per_tok_layer = bytes_per * (6 * (llm_dim or 0) + 3 * inter)
+    # Scaled by ACTIVATION_CALIBRATION -- see its definition; unscaled this
+    # term is 2.55x under what the granite_qwen run actually used, which is
+    # enough to recommend a 48 GB card for a job that needs ~42 GiB.
+    per_tok_layer = act_bytes_per * (6 * (llm_dim or 0) + 3 * inter) * ACTIVATION_CALIBRATION
     if ckpt:
         # Only layer boundaries are kept; one layer is recomputed at a time.
+        # The boundary term is a plain hidden-sized tensor per layer and is
+        # NOT subject to the calibration, which corrects the within-layer
+        # tape; only the single recomputed layer carries that.
         acts = (
-            batch * seq_len * (llm_dim or 0) * layers * bytes_per + batch * seq_len * per_tok_layer
+            batch * seq_len * (llm_dim or 0) * layers * act_bytes_per
+            + batch * seq_len * per_tok_layer
         )
     else:
         acts = batch * seq_len * layers * per_tok_layer
 
+    # Encoder activation tape. Zero while the encoder is frozen -- ASRModel.forward
+    # runs it under no_grad, so nothing is retained -- and a large term the moment
+    # it is not. Missing this is what made granite_qwen_lora plan at 67.94 GiB and
+    # then OOM at 79.16 on an 80 GB card: only the static side (+6 GiB) was
+    # counted, and the tape is bigger than the static.
+    #
+    # Granite's 16 conformer blocks run at the post-subsampling rate, so the
+    # sequence length here is the ENCODER's, not the decoder's: 19s of audio is
+    # ~950 frames at the stacked-mel rate, and encoder_conv_layers halves twice
+    # to ~237. Per token per block the tape is dominated by the two half-step
+    # feed-forwards (2 x 2 x ff_expansion x d), attention q/k/v/o (4d) plus its
+    # score matrix, and the conv module -- the same shape as the decoder term,
+    # so it reuses the same empirical calibration.
+    # Fraction of the block stack that keeps its tape. Autograd retains
+    # activations only from the first trainable parameter onward, and the
+    # projector sits AFTER the encoder, so a top-N unfreeze retains the top N
+    # blocks and nothing below them. Gating on `freeze_audio_encoder` alone
+    # reported zero for the partial case; measured peaks say otherwise --
+    # frozen 55.4 GiB, top-4 60.6, full ~79.4 at batch 48, and 4/16 of the
+    # full increment is 6.0 GiB against an observed 5.2.
+    enc_layers = int(getattr(enc_inner, "num_hidden_layers", 0) or 0)
+    if not bool(train.get("freeze_audio_encoder", True)):
+        trainable_blocks = enc_layers
+    else:
+        top_n = int(train.get("encoder_trainable_top_layers", 0) or 0)
+        trainable_blocks = min(top_n, enc_layers)
+
+    enc_acts = 0
+    if trainable_blocks and encoder_dim:
+        enc_layers = trainable_blocks
+        # The encoder's sequence is its own, NOT the decoder's `seq_len`: it is
+        # acoustic frames, and there are far more of them than there are text
+        # tokens. DataCollator caps audio at 19s and Granite's extractor stacks
+        # mel pairs to 50 Hz, so ~950 frames enter the block stack and
+        # encoder_conv_layers halves twice to ~237. Using seq_len here instead
+        # gave 82 and undercounted the tape ~3x.
+        enc_seq = int(MAX_AUDIO_SECONDS * ENCODER_FRAME_RATE_HZ)
+        for pad, kernel, stride in cfg.model.get("encoder_conv_layers") or []:
+            enc_seq = (enc_seq + 2 * pad - (kernel - 1) - 1) // stride + 1
+        if enc_layers:
+            per_tok_enc = (
+                act_bytes_per * (6 * encoder_dim + 3 * 4 * encoder_dim) * ACTIVATION_CALIBRATION
+            )
+            enc_acts = batch * enc_seq * enc_layers * per_tok_enc
+            if ckpt:
+                enc_acts = batch * enc_seq * encoder_dim * enc_layers * act_bytes_per + (
+                    batch * enc_seq * per_tok_enc
+                )
+    acts += enc_acts
+
     # Cross-entropy. liger fuses lm_head+softmax+CE into O(B*T*D); without it
     # the (B, T, V) fp32 logits plus a log_softmax copy dominate everything.
+    #
+    # What makes `use_liger` a sufficient condition is ASRModel.forward
+    # requesting `skip_logits=True` on every labelled forward. Leaning on
+    # liger's own default instead is what made this term wrong once already:
+    # that default reads the DECODER's `training` flag, which is False
+    # whenever the decoder is frozen, so granite_qwen_lora planned at 60.10
+    # GiB and then OOMed on a 12.37 GiB logits gradient. The term is still
+    # optimistic if liger has no patcher for the architecture -- train.py
+    # warns in that case, and so does ASRModel.__init__.
     fused = bool(train.get("use_liger", True))
     logits = 0 if fused else batch * seq_len * vocab * 4 * 2
 
-    subtotal = weights + grads + optim + acts + logits
+    # Autocast's bf16 copy of every fp32 weight. torch.autocast caches its
+    # casts for the lifetime of the autocast region, and that region ends when
+    # the FORWARD ends -- exactly when the activation tape is at its maximum,
+    # so this stacks onto the peak rather than the trough. Zero when the master
+    # weights are already 2 bytes (nothing to cast) or when autocast is off.
+    # Worth 4.41 GiB on granite_qwen_full, and it was simply missing here.
+    autocast_cache = total_params * 2 if (act_bytes_per == 2 and bytes_per != 2) else 0
+
+    subtotal = weights + grads + optim + acts + logits + autocast_cache
     plan.vram = {
         "weights": weights / GIB,
         "gradients": grads / GIB,
         "optimizer (AdamW x2)": optim / GIB,
         "activations (est.)": acts / GIB,
+        "  of which encoder": enc_acts / GIB,
+        "autocast bf16 weight cache": autocast_cache / GIB,
         "cross-entropy": logits / GIB,
         "subtotal": subtotal / GIB,
         "recommended (x1.25)": subtotal * OVERHEAD_FACTOR / GIB,
@@ -376,11 +562,11 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # sizing, but a silently inflated figure invites renting the wrong GPU.
     if dec_trainable:
         plan.warnings.append(
-            "Trainable-parameter count is an upper bound: it includes any "
-            "multimodal tower in the checkpoint that ASRModel discards "
-            "(~476M on gemma-4-E2B-it), and charges trainable weights and "
-            "gradients at projector_dtype even though the decoder trains at "
-            "model_dtype. Expect real usage below the figure above."
+            "Trainable-parameter count is an upper bound: it charges trainable "
+            "weights and gradients at projector_dtype even though the decoder "
+            "trains at model_dtype. Expect real usage at or below the figure "
+            "above. (Multimodal towers the loader discards -- visual./mtp./"
+            "audio_tower. -- are no longer counted; see _NON_LM_TOWER_PREFIXES.)"
         )
 
     if not dec_trainable and trainable_params and not ckpt:
@@ -435,7 +621,11 @@ def _fmt(n: float) -> str:
 
 def plan_command(
     experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
-    seq_len: int = typer.Option(512, "--seq-len", help="Assumed tokens per sample"),
+    seq_len: int = typer.Option(
+        320,
+        "--seq-len",
+        help="Assumed tokens per sample. Default 320 is the measured granite_qwen sequence: 237 audio tokens at the 19s collator ceiling, plus prompt and transcript. Raise it for recipes with a longer window -- the activation term is linear in this.",
+    ),
     gpu: str | None = typer.Option(
         None,
         "--gpu",
@@ -751,7 +941,7 @@ def _datacenters_for_gpu(
 
 def provision_command(
     experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
-    seq_len: int = typer.Option(512, "--seq-len"),
+    seq_len: int = typer.Option(320, "--seq-len"),
     name: str | None = typer.Option(
         None, "--name", help="Pod name (default tiny-audio-<experiment>)"
     ),

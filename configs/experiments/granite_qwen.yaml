@@ -81,6 +81,15 @@ model:
   # The fp32/FA2 startup-warning argument from the joint revision no longer
   # applies (model_dtype is bfloat16 below), but the FLOP argument alone is
   # sufficient and it is the load-bearing one.
+  # NOTE: setting this under `model:` alone is INERT. `attn_implementation` is
+  # the first entry in scripts/train.py's TRAINING_MODEL_PARAMS, and the merge
+  # at train.py:1314 copies every one of those names from `cfg.training` over
+  # `cfg.model` whenever the training value is non-None. production.yaml sets
+  # flash_attention_2, so this line was silently overridden for the entire
+  # first run -- the shipped checkpoint's config.json reads
+  # "attn_implementation": "flash_attention_2". The override below in the
+  # `training:` block is the one that actually takes effect; both are kept in
+  # sync, and train.py now warns when they disagree.
   attn_implementation: sdpa
 
   # Granite's feature extractor stacks mel pairs (100 Hz -> 50 Hz, 320-dim) and
@@ -190,6 +199,13 @@ model:
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-granite-qwen"
+
+  # The effective attention setting -- see the long argument under
+  # `model.attn_implementation` above. This block wins the TRAINING_MODEL_PARAMS
+  # merge, so overriding production.yaml's flash_attention_2 has to happen here.
+  # It also drops this experiment's reliance on the flash-attn source build,
+  # which the repo documents as routinely failing on RunPod images.
+  attn_implementation: sdpa
 
   # Joint: projector and decoder both train from step 0, matching
   # production.yaml rather than granite_gemma's projector-only recipe.
@@ -332,21 +348,21 @@ training:
   # by ~15%. 2.5 sits just above the observed p99 while still catching genuine
   # blow-up spikes.
   #
-  # The joint recipe's second clipping concern is back, and it is the one to
-  # watch on this run. Global-norm clipping runs over ALL parameters at once,
-  # so while the fresh projector's ||grad|| sits near 9 it dominates the global
-  # norm and any clip scales the decoder's update down with it -- the
-  # "spill-over" effect AGGC (arXiv 2601.11864) describes. The decoder pays for
-  # the projector's initialization transient.
+  # The joint recipe's second clipping concern -- that global-norm clipping
+  # makes the decoder pay for the fresh projector's initialization transient,
+  # the "spill-over" effect AGGC (arXiv 2601.11864) describes -- was measured
+  # on the full 32,909-step run and does not occur here. Per-group grad norms
+  # logged over that run put the projector at 0.13% of ||g||^2 post-warmup
+  # (max 0.46%, median ||grad_proj|| 0.035 against ||grad_dec|| 1.00), so the
+  # decoder IS the global norm and clipping cannot scale it down on the
+  # projector's behalf. warmup_steps: 700 covers the transient that made the
+  # question worth asking. Do not re-add per-group grad-norm logging to
+  # re-check this; the instrumentation was removed once it answered.
   #
-  # warmup_steps: 700 covers most of it (the projector's noise->signal
-  # transition completed at step 488 in stage_1, and ||grad_proj|| settles to
-  # 0.4-0.6 after), so the exposure is bounded. If early decoder drift looks
-  # suppressed, the fix is a shorter clip on the projector group rather than a
-  # looser global one.
-  #
-  # Still uncalibrated for this exact pairing: read grad_norm over the first
-  # ~500 steps and tighten toward the observed median if it sits low.
+  # 2.5 is also calibrated for this pairing now rather than inherited:
+  # post-warmup grad_norm ran median 1.01, p95 1.84, max 67.9 (a single
+  # warmup-era spike), and the cap bound on 16 of 659 logged steps, all of
+  # them inside warmup. It is doing exactly the job it is meant to.
   max_grad_norm: 2.5
 
   seed: 44

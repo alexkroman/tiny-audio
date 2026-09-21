@@ -5,7 +5,8 @@ Beyond the regex check (probe_label_regex.py), this looks at:
   - audio decode failures / NaN / Inf
   - audio multi-channel rate (squashed via mean — silent data loss
     indicator if a dataset ships stereo by default)
-  - duration distribution + DataCollator filter loss (<0.8s, >30s)
+  - duration distribution + DataCollator filter loss (thresholds are
+    imported from DataCollator, currently <0.8s / >19.0s)
   - label length distribution (chars, words)
   - words-per-second ratio (label/audio-drift detector — extreme
     values suggest misaligned segments)
@@ -32,12 +33,18 @@ import numpy as np
 import typer
 from datasets import Audio, load_dataset
 
-from scripts.train import _normalize_label
+from scripts.train import DataCollator, _normalize_label
 from scripts.utils import load_data_config
 
 SAMPLE_RATE = 16_000
-MIN_AUDIO_S = 0.8
-MAX_AUDIO_S = 30.0
+# Imported, not restated. This file's docstring promised filter loss against
+# "(<0.8s, >30s)" while DataCollator has enforced 19.0s since 94d59598
+# (2026-09-17), so the one tool meant to audit collator loss reported against a
+# cap the trainer had not used for four months -- which is how LibriHeavy's
+# real 19.6% loss (documented as ~3%) went unnoticed. Bind to the source of
+# truth so the two cannot drift again.
+MIN_AUDIO_S = DataCollator._MIN_AUDIO_SECONDS
+MAX_AUDIO_S = DataCollator._MAX_AUDIO_SECONDS
 
 # Character-class predicates
 CJK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯]")

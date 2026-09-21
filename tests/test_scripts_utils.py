@@ -82,6 +82,63 @@ class TestParseResultsFile:
         assert len(samples) == 1
         assert samples[0]["wer"] == 100.0
 
+    def test_empty_prediction_is_kept(self, tmp_path: Path):
+        """A model that transcribed nothing is a 100%-deletion row, not a parse error.
+
+        Dropping it silently flattered every model that ever returned an
+        empty transcript -- 17,074 rows across outputs/ when this was found.
+        """
+        results_file = tmp_path / "results.txt"
+        results_file.write_text(
+            "Sample 1 - WER: 100.00%\nGround Truth: hello world\nPrediction: \n" + "-" * 80
+        )
+
+        samples = parse_results_file(results_file)
+
+        assert len(samples) == 1
+        assert samples[0]["ground_truth"] == "hello world"
+        assert samples[0]["prediction"] == ""
+        assert samples[0]["wer"] == 100.0
+
+    def test_empty_prediction_with_no_trailing_space_is_kept(self, tmp_path: Path):
+        results_file = tmp_path / "results.txt"
+        results_file.write_text(
+            "Sample 1 - WER: 100.00%\nGround Truth: hello\nPrediction:\n" + "-" * 80
+        )
+
+        samples = parse_results_file(results_file)
+
+        assert len(samples) == 1
+        assert samples[0]["prediction"] == ""
+
+    def test_empty_raw_lines_are_empty_not_missing(self, tmp_path: Path):
+        """An empty raw value must read as "" -- `None` means the line is absent."""
+        results_file = tmp_path / "results.txt"
+        results_file.write_text(
+            "Sample 1 - WER: 100.00%\n"
+            "Ground Truth: hello\n"
+            "Prediction: \n"
+            "Ground Truth Raw: Hello.\n"
+            "Prediction Raw: \n" + "-" * 80
+        )
+
+        samples = parse_results_file(results_file)
+
+        assert samples[0]["ground_truth_raw"] == "Hello."
+        assert samples[0]["prediction_raw"] == ""
+
+    def test_missing_raw_lines_stay_none(self, tmp_path: Path):
+        """Pre-raw-transcript runs must still be distinguishable from empty ones."""
+        results_file = tmp_path / "results.txt"
+        results_file.write_text(
+            "Sample 1 - WER: 0.00%\nGround Truth: hello\nPrediction: hello\n" + "-" * 80
+        )
+
+        samples = parse_results_file(results_file)
+
+        assert samples[0]["ground_truth_raw"] is None
+        assert samples[0]["prediction_raw"] is None
+
 
 class TestFindModelDirs:
     """Tests for find_model_dirs function."""

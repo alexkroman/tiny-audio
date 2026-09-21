@@ -136,6 +136,21 @@ tf32: true
 torch_compile: false
 attn_implementation: flash_attention_2
 
+# Load-bearing, and NOT the same knob as the decoder's training-time cache.
+# transformers' Trainer.__init__ does
+#     self.model.config.use_cache = self.args.use_cache
+# with TrainingArguments.use_cache defaulting to False, and for ASRModel
+# `model.config` IS the ASRConfig. Trainer.__init__ runs AFTER scripts/train.py
+# clears use_cache, so without this line the default re-stamps
+# `use_cache: false` onto every checkpoint and every model pushed to the Hub --
+# exactly the regression train.py's own comment says it fixed. The reload path
+# then decodes with no KV cache, i.e. quadratic.
+#
+# Setting it True here does not re-enable the cache during training: the
+# training forward is governed by model.language_model.config.use_cache, which
+# Trainer never touches, and ASRModel.forward passes use_cache explicitly.
+use_cache: true
+
 # Data loading. EPYC 9355 has 32 cores / 64 threads; 16 workers + prefetch 8
 # keep up with batch_size=100 (ftfy + truecase label normalization is the
 # dominant per-row cost) while leaving cores for the main process, GPU sync,

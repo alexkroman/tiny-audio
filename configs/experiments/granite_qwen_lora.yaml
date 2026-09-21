@@ -3,10 +3,25 @@
 #
 #   ibm-granite/granite-speech-5.0-470m-turboctc  (FROZEN)
 #     -> MLP projector (fresh init, 12.6M, lr 1e-3)
-#     -> Qwen/Qwen3.5-2B, base weights FROZEN + LoRA all-linear r=64 (67.3M, lr 2e-4)
+#     -> Qwen/Qwen3.5-2B, base weights FROZEN + LoRA all-linear r=64 (67.3M, lr 1e-4)
 #
-# Trainable drops 1.3859B -> 0.0799B (5.8%). Everything else is held at the
-# granite_qwen values so the comparison is single-variable.
+# Trainable drops 1.3859B -> 0.0799B (5.8%).
+#
+# THE CONTROL. This is the only recipe here that holds the encoder frozen, and
+# it is the one that answers the question the file was built for: does LoRA
+# match full fine-tuning on the decoder? granite_qwen_top4 and
+# granite_qwen_encoder both train the encoder, so neither can. An earlier
+# revision briefly turned this file into a third encoder-training arm, which
+# left the matrix with no control at all.
+#
+# NOT single-variable against granite_qwen, despite what this header used to
+# claim -- measured, not assumed. Beyond LoRA the two differ in data mix
+# (#80 dropped earnings22 and peoples:clean_sa, so granite_qwen's 6.48%
+# Earnings22 is scored on calls it trained on and is NOT comparable),
+# model_dtype (bf16 vs fp32), attn_implementation (sdpa vs the
+# flash_attention_2 that silently won granite_qwen's TRAINING_MODEL_PARAMS
+# merge), batch shape, and projector_weight_decay. Compare on the ten
+# uncontaminated datasets and treat the rest as confounded.
 #
 #   poetry run python scripts/train.py +experiments=granite_qwen_lora
 #
@@ -84,11 +99,19 @@ model:
   # Left as `auto` for this run anyway, deliberately:
   #   - It is not a regression. The same drift happened under the previous
   #     recipe, so keeping it holds the comparison single-variable.
-  #   - The fix is not obvious. A trailing weightless RMSNorm times the fixed
-  #     scale would pin it every forward (Gemma3n does exactly this in
-  #     Gemma3nMultimodalEmbedder), but the author built `_maybe_probe_scale_
-  #     gradient` precisely to test whether the loss WANTS the hot scale, and
-  #     its sign is wandb-only. Check `scale_grad` before "fixing" this.
+  #   - The obvious fix was tried and is WRONG. A trailing weightless RMSNorm
+  #     times the fixed scale (Gemma3n does this in
+  #     Gemma3nMultimodalEmbedder) pins the scale perfectly -- and collapses
+  #     training: step-300 loss 3.166 against 0.319 for the same recipe
+  #     without it. It pins every TOKEN to one magnitude, not the aggregate,
+  #     and the per-token spread it deletes is real signal (CV 0.373,
+  #     p95/p5 3.67x). See MLPAudioProjector's docstring.
+  #   - The drift also has no measured cost: dL/d(log c) came back
+  #     +0.0005 +/- 0.0273 (|t| = 0.05), a line search was flat from 2x to 8x,
+  #     and the completed granite_qwen run reached ~48x while producing the
+  #     best WER on record here. If a brake is ever wanted, lower the
+  #     projector LR -- equilibrium ||W|| scales with lr -- rather than
+  #     clamping the output.
   #   - Note this run frets less about it than the last one: the decoder base
   #     is frozen, so the compensation that layers 0-2 were doing now has to
   #     come from LoRA instead. If the hot prefix is genuinely costly, this run
@@ -111,6 +134,14 @@ model:
   # decoder, and optimizer state over 80M params instead of 1.386B.
   model_dtype: bfloat16
   projector_dtype: float32
+  # No `encoder_dtype` here: the encoder is frozen, so it has no optimizer
+  # state and no update to round away, and fp32 would cost +0.95 GB for
+  # nothing. ANY recipe that unfreezes it MUST set `encoder_dtype: float32` --
+  # Granite's weights have RMS 0.0868 where one bf16 ULP is 4.88e-4, so Adam's
+  # step at 1e-5 is 49x below a single ULP. Measured: bfloat16 moved 3.4% of
+  # elements and retained 26.4% of the fp32 update norm, and the survivors are
+  # the smallest-magnitude weights, so no LR change corrects it. See
+  # granite_qwen_top4.yaml.
 
   use_lora: true
   # r=64 with alpha=128 (scale 2.0). Canary-Qwen uses r=128/alpha=256 on a
@@ -186,25 +217,108 @@ training:
   #     top 6 -> 198.21M (41.9%), each including `out`/`out_mid` and never
   #     `input_linear`.
   #
-  # To run the follow-up, set encoder_trainable_top_layers: 4 and
-  # encoder_learning_rate: 1e-5 (an order of magnitude under the projector).
-  # The selection is tested in tests/test_encoder_partial_unfreeze.py, which
-  # asserts on parameter identity and on autograd behaviour, not on a count.
+  # ENCODER FROZEN. That is this file's whole point -- it is the control that
+  # granite_qwen_top4 (top-4 blocks @ 1e-5) and granite_qwen_encoder (all 16 @
+  # 1e-4) are measured against.
+  #
+  # Both of those are worth running; the evidence for training the encoder is
+  # good (Ultravox ships audio_tower + projector and no LLM at all, its encoder
+  # 14.74% drifted from whisper-large-v3-turbo across all 32 layers; the frozen
+  # encoder's own CTC head already beats this full stack on 7 of 12 eval sets;
+  # per-block gradient profiling put 29% of the model's total ||g||^2 inside
+  # the frozen encoder, computed and discarded every step). But "train the
+  # encoder" and "does the decoder need full fine-tuning" are different
+  # questions, and this file asks the second one.
+  #
+  # No `encoder_learning_rate` either: there is no trainable encoder parameter
+  # for it to apply to, and ASRTrainer.create_optimizer builds its groups from
+  # requires_grad, so the group would simply be empty.
   freeze_audio_encoder: true
   encoder_trainable_top_layers: 0
 
-  # Projector unchanged at 1e-3 (fresh init, same job as before). LoRA at 2e-4
-  # rather than the old 2e-5 full-FT decoder LR: LoRA's B matrix initialises to
-  # zero, so it needs a materially higher LR than pretrained weights being
-  # nudged. 1e-4 to 3e-4 is the standard band; 2e-4 sits mid-range. This is the
-  # one hyperparameter here with no measurement behind it -- read grad_norm and
-  # the LoRA-vs-base weight ratio over the first ~2k steps and adjust.
+  # Projector unchanged at 1e-3 (fresh init, same job as before). LoRA lowered
+  # from 2e-4 to 1e-4 -- the measurement this comment used to ask for has now
+  # been taken.
+  #
+  # ||dW||/||W|| of the adapter at step 2,000 (6.7% of the schedule), including
+  # peft's alpha/r = 2.0 scaling, against the completed full-FT run's drift:
+  #
+  #                  LoRA @2k (6.7%)   full-FT @32.9k (100%)
+  #   in_proj_b           35.86%              18.07%
+  #   k_proj              23.55%              16.23%
+  #   up_proj             22.40%              18.39%
+  #   gate_proj           21.60%              15.01%
+  #   q_proj              21.31%              13.62%
+  #   down_proj           19.73%              19.30%
+  #   ALL adapted         19.58%              13.31% (all 319 matrices)
+  #
+  # At 6.7% of training LoRA had already perturbed the decoder 1.47x more than
+  # the full fine-tune managed over an ENTIRE run, and on every matched module
+  # without exception -- with B initialised at zero, so still climbing. That
+  # contradicts the premise of this file: the point is to keep the decoder's
+  # formatting ability while paying less for it, and a perturbation larger than
+  # full-FT's is not the gentler intervention the parameter count suggests.
+  # Trainable params and perturbation size are independent knobs; cutting
+  # params 17x while raising the LR 10x moved them in opposite directions.
+  #
+  # 1e-4 is still inside the standard 1e-4..3e-4 LoRA band, at the low end
+  # where a preservation experiment belongs. Watch the ratio again at 2k: the
+  # target is to land near full-FT's 13.31% by the END of the run, not at 7%.
+  # Note in_proj_b is the worst offender and is the delta-net GATE, whose dW is
+  # rank-capped at 16 by its (16, 2048) shape -- the most destabilising place
+  # to put a large relative change.
+  # Must be set HERE, not only under `model:`. attn_implementation is the
+  # first entry in scripts/train.py's TRAINING_MODEL_PARAMS, and that merge
+  # copies every one of those names from `training:` over `model:`. With only
+  # the `model:` line, production.yaml's flash_attention_2 silently won and
+  # this experiment's sdpa choice never reached ASRConfig -- the same way it
+  # was overridden for the whole granite_qwen run. train.py now warns when the
+  # two disagree; keep them in sync.
+  #
+  # sdpa is still right on an A100: at T~320 the QK^T + AV work FA2 optimizes
+  # is a low single-digit fraction of decoder FLOPs (18 of 24 Qwen3.5 layers
+  # are linear_attention and never touch it), and it drops the flash-attn
+  # source build from the critical path.
+  attn_implementation: sdpa
+
   learning_rate: 1e-3
-  decoder_learning_rate: 2e-4
+  decoder_learning_rate: 1e-4
 
   label_smoothing_factor: 0.0
   weight_decay: 0.01
-  projector_weight_decay: 0.0
+  # Restored to granite_qwen's 0.01 from the 0.0 this file shipped with. The
+  # projector is the ONLY group where decoupled AdamW's decay does measurable
+  # work -- it shrinks by exp(-steps * lr * mean_lr_factor * wd), which over
+  # this schedule is 15.9% at lr 1e-3 against 0.34% for the decoder at 2e-5.
+  #
+  # The reason to want that brake is now measured rather than assumed. Probing
+  # the step-2000 checkpoint on real audio with a scalar knob `c` on the
+  # projector output:
+  #
+  #   dL/d(log c) at c=1, per batch:
+  #     +0.0278 +0.0057 +0.0262 -0.0188 +0.0052 -0.0430
+  #     mean +0.0005, sd 0.0273, |t| = 0.05
+  #
+  # i.e. the loss is statistically indifferent to the audio prefix's scale.
+  # A line search agrees: loss is 0.2394 / 0.2350 / 0.2622 at 3.81x / 7.62x /
+  # 15.24x embed RMS -- a flat basin roughly 2x-8x wide, turning sharply bad
+  # outside it (0.4756 at 30.5x).
+  #
+  # Zero gradient plus a flat basin means the output scale is a locally FREE
+  # parameter with no restoring force, which is exactly the condition under
+  # which Adam's weight-norm growth wanders: the per-parameter step is ~lr
+  # regardless of gradient, so linear_2 grows and drags the scale along. That
+  # is the 1x -> 48x drift the previous run logged, and it is a random walk up
+  # a flat valley floor rather than the loss expressing a preference. Weight
+  # decay is the only force opposing it, and since the loss is indifferent it
+  # costs nothing in loss terms.
+  #
+  # NOT a reason to pin the scale directly (a trailing weightless RMSNorm, as
+  # Gemma3nMultimodalEmbedder does). The same line search shows reverting to
+  # the 1.0x design target costs +0.0468 loss, ~20% relative, because the
+  # weights co-adapt to whatever scale they grew into. Control linear_2's norm
+  # growth, do not clamp its output.
+  projector_weight_decay: 0.01
   warmup_steps: 700
   lr_scheduler_type: cosine_with_min_lr
   lr_scheduler_kwargs:
@@ -213,14 +327,45 @@ training:
   seed: 44
 
   auto_find_batch_size: false
-  # Same effective batch as granite_qwen (32 x 3 = 96) so the projector LR
-  # transfers unchanged. Per-device can likely go higher -- optimizer state
-  # drops from 1.386B to 80M params and there is no fp32 master copy -- but
-  # raising it would change the effective batch and break the comparison.
-  # Measure the VRAM headroom on this run, spend it on epochs in the next.
-  per_device_train_batch_size: 32
-  per_device_eval_batch_size: 32
-  gradient_accumulation_steps: 3
+  # 48 x 2 = 96. Same EFFECTIVE batch as granite_qwen, so the projector LR
+  # transfers unchanged and the comparison holds -- but the per-device batch
+  # is maximised for the card instead of inherited from a recipe that had to
+  # carry fp32 master weights and 1.386B of optimizer state.
+  #
+  # 48 is the largest divisor of 96 that fits. Sized for an A100 80GB
+  # (79.15 GiB usable) with the calibrated estimator in scripts/deploy/plan.py:
+  #   32 x 3   42.17 GiB   53%
+  #   48 x 2   60.10 GiB   76%   <- here
+  #   96 x 1  ~113    GiB   over the card (activations are ~1.12 GiB/sample)
+  #
+  # 76% is not the edge, and the benchmark for that claim is empirical rather
+  # than a safety factor: granite_qwen itself ran 32 x 3 at ~65 GiB, 82% of an
+  # 80 GB card, for all 32,922 steps without OOM. This recipe asks for LESS
+  # than that run already survived on the same amount of VRAM. Note the
+  # planner's "recommended (x1.25)" line is margin stacked on top of an
+  # activation term that is already calibrated to a measured peak (nvidia-smi
+  # reserved, i.e. a high-water mark including allocator caching) -- reading
+  # that 75 GiB figure as the requirement double-counts conservatism.
+  #
+  # The win is throughput, not capacity: a third fewer micro-batches per
+  # optimizer step and larger GEMMs, which matters on an A100 (~1935 GB/s
+  # against an H100 SXM's ~3350) where this run is bandwidth-bound and already
+  # looking at ~4.5-5 days.
+  #
+  # Padding does not degrade at 48. granite_qwen.yaml's analysis applies: the
+  # collator pads each batch to its own longest row within an [0.8s, 19s]
+  # window, and multiasr puts enough mass near the ceiling that most 32-row
+  # batches already contain a near-ceiling row -- so E[max duration] is
+  # already saturated and per-sample cost stays flat rather than creeping up.
+  # 48 x 2 = 96, measured rather than estimated: run 1995 ran exactly this
+  # configuration at 55.4 GiB of 79.25 (69%). The 32 x 3 an earlier revision
+  # used was forced by the full-encoder unfreeze, which retains ~24 GiB more
+  # activation tape at batch 48 and OOMed at 79.16; with the encoder frozen
+  # ASRModel.forward runs it under no_grad and retains nothing, so that
+  # pressure is gone.
+  per_device_train_batch_size: 48
+  per_device_eval_batch_size: 48
+  gradient_accumulation_steps: 2
 
   # ONE epoch, matching granite_qwen, so this is a like-for-like comparison.
   #

@@ -4,7 +4,7 @@
 import functools
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
@@ -15,6 +15,11 @@ from rich.table import Table
 
 from scripts.itn import ITN_CLASSES, contains_subsequence, merge_scores, score_sample
 from scripts.utils import _extract_model_from_dir, find_model_dirs, parse_results_file
+
+# Minimum reference spans before an ITN class gets its own column. At n<15 a
+# single span is worth >6.7 points, so the cell reads as a measurement while
+# being dominated by sampling. Raise it as the eval set grows.
+MIN_CLASS_SUPPORT = 15
 
 app = typer.Typer(help="Analyze and compare `ta eval` results.", add_completion=False)
 console = Console()
@@ -395,6 +400,37 @@ def parse_metrics_file(metrics_file: Path) -> dict:
     return result
 
 
+def _latest_sweep(dirs: list[Path]) -> tuple[list[Path], str]:
+    """Keep only the newest sweep. Returns (dirs, run_id).
+
+    A sweep is one `ta eval` invocation; every dataset it writes shares a
+    `Run ID`. Selecting per DATASET instead -- which `find_model_dirs(
+    latest=True)` does -- silently pairs runs from different sweeps: a
+    partially re-run suite gave one model a corpus pool that was 53%
+    LibriSpeech by reference word against 18% for the other, and put an n=100
+    CommonVoice column next to an n=500 LibriSpeech column with nothing in the
+    table to show it.
+
+    Directories with no `Run ID` are dropped, not guessed at. Every number in
+    the output then comes from one invocation of one checkpoint, which is the
+    only basis on which the columns can be read together.
+    """
+    by_run: dict[str, list[Path]] = defaultdict(list)
+    for d in dirs:
+        mf = d / "metrics.txt"
+        if not mf.exists():
+            continue
+        rid = parse_metrics_file(mf).get("run_id")
+        if isinstance(rid, str) and rid:
+            by_run[rid].append(d)
+    if not by_run:
+        return [], ""
+    # Directory names start with a zero-padded UTC timestamp, so lexicographic
+    # max is chronological max.
+    newest = max(by_run.items(), key=lambda kv: max(d.name for d in kv[1]))
+    return newest[1], newest[0]
+
+
 def collect_model_metrics(
     model_pattern: str, outputs_dir: Path, exclude: list[str] | None = None
 ) -> dict:
@@ -402,11 +438,15 @@ def collect_model_metrics(
     import jiwer
 
     model_dirs = find_model_dirs(outputs_dir, model_pattern, exclude, latest=True)
+    # One sweep only -- see _latest_sweep. Mixing them is how the corpus WER
+    # ended up comparing different data between models.
+    model_dirs, sweep_label = _latest_sweep(model_dirs)
 
     display_name = extract_model_name(model_dirs[0].name) if model_dirs else model_pattern
 
     metrics = {
         "display_name": display_name,
+        "sweep": sweep_label,
         "datasets": {},
         "by_length": defaultdict(lambda: {"wers": []}),
         "diarization": None,
@@ -421,12 +461,6 @@ def collect_model_metrics(
     all_refs = []
     all_preds = []
     all_latencies = []
-
-    keywords_path = Path(KEYWORDS_FILE)
-    ref_entities = {}
-    if keywords_path.exists():
-        keywords = json.loads(keywords_path.read_text())
-        ref_entities = {ref["text"]: ref["entities"] for ref in keywords["references"]}
 
     for dir_path in model_dirs:
         results_file = dir_path / "results.txt"
@@ -452,10 +486,18 @@ def collect_model_metrics(
         if not results_file.exists():
             continue
 
-        ds_metrics = {"refs": [], "preds": [], "avg_time": None, "wer": None}
+        ds_metrics = {
+            "refs": [],
+            "preds": [],
+            "raw_pairs": [],
+            "avg_time": None,
+            "wer": None,
+            "run_id": None,
+        }
 
         if metrics_file.exists():
             parsed = parse_metrics_file(metrics_file)
+            ds_metrics["run_id"] = parsed.get("run_id")
             avg_time = parsed.get("avg_time")
             if isinstance(avg_time, float):
                 ds_metrics["avg_time"] = avg_time
@@ -477,10 +519,22 @@ def collect_model_metrics(
             gt_unnorm = sample.get("ground_truth_raw")
             pred_unnorm = sample.get("prediction_raw")
             if gt_unnorm is not None and pred_unnorm is not None:
-                metrics["itn_raw_samples"] += 1
-                merge_scores(metrics["itn"], score_sample(gt_unnorm, pred_unnorm))
-            ref = normalize_text(gt_raw)
-            pred = normalize_text(pred_raw)
+                ds_metrics["raw_pairs"].append((gt_unnorm, pred_unnorm))
+            # Scored AS-IS, deliberately. `Ground Truth:` / `Prediction:` in
+            # results.txt are already the Whisper `EnglishTextNormalizer`
+            # pair that `ta eval` scored and wrote to metrics.txt (see
+            # scripts/eval/cli.save_results). Running them through
+            # `normalize_text` a second time made every number in this table
+            # disagree with the one `ta eval` printed: it expands "%" to
+            # " percent" (so "25%" becomes two tokens, inflating the
+            # reference word count) and strips currency symbols. On
+            # earnings22 that was 11.67% here vs 11.89% from the harness,
+            # off a denominator of 1585 vs 1581 words. Whisper's normalizer
+            # is the benchmark standard and the single source of truth;
+            # `normalize_text` stays for entity matching, where a looser
+            # comparison is what's wanted.
+            ref = gt_raw
+            pred = pred_raw
 
             if ref:
                 ds_metrics["refs"].append(ref)
@@ -490,15 +544,6 @@ def collect_model_metrics(
 
                 word_count = len(ref.split())
                 metrics["by_length"][word_count]["wers"].append(sample.get("wer", 0))
-
-                if gt_raw in ref_entities:
-                    for entity in ref_entities[gt_raw]:
-                        entity_type = entity["label"]
-                        entity_text = entity["text"]
-
-                        metrics["entity_errors"][entity_type]["total"] += 1
-                        if entity_in_text(entity_text, pred_raw):
-                            metrics["entity_errors"][entity_type]["found"] += 1
 
         if ds_metrics["refs"]:
             output = jiwer.process_words(ds_metrics["refs"], ds_metrics["preds"])
@@ -574,6 +619,241 @@ def _dataset_wer(ds_data: dict) -> float | None:
     return ds_data.get("wer") if wer is None else wer
 
 
+def _entity_support(model_metrics: dict) -> Counter:
+    """Max reference-entity count per semantic type across the compared models."""
+    support: Counter = Counter()
+    for d in model_metrics.values():
+        for t, st in d.get("entity_errors", {}).items():
+            if t not in ITN_COVERED_ENTITY_TYPES:
+                support[t] = max(support[t], st["total"])
+    return support
+
+
+def _entity_types_with_support(model_metrics: dict) -> set:
+    return {t for t, n in _entity_support(model_metrics).items() if n >= MIN_CLASS_SUPPORT}
+
+
+def _load_ref_entities() -> dict:
+    """Reference text -> spaCy entities, keyed on the NORMALIZED reference.
+
+    `ta analysis extract-entities` writes the map; the key is the normalized
+    form because that is what `results.txt` stores first and what the
+    extractor keyed on.
+    """
+    path = Path(KEYWORDS_FILE)
+    if not path.exists():
+        return {}
+    keywords = json.loads(path.read_text())
+    return {ref["text"]: ref["entities"] for ref in keywords["references"]}
+
+
+def _recompute_matched_corpus(model_metrics: dict, ref_entities: dict | None = None) -> None:
+    """Rebuild each model's `corpus_wer` over a subset every model shares.
+
+    The per-model pooled WER is only meaningful when the models were scored on
+    the same audio. `find_model_dirs(latest=True)` picks the newest directory
+    PER DATASET, so a sweep that was re-run for some datasets and not others
+    yields a different mix per model. Measured case: one model's pool was 53%
+    LibriSpeech by reference word (its only two n=500 runs, and the two easiest
+    corpora) against 18% for the other, which made a 5.70% "corpus WER" look
+    like it beat 7.03% when neither number described the same data.
+
+    So: keep only datasets every model has, truncate each to the shared row
+    count, and require the references to match position-for-position. The eval
+    draw is a deterministic prefix of a fixed-seed shuffle, so an n=100 run is
+    the first 100 rows of the n=500 run of the same dataset -- truncation
+    yields a genuinely paired comparison rather than an approximate one. A
+    dataset whose references disagree after truncation is dropped rather than
+    silently pooled.
+
+    Sets `corpus_wer`, `corpus_ins_rate`, `corpus_datasets` and
+    `corpus_excluded` on each model in place.
+    """
+    import jiwer
+
+    ref_entities = ref_entities or {}
+    if not model_metrics:
+        return
+    shared = set.intersection(*(set(m["datasets"]) for m in model_metrics.values()))
+
+    usable, excluded = [], {}
+    for ds in sorted(shared):
+        per_model = [m["datasets"][ds] for m in model_metrics.values()]
+        if any(not d["refs"] for d in per_model):
+            excluded[ds] = "no scored rows"
+            continue
+        n = min(len(d["refs"]) for d in per_model)
+        first = per_model[0]["refs"][:n]
+        if any(d["refs"][:n] != first for d in per_model):
+            excluded[ds] = "references differ (different eval pool)"
+            continue
+        usable.append((ds, n))
+
+    for m in model_metrics.values():
+        refs, preds = [], []
+        for ds, n in usable:
+            d = m["datasets"][ds]
+            refs += d["refs"][:n]
+            preds += d["preds"][:n]
+        m["corpus_datasets"] = [ds for ds, _ in usable]
+        m["corpus_excluded"] = excluded
+
+        # Entity and ITN are rescored over the SAME rows, not over whatever
+        # each model happened to have on disk. Scored at collection time they
+        # compared a 1,200-sample sweep against a 6,000-sample one, which put
+        # "PERSON 100% missed" (1 of 1) next to "58.3%" (7 of 12) as if the two
+        # were commensurable.
+        m["entity_errors"] = defaultdict(lambda: {"found": 0, "total": 0})
+        m["itn"] = {}
+        m["itn_raw_samples"] = 0
+        for ds, n in usable:
+            for gt_raw, pred_raw in m["datasets"][ds]["raw_pairs"][:n]:
+                m["itn_raw_samples"] += 1
+                merge_scores(m["itn"], score_sample(gt_raw, pred_raw))
+                for entity in ref_entities.get(normalize_text(gt_raw), ()):
+                    stats = m["entity_errors"][entity["label"]]
+                    stats["total"] += 1
+                    if entity_in_text(entity["text"], pred_raw):
+                        stats["found"] += 1
+        m.pop("corpus_wer", None)
+        m.pop("corpus_ins_rate", None)
+        if not refs:
+            continue
+        out = jiwer.process_words(refs, preds)
+        denom = out.hits + out.substitutions + out.deletions
+        if denom:
+            m["corpus_wer"] = out.wer * 100
+            m["corpus_ins_rate"] = out.insertions / denom * 100
+
+        # Per-utterance error and reference-length counts, kept so the corpus
+        # delta between two models can carry a confidence interval. They are
+        # recorded HERE because this is the only place the paired row set
+        # exists: same datasets, same rows, same order for every model.
+        per_utt = [jiwer.process_words([r], [p]) for r, p in zip(refs, preds, strict=True)]
+        m["corpus_utt_errors"] = [o.substitutions + o.deletions + o.insertions for o in per_utt]
+        m["corpus_utt_ref_words"] = [o.substitutions + o.deletions + o.hits for o in per_utt]
+
+
+def _paired_bootstrap_delta(
+    a_errors: list[int],
+    a_ref_words: list[int],
+    b_errors: list[int],
+    b_ref_words: list[int],
+    resamples: int = 10_000,
+    seed: int = 0,
+) -> tuple[float, float, float]:
+    """95% CI on (WER_a - WER_b) in points, by paired utterance bootstrap.
+
+    Why this has to exist: nothing in this repo computed a confidence interval,
+    so every margin quoted in the experiment configs was a point estimate.
+    That is how the same granite_qwen_top4 checkpoint came to be cited at
+    11.95 / 11.76 / 10.94 / 10.50 across sweeps -- a ~1.5pt spread -- while
+    recipes were being judged on differences smaller than that.
+
+    PAIRED means both models are resampled on the SAME utterance indices, so
+    the shared difficulty of the draw cancels. That is what makes this able to
+    resolve a delta much finer than either model's own CI.
+
+    WER is a ratio of corpus totals, not a mean of per-utterance rates, so the
+    statistic recomputed on each resample is sum(errors)/sum(ref_words) over
+    the resampled rows. Averaging per-utterance WER instead would silently
+    reweight the corpus toward short references.
+    """
+    import numpy as np
+
+    a_err = np.asarray(a_errors, dtype=np.float64)
+    a_ref = np.asarray(a_ref_words, dtype=np.float64)
+    b_err = np.asarray(b_errors, dtype=np.float64)
+    b_ref = np.asarray(b_ref_words, dtype=np.float64)
+
+    n = len(a_err)
+    point = (a_err.sum() / a_ref.sum() - b_err.sum() / b_ref.sum()) * 100 if n else float("nan")
+    if n == 0:
+        return point, float("nan"), float("nan")
+
+    rng = np.random.default_rng(seed)
+    deltas = np.empty(resamples, dtype=np.float64)
+    # Chunked: a single (resamples, n) index matrix is 10k x 6k x 8B = 480 MB.
+    chunk = max(1, min(resamples, 2_000_000 // max(n, 1)))
+    done = 0
+    while done < resamples:
+        size = min(chunk, resamples - done)
+        idx = rng.integers(0, n, size=(size, n))
+        a_wer = a_err[idx].sum(axis=1) / a_ref[idx].sum(axis=1)
+        b_wer = b_err[idx].sum(axis=1) / b_ref[idx].sum(axis=1)
+        deltas[done : done + size] = (a_wer - b_wer) * 100
+        done += size
+
+    return point, float(np.percentile(deltas, 2.5)), float(np.percentile(deltas, 97.5))
+
+
+def _print_corpus_wer_cis(model_metrics: dict) -> None:
+    """Corpus-WER deltas against the best model, each with a 95% CI.
+
+    Ranks by corpus WER and reports every other model's gap to the leader.
+    A CI that straddles zero means the sweep cannot separate the two, which is
+    the finding -- reporting the point estimate alone is how a rounding error
+    gets read as a win.
+    """
+    scored = {
+        name: data
+        for name, data in model_metrics.items()
+        if data.get("corpus_wer") is not None and data.get("corpus_utt_errors")
+    }
+    if len(scored) < 2:
+        return
+
+    ranked = sorted(scored.items(), key=lambda kv: kv[1]["corpus_wer"])
+    best_name, best = ranked[0]
+    n_utts = len(best["corpus_utt_errors"])
+
+    console.print("\n")
+    table = Table(
+        title=(
+            f"Corpus WER delta vs {best['display_name'] if best.get('display_name') else best_name}"
+            f"  (paired bootstrap, n={n_utts:,} utterances, 10k resamples)"
+        )
+    )
+    table.add_column("Model", style="cyan")
+    table.add_column("Corpus WER", justify="right")
+    table.add_column("Δ vs best", justify="right", style="bold")
+    table.add_column("95% CI", justify="right")
+    table.add_column("Verdict")
+
+    for name, data in ranked[1:]:
+        if len(data["corpus_utt_errors"]) != n_utts:
+            continue
+        point, lo, hi = _paired_bootstrap_delta(
+            data["corpus_utt_errors"],
+            data["corpus_utt_ref_words"],
+            best["corpus_utt_errors"],
+            best["corpus_utt_ref_words"],
+        )
+        if lo > 0:
+            verdict = "[green]separated[/green]"
+        elif hi < 0:
+            # Only reachable if corpus_wer and the paired statistic disagree,
+            # which would mean the two were computed over different rows.
+            verdict = "[red]inconsistent — check pairing[/red]"
+        else:
+            verdict = "[yellow]not separated[/yellow]"
+        table.add_row(
+            data.get("display_name", name),
+            f"{data['corpus_wer']:.2f}%",
+            f"{point:+.2f}",
+            f"[{lo:+.2f}, {hi:+.2f}]",
+            verdict,
+        )
+
+    console.print(table)
+    console.print(
+        "[dim]Paired: both models resampled on the same utterance indices, so the "
+        "draw's difficulty cancels. 'not separated' means this sweep cannot tell "
+        "the two apart — collect more samples rather than reporting the point "
+        "estimate.[/dim]"
+    )
+
+
 @app.command("compare")
 def compare(
     models: Annotated[list[str], typer.Argument(help=f"{MODEL_ARG_HELP}s to compare")],
@@ -586,6 +866,44 @@ def compare(
     for model in models:
         console.print(f"Collecting metrics for '{model}'...")
         model_metrics[model] = collect_model_metrics(model, output_dir, exclude)
+
+    # Every model must have contributed a sweep, or the table has nothing
+    # coherent to show. Runs predating Run IDs are excluded by _latest_sweep.
+    stale = [m for m, d in model_metrics.items() if not d["datasets"]]
+    if stale:
+        console.print(
+            f"[red]No Run ID found for: {', '.join(stale)}[/red]\n"
+            "[yellow]`ta analysis compare` only reads runs that carry a Run ID, so that "
+            "every column comes from one sweep of one checkpoint. Re-run "
+            "`ta eval -m <model> -d all -n <N>` to produce one.[/yellow]"
+        )
+        raise typer.Exit(1)
+    for model, data in model_metrics.items():
+        console.print(
+            f"[dim]{data.get('display_name', model)}: sweep {data.get('sweep')} "
+            f"({len(data['datasets'])} datasets)[/dim]"
+        )
+
+    # Corpus WER is only comparable across models scored on the same rows;
+    # the per-dataset columns below are fine as-is.
+    _recompute_matched_corpus(model_metrics, _load_ref_entities())
+    sample = next(iter(model_metrics.values()), {})
+    if sample.get("corpus_excluded"):
+        for ds, why in sorted(sample["corpus_excluded"].items()):
+            console.print(f"[yellow]Corpus excludes {ds}: {why}[/yellow]")
+    mixed = {
+        ds: sorted(
+            {len(m["datasets"][ds]["refs"]) for m in model_metrics.values() if ds in m["datasets"]}
+        )
+        for ds in sample.get("corpus_datasets", [])
+    }
+    ragged = {ds: ns for ds, ns in mixed.items() if len(ns) > 1}
+    if ragged:
+        console.print(
+            "[yellow]Corpus truncated to the shared row count on: "
+            + ", ".join(f"{ds} {ns}" for ds, ns in sorted(ragged.items()))
+            + "[/yellow]"
+        )
 
     # Get all datasets present across models (excluding certain datasets)
     all_datasets = set()
@@ -650,6 +968,8 @@ def compare(
         lambda ds: ds.get("ins_rate"),
         lambda v: f"{v:.2f}%",
     )
+
+    _print_corpus_wer_cis(model_metrics)
 
     # === WER by Word Count Table ===
     console.print("\n")
@@ -822,7 +1142,17 @@ def compare(
         all_entity_types.update(m["entity_errors"].keys())
     all_entity_types -= ITN_COVERED_ENTITY_TYPES
 
-    if all_entity_types:
+    if all_entity_types and not _entity_types_with_support(model_metrics):
+        best = _entity_support(model_metrics).most_common(4)
+        console.print(
+            f"\n[yellow]Entity table skipped: no semantic type reaches {MIN_CLASS_SUPPORT} "
+            "reference entities on the compared rows"
+            + (f" (best: {', '.join(f'{t}={n}' for t, n in best)})" if best else "")
+            + ".[/yellow]\n[dim]outputs/keywords.json only covers the references it was generated "
+            "from; regenerate it with `ta analysis extract-entities` against the current eval "
+            "pool to restore coverage.[/dim]"
+        )
+    elif all_entity_types:
         # Order entity types by frequency
         entity_type_order = [
             "GPE",
@@ -837,8 +1167,21 @@ def compare(
             "LAW",
             "LANGUAGE",
         ]
-        ordered_entity_types = [t for t in entity_type_order if t in all_entity_types]
-        ordered_entity_types += [t for t in sorted(all_entity_types) if t not in entity_type_order]
+        # Same support floor as the ITN table: below it a single entity moves
+        # the cell by >6 points, which is how "PERSON 100% missed" (1 of 1)
+        # came to sit next to "58.3%" (7 of 12) as though they were the same
+        # kind of number.
+        support = Counter()
+        for d in model_metrics.values():
+            for t, st in d["entity_errors"].items():
+                support[t] = max(support[t], st["total"])
+        keep = {t for t in all_entity_types if support[t] >= MIN_CLASS_SUPPORT}
+        ent_dropped = sorted(
+            (t for t in all_entity_types if 0 < support[t] < MIN_CLASS_SUPPORT),
+            key=lambda t: -support[t],
+        )
+        ordered_entity_types = [t for t in entity_type_order if t in keep]
+        ordered_entity_types += [t for t in sorted(keep) if t not in entity_type_order]
 
         console.print("\n")
         entity_table = Table(title="Missed Entity Errors (semantic types; numeric types in ITN)")
@@ -877,6 +1220,18 @@ def compare(
             entity_table.add_row(*row)
 
         console.print(entity_table)
+        if ordered_entity_types:
+            console.print(
+                "[dim]Reference entities per type: "
+                + ", ".join(f"{t}={support[t]}" for t in ordered_entity_types)
+                + "[/dim]"
+            )
+        if ent_dropped:
+            console.print(
+                f"[dim]Hidden (fewer than {MIN_CLASS_SUPPORT} reference entities): "
+                + ", ".join(f"{t}={support[t]}" for t in ent_dropped)
+                + "[/dim]"
+            )
         console.print(
             "[dim]% of reference entities absent from the prediction. "
             "Numeric types (dates, money, counts) are scored in the ITN table below, "
@@ -892,8 +1247,22 @@ def compare(
 
     if scored:
         class_order = [name for name, _ in ITN_CLASSES]
-        present = {c for d in scored.values() for c, st in d["itn"].items() if st["total"]}
-        ordered = [c for c in class_order if c in present]
+        # Drop classes with too few reference spans to carry a percentage.
+        # Below the threshold a single span moves the number by >6 points, so
+        # the column reads like a measurement while being noise: `fraction`
+        # had n=1 (rendering one sample as "0.0%"), `title_abbrev` and
+        # `acronym_dotted` n=4. Support is pooled across models because every
+        # model is scored on the same references, so the count is a property
+        # of the eval set rather than of any one system.
+        support = Counter()
+        for d in scored.values():
+            for c, st in d["itn"].items():
+                support[c] = max(support[c], st["total"])
+        ordered = [c for c in class_order if support[c] >= MIN_CLASS_SUPPORT]
+        dropped = sorted(
+            (c for c in class_order if 0 < support[c] < MIN_CLASS_SUPPORT),
+            key=lambda c: -support[c],
+        )
 
         console.print("\n")
         itn_table = Table(
@@ -935,6 +1304,17 @@ def compare(
             "Fmt-only err = value present, formatting differs (e.g. '1250' for '1,250'). "
             "The remainder is recognition error.[/dim]"
         )
+        console.print(
+            "[dim]Reference spans per class: "
+            + ", ".join(f"{c}={support[c]}" for c in ordered)
+            + "[/dim]"
+        )
+        if dropped:
+            console.print(
+                f"[dim]Hidden (fewer than {MIN_CLASS_SUPPORT} reference spans): "
+                + ", ".join(f"{c}={support[c]}" for c in dropped)
+                + "[/dim]"
+            )
 
     if skipped:
         console.print(

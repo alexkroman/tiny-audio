@@ -40,7 +40,24 @@ ITN_CLASSES: list[tuple[str, str]] = [
     ("fraction", r"\b\d+\s?/\s?\d+\b"),
     ("range_score", r"\b\d+\s?[-–]\s?\d+\b"),
     ("decimal", r"\b\d+\.\d+\b"),
-    ("ordinal", r"\b\d+(?:st|nd|rd|th)\b"),
+    # `ordinal` REMOVED (2026-09-20). It is unscoreable by construction, not
+    # merely hard. The spoken-form alternative is a word ("first"), and
+    # `_loose_tokens` strips punctuation without mapping words to digits, so
+    # "1st" -> ['1st'] can never match "first" -> ['first']. A model writing
+    # the word form therefore scores 0 on `exact` AND 0 on `loose`, making
+    # `loose - exact` report a recognition error for what is purely a
+    # formatting choice -- exactly the conflation this module's docstring
+    # says the metric exists to avoid. Currency escapes this because the
+    # digits survive ("$650" -> ['650'] matches "650 million dollars").
+    #
+    # It is also the minority convention in the data: digit ordinals appear
+    # in 2/500 Earnings22 and 7/500 Peoples references and 0/500 in the
+    # other eight corpora, while word ordinals appear throughout. The model
+    # writing "first" is following its training distribution.
+    #
+    # Re-add only alongside a word<->digit equivalence in the loose check.
+    # Note "1st" falls through to no class: `integer` (\b\d+\b) does not
+    # match it, and `alphanum_id` requires a leading letter.
     ("acronym_dotted", r"\b(?:[A-Za-z]\.){2,}"),
     ("title_abbrev", r"\b(?:Mr|Mrs|Ms|Dr|Prof|Rev|St|Ave|Blvd|Rd|Jr|Sr|Inc|Ltd|Co|vs|etc)\."),
     ("alphanum_id", r"\b(?=[\w-]*[A-Za-z])(?=[\w-]*\d)[A-Za-z][\w-]*\b"),

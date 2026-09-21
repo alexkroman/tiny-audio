@@ -12,10 +12,12 @@ from transformers.pipelines.audio_utils import ffmpeg_read
 try:
     from .alignment import ForcedAligner
     from .asr_modeling import ASRModel
+    from .asr_processing import prepend_lead_in
     from .diarization import SpeakerDiarizer
 except ImportError:
     from alignment import ForcedAligner  # type: ignore[no-redef]
     from asr_modeling import ASRModel  # type: ignore[no-redef]
+    from asr_processing import prepend_lead_in  # type: ignore[no-redef]
     from diarization import SpeakerDiarizer  # type: ignore[no-redef]
 
 # Re-export for backwards compatibility
@@ -220,6 +222,28 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 "raw": inputs["array"],
                 "sampling_rate": inputs.get("sampling_rate", self.feature_extractor.sampling_rate),
             }
+
+        # Inference-only lead-in silence. See prepend_lead_in for the
+        # measurement; applied here rather than in ASRProcessor because this
+        # pipeline holds the feature extractor directly and never routes
+        # through ASRProcessor.__call__, so the two cannot double-apply.
+        # Require a genuine number. `float()` on a stand-in config is not safe:
+        # a MagicMock coerces to 1.0, which would silently prepend a FULL
+        # SECOND of silence to every clip for any caller holding a mock. Same
+        # hazard `_load_audio_encoder` documents for encoder_trainable_top_layers.
+        raw_lead_in = getattr(self.model.config, "inference_lead_in_seconds", 0.0)
+        lead_in = (
+            float(raw_lead_in)
+            if isinstance(raw_lead_in, (int, float)) and not isinstance(raw_lead_in, bool)
+            else 0.0
+        )
+        if lead_in > 0 and isinstance(inputs, dict) and "raw" in inputs:
+            inputs = dict(inputs)
+            inputs["raw"] = prepend_lead_in(
+                inputs["raw"],
+                inputs.get("sampling_rate", self.feature_extractor.sampling_rate),
+                lead_in,
+            )
 
         for item in super().preprocess(inputs, **preprocess_params):
             if "is_last" not in item:

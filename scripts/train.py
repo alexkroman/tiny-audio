@@ -31,12 +31,12 @@ import torch
 import wandb
 from datasets import (
     Audio,
+    ClassLabel,
     Dataset,
     concatenate_datasets,
     load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
-from torch.nn.utils import get_total_norm
 from tqdm.auto import tqdm
 from transformers import (
     Trainer,
@@ -60,11 +60,24 @@ TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 # "<|audio|>transcribe the speech with proper punctuation and capitalization."
 # Qwen3-ASR does the equivalent through a system turn plus an assistant prefill.
 #
-# Without the split, the ~25% of multiasr that is truecased-but-unpunctuated
-# (TEDLIUM, Peoples, AMI, Switchboard) trains the model to SUPPRESS punctuation
-# under the same prompt the punctuated ~75% uses to produce it. Identical
-# conditioning, contradictory targets: the model can only learn a hedge, and
-# every dropped mark scores as an error against punctuated references.
+# Without the split, the unpunctuated share of multiasr trains the model to
+# SUPPRESS punctuation under the same prompt the punctuated share uses to
+# produce it. Identical conditioning, contradictory targets: the model can
+# only learn a hedge, and every dropped mark scores as an error against
+# punctuated references.
+#
+# Share re-measured 2026-09-20: 12.1% plain-prompt (TEDLIUM ~194,900 + AMI
+# 147,504) against 87.9% punct-prompt, NOT the ~25%/~75% this comment used to
+# claim. Two of the four sources it named -- Peoples and Switchboard -- have
+# left the mix entirely, and the TEDLIUM leading-<unk> filter shrank a third.
+# The split still earns its keep at 12.1%, but the real format heterogeneity
+# now lives INSIDE the punct-prompt majority: 39.5% of SPGISpeech rows start
+# lowercase and 41.5% end without terminal punctuation (mid-stream 5-15s
+# window cuts), i.e. ~6% of the whole mix teaching "begin mid-sentence, no
+# final period" under the punctuation prompt. That is invisible to WER -- the
+# eval normalizer strips case and punctuation from both sides -- and shows up
+# only in orthographic_wer, the same blind spot that hid the %-stripping bug.
+# Measure before acting.
 TRANSCRIBE_PROMPT_PUNCT = "Transcribe the speech with proper punctuation and capitalization"
 
 # Gigaspeech ships inline punctuation as angle-bracket tags so we restore
@@ -162,9 +175,26 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # earns its keep over the frozen encoder (+6.18 WER). Edge position is also
 # what the eval evidence actually implicates: a positional prior is learnable,
 # a scattered mid-sentence omission is closer to label noise.
-_EDGE_CONTENT_TAG_RE = re.compile(
-    r"^\s*<(?:unk|foreign|overlap)>|<(?:unk|foreign|overlap)>\s*$", re.IGNORECASE
-)
+# LEADING ONLY as of 2026-09-20. The trailing alternation was dropped after
+# measuring what the two halves actually cost: on the 25,550-row TEDLIUM index,
+# 27.3% of rows start with a stripped tag and 20.3% end with one, union 41.2%
+# (the prior "roughly half" estimate summed the two and double-counted the
+# 1,652 rows that do both). Leading-only drops 27.3%, recovering ~13.9% of
+# TEDLIUM, about +37,300 rows.
+#
+# The evidence base only ever supported the leading half. It came from the
+# Peoples eval -- a *leading*-word deletion prior, measured as >=1 dropped
+# leading reference word on 52/100 samples. Trailing truncation was never
+# measured separately, and Peoples has since left the training mix, so the
+# trailing half rested on argument-by-analogy to a corpus that is no longer
+# there. Meanwhile TEDLIUM is the one dataset where the decoder measurably
+# beats the frozen encoder (+6.18 WER), and this filter was cutting it 41%.
+#
+# To re-justify the trailing half, run the leading/trailing-deletion-run
+# analysis in scripts/analysis.py against the TEDLIUM eval; if trailing runs
+# are elevated over baseline, restore the `|<(?:unk|foreign|overlap)>\s*$`
+# alternation.
+_EDGE_CONTENT_TAG_RE = re.compile(r"^\s*<(?:unk|foreign|overlap)>", re.IGNORECASE)
 
 
 def _has_edge_content_tag(raw_text: str) -> bool:
@@ -427,6 +457,9 @@ class DatasetLoader:
         self.cache_dir = self.config.dataset_cache_dir
         self.seed = config.training.get("seed", 42)
         self.num_proc = self.config.get("num_proc", 16)
+        self.num_train_epochs = config.training.get("num_train_epochs", 1)
+        # See _expand_epochs / load() for what this does and why it exists.
+        self.epoch_expansion = int(self.config.get("epoch_expansion", 1) or 1)
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
         dataset_path = dataset_cfg.get("path")
@@ -459,6 +492,7 @@ class DatasetLoader:
 
         # Declarative row filter on a source-metadata column, e.g.
         #   exclude_where: {column: source, values: [audiobook]}
+        #   exclude_where: {column: audio_duration, above: 19.0}
         # It must run HERE, before the keep_cols pruning below drops every
         # column that is not audio/text/_text_case/_text_punct -- by then the
         # column you want to filter on no longer exists.
@@ -472,13 +506,19 @@ class DatasetLoader:
         # target_samples cap, so row count, mix share and download are all
         # unchanged. Rows are swapped, not lost.
         exclude_where = dataset_cfg.get("exclude_where")
-        if exclude_where:
+        if exclude_where is not None:
             column = exclude_where.get("column")
-            values = set(exclude_where.get("values") or [])
-            if not column or not values:
+            names = list(exclude_where.get("values") or [])
+            # Numeric bounds, added 2026-09-20 for LibriHeavy. Semantics follow
+            # the key's name: this EXCLUDES rows, so `above: 19.0` drops rows
+            # whose value exceeds 19.0 (it is not a keep-ceiling).
+            above = exclude_where.get("above")
+            below = exclude_where.get("below")
+            if not column or (not names and above is None and below is None):
                 raise ValueError(
-                    f"exclude_where needs both 'column' and non-empty 'values', "
-                    f"got {exclude_where!r} for {dataset_path}"
+                    f"exclude_where needs 'column' plus at least one of "
+                    f"'values' / 'above' / 'below', got {exclude_where!r} "
+                    f"for {dataset_path}"
                 )
             if column not in ds.column_names:
                 # Fail loudly: a silently-ignored filter would train on the
@@ -487,36 +527,54 @@ class DatasetLoader:
                     f"exclude_where column {column!r} not in {dataset_path} "
                     f"(available: {sorted(ds.column_names)})"
                 )
-            # Resolve ClassLabel columns to their integer codes. Gigaspeech's
-            # `source` is ClassLabel(names=['audiobook','podcast','youtube']),
-            # so rows hold 0/1/2 and a naive `v not in {"audiobook"}` compares
-            # int against str, matches nothing, and silently drops 0 rows --
-            # which is exactly what it did before this was fixed.
-            feature = ds.features.get(column)
-            wanted = set(values)
-            if hasattr(feature, "str2int") and hasattr(feature, "names"):
-                unknown = sorted(v for v in values if v not in feature.names)
-                if unknown:
-                    raise ValueError(
-                        f"exclude_where values {unknown} are not valid labels for "
-                        f"{column!r} on {dataset_path} (valid: {feature.names})"
-                    )
-                wanted = {feature.str2int(v) for v in values}
+            # Gigaspeech's `source` is a ClassLabel, so its rows hold ints
+            # (0=audiobook, 1=podcast, 2=youtube), NOT the label strings the
+            # datasets-server `statistics` endpoint renders. Comparing rows
+            # against the human-readable names matches nothing and silently
+            # dropped 0 of 910,140 rows. Resolve names -> ids so the config
+            # stays readable, and reject a name the column does not define.
+            feature = (ds.features or {}).get(column)
+            wanted: set | None = None
+            if names:
+                if isinstance(feature, ClassLabel):
+                    # Report every bad name at once rather than dying on the first.
+                    unknown = sorted(n for n in names if n not in feature.names)
+                    if unknown:
+                        raise ValueError(
+                            f"exclude_where value {unknown} not a label of {column!r} in "
+                            f"{dataset_path} (defined: {feature.names})"
+                        )
+                    wanted = {feature.str2int(n) for n in names}
+                else:
+                    wanted = set(names)
+
+            def _keep(v, _wanted=wanted, _above=above, _below=below):
+                excluded = (
+                    (_wanted is not None and v in _wanted)
+                    or (v is not None and _above is not None and v > _above)
+                    or (v is not None and _below is not None and v < _below)
+                )
+                return not excluded
 
             before = len(ds)
+            # `input_columns` keeps this from materialising the audio column --
+            # it matters for a duration filter over ~1.1M rows, which would
+            # otherwise decode every clip to answer a float comparison.
             ds = ds.filter(
-                lambda v: v not in wanted,
+                _keep,
                 num_proc=self.num_proc,
                 input_columns=column,
             )
             dropped = before - len(ds)
             logger.info(
-                "exclude_where on %s: dropped %d/%d rows where %s in %s",
+                "exclude_where on %s: dropped %d/%d rows (%s in %s, above=%s, below=%s)",
                 dataset_path,
                 dropped,
                 before,
                 column,
-                sorted(values),
+                names or "-",
+                above,
+                below,
             )
             # A filter that matches nothing is a configuration bug, not a
             # legitimate no-op: you asked to exclude something that is not
@@ -526,8 +584,8 @@ class DatasetLoader:
             if dropped == 0:
                 raise ValueError(
                     f"exclude_where on {dataset_path} matched 0 of {before} rows "
-                    f"({column} in {sorted(values)}). Check the column's value type "
-                    f"and spelling -- feature is {feature!r}."
+                    f"({column}: values={sorted(names)} above={above} below={below}). "
+                    f"Check the column's value type and spelling -- feature is {feature!r}."
                 )
 
         col_map = {
@@ -614,12 +672,77 @@ class DatasetLoader:
             return ds
         if current > target:
             return ds.shuffle(seed=self.seed).select(range(target))
+        # Upsampling repeats rows verbatim, so the extra "samples" carry no
+        # new signal. That is intended for small sources, but it is also what
+        # happens when a filter (e.g. exclude_where) cuts a large source below
+        # its cap -- silently, since the row count still reads 600K. Say so.
+        logger.warning(
+            "target_samples %d exceeds the %d available rows; repeat-padding "
+            "%.2fx (no new signal in the duplicated rows)",
+            target,
+            current,
+            target / current,
+        )
         repeats = (target // current) + 1
         indices = list(range(current)) * repeats
         return ds.select(indices[:target])
 
+    @staticmethod
+    def _expand_epochs(ds: Dataset, times: int) -> Dataset:
+        """Repeat an uncapped source `times` over, verbatim.
+
+        Only for sources already at their natural size: there are no unused
+        rows to draw, so repeating is exactly what a second Trainer epoch
+        would have done. Capped sources go through _resample_to_target with a
+        multiplied target instead, which spends the multiplier on FRESH rows
+        first and only repeat-pads what the pool cannot cover.
+        """
+        if times <= 1:
+            return ds
+        return ds.select(list(range(len(ds))) * times)
+
     def load(self) -> tuple[Dataset, Dataset]:
         train_datasets, val_datasets = [], []
+
+        # epoch_expansion: build ONE physical epoch that is worth N logical
+        # ones, so that capped sources contribute fresh rows instead of
+        # replaying the same subset.
+        #
+        # The problem it fixes: _resample_to_target runs once, here in load(),
+        # so `num_train_epochs: 2` iterates the IDENTICAL 600K subset twice
+        # while the rest of the pool is never touched. Measured on the current
+        # mix, that leaves ~285K eligible LibriHeavy rows and ~338K eligible
+        # CommonVoice rows unseen while their siblings are shown twice.
+        #
+        # Why this shape rather than a per-epoch sampler: the uncapped sources
+        # (SPGI, TEDLIUM, VoxPopuli, AMI) are already at natural size, so the
+        # only place extra unique data can come from is the capped ones --
+        # and raising their caps alone would change per-step mix share, which
+        # is the one thing the caps exist to control. Multiplying EVERY
+        # source by N holds per-step share exactly where it was while letting
+        # the capped sources spend their larger budget on unseen rows. What
+        # the model sees per step is unchanged; what it sees over the run is
+        # strictly more diverse.
+        #
+        # Mutually exclusive with num_train_epochs > 1 -- the two multiply,
+        # and silently training 4 epochs' worth would be worse than either.
+        expansion = self.epoch_expansion
+        if expansion > 1 and self.num_train_epochs > 1:
+            raise ValueError(
+                f"epoch_expansion={expansion} and num_train_epochs="
+                f"{self.num_train_epochs} would compound to "
+                f"{expansion * self.num_train_epochs} epochs of exposure. "
+                f"epoch_expansion already folds the repeats into one physical "
+                f"epoch, so set num_train_epochs: 1 when using it."
+            )
+        if expansion > 1:
+            logger.info(
+                "epoch_expansion=%d: building one physical epoch worth %d "
+                "logical epochs; capped sources draw fresh rows up to their "
+                "pool before any repeat-padding",
+                expansion,
+                expansion,
+            )
 
         for d_cfg in tqdm(self.config.datasets, desc="Loading datasets"):
             train_splits = d_cfg.get("train_splits", ["train"])
@@ -629,7 +752,13 @@ class DatasetLoader:
             for train_split in train_splits:
                 ds = self._prepare_split(d_cfg, train_split)
                 if target_samples:
-                    ds = self._resample_to_target(ds, target_samples)
+                    # Multiply the cap, not the dataset: _resample_to_target
+                    # shuffles then takes the first target*N, so the extra
+                    # budget is spent on unseen rows first and only
+                    # repeat-pads (with a warning) once the pool runs out.
+                    ds = self._resample_to_target(ds, target_samples * expansion)
+                else:
+                    ds = self._expand_epochs(ds, expansion)
                 train_datasets.append(ds)
 
             # Per-dataset eval cap applied here (pre-concat) so each eval
@@ -700,9 +829,18 @@ class DataCollator:
     # training the model to transcribe content it never sees. Drop those rows.
     # Lowered from 30s to 19s to reduce batch-memory pressure: with
     # group_by_length disabled, a single long sample forces the whole batch
-    # to its length. 19s sits just under the ~20s production-norm cap for
-    # ASR fine-tunes and drops the long-form tail of TEDLIUM / Earnings22 /
-    # Peoples / VoxPopuli (roughly 3-8% of rows in those sources). In
+    # to its length. 19s sits just under the ~20s production-norm cap
+    # for ASR fine-tunes.
+    #
+    # Per-source loss re-measured 2026-09-20 -- the old "TEDLIUM / Earnings22
+    # / Peoples / VoxPopuli, roughly 3-8%" was wrong in every particular:
+    # LibriHeavy 19.6% (the source it hits hardest was not even named, and is
+    # now pre-filtered at prep time via exclude_where so the 600K cap
+    # delivers a true 600K), VoxPopuli 13.7%, TEDLIUM 0.07%, SPGISpeech 0.0%;
+    # Earnings22 and Peoples have left the mix. Because these drops run at
+    # COLLATE time -- after target_samples -- a capped source silently
+    # delivers fewer rows than its cap, which is how the mix table came to
+    # overstate the corpus by 235K rows. In
     # exchange, mel-spec peak memory drops ~37% vs the 30s default, freeing
     # headroom for auto_find_batch_size (observed batch=70 at max=30s →
     # expected ~100+ at max=19s for the same mix without WHAM).
@@ -966,41 +1104,33 @@ class ASRTrainer(Trainer):
         enc_lr = self.encoder_learning_rate if self.encoder_learning_rate is not None else base_lr
         enc_wd = self.encoder_weight_decay if self.encoder_weight_decay is not None else base_wd
 
-        # `name` is carried purely so `_trust_ratios` can attribute each group;
-        # torch ignores keys it does not recognize in a param group.
         optimizer_grouped_parameters = [
             {
-                "name": "projector",
                 "params": groups[("other", True)],
                 "weight_decay": proj_wd,
                 "lr": base_lr,
             },
             {
-                "name": "projector",
                 "params": groups[("other", False)],
                 "weight_decay": 0.0,
                 "lr": base_lr,
             },
             {
-                "name": "decoder",
                 "params": groups[("decoder", True)],
                 "weight_decay": dec_wd,
                 "lr": dec_lr,
             },
             {
-                "name": "decoder",
                 "params": groups[("decoder", False)],
                 "weight_decay": 0.0,
                 "lr": dec_lr,
             },
             {
-                "name": "encoder",
                 "params": groups[("encoder", True)],
                 "weight_decay": enc_wd,
                 "lr": enc_lr,
             },
             {
-                "name": "encoder",
                 "params": groups[("encoder", False)],
                 "weight_decay": 0.0,
                 "lr": enc_lr,
@@ -1012,122 +1142,33 @@ class ASRTrainer(Trainer):
         self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
 
-    def _clip_grad_norm(self, model):
-        """Clip exactly as the base Trainer does, but log per-group norms first.
+    def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
+        """Attach the projector's output-scale diagnostic to each training log.
 
-        Global-norm clipping scales every parameter by one factor
-        `min(1, max_grad_norm / ||g||_global)`. With a fresh projector at
-        ||grad|| ~= 9 alongside a decoder at ~1.2, the projector dominates that
-        global norm and any clip scales the decoder's update down with it.
-        Nothing in this repo logged the two groups separately, so that concern
-        could never be checked against a number — HF reports one scalar, which
-        by construction cannot separate them.
-
-        Instrumentation only: the clipping below is byte-identical to the base
-        implementation, and `_get_grad_norm` still receives the global pre-clip
-        norm so `grad_norm` stays comparable across runs. Split the clip only
-        if these logs show projector >> decoder persistently past warmup —
-        per-group clipping makes the combined update no longer a scalar
-        multiple of the true gradient, which every comparable published recipe
-        avoids.
-
-        `on_pre_optimizer_step` cannot do this: Trainer fires it after
-        `_clip_grad_norm`, so a callback only ever sees post-clip gradients.
+        Riding the Trainer's own log call rather than calling `self.log` from
+        inside the step is what puts this metric on the SAME wandb step as
+        `train/loss`. Its previous home (a `_clip_grad_norm` override) emitted
+        a step of its own, so every diagnostic row carried NaN for loss and
+        every loss row carried NaN for the diagnostic, and the two series could
+        not be plotted against each other or correlated from `run.history()`.
         """
-        if self.state.global_step % max(1, self.args.logging_steps) == 0:
-            groups: dict[str, list] = {"projector": [], "decoder": [], "encoder": []}
-            for name, param in model.named_parameters():
-                if param.grad is None:
-                    continue
-                clean = name.removeprefix("_orig_mod.").removeprefix("module.")
-                if clean.startswith("audio_tower."):
-                    groups["encoder"].append(param.grad)
-                elif clean.startswith("language_model."):
-                    groups["decoder"].append(param.grad)
-                else:
-                    groups["projector"].append(param.grad)
-
-            metrics = {}
-            for group, grads in groups.items():
-                if grads:
-                    # Global L2 over the group's gradients (`foreach` fast path).
-                    metrics[f"grad_norm/{group}"] = get_total_norm(grads, norm_type=2.0).item()
-            if metrics:
-                total = math.sqrt(sum(v * v for v in metrics.values()))
-                if self.args.max_grad_norm > 0 and total > 0:
-                    metrics["grad_norm/clip_factor"] = min(1.0, self.args.max_grad_norm / total)
-                metrics.update(self._trust_ratios())
-                metrics.update(self._projector_output_rms())
-                self.log(metrics)
-
-        return super()._clip_grad_norm(model)
-
-    def _trust_ratios(self) -> dict:
-        """Per-group ||update|| / ||w||, the scale-free "is this LR sane" metric.
-
-        Grad-norm ratios cannot answer that question: ||g|| = r * sqrt(N), so
-        they are dominated by parameter count (the decoder has 109x the
-        projector's params, so its norm is ~10x larger at equal per-parameter
-        gradient). AdamW also divides gradient magnitude out entirely -- the
-        step is lr * m_hat/(sqrt(v_hat)+eps), i.e. ~lr per parameter regardless
-        of ||g||. What actually governs learning is the step relative to the
-        weight, and the healthy fine-tuning band is roughly 1e-3 to 1e-2.
-
-        Read from the optimizer's own Adam state, so this reflects the update
-        actually applied on the previous step rather than a theoretical bound.
-        """
-        opt = self.optimizer
-        if opt is None or not getattr(opt, "param_groups", None):
-            return {}
-
-        totals: dict[str, list[float]] = {}
-        for pg in opt.param_groups:
-            name = pg.get("name") or pg.get("component") or "other"
-            lr, eps = pg.get("lr", 0.0), pg.get("eps", 1e-8)
-            b1, b2 = pg.get("betas", (0.9, 0.999))
-            # Accumulate on-device and sync once per device, rather than
-            # blocking on .item() twice for every parameter in the group.
-            upd_terms: dict[torch.device, torch.Tensor] = {}
-            w_terms: dict[torch.device, torch.Tensor] = {}
-            for p in pg["params"]:
-                st = opt.state.get(p)
-                if not st or "exp_avg" not in st:
-                    continue
-                t = int(
-                    st.get("step", 0)
-                    if not torch.is_tensor(st.get("step", 0))
-                    else st["step"].item()
-                )
-                if t < 1:
-                    continue
-                m = st["exp_avg"].to(torch.float32) / (1 - b1**t)
-                v = st["exp_avg_sq"].to(torch.float32) / (1 - b2**t)
-                upd = (lr * m / (v.sqrt() + eps)).pow(2).sum()
-                w = torch.linalg.vector_norm(p.detach(), 2, dtype=torch.float32).pow(2)
-                dev = p.device
-                upd_terms[dev] = upd_terms[dev] + upd if dev in upd_terms else upd
-                w_terms[dev] = w_terms[dev] + w if dev in w_terms else w
-            upd_sq = sum(x.item() for x in upd_terms.values())
-            w_sq = sum(x.item() for x in w_terms.values())
-            if w_sq > 0:
-                totals.setdefault(name, [0.0, 0.0])
-                totals[name][0] += upd_sq
-                totals[name][1] += w_sq
-
-        return {
-            f"trust_ratio/{name}": math.sqrt(u) / math.sqrt(w)
-            for name, (u, w) in totals.items()
-            if w > 0
-        }
+        if "loss" in logs:
+            logs.update(self._projector_output_rms())
+        super().log(logs, start_time)
 
     def _projector_output_rms(self) -> dict:
-        """Projector output RMS against the decoder's embedding RMS.
+        """Projector output RMS as a multiple of the decoder's embedding RMS.
 
-        The whole point of `projector_output_rms` is that audio tokens should
-        enter the residual stream at the same magnitude as text tokens. Nothing
-        else in the run reports whether that holds once training starts moving
-        the weights, and the repo has already measured one small-init attempt
-        drifting back up by ~35x. This is the number that says whether it stuck.
+        Audio tokens should enter the residual stream at the magnitude text
+        tokens do. `projector_output_rms: auto` sets that at construction and
+        this is the only thing that reports whether it survives training. It
+        does not: over granite_qwen's 32,909-step run the ratio started at
+        1.0x by construction, reached ~48x by step ~13k and plateaued there.
+
+        Reported as the ratio alone. The raw RMS rode alongside it for that
+        full run and carried nothing extra -- `freeze_text_embed_tokens` pins
+        the denominator, so the two series differed by a constant to sixteen
+        significant figures.
         """
         model = self.model
         projector = getattr(model, "projector", None)
@@ -1148,25 +1189,9 @@ class ASRTrainer(Trainer):
         finally:
             projector.train(was_training)
 
-        metrics = {"projector/output_rms": out_rms}
-        if emb_rms > 0:
-            metrics["projector/output_rms_over_embed"] = out_rms / emb_rms
-
-        # dL/d(log c) for a hypothetical output-scale multiplier c, accumulated
-        # by the projector's backward hook. This is the metric that decides
-        # whether the observed drift toward ~47x embed RMS is the loss pursuing
-        # a larger injection magnitude (persistently negative) or just Adam
-        # dragging the scale along as the weights grow (hovering near zero).
-        # Drained here so it does not accumulate across logging intervals.
-        # Averaged over the micro-batches accumulated since the last drain, so
-        # the value does not scale with logging_steps or grad accumulation.
-        scale_grad = getattr(projector, "scale_grad", None)
-        count = getattr(projector, "scale_grad_count", 0)
-        if scale_grad is not None and count:
-            metrics["projector/dloss_dlogscale"] = float(scale_grad.detach().item()) / count
-            projector.scale_grad = None
-            projector.scale_grad_count = 0
-        return metrics
+        if emb_rms <= 0:
+            return {}
+        return {"projector/output_rms_over_embed": out_rms / emb_rms}
 
 
 class PushToHubCallback(TrainerCallback):
@@ -1225,12 +1250,181 @@ TRAINING_MODEL_PARAMS = [
     "lora_alpha",
     "lora_dropout",
     "lora_target_modules",
+    "lora_rank_pattern",
+    "lora_alpha_pattern",
     "freeze_projector",
     "freeze_language_model",
     "freeze_text_embed_tokens",
     "freeze_audio_encoder",
     "encoder_trainable_top_layers",
+    "encoder_trainable_post_projections",
 ]
+
+
+# transformers pins kernels-community/mamba-ssm at `version=2`
+# (integrations/hub_kernels.py), and that revision's build set starts at torch
+# 2.11. RunPod's base image is on torch 2.8, so Hub-kernel dispatch resolves
+# the repo, then raises FileNotFoundError when it looks for a matching variant
+# -- ASRModel.train catches it and falls back to the torch reference path for
+# Qwen3.5's causal depthwise conv.
+#
+# That fallback is avoidable. Released tags DO carry torch 2.8 builds, checked
+# against the Hub rather than inferred:
+#   v0.0.4  torch28, torch29                       torch28-cxx11-cu{126,128,129}-x86_64-linux
+#   v0.0.3  torch25..29                            same
+#   v0.0.2  torch25..28                            same
+#   main    torch28, 29, 210, 211, 212             same
+# Newest released tag first, `main` last, so the pin stays reproducible unless
+# only main has a matching build (which is what a future torch upgrade looks
+# like).
+_CONV1D_KERNEL_REPO = "kernels-community/mamba-ssm"
+_CONV1D_KERNEL_REVISIONS = ("v0.0.4", "v0.0.3", "v0.0.2", "main")
+_CONV1D_KERNEL_LAYERS = ("causal_conv1d_fn", "causal_conv1d_update")
+
+
+def _kernel_revision_for(torch_tag: str, arch: str, revisions=_CONV1D_KERNEL_REVISIONS):
+    """First revision carrying a build variant for this torch + CPU, else None.
+
+    Build directories are named `build/torch28-cxx11-cu126-x86_64-linux/...`,
+    so the match is prefix on the torch tag plus the machine arch.
+    """
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    for revision in revisions:
+        try:
+            files = api.list_repo_files(_CONV1D_KERNEL_REPO, revision=revision)
+        except Exception as exc:  # unknown tag, offline, rate limited
+            logger.debug("Could not list %s@%s: %s", _CONV1D_KERNEL_REPO, revision, exc)
+            continue
+        variants = {f.split("/")[1] for f in files if f.startswith("build/") and f.count("/") >= 2}
+        if any(
+            v.startswith(f"{torch_tag}-") and arch in v and v.endswith("linux") for v in variants
+        ):
+            return revision
+    return None
+
+
+def _repin_causal_conv1d_kernel() -> None:
+    """Point the causal-conv1d Hub kernels at a revision built for this torch.
+
+    Must run AFTER the model is constructed: transformers calls
+    `register_kernel_mapping_transformers()` inside `from_pretrained`, and
+    `register_kernel_mapping` merges with `inherit_mapping=True`, so anything
+    registered earlier would be overwritten by the defaults. Registering here
+    overrides only these two layer names and leaves the kernels-community/fla
+    entries (the gated delta-net fast path, 18 of 24 layers) untouched.
+
+    Entirely best-effort. Every failure path leaves the previous behaviour
+    intact, because ASRModel.train still catches an unresolvable kernel and
+    disables Hub dispatch.
+    """
+    if not torch.cuda.is_available():
+        return
+    try:
+        import platform
+
+        from kernels import LayerRepository, Mode
+        from transformers.integrations.hub_kernels import register_kernel_mapping_transformers
+
+        version = torch.__version__.split("+")[0].split(".")
+        torch_tag = f"torch{version[0]}{version[1]}"
+        arch = platform.machine()
+        revision = _kernel_revision_for(torch_tag, arch)
+        if revision is None:
+            logger.warning(
+                "No %s revision carries a build for %s/%s; leaving the default "
+                "pin in place. The causal-conv1d fast path will fall back to "
+                "the torch reference implementation (same numerics, slower).",
+                _CONV1D_KERNEL_REPO,
+                torch_tag,
+                arch,
+            )
+            return
+        register_kernel_mapping_transformers(
+            {
+                name: {
+                    "cuda": {
+                        mode: LayerRepository(
+                            repo_id=_CONV1D_KERNEL_REPO, layer_name=name, revision=revision
+                        )
+                        for mode in (Mode.TRAINING, Mode.INFERENCE)
+                    }
+                }
+                for name in _CONV1D_KERNEL_LAYERS
+            }
+        )
+        logger.info(
+            "Re-pinned %s to %s (has a %s-%s build); transformers' default "
+            "version=2 pin starts at torch 2.11.",
+            ", ".join(_CONV1D_KERNEL_LAYERS),
+            revision,
+            torch_tag,
+            arch,
+        )
+    except ImportError:
+        return  # `kernels` not installed; nothing dispatches from the Hub
+    except Exception as exc:
+        logger.warning(
+            "Could not re-pin the causal-conv1d Hub kernel (%s: %s). Continuing "
+            "with transformers' default pin.",
+            type(exc).__name__,
+            exc,
+        )
+
+
+def _require_fused_cross_entropy(model, cfg) -> None:
+    """Fail at startup when fused CE is unavailable on a GPU run.
+
+    Without liger's fused linear cross-entropy, every labelled forward
+    materializes a (batch, seq, vocab) logits tensor plus its fp32 upcast and
+    its gradient. On Qwen3.5-2B (vocab 248,320) at batch 48 / seq 330 that is
+    ~25 GiB -- most of an 80 GB card, spent on a tensor nothing in this repo
+    reads. It is also what killed several granite_qwen_lora launches with an
+    OOM in backward.
+
+    This used to be two `logger.warning` calls (one here, one in
+    `ASRModel.__init__`). Both fired correctly and both were missed, because a
+    warning scrolls past during model load and the run then trains normally --
+    just 25 GiB heavier and at permanent OOM risk. The failure has no symptom
+    until the batch that does not fit.
+
+    Raised only where the memory actually costs something: CUDA, a large
+    vocabulary, and liger requested. CPU/MPS smoke runs on a mac cannot have
+    liger at all (it is a linux-only dependency) and must stay runnable.
+    Set `training.allow_unfused_ce: true` to proceed anyway.
+    """
+    if getattr(model, "_lm_accepts_skip_logits", False):
+        return
+    if not cfg.training.get("use_liger", True):
+        return  # deliberately off; the planner already accounts for it
+    if cfg.training.get("allow_unfused_ce", False):
+        logger.warning(
+            "Fused cross-entropy is NOT active and allow_unfused_ce is set -- "
+            "continuing with the unfused path. Expect materially higher VRAM."
+        )
+        return
+    if not torch.cuda.is_available():
+        return  # mac / CPU smoke runs: liger is linux-only, nothing to fix
+
+    vocab = getattr(model.language_model.config, "vocab_size", 0) or 0
+    if vocab < 100_000:
+        return  # small vocab: the logits tensor is not the dominant term
+
+    batch = cfg.training.get("per_device_train_batch_size", 1)
+    est_gib = batch * 330 * vocab * 4 * 2 / 2**30
+    raise RuntimeError(
+        f"liger's fused linear cross-entropy is NOT active for "
+        f"{type(model.language_model).__name__} (vocab {vocab:,}). Every "
+        f"training step would materialize a (batch, seq, {vocab:,}) logits "
+        f"tensor -- roughly {est_gib:.0f} GiB at batch {batch}, seq 330 -- and "
+        f"risk an OOM in backward.\n"
+        f"Fix: `poetry install` on this machine (liger-kernel >=0.8.0 is "
+        f"required for qwen3.5 and is pinned in pyproject.toml), then check "
+        f"the log for 'Applied liger kernels via ...'.\n"
+        f"Override with `training.allow_unfused_ce=true` if this is "
+        f"deliberate."
+    )
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
@@ -1311,6 +1505,23 @@ def main(cfg: DictConfig) -> None:
         val = cfg.training.get(param)
         if val is None:
             continue
+        # Warn when both blocks set the same key. `training:` silently wins, so
+        # a `model:`-block value is dead config -- which is exactly how
+        # granite_qwen.yaml's `attn_implementation: sdpa` was overridden by
+        # production.yaml's flash_attention_2 for a full 33k-step run, with 15
+        # lines of FLOP arithmetic above it describing a setting the run never
+        # used. Loud rather than silent; the merge itself is unchanged.
+        model_val = model_config_dict.get(param)
+        if model_val is not None and model_val != val:
+            logger.warning(
+                "Config conflict on %r: model=%r is overridden by training=%r. "
+                "`training:` wins the TRAINING_MODEL_PARAMS merge -- set the "
+                "value you want under `training:`, and keep `model:` in sync or "
+                "remove it.",
+                param,
+                model_val,
+                val,
+            )
         # Strip OmegaConf wrappers so list/dict params (e.g. lora_target_modules)
         # land in ASRConfig as plain Python types — otherwise config.save_pretrained
         # hits a TypeError when json.dumps walks a ListConfig at checkpoint time.
@@ -1320,6 +1531,9 @@ def main(cfg: DictConfig) -> None:
     asr_config = ASRConfig(**model_config_dict)
 
     model = ASRModel(asr_config)
+
+    _require_fused_cross_entropy(model, cfg)
+    _repin_causal_conv1d_kernel()
 
     # Disable the KV cache for training on the decoder's own config, NOT on the
     # ASRConfig. ASRConfig.use_cache is an inference setting: __init__ copies it
@@ -1389,7 +1603,15 @@ def main(cfg: DictConfig) -> None:
     )
 
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
-    trainer.save_model()
+    # `_internal_call=True` suppresses Trainer's own hub push, which
+    # `upload_folder`s the entire output_dir. The explicit push below is the
+    # one that matters: it runs through `ASRModel.push_to_hub`, which sets
+    # `base_model_name_or_path` in adapter_config.json so the HF pipeline can
+    # load the repo. Letting both fire uploads the same multi-GB checkpoint
+    # twice. Only suppress it when we are the ones pushing -- a config with
+    # `push_to_hub: true` but no `hub_model_id` still gets Trainer's push to
+    # its output_dir-derived repo.
+    trainer.save_model(_internal_call=bool(push_to_hub))
 
     if push_to_hub:
         trainer.model.push_to_hub(

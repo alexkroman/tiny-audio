@@ -127,6 +127,12 @@ class LocalEvaluator(Evaluator):
     def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
         super().__init__(**kwargs)
         self.pipe = _build_local_pipeline(model_path)
+        # Explicit, not incidental. LocalStreamingEvaluator has always done
+        # this; this class never did, and got away with it only because
+        # nothing in the stack was train/eval-sensitive. A partially unfrozen
+        # Granite encoder is: its 16 BatchNorm1d modules normalise with batch
+        # statistics in train mode, which cost 25 WER points on Earnings22.
+        self.pipe.model.eval()
         self.user_prompt = user_prompt
 
         print_generation_config(self.pipe.model, model_path)
@@ -174,6 +180,17 @@ class LocalStreamingEvaluator(Evaluator):
 
         # Print generation config
         print_generation_config(self.model, model_path)
+
+    def _reset_run_state(self) -> None:
+        """Also clear the TTFB / processing accumulators.
+
+        `compute_metrics` averages these, and the CLI reuses one evaluator
+        for every dataset in a sweep, so without this the second dataset's
+        avg_ttfb would include the first dataset's samples.
+        """
+        super()._reset_run_state()
+        self.ttfb_times = []
+        self.processing_times = []
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
         from transformers import TextIteratorStreamer

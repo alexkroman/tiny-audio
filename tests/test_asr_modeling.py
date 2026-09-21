@@ -57,6 +57,16 @@ class TestTokenizerInit:
         eos_ids = base_asr_model.generation_config.eos_token_id
         assert eos_ids is None or all(e is not None for e in eos_ids)
 
+    def test_generation_config_carries_no_repeat_ngram_size(self, base_asr_model):
+        # `generate()` consults the GenerationConfig only; a value that lives
+        # on ASRConfig alone is inert, which is how the loop guard shipped
+        # disabled to the Hub.
+        assert (
+            base_asr_model.generation_config.no_repeat_ngram_size
+            == base_asr_model.config.no_repeat_ngram_size
+        )
+        assert base_asr_model.generation_config.no_repeat_ngram_size == 12
+
 
 class TestEmbeddings:
     """get_input_embeddings / set_input_embeddings / get_output_embeddings."""
@@ -1019,3 +1029,156 @@ class TestAssertProjectorLoaded:
                 ),
                 "mlp",
             )
+
+
+class TestHubKernelRecovery:
+    """A Hub kernel with no build for this box must not kill the run.
+
+    `use_kernels=True` resolves lazily on the first cuda-side kernelize, which
+    is the first `model.train()` — so `kernels-community/mamba-ssm` publishing
+    only torch 2.11+ wheels surfaces as a FileNotFoundError at step 0 of a
+    multi-day run, long after `from_pretrained` reported success.
+    """
+
+    def test_disable_hub_kernels_reports_and_clears_flags(self):
+        import torch.nn as nn
+
+        from tiny_audio.asr_modeling import disable_hub_kernels
+
+        inner = nn.Linear(2, 2)
+        inner._use_kernels = True
+        root = nn.Sequential(nn.Linear(2, 2), inner)
+        root._use_kernels = True
+
+        disabled = disable_hub_kernels(root)
+
+        # The root reports under its class name; children under their path.
+        assert disabled == ["Sequential", "1"]
+        assert root._use_kernels is False
+        assert inner._use_kernels is False
+
+    def test_disable_hub_kernels_returns_empty_when_unused(self):
+        import torch.nn as nn
+
+        from tiny_audio.asr_modeling import disable_hub_kernels
+
+        assert disable_hub_kernels(nn.Linear(2, 2)) == []
+
+    def test_train_retries_with_kernels_disabled(self, base_asr_model):
+        """The kernelize failure degrades to the reference path, not a crash."""
+
+        class KernelizingChild(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self._use_kernels = True
+                self.attempts = 0
+
+            def train(self, mode: bool = True):
+                self.attempts += 1
+                if self._use_kernels:
+                    raise FileNotFoundError(
+                        "Cannot find a build variant for this system in kernels-community/mamba-ssm"
+                    )
+                return super().train(mode)
+
+        child = KernelizingChild()
+        base_asr_model.add_module("_kernel_probe", child)
+        try:
+            base_asr_model.train(True)
+
+            assert base_asr_model.training is True
+            assert child._use_kernels is False
+            # One failed pass, one that went through after the flag flipped.
+            assert child.attempts == 2
+        finally:
+            del base_asr_model._modules["_kernel_probe"]
+            base_asr_model.train(False)
+
+    def test_train_reraises_when_kernels_are_not_involved(self, base_asr_model):
+        """Without kernels to blame, the original error must surface."""
+
+        class BrokenChild(torch.nn.Module):
+            def train(self, mode: bool = True):
+                raise RuntimeError("unrelated failure")
+
+        base_asr_model.add_module("_broken_probe", BrokenChild())
+        try:
+            with pytest.raises(RuntimeError, match="unrelated failure"):
+                base_asr_model.train(True)
+        finally:
+            del base_asr_model._modules["_broken_probe"]
+            base_asr_model.train(False)
+
+
+class TestFusedCrossEntropyRouting:
+    """`skip_logits` must reach the decoder on TRAIN steps, not just eval.
+
+    liger's own default is `skip_logits = self.training and labels is not
+    None`, read off the language model. `ASRModel.train` forces the decoder
+    into eval mode whenever it is frozen, so under `freeze_language_model` (or
+    LoRA) that default is False mid-training and the (batch, seq, vocab)
+    logits tensor comes back — 12.37 GiB at the granite_qwen_lora geometry,
+    which is an OOM in backward rather than a slowdown.
+    """
+
+    @staticmethod
+    def _record_skip_logits(model, monkeypatch):
+        """Report `skip_logits` as the decoder would see it, per call."""
+        seen = []
+        inner = model.language_model.forward
+
+        def recording_forward(*args, **kwargs):
+            seen.append(kwargs.pop("skip_logits", None))
+            return inner(*args, **kwargs)
+
+        monkeypatch.setattr(model.language_model, "forward", recording_forward)
+        # The stub decoder stands in for liger's patched `lce_forward`, which
+        # is the only forward that declares the parameter.
+        monkeypatch.setattr(model, "_lm_accepts_skip_logits", True)
+        return seen
+
+    @pytest.mark.parametrize("training", [True, False])
+    def test_skip_logits_requested_whenever_labels_are_present(
+        self, base_asr_model, monkeypatch, training
+    ):
+        seen = self._record_skip_logits(base_asr_model, monkeypatch)
+        input_ids = torch.tensor([[1, 2, 3, 4, 5]])
+
+        was_training = base_asr_model.training
+        try:
+            base_asr_model.train(training)
+            base_asr_model(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids),
+                labels=input_ids.clone(),
+            )
+        finally:
+            base_asr_model.train(was_training)
+
+        assert seen == [True]
+
+    def test_unlabelled_forward_keeps_its_logits(self, base_asr_model, monkeypatch):
+        """generate() and friends run without labels and do need the logits."""
+        seen = self._record_skip_logits(base_asr_model, monkeypatch)
+        input_ids = torch.tensor([[1, 2, 3, 4, 5]])
+
+        with torch.no_grad():
+            out = base_asr_model(input_ids=input_ids, attention_mask=torch.ones_like(input_ids))
+
+        assert seen == [None]
+        assert out.logits is not None
+
+    def test_explicit_skip_logits_is_not_overridden(self, base_asr_model, monkeypatch):
+        """A caller that asks for logits with labels still gets them."""
+        seen = self._record_skip_logits(base_asr_model, monkeypatch)
+        input_ids = torch.tensor([[1, 2, 3, 4, 5]])
+
+        with torch.no_grad():
+            base_asr_model(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids),
+                labels=input_ids.clone(),
+                skip_logits=False,
+            )
+
+        assert seen == [False]

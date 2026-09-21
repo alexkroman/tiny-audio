@@ -2,6 +2,7 @@
 
 from typing import ClassVar, Union
 
+import numpy as np
 import torch
 import transformers
 from torch.nn.utils.rnn import pad_sequence
@@ -15,6 +16,35 @@ except ImportError:
         ASRConfig,
         compute_encoder_output_length,
     )
+
+
+def prepend_lead_in(audio, sampling_rate: int, seconds: float):
+    """Prepend `seconds` of silence to a waveform (or each waveform in a list).
+
+    Peoples ships fixed ~15s grid cuts rather than sentence-aligned segments,
+    so a clip routinely opens mid-word and the model declines to emit the
+    partial first token. Measured on 500 Peoples clips with a paired
+    bootstrap: 20.51% -> 19.28% WER (delta -1.22, CI [-1.83, -0.64]) and
+    utterances dropping a leading reference word fall 258/460 -> 170/460.
+    CommonVoice, whose clips already start cleanly, is unaffected (+0.30,
+    CI [-0.43, +1.17]).
+
+    Inference only. Training feeds raw audio through the collator, so this is
+    a test-time transform, and it recovers two thirds of the dropped onsets
+    rather than all of them -- the remainder are clips whose first syllable
+    was never recorded, which no amount of lead-in reconstructs.
+    """
+    if not seconds or seconds <= 0:
+        return audio
+
+    if isinstance(audio, (list, tuple)) and audio and not isinstance(audio[0], (int, float)):
+        return [prepend_lead_in(a, sampling_rate, seconds) for a in audio]
+
+    pad = round(sampling_rate * seconds)
+    if pad <= 0:
+        return audio
+    arr = np.asarray(audio)
+    return np.concatenate([np.zeros(pad, dtype=arr.dtype), arr])
 
 
 class ASRProcessor(ProcessorMixin):
@@ -39,6 +69,7 @@ class ASRProcessor(ProcessorMixin):
         projector=None,
         encoder_conv_layers: list | None = None,
         audio_token: str | None = None,
+        lead_in_seconds: float = 0.0,
     ):
         """Initialize the ASR processor.
 
@@ -57,6 +88,7 @@ class ASRProcessor(ProcessorMixin):
         self.audio_token_id = tokenizer.convert_tokens_to_ids(self.audio_token)
         self.projector = projector
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
+        self.lead_in_seconds = float(lead_in_seconds)
 
     def _compute_encoder_output_length(self, mel_length: int) -> int:
         """Compute encoder output length using conv layer formulas."""
@@ -130,6 +162,8 @@ class ASRProcessor(ProcessorMixin):
 
         # Process audio
         if audio is not None:
+            sr = getattr(self.feature_extractor, "sampling_rate", 16000)
+            audio = prepend_lead_in(audio, sr, self.lead_in_seconds)
             audio_inputs = self.feature_extractor(
                 audio,
                 sampling_rate=getattr(self.feature_extractor, "sampling_rate", 16000),

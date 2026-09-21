@@ -48,9 +48,21 @@ def fake_spacy(monkeypatch):
     return module
 
 
-def _write_results(path: Path, samples: list[dict]) -> None:
-    """Write a results.txt in the format `parse_results_file` expects."""
+def _write_results(path: Path, samples: list[dict], run_id: str = "testrun") -> None:
+    """Write a results.txt in the format `parse_results_file` expects.
+
+    Also writes the minimal metrics.txt carrying a `Run ID`, because
+    `_latest_sweep` reads runs by sweep and drops directories without one.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    name = path.parent.name
+    stamp = name[:15]
+    dataset = name.rsplit("_", 1)[-1]
+    (path.parent / "metrics.txt").write_text(
+        f"Model: {name}\nDataset: {dataset}\nTimestamp: {stamp}\nRun ID: {run_id}\n"
+        + "-" * 40
+        + f"\nwer: 0.0\nnum_samples: {len(samples)}\n"
+    )
     blocks = []
     for i, s in enumerate(samples, start=1):
         lines = [
@@ -148,8 +160,14 @@ class TestEntityTableColumns:
     """The table reports semantic recall; numeric types belong to the ITN table."""
 
     @pytest.fixture
-    def compared(self, outputs):
-        """Run `compare` against a keywords file holding both type families."""
+    def compared(self, outputs, monkeypatch):
+        """Run `compare` against a keywords file holding both type families.
+
+        `MIN_CLASS_SUPPORT` is lowered because these assert on which COLUMNS
+        appear, not on whether a handful of entities is enough to report --
+        the support floor is covered by its own tests.
+        """
+        monkeypatch.setattr("scripts.analysis.MIN_CLASS_SUPPORT", 1)
         (outputs / "keywords.json").write_text(
             json.dumps(
                 {

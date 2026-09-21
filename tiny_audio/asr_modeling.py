@@ -1,4 +1,5 @@
 import functools
+import inspect
 import json
 import logging
 import math
@@ -20,6 +21,7 @@ from transformers import (
 )
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.utils import is_kernels_available
 
 try:
     from .asr_config import ASRConfig, compute_encoder_output_length
@@ -149,19 +151,47 @@ def find_encoder_layer_stack(encoder: nn.Module) -> tuple[str, nn.Module] | None
     return None
 
 
-def unfreeze_encoder_top_layers(encoder: nn.Module, top_n: int) -> list[str]:
-    """Unfreeze the top `top_n` encoder blocks plus the output projections.
+def _resolve_dtype(name, fallback: torch.dtype) -> torch.dtype:
+    """Resolve a config dtype name to a `torch.dtype`, falling back when unusable.
+
+    Only a genuine `str` naming a real floating-point dtype is honoured. Stand-in
+    config objects hand back a `MagicMock` for every attribute, and
+    `getattr(torch, MagicMock())` raises `TypeError: attribute name must be
+    string` -- which turned an unset optional field into a hard crash for any
+    caller holding a mock or a checkpoint config predating the field. Same
+    hazard `encoder_trainable_top_layers` guards against just below.
+    """
+    if not isinstance(name, str):
+        return fallback
+    resolved = getattr(torch, name, None)
+    return (
+        resolved if isinstance(resolved, torch.dtype) and resolved.is_floating_point else fallback
+    )
+
+
+def unfreeze_encoder_top_layers(
+    encoder: nn.Module, top_n: int, include_post_projections: bool = True
+) -> list[str]:
+    """Unfreeze the top `top_n` encoder blocks, optionally with the output projections.
 
     Assumes the caller has already frozen the whole encoder. Returns the sorted
     names of every parameter switched back on, so callers (and tests) can
     assert on exactly what moved rather than trusting a count.
 
-    The post-stack projections (Granite's `out` / `out_mid`) are included: they
-    sit between the top block and the projector, so leaving them frozen would
-    force the newly-trainable blocks to adapt through a fixed output map. The
-    pre-stack `input_linear` stays frozen -- it is the feature front-end, the
-    part most expensive to damage and least specialised to the encoder's own
-    CTC head.
+    The post-stack projections (Granite's `out` / `out_mid`) are included by
+    default: they sit between the top block and the projector, so leaving them
+    frozen forces the newly-trainable blocks to adapt through a fixed output
+    map. That is a reasonable prior, but on this stack it is not what the
+    gradient says. Probing the step-2000 granite_qwen_lora checkpoint on real
+    audio, `out`/`out_mid` carry 33.57M params -- 23% of a top-4 budget -- for
+    an RMS-per-param gradient of 1.14e-05 against 1.4-1.7e-04 in the top
+    blocks, i.e. **0.27% of the selection's squared gradient**. Dropping them
+    moved the aggregate norm from 1.5840 to 1.5827. Pass False to reclaim the
+    parameters; the default stays True so existing recipes are unchanged.
+
+    The pre-stack `input_linear` stays frozen either way -- it is the feature
+    front-end, the part most expensive to damage and least specialised to the
+    encoder's own CTC head.
 
     Raises if the layer stack cannot be found or `top_n` exceeds its depth:
     silently unfreezing nothing would produce a run that looks like a
@@ -190,7 +220,7 @@ def unfreeze_encoder_top_layers(encoder: nn.Module, top_n: int) -> list[str]:
             unfrozen.append(f"{path}.{idx}.{name}")
     # Post-stack projections, identified positionally: direct children that are
     # not the stack itself and not the pre-stack input projection.
-    for name, child in encoder.named_children():
+    for name, child in encoder.named_children() if include_post_projections else ():
         if name == path.split(".")[0] or name.startswith("input"):
             continue
         for pname, param in child.named_parameters():
@@ -437,6 +467,30 @@ def _assert_projector_loaded(incompatible_keys, projector_type: str) -> None:
     )
 
 
+def disable_hub_kernels(root: nn.Module) -> list[str]:
+    """Switch off transformers' Hub-kernel dispatch everywhere it is enabled.
+
+    Returns the names of the submodules that were carrying it, so a caller can
+    tell "kernels were on, now they are off" from "kernels had nothing to do
+    with this failure" and re-raise in the second case.
+
+    Writes `_use_kernels` directly instead of going through the public
+    `use_kernels` setter. The setter does the same assignment but first logs
+    "Disabling kernels at runtime is a no-op as there is no 'unkernelize'
+    routine; keeping current kernels active" -- true of the layers already
+    swapped, misleading as an explanation of what this call accomplishes. What
+    it accomplishes is stopping the *next* kernelize: `PreTrainedModel.train`
+    re-runs `set_use_kernels(True)` on every mode flip, and that is the call
+    that raises.
+    """
+    disabled = []
+    for name, module in root.named_modules():
+        if getattr(module, "_use_kernels", False):
+            module._use_kernels = False
+            disabled.append(name or type(module).__name__)
+    return disabled
+
+
 class ASRModel(PreTrainedModel, GenerationMixin):
     """Audio-to-text model combining an audio encoder, projector, and language model."""
 
@@ -535,6 +589,34 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Language model (frozen)
         self.language_model = self._load_language_model(config, target_dtype)
 
+        # Does the decoder's forward take `skip_logits`? Only liger's patched
+        # `lce_forward` declares it; the stock transformers forward does not.
+        # Resolved once here rather than per-step, and read in forward() to
+        # skip the lm_head projection on any labelled forward, train or eval
+        # (see the comment there). Checked
+        # on the class rather than the instance because liger patches the
+        # class. scripts/train.py applies liger BEFORE constructing ASRModel,
+        # so this sees the patched state.
+        self._lm_accepts_skip_logits = (
+            "skip_logits" in inspect.signature(type(self.language_model).forward).parameters
+        )
+        if not self._lm_accepts_skip_logits:
+            # Say so once, loudly. Without the fused path every labelled
+            # forward builds a (B, T, vocab) tensor plus its fp32 upcast and
+            # its gradient, which on a large-vocab decoder is the difference
+            # between fitting on the card and not -- and the ways to end up
+            # here are all quiet: no liger patcher mapped for this
+            # text_model_id, liger missing (it is linux-only), or a patcher
+            # that patched a different class than the one that got loaded.
+            logger.warning(
+                "%s's forward does not accept `skip_logits` — liger's fused "
+                "linear cross-entropy is NOT active, so every training step "
+                "materializes a (batch, seq, %s) logits tensor. Check for an "
+                "'Applied liger kernels via ...' line earlier in the log.",
+                type(self.language_model).__name__,
+                getattr(self.language_model.config, "vocab_size", None) or "vocab",
+            )
+
         # Initialize tokenizer and special tokens
         self._init_tokenizer(config)
 
@@ -542,6 +624,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.generation_config = self.language_model.generation_config
         self.generation_config.max_new_tokens = config.max_new_tokens
         self.generation_config.use_cache = config.use_cache
+        # `generate()` reads the GenerationConfig and nothing else, so every
+        # decoding knob ASRConfig owns has to be copied across here. Omitting
+        # this line left ASRConfig's 12-gram loop guard inert: the value was
+        # set on the config, serialized into config.json, and never consulted.
+        self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
         # Set EOS tokens, filtering out any that don't exist in the tokenizer.
         # `convert_tokens_to_ids` reports "not in vocab" inconsistently: Qwen-
         # style tokenizers return None, while Gemma's returns unk_token_id.
@@ -717,7 +804,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # then complains "current dype is torch.float32, expected fp16/bf16",
         # and even with sdpa the projector→encoder feed mismatches dtypes.
         # `.to(dtype=...)` after load is idempotent and forces the issue.
-        encoder = encoder.to(dtype=dtype)
+        # `encoder_dtype` overrides the stack dtype when the encoder has
+        # trainable blocks; it must be fp32 for Adam's step to survive
+        # rounding. See ASRConfig.encoder_dtype for the arithmetic.
+        encoder = encoder.to(dtype=_resolve_dtype(getattr(config, "encoder_dtype", None), dtype))
         if getattr(config, "freeze_audio_encoder", True):
             encoder.requires_grad_(False)
             encoder.train(False)  # equivalent to .eval(); avoids a security hook false-positive
@@ -728,8 +818,34 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             top_n = getattr(config, "encoder_trainable_top_layers", 0)
             top_n = top_n if isinstance(top_n, int) and not isinstance(top_n, bool) else 0
             if top_n > 0:
-                unfreeze_encoder_top_layers(encoder, top_n)
-                encoder.train(True)
+                unfreeze_encoder_top_layers(
+                    encoder,
+                    top_n,
+                    include_post_projections=bool(
+                        getattr(config, "encoder_trainable_post_projections", True)
+                    ),
+                )
+        # Deliberately does NOT call `encoder.train(True)` for the partial
+        # unfreeze. Construction must not decide train/eval mode: `train()` /
+        # `eval()` own that, and `_apply_train_mode` already routes the encoder
+        # correctly on every such call. Setting train mode here instead left it
+        # sticky for any consumer that never calls either -- which is exactly
+        # what LocalEvaluator did, and Granite's encoder carries 16
+        # BatchNorm1d modules. In train mode those normalise with per-utterance
+        # batch statistics rather than IBM's running statistics: near-harmless
+        # on in-domain clean audio, and measured at 12.27% -> 37.44% WER on
+        # Earnings22, where the audio is out of distribution and the clips are
+        # short enough for batch statistics to be noisy.
+        #
+        # Note the encoder stays in EVAL mode during training too (the branch
+        # in `_apply_train_mode` keyed on `freeze_audio_encoder`, which the
+        # partial-unfreeze recipe leaves True). That is correct rather than
+        # incidental: frozen BatchNorm statistics are standard practice when
+        # fine-tuning a pretrained encoder, gradients still reach the conv
+        # weights and BN's own affine parameters through an eval-mode BN, and
+        # it keeps the running stats identical to base -- which matters because
+        # a partial-unfreeze checkpoint saves only trainable PARAMETERS, not
+        # buffers, so drifting running stats would silently not round-trip.
         return encoder
 
     @classmethod
@@ -763,6 +879,45 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
+
+        # Opt into transformers' hub-kernel dispatch. For Qwen3.5 this is the
+        # difference between the gated-delta-net fast path and the torch
+        # reference: 18 of its 24 layers are linear_attention, and upstream
+        # measures "more than an order of magnitude on an H100" for
+        # chunk_gated_delta_rule alone. Numerics are unaffected -- the
+        # decorator's fallback chain (hub -> original package -> torch) picks
+        # an implementation, not a different computation.
+        #
+        # Gated rather than unconditional: the kernels are CUDA binaries, so
+        # asking for them on mps/cpu only buys resolution failures and log
+        # noise. Absent `kernels`, from_pretrained pops the flag and proceeds.
+        # Gate on transformers' OWN predicate, not on whether the package
+        # imports. transformers accepts `kernels` only inside a version window
+        # (KERNELS_MIN_VERSION <= v < KERNELS_MAX_VERSION) and
+        # set_use_kernels RAISES inside from_pretrained when the installed
+        # version is outside it -- so a presence check like find_spec() turns a
+        # would-be speedup into a hard crash at model construction. That is
+        # precisely what an earlier revision did: it saw kernels 0.17.1
+        # installed, asked for them, and died against a transformers wanting
+        # <0.17.0. is_kernels_available() checks presence AND the window, so a
+        # mismatch now degrades to the torch reference path.
+        #
+        # The gate is necessary but not sufficient: it says the `kernels`
+        # PACKAGE is usable, not that the Hub has a build of each mapped repo
+        # for this torch/CUDA/arch. That second failure cannot be checked here
+        # -- resolution happens lazily on the first cuda-side kernelize, which
+        # is the first `train()` -- so it is handled there, in `ASRModel.train`.
+        kernels_ok = is_kernels_available()
+        if torch.cuda.is_available() and kernels_ok:
+            decoder_kwargs["use_kernels"] = True
+        else:
+            logger.info(
+                "Hub kernels not requested (cuda=%s, kernels usable=%s) — "
+                "Qwen3.5-style linear-attention layers will use the slower "
+                "torch reference path.",
+                torch.cuda.is_available(),
+                kernels_ok,
+            )
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
 
@@ -928,8 +1083,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # The projector may run at a higher precision than the frozen stack --
         # it is the only module with optimizer state, so it is the only one
         # that needs master-weight precision. See ASRConfig.projector_dtype.
-        proj_name = getattr(config, "projector_dtype", None)
-        proj_dtype = getattr(torch, proj_name) if proj_name else dtype
+        proj_dtype = _resolve_dtype(getattr(config, "projector_dtype", None), dtype)
         self._projector_dtype = proj_dtype
         return projector.to(device=device, dtype=proj_dtype)
 
@@ -942,6 +1096,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             lora_alpha=config.lora_alpha,
             target_modules=config.lora_target_modules,
             lora_dropout=config.lora_dropout,
+            # Per-module overrides for targets whose shape makes the global
+            # rank wrong -- see ASRConfig.lora_rank_pattern. PEFT resolves the
+            # two patterns independently, so a recipe that sets one and not the
+            # other silently changes that module's alpha/r scale; the config
+            # field's docstring spells out the arithmetic.
+            rank_pattern=dict(getattr(config, "lora_rank_pattern", None) or {}),
+            alpha_pattern=dict(getattr(config, "lora_alpha_pattern", None) or {}),
             bias="none",
             task_type="CAUSAL_LM",
         )
@@ -1098,13 +1259,103 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         on modules with `requires_grad_(False)`. The frozen encoder (and the LM
         when `freeze_language_model=True`) should always run deterministically;
         train-mode dropout only adds noise that can't improve a frozen network.
+
+        Also the place where Hub-kernel dispatch is caught and switched off.
+        `use_kernels=True` (see `_load_language_model`) is resolved lazily, per
+        device and per mode: `from_pretrained` kernelizes while the decoder is
+        still on CPU, where the mapping has no entry and the pass no-ops, so a
+        load that "succeeded" proves nothing. Trainer then moves the model to
+        CUDA and calls this method, `PreTrainedModel.train` re-runs
+        `set_use_kernels(True)`, and only now does `kernels` go and fetch the
+        repo the mapping names for (cuda, TRAINING). A repo with no build
+        variant for this box raises FileNotFoundError there -- step 0 of the
+        run, after the dataset and the model are already up. Qwen3.5's conv
+        functions hit exactly this: they map to kernels-community/mamba-ssm,
+        which transformers pins at `version=2` (integrations/hub_kernels.py),
+        and THAT REVISION's build set starts at torch 2.11 while the RunPod
+        base image is on torch 2.8.
+
+        An earlier version of this comment concluded that no branch of the
+        repo had a torch 2.8 build and there was nothing to move to. That was
+        wrong: it read "the pinned revision has no matching build" as "no
+        build exists". Checked against the Hub -- tags v0.0.2, v0.0.3 and
+        v0.0.4 all ship torch28-cxx11-cu{126,128,129}-x86_64-linux, and so
+        does main. `scripts/train._repin_causal_conv1d_kernel` re-registers
+        these two layers against the newest revision carrying a build for the
+        local torch, so on a correctly provisioned pod the fast path resolves
+        and this fallback is not reached.
+
+        The fallback stays because it still covers what the re-pin cannot:
+        `kernels` absent, the Hub unreachable at startup, or a torch version
+        nobody has built a variant for.
+
+        `kernels`' own `use_fallback=True` does not cover this. It guards the
+        mapping lookups only; once a repo is selected, `_get_layer_memoize` ->
+        `repo.load()` is unguarded and a missing variant is fatal. Nor can the
+        `is_kernels_available()` gate see it -- that checks the `kernels`
+        package version window, not what the Hub built.
+
+        So catch it here, at the one call site that triggers it, and retry with
+        kernels off. Layers swapped before the raise keep their kernels: they
+        resolved for the mode being requested and are drop-in equivalents, so a
+        partial swap is slower-in-places, never wrong. The retry is safe
+        because `super().train(mode)` is idempotent, and it terminates because
+        the flag that drives the kernelize is now False.
         """
+        try:
+            self._apply_train_mode(mode)
+        except Exception as exc:  # re-raised below unless kernels explain it
+            disabled = disable_hub_kernels(self)
+            if not disabled:
+                raise
+            logger.warning(
+                "Hub kernel dispatch failed switching to %s mode (%s: %s). "
+                "Disabled it on %s; the run continues on the torch reference "
+                "path -- same numerics, slower hybrid/linear-attention layers.",
+                "train" if mode else "eval",
+                type(exc).__name__,
+                exc,
+                ", ".join(disabled),
+            )
+            self._apply_train_mode(mode)
+        return self
+
+    def _apply_train_mode(self, mode: bool) -> None:
+        """The actual mode switch, factored out so `train` can retry it."""
         super().train(mode)
         if getattr(self.config, "freeze_audio_encoder", True):
             self.audio_tower.train(False)
+        elif mode:
+            # Fully-unfrozen encoder: keep BatchNorm on its pretrained running
+            # statistics anyway. Granite Speech 5.0 carries 16 BatchNorm1d and
+            # zero Dropout, and for non-Whisper extractors the collator pads to
+            # the batch longest (`DataCollator._audio_padding`) with
+            # group_by_length off, so clips spanning 0.8-19.0s leave a large
+            # pad fraction. Granite's conv module zeroes pad positions and THEN
+            # runs BatchNorm1d over the full padded (B, C, T); BN reduces over
+            # B*T, so those zeros are counted as data -- deflating the mean and
+            # shrinking the variance. At BN's default momentum=0.1 the running
+            # stats converge to the polluted values within ~30-50 steps, and
+            # every eval and checkpoint after that uses them.
+            #
+            # This channel is invisible to `encoder_learning_rate`: running
+            # stats are buffers, so they carry no gradient and sit in no
+            # optimizer group. See the measured 12.27% -> 37.44% Earnings22
+            # regression documented in `_load_audio_encoder` for what wrong BN
+            # statistics cost on this exact encoder.
+            #
+            # Pinning the statistics does not freeze the module: gradients
+            # still reach the conv weights and BN's own affine weight/bias
+            # through an eval-mode BN, and those params remain trainable at
+            # `encoder_learning_rate` (routed to the no-decay group, since
+            # create_optimizer matches any module whose class name contains
+            # "Norm"). This mirrors what the partial-unfreeze path already gets
+            # for free via the `freeze_audio_encoder: true` branch above.
+            for module in self.audio_tower.modules():
+                if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+                    module.eval()
         if getattr(self.config, "freeze_language_model", True):
             self.language_model.train(False)
-        return self
 
     def _set_gradient_checkpointing(
         self,
@@ -1163,7 +1414,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         to the projector); includes the encoder only when it's trainable.
         """
         targets: list[nn.Module] = [self.language_model]
-        if not getattr(self.config, "freeze_audio_encoder", True):
+        # Autograd state again, not the flag: a partially unfrozen encoder has
+        # an activation tape worth checkpointing even though the flag is True.
+        if any(p.requires_grad for p in self.audio_tower.parameters()):
             targets.append(self.audio_tower)
         return targets
 
@@ -1220,8 +1473,22 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         round-trip with the rest of the LM.
         """
         sd = {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
-        if not getattr(self.config, "freeze_audio_encoder", True):
-            sd.update({f"audio_tower.{k}": v for k, v in self.audio_tower.state_dict().items()})
+        # Keyed on autograd state, not `freeze_audio_encoder`. Under the
+        # documented partial-unfreeze recipe that flag stays True while the top
+        # N blocks train, so gating on it meant a trained encoder was never
+        # written to the checkpoint -- the run did the work and threw it away.
+        # Only the trainable tensors are saved: the rest reload from
+        # `audio_model_id`, and from_pretrained overlays with strict=False.
+        enc_trainable = {n for n, p in self.audio_tower.named_parameters() if p.requires_grad}
+        if enc_trainable:
+            fully = len(enc_trainable) == sum(1 for _ in self.audio_tower.parameters())
+            sd.update(
+                {
+                    f"audio_tower.{k}": v
+                    for k, v in self.audio_tower.state_dict().items()
+                    if fully or k in enc_trainable
+                }
+            )
         if not getattr(self.config, "freeze_language_model", True):
             lm = self.language_model
             if hasattr(lm, "peft_config"):
@@ -1332,7 +1599,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         ):
             tower_kwargs["attention_mask"] = audio_attention_mask.to(audio_features.device)
 
-        encoder_frozen = getattr(self.config, "freeze_audio_encoder", True)
+        # Gate on autograd state, NOT on `freeze_audio_encoder` alone. The
+        # documented partial-unfreeze recipe is `freeze_audio_encoder: true`
+        # PLUS `encoder_trainable_top_layers: N` (see ASRConfig), which leaves
+        # the flag True while `_load_audio_encoder` switches the top N blocks
+        # back on. Reading the flag here then wrapped those blocks in no_grad
+        # and zeroed their gradients -- exactly the failure the comment above
+        # warns about -- so the run paid ~1.6 GiB of AdamW state for 198M
+        # params that could never move, with nothing in the logs saying so.
+        encoder_frozen = not any(p.requires_grad for p in self.audio_tower.parameters())
         if encoder_frozen:
             with torch.no_grad():
                 encoder_out = self.audio_tower(**tower_kwargs)
@@ -1580,6 +1855,46 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # `return_dict` instead!". Supplying the value means the fallback never
         # runs.
         kwargs.setdefault("return_dict", True)
+
+        # Skip the lm_head projection whenever the loss is all that is wanted.
+        # Nothing in this repo reads `outputs.logits` on a labelled forward --
+        # not the Trainer (no compute_metrics), not the custom metrics -- so
+        # the (B, T, V) tensor is pure cost on both train and eval.
+        #
+        # Requesting it EXPLICITLY on both, rather than leaning on liger's
+        # default, because that default is wrong here in both directions:
+        #
+        #   skip_logits = self.training and labels is not None
+        #
+        # where `self` is the LANGUAGE MODEL. Two ways that misfires:
+        #
+        #   eval  -- runs under model.eval(), so the default is False and the
+        #            full tensor gets built. granite_qwen.yaml's claim that
+        #            "the logits never materialize past liger's fused CE" was
+        #            not true as configured: Trainer injects skip_logits only
+        #            when `args.use_liger_kernel` is set (trainer.py:3135),
+        #            and this repo patches liger by hand and leaves that flag
+        #            False. At B=32, T~320, V=248320 that is ~5.1 GiB in bf16
+        #            plus the fp32 upcast inside the loss.
+        #
+        #   train -- `train()` above forces the decoder into eval mode when
+        #            `freeze_language_model=True`, so the LM's `training` flag
+        #            is False WHILE THE RUN IS TRAINING and the default turns
+        #            the fused CE off exactly where it matters most. That is
+        #            an OOM, not a slowdown: granite_qwen_lora at B=48, T=557
+        #            died on a 12.37 GiB allocation in backward, which is
+        #            48*557*248320*2 bytes to the byte. The full-FT recipe
+        #            never saw it -- its decoder stayed in train mode, so the
+        #            default happened to be right.
+        #
+        # Done here rather than via `use_liger_kernel: true` because that flag
+        # makes transformers call apply_liger_kernel(), which *raises* when
+        # liger-kernel is unavailable -- and liger is a linux-only dependency
+        # (pyproject.toml), so it would break every mps_smoke run on a mac.
+        # Gating on the patched signature is equivalent where it matters and
+        # inert everywhere else.
+        if labels is not None and self._lm_accepts_skip_logits:
+            kwargs.setdefault("skip_logits", True)
 
         return self.language_model(
             attention_mask=attention_mask,
@@ -1964,6 +2279,28 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         shutil.copy(src_dir / "alignment.py", save_dir / "alignment.py")
         # Copy diarization module
         shutil.copy(src_dir / "diarization.py", save_dir / "diarization.py")
+
+    def create_or_update_model_card(self, output_dir: str | Path) -> None:
+        """Re-apply the PEFT card metadata to `output_dir/README.md`.
+
+        This is a PEFT method, not a transformers one, and it exists here only
+        because `Trainer` calls it on the unwrapped model. `create_model_card`
+        overwrites the README with its own training summary, and if the card it
+        replaced declared `library_name: peft` it then asks the model to put the
+        adapter metadata back. On a LoRA run that branch always fires: the
+        `language_model.save_pretrained` call above writes the adapter through
+        `PeftModel.save_pretrained`, which stamps a peft card into the same
+        directory the trainer is about to overwrite. `PreTrainedModel` has no
+        such method, so without this delegation the final `trainer.save_model()`
+        dies with AttributeError *after* the run has finished training.
+
+        Delegating to the language model is a no-op when there is no adapter
+        (a stale peft README left in `output_dir` by an earlier LoRA run in the
+        same directory is enough to reach here on a run with LoRA disabled).
+        """
+        card_fn = getattr(self.language_model, "create_or_update_model_card", None)
+        if card_fn is not None:
+            card_fn(str(output_dir))
 
     def push_to_hub(self, repo_id: str, **kwargs) -> str:
         """Push model to HuggingFace Hub, ensuring adapter_config points to repo.

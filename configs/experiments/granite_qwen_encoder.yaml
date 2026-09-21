@@ -1,0 +1,233 @@
+# @package _global_
+# ENCODER-FIRST EXPERIMENT -- the Ultravox allocation.
+#
+#   ibm-granite/granite-speech-5.0-470m-turboctc  (FULLY TRAINABLE, 472.9M)
+#     -> MLP projector (fresh init, 12.6M, lr 1e-3)
+#     -> Qwen/Qwen3.5-2B  (FULLY FROZEN -- no LoRA, no adapters, nothing)
+#
+# Trainable: 485.5M of 2.434B (19.9%). The decoder contributes zero trainable
+# parameters; the encoder and the projector carry the entire adaptation.
+#
+#   poetry run python scripts/train.py +experiments=granite_qwen_encoder
+#
+# ---------------------------------------------------------------------------
+# WHY: this is what the two closest published recipes actually do, and this
+# repo has never tried it on Granite+Qwen.
+#
+# Measured from the shipped checkpoints rather than read from papers:
+#
+#   fixie-ai/ultravox-v0_5-llama-3_2-1b ships 0.68B params in 491 tensors:
+#     audio_tower 487, multi_modal_projector 4, language_model ABSENT.
+#   The LLM is not in the repo at all -- it loads unmodified from
+#   meta-llama/Llama-3.2-1B-Instruct. You do not ship 1B parameters you did
+#   not change. Its encoder against openai/whisper-large-v3-turbo:
+#     overall ||dW||/||W|| = 14.74%, all 487 tensors, every one of 32 layers
+#     (layer 0 35.1%, layer 12 49.4%, layer 24 34.4%, layer 31 38.2%).
+#
+#   nvidia/canary-qwen-2.5b, from its config.json:
+#     freeze_params: ['^llm\..+$', '^embed_tokens\..+$']
+#     prevent_freeze_params: ['^.+\.lora_.+$']
+#   i.e. fully trainable encoder, LLM frozen except a q/v LoRA.
+#
+# Both put the entire trainable budget in the encoder and constrain the LLM.
+# This file goes one step further than Canary-Qwen and drops the LoRA too,
+# matching Ultravox exactly.
+#
+# Corroborating evidence from this repo's own runs:
+#   - The frozen encoder's OWN CTC head beats the full stack on 7 of 12 eval
+#     sets (pooled minus TEDLIUM: CTC 7.29 vs full stack 7.62). The decoder's
+#     net WER contribution is ~zero.
+#   - Per-block gradient profiling of the frozen encoder at step 2000 put 29%
+#     of the model's total ||g||^2 inside the encoder -- computed by the
+#     backward pass and then discarded every step. The top 4 blocks alone held
+#     3.14x the projector's gradient energy.
+#
+# WHAT IT COSTS: the decoder's formatting. Plain WER cannot see this because
+# the eval normalizer lowercases and strips punctuation from both sides. The
+# granite_qwen baseline scored orthographic WER 10.14 / punctuation F1 77.07
+# on the 270 cased+punctuated samples. A frozen decoder still has all of
+# Qwen3.5's formatting ability -- it simply cannot ADAPT it to this task.
+# `ta eval` + the formatting table is the measurement that decides this, not
+# corpus WER. Run it at -n 500; n=44 cannot resolve the difference.
+# ---------------------------------------------------------------------------
+
+defaults:
+  - override /data: multiasr
+
+model:
+  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc
+  text_model_id: Qwen/Qwen3.5-2B
+  projector_type: mlp
+  attn_implementation: sdpa
+  projector_pool_stride: 1
+  encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
+  projector_hidden_dim: 4096
+  projector_output_rms: auto
+  transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
+  label_smoothing: 0.0
+  max_new_tokens: 256
+
+  model_dtype: bfloat16
+  projector_dtype: float32
+  # REQUIRED, not a preference, and it is the whole recipe's precondition.
+  # AdamW allocates its moments with zeros_like(param), so a bfloat16 encoder
+  # gets bfloat16 moments and the update lands in bfloat16. Granite's weights
+  # have RMS 0.0868, where one bf16 ULP is 4.88e-4; Adam's step at 1e-4 is
+  # ~1e-4, i.e. 5x below a single ULP. Measured on a real step at lr 1e-5:
+  # bfloat16 moved 3.4% of elements and retained 26.4% of the fp32 update
+  # norm, against float32's 99.0%. And the survivors are the SMALLEST-magnitude
+  # weights -- the ones whose proportionally smaller ULP a tiny step can clear
+  # -- so it is a magnitude-biased update, not a scaled-down one, and no LR
+  # change corrects it. fp32 for all 472.9M costs +0.95 GB over bfloat16.
+  encoder_dtype: float32
+
+  # NO LoRA. This is the variable under test: granite_qwen full-FT'd the
+  # decoder (1.37B trainable), granite_qwen_lora adapted it (67.3M), this one
+  # spends nothing on it at all.
+  use_lora: false
+
+  # SpecAugment deliberately OFF.
+  #
+  # ASRConfig warns that a trainable encoder "sees identical mel inputs on
+  # every visit and overfits fast" without it, and that warning has more force
+  # here than anywhere else in the repo: Granite Speech 5.0's encoder contains
+  # ZERO dropout modules (measured -- 16 BatchNorm1d and 80 LayerNorm, no
+  # Dropout), so with 472.9M params trainable and no input masking the encoder
+  # carries no stochastic regularization whatsoever. Only weight decay.
+  #
+  # Left off anyway, for two reasons. First, precedent: nvidia/canary-qwen-2.5b
+  # has no `spec_augment` section in its config at all -- its perception block
+  # is exactly {encoder, modality_adapter, output_dim, preprocessor}, and in
+  # NeMo spec_augment is a sibling of those. NeMo's own ASR recipes for this
+  # encoder family normally DO carry one, so its absence in the SALM stage is a
+  # deliberate omission, not an oversight. Second, single-variable: this file
+  # already changes the encoder and the decoder allocation at once against
+  # granite_qwen_lora. Adding augmentation makes a regression unassignable.
+  #
+  # THE SIGNAL TO WATCH: train/eval gap. granite_qwen held it dead flat at
+  # 0.189 +/- 0.004 across all 17 evals, i.e. zero overfitting, and
+  # granite_qwen_lora ran 0.2015 at step 2000. If this run's gap widens past
+  # ~0.25 and keeps going while eval loss flattens, that is the encoder
+  # memorizing and augmentation is the first thing to add back.
+  apply_spec_augment: false
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-granite-qwen-encoder"
+
+  attn_implementation: sdpa
+
+  # The allocation. `freeze_audio_encoder: false` unfreezes ALL 16 blocks plus
+  # input_linear and out/out_mid -- not a top-N slice. That is deliberate:
+  # neither Ultravox nor Canary-Qwen does a partial unfreeze, and the one
+  # external drift profile available (Ultravox, above) peaks in the MIDDLE of
+  # the stack (layer 12 at 49.4%) rather than the top, which a top-N selection
+  # would miss entirely.
+  #
+  # Note `encoder_trainable_top_layers` is inert when freeze_audio_encoder is
+  # false -- that field only ever re-enables layers the freeze path turned off.
+  freeze_audio_encoder: false
+  freeze_language_model: true
+  freeze_projector: false
+  # Redundant with a fully frozen LM, kept explicit so the intent survives
+  # anyone flipping freeze_language_model later.
+  freeze_text_embed_tokens: true
+
+  learning_rate: 1e-3
+  # 1e-4, matching this repo's own encoder_train.yaml -- the existing recipe
+  # for exactly this allocation (trainable encoder, frozen LLM) -- rather than
+  # the 1e-5 granite_qwen_lora uses for a 4-block partial unfreeze. The
+  # encoder is the primary adaptation module here, not a cautious addition to
+  # one.
+  #
+  # Sized against the target, not guessed. granite_qwen_lora measured 0.357%
+  # encoder drift at 2,000 steps with lr 1e-5 on its top 4 blocks. Scaling 10x
+  # in LR and 15x in steps gives ~14% under a diffusive (sqrt-steps) walk,
+  # which lands on Ultravox's measured 14.74% endpoint. If the walk turns out
+  # closer to linear the same arithmetic gives ~53%, which would be far too
+  # much.
+  #
+  # SO CHECK IT: `ta debug analyze-weights` / a diff against
+  # ibm-granite/granite-speech-5.0-470m-turboctc at the 2k and 4k checkpoints.
+  # ~3.6% at 2k is on track. Materially above ~6% at 2k means the walk is
+  # linear rather than diffusive and this should drop to 3e-5.
+  encoder_learning_rate: 1e-4
+  # decoder_learning_rate is NOT set here and is therefore inherited from
+  # production.yaml as 2e-5. That is inert, not a bug: create_optimizer builds
+  # its groups from parameters with requires_grad, and a fully frozen decoder
+  # contributes none, so the group is empty. Verified on a real build -- the
+  # optimizer comes back with projector and encoder groups only. Worth knowing
+  # rather than rediscovering if freeze_language_model is ever flipped here,
+  # at which point 2e-5 would silently become the decoder's LR.
+
+  label_smoothing_factor: 0.0
+  weight_decay: 0.01
+  # 0.01 on the projector, as in granite_qwen_lora. It is the only group where
+  # decoupled AdamW's decay does real work -- exp(-steps*lr*mean_lr_factor*wd)
+  # is ~15% at lr 1e-3 over this schedule against ~1.5% for the encoder at
+  # 1e-4 -- and it is the only force opposing the projector's unbounded output
+  # -scale growth, which a measured dL/d(log c) of +0.0005 +/- 0.0273 (|t|=0.05)
+  # showed the loss is indifferent to and therefore will not restrain.
+  projector_weight_decay: 0.01
+  # Explicit rather than inheriting `weight_decay`. Numerically near-inert
+  # (~1.5% shrink over the run at 1e-4), but pulling a 60k-hour pretrained
+  # encoder toward zero is not obviously desirable, and stating it stops the
+  # base value from silently applying.
+  encoder_weight_decay: 0.01
+
+  warmup_steps: 700
+  lr_scheduler_type: cosine_with_min_lr
+  lr_scheduler_kwargs:
+    min_lr_rate: 0.05
+  # 2.5, as in granite_qwen_lora, but this is the recipe most likely to need
+  # revisiting: the trainable set changes shape completely (472.9M of encoder
+  # replacing 67.3M of LoRA), so the post-warmup grad-norm distribution this
+  # was calibrated against no longer applies. Read it off the first 2k steps.
+  max_grad_norm: 2.5
+
+  seed: 44
+  auto_find_batch_size: false
+  # 48 x 2 = 96 effective, matching granite_qwen_lora so the projector LR
+  # transfers and the comparison holds. Re-check against `ta runpod plan`:
+  # the encoder's optimizer state is ~7.6 GB of fp32 grads + moments that
+  # granite_qwen_lora did not pay, and its activations are now retained for
+  # backprop rather than discarded.
+  # 32 x 3 = 96, NOT the 48 x 2 this file shipped with. 48 OOMed on an 80 GB
+  # card: the process reached 79.16 GiB of 79.25 and died asking for 190 MiB.
+  #
+  # The cause was an activation term nobody was counting. While the encoder is
+  # frozen ASRModel.forward runs it under no_grad and retains nothing; unfreeze
+  # it and 16 conformer blocks at ~237 frames x 1024 dims keep their full tape.
+  # Backing it out of the observed peak: 79.4 GiB needed - 12.5 static = ~66.9
+  # GiB of activations at batch 48, i.e. ~1.39 GiB/sample against the ~1.12
+  # the frozen-encoder recipe measured. scripts/deploy/plan.py models this now
+  # (it reported 61.78 GiB for the frozen version and reports 83.88 here).
+  #
+  # Scaling the measured peak: 32 -> ~57 GiB (72%), 24 -> ~46 GiB (58%).
+  # 32 keeps the effective batch at 96 with one extra micro-step and lands at
+  # the utilization granite_qwen already survived a full run at (82%). Drop to
+  # 24 x 4 if it OOMs again; gradient_checkpointing: true is the other lever
+  # and now reaches the encoder too, at ~30% wall-clock.
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 3
+
+  num_train_epochs: 1
+  save_steps: 2000
+  eval_steps: 2000
+
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 8
+  torch_compile: false
+
+  # SUCCESS CRITERIA, written before the run.
+  #   PASS  corpus WER at or below granite_qwen_lora's, AND orthographic WER
+  #         within ~1.0 of the 10.14 baseline. The decoder was rentable: spend
+  #         everything on the encoder from here.
+  #   MIXED corpus WER improves but orthographic WER regresses >1.5. The
+  #         encoder carries recognition, the decoder carries formatting, and
+  #         the right recipe is this plus a small LoRA -- i.e. Canary-Qwen.
+  #   FAIL  corpus WER regresses. The decoder was doing recognition work after
+  #         all, or 7.6k hours damaged a 60k-hour encoder. Check encoder drift
+  #         before concluding which.
+  # The frozen-encoder CTC baseline (7.56 pooled) remains the floor: a stack
+  # that does not clearly beat it is not earning its parameters.

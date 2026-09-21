@@ -123,6 +123,19 @@ class ASRConfig(transformers.PretrainedConfig):
         # matters at frozen-model memory cost. Defaults to model_dtype, so
         # existing recipes are unchanged.
         projector_dtype: str | None = None,
+        # Same idea as `projector_dtype`, for the encoder, and load-bearing the
+        # moment `encoder_trainable_top_layers > 0`. AdamW allocates its states
+        # with `zeros_like(param)`, so a bfloat16 encoder gets bfloat16 moments
+        # and the update is applied in bfloat16. Granite Speech 5.0's weights
+        # have RMS 0.0868, where one bf16 ULP is 4.88e-4; Adam's step at the
+        # recommended encoder LR of 1e-5 is ~1e-5, i.e. 49x BELOW a single ULP,
+        # so every update rounds away and the encoder silently does not train.
+        # You would need lr ~5e-4 to clear the ULP, which is far too hot for a
+        # pretrained Conformer. This is the same argument granite_qwen.yaml
+        # makes for the decoder, and it bites harder here because the encoder's
+        # weights are ~5x larger than the decoder's (0.087 vs 0.015-0.02).
+        # Defaults to model_dtype, so frozen-encoder recipes are unchanged.
+        encoder_dtype: str | None = None,
         projector_pool_stride: int = 4,
         projector_hidden_dim: int | None = None,
         projector_type: str = "mlp",
@@ -158,6 +171,38 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_alpha: int = 32,  # SALMONN default (scaling factor 4.0)
         lora_dropout: float = 0.0,
         lora_target_modules: list | None = None,  # Default: all linear layers
+        # Per-module rank/alpha overrides, keyed by the module's leaf name and
+        # matched by PEFT as `(.*\.)?<key>$` against the full module path.
+        #
+        # These exist because `all-linear` is blind to a matrix's shape. On
+        # Qwen3.5 the gated-DeltaNet gates `in_proj_a` / `in_proj_b` are
+        # (16, 2048) -- one scalar per value head -- so a rank-64 adapter on
+        # them is capped at rank 16 by the output dimension and spends
+        # 64*2048 + 16*64 = 132K parameters to express an update that a full
+        # fine-tune of the same matrix would carry in 32K. Measured on the
+        # step-20000 granite_qwen_top4 checkpoint: 4.76M LoRA params across the
+        # 36 gate matrices, 4.03x what full fine-tuning them costs, and the
+        # realised update's effective rank was 6.3 / 7.3 against the 64
+        # allocated.
+        #
+        # PEFT looks up rank_pattern and alpha_pattern INDEPENDENTLY, each
+        # falling back to `r` / `lora_alpha`. Overriding rank alone therefore
+        # changes the scale: alpha/r goes 128/64 = 2.0 to 128/16 = 8.0. Always
+        # set both, and keep the ratio equal to the global one unless the
+        # scale change is the point.
+        lora_rank_pattern: dict | None = None,
+        lora_alpha_pattern: dict | None = None,
+        # Seconds of silence prepended to every clip at INFERENCE. Measured on
+        # Peoples (n=500, paired bootstrap): 20.51% -> 19.28% WER, delta -1.22
+        # CI [-1.83, -0.64], with utterances losing a leading reference word
+        # falling from 258/460 to 170/460. CommonVoice over the same protocol
+        # is +0.30 CI [-0.43, +1.17] -- not significant -- so this is a win
+        # where clips are cut mid-utterance and free where they are not.
+        #
+        # 0.25s, not more: the effect saturates there (0.50s gave no further
+        # onset recovery). Training does NOT apply this -- the collator feeds
+        # raw audio -- so it is an inference-only transform. Set 0.0 to disable.
+        inference_lead_in_seconds: float = 0.25,
         freeze_projector: bool = False,  # True for Stage 2 (LoRA-only training)
         freeze_language_model: bool = True,  # False = full decoder fine-tuning
         freeze_text_embed_tokens: bool = False,
@@ -183,6 +228,12 @@ class ASRConfig(transformers.PretrainedConfig):
         # selectively re-enables the top N. Pair with `encoder_learning_rate`
         # (an order of magnitude below the projector LR).
         encoder_trainable_top_layers: int = 0,
+        # Whether `encoder_trainable_top_layers` also unfreezes the post-stack
+        # output projections (Granite's `out` / `out_mid`). True preserves the
+        # original behaviour. False is worth it on Granite Speech 5.0, where
+        # those two carry 33.57M params for 0.27% of the selection's squared
+        # gradient -- see unfreeze_encoder_top_layers for the measurement.
+        encoder_trainable_post_projections: bool = True,
         # SpecAugment on mel input (training-only), parameters match
         # transformers' WhisperConfig / Wav2Vec2 conventions. Most relevant
         # when the encoder is trainable (`freeze_audio_encoder=False`) —
@@ -202,6 +253,7 @@ class ASRConfig(transformers.PretrainedConfig):
         mask_time_min_masks: int = 2,
         max_new_tokens: int | None = None,
         use_cache: bool | None = None,
+        no_repeat_ngram_size: int | None = None,
         **kwargs,
     ):
         """Initialize ASR model configuration.
@@ -217,9 +269,25 @@ class ASRConfig(transformers.PretrainedConfig):
         # Set default generation parameters (greedy decoding only).
         # Applied via setattr below — keeping these out of kwargs so they
         # don't get re-overwritten by super().__init__(**kwargs) at the end.
+        # `no_repeat_ngram_size` is the only non-greedy-neutral default here and
+        # it is a guard, not a decoding strategy. Greedy decoding with
+        # repetition_penalty=1.0 has no loop protection at all: one CommonVoice
+        # sample emitted a correct transcript then repeated a 21-word phrase
+        # four times until max_new_tokens cut it off, scoring 1513% on that row
+        # and moving the 100-sample corpus WER from 8.30 to 31.83. The shipped
+        # `_truncate_repetitions` postprocess missed it because its regex is
+        # anchored to end-of-string and the loop was truncated mid-phrase.
+        #
+        # 12 is chosen to be inert on real speech: it blocks only exact 12-gram
+        # repeats, and natural English -- including genuine stutters, list
+        # recitation and "very very very" -- effectively never repeats a
+        # 12-token span verbatim. Measured rate of runaway loops is 1 in 10,630
+        # rows, so this should fire almost never; it bounds the tail rather
+        # than changing normal output.
         generation_defaults = {
             "max_new_tokens": 128,
             "use_cache": True,
+            "no_repeat_ngram_size": 12,
         }
 
         self.audio_model_id = audio_model_id
@@ -241,6 +309,7 @@ class ASRConfig(transformers.PretrainedConfig):
         )
         self.audio_token = audio_token or native_audio_token(text_model_id) or "<audio>"
         self.projector_dtype = projector_dtype or model_dtype
+        self.encoder_dtype = encoder_dtype or model_dtype
         self.audio_sample_rate = audio_sample_rate
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
@@ -253,6 +322,11 @@ class ASRConfig(transformers.PretrainedConfig):
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
+        # Plain dicts, never None: PEFT's LoraConfig defaults them to {} and
+        # `get_pattern_key` iterates the keys unconditionally.
+        self.lora_rank_pattern = dict(lora_rank_pattern or {})
+        self.lora_alpha_pattern = dict(lora_alpha_pattern or {})
+        self.inference_lead_in_seconds = float(inference_lead_in_seconds)
         self.lora_target_modules = lora_target_modules or [
             "q_proj",
             "k_proj",
@@ -267,6 +341,7 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_text_embed_tokens = freeze_text_embed_tokens
         self.freeze_audio_encoder = freeze_audio_encoder
         self.encoder_trainable_top_layers = encoder_trainable_top_layers
+        self.encoder_trainable_post_projections = encoder_trainable_post_projections
         self.apply_spec_augment = apply_spec_augment
         self.mask_time_prob = mask_time_prob
         self.mask_time_length = mask_time_length
@@ -275,6 +350,7 @@ class ASRConfig(transformers.PretrainedConfig):
         explicit_generation_args = {
             "max_new_tokens": max_new_tokens,
             "use_cache": use_cache,
+            "no_repeat_ngram_size": no_repeat_ngram_size,
         }
         for key, default in generation_defaults.items():
             value = explicit_generation_args[key]

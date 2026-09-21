@@ -1,0 +1,360 @@
+# @package _global_
+# FROZEN ENCODER + PROJECTOR + LoRA, two epochs.
+#
+#   ibm-granite/granite-speech-5.0-470m-turboctc   FULLY FROZEN (0 trainable)
+#   -> MLP projector (fresh init, 12.6M, lr 1e-3)
+#   -> Qwen/Qwen3.5-2B, base FROZEN + LoRA all-linear r=64 (63.7M, lr 1e-4)
+#
+# Trainable: 76.3M of 2.434B (3.1%) -- the smallest allocation tried here.
+#
+#   poetry run python scripts/train.py +experiments=granite_qwen_frozen
+#
+# ---------------------------------------------------------------------------
+# WHY THIS FILE EXISTS
+#
+# There is no completed frozen-encoder run on this architecture, and as of
+# 2026-09-20 there is no way to infer one. Two things forced it:
+#
+# 1. THE TOP-4 ENCODER NEVER LEARNED. Drift of blocks 12-15 ran 0.366% ->
+#    0.954% over 2k->20k steps and gained 0.012pp in the last 2,000 (measured
+#    again today directly against the base IBM weights: 0.9959%). Successive
+#    4,000-step displacement vectors are orthogonal -- cos(seg, prev) fell
+#    0.118 -> 0.004 -- and net displacement is 0.48x the path travelled,
+#    against 1/sqrt(5)=0.447 for a pure random walk. Growth over a 10x step
+#    increase was 2.61x where free diffusion predicts sqrt(10)=3.16x, i.e.
+#    SUB-diffusive: a restoring force. That force is decoupled AdamW's decay,
+#    lr*wd = 1e-5 * 0.01 = 1e-7/step, ~0.2% pull toward the origin over 20k
+#    steps against 0.95% of observed displacement. The encoder random-walked
+#    to its weight-decay equilibrium radius and stopped. For reference,
+#    Ultravox's comparable top-4 slice moved 31.8% -- 33x further.
+#
+# 2. YOU CANNOT REMOVE IT AFTER THE FACT. Inference ablation on the shipped
+#    top4 checkpoint (n=100, paired rows, model verified bit-deterministic
+#    across processes), reverting blocks 12-15 to the base IBM weights and
+#    changing nothing else:
+#
+#                        full      base encoder
+#      peoples          21.09          34.82
+#      ami-sdm          20.39          36.16
+#
+#    A 0.996% weight change costs 14-16 WER points. That is NOT evidence the
+#    encoder training learned something useful -- the drift statistics above
+#    say it learned nothing directional. It is evidence of CO-ADAPTATION: the
+#    freshly-initialised projector and the LoRA adapters trained against that
+#    specific random endpoint and cannot read the base encoder's output.
+#    (Same asymmetry, larger, for the adapters: disabling LoRA on the same
+#    rows gave peoples 160.83 / ami-sdm 378.87.)
+#
+# So the frozen-encoder baseline cannot be recovered by ablation and has to be
+# TRAINED. That is this file. It is the control every other recipe in this
+# repo has been implicitly compared against without ever being run.
+#
+# What a result here means:
+#   - Within noise of top4  -> the encoder unfreeze was never doing work, and
+#     the 109.76M params + fp32 master weights it cost are free to reclaim.
+#   - Clearly worse         -> the unfreeze mattered after all, by a mechanism
+#     the drift statistics do not capture, and granite_qwen_full_encoder
+#     becomes the priority.
+#   - Clearly better        -> the random walk was actively corrosive, which
+#     is the expected sign of displacing a converged pretrained encoder in a
+#     direction with no gradient signal.
+#
+# SECOND EPOCH. Every run on this stack that got far enough to say anything
+# ended with eval/loss still descending: granite_qwen reached eval-best at
+# step 32,000 of 32,922 (97.2% through) with the 12-set mean still falling
+# 8.997 -> 8.973 -> 8.868, and the long top4 run (jscyrgkt) was still falling
+# when it stopped at 20,000 of ~27,400. Nobody has observed the end of a
+# training curve here. Under num_train_epochs: 1 every example is seen at
+# most once, so "more data" and "train longer" are the same lever and the
+# cheapest version is a second pass over rows already downloaded.
+#
+# Overfitting risk is real but low for THIS allocation: the earlier
+# epoch-2 overfit (ppbo0oqn) was a fully fine-tuned 0.6B decoder. Here the
+# base decoder is frozen and only 3.1% of the model trains. The top4 run held
+# an absolute train/eval gap of 0.199 +/- 0.005 across 10 evals while both
+# curves descended. Watch that gap at the epoch boundary; if it starts
+# opening in epoch 2, stop and keep the epoch-1 checkpoint.
+# ---------------------------------------------------------------------------
+
+defaults:
+  - override /data: multiasr
+
+data:
+  # Two logical epochs folded into one physical pass, so that the capped
+  # sources spend the second pass on ROWS THEY HAVE NOT SEEN instead of
+  # replaying the first 600K.
+  #
+  # Why it was needed: _resample_to_target runs once inside DatasetLoader.load(),
+  # so `num_train_epochs: 2` iterates the identical 600K subset twice. Measured
+  # against the current pools, that wastes real data:
+  #
+  #                  eligible pool     cap    never seen
+  #     LibriHeavy        ~885,000   600,000   ~285,000 (32%)
+  #     CommonVoice        938,087   600,000   ~338,000 (36%)
+  #     Gigaspeech         656,893   600,000    ~57,000 ( 9%)
+  #
+  # With expansion=2 each capped source targets 1,200,000, draws every
+  # eligible row first and repeat-pads only the shortfall (LibriHeavy 1.36x,
+  # CommonVoice 1.28x, Gigaspeech 1.83x -- each logged). Uncapped sources
+  # (SPGI, TEDLIUM, VoxPopuli, AMI) are already at natural size and are simply
+  # repeated 2x, exactly as a second Trainer epoch would have.
+  #
+  # Per-step mix share is UNCHANGED -- every source is multiplied by the same
+  # factor -- and total steps are unchanged. Unique rows seen over the run go
+  # from ~2.68M to ~3.36M (+25%).
+  epoch_expansion: 2
+
+model:
+  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc
+
+  # bfloat16, NOT the float32 the top4 recipe uses. That fp32 choice existed
+  # for exactly one reason -- an Adam step of ~1e-5 at encoder lr 1e-5 is 49x
+  # below a single bf16 ULP at Granite's 0.0868 weight RMS, so updates were
+  # being quantised away. With zero trainable encoder params there are no
+  # updates to lose, and the rationale evaporates. Reclaims the +0.95 GB the
+  # top4 comment attributes to it, which is spent on batch size below.
+  encoder_dtype: bfloat16
+
+  use_lora: true
+  lora_rank: 64
+  # 64, i.e. alpha/r = 1.0, DOWN from top4's 128. Measured on the shipped
+  # top4 adapter (2026-09-20) by reconstructing (alpha/r)*B@A per module and
+  # taking ||dW||_F / ||W_base||_F against Qwen3.5-2B:
+  #
+  #     ALL 186 adapted matrices   mean 18.39%   max 55.46%
+  #     linear_attn.in_proj_b      mean 27.93%   max 55.46%
+  #     mlp.up_proj                mean 21.04%
+  #     self_attn.v_proj           mean 11.27%   (smallest)
+  #
+  # The decisive comparison: FULLY FINE-TUNING this decoder (granite_qwen,
+  # 1.37B trainable) moved it 13.31% over a complete run. A 67M-param adapter
+  # at scale 2.0 perturbs the base model HARDER than unfreezing all of it did.
+  # That inverts the premise of LoRA as a light-touch method. It corroborates
+  # the independently-logged adapter norm of 17.16% at step 20,000, and it
+  # explains jscyrgkt's oscillation: 123 units of path for 50 units of net
+  # displacement, with cos(seg, prev) running -0.09 to -0.17 from step 10,000
+  # -- roughly 60% of the decoder-side optimizer work spent going back and
+  # forth. Steps too large, overshoot, thrash.
+  #
+  # top4's own comment nominated this as "the first knob to try if the drift
+  # check comes back hot". It came back hot. Scale 1.0 halves the expected
+  # perturbation to ~9.2%, under full fine-tuning's 13.31% and in the
+  # neighbourhood of Granite Speech 3.3 (scale 0.5, the closest published
+  # frozen-base + LoRA analogue). A second epoch doubles the exposure that
+  # produced 18.39% in two-thirds of one epoch, so this is the wrong run to
+  # leave it hot on.
+  #
+  # RANK STAYS AT 64 -- checked, not assumed. Singular spectrum of the same
+  # updates: rank needed for 90% of update energy is 41.8-46.5 on gate/up/
+  # down/o/out_proj, so rank 32 would clip over half the modules. (Stable
+  # rank reads 7.6-14.2, but that metric is dominated by the leading singular
+  # value and understates usable capacity.) The exception is the DeltaNet
+  # gates below, which need ~4.
+  lora_alpha: 64
+  lora_dropout: 0.0
+  # all-linear, VERIFIED against the shipped top4 adapter (2026-09-20) rather
+  # than inherited. Per-layer mean ||dW||_F/||W||_F across all 186 adapted
+  # matrices runs 14.60% (layer 23) to 21.78% (layer 0) with no concentration
+  # at any depth; the 6 full-attention layers (3,7,11,15,19,23) sit slightly
+  # cooler at 14.6-17.5 than the 18 linear-attention layers at 17.8-21.8. The
+  # quietest module family is self_attn.v_proj at 11.27%. Nothing is inert, so
+  # there is no depth slice for `layers_to_transform` and no family to drop.
+  #
+  # Narrowing toward the published analogue would be a mistake on THIS
+  # architecture: Granite Speech 3.3 adapts q_proj/v_proj only, but Qwen3.5 is
+  # hybrid and full attention exists in just 6 of 24 layers, so the literal
+  # translation covers 24 of 186 matrices and leaves 18 layers unadapted.
+  #
+  # CAVEAT, and the reason to re-check: this shows every module MOVED, not
+  # that every module was USEFUL. A uniform ~18% profile is equally the
+  # signature of an over-driven adapter, which the alpha note above documents.
+  # Re-measure the profile at this run's final checkpoint, where scale 1.0
+  # should put the mean near 9%. Flat and uniform there confirms all-linear on
+  # a well-conditioned adapter; families collapsing toward zero would be the
+  # first honest evidence for narrowing the target set.
+  lora_target_modules: all-linear
+
+  # CARRIED OVER from granite_qwen_full_encoder -- a shape-driven efficiency
+  # fix, measured on the top4 step-20000 checkpoint, that cannot interact with
+  # the encoder or epoch changes.
+  #
+  # `all-linear` is blind to matrix shape, and on Qwen3.5 that misfires on the
+  # gated-DeltaNet gates. `in_proj_a` (per-head decay) and `in_proj_b` (delta-
+  # rule write strength) are (16, 2048) -- 16 output rows -- so a rank-64
+  # adapter is capped at rank 16 by geometry no matter what is configured. The
+  # realised update's effective rank was 6.29 and 7.34 against the 64
+  # allocated, and those 36 gate matrices consumed 4,755,456 LoRA params:
+  # 4.03x what fully fine-tuning the same matrices would cost (1,179,648), for
+  # 7.1% of the adapter budget. Rank 16 is the honest allocation. Saves 3.57M
+  # of 67.28M, taking the adapter to ~63.7M.
+  #
+  # BOTH patterns are required. PEFT resolves rank_pattern and alpha_pattern
+  # with independent lookups, each falling back to r / lora_alpha, so setting
+  # rank alone would move these modules from alpha/r = 128/64 = 2.0 to
+  # 128/16 = 8.0 -- 4x HOTTER, the opposite of the intent. 32/16 holds them at
+  # the global 2.0.
+  lora_rank_pattern:
+    in_proj_a: 16
+    in_proj_b: 16
+  # 16, not 32: these track the GLOBAL alpha/r, which is now 1.0 rather than
+  # 2.0. PEFT looks rank_pattern and alpha_pattern up independently, so if
+  # this is left at 32 the gates run at 32/16 = 2.0 while everything else runs
+  # at 1.0 -- and the gates are already the hottest modules in the model
+  # (in_proj_b at 27.93% mean / 55.46% max relative perturbation). Measured
+  # 90%-energy rank on these is 3.9-4.8, so even 16 is generous; it is kept
+  # because 16 is the geometric ceiling imposed by their (16, 2048) shape and
+  # going lower is a separate experiment.
+  lora_alpha_pattern:
+    in_proj_a: 16
+    in_proj_b: 16
+
+  # Off. With the encoder frozen and 3.1% of the model training, the
+  # overfitting surface is the smallest of any recipe here, and the top4 run
+  # showed a flat train/eval gap with eval/loss still descending -- there is
+  # nothing to regularise yet. Revisit only if epoch 2 opens that gap.
+  apply_spec_augment: false
+
+training:
+  hub_model_id: "mazesmazes/tiny-audio-granite-qwen-frozen"
+
+  attn_implementation: sdpa
+
+  freeze_language_model: true
+  freeze_projector: false
+  freeze_text_embed_tokens: true
+
+  # THE POINT OF THIS FILE. `freeze_audio_encoder: true` with
+  # `encoder_trainable_top_layers: 0` is a total freeze -- 0 of 472.9M encoder
+  # params train. asr_modeling.py defaults top_n to 0, so the explicit 0 is
+  # documentation rather than strictly required; keep it explicit so the
+  # difference from top4 is one readable line.
+  #
+  # Two things follow that are worth having. Backward never enters the encoder
+  # at all (top-4 forced backprop through blocks 12-15), and _apply_train_mode
+  # keeps the encoder's 16 BatchNorm1d modules in eval mode, which is the
+  # failure that once cost 25 WER points on Earnings22 when the encoder was
+  # put in train mode at construction. A frozen encoder also keeps its own CTC
+  # head valid as a mid-run sanity check -- that check dies the moment any
+  # encoder block unfreezes.
+  freeze_audio_encoder: true
+  encoder_trainable_top_layers: 0
+  encoder_trainable_post_projections: false
+
+  learning_rate: 1e-3
+  decoder_learning_rate: 1e-4
+  # INERT under a total freeze: the encoder param group resolves to an empty
+  # parameter list, which fused AdamW accepts (verified). Kept so a future
+  # partial unfreeze does not silently inherit `learning_rate` (1e-3) as its
+  # encoder LR, which would be 100x the value any recipe here has used.
+  encoder_learning_rate: 1e-5
+
+  label_smoothing_factor: 0.0
+  weight_decay: 0.01
+  # The projector is the only group where decoupled decay does real work
+  # (~15% shrink over this schedule at lr 1e-3), and it is the only force
+  # opposing the projector's output-scale growth -- which reached ~48x
+  # embed_tokens RMS by step 13k on the top4 run and plateaued. Keep watching
+  # `projector/output_rms_over_embed`; a second epoch doubles the exposure.
+  projector_weight_decay: 0.01
+  encoder_weight_decay: 0.0
+
+  warmup_steps: 700
+  # Plain cosine to ZERO. Dropping min_lr_rate: 0.05 also means dropping
+  # `cosine_with_min_lr`, which exists only to consume that kwarg -- with no
+  # floor the two schedulers differ solely in the tail, so `cosine` is the
+  # honest name for what now runs.
+  #
+  # The 5% floor was never measured here; it kept ~5e-5 on the projector and
+  # ~5e-6 on the decoder running through the final steps. Annealing to zero
+  # lets the run actually settle, which matters more than usual because this
+  # is the first recipe expected to reach the end of its schedule rather than
+  # being cut off mid-descent.
+  lr_scheduler_type: cosine
+  # Explicitly nulled, not just omitted. configs/training/production.yaml sets
+  # `lr_scheduler_kwargs: {min_lr_rate: 0.1}`, and Hydra MERGES that in -- an
+  # omitted key here inherits it, and plain `cosine` does not accept
+  # min_lr_rate, so get_scheduler() would raise at construction.
+  lr_scheduler_kwargs: null
+  max_grad_norm: 2.5
+
+  seed: 44
+  # Deliberately false. HF's auto_find_batch_size halves
+  # per_device_train_batch_size on OOM WITHOUT touching
+  # gradient_accumulation_steps, so it silently changes the effective batch
+  # and makes the run non-comparable to anything.
+  auto_find_batch_size: false
+
+  # 64 x 2 = 128 effective, sized against the measured frozen-encoder anchor
+  # rather than guessed: granite_qwen_top4 records a frozen baseline peaking
+  # at 55.4 GiB of 79.25 at batch 48 (the top-4 unfreeze added +5.2 GiB to
+  # reach 60.6, and unfreezing all 16 blocks OOMed at 79.16).
+  #
+  # Backing out the fixed cost at batch 48 -- encoder 1.89 GB fp32 + decoder
+  # bf16 2.74 + LoRA master/moments/grads ~1.08 + projector ~0.20 = ~5.9 GB --
+  # leaves ~49.5 GiB of activation tape, i.e. ~1.03 GiB per unit of batch.
+  # Dropping the encoder to bf16 takes the fixed cost to ~5.0 GB, so
+  #     batch 64 -> 5.0 + 66.0 = ~71 GiB of 79.25 (~90%),
+  # leaving ~8 GiB of headroom. Sequence length is bounded by the collator's
+  # 19.0s cap, so activation memory is near-linear in batch with no O(L^2)
+  # surprise.
+  #
+  # VERIFY ON THE FIRST RUN: if it OOMs, step to 56 (~63 GiB) rather than
+  # re-enabling auto_find_batch_size. Do not spend the headroom on gradient
+  # checkpointing -- it would buy a much larger batch at ~30% slower steps,
+  # which is the wrong trade when the run is already paying 2x for a second
+  # epoch.
+  per_device_train_batch_size: 64
+  per_device_eval_batch_size: 64
+  gradient_accumulation_steps: 2
+
+  # ONE physical epoch, worth two logical ones -- see `data.epoch_expansion`
+  # below. num_train_epochs MUST stay 1 here; the loader raises if both are
+  # set, because they compound to 4 epochs of exposure.
+  #
+  # ~5,368,688 rows at effective batch 128 is ~41,943 steps. That already
+  # exceeds every run on record -- jscyrgkt stopped at 20,000 and
+  # granite_qwen's full epoch was 32,922 -- so step count is no longer the
+  # binding constraint; the earlier runs were under-trained because they ran
+  # a single pass, not because their batches were small. Warmup 700 is ~1.7%
+  # of the schedule.
+  num_train_epochs: 1
+  save_steps: 2000
+  eval_steps: 2000
+
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 8
+  torch_compile: false
+
+  # SUCCESS CRITERIA
+  #
+  # 1. PRIMARY: pooled WER against granite_qwen_top4 on a SAMPLE-MATCHED
+  #    n=500 sweep. Every cross-date comparison in outputs/ to date has been
+  #    unmatched -- the 2026-09-18 and 2026-09-21 sweeps share only 1-9 rows
+  #    per 100 -- so score both models in the same sweep or the number is
+  #    meaningless. The model is bit-deterministic once the checkpoint is
+  #    pinned (verified: 400 samples, 4 datasets, 0 prediction differences
+  #    across processes), so n=100 is usable for large effects PROVIDED the
+  #    snapshot SHA is fixed; run-to-run variation previously attributed to
+  #    nondeterminism was 13 different checkpoints being published in a day.
+  #
+  # 2. DOES THE SECOND PASS PAY? There is no Trainer epoch boundary any more
+  #    (epoch_expansion folds both passes into one shuffled stream, which
+  #    also removes the distribution step a hard boundary would create), so
+  #    read it off the eval curve: compare eval/loss around step ~21,000
+  #    against the end. Flat or rising while train/loss falls means the extra
+  #    exposure is overfitting and the mid-run checkpoint is the one to ship.
+  #    Note the replay is now interleaved rather than sequential, so any
+  #    overfitting should appear as a gradual divergence rather than a kink.
+  #
+  # 3. PROJECTOR SCALE: `projector/output_rms_over_embed`. It reached ~48x on
+  #    the top4 run. If a second epoch pushes it materially past that, the
+  #    audio prefix is drifting further off the decoder's native embedding
+  #    scale and projector lr 3e-4 becomes the next lever.
+  #
+  # 4. LoRA PERTURBATION: re-run the ||dW||/||W|| measurement at the final
+  #    checkpoint. Target is ~9-10% mean (half of top4's 18.39%) and clearly
+  #    under full fine-tuning's 13.31%. If it lands near 18% again despite
+  #    scale 1.0, the driver is decoder_learning_rate rather than alpha and
+  #    1e-4 -> 5e-5 is the next lever. Also re-check path-vs-displacement: if
+  #    the adapter still travels ~2.5x its net displacement with negative
+  #    step-to-step cosine, the step size is still too large.

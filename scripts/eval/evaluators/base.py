@@ -117,9 +117,39 @@ class Evaluator:
             norm_reference=norm_ref,
         )
 
-    def evaluate(self, dataset, max_samples: int | None = None) -> list[EvalResult]:
-        """Run evaluation loop on dataset."""
+    def _reset_run_state(self) -> None:
+        """Clear per-dataset accumulators before an `evaluate` call.
+
+        The base class only accumulates `results`. Subclasses that collect
+        anything else across `transcribe` calls must extend this -- a single
+        evaluator instance is now reused for every dataset in a sweep (see
+        `scripts/eval/cli.py`), so anything not reset here silently pools
+        across corpora.
+        """
         self.results = []
+
+    def evaluate(
+        self,
+        dataset,
+        max_samples: int | None = None,
+        *,
+        audio_field: str | None = None,
+        text_field: str | None = None,
+    ) -> list[EvalResult]:
+        """Run evaluation loop on dataset.
+
+        `audio_field` / `text_field` override the column names given at
+        construction, for the duration of this call onward. They exist so one
+        evaluator -- and therefore one loaded model, one Swift subprocess, one
+        authorized SFSpeechRecognizer -- can be reused across datasets whose
+        columns differ (`wav` vs `audio`, `text` vs `sentence` vs
+        `transcript`). Omit both to keep the constructor's values.
+        """
+        self._reset_run_state()
+        if audio_field is not None:
+            self.audio_field = audio_field
+        if text_field is not None:
+            self.text_field = text_field
 
         if self.num_workers > 1:
             # Parallel processing requires pre-collecting samples

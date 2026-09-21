@@ -1,4 +1,4 @@
-"""Tests for MLPAudioProjector's output-scale calibration and gradient probe."""
+"""Tests for MLPAudioProjector's output-scale calibration."""
 
 from types import SimpleNamespace
 
@@ -62,9 +62,6 @@ class TestOutputScaleCalibration:
         state = projector.state_dict()
         assert "output_scale" in state
         assert not any(p is projector.output_scale for p in projector.parameters())
-        # The gradient probe's accumulators are neither parameters nor buffers.
-        assert "scale_grad" not in state
-        assert "scale_grad_count" not in state
 
     def test_scale_round_trips_through_state_dict(self):
         src = MLPAudioProjector(scaled_config(0.02))
@@ -80,46 +77,3 @@ class TestOutputScaleCalibration:
             projector.output_scale.fill_(3.0)
             scaled = projector(x)
         assert torch.allclose(scaled, 3.0 * base, atol=1e-5)
-
-
-class TestScaleGradientProbe:
-    """The backward hook accumulates dL/d(log c) only while training with grad."""
-
-    def test_accumulates_in_training_mode(self, projector_config):
-        projector = MLPAudioProjector(projector_config()).train()
-        x = torch.randn(2, 8, 256)
-        weights = torch.randn(2, 2, 512)
-
-        out = projector(x)
-        # L = sum(W * out) => dL/dout = W, so the probe equals L itself.
-        loss = (out * weights).sum()
-        loss.backward()
-
-        assert projector.scale_grad_count == 1
-        assert projector.scale_grad is not None
-        assert projector.scale_grad.item() == pytest.approx(loss.item(), rel=1e-4)
-
-    def test_accumulates_across_forwards(self, projector_config):
-        projector = MLPAudioProjector(projector_config()).train()
-        total = 0.0
-        for _ in range(3):
-            out = projector(torch.randn(1, 8, 256))
-            loss = out.sum()
-            loss.backward()
-            total += loss.item()
-        assert projector.scale_grad_count == 3
-        assert projector.scale_grad.item() == pytest.approx(total, rel=1e-4)
-
-    def test_silent_in_eval_mode(self, projector_config):
-        projector = MLPAudioProjector(projector_config()).eval()
-        out = projector(torch.randn(1, 8, 256))
-        out.sum().backward()
-        assert projector.scale_grad is None
-        assert projector.scale_grad_count == 0
-
-    def test_silent_without_grad(self, projector_config):
-        projector = MLPAudioProjector(projector_config()).train()
-        with torch.no_grad():
-            projector(torch.randn(1, 8, 256))
-        assert projector.scale_grad is None
-        assert projector.scale_grad_count == 0

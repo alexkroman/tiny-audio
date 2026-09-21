@@ -23,11 +23,28 @@ def parse_results_file(results_path: Path) -> list[dict]:
     blocks = content.split("-" * 80)
 
     for block in blocks:
+        # `(.*)`, not `(.+?)`: an empty value is a real datum, not a parse
+        # failure. `save_results` writes `Ground Truth: ` / `Prediction: ` with
+        # nothing after the space when a reference normalizes away or a model
+        # returns no transcript, and the old `Ground Truth: (.+?)` needed one
+        # character -- so those rows vanished. Measured across outputs/: 7,923
+        # rows in 600 of 2,087 results.txt files.
+        #
+        # This does NOT move any WER: every one of those 7,923 has an empty
+        # reference, and both scorers already exclude empty references
+        # (`_corpus_wer`'s `if r.norm_reference`, and `if ref:` in
+        # analysis.collect_model_metrics). It matters for the row counts and
+        # for the formatting/ITN scorers, which should see an empty hypothesis
+        # as a miss rather than never see the sample.
+        #
+        # The Match object stays truthy when the group is empty, so the
+        # presence check below still distinguishes "line absent"
+        # (pre-raw-transcript runs -> None) from "line present but empty".
         sample_match = re.search(r"Sample (\d+) - WER: ([\d.]+)%", block)
-        gt_match = re.search(r"^Ground Truth: (.+?)$", block, re.MULTILINE)
-        pred_match = re.search(r"^Prediction:[ \t]*(.+?)$", block, re.MULTILINE)
-        gt_raw_match = re.search(r"^Ground Truth Raw: (.+?)$", block, re.MULTILINE)
-        pred_raw_match = re.search(r"^Prediction Raw:[ \t]*(.+?)$", block, re.MULTILINE)
+        gt_match = re.search(r"^Ground Truth:[ \t]*(.*)$", block, re.MULTILINE)
+        pred_match = re.search(r"^Prediction:[ \t]*(.*)$", block, re.MULTILINE)
+        gt_raw_match = re.search(r"^Ground Truth Raw:[ \t]*(.*)$", block, re.MULTILINE)
+        pred_raw_match = re.search(r"^Prediction Raw:[ \t]*(.*)$", block, re.MULTILINE)
 
         if sample_match and gt_match and pred_match:
             wer = float(sample_match.group(2))
