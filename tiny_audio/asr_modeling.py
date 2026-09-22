@@ -444,11 +444,13 @@ def _assert_projector_loaded(incompatible_keys, projector_type: str) -> None:
         detail.append(f"present in the checkpoint but not in the model: {unexpected}")
 
     hint = ""
-    if missing == ["projector.output_scale"] and not unexpected:
+    if unexpected == ["projector.output_scale"] and not missing:
         hint = (
-            "\n\nOnly `projector.output_scale` is missing, so this checkpoint predates "
-            "the fixed output-scale buffer. Its projector was trained without one and "
-            "is not equivalent to a scale-1.0 projector, so it has to be retrained."
+            "\n\nThis checkpoint carries `projector.output_scale`, a fixed output-scale "
+            "buffer that has since been removed. Its linears were trained behind that "
+            "multiplier, so loading them without it changes the output magnitude ~13x; "
+            "install a tiny-audio revision from before the removal to load this "
+            "checkpoint as-is, or retrain the projector."
         )
     elif any(k.startswith("projector.norm_2.") for k in unexpected):
         hint = (
@@ -1034,40 +1036,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if config.llm_dim is None:
                 raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
 
-        # "auto" -> the decoder's own token-embedding RMS. Resolved here rather
-        # than in the projector because only the model can see embed_tokens,
-        # and the right target differs ~67x between plainly-embedded decoders
-        # (Qwen/Llama, ~0.015) and Gemma-family ones that scale embeddings by
-        # sqrt(hidden_size) (~1.0).
-        if getattr(config, "projector_output_rms", None) == "auto":
-            embed = self.language_model.get_input_embeddings()
-            weight = getattr(embed, "weight", None)
-            if weight is None:
-                config.projector_output_rms = None
-            else:
-                # The target is the EFFECTIVE magnitude a text token enters the
-                # residual stream with, not the raw table's RMS. Gemma-family
-                # decoders embed through a ScaledWordEmbedding whose forward is
-                # `super().forward(ids) * embed_scale` with
-                # `embed_scale = hidden_size ** 0.5`, so reading the table alone
-                # understates them by ~50x and would target a scale the decoder
-                # never sees. Qwen/Llama embed plainly and have no such factor.
-                scale = getattr(embed, "embed_scale", None)
-                if scale is None:
-                    scale = getattr(embed, "scalar_embed_scale", 1.0)
-                scale = float(scale.item() if torch.is_tensor(scale) else scale)
-                with torch.no_grad():
-                    raw_rms = float(weight.detach().float().pow(2).mean().sqrt().item())
-                config.projector_output_rms = raw_rms * scale
-                logger.info(
-                    "projector_output_rms auto-resolved to %.6f from %s embed_tokens "
-                    "(table RMS %.6f x embed_scale %.4f)",
-                    config.projector_output_rms,
-                    config.text_model_id,
-                    raw_rms,
-                    scale,
-                )
-
         # Select projector type based on config
         projector_type = getattr(config, "projector_type", "mlp")
         projector_class = PROJECTOR_CLASSES.get(projector_type)
@@ -1638,25 +1606,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         _assert_audio_token_counts(
             audio_embeds, token_counts, self.projector, encoder_valid_lengths, max_tokens
         )
-        packed = _gather_audio_embeds(audio_embeds, token_counts, max_tokens)
-
-        # On-data companion to `measure_output_rms`'s synthetic probe. The
-        # probe draws isotropic noise, but Granite's Conformer output is
-        # strongly directional (DC alone carries ~32% of its energy), and a
-        # TRAINED linear_1 aligns its large singular directions with that
-        # subspace -- so real features excite the projector harder than random
-        # ones. Measured on the shipped top4 checkpoint the gap is 1.46x:
-        # probe 45.30x embed vs 66.10x on real encoder output. At init the two
-        # agree to 2.4%, which is why the calibration in _calibrate_output_scale
-        # is still sound and only the drift SERIES was biased.
-        #
-        # Measured on the packed tensor, so padding frames are excluded and
-        # this is exactly what lands in the residual stream. Kept as a 0-dim
-        # tensor rather than a float: `.item()` here would force a host-device
-        # sync every step, so the trainer pays it only when it logs.
-        if self.training:
-            self._last_audio_embed_rms = packed.detach().float().pow(2).mean().sqrt()
-        return packed
+        return _gather_audio_embeds(audio_embeds, token_counts, max_tokens)
 
     def _mask_input_features(
         self,

@@ -139,25 +139,6 @@ class ASRConfig(transformers.PretrainedConfig):
         projector_pool_stride: int = 4,
         projector_hidden_dim: int | None = None,
         projector_type: str = "mlp",
-        # Target RMS for the projector's output, i.e. the magnitude at which
-        # audio tokens enter the decoder's residual stream. "auto" measures the
-        # decoder's own `embed_tokens` RMS at construction; a float sets it
-        # directly; None leaves PyTorch's default init alone.
-        #
-        # This is a property of the DECODER, not the projector. Qwen/Llama/
-        # Mistral embed plainly, so their tokens sit near 0.015. Gemma-family
-        # decoders multiply embeddings by sqrt(hidden_size), so theirs sit near
-        # 1.0 -- a ~67x difference. Hardcoding either number breaks the other,
-        # hence "auto".
-        #
-        # Why it matters: the decoder is pre-norm, so every sublayer reads a
-        # normalized copy and the loss is nearly blind to prefix magnitude. But
-        # the residual stream is NOT normalized, so audio tokens entering at
-        # 13x the text scale make each sublayer's contribution at those
-        # positions 13x smaller in relative terms -- the prefix passes through
-        # all layers close to unchanged. Measured at init on granite_qwen
-        # before this landed: projector out 0.198 vs embed_tokens 0.0150.
-        projector_output_rms: float | str | None = "auto",
         # Label smoothing applied inside the LM's loss function (not HF Trainer's
         # LabelSmoother). Train-only — ASRModel.forward zeros it on eval. Routing
         # smoothing through the loss_function flows through liger's fused linear
@@ -314,7 +295,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
         self.projector_type = projector_type
-        self.projector_output_rms = projector_output_rms
         self.transcribe_prompt = transcribe_prompt
         self.label_smoothing = label_smoothing
         # LoRA configuration
