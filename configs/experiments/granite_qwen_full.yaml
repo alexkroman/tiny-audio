@@ -59,7 +59,6 @@ model:
   projector_pool_stride: 1
   encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
   projector_hidden_dim: 4096
-  projector_output_rms: auto
   transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
   label_smoothing: 0.0
   max_new_tokens: 256
@@ -264,8 +263,6 @@ training:
   # (||linear_1|| 92.6 -> 160.7, ||linear_2|| 86.2 -> 169.6 between steps 4k
   # and 12k), which a measured dL/d(log c) of +0.0005 +/- 0.0273 (|t| = 0.05)
   # showed the loss is indifferent to and will not restrain on its own.
-  # Pairs with projector_output_rms: auto -- that sets the scale at init,
-  # this keeps it there.
   projector_weight_decay: 0.01
   encoder_weight_decay: 0.01
 

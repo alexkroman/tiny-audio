@@ -121,7 +121,6 @@ model:
   projector_pool_stride: 1
   encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
   projector_hidden_dim: 4096
-  projector_output_rms: auto
   model_dtype: bfloat16
   projector_dtype: float32
 
@@ -334,11 +333,11 @@ training:
   # pinned the encoder at a "weight-decay equilibrium radius" and stopped it
   # learning -- the LoRA group was running at 1e-4 * 0.01 = 1e-6/step, TEN
   # TIMES that force, which the header never applied to the adapter it is
-  # trying to hold at ~9% perturbation. Success criterion #4 would have been
+  # trying to hold at ~9% perturbation. Success criterion #3 would have been
   # reading a number weight decay was partly setting.
   #
   # This makes alpha the only thing controlling adapter magnitude, which is
-  # the point of criterion #4. If dW comes back hot anyway, the levers are
+  # the point of criterion #3. If dW comes back hot anyway, the levers are
   # decoder_learning_rate 1e-4 -> 5e-5 (already nominated) or wiring up a real
   # `decoder_weight_decay` -- not putting this back silently.
   weight_decay: 0.0
@@ -346,14 +345,8 @@ training:
   # above, the encoder 0.0 below and inert under the freeze). ~15% shrink over
   # this schedule at lr 1e-3, and it is the only force opposing the
   # projector's output-scale growth -- which reached ~48x embed_tokens RMS by
-  # step 13k on the top4 run and plateaued.
-  #
-  # Watch `projector/output_rms_over_embed_ondata`, NOT the bare
-  # `output_rms_over_embed`. The latter is a synthetic isotropic probe and
-  # understates a trained projector by ~1.46x (45.30x vs 66.10x measured on
-  # the shipped top4 checkpoint), because real Granite features are
-  # directional and linear_1 learns to align with them. The "~48x" on record
-  # is really ~66x on data; criterion #3 should be read off the on-data series.
+  # step 13k on the top4 run (~66x measured on real encoder output) and
+  # plateaued. That drift has no measured loss cost and is no longer logged.
   projector_weight_decay: 0.01
   encoder_weight_decay: 0.0
 
@@ -488,12 +481,7 @@ training:
   #    rising while train/loss falls means it is fitting noise, and
   #    `gradient_accumulation_steps: 2` is the one-line revert.
   #
-  # 3. PROJECTOR SCALE: `projector/output_rms_over_embed`. It reached ~48x on
-  #    the top4 run. If the longer schedule pushes it materially past that, the
-  #    audio prefix is drifting further off the decoder's native embedding
-  #    scale and projector lr 3e-4 becomes the next lever.
-  #
-  # 4. LoRA PERTURBATION: re-run the ||dW||/||W|| measurement at the final
+  # 3. LoRA PERTURBATION: re-run the ||dW||/||W|| measurement at the final
   #    checkpoint. Target is ~9-10% mean (half of top4's 18.39%) and clearly
   #    under full fine-tuning's 13.31%. If it lands near 18% again despite
   #    scale 1.0, the driver is decoder_learning_rate rather than alpha and

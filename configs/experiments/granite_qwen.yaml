@@ -129,22 +129,6 @@ model:
   # and directly comparable, and train sitting slightly above eval is the
   # healthy fine-tune signature.
 
-  # Land audio tokens at the decoder's own token-embedding RMS. "auto" measures
-  # it from embed_tokens at construction (0.0150 for Qwen3.5-2B) rather than
-  # hardcoding, because the right target differs ~67x across decoder families:
-  # Gemma multiplies embeddings by sqrt(hidden_size) and sits near 1.0, Qwen
-  # embeds plainly. This file's own granite_gemma sibling would need the other
-  # number.
-  #
-  # Needed because removing the projector's trailing norm handed the output
-  # scale to linear_2 without setting it: measured at init, the projector emits
-  # RMS 0.198 against embed_tokens' 0.0150, i.e. 13x hot. The loss barely sees
-  # that (pre-norm decoder), but the residual stream is NOT normalized, so a
-  # 13x-hot prefix makes every sublayer's write at those 237 audio positions
-  # 13x smaller in relative terms and the audio passes through the stack nearly
-  # uncomputed-on.
-  projector_output_rms: auto
-
   # Match the prompt the punctuated majority of multiasr trains under (see
   # `text_punct` in configs/data/multiasr.yaml). Without this, training splits
   # the prompt by source and inference would still ask for the unpunctuated
@@ -304,9 +288,6 @@ training:
   # brake -- on precisely the group whose unbounded norm growth is measured in
   # projectors.py's docstring (||linear_1|| 92.6 -> 160.7, ||linear_2|| 86.2 ->
   # 169.6 between steps 4k and 12k).
-  #
-  # Pairs with projector_output_rms below: that sets the output scale at init,
-  # this is what keeps it there.
   projector_weight_decay: 0.01
 
   # Smoothing rides model.label_smoothing (liger fused CE) when enabled at

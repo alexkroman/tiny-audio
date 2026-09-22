@@ -4,8 +4,6 @@ This module contains all projector architectures:
 - MLPAudioProjector: Simple 2-layer MLP with frame stacking downsampling
 """
 
-import math
-
 import torch
 import torch.nn as nn
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
@@ -36,9 +34,8 @@ class MLPAudioProjector(nn.Module):
 
     TRIED AND REJECTED, with numbers, so nobody spends another launch on it.
     Adding Gemma3n's trailing weightless RMSNorm here (``Qwen3_5RMSNorm`` with
-    ``with_scale`` off, so no parameter and no state_dict key) does pin the
-    scale perfectly -- ``output_rms_over_embed`` logs 1.0000000 for the whole
-    run instead of climbing to 28x. It also destroys training: loss at step
+    ``with_scale`` off, so no parameter and no state_dict key) pins the output
+    to the decoder's embedding scale -- and destroys training: loss at step
     300 was **3.166 against 0.319** for the identical recipe without it, and
     the projector's noise->signal cliff never fired at all.
     Because a trailing norm does not pin the AGGREGATE scale, which is what
@@ -48,13 +45,16 @@ class MLPAudioProjector(nn.Module):
     ``embed_tokens`` rows. That spread is signal: silence against speech,
     confident frames against ambiguous ones. Normalising per token deletes it
     and leaves only direction.
-    ``output_scale`` -- one scalar -- is the right SHAPE of intervention for
-    this reason: it fixes the aggregate and leaves relative magnitudes alone.
-    Its only weakness is being applied once at init. If the drift ever needs a
-    brake, lower the projector LR (equilibrium ||W|| scales with lr) rather
-    than clamping the output; and note the drift has no measured cost --
-    dL/d(log c) came back +0.0005 +/- 0.0273, |t| = 0.05, and the completed
-    granite_qwen run reached ~48x while producing the best WER on record here.
+
+    The output scale is therefore left to ``linear_2`` and the optimizer. A
+    fixed calibration buffer (``output_scale``) used to set it to the
+    decoder's embedding RMS at init; it never held past init -- the weights
+    grew and the ratio settled at ~48-66x embed RMS regardless -- and the
+    drift has no measured cost: dL/d(log c) came back +0.0005 +/- 0.0273,
+    |t| = 0.05, and the completed granite_qwen run reached ~48x while
+    producing the best WER on record here. If the drift ever needs a brake,
+    lower the projector LR (equilibrium ||W|| scales with lr) or raise its
+    weight decay rather than clamping the output.
 
     A trailing ``norm_2`` RMSNorm used to follow ``linear_2``, with the other
     RMSNorm between ``linear_1`` and the activation. Both made the linear
@@ -111,72 +111,6 @@ class MLPAudioProjector(nn.Module):
         self.act = nn.GELU()
         self.linear_2 = nn.Linear(hidden_dim, llm_dim)
 
-        # Fixed, non-learnable. Persistent so it round-trips with the
-        # checkpoint -- recomputing it at load time would calibrate against the
-        # freshly-initialized weights rather than the trained ones.
-        self.register_buffer("output_scale", torch.ones(()), persistent=True)
-        self._calibrate_output_scale(getattr(config, "projector_output_rms", None))
-
-    def _calibrate_output_scale(self, target_rms) -> None:
-        """Set ``output_scale`` so the projector emits at the decoder's embedding scale.
-
-        Dropping the trailing norm let ``linear_2`` own the output scale, but
-        nothing then *sets* it: PyTorch's default init puts the output at RMS
-        ~0.198 against Qwen3.5's ``embed_tokens`` RMS of 0.0150, i.e. 13x hot.
-        The decoder is pre-norm, so the loss barely sees this -- but the
-        residual stream is unnormalized, so a 13x-hot prefix makes every
-        sublayer's write at those ~237 audio positions 13x smaller in relative
-        terms, and the audio passes through the stack close to untouched.
-
-        The scale lives in a fixed buffer rather than being folded into
-        ``linear_2``'s weights, and that distinction is load-bearing. Folding
-        it in shrinks ``linear_2`` by the same 13x, which leaves its relative
-        step ``lr/|w|`` 13x LARGER -- at lr 1e-3 against a post-scaling std of
-        ~6.8e-4 that is an O(1) update per step, and the weights simply grow
-        until the relative step becomes reasonable again. That is exactly the
-        mechanism behind the drift this repo already measured, where a 0.029
-        init climbed back to ~1.0. A constant multiplier sets the output scale
-        while leaving ``linear_2`` at default-init magnitude, so its relative
-        step stays sane.
-
-        It is also not a normalizer: the buffer is fixed, so ``linear_2``'s own
-        magnitude stays visible to the loss and the scale-invariance
-        degeneracy that removing ``norm_2`` fixed does not come back.
-
-        Calibrated by probe rather than closed form because the init -> output
-        RMS mapping runs through GELU and depends on ``hidden_dim`` and
-        ``pool_stride``. The output is exactly linear in the scale, so one
-        probe is exact for any geometry.
-        """
-        # "auto" is resolved to a float by ASRModel._create_projector, the only
-        # place that can see the decoder's embedding table. A projector built
-        # standalone (deploy planning, unit tests) gets the unresolved sentinel
-        # and keeps scale 1.0.
-        if not isinstance(target_rms, (int, float)) or isinstance(target_rms, bool):
-            return
-        if target_rms <= 0:
-            return
-
-        measured = self.measure_output_rms()
-
-        if not math.isfinite(measured) or measured <= 0.0:
-            return
-        self.output_scale.fill_(float(target_rms) / measured)
-
-    def measure_output_rms(self) -> float:
-        """RMS of this projector's output on a standard-normal probe.
-
-        Used both to calibrate ``output_scale`` at init and by the trainer to
-        log whether that calibration is holding as the weights move. Both need
-        the same probe geometry, so it is defined once here rather than
-        reconstructed from ``linear_1``/``linear_2`` internals by the caller.
-        """
-        with torch.no_grad():
-            w = self.linear_2.weight
-            enc_dim = self.linear_1.in_features // self.k
-            probe = torch.randn(1, 64 * self.k, enc_dim, dtype=w.dtype, device=w.device)
-            return self.forward(probe).float().pow(2).mean().sqrt().item()
-
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length given input length (matches GLM-ASR)."""
         return _frame_stack_length(input_length, self.k)
@@ -194,7 +128,7 @@ class MLPAudioProjector(nn.Module):
         x = self.input_norm(x)
         x = self.linear_1(x)
         x = self.act(x)
-        return self.linear_2(x) * self.output_scale
+        return self.linear_2(x)
 
 
 # =============================================================================

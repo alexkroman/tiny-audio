@@ -10,7 +10,6 @@
 import contextlib
 import functools
 import logging
-import math
 import os
 import re
 import subprocess
@@ -1163,74 +1162,6 @@ class ASRTrainer(Trainer):
         optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args, opt_model)
         self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
-
-    def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
-        """Attach the projector's output-scale diagnostic to each training log.
-
-        Riding the Trainer's own log call rather than calling `self.log` from
-        inside the step is what puts this metric on the SAME wandb step as
-        `train/loss`. Its previous home (a `_clip_grad_norm` override) emitted
-        a step of its own, so every diagnostic row carried NaN for loss and
-        every loss row carried NaN for the diagnostic, and the two series could
-        not be plotted against each other or correlated from `run.history()`.
-        """
-        if "loss" in logs:
-            logs.update(self._projector_output_rms())
-        super().log(logs, start_time)
-
-    def _projector_output_rms(self) -> dict:
-        """Projector output RMS as a multiple of the decoder's embedding RMS.
-
-        Audio tokens should enter the residual stream at the magnitude text
-        tokens do. `projector_output_rms: auto` sets that at construction and
-        this is the only thing that reports whether it survives training. It
-        does not: over granite_qwen's 32,909-step run the ratio started at
-        1.0x by construction, reached ~48x by step ~13k and plateaued there.
-
-        Reported as the ratio alone. The raw RMS rode alongside it for that
-        full run and carried nothing extra -- `freeze_text_embed_tokens` pins
-        the denominator, so the two series differed by a constant to sixteen
-        significant figures.
-
-        Two series are emitted. `output_rms_over_embed` is the synthetic
-        standard-normal probe and is kept unchanged so the existing history
-        stays comparable. `output_rms_over_embed_ondata` is the same ratio
-        measured on the real audio tokens of the last training micro-batch
-        (stashed by `ASRModel._encode_audio`), and is the one to threshold
-        against: the probe UNDERSTATES a trained projector by ~1.46x, because
-        it draws isotropic noise while real encoder features are directional
-        and linear_1 learns to align with them. The "~48x" on record is really
-        ~66x on data.
-        """
-        model = self.model
-        projector = getattr(model, "projector", None)
-        if projector is None or not hasattr(projector, "measure_output_rms"):
-            return {}
-        try:
-            was_training = projector.training
-            projector.eval()
-            out_rms = projector.measure_output_rms()
-            with torch.no_grad():
-                emb = model.language_model.get_input_embeddings().weight
-                emb_rms = (
-                    torch.linalg.vector_norm(emb.detach(), 2, dtype=torch.float32)
-                    / math.sqrt(emb.numel())
-                ).item()
-        except Exception:  # diagnostics must never take the run down
-            return {}
-        finally:
-            projector.train(was_training)
-
-        if emb_rms <= 0:
-            return {}
-        metrics = {"projector/output_rms_over_embed": out_rms / emb_rms}
-
-        # Absent on the very first log (no training forward yet) and whenever
-        # the model is not an ASRModel; the probe series carries on alone.
-        on_data = getattr(model, "_last_audio_embed_rms", None)
-        if on_data is not None:
-            metrics["projector/output_rms_over_embed_ondata"] = on_data.item() / emb_rms
-        return metrics
 
 
 class PushToHubCallback(TrainerCallback):

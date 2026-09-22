@@ -43,7 +43,6 @@ model:
   projector_pool_stride: 1
   encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
   projector_hidden_dim: 4096
-  projector_output_rms: auto
   transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
   label_smoothing: 0.0
   max_new_tokens: 256

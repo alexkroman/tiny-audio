@@ -73,50 +73,17 @@ model:
   projector_pool_stride: 1
   encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
   projector_hidden_dim: 4096
-  # CAVEAT, measured rather than assumed. Two separate claims live behind this
-  # one word, and only the first holds:
-  #
-  #   1. The auto-resolved TARGET is correct. It logs 0.015010; the actual RMS
-  #      of Qwen3.5-2B's embed_tokens table [248320, 2048], computed in float64
-  #      from the safetensors, is 0.015008. Not garbage.
-  #   2. The MECHANISM does not hold that target through training. `output_scale`
-  #      is a fixed, non-learnable buffer (0.076075 in the shipped checkpoint),
-  #      so it pins the output to 1.0x embed RMS AT INIT ONLY. The projector's
-  #      weights then grow -- ||linear_1|| 157.5, ||linear_2|| 186.5 -- and the
-  #      output drifts with them. Probing the trained checkpoint at the repo's
-  #      own geometry: output RMS 0.8350, i.e. **55.6x embed RMS** against a
-  #      design target of 1.0x. An independent probe using the repo's
-  #      measure_output_rms() got 48.6x; different probe, same conclusion.
-  #
-  # So the audio prefix ends the run ~4x HOTTER than the 13.1x that motivated
-  # adding output_scale in the first place (1/0.076075 = 13.1x, which this
-  # measurement also confirms). Corroborating weight evidence from the
-  # completed run: MLP drift and post_attention_layernorm drift are both
-  # sharply front-loaded (layers 0-2 at ~20-21% MLP and 8.2%/6.1% norm, against
-  # 14.8-17.4% and 0.5-0.7% at layers 20-23), which is what the first few
-  # decoder layers renormalising a hot prefix looks like.
-  #
-  # Left as `auto` for this run anyway, deliberately:
-  #   - It is not a regression. The same drift happened under the previous
-  #     recipe, so keeping it holds the comparison single-variable.
-  #   - The obvious fix was tried and is WRONG. A trailing weightless RMSNorm
-  #     times the fixed scale (Gemma3n does this in
-  #     Gemma3nMultimodalEmbedder) pins the scale perfectly -- and collapses
-  #     training: step-300 loss 3.166 against 0.319 for the same recipe
-  #     without it. It pins every TOKEN to one magnitude, not the aggregate,
-  #     and the per-token spread it deletes is real signal (CV 0.373,
-  #     p95/p5 3.67x). See MLPAudioProjector's docstring.
-  #   - The drift also has no measured cost: dL/d(log c) came back
-  #     +0.0005 +/- 0.0273 (|t| = 0.05), a line search was flat from 2x to 8x,
-  #     and the completed granite_qwen run reached ~48x while producing the
-  #     best WER on record here. If a brake is ever wanted, lower the
-  #     projector LR -- equilibrium ||W|| scales with lr -- rather than
-  #     clamping the output.
-  #   - Note this run frets less about it than the last one: the decoder base
-  #     is frozen, so the compensation that layers 0-2 were doing now has to
-  #     come from LoRA instead. If the hot prefix is genuinely costly, this run
-  #     is where it shows up most clearly.
-  projector_output_rms: auto
+  # No output-scale calibration. `projector_output_rms: auto` used to pin the
+  # projector's output to 1.0x embed_tokens RMS at init via a fixed buffer, and
+  # the shipped checkpoint from that recipe shows it never held: the weights
+  # grew (||linear_1|| 157.5, ||linear_2|| 186.5) and the output ended at
+  # ~50-56x embed RMS regardless. The drift has no measured cost -- dL/d(log c)
+  # +0.0005 +/- 0.0273 (|t| = 0.05), flat line search from 2x to 8x, best WER on
+  # record at ~48x -- and the obvious fix (a trailing weightless RMSNorm, as
+  # Gemma3n does) collapses training (step-300 loss 3.166 vs 0.319) because it
+  # pins every TOKEN to one magnitude and deletes real per-token spread. See
+  # MLPAudioProjector's docstring. If a brake is ever wanted, lower the
+  # projector LR or raise its weight decay rather than clamping the output.
   transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
   label_smoothing: 0.0
   max_new_tokens: 256
