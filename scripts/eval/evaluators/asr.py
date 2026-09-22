@@ -105,28 +105,81 @@ def _resolve_local_runtime() -> tuple[int | str, str]:
     return -1, "float32"
 
 
-def _build_local_pipeline(model_path: str):
-    """Build the ASR pipeline both local evaluators run on."""
+def _build_working_tree_pipeline(model_path: str, device: int | str, model_dtype: str):
+    """Build the pipeline from THIS checkout's tiny_audio, ignoring the checkpoint's copy.
+
+    `save_pretrained` ships the modeling code alongside the weights and points
+    `auto_map` / `custom_pipelines` in config.json at it
+    (`asr_modeling.ASRModel`, `asr_pipeline.ASRPipeline`). Under
+    `trust_remote_code=True` transformers resolves those entries by importing
+    the checkpoint's OWN .py files -- from the Hub snapshot, byte-compiled into
+    ~/.cache/huggingface/modules/transformers_modules/ -- and never looks at
+    the working tree. So `ta eval -m mazesmazes/...` measures the code as it
+    was when that checkpoint was pushed, and an edit to asr_modeling.py or
+    asr_pipeline.py has no effect on the number until it is pushed. Locally
+    saved checkpoints carry the same frozen copy, so `ta eval -m
+    checkpoints/checkpoint-2000` is equally stale.
+
+    This path takes only the weights and config from `model_path` and supplies
+    every class from the import graph: `ASRConfig.from_pretrained` rather than
+    `AutoConfig` (no auto_map lookup), the imported `ASRModel`, and the
+    imported `ASRPipeline` in place of the `custom_pipelines` entry.
+
+    dtype goes through the config, not a `dtype=` kwarg -- see
+    `_resolve_local_runtime` for why that distinction is load-bearing.
+    """
+    from tiny_audio.asr_config import ASRConfig
+    from tiny_audio.asr_modeling import ASRModel
+    from tiny_audio.asr_pipeline import ASRPipeline
+
+    config = ASRConfig.from_pretrained(model_path)
+    config.model_dtype = model_dtype
+    model = ASRModel.from_pretrained(model_path, config=config)
+    return ASRPipeline(model=model, device=device)
+
+
+def _build_local_pipeline(model_path: str, *, local_code: bool = False):
+    """Build the ASR pipeline both local evaluators run on.
+
+    `local_code=True` swaps the checkpoint's bundled modeling code for this
+    checkout's; see `_build_working_tree_pipeline`.
+    """
     from transformers import pipeline
 
     device, model_dtype = _resolve_local_runtime()
-    pipe = pipeline(
-        "automatic-speech-recognition",
-        model=model_path,
-        trust_remote_code=True,
-        device=device,
-        model_kwargs={"model_dtype": model_dtype},
+    if local_code:
+        pipe = _build_working_tree_pipeline(model_path, device, model_dtype)
+    else:
+        pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_path,
+            trust_remote_code=True,
+            device=device,
+            model_kwargs={"model_dtype": model_dtype},
+        )
+    # Which code ran, and which attention kernel, are both part of what the WER
+    # means -- so they are logged next to the device rather than left to infer.
+    source = "working tree" if local_code else "checkpoint (trust_remote_code)"
+    resolved = pipe.model.language_model.config._attn_implementation
+    console.print(
+        f"[dim]Using device: {device}, model_dtype: {model_dtype}, "
+        f"code: {source}, decoder attn: {resolved}[/dim]"
     )
-    console.print(f"[dim]Using device: {device}, model_dtype: {model_dtype}[/dim]")
     return pipe
 
 
 class LocalEvaluator(Evaluator):
     """Evaluator for local models."""
 
-    def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
+    def __init__(
+        self,
+        model_path: str,
+        user_prompt: str | None = None,
+        local_code: bool = False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        self.pipe = _build_local_pipeline(model_path)
+        self.pipe = _build_local_pipeline(model_path, local_code=local_code)
         # Explicit, not incidental. LocalStreamingEvaluator has always done
         # this; this class never did, and got away with it only because
         # nothing in the stack was train/eval-sensitive. A partially unfrozen
@@ -166,9 +219,15 @@ class LocalEvaluator(Evaluator):
 class LocalStreamingEvaluator(Evaluator):
     """Evaluator for local models with streaming metrics (TTFB, processing time)."""
 
-    def __init__(self, model_path: str, user_prompt: str | None = None, **kwargs):
+    def __init__(
+        self,
+        model_path: str,
+        user_prompt: str | None = None,
+        local_code: bool = False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        self.pipe = _build_local_pipeline(model_path)
+        self.pipe = _build_local_pipeline(model_path, local_code=local_code)
         self.model = self.pipe.model
         self.model.eval()
         self.processor = self.model.get_processor()

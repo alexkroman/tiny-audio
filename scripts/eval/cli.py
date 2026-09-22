@@ -191,6 +191,11 @@ def expand_datasets(datasets: list[str]) -> list[str]:
     return datasets
 
 
+# --model values that dispatch to a non-PyTorch backend (hosted API, Swift
+# binary, on-device Apple recognizer) rather than loading an ASRModel here.
+_NON_LOCAL_MODELS = frozenset({"assemblyai", "deepgram", "elevenlabs", "apple-speech", "swift"})
+
+
 def _build_evaluator(
     *,
     model: str,
@@ -204,6 +209,7 @@ def _build_evaluator(
     locale: str,
     num_workers: int,
     user_prompt: str | None,
+    local_code: bool = False,
 ) -> tuple[str, Evaluator]:
     """Construct the evaluator once for a whole sweep. Returns (model_id, evaluator).
 
@@ -220,6 +226,18 @@ def _build_evaluator(
     instance serves every dataset. Anything an evaluator accumulates across
     `transcribe` calls must be cleared in `_reset_run_state`.
     """
+    # Checked before anything is constructed, so the error lands before an API
+    # client, a Swift build or an SFSpeechRecognizer authorization. A silent
+    # no-op would be the worse failure: --local-code exists to make a working
+    # tree edit visible in the WER, and ignoring it on a backend that has no
+    # local code at all would read as "my change did nothing".
+    if local_code and (endpoint or model in _NON_LOCAL_MODELS or model.startswith("swift://")):
+        raise typer.BadParameter(
+            f"--local-code has no meaning for --model {model!r}: it swaps the "
+            "modeling code bundled with a checkpoint for this checkout's, and "
+            "this backend runs no tiny_audio code. Drop the flag."
+        )
+
     if model == "assemblyai":
         api_key = _require_api_key(assemblyai_api_key, "--assemblyai-api-key", "ASSEMBLYAI_API_KEY")
 
@@ -302,12 +320,14 @@ def _build_evaluator(
         evaluator = LocalStreamingEvaluator(
             model_path=model,
             user_prompt=user_prompt,
+            local_code=local_code,
         )
     else:
         model_id = get_model_name(model)
         evaluator = LocalEvaluator(
             model_path=model,
             user_prompt=user_prompt,
+            local_code=local_code,
         )
 
     return model_id, evaluator
@@ -386,6 +406,17 @@ def main(
         int,
         typer.Option("--num-workers", "-w", help="Number of parallel workers for API evaluations"),
     ] = 1,
+    local_code: Annotated[
+        bool,
+        typer.Option(
+            "--local-code",
+            help="Run the model/pipeline code from this checkout instead of the copy "
+            "published with the checkpoint. Checkpoints bundle their own "
+            "asr_modeling.py / asr_pipeline.py and config.json points auto_map at "
+            "them, so without this a local edit is not measured until it is pushed. "
+            "Local models only.",
+        ),
+    ] = False,
     model_name: Annotated[
         str | None,
         typer.Option(
@@ -414,6 +445,7 @@ def main(
         locale=locale,
         num_workers=num_workers,
         user_prompt=user_prompt,
+        local_code=local_code,
     )
 
     for dataset_name in expand_datasets([d.value for d in datasets]):

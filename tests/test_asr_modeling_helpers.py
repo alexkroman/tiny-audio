@@ -14,6 +14,7 @@ from tiny_audio.asr_modeling import (
     ASRModel,
     _assert_audio_token_counts,
     _gather_audio_embeds,
+    _has_sliding_window_attention,
     _resolve_attn_implementation,
 )
 
@@ -45,8 +46,135 @@ class TestResolveAttnImplementation:
 
     @pytest.mark.parametrize("requested", [None, "sdpa", "flash_attention_2"])
     def test_mps_forces_eager(self, monkeypatch, requested):
+        """Without a model id there is nothing to check, so MPS stays conservative."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
         assert _resolve_attn_implementation(requested) == "eager"
+
+    @pytest.mark.parametrize("requested", [None, "sdpa"])
+    def test_mps_keeps_request_without_sliding_window(self, monkeypatch, requested):
+        """Qwen3.5's case: no sliding-window layer, so eager is not needed."""
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+        monkeypatch.setattr(
+            "tiny_audio.asr_modeling._has_sliding_window_attention", lambda _: False
+        )
+        assert _resolve_attn_implementation(requested, "some/model") == requested
+
+    @pytest.mark.parametrize("requested", [None, "sdpa"])
+    def test_mps_forces_eager_with_sliding_window(self, monkeypatch, requested):
+        """Gemma 4's case: Metal sdpa is wrong for cached sliding-window decode."""
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+        monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", lambda _: True)
+        assert _resolve_attn_implementation(requested, "some/model") == "eager"
+
+    def test_mps_fa2_still_degrades_to_sdpa(self, monkeypatch):
+        """A config pinning FA2 must not survive just because eager was skipped."""
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+        monkeypatch.setattr(
+            "tiny_audio.asr_modeling._has_sliding_window_attention", lambda _: False
+        )
+        assert _resolve_attn_implementation("flash_attention_2", "some/model") == "sdpa"
+
+
+class TestHasSlidingWindowAttention:
+    """Read from the config, since the answer is needed before the model loads."""
+
+    @pytest.fixture(autouse=True)
+    def clear_cache(self):
+        _has_sliding_window_attention.cache_clear()
+        yield
+        _has_sliding_window_attention.cache_clear()
+
+    @staticmethod
+    def _patch(monkeypatch, **attrs):
+        config = SimpleNamespace(**attrs)
+        monkeypatch.setattr(
+            "tiny_audio.asr_modeling.AutoConfig.from_pretrained",
+            lambda *a, **k: config,
+        )
+
+    def test_gemma4_style_layer_types(self, monkeypatch):
+        """google/gemma-4-E2B-it ships sliding_window 512 AND these layer_types."""
+        self._patch(
+            monkeypatch,
+            layer_types=["full_attention", "sliding_attention"],
+            sliding_window=512,
+        )
+        assert _has_sliding_window_attention("gemma") is True
+
+    def test_qwen35_style_no_window(self, monkeypatch):
+        """Qwen/Qwen3.5-2B: linear + full attention, sliding_window None."""
+        self._patch(
+            monkeypatch,
+            layer_types=["linear_attention", "full_attention"],
+            sliding_window=None,
+        )
+        assert _has_sliding_window_attention("qwen35") is False
+
+    def test_inert_window_is_vetoed_by_use_sliding_window(self, monkeypatch):
+        """Qwen2 style: a non-null window that the model never actually applies."""
+        self._patch(monkeypatch, sliding_window=4096, use_sliding_window=False)
+        assert _has_sliding_window_attention("qwen2") is False
+
+    def test_bare_sliding_window_counts(self, monkeypatch):
+        self._patch(monkeypatch, sliding_window=512)
+        assert _has_sliding_window_attention("other") is True
+
+    def test_unreadable_config_is_treated_as_sliding(self, monkeypatch):
+        """Unknown architecture keeps the conservative eager path."""
+
+        def boom(*_a, **_k):
+            raise OSError("no network")
+
+        monkeypatch.setattr("tiny_audio.asr_modeling.AutoConfig.from_pretrained", boom)
+        assert _has_sliding_window_attention("missing/model") is True
+
+
+class _MaskOnDevice:
+    """Attention mask that reports an arbitrary device.
+
+    A real `mps` tensor cannot be built on a CI box without Metal, and
+    `_assert_sdpa_safe_on_mps` only needs `.device`, `.shape` and `== 0`.
+    """
+
+    __hash__ = None
+
+    def __init__(self, rows, device):
+        self._tensor = torch.tensor(rows)
+        self.device = torch.device(device)
+        self.shape = self._tensor.shape
+
+    def __eq__(self, other):
+        return self._tensor == other
+
+
+class TestAssertSdpaSafeOnMps:
+    """Metal's sdpa NaNs any left-padded row; refuse rather than emit '!!!!!!'."""
+
+    @staticmethod
+    def _call(impl, mask):
+        model = SimpleNamespace(
+            language_model=SimpleNamespace(config=SimpleNamespace(_attn_implementation=impl))
+        )
+        ASRModel._assert_sdpa_safe_on_mps(model, mask)
+
+    def test_padded_batch_on_mps_with_sdpa_raises(self):
+        mask = _MaskOnDevice([[1, 1, 1], [0, 1, 1]], "mps")
+        with pytest.raises(ValueError, match="left-padded batch"):
+            self._call("sdpa", mask)
+
+    def test_unpadded_batch_passes(self):
+        """Batch 1 and uniform-length batches pad nothing, which is the eval path."""
+        self._call("sdpa", _MaskOnDevice([[1, 1, 1], [1, 1, 1]], "mps"))
+
+    def test_eager_is_allowed_to_pad(self):
+        self._call("eager", _MaskOnDevice([[1, 1, 1], [0, 1, 1]], "mps"))
+
+    def test_off_mps_is_allowed_to_pad(self):
+        """The bug is Metal-specific; CPU/fp32 is exact and CUDA is unaffected."""
+        self._call("sdpa", _MaskOnDevice([[1, 1, 1], [0, 1, 1]], "cpu"))
+
+    def test_no_mask_passes(self):
+        self._call("sdpa", None)
 
 
 class TestGatherAudioEmbeds:

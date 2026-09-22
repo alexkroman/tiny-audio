@@ -267,7 +267,42 @@ def _max_attention_head_dim(text_config) -> int | None:
     return max(usable) if usable else None
 
 
-def _resolve_attn_implementation(requested: str | None) -> str | None:
+@functools.lru_cache(maxsize=16)
+def _has_sliding_window_attention(model_id: str) -> bool:
+    """Whether `model_id`'s text stack has any sliding-window attention layer.
+
+    Read from the config rather than the loaded module so the answer is
+    available before `from_pretrained` picks an attn implementation.
+
+    Two independent spellings, because transformers has both. Gemma 4 declares
+    `sliding_window: 512` AND `layer_types: [full_attention,
+    sliding_attention]` (verified against google/gemma-4-E2B-it); Qwen2-style
+    configs carry a non-null `sliding_window` that is inert unless
+    `use_sliding_window` is true, so that flag has to veto the window.
+
+    Returns True when the config can't be read, so an unknown architecture
+    keeps the conservative eager path on MPS.
+    """
+    try:
+        probe = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+        text_config = probe.get_text_config() if hasattr(probe, "get_text_config") else probe
+    except Exception:
+        logger.warning(
+            "Could not read the config for %s to check for sliding-window "
+            "attention; assuming it has some and using eager attention on MPS.",
+            model_id,
+        )
+        return True
+
+    layer_types = getattr(text_config, "layer_types", None) or []
+    if any("sliding" in str(layer_type) for layer_type in layer_types):
+        return True
+    if getattr(text_config, "use_sliding_window", None) is False:
+        return False
+    return bool(getattr(text_config, "sliding_window", None))
+
+
+def _resolve_attn_implementation(requested: str | None, model_id: str | None = None) -> str | None:
     """Coerce flash_attention_2 to sdpa when CUDA isn't available, and avoid sdpa on MPS.
 
     FA2 is CUDA-only. On MPS/CPU, requesting it either errors at load or
@@ -275,16 +310,44 @@ def _resolve_attn_implementation(requested: str | None) -> str | None:
     install + import cost for no win. Coerce here so a saved config that
     pins flash_attention_2 still loads on Mac / CPU-only Linux boxes.
 
-    MPS goes further and needs eager. PyTorch's Metal sdpa kernel returns wrong
+    MPS needs eager for SOME models. PyTorch's Metal sdpa kernel returns wrong
     results for cached single-token decode against a sliding-window mask, which
     is exactly Gemma 4's layout (`sliding_window=512`, four sliding layers per
     full-attention layer). A full-sequence forward is fine, so the damage shows
     up only during generation: greedy decode with no cache transcribed
-    correctly while the identical cached decode produced "Mr. and a". Eager is
-    correct there and, at this model size, no slower in practice.
+    correctly while the identical cached decode produced "Mr. and a".
+
+    The mask is the trigger, so the coercion is scoped to models that actually
+    build one. `model_id` opts into that check; without it every MPS load falls
+    back to eager, which is what this function used to do unconditionally. That
+    blanket version taxed the models it was never protecting: Qwen3.5-2B
+    declares `sliding_window: None` and cannot hit the bug, and eager cost it
+    41% of decode throughput on an M4 Max (19.9 -> 28.1 tok/s, bf16, 64 tokens
+    from a 200-token prompt). Audio encoders are likewise unaffected -- they run
+    full-sequence forwards with no cache at all, and the Granite branch below
+    has been pinning sdpa on MPS for every granite_qwen run to date.
+
+    SECOND, SEPARATE MPS sdpa HAZARD, and the reason `generate` carries a guard:
+    Metal's sdpa returns NaN for a row containing any fully-masked position, so
+    a LEFT-PADDED batch comes back as NaN logits, argmax 0, and a transcript of
+    "!!!!!!". One pad token is enough. Measured on bare transformers with no
+    tiny_audio code involved (Qwen3.5-2B, bf16): the identical forward is exact
+    to 0.000 on CPU/fp32, and eager is correct on MPS at any padding. Batch 1
+    pads nothing, which is why the eval harness is safe under sdpa -- but this
+    is what the blanket eager was accidentally also protecting, so anything
+    that batches ragged audio on a Mac must ask for eager explicitly. See
+    `_assert_sdpa_safe_on_mps`.
     """
-    if torch.backends.mps.is_available() and requested in (None, "sdpa", "flash_attention_2"):
+    if (
+        torch.backends.mps.is_available()
+        and requested in (None, "sdpa", "flash_attention_2")
+        and (model_id is None or _has_sliding_window_attention(model_id))
+    ):
         return "eager"
+    # Otherwise fall through: on MPS, sdpa and None (let transformers pick,
+    # which is sdpa where available) are both safe for a model with no
+    # sliding-window layer, and a config pinning flash_attention_2 is still
+    # downgraded to sdpa below.
     if requested != "flash_attention_2":
         return requested
     if not torch.cuda.is_available():
@@ -731,7 +794,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         LR routing.
         """
         encoder_kwargs = {
-            "attn_implementation": _resolve_attn_implementation(config.attn_implementation),
+            "attn_implementation": _resolve_attn_implementation(
+                config.attn_implementation, config.audio_model_id
+            ),
             "low_cpu_mem_usage": True,
             "dtype": dtype,
         }
@@ -851,7 +916,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     @classmethod
     def _load_language_model(cls, config: ASRConfig, dtype: torch.dtype) -> PreTrainedModel:
         """Load and freeze the language model."""
-        attn_implementation = _resolve_attn_implementation(config.attn_implementation)
+        attn_implementation = _resolve_attn_implementation(
+            config.attn_implementation, config.text_model_id
+        )
 
         # FlashAttention only has kernels for head_dim <= 256, and it fails at
         # the first forward rather than at load. Gemma 4 E2B trips this: 7 of
@@ -2044,6 +2111,38 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
         return input_ids, attention_mask, inputs_embeds
 
+    def _assert_sdpa_safe_on_mps(self, attention_mask: torch.Tensor | None) -> None:
+        """Refuse a left-padded batch when Metal's sdpa would silently NaN it.
+
+        A ragged batch left-pads the shorter prompts (see
+        `_left_pad_prompt_rows`), and on MPS the sdpa kernel turns any row with
+        a fully-masked position into NaN logits. argmax then falls through to
+        token 0, so the row decodes as "!!!!!!" -- at full speed, no warning,
+        and for 3 of 4 rows in a mixed-length LibriSpeech batch. Silent wrong
+        transcripts are the worst outcome here, so this raises instead; a WER
+        computed from them would look merely bad, not broken.
+
+        Batch 1 and uniform-length batches pad nothing and pass. `eager` is
+        correct on MPS at any padding, and the bug is Metal-specific, so a CUDA
+        box is unaffected either way. `_resolve_attn_implementation` documents
+        the measurements.
+        """
+        if attention_mask is None or attention_mask.device.type != "mps":
+            return
+        if self.language_model.config._attn_implementation != "sdpa":
+            return
+        if not bool((attention_mask == 0).any()):
+            return
+        raise ValueError(
+            "Refusing to generate: this is a left-padded batch of "
+            f"{attention_mask.shape[0]} on MPS with sdpa attention, where "
+            "Metal's kernel returns NaN for the padded rows and every one of "
+            "them would decode as '!!!!!!' with no error. Either load with "
+            "attn_implementation='eager' (correct at any padding, ~30% slower "
+            "to decode), batch only equal-length clips, or generate one clip "
+            "at a time."
+        )
+
     @torch.no_grad()
     def generate(
         self,
@@ -2070,6 +2169,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
+        self._assert_sdpa_safe_on_mps(attention_mask)
 
         # transformers v5 deprecates passing generation flags as kwargs when a
         # `generation_config` is also passed — the kwargs get silently dropped.
