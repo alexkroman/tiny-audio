@@ -2,9 +2,9 @@
 #
 # Natural-cap mix: every dataset runs at its full natural train-split
 # size, with Gigaspeech on the curated M tier rather than L. The one
-# exception is the Big-3 (LibriHeavy / CommonVoice 17 / Gigaspeech M),
-# each held to a 600K `target_samples` cap so no single-speaker read
-# corpus dominates the per-step gradient — see the mix table below.
+# exception is LibriHeavy, held to a 600K `target_samples` cap. CommonVoice
+# 17 and Gigaspeech M were capped at 600K too until 2026-09-22 and now run
+# at natural size — see the mix table below.
 # The prior revision's "tilt"
 # (downcap Switchboard / AMI-SDM / SPGI to fund GS L expansion) was
 # rolled back after observing cross-eval regression: cutting exposure
@@ -77,16 +77,19 @@
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy med (cap 600K)│ 1,101,040 │   600,000 │   22.3% │
-# │ Gigaspeech M (cap 600K)  │   910,140 │   600,000 │   22.3% │
-# │ CommonVoice 17 en (600K) │ 1,101,170 │   599,940 │   22.3% │
-# │ SPGISpeech M             │   385,000 │   385,000 │   14.3% │
-# │ TEDLIUM-3                │   268,263 │  ~194,900 │    7.3% │
-# │ VoxPopuli en             │   182,482 │  ~157,000 │    5.9% │
-# │ AMI SDM                  │   107,319 │    74,265 │    2.8% │
-# │ AMI IHM                  │   108,502 │    73,239 │    2.7% │
+# │ LibriHeavy med (cap 600K)│ 1,101,040 │   600,000 │   19.5% │
+# │ Gigaspeech M (uncapped)  │   910,140 │   656,893 │   21.3% │
+# │ CommonVoice 17 (uncapped)│ 1,101,170 │  ~938,000 │   30.5% │
+# │ SPGISpeech M             │   385,000 │   385,000 │   12.5% │
+# │ TEDLIUM-3                │   268,263 │  ~194,900 │    6.3% │
+# │ VoxPopuli en             │   182,482 │  ~157,000 │    5.1% │
+# │ AMI SDM                  │   107,319 │    74,265 │    2.4% │
+# │ AMI IHM                  │   108,502 │    73,239 │    2.4% │
 # └──────────────────────────┴───────────┴───────────┴─────────┘
-# Total raw: ~4,163,916  →  Total effective: ~2,684,344
+# Total raw: ~4,163,916  →  Total effective: ~3,080,000
+# (2026-09-22: CV and Gigaspeech uncapped. CV's ~938K is 1,101,170 less the
+# measured 14.81% down_votes drop, an estimate until the next run logs it.
+# The previous capped mix was ~2,684,344 with each Big-3 source at 22.3%.)
 #
 # 8 training sources. Big-3 combined 66.9%. AMI combined 5.5% and still the
 # entire conversational share; the mix has zero 8 kHz telephony. Finance is
@@ -449,10 +452,15 @@ datasets:
     text_punct: true
     train_splits: [train]
     eval_splits: [validation]
-    # Big-3 cap. Applies to train_splits only, so the validation split
-    # stays whole. CV ships ordered by validation date — the shuffle in
-    # _resample_to_target is what keeps the cap from being a date slice.
-    target_samples: 600000
+    # UNCAPPED 2026-09-22 (was target_samples: 600000). The official train
+    # split holds one recording per sentence, so every row past the old cap
+    # is a NEW sentence -- new vocabulary and entities, which is what the CV
+    # gap is made of (proper-noun + rare-word substitutions were +62 of the
+    # 62-error CV deficit vs universal-3-5-pro on the 2026-09-22 sweep).
+    # ~938K rows after the down_votes filter. Do NOT restore a cap above
+    # that: _resample_to_target repeat-pads when the cap exceeds the pool.
+    # Watch AMI / ami-sdm -- every earlier read-speech share increase
+    # regressed them.
 
   # Gigaspeech M (official speechcolab repo). M tier is ~1,000hr / ~910K
   # segments — natural cap, no replay. Stepped back down from L
@@ -508,9 +516,9 @@ datasets:
     exclude_where:
       column: source
       values: [audiobook]
-    # Big-3 cap. M's natural size (910,140; 656,893 after the audiobook
-    # exclusion) is closest to the cap of the three, so this trims the least.
-    target_samples: 600000
+    # UNCAPPED 2026-09-22 (was target_samples: 600000). M's natural size is
+    # 910,140; 656,893 after the audiobook exclusion, so this adds the
+    # 56,893 in-register rows the cap used to trim. Still the M tier, not L.
 
   # Gigaspeech dev split — official repo ships dev/test as separate configs
   # (same pattern as the fixie mirror). The `dev` config exposes its data

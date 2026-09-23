@@ -183,6 +183,162 @@ class TestModelDtypeIsTheWorkingOverride:
         assert cfg.model_dtype == "bfloat16"
 
 
+class TestInferenceDtypeFieldsAllLand:
+    """`model_dtype` alone does not reach the encoder or the projector.
+
+    `projector_dtype` / `encoder_dtype` exist to hold fp32 MASTER WEIGHTS for
+    AdamW, they are persisted into every checkpoint's config.json, and
+    ASRModel prefers them over `model_dtype` when casting. So the bandwidth
+    argument `TestModelDtypeIsTheWorkingOverride` pins for the decoder was
+    only half-applied: a `-top4` eval held the 473M-param Granite encoder in
+    fp32, and every eval held the projector there.
+    """
+
+    def test_all_three_fields_are_overridden_together(self, tmp_path):
+        from scripts.eval.evaluators.asr import DTYPE_CONFIG_FIELDS
+        from tiny_audio.asr_config import ASRConfig
+
+        ASRConfig(
+            model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"
+        ).save_pretrained(tmp_path)
+
+        cfg = ASRConfig.from_pretrained(tmp_path, **dict.fromkeys(DTYPE_CONFIG_FIELDS, "bfloat16"))
+
+        assert [getattr(cfg, f) for f in DTYPE_CONFIG_FIELDS] == ["bfloat16"] * 3
+
+    def test_model_dtype_alone_leaves_the_encoder_in_float32(self, tmp_path):
+        """The regression itself, so the constant cannot be quietly narrowed back."""
+        from tiny_audio.asr_config import ASRConfig
+
+        ASRConfig(
+            model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"
+        ).save_pretrained(tmp_path)
+
+        cfg = ASRConfig.from_pretrained(tmp_path, model_dtype="bfloat16")
+
+        assert cfg.encoder_dtype == "float32"
+        assert cfg.projector_dtype == "float32"
+
+
+class TestMergeLoraAdapters:
+    """Eval decodes through merged weights, not a live PeftModel.
+
+    Unmerged adapters cost two extra matmuls per adapted linear per token, in
+    fp32 against a bf16 base. Measured on an M-series Mac (granite-qwen-frozen,
+    sdpa, batch 1): 20.6 -> 36.7 tok/s once merged.
+    """
+
+    @staticmethod
+    def _peft_holder():
+        import types
+
+        import torch.nn as nn
+        from peft import LoraConfig, get_peft_model
+
+        class Tiny(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = nn.Linear(4, 4)
+
+        peft_model = get_peft_model(Tiny(), LoraConfig(target_modules=["lin"], r=2))
+        return types.SimpleNamespace(language_model=peft_model)
+
+    def test_merges_and_unwraps_a_peft_decoder(self):
+        from peft import PeftModel
+
+        from scripts.eval.evaluators.asr import _merge_lora_adapters
+
+        holder = self._peft_holder()
+        assert _merge_lora_adapters(holder) is True
+        assert not isinstance(holder.language_model, PeftModel)
+
+    def test_is_a_noop_without_lora(self):
+        import types
+
+        import torch.nn as nn
+
+        from scripts.eval.evaluators.asr import _merge_lora_adapters
+
+        holder = types.SimpleNamespace(language_model=nn.Linear(4, 4))
+        original = holder.language_model
+
+        assert _merge_lora_adapters(holder) is False
+        assert holder.language_model is original
+
+
+class TestUseSdpaWhereSafe:
+    """The MPS attention policy has to be re-applied AFTER load.
+
+    On the default eval path `trust_remote_code` imports the CHECKPOINT's
+    asr_modeling.py, so the policy that ran is whatever was published with the
+    weights -- and every checkpoint on the Hub carries the blanket
+    "MPS -> eager" version that predates scoping it to sliding-window models.
+    Qwen3.5-2B has `sliding_window: None` and cannot hit the Metal bug, so it
+    was paying ~30% of decode throughput for a guard that did not apply to it.
+    """
+
+    @staticmethod
+    def _holder(loaded_impl: str, requested: str = "sdpa"):
+        import types
+
+        calls: list[str] = []
+        language_model = types.SimpleNamespace(
+            config=types.SimpleNamespace(_attn_implementation=loaded_impl),
+            set_attn_implementation=calls.append,
+        )
+        holder = types.SimpleNamespace(
+            config=types.SimpleNamespace(
+                attn_implementation=requested, text_model_id="stub/decoder"
+            ),
+            language_model=language_model,
+        )
+        return holder, calls
+
+    @pytest.fixture
+    def on_mps(self, monkeypatch):
+        import torch
+
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+
+    @staticmethod
+    def _set_sliding_window(monkeypatch, value: bool):
+        monkeypatch.setattr(
+            "tiny_audio.asr_modeling._has_sliding_window_attention", lambda _model_id: value
+        )
+
+    def test_corrects_a_stale_eager_decoder_to_sdpa(self, monkeypatch, on_mps):
+        from scripts.eval.evaluators.asr import _use_sdpa_where_safe
+
+        self._set_sliding_window(monkeypatch, False)
+        holder, calls = self._holder("eager")
+
+        _use_sdpa_where_safe(holder)
+
+        assert calls == ["sdpa"]
+
+    def test_leaves_a_sliding_window_model_on_eager(self, monkeypatch, on_mps):
+        """Metal's sdpa returns wrong results for cached decode against that mask."""
+        from scripts.eval.evaluators.asr import _use_sdpa_where_safe
+
+        self._set_sliding_window(monkeypatch, True)
+        holder, calls = self._holder("eager")
+
+        _use_sdpa_where_safe(holder)
+
+        assert calls == []
+
+    def test_is_a_noop_when_load_already_resolved_correctly(self, monkeypatch, on_mps):
+        """--local-code already gets this right; re-applying must not churn the model."""
+        from scripts.eval.evaluators.asr import _use_sdpa_where_safe
+
+        self._set_sliding_window(monkeypatch, False)
+        holder, calls = self._holder("sdpa")
+
+        _use_sdpa_where_safe(holder)
+
+        assert calls == []
+
+
 class TestStreamingRetry:
     """AssemblyAIStreamingEvaluator retries only on transient stream close codes."""
 

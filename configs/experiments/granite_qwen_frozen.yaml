@@ -163,7 +163,7 @@ model:
   # train and inference, so nothing breaks -- but the inherited default drops
   # the punctuation-and-capitalization cue on a stack where formatting is a
   # live concern, and it is one more uncontrolled difference from top4.
-  transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
+  # transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
 
   # bfloat16, NOT the float32 the top4 recipe uses. That fp32 choice existed
   # for exactly one reason -- an Adam step of ~1e-5 at encoder lr 1e-5 is 49x
@@ -283,7 +283,7 @@ model:
   apply_spec_augment: false
 
 training:
-  hub_model_id: "mazesmazes/tiny-audio-granite-qwen-frozen"
+  hub_model_id: "mazesmazes/tiny-audio-granite-qwen-frozen-2"
 
   attn_implementation: sdpa
 
