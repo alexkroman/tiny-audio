@@ -55,6 +55,21 @@ def print_generation_config(model, model_path: str):
     console.print(table)
 
 
+# Every ASRConfig field that names a weight dtype. All three get pinned to the
+# same value for inference, because `model_dtype` alone does not reach the
+# encoder or the projector: `projector_dtype: float32` is in every experiment
+# config and `encoder_dtype: float32` is in the encoder-unfreezing ones
+# (granite_qwen_top4 / _encoder / _full_encoder). Both persist into the
+# checkpoint's config.json, and `_load_audio_encoder` / `_create_projector`
+# prefer them over `model_dtype` (asr_modeling.py `_resolve_dtype` callers).
+# Overriding only `model_dtype` therefore left the 473M-param Granite encoder
+# in fp32 on every `-top4` eval and the 12.6M projector in fp32 on all of them.
+# Those two fields exist to hold fp32 MASTER WEIGHTS for AdamW -- the same
+# training-only argument `_resolve_local_runtime` makes for `model_dtype`,
+# which had only been half-applied.
+DTYPE_CONFIG_FIELDS = ("model_dtype", "projector_dtype", "encoder_dtype")
+
+
 def _resolve_local_runtime() -> tuple[int | str, str]:
     """Pick the device and weight dtype for a locally loaded ASRModel pipeline.
 
@@ -90,13 +105,13 @@ def _resolve_local_runtime() -> tuple[int | str, str]:
     CPU stays fp32: reduced precision there is emulated rather than
     accelerated without AMX, so it is a slowdown, not a win.
 
-    attn_implementation is deliberately NOT set. ASRModel routes whatever the
-    config asks for through _resolve_attn_implementation, which already coerces
-    FA2 -> sdpa off CUDA and anything -> eager on MPS (Metal's sdpa kernel
-    returns wrong results for cached single-token decode against a
-    sliding-window mask). Passing it here would be a second, silently diverging
-    copy of that policy -- which is what it had become: the streaming evaluator
-    asked for "sdpa" on MPS and got eager anyway.
+    attn_implementation is deliberately NOT set here. ASRModel routes whatever
+    the config asks for through _resolve_attn_implementation; passing it here
+    would be a second, silently diverging copy of that policy -- which is what
+    it had become: the streaming evaluator asked for "sdpa" on MPS and got
+    eager anyway. The kernel is instead corrected AFTER load, by
+    `_use_sdpa_where_safe`, which calls that same helper. See its docstring for
+    why post-load is the only placement that works.
     """
     if torch.cuda.is_available():
         return 0, "bfloat16"
@@ -133,9 +148,92 @@ def _build_working_tree_pipeline(model_path: str, device: int | str, model_dtype
     from tiny_audio.asr_pipeline import ASRPipeline
 
     config = ASRConfig.from_pretrained(model_path)
-    config.model_dtype = model_dtype
+    for field in DTYPE_CONFIG_FIELDS:
+        setattr(config, field, model_dtype)
     model = ASRModel.from_pretrained(model_path, config=config)
     return ASRPipeline(model=model, device=device)
+
+
+def _merge_lora_adapters(model) -> bool:
+    """Fold LoRA adapters into the base weights for inference. Returns whether it ran.
+
+    `ASRModel.from_pretrained` wraps the decoder in a live `PeftModel` and
+    nothing ever unwrapped it, so eval decoded through the adapters as separate
+    modules: two extra matmuls per adapted linear per token, and peft builds
+    adapter weights in fp32 regardless of the base dtype, so those matmuls ran
+    fp32 against a bf16 base. granite_qwen_frozen adapts six projections per
+    layer -- mlp gate/up/down and linear_attn in_proj_qkv/in_proj_z/out_proj --
+    which is 67.3M fp32 params and tens of thousands of extra Metal dispatches
+    over a 64-token decode.
+
+    Merging is a pure win on a decode loop that is launch- and
+    bandwidth-bound, and it is not MPS-specific. Measured on an M-series Mac
+    (granite-qwen-frozen, bf16, 10s audio, 64 tokens, batch 1, sdpa):
+    20.6 -> 36.7 tok/s, a 78% gain.
+
+    NOT bit-exact: the fp32 `B @ A` product is rounded into bf16 base weights,
+    where holding the adapters separate kept the correction in fp32 until the
+    residual add. Bounded rather than assumed -- paired against the unmerged
+    path on 30 librispeech samples (with `_use_sdpa_where_safe`, which has the
+    same exposure), all 30 predictions came back byte-identical, WER matched at
+    1.5986, and the only metric that moved at all was mean top1/top2 margin,
+    5.8474 -> 5.8466. Nothing came close to flipping a token. A larger paired
+    run is still the right check before a sub-noise WER delta is reported as
+    real.
+
+    Inference only. Training must keep the adapters live -- they are the only
+    thing with gradients -- so this belongs in the eval loader and nowhere in
+    `asr_modeling`. `config.use_lora` is read only during load, so unwrapping
+    afterwards is invisible to the rest of the stack.
+    """
+    from peft import PeftModel
+
+    if not isinstance(model.language_model, PeftModel):
+        return False
+    model.language_model = model.language_model.merge_and_unload()
+    return True
+
+
+def _use_sdpa_where_safe(model) -> None:
+    """Re-apply the MPS attention policy after load, overriding the checkpoint's copy.
+
+    This duplicates what `_resolve_attn_implementation` already decided at
+    load -- deliberately, because on the default eval path that function is not
+    the working tree's. `trust_remote_code` resolves the `auto_map` entry by
+    importing the checkpoint's OWN `asr_modeling.py` (see
+    `_build_working_tree_pipeline`), so the attention policy that runs is
+    whatever was published with the weights. Every checkpoint on the Hub
+    predates the fix that scoped MPS's eager coercion to models that actually
+    build a sliding-window mask, and carries the blanket "MPS -> eager"
+    version instead. `--local-code` cannot rescue it either: every published
+    checkpoint fails the `projector.output_scale` compatibility guard.
+
+    So the fix shipped and was unreachable. `ta eval` on a Mac printed
+    `decoder attn: eager` against Qwen3.5-2B, which declares
+    `sliding_window: None` and cannot hit the Metal correctness bug that
+    coercion exists for. Cost, same setup as `_merge_lora_adapters`:
+    15.8 tok/s eager vs 20.6 tok/s sdpa. Together the two take `ta eval`
+    on librispeech from 1.63 to 1.05 s/sample at identical WER.
+
+    Setting it post-load fixes it regardless of which code version loaded, and
+    is a no-op under `--local-code` where the resolution was already right.
+    The policy itself is imported rather than restated, so this stays one
+    source of truth -- it only moves WHEN that policy is consulted.
+
+    Batch 1 only, which the eval harness is: Metal's sdpa returns NaN for a
+    fully-masked row, so a left-padded batch decodes as "!!!!!!". `-w N` runs
+    N threads each making batch-1 calls, so it stays safe. Anything that
+    batches ragged audio on a Mac must not come through here.
+    """
+    from tiny_audio.asr_modeling import _resolve_attn_implementation
+
+    text_model_id = getattr(model.config, "text_model_id", None)
+    resolved = _resolve_attn_implementation(
+        model.config.attn_implementation, model_id=text_model_id
+    )
+    if resolved is None or resolved == model.language_model.config._attn_implementation:
+        return
+    model.language_model.set_attn_implementation(resolved)
 
 
 def _build_local_pipeline(model_path: str, *, local_code: bool = False):
@@ -155,15 +253,18 @@ def _build_local_pipeline(model_path: str, *, local_code: bool = False):
             model=model_path,
             trust_remote_code=True,
             device=device,
-            model_kwargs={"model_dtype": model_dtype},
+            model_kwargs=dict.fromkeys(DTYPE_CONFIG_FIELDS, model_dtype),
         )
+    merged = _merge_lora_adapters(pipe.model)
+    _use_sdpa_where_safe(pipe.model)
     # Which code ran, and which attention kernel, are both part of what the WER
     # means -- so they are logged next to the device rather than left to infer.
     source = "working tree" if local_code else "checkpoint (trust_remote_code)"
     resolved = pipe.model.language_model.config._attn_implementation
     console.print(
         f"[dim]Using device: {device}, model_dtype: {model_dtype}, "
-        f"code: {source}, decoder attn: {resolved}[/dim]"
+        f"code: {source}, decoder attn: {resolved}, "
+        f"lora: {'merged' if merged else 'none'}[/dim]"
     )
     return pipe
 
