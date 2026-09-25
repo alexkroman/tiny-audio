@@ -2,10 +2,11 @@
 # FROZEN ENCODER + PROJECTOR + LoRA, one epoch.
 #
 #   ibm-granite/granite-speech-5.0-470m-turboctc   FULLY FROZEN (0 trainable)
-#   -> MLP projector (fresh init, 12.6M, lr 1e-3)
-#   -> Qwen/Qwen3.5-2B, base FROZEN + LoRA all-linear r=64 (67.3M, lr 1e-4)
+#   -> MLP projector (fresh init, 14.7M, lr 1e-3)
+#   -> Qwen/Qwen3.5-4B, base FROZEN + LoRA all-linear r=64 (129.9M, lr 1e-4)
 #
-# Trainable: 79.9M of 2.434B (3.3%) -- the smallest allocation tried here.
+# Trainable: 144.5M of 4.82B (3.0%). Sized for one H100 80GB (see the batch
+# size note under `training`).
 #
 #   poetry run python scripts/train.py +experiments=granite_qwen_frozen
 #
@@ -116,7 +117,7 @@ model:
   # Values copied from granite_qwen_lora (closest recipe: same encoder, same
   # LoRA-on-frozen-decoder shape). The deliberate divergences from it --
   # encoder_dtype, lora_rank, lora_alpha -- are documented at their own keys.
-  text_model_id: Qwen/Qwen3.5-2B
+  text_model_id: Qwen/Qwen3.5-4B
   projector_type: mlp
   projector_pool_stride: 1
   encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
@@ -157,13 +158,14 @@ model:
   # file exists to make. stage_1.yaml:74 already retired 0.1 -> 0.0 on this
   # stack after qmzim6ia/84w5zjhj.
   label_smoothing: 0.0
-  # transcribe_prompt: unset resolves to None, which falls back to
-  # ASRModel.TRANSCRIBE_PROMPT ("Transcribe the speech to text") rather than
-  # the instruction the sibling recipes train on. Self-consistent between
-  # train and inference, so nothing breaks -- but the inherited default drops
-  # the punctuation-and-capitalization cue on a stack where formatting is a
-  # live concern, and it is one more uncontrolled difference from top4.
-  # transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
+  # INFERENCE prompt only. Training picks the prompt per row from
+  # `text_punct` (scripts/train.py _build_sample), so the plain default
+  # ("Transcribe the speech to text") is only ever trained on TEDLIUM + AMI,
+  # ~12% of the mix. Leaving this unset makes inference borrow their style.
+  # Measured on frozen-2 (2026-09-24, same weights, CV n=300): plain 9.50 vs
+  # this prompt 7.38. The plain prompt drops all terminal punctuation and
+  # prefixes "Laughter" on 15% of CV rows.
+  transcribe_prompt: "Transcribe the speech with proper punctuation and capitalization"
 
   # bfloat16, NOT the float32 the top4 recipe uses. That fp32 choice existed
   # for exactly one reason -- an Adam step of ~1e-5 at encoder lr 1e-5 is 49x
@@ -283,7 +285,7 @@ model:
   apply_spec_augment: false
 
 training:
-  hub_model_id: "mazesmazes/tiny-audio-granite-qwen-frozen-2"
+  hub_model_id: "mazesmazes/tiny-audio-granite-qwen-frozen-3"
 
   attn_implementation: sdpa
 
@@ -387,60 +389,52 @@ training:
   # and makes the run non-comparable to anything.
   auto_find_batch_size: false
 
-  # 64 per device, sized against the measured frozen-encoder anchor rather
-  # than guessed: granite_qwen_top4 records a frozen baseline peaking at 55.4
-  # GiB of 79.25 at batch 48 (the top-4 unfreeze added +5.2 GiB to reach
-  # 60.6, and unfreezing all 16 blocks OOMed at 79.16).
+  # 28 per device x 2 accumulation, sized for Qwen3.5-4B on an H100 80GB.
+  # The H100 is FASTER than the A100 80GB the 2B run used, not bigger:
+  # nvidia-smi reports ~79.6 GiB against the A100's 80.0.
   #
-  # Backing out the fixed cost at batch 48 -- encoder 1.89 GB fp32 + decoder
-  # bf16 2.74 + LoRA master/moments/grads ~1.08 + projector ~0.20 = ~5.9 GB --
-  # leaves ~49.5 GiB of activation tape, i.e. ~1.03 GiB per unit of batch.
-  # Dropping the encoder to bf16 takes the fixed cost to ~5.0 GB, so
-  #     batch 64 -> 5.0 + 66.0 = ~71 GiB of 79.25 (~90%),
-  # leaving ~8 GiB of headroom. Sequence length is bounded by the collator's
-  # 19.0s cap, so activation memory is near-linear in batch with no O(L^2)
-  # surprise. Restoring the gates to r=64 adds ~62 MB and does not move this.
+  # Anchor: `ta runpod plan` predicted 77.3 GiB for the 2B run at batch 64,
+  # and W&B es1p5srq measured a 76.4 GiB peak (95.5% of the card, median
+  # 68.6). The planner is calibrated to within ~1 GiB here, so its 4B
+  # numbers are used as-is:
+  #     static      10.9 GiB  (decoder bf16 8.7G, LoRA 129.9M fp32 + Adam)
+  #     activations  2.09 GiB per sample (32 layers x 2560 hidden against
+  #                  24 x 2048: ~1.87x the 2B run's 1.12)
+  #     batch 32 -> 77.8 GiB (~98%)  no headroom for all-19s batches
+  #     batch 30 -> 73.6 GiB (~92%)
+  #     batch 28 -> 69.5 GiB (~87%)  <- this file
   #
-  # VERIFY ON THE FIRST RUN: if it OOMs, step to 56 (~63 GiB) rather than
-  # re-enabling auto_find_batch_size. Do not spend the headroom on gradient
-  # checkpointing -- it buys a larger batch at ~30% slower steps, and a
-  # larger batch is the opposite of what this recipe wants (below).
-  per_device_train_batch_size: 64
-  per_device_eval_batch_size: 64
-  # 1, DOWN from 2, so the effective batch is 64 rather than 128. This is
-  # the efficiency lever for a one-pass run. The GPU cost of an epoch is the
-  # forward/backward passes, and the data fixes that; what the run gets OUT
-  # of them is optimizer steps, and accumulation halves those for nothing.
-  # At a single pass over ~2.85M loader rows:
+  # MEASURED (W&B rjid9zj6, H100 80GB HBM3, batch 30): the planner undershoots
+  # the 4B stack by ~5%. The training peak hit 97.3% (77.5 GiB) by step 2,000
+  # and was still rising (96.1% at step 1,600), with expandable_segments
+  # already on, so this is real peak demand, not fragmentation. Eval dips to
+  # ~17% and is not the constraint. 28 scales to ~73.5 GiB (~92%). Step down
+  # BEFORE a run, not after an OOM: the data order is seeded, so resuming at
+  # the same batch replays the batch that failed, and resuming at a new batch
+  # breaks the step-indexed LR schedule and data skip.
   #
-  #     effective batch 128   ~22.3k steps   (this file, previously)
-  #     effective batch  96   ~29.7k steps   (top4's setting)
-  #     effective batch  64   ~44.6k steps   <- this file
+  # No gradient checkpointing. With the base frozen, backward is ~1x forward,
+  # so recompute costs ~+50% per sample. That is a worse trade than a smaller
+  # batch, and 28 x ~260 tokens already keeps an H100 busy.
   #
-  # An 80M-param AdamW step is negligible next to a 2.4B-param forward, so
-  # the wall clock is the same to within logging noise. Every run on this
-  # stack has ended with eval/loss still falling; the header used to buy
-  # more steps with a second data pass at 2x the cost, this buys ~2x the
-  # steps at 1x. Below the critical batch size, more and smaller updates are
-  # the compute-efficient regime (McCandlish et al. 2018), and 64 is an
-  # ordinary LoRA fine-tuning batch. Learning rates are unchanged: Adam's
-  # per-step update magnitude is set by lr, not by batch, so this does not
-  # need a rescale.
-  #
-  # FAILURE MODE to watch: per-step gradient noise rises ~sqrt(2). grad norm
-  # on top4 ran median 0.634 post-warmup at batch 96; expect ~0.75 here with
-  # `max_grad_norm: 1.0` engaging on a minority of steps rather than never.
-  # If train/loss is visibly noisier AND eval/loss is not below the top4
-  # curve at matched step count by step ~10k, put this back to 2 -- a
-  # one-line revert that touches nothing else here.
-  gradient_accumulation_steps: 1
+  # Eval runs under no_grad but still materialises 248K-vocab logits, so it
+  # halves with the train batch.
+  per_device_train_batch_size: 28
+  per_device_eval_batch_size: 32
+  # 2, so the effective batch is 56, close to the 64 this recipe was tuned
+  # and measured at (max_grad_norm 1.0, lr 1e-3 / 1e-4). The frozen run
+  # showed samples, not optimizer steps, are the currency: eval CE for
+  # y1tulo4j overlaid top4 (jscyrgkt) at matched samples despite ~1.6x the
+  # steps. Halving the batch to 28 without accumulation would only add
+  # gradient noise.
+  gradient_accumulation_steps: 2
 
   # ONE pass. `data.epoch_expansion` stays 1; the loader raises if both it
   # and this are >1, because they compound.
   #
-  # ~2.85M loader rows at effective batch 64 is ~44.6k optimizer steps, more
-  # than any run on record (jscyrgkt stopped at 20,000; granite_qwen's full
-  # epoch was 32,922) without showing any row twice. Warmup 1,000 is ~2.2%
+  # ~3.68M loader rows (multiasr, all sources uncapped + Peoples) at
+  # effective batch 56 is ~66k optimizer steps without showing any row
+  # twice. Warmup 1,000 is ~1.5%
   # of the schedule and the modal published value for this architecture
   # class (Granite Speech 1000, Canary-Qwen 1000, SLAM-ASR 1000; Ultravox's
   # default is 0, not the 1000 this file used to cite); 700 was not measured

@@ -5,6 +5,7 @@ Covers the Ultravox-style training-label normalizer:
 - Gigaspeech garbage-tag sample drops (<MUSIC>/<NOISE>/<SIL>/<OTHER>)
 - Conditional truecasing (mono-case sources lifted, already-cased preserved)
 - Residual marker stripping (<unk>, <laugh>, TEDLIUM brackets)
+- TEDLIUM edge audience-event words (laughter / applause)
 - Percent canonicalization carryover from the prior normalizer
 """
 
@@ -308,3 +309,35 @@ class TestSpelledLetterRuns:
         """
         result = _normalize_label("e t. the video game", TEXT_CASE_MONO)
         assert ". The" in result, result
+
+
+class TestTedliumEdgeEvents:
+    """TEDLIUM writes audience events as bare lowercase words at segment edges."""
+
+    def test_leading_laughter_stripped(self):
+        out = _normalize_label("laughter so i had to add handcuffs", TEXT_CASE_MONO)
+        assert "laughter" not in out.lower()
+        assert out.lower().startswith("so i had")
+
+    def test_trailing_chain_stripped(self):
+        out = _normalize_label("walking around like crazy laughter applause", TEXT_CASE_MONO)
+        assert out.lower().endswith("like crazy")
+
+    def test_event_only_label_becomes_empty(self):
+        assert _normalize_label("applause", TEXT_CASE_MONO) == ""
+
+    def test_mid_segment_real_speech_kept(self):
+        out = _normalize_label("the first time i felt applause on the vest", TEXT_CASE_MONO)
+        assert "applause" in out.lower()
+
+    def test_word_prefix_not_matched(self):
+        out = _normalize_label("laughteresque moments", TEXT_CASE_MONO)
+        assert out.lower().startswith("laughteresque")
+
+    def test_cased_source_edge_word_kept(self):
+        text = "The hall erupted in laughter"
+        assert _normalize_label(text, TEXT_CASE_CASED) == text
+
+    def test_all_caps_mono_source_kept(self):
+        out = _normalize_label("THEY ROARED WITH LAUGHTER", TEXT_CASE_MONO)
+        assert out.lower().endswith("laughter")

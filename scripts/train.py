@@ -124,6 +124,15 @@ _RESIDUAL_ANGLE_TAG_RE = re.compile(r"<[^>]+>")
 # ([ medicine ], [ multi-word stage direction ]) — ~0.25% of train rows;
 # zero in dev/test. Same single-space substitution rationale as above.
 _TEDLIUM_BRACKET_RE = re.compile(r"\[[^\]]*\]")
+# TEDLIUM writes audience events as bare words at segment edges ("laughter so
+# i had to add handcuffs", "... united hatzalah applause"): 53 edge vs 2
+# mid-segment hits in 15,000 train rows, the mid ones split between an event
+# and real speech ("i felt applause on the vest"), so only edges are
+# stripped. The TEDLIUM eval refs carry none. ~0.4% of rows, but frozen-2's
+# plain prompt amplified it into a leading "Laughter" on 15% of CommonVoice.
+# Applied only to all-lowercase mono labels (TEDLIUM's raw form), so cased
+# sources and ALL-CAPS Gigaspeech/AMI keep a real edge "laughter".
+_EDGE_EVENT_RE = re.compile(r"^(?:(?:laughter|applause)\b\s*)+|(?:\s*\b(?:laughter|applause))+$")
 # Word-bounded `per cent` → `percent` to avoid false positives on
 # `per centage` / `per centimeter` / etc.; the prior `text.replace("per cent", "percent")`
 # silently mangled those. `\bper ?cent\b` also harmlessly matches an
@@ -354,6 +363,30 @@ def _recase_monocase_text(text: str) -> str:
     return _capitalize_first_letter(text.lower())
 
 
+def _resolve_transcribe_prompt(configured: str | None, datasets: list) -> str | None:
+    """Pick the inference prompt a checkpoint is saved with.
+
+    `transcribe_prompt` never reaches training -- `_build_sample` routes each
+    row by `text_punct` -- so it only decides which trained convention
+    inference asks for. Left unset, ASRModel falls back to the plain prompt,
+    which is the minority unpunctuated bucket (TEDLIUM/AMI/Peoples) whenever
+    any source is punctuated. frozen-2 shipped that way: 0% terminal
+    punctuation, "Laughter" prefixed to 15% of CommonVoice rows, CV 7.38 ->
+    9.50 WER on identical weights. So an unset prompt resolves to the
+    punctuated one when a punctuated source trains, and is written into the
+    config so the checkpoint decodes under it.
+    """
+    if configured is not None:
+        return configured
+    if any(d.get("text_punct") and d.get("train_splits", ["train"]) for d in datasets):
+        logger.info(
+            "transcribe_prompt unset; resolving to %r (a text_punct source trains)",
+            TRANSCRIBE_PROMPT_PUNCT,
+        )
+        return TRANSCRIBE_PROMPT_PUNCT
+    return None
+
+
 # Pure function of its input, and the collator normalizes each row twice: once
 # to test for an empty label and once to build the sample. Cache sized well
 # above the largest training batch so the second call is always a hit.
@@ -431,6 +464,8 @@ def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
     text = _PER_CENT_RE.sub("percent", text)
     text = _ORPHAN_NT_RE.sub(r"\1't", text)
     text = _WHITESPACE_RE.sub(" ", text).strip()
+    if text_case == TEXT_CASE_MONO and text.islower():
+        text = _EDGE_EVENT_RE.sub("", text).strip()
     if not text:
         return ""
     if text_case == TEXT_CASE_CASED:
@@ -1498,6 +1533,9 @@ def main(cfg: DictConfig) -> None:
         if OmegaConf.is_config(val):
             val = OmegaConf.to_container(val, resolve=True)
         model_config_dict[param] = val
+    model_config_dict["transcribe_prompt"] = _resolve_transcribe_prompt(
+        model_config_dict.get("transcribe_prompt"), cfg.data.get("datasets") or []
+    )
     asr_config = ASRConfig(**model_config_dict)
 
     model = ASRModel(asr_config)
