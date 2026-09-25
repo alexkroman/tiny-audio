@@ -1,10 +1,10 @@
 # Multi-ASR dataset configuration
 #
 # Natural-cap mix: every dataset runs at its full natural train-split
-# size, with Gigaspeech on the curated M tier rather than L. The one
-# exception is LibriHeavy, held to a 600K `target_samples` cap. CommonVoice
-# 17 and Gigaspeech M were capped at 600K too until 2026-09-22 and now run
-# at natural size — see the mix table below.
+# size, with Gigaspeech on the curated M tier rather than L. No source is
+# capped: CommonVoice 17 and Gigaspeech M lost their 600K `target_samples`
+# caps on 2026-09-22 and LibriHeavy lost its on 2026-09-24 — see the mix
+# table below.
 # The prior revision's "tilt"
 # (downcap Switchboard / AMI-SDM / SPGI to fund GS L expansion) was
 # rolled back after observing cross-eval regression: cutting exposure
@@ -46,15 +46,15 @@
 # in the mix and the YouTube-monologue register didn't earn its 6.3%
 # mix share. If re-introducing later, filter by dnsmos > 3.0 + Scribe/
 # Emilia transcript agreement to suppress the label-noise tail.
-# Peoples: REMOVED FROM TRAINING 2026-09-18 (kept as an eval set).
+# Peoples: removed from training 2026-09-18, REINSTATED 2026-09-24 (see
+# the clean_sa entry below for why the removal rationale did not hold).
 # CORRECTION to what this header used to claim: it asserted that "both
 # `_sa` configs apply the sentence-alignment filter ... so each segment's
 # audio span matches its label span." That is false. The `_sa` filter
 # constrains alignment QUALITY, not segment boundaries — `clean_sa`
 # ships fixed ~15s grid windows in which 99.3% of rows begin mid-stream
 # and the word straddling each seam is lost. The full measurement and
-# the removal rationale are at the (now commented-out) clean_sa entry
-# below. `dirty_sa` (602K) had been dropped earlier for label quality.
+# the removal/reinstatement history are at the clean_sa entry below. `dirty_sa` (602K) had been dropped earlier for label quality.
 # Peoples eval refs ARE clean — test/validation are utterance-bounded,
 # not grid-cut (median 4.2s vs train's 14.8s), and are human-transcribed
 # per the MLCommons card. No dataset is repeated — every source runs at
@@ -77,23 +77,28 @@
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy med (cap 600K)│ 1,101,040 │   600,000 │   19.5% │
-# │ Gigaspeech M (uncapped)  │   910,140 │   656,893 │   21.3% │
-# │ CommonVoice 17 (uncapped)│ 1,101,170 │  ~938,000 │   30.5% │
-# │ SPGISpeech M             │   385,000 │   385,000 │   12.5% │
-# │ TEDLIUM-3                │   268,263 │  ~194,900 │    6.3% │
-# │ VoxPopuli en             │   182,482 │  ~157,000 │    5.1% │
-# │ AMI SDM                  │   107,319 │    74,265 │    2.4% │
-# │ AMI IHM                  │   108,502 │    73,239 │    2.4% │
+# │ LibriHeavy med (uncapped)│ 1,101,040 │  ~885,000 │   24.1% │
+# │ Gigaspeech M (uncapped)  │   910,140 │   656,893 │   17.9% │
+# │ CommonVoice 17 (uncapped)│ 1,101,170 │  ~938,000 │   25.5% │
+# │ SPGISpeech M             │   385,000 │   385,000 │   10.5% │
+# │ Peoples clean_sa         │  ~311,000 │  ~311,000 │    8.5% │
+# │ TEDLIUM-3                │   268,263 │  ~194,900 │    5.3% │
+# │ VoxPopuli en             │   182,482 │  ~157,000 │    4.3% │
+# │ AMI SDM                  │   107,319 │    74,265 │    2.0% │
+# │ AMI IHM                  │   108,502 │    73,239 │    2.0% │
 # └──────────────────────────┴───────────┴───────────┴─────────┘
-# Total raw: ~4,163,916  →  Total effective: ~3,080,000
+# Total raw: ~4,474,916  →  Total effective: ~3,675,000
+# (2026-09-24: LibriHeavy uncapped. ~885K is the pool left after the
+# >19.0s exclude_where pre-filter (1,101,040 less the measured 19.6%).)
+# (2026-09-24: Peoples clean_sa reinstated. Its rows are ~15s grid windows,
+# so the 0.8s / 19.0s duration filters drop ~none; effective ≈ raw.)
 # (2026-09-22: CV and Gigaspeech uncapped. CV's ~938K is 1,101,170 less the
 # measured 14.81% down_votes drop, an estimate until the next run logs it.
 # The previous capped mix was ~2,684,344 with each Big-3 source at 22.3%.)
 #
-# 8 training sources. Big-3 combined 66.9%. AMI combined 5.5% and still the
+# 9 training sources. Big-3 combined 67.5%. AMI combined 4.0% and still the
 # entire conversational share; the mix has zero 8 kHz telephony. Finance is
-# carried by SPGISpeech alone (14.3%), professionally transcribed, no overlap
+# carried by SPGISpeech alone (10.5%), professionally transcribed, no overlap
 # with any eval split.
 #
 # STATE PLAINLY, because it cuts against this file's own stated goal: the
@@ -105,6 +110,9 @@
 # wanted, the lever is LOWERING the three caps, not leaving an unintended
 # shortfall in place. What changed here is that the caps now mean what they
 # say.
+# (2026-09-24: all three Big-3 caps are now gone, so the "lower the caps"
+# lever above no longer exists in this file. Big-3 sits at 67.5% at natural
+# size; lowering it now means re-adding caps, not tightening them.)
 #
 # SWITCHBOARD REMOVED (2026-09-17). `hhoangphuoc/switchboard` returns 404 /
 # RepositoryNotFoundError -- the repo is gone from the Hub, which is the
@@ -200,8 +208,8 @@
 # - LibriHeavy >19.0s: 19.6% (documented as ~3%, which is the 30s figure --
 #   this single error is most of the 235K-row discrepancy). Now pre-filtered
 #   at prep time via `exclude_where: {column: audio_duration, above: 19.0}`
-#   so the 600K cap selects from an ~885K eligible pool and actually delivers
-#   600K. Side effect, stated: it shifts LibriHeavy toward shorter segments
+#   so LibriHeavy (now uncapped) contributes the ~885K eligible pool.
+#   Side effect, stated: it shifts LibriHeavy toward shorter segments
 #   (median was 14.05s).
 # - VoxPopuli >19.0s: ~13.7% (documented ~1.5% at 30s). Raw train is 182,482
 #   rows, not the ~168K stated elsewhere in this file.
@@ -272,22 +280,21 @@ datasets:
     text_punct: true
     train_splits: [train]
     eval_splits: []
-    # Drop the >19s tail BEFORE target_samples, not after. DataCollator's
-    # 19.0s cap silently removed 19.6% of LibriHeavy at collate time, i.e.
-    # after this cap had already picked 600K, so the source delivered 482,400
-    # rows against a nominal 600K -- most of the 235K-row error in the old
-    # mix table. Filtering here makes the cap select from the ~885K eligible
-    # rows and deliver a true 600K. `audio_duration` is a float column on the
+    # Drop the >19s tail at prep time, not in the collator. DataCollator's
+    # 19.0s cap silently removed 19.6% of LibriHeavy at collate time, after
+    # the old 600K cap had already picked its rows, so the source delivered
+    # 482,400 rows against a nominal 600K -- most of the 235K-row error in the
+    # old mix table. Filtering here keeps the mix table honest (~885K) and
+    # keeps any future cap exact. `audio_duration` is a float column on the
     # mythicinfinity mirror (verified via the datasets-server /info endpoint),
     # and `input_columns` keeps the filter from decoding audio to answer it.
     exclude_where:
       column: audio_duration
       above: 19.0
-    # Big-3 cap (see the mix table above). Read by
-    # scripts/train.py:_resample_to_target, which shuffles on self.seed
-    # before selecting so the cap is a representative sample rather than
-    # the first N rows — LibriHeavy ships ordered by chapter/speaker.
-    target_samples: 600000
+    # UNCAPPED 2026-09-24 (was target_samples: 600000), matching CV and
+    # Gigaspeech. If a cap returns, _resample_to_target in scripts/train.py
+    # shuffles on self.seed before selecting, which matters because
+    # LibriHeavy ships ordered by chapter/speaker.
 
   # People's Speech `clean_sa` (~311K train natural, CC-BY). Sentence-
   # aligned subset of the clean tier: CER ≤ 20% upper bound on alignment
@@ -320,7 +327,30 @@ datasets:
   # tail did NOT improve Peoples WER in either cap-1M or uncapped runs
   # (both ~25), so the volume bet wasn't paying off on the source
   # distribution anyway.
-  # PEOPLES clean_sa REMOVED FROM TRAINING (2026-09-18). It was 311K rows /
+  #
+  # REINSTATED 2026-09-24. The removal below was a single-variable test of
+  # "grid-cut labels teach an abrupt-onset => skip-first-word prior", and the
+  # test failed: granite-qwen-top4 (fresh projector, no Peoples in training,
+  # n=500) dropped onsets on 52.2% of Peoples utterances vs 50.6% for
+  # granite-qwen trained WITH clean_sa -- Peoples WER 19.31 vs 19.86, i.e. no
+  # meaningful change. The onset loss is fixed at inference instead
+  # (`inference_lead_in_seconds: 0.25`, -1.22 WER on Peoples at n=500). With
+  # the attribution disproven, the removal bought nothing and gave up 10% of
+  # the mix plus the cross-corpus regularization flagged as a KNOWN RISK
+  # below. The corpus measurements that follow are still accurate; only the
+  # causal claim drawn from them is wrong.
+  - path: MLCommons/peoples_speech
+    name: clean_sa
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    # Lowercase, no punctuation.
+    text_case: mono
+    text_punct: false
+    train_splits: [train]
+    eval_splits: []
+
+  # (Historical) PEOPLES clean_sa REMOVED FROM TRAINING (2026-09-18). It was 311K rows /
   # 10.1% of the mix, the 5th-largest source. Kept as an EVAL set (the
   # `validation` entry below is unaffected).
   #
@@ -487,7 +517,7 @@ datasets:
     #   dev/valid    0.0%      55.3%     44.7%   (FULL 6,750-row scan)
     # The split we are scored on contains zero audiobook, yet a quarter of
     # the Gigaspeech rows we train on are audiobook -- a register that is 0%
-    # of the eval, and one the mix already over-supplies via 600K LibriHeavy
+    # of the eval, and one the mix already over-supplies via ~885K LibriHeavy
     # audiobook rows.
     #
     # This is free, which is why it is worth doing even though the Gigaspeech
