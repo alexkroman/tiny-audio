@@ -72,7 +72,7 @@ class TestAudio:
 
 class TestExpandObservation:
     def test_negative_is_one_silenced_hold(self):
-        cfg = PoolConfig(lead_sil_prob=0.0)
+        cfg = PoolConfig(lead_sil_prob=0.0, hold_copies=())
         out = expand_observation(_obs(label=0, kind="payload_cut"), cfg, random.Random(0))
         assert [e["schema"] for e in out] == ["hold_sil"]
         assert not out[0]["fire"]
@@ -219,3 +219,75 @@ def test_first_fire_times_per_threshold():
     margins = [-5.0, 1.0, float("nan"), 3.5]
     fires = first_fire_times(times, margins, [-6.0, 0.0, 2.0, 5.0])
     assert fires == {-6.0: 0.16, 0.0: 0.32, 2.0: 0.64, 5.0: None}
+
+
+def test_set_end_of_turn_threshold_round_trips(tmp_path):
+    from transformers import GenerationConfig
+
+    from scripts.turn_aware.model import set_end_of_turn_threshold
+
+    config = GenerationConfig(sequence_bias=[[[42], 1.5]])
+    set_end_of_turn_threshold(config, 151705, 2.5)
+    config.save_pretrained(tmp_path)
+    back = GenerationConfig.from_pretrained(tmp_path)
+    assert back.sequence_bias == [[[42], 1.5], [[151705], -2.5]]  # other biases kept
+    set_end_of_turn_threshold(back, 151705, 2.0)
+    assert back.sequence_bias == [[[42], 1.5], [[151705], -2.0]]  # replaced, not stacked
+    set_end_of_turn_threshold(back, 151705, 0.0)
+    assert back.sequence_bias == [[[42], 1.5]]
+
+
+def test_hold_copies_oversample_costly_kinds_with_fresh_tails():
+    cfg = PoolConfig(lead_sil_prob=0.0, hold_copies=(("payload_cut", 3),))
+    out = expand_observation(_obs(label=0, kind="payload_cut"), cfg, random.Random(0))
+    assert [e["key"] for e in out] == ["k@1.0#hold_sil", "k@1.0#hold_sil1", "k@1.0#hold_sil2"]
+    assert len({e["tail_s"] for e in out}) == 3
+    assert len(expand_observation(_obs(label=0, kind="word_cut"), cfg, random.Random(0))) == 1
+
+
+class TestMinePauses:
+    @pytest.mark.parametrize(
+        ("text", "mid"),
+        [
+            ("which I'd like to pay now with", True),
+            ("my card—", True),
+            ("It's 706,", True),
+            ("That's all.", False),
+            ('He said "stop."', False),
+            ("Is that right?", False),
+            ("", False),
+        ],
+    )
+    def test_ends_mid_sentence(self, text, mid):
+        from scripts.turn_aware.data import ends_mid_sentence
+
+        assert ends_mid_sentence(text) is mid
+
+    def test_mines_only_unlabelled_interior_mid_sentence_pauses(self):
+        from scripts.turn_aware.data import MINED_KIND, mine_pauses
+
+        turn = {
+            "turn_key": "t1",
+            "style": "afterthought",
+            "domain": "banking",
+            "chunks": ["Hi, I'd like to pay", "my bill today.", "Oh, and the", "late fee."],
+            "chunk_ends_s": [1.5, 3.0, 4.2, 5.0],
+        }
+        # 4.2 is mid-sentence but already labelled; 3.0 ends a sentence; 5.0 is the turn end
+        mined = mine_pauses([turn], labelled={("t1", 4.2)})
+        assert [(m["at_s"], m["label"], m["kind"]) for m in mined] == [(1.5, 0, MINED_KIND)]
+        assert mined[0]["key"] == "t1@1.5#pause"
+        assert mined[0]["text"] == "Hi, I'd like to pay"
+
+
+def test_hold_targets_lose_terminal_punct_but_fire_targets_keep_it():
+    cfg = PoolConfig(hold_copies=(), nosil_prob=1.0, long_tail_prob=0.0)
+    hold = expand_observation({**_obs(label=0), "target": "It's 706, 555."}, cfg, random.Random(0))
+    assert hold[0]["text"] == "It's 706, 555"
+    fire, nosil = expand_observation({**_obs(), "target": "That's all."}, cfg, random.Random(0))
+    assert fire["text"] == nosil["text"] == "That's all."
+    off = PoolConfig(hold_copies=(), strip_hold_punct=False)
+    assert (
+        expand_observation({**_obs(label=0), "target": "Wait?"}, off, random.Random(0))[0]["text"]
+        == "Wait?"
+    )

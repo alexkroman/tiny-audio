@@ -68,6 +68,42 @@ def _self_transcripts(obs, store, model_id: str, cache: Path, batch_size: int) -
     return done
 
 
+def _prepare_observations(obs, store, target_text, model, cache, batch_size):
+    """Add speech_end_s, agent_turn and target to observation rows (a DataFrame).
+
+    The cut instant is pulled back to the last speech frame, so every example's
+    silence is exactly the silence build_pool adds. Rows with no speech left
+    are dropped.
+    """
+    from scripts.turn_aware.data import trim_tail_silence
+
+    obs = obs[obs["turn_key"].isin(store.meta)].sort_values("turn_key").copy()
+    obs["speech_end_s"] = [
+        trim_tail_silence(store.get(k)[: round(at_s * SAMPLE_RATE)]) / SAMPLE_RATE
+        for k, at_s in zip(obs["turn_key"], obs["at_s"], strict=True)
+    ]
+    obs["agent_turn"] = [store.meta[k]["agent_turn"] for k in obs["turn_key"]]
+    obs = obs[obs["speech_end_s"] > 0]
+    if target_text == "self":
+        texts = _self_transcripts(obs, store, model, cache, batch_size)
+        obs["target"] = [texts[k] for k in obs["key"]]
+    else:
+        obs["target"] = obs["text"].fillna("")
+    return obs
+
+
+def _load_extra(source: str, split: str):
+    """Prepared extra observations for `split`: a local dir of {split}.parquet or a Hub repo."""
+    import pandas as pd
+
+    local = Path(source) / f"{split}.parquet"
+    if local.exists():
+        return pd.read_parquet(local)
+    from datasets import load_dataset
+
+    return load_dataset(source, split=split).to_pandas()
+
+
 @app.command("build-pool")
 def build_pool_cmd(
     splits: Annotated[
@@ -90,6 +126,20 @@ def build_pool_cmd(
             help="'self': base model's own transcript (default); 'dataset': the observation's text",
         ),
     ] = "self",
+    extra: Annotated[
+        str | None,
+        typer.Option(
+            "--extra",
+            help="Prepared extra observations (dir or Hub dataset, e.g. from mine-pauses) to merge",
+        ),
+    ] = None,
+    transcript_cache: Annotated[
+        Path | None,
+        typer.Option(
+            "--transcript-cache",
+            help="Dir holding transcripts-{split}.jsonl to reuse (default: --output-dir)",
+        ),
+    ] = None,
     max_samples: Annotated[
         int | None,
         typer.Option("--max-samples", "-n", help="Random observations per split (smoke runs)"),
@@ -102,41 +152,29 @@ def build_pool_cmd(
     """Build the training manifest from mazesmazes/turn-end-detection."""
     import pandas as pd
 
-    from scripts.turn_aware.data import (
-        PoolConfig,
-        TurnAudioStore,
-        build_pool,
-        load_split,
-        trim_tail_silence,
-    )
+    from scripts.turn_aware.data import PoolConfig, TurnAudioStore, build_pool, load_split
 
     if target_text not in ("self", "dataset"):
         raise typer.BadParameter("must be 'self' or 'dataset'", param_hint="--target-text")
     output_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = transcript_cache or output_dir
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     for split in splits or ["train", "validation"]:
         obs = load_split("observations", split).to_pandas()
-        if max_samples:
-            obs = obs.sample(n=min(max_samples, len(obs)), random_state=seed)
+        frac = 1.0
+        if max_samples and max_samples < len(obs):
+            frac = max_samples / len(obs)
+            obs = obs.sample(n=max_samples, random_state=seed)
         store = TurnAudioStore(split)
-        obs = obs[obs["turn_key"].isin(store.meta)].sort_values("turn_key")
-
-        # The cut instant, pulled back to the last speech frame: every example's
-        # silence is then exactly the silence build_pool adds.
-        ends = []
-        for turn_key, at_s in zip(obs["turn_key"], obs["at_s"], strict=True):
-            prefix = store.get(turn_key)[: round(at_s * SAMPLE_RATE)]
-            ends.append(trim_tail_silence(prefix) / SAMPLE_RATE)
-        obs["speech_end_s"] = ends
-        obs["agent_turn"] = [store.meta[k]["agent_turn"] for k in obs["turn_key"]]
-        obs = obs[obs["speech_end_s"] > 0]
-
-        if target_text == "self":
-            cache = output_dir / f"transcripts-{split}.jsonl"
-            texts = _self_transcripts(obs, store, model, cache, batch_size)
-            obs["target"] = [texts[k] for k in obs["key"]]
-        else:
-            obs["target"] = obs["text"].fillna("")
+        cache = cache_dir / f"transcripts-{split}.jsonl"
+        obs = _prepare_observations(obs, store, target_text, model, cache, batch_size)
+        if extra:
+            more = _load_extra(extra, split)
+            if frac < 1.0:  # keep the extra rows in proportion to a smoke sample
+                more = more.sample(frac=frac, random_state=seed)
+            obs = pd.concat([obs, more[more["turn_key"].isin(store.meta)]], ignore_index=True)
+            console.print(f"merged {len(more)} extra observations from {extra}")
 
         pool = pd.DataFrame(build_pool(obs.to_dict("records"), PoolConfig(), seed=seed))
         path = output_dir / f"{split}.parquet"
@@ -145,6 +183,64 @@ def build_pool_cmd(
             f"[green]{split}[/]: {len(obs)} observations -> {len(pool)} examples -> {path}"
         )
         console.print(pool["schema"].value_counts().to_string())
+
+
+@app.command("mine-pauses")
+def mine_pauses_cmd(
+    splits: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--split",
+            help="Split(s) to mine; repeat for several (default: train, validation, test)",
+        ),
+    ] = None,
+    output_dir: Annotated[
+        Path, typer.Option("--output-dir", "-o", help="Where {split}.parquet observations go")
+    ] = Path("data/turn_aware_pauses"),
+    model: Annotated[
+        str, typer.Option("--model", "-m", help="Base model that writes self-distilled targets")
+    ] = "Qwen/Qwen3-ASR-0.6B-hf",
+    max_samples: Annotated[
+        int | None,
+        typer.Option("--max-samples", "-n", help="Random mined pauses per split (smoke runs)"),
+    ] = None,
+    batch_size: Annotated[
+        int, typer.Option("--batch-size", help="Decode batch size for self-transcription")
+    ] = 32,
+    repo_id: Annotated[
+        str | None,
+        typer.Option("--repo-id", "-r", help="Also push the prepared splits to this Hub dataset"),
+    ] = None,
+    seed: Annotated[int, typer.Option("--seed", help="Seed for --max-samples")] = 0,
+):
+    """Mine unlabelled mid-sentence pauses as label-0 observations, ready for --extra."""
+    import pandas as pd
+
+    from scripts.turn_aware.data import TurnAudioStore, load_split, mine_pauses
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for split in splits or ["train", "validation", "test"]:
+        obs = load_split("observations", split).to_pandas()
+        labelled = {
+            (k, round(float(a), 2)) for k, a in zip(obs["turn_key"], obs["at_s"], strict=True)
+        }
+        turns = load_split("turns", split).remove_columns(["audio"]).to_pandas()
+        mined = pd.DataFrame(mine_pauses(turns.to_dict("records"), labelled))
+        if max_samples and max_samples < len(mined):
+            mined = mined.sample(n=max_samples, random_state=seed)
+        store = TurnAudioStore(split)
+        cache = output_dir / f"transcripts-{split}.jsonl"
+        mined = _prepare_observations(mined, store, "self", model, cache, batch_size)
+        path = output_dir / f"{split}.parquet"
+        mined.to_parquet(path, index=False)
+        console.print(f"[green]{split}[/]: {len(mined)} mid-sentence pauses -> {path}")
+        if repo_id:
+            from datasets import Dataset
+
+            Dataset.from_pandas(mined, preserve_index=False).push_to_hub(
+                repo_id, split=split, private=True
+            )
+            console.print(f"pushed {split} to {repo_id}")
 
 
 # Margin thresholds swept by `evaluate`. 0 is plain greedy; positive values
@@ -243,6 +339,47 @@ def evaluate_cmd(
         frame["marker_margin"] = margins
         frame.to_parquet(output_dir / "predictions.parquet", index=False)
         console.print(f"wrote {output_dir / 'metrics.json'} and predictions.parquet")
+
+
+@app.command("set-threshold")
+def set_threshold_cmd(
+    model: Annotated[str, typer.Option("--model", "-m", help="Model dir or Hub ID to read")],
+    tau: Annotated[
+        float, typer.Option("--tau", help="Fire only when the marker margin exceeds this (0 = off)")
+    ],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", "-o", help="Write the updated generation_config.json here"),
+    ] = None,
+    repo_id: Annotated[
+        str | None,
+        typer.Option(
+            "--repo-id", "-r", help="Push ONLY generation_config.json to this Hub model repo"
+        ),
+    ] = None,
+):
+    """Ship a marker threshold with a checkpoint via generation_config.json.
+
+    Weights are untouched: the threshold is a `sequence_bias` of -tau on
+    <END_OF_TURN> that stock `generate()` applies.
+    """
+    from transformers import GenerationConfig
+
+    from scripts.turn_aware.data import END_OF_TURN
+    from scripts.turn_aware.model import load_processor, set_end_of_turn_threshold
+
+    if output_dir is None and repo_id is None:
+        raise typer.BadParameter("pass --output-dir and/or --repo-id", param_hint="--output-dir")
+    token_id = load_processor(model).tokenizer.convert_tokens_to_ids(END_OF_TURN)
+    config = GenerationConfig.from_pretrained(model)
+    set_end_of_turn_threshold(config, token_id, tau)
+    console.print(f"sequence_bias -> {config.sequence_bias}")
+    if output_dir:
+        config.save_pretrained(output_dir)
+        console.print(f"wrote {output_dir / 'generation_config.json'}")
+    if repo_id:
+        config.push_to_hub(repo_id, commit_message=f"Set end-of-turn threshold tau={tau:g}")
+        console.print(f"pushed generation_config.json to {repo_id}")
 
 
 def _fire_times(

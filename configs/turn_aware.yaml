@@ -50,11 +50,17 @@ model:
   lora_rank: 32
   lora_alpha: 64
   lora_dropout: 0.05
+  # Decode-time confidence bar for the marker, written into the saved
+  # generation_config.json as sequence_bias = -tau on <END_OF_TURN>, so plain
+  # generate() fires only when logit(marker) - logit(<|im_end|>) > tau. 0 is
+  # plain greedy. Pick it from `ta turn-aware evaluate`'s threshold sweep on
+  # VALIDATION; `ta turn-aware set-threshold` updates an existing checkpoint.
+  end_of_turn_threshold: 0.0
 
 data:
   dataset_id: mazesmazes/turn-end-detection
   # Written by `ta turn-aware build-pool`: {train,validation}.parquet manifests.
-  pool_dir: data/turn_aware
+  pool_dir: data/turn_aware_v2
   # Manifest + turns split names. A local smoke can point both at a small
   # validation pool and skip the ~9 GB train split entirely.
   train_split: train
@@ -70,7 +76,7 @@ resume_from_checkpoint: null
 # Deliberately outside `training`: Trainer's own push_to_hub would upload raw
 # PEFT checkpoints at every save. Smoke runs should pass `hub_model_id=null`,
 # or a 30-step model overwrites the real one.
-hub_model_id: mazesmazes/tiny-audio-turn-aware-qwen3-asr
+hub_model_id: mazesmazes/tiny-audio-turn-aware-qwen3-asr-v2
 
 training:
   output_dir: outputs/turn_aware
@@ -96,7 +102,7 @@ training:
   save_total_limit: 3
   dataloader_num_workers: 8
   report_to: wandb
-  run_name: turn-aware-qwen3-asr-0.6b
+  run_name: turn-aware-qwen3-asr-0.6b-v2
 
 hydra:
   run:

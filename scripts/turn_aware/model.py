@@ -35,7 +35,10 @@ def load_processor(model_id: str = MODEL_ID):
     from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(model_id)
-    if END_OF_TURN not in processor.tokenizer.get_vocab():
+    # Recorded so add_end_of_turn_token leaves a TRAINED marker row alone when
+    # training continues from a turn-aware checkpoint.
+    processor.end_of_turn_added = END_OF_TURN not in processor.tokenizer.get_vocab()
+    if processor.end_of_turn_added:
         processor.tokenizer.add_special_tokens({"additional_special_tokens": [END_OF_TURN]})
     return processor
 
@@ -67,6 +70,8 @@ def add_end_of_turn_token(model, processor, init_std: float = 0.02, seed: int = 
     contents would otherwise set the marker's initial logit.
     """
     token_id = processor.tokenizer.convert_tokens_to_ids(END_OF_TURN)
+    if not getattr(processor, "end_of_turn_added", True):
+        return token_id  # continuing from a turn-aware checkpoint: keep the trained row
     embed = model.get_input_embeddings().weight
     if token_id >= embed.shape[0]:
         model.resize_token_embeddings(len(processor.tokenizer))
@@ -92,6 +97,25 @@ def apply_lora(model, token_id: int, rank: int, alpha: int, dropout: float):
         bias="none",
     )
     return get_peft_model(model, config)
+
+
+def set_end_of_turn_threshold(generation_config, token_id: int, tau: float) -> None:
+    """Make plain `generate()` fire only when the marker margin exceeds `tau`.
+
+    Implemented as `sequence_bias` = -tau on `<END_OF_TURN>`, which
+    generation_config.json serialises and `generate()` applies with stock
+    transformers -- the threshold ships with the checkpoint, no custom decode
+    loop needed. At the step where a transcript ends the competitors are
+    `<|im_end|>` and the marker, so greedy then fires iff
+    logit(marker) - logit(<|im_end|>) > tau. tau=0 removes the bias.
+
+    Margins recorded by `decode_batch` are read AFTER built-in processors, so
+    on a biased checkpoint they are relative to its shipped threshold.
+    """
+    keep = [e for e in (generation_config.sequence_bias or []) if list(e[0]) != [token_id]]
+    if tau:
+        keep.append([[token_id], -float(tau)])
+    generation_config.sequence_bias = keep or None
 
 
 class _PairLogitRecorder(LogitsProcessor):

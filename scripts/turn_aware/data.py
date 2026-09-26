@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import io
 import random
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
@@ -171,11 +172,30 @@ class PoolConfig:
     # context. Below 1 so the model still endpoints with no context at all.
     ctx_prob: float = 0.5
     max_audio_s: float = 30.0
+    # Silenced copies per label-0 observation, by kind (default 1). Each copy
+    # draws its own tail. The costly holds -- cut just before the requested
+    # detail, or mid-phrase -- are the model's main error, and at one copy
+    # they were ~7% of the pool against ~52% fires.
+    hold_copies: tuple[tuple[str, int], ...] = (("payload_cut", 3), ("word_cut", 2))
+    # Drop the final . ? ! from HOLD targets. The base model closes 96-100% of
+    # transcripts of unfinished speech with terminal punctuation -- as often as
+    # finished speech -- so every hold reached the marker decision looking
+    # complete. Without it, "is the sentence over?" becomes the punctuation
+    # decision, which the LM already makes well; fire_nosil keeps its period
+    # (finished speech), so silence is still what separates fire from hold.
+    strip_hold_punct: bool = True
 
 
-def _example(obs: dict, schema: str, tail_s: float, fire: bool, lead_s: float, ctx: str) -> dict:
+def strip_terminal_punct(text: str) -> str:
+    """'...Farmington Avenue, App.' -> '...Farmington Avenue, App'."""
+    return text.rstrip().rstrip(".?!\u2026").rstrip()
+
+
+def _example(
+    obs: dict, schema: str, tail_s: float, fire: bool, lead_s: float, ctx: str, copy: int = 0
+) -> dict:
     return {
-        "key": f"{obs['key']}#{schema}",
+        "key": f"{obs['key']}#{schema}{copy or ''}",
         "turn_key": obs["turn_key"],
         "kind": obs["kind"],
         "schema": schema,
@@ -197,7 +217,13 @@ def expand_observation(obs: dict, cfg: PoolConfig, rng: random.Random) -> list[d
     ctx = obs.get("agent_turn") or ""
     ctx = ctx if ctx and rng.random() < cfg.ctx_prob else ""
     if not obs["label"]:
-        return [_example(obs, "hold_sil", rng.uniform(*cfg.hold_tail_s), False, lead, ctx)]
+        copies = dict(cfg.hold_copies).get(obs["kind"], 1)
+        if cfg.strip_hold_punct:
+            obs = {**obs, "target": strip_terminal_punct(obs["target"])}
+        return [
+            _example(obs, "hold_sil", rng.uniform(*cfg.hold_tail_s), False, lead, ctx, copy=j)
+            for j in range(copies)
+        ]
     if rng.random() < cfg.long_tail_prob:
         out = [_example(obs, "fire_long", rng.uniform(*cfg.long_tail_s), True, lead, ctx)]
     else:
@@ -238,6 +264,50 @@ def build_pool(observations: list[dict], cfg: PoolConfig, seed: int = 0) -> list
         )
     rng.shuffle(pool)
     return pool
+
+
+MINED_KIND = "mid_sentence_pause"
+_SENTENCE_END = re.compile(r"[.?!][\"'\u201d\u2019)]*\s*$")
+
+
+def ends_mid_sentence(text: str) -> bool:
+    """True when a chunk's script text stops without terminal punctuation."""
+    return bool(text.strip()) and not _SENTENCE_END.search(text.strip())
+
+
+def mine_pauses(turns: list[dict], labelled: set[tuple[str, float]]) -> list[dict]:
+    """Unlabelled interior pauses that fall mid-sentence, as label-0 observations.
+
+    Every interior entry of `chunk_ends_s` is a real pause in the audio (the
+    TTS chunks are separate clips), but only ~46% carry an observation. The
+    unlabelled mid-sentence ones -- "...which I'd like to pay now with" -- are
+    unambiguous holds and exactly where streaming replay cut callers off.
+    Complete-sentence pauses are NOT mined: the dataset labels those 1 unless
+    the requested detail follows, which the script text alone cannot settle.
+
+    `labelled` holds (turn_key, round(at_s, 2)) for existing observations.
+    """
+    out = []
+    for turn in turns:
+        chunks = list(turn["chunks"])
+        ends = [float(e) for e in turn["chunk_ends_s"]]
+        for i in range(min(len(ends) - 1, len(chunks))):
+            at_s = round(ends[i], 2)
+            if (turn["turn_key"], at_s) in labelled or not ends_mid_sentence(chunks[i]):
+                continue
+            out.append(
+                {
+                    "key": f"{turn['turn_key']}@{at_s:g}#pause",
+                    "turn_key": turn["turn_key"],
+                    "at_s": at_s,
+                    "label": 0,
+                    "kind": MINED_KIND,
+                    "text": " ".join(chunks[: i + 1]),
+                    "style": turn.get("style", ""),
+                    "domain": turn.get("domain", ""),
+                }
+            )
+    return out
 
 
 def stratified_subset(rows: list[dict], n: int, seed: int = 0) -> list[dict]:
@@ -394,6 +464,7 @@ SWEEP_METRICS = (
     "acc_kind/payload_cut",
     "acc_kind/word_cut",
     "acc_kind/trailing_frag",
+    f"acc_kind/{MINED_KIND}",
 )
 
 

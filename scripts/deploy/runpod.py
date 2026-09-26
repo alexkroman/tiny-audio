@@ -750,7 +750,13 @@ sleep infinity
 # Qwen3-ASR recipe (configs/turn_aware.yaml, scripts/turn_aware/), which needs
 # its manifest built before it can train.
 TURN_AWARE_EXPERIMENT = "turn_aware"
-TURN_AWARE_POOL_DIR = "data/turn_aware"
+TURN_AWARE_POOL_DIR = "data/turn_aware_v2"
+# v1's pool dir: its transcripts-{split}.jsonl (~80k base-model transcripts,
+# about an hour of GPU) are reused by every later pool instead of re-decoded.
+TURN_AWARE_TRANSCRIPT_CACHE = "data/turn_aware"
+# Unlabelled mid-sentence pauses mined by `ta turn-aware mine-pauses`, already
+# carrying speech_end_s and base-model targets, merged into the pool as holds.
+TURN_AWARE_EXTRA = "mazesmazes/turn-end-detection-mined-pauses"
 # build-pool's base-model transcription is launch-bound at batch 32 on a 0.6B
 # model: per-token kernel launches cost the same at 32 or 128 clips, so a pod
 # gets ~4x the throughput for ~7 GB of KV cache at the 30 s worst case.
@@ -776,7 +782,8 @@ if [ -f {pool}/train.parquet ] && [ -f {pool}/validation.parquet ]; then
     echo "Reusing turn-aware pool in {pool}"
 else
     python -m scripts.cli turn-aware build-pool --split train --split validation -o {pool} \\
-        --batch-size {pool_batch_size}
+        --batch-size {pool_batch_size} --transcript-cache {TURN_AWARE_TRANSCRIPT_CACHE} \\
+        --extra {TURN_AWARE_EXTRA}
 fi && python -m scripts.turn_aware.train {overrides}"""
 
 
@@ -1237,7 +1244,8 @@ if [ -f {pool}/{split}.parquet ]; then
     echo "Reusing turn-aware {split} pool in {pool}"
 else
     python -m scripts.cli turn-aware build-pool --split {split} -o {pool} \\
-        --batch-size {pool_batch_size}
+        --batch-size {pool_batch_size} --transcript-cache {TURN_AWARE_TRANSCRIPT_CACHE} \\
+        --extra {TURN_AWARE_EXTRA}
 fi && python -m scripts.cli turn-aware evaluate -m {shlex.quote(model)} \\
     --pool-dir {pool} --split {split} -n {max_samples} --batch-size {batch_size} \\
     -o {out_dir}"""

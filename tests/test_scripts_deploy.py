@@ -250,10 +250,14 @@ class TestBuildTrainingScript:
         assert "python -m scripts.train " not in script
         assert "+experiments=" not in script
         assert (
-            "[ -f data/turn_aware/train.parquet ] && [ -f data/turn_aware/validation.parquet ]"
+            "[ -f data/turn_aware_v2/train.parquet ] && [ -f data/turn_aware_v2/validation.parquet ]"
             in script
         )
-        assert "turn-aware build-pool --split train --split validation -o data/turn_aware" in script
+        assert (
+            "turn-aware build-pool --split train --split validation -o data/turn_aware_v2" in script
+        )
+        assert "--transcript-cache data/turn_aware " in script
+        assert "--extra mazesmazes/turn-end-detection-mined-pauses" in script
         assert "--batch-size 128" in script
         assert (
             "fi && python -m scripts.turn_aware.train training.per_device_train_batch_size=12"
@@ -269,12 +273,12 @@ class TestBuildTrainingScript:
             hf_token="token",
             wandb_run_id=None,
             wandb_resume=None,
-            extra_args=["data.pool_dir=data/turn_aware_v2"],
+            extra_args=["data.pool_dir=data/turn_aware_v3"],
         )
 
-        assert "[ -f data/turn_aware_v2/train.parquet ]" in script
-        assert "-o data/turn_aware_v2" in script
-        assert "scripts.turn_aware.train data.pool_dir=data/turn_aware_v2" in script
+        assert "[ -f data/turn_aware_v3/train.parquet ]" in script
+        assert "-o data/turn_aware_v3" in script
+        assert "scripts.turn_aware.train data.pool_dir=data/turn_aware_v3" in script
 
 
 class TestHandlerLocal:
@@ -345,8 +349,9 @@ class TestBuildTurnAwareEvalScript:
 
     def test_builds_missing_pool_then_evaluates(self):
         script = self._script()
-        assert "if [ -f data/turn_aware/test.parquet ]; then" in script
-        assert "build-pool --split test -o data/turn_aware" in script
+        assert "if [ -f data/turn_aware_v2/test.parquet ]; then" in script
+        assert "build-pool --split test -o data/turn_aware_v2" in script
+        assert "--extra mazesmazes/turn-end-detection-mined-pauses" in script
         assert "--batch-size 128" in script
         assert "turn-aware evaluate -m mazesmazes/tiny-audio-turn-aware-qwen3-asr" in script
         assert "--split test -n 0 --batch-size 64" in script

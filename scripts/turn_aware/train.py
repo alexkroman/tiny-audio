@@ -37,6 +37,7 @@ from scripts.turn_aware.model import (
     decode_batch,
     load_model,
     load_processor,
+    set_end_of_turn_threshold,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,7 @@ def main(cfg: DictConfig) -> None:
     # neither PEFT nor this package.
     final_dir = Path(cfg.training.output_dir) / "final"
     merged = trainer.model.merge_and_unload()
+    set_end_of_turn_threshold(merged.generation_config, token_id, cfg.model.end_of_turn_threshold)
     merged.save_pretrained(final_dir)
     processor.save_pretrained(final_dir)
     logger.info("merged model written to %s", final_dir.resolve())
