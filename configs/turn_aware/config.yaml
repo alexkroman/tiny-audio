@@ -113,8 +113,11 @@ data:
   # Teacher-forced eval/loss subset (balanced across schemas).
   eval_samples: 2000
   # Greedy-decoded subset for eval_markers/* (fire P/R/F1, per-kind accuracy,
-  # text drift). Decoding costs ~10x a loss pass, so it is smaller.
-  marker_eval_samples: 600
+  # text drift), stratified across the 5 schemas (~400 each). 2000, not the
+  # v1 run's 600: at 600 payload_cut had ~17 rows, so one row moved it 6
+  # points and the curves could not say whether training had converged --
+  # which is what decides a second epoch. Costs ~1-2 min per eval on an A100.
+  marker_eval_samples: 2000
 
 resume_from_checkpoint: null
 # The MERGED final model is pushed here after training (null = keep local).
