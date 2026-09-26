@@ -291,3 +291,20 @@ def test_hold_targets_lose_terminal_punct_but_fire_targets_keep_it():
         expand_observation({**_obs(label=0), "target": "Wait?"}, off, random.Random(0))[0]["text"]
         == "Wait?"
     )
+
+
+def test_transcript_cache_survives_a_truncated_last_line(tmp_path, monkeypatch):
+    import json
+
+    import pandas as pd
+
+    import scripts.turn_aware.cli as cli
+
+    cache = tmp_path / "transcripts-train.jsonl"
+    cache.write_text(json.dumps({"key": "a", "text": "hello"}) + '\n{"key": "b", "te')
+    obs = pd.DataFrame([{"key": "a", "turn_key": "t", "speech_end_s": 1.0}])
+    # Every key is cached, so no model is loaded; the bad line must not raise.
+    assert cli._self_transcripts(obs, store=None, model_id="x", cache=cache, batch_size=1) == {
+        "a": "hello"
+    }
+    assert cache.read_text().endswith("\n")  # next appended record starts cleanly

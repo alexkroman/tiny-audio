@@ -332,10 +332,13 @@ class TestBuildTurnAwareEvalScript:
         assert "turn-aware evaluate -m mazesmazes/tiny-audio-turn-aware-qwen3-asr" in script
         assert "--pool-dir data/turn_aware_eval --split test -n 0 --batch-size 64" in script
         assert (
-            "-o /workspace/outputs/turn_aware/eval/tiny-audio-turn-aware-qwen3-asr_test" in script
+            "-o /workspace/outputs/turn_aware/eval/mazesmazes_tiny-audio-turn-aware-qwen3-asr_test"
+            in script
         )
         assert "HF_DATASETS_CACHE=/workspace/datasets" in script
 
-    def test_local_model_path_names_the_output_dir(self):
-        script = self._script(model="outputs/turn_aware/final/", split="validation")
-        assert "-o /workspace/outputs/turn_aware/eval/final_validation" in script
+    def test_local_checkpoints_get_distinct_output_dirs(self):
+        v1 = self._script(model="outputs/turn_aware/v1/final/", split="validation")
+        v2 = self._script(model="outputs/turn_aware/v2/final", split="validation")
+        assert "-o /workspace/outputs/turn_aware/eval/outputs_turn_aware_v1_final_validation" in v1
+        assert "-o /workspace/outputs/turn_aware/eval/outputs_turn_aware_v2_final_validation" in v2

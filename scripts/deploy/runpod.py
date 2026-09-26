@@ -2,6 +2,7 @@
 """Unified CLI for RunPod operations."""
 
 import io
+import re
 import shlex
 import subprocess
 import sys
@@ -1229,8 +1230,11 @@ def build_turn_aware_eval_script(
     # mined pauses included -- the same pool for every model scored.
     eval_overrides = ["+experiment=eval"]
     pool = shlex.quote(load_config(eval_overrides).data.pool_dir)
-    model_short = model.rstrip("/").rsplit("/", maxsplit=1)[-1]
-    out_dir = shlex.quote(f"/workspace/outputs/turn_aware/eval/{model_short}_{split}")
+    # The WHOLE model path, flattened: local checkpoints all end in `final`
+    # (outputs/turn_aware/v1/final, .../v2/final), so the last component alone
+    # made every one of them overwrite the same results dir.
+    model_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", model.strip("/"))
+    out_dir = shlex.quote(f"/workspace/outputs/turn_aware/eval/{model_slug}_{split}")
     extra_exports = (
         "export TOKENIZERS_PARALLELISM=false\n"
         'export HF_DATASETS_AUDIO_DECODER="soundfile"\n'
@@ -1280,13 +1284,14 @@ def eval_turn_aware(
 ):
     """Score a turn-aware model's end-of-turn decisions on a RunPod instance.
 
-    Builds data/turn_aware/{split}.parquet on the pod if it is missing, then
-    runs `ta turn-aware evaluate`; metrics.json lands in
-    /workspace/outputs/turn_aware/eval/<model>_<split>/.
+    Builds the recipe-neutral `+experiment=eval` pool for the split
+    (data/turn_aware_eval, mined pauses included) unless it is up to date, then
+    runs `ta turn-aware evaluate`; metrics.json and predictions.parquet land in
+    /workspace/outputs/turn_aware/eval/<model path, flattened>_<split>/.
 
     Examples:
         ta runpod eval-turn-aware <HOST> <PORT>
-        ta runpod eval-turn-aware <HOST> <PORT> -m outputs/turn_aware/final -n 2000
+        ta runpod eval-turn-aware <HOST> <PORT> -m outputs/turn_aware/v2/final -n 2000
     """
     conn = connect(host, port)
 

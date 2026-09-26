@@ -43,9 +43,16 @@ def _self_transcripts(obs, store, model_id: str, cache: Path, batch_size: int) -
 
     done: dict[str, str] = {}
     if cache.exists():
-        for line in cache.read_text().splitlines():
-            rec = json.loads(line)
+        raw = cache.read_text()
+        for line in raw.splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # a write cut off by a kill: that clip is simply redone
             done[rec["key"]] = rec["text"]
+        if raw and not raw.endswith("\n"):
+            with cache.open("a") as fh:  # so the next record starts on its own line
+                fh.write("\n")
     todo = obs[~obs["key"].isin(done)].sort_values("speech_end_s", ascending=False)
     if todo.empty:
         return done
