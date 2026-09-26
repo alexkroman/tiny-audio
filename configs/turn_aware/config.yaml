@@ -13,7 +13,7 @@
 #
 #   poetry run ta turn-aware build-pool +experiment=v2              # builds data.pool_dir
 #   poetry run python -m scripts.turn_aware.train +experiment=v2
-#   ta runpod train <host> <port> -e turn_aware +experiment=v2      # both, on a pod
+#   ta runpod train-turn-aware <host> <port> +experiment=v2        # both, on a pod
 #   poetry run ta turn-aware evaluate -m outputs/turn_aware/v2/final
 #
 # Without a preset you get the v2 recipe under a scratch identity (pool
@@ -32,7 +32,7 @@
 #   the cheapest insurance against WER drift. alpha/r = 2 at r=32 is 9.18M
 #   params: generous for one new decision, small enough to not re-learn ASR.
 #
-# - Self-distilled targets (build-pool --target-text self, the default). The
+# - Self-distilled targets (pool.target_text: self, the default). The
 #   transcript part of every label is the base model's own greedy output, so
 #   ~all the loss that is not the marker is already near zero at step 0 and
 #   the gradient concentrates on WHEN to emit the marker. `eval_markers/text_wer`

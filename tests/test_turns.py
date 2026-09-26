@@ -77,3 +77,25 @@ def test_turns_package_never_imports_the_rest_of_tiny_audio():
                 continue
             for name in names:
                 assert name.split(".")[0] in allowed, f"{path.name} imports {name}"
+
+
+def test_register_end_of_turn_reports_whether_token_was_new():
+    from types import SimpleNamespace
+
+    from tiny_audio.turns import END_OF_TURN, register_end_of_turn
+
+    class Tok:
+        def __init__(self):
+            self.vocab = {"a": 0}
+
+        def get_vocab(self):
+            return self.vocab
+
+        def add_special_tokens(self, spec):
+            for t in spec["additional_special_tokens"]:
+                self.vocab[t] = len(self.vocab)
+
+    processor = SimpleNamespace(tokenizer=Tok())
+    assert register_end_of_turn(processor) is True
+    assert END_OF_TURN in processor.tokenizer.vocab
+    assert register_end_of_turn(processor) is False  # a turn-aware checkpoint already has it

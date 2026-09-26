@@ -12,22 +12,12 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from tiny_audio.turns import SAMPLE_RATE
+# tiny_audio.turns is imported inside each command, never here: importing it
+# loads the whole tiny_audio package (~3.5 s), which every `ta --help` and
+# `ta turn-aware ...` invocation would otherwise pay.
 
 app = typer.Typer(no_args_is_help=True, help="Turn-aware ASR on Qwen3-ASR (end-of-turn token).")
 console = Console()
-
-# `evaluate`'s default: the recipe-neutral pool from `build-pool +experiment=eval`.
-DEFAULT_POOL_DIR = "data/turn_aware_eval"
-
-
-def _print_metrics(title: str, metrics: dict) -> None:
-    table = Table(title=title)
-    table.add_column("metric")
-    table.add_column("value", justify="right")
-    for key, value in metrics.items():
-        table.add_row(key, f"{value:.4f}" if isinstance(value, float) else str(value))
-    console.print(table)
 
 
 def _self_transcripts(obs, store, model_id: str, cache: Path, batch_size: int) -> dict[str, str]:
@@ -84,6 +74,7 @@ def _prepare_observations(obs, store, target_text, model, cache, batch_size):
     are dropped.
     """
     from scripts.turn_aware.data import trim_tail_silence
+    from tiny_audio.turns import SAMPLE_RATE
 
     obs = obs[obs["turn_key"].isin(store.meta)].sort_values("turn_key").copy()
     obs["speech_end_s"] = [
@@ -210,8 +201,13 @@ def mine_pauses_cmd(
         Path, typer.Option("--output-dir", "-o", help="Where {split}.parquet observations go")
     ] = Path("data/turn_aware_pauses"),
     model: Annotated[
-        str, typer.Option("--model", "-m", help="Base model that writes self-distilled targets")
-    ] = "Qwen/Qwen3-ASR-0.6B-hf",
+        str | None,
+        typer.Option(
+            "--model",
+            "-m",
+            help="Base model that writes self-distilled targets (default: tiny_audio.turns.MODEL_ID)",
+        ),
+    ] = None,
     max_samples: Annotated[
         int | None,
         typer.Option("--max-samples", "-n", help="Random mined pauses per split (smoke runs)"),
@@ -225,10 +221,17 @@ def mine_pauses_cmd(
     ] = None,
     seed: Annotated[int, typer.Option("--seed", help="Seed for --max-samples")] = 0,
 ):
-    """Mine unlabelled mid-sentence pauses as label-0 observations, ready for --extra."""
+    """Mine unlabelled mid-sentence pauses as label-0 observations, for `pool.extra`.
+
+    Must use the same base model as the pool's `pool.target_model`, so mined
+    targets are self-distilled from the same transcriber.
+    """
     import pandas as pd
 
     from scripts.turn_aware.data import TurnAudioStore, load_split, mine_pauses
+    from tiny_audio.turns import MODEL_ID
+
+    model = model or MODEL_ID
 
     output_dir.mkdir(parents=True, exist_ok=True)
     for split in splits or ["train", "validation", "test"]:
@@ -278,9 +281,12 @@ def _print_columns(title: str, columns: dict[str, dict], metrics) -> None:
 @app.command("evaluate")
 def evaluate_cmd(
     model: Annotated[str, typer.Option("--model", "-m", help="Trained model dir or Hub ID")],
-    pool_dir: Annotated[
-        Path, typer.Option("--pool-dir", help="Directory holding {split}.parquet manifests")
-    ] = Path(DEFAULT_POOL_DIR),
+    overrides: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="Hydra overrides picking the manifest (default: +experiment=eval, the neutral pool)"
+        ),
+    ] = None,
     split: Annotated[str, typer.Option("--split", help="Manifest split to score")] = "validation",
     max_samples: Annotated[
         int, typer.Option("--max-samples", "-n", help="Schema-balanced sample size (0 = all)")
@@ -295,42 +301,44 @@ def evaluate_cmd(
 ):
     """Score end-of-turn firing (P/R/F1, per kind) and transcript drift on a manifest.
 
-    Also splits the scores by whether the agent's question was given as
-    context, and sweeps a confidence threshold on the marker: fire only when
+    The manifest is data.pool_dir/{split}.parquet from the resolved config --
+    build it first with `build-pool` and the same overrides. Also splits the
+    scores by whether the agent's question was given as context, and sweeps a
+    confidence threshold on the marker: fire only when
     logit(<END_OF_TURN>) - logit(<|im_end|>) > tau at the end of the transcript.
     """
     import pandas as pd
 
     from scripts.eval.audio import TextNormalizer
+    from scripts.turn_aware.config import load_config
     from scripts.turn_aware.data import (
         SWEEP_METRICS,
         TurnAudioStore,
         marker_metrics,
+        predict_rows,
         stratified_subset,
         threshold_sweep,
     )
-    from scripts.turn_aware.train import predict_rows
     from tiny_audio.turns import load_model, load_processor
 
-    rows = stratified_subset(
-        pd.read_parquet(pool_dir / f"{split}.parquet").to_dict("records"), max_samples
-    )
+    cfg = load_config(overrides or ["+experiment=eval"])
+    manifest = Path(cfg.data.pool_dir) / f"{split}.parquet"
+    rows = stratified_subset(pd.read_parquet(manifest).to_dict("records"), max_samples)
     processor = load_processor(model)
     net = load_model(model).eval()
-    preds = predict_rows(net, processor, rows, TurnAudioStore(split), batch_size, progress=True)
-    greedy = [(t, f) for t, f, _ in preds]
-    margins = [m for _, _, m in preds]
+    store = TurnAudioStore(split, cfg.data.dataset_id)
+    preds = predict_rows(net, processor, rows, store, batch_size, progress=True)
+    fired = [p.fired for p in preds]
+    margins = [p.margin for p in preds]
 
-    metrics = marker_metrics(rows, greedy, normalize=TextNormalizer().normalize)
-    _print_metrics(f"{model} on {split}", metrics)
+    metrics = marker_metrics(rows, fired, [p.text for p in preds], TextNormalizer().normalize)
+    _print_columns(f"{model} on {manifest}", {"value": metrics}, metrics)
 
     by_context = {"all": metrics}
     for name, has_ctx in (("with context", True), ("no context", False)):
         idx = [i for i, r in enumerate(rows) if bool(r["ctx"]) == has_ctx]
         if idx:
-            by_context[name] = marker_metrics(
-                [rows[i] for i in idx], [greedy[i] for i in idx], text_wer=False
-            )
+            by_context[name] = marker_metrics([rows[i] for i in idx], [fired[i] for i in idx])
     _print_columns("by agent-question context", by_context, ("n", *SWEEP_METRICS))
 
     sweep = threshold_sweep(rows, margins, SWEEP_TAUS)
@@ -346,8 +354,8 @@ def evaluate_cmd(
         report = {**metrics, "by_context": by_context, "threshold_sweep": sweep}
         (output_dir / "metrics.json").write_text(json.dumps(report, indent=2))
         frame = pd.DataFrame(rows)
-        frame["pred_text"] = [t for t, _ in greedy]
-        frame["pred_fired"] = [f for _, f in greedy]
+        frame["pred_text"] = [p.text for p in preds]
+        frame["pred_fired"] = fired
         frame["marker_margin"] = margins
         frame.to_parquet(output_dir / "predictions.parquet", index=False)
         console.print(f"wrote {output_dir / 'metrics.json'} and predictions.parquet")
@@ -429,7 +437,7 @@ def replay_cmd(
     from rich.progress import track
 
     from scripts.turn_aware.data import TurnAudioStore, endpoint_summary, load_split
-    from tiny_audio.turns import load_model, load_processor, stream_fire_times
+    from tiny_audio.turns import SAMPLE_RATE, load_model, load_processor, stream_fire_times
 
     endpoints = load_split("endpoints", "test").to_pandas()
     # A seeded random sample, never the first N: turn keys sort by style, so the

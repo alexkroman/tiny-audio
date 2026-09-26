@@ -10,13 +10,15 @@ current settings, and training refuses one that does not.
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 
 from scripts.turn_aware.data import PoolConfig
+from scripts.utils import get_project_root
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs" / "turn_aware"
+CONFIG_DIR = get_project_root() / "configs" / "turn_aware"
 SIGNATURE_FILE = "pool_config.json"
 
 
@@ -29,32 +31,34 @@ def load_config(overrides: list[str] | None = None) -> DictConfig:
 
 
 def pool_config(cfg: DictConfig) -> PoolConfig:
-    """The `pool:` section as a PoolConfig (lists -> tuples, hold_copies -> pairs)."""
-    p = cfg.pool
-    return PoolConfig(
-        fire_tail_s=tuple(p.fire_tail_s),
-        hold_tail_s=tuple(p.hold_tail_s),
-        long_tail_s=tuple(p.long_tail_s),
-        long_tail_prob=p.long_tail_prob,
-        nosil_prob=p.nosil_prob,
-        lead_sil_s=tuple(p.lead_sil_s),
-        lead_sil_prob=p.lead_sil_prob,
-        silence_only_frac=p.silence_only_frac,
-        silence_only_s=tuple(p.silence_only_s),
-        ctx_prob=p.ctx_prob,
-        max_audio_s=p.max_audio_s,
-        hold_copies=tuple(sorted((str(k), int(v)) for k, v in p.hold_copies.items())),
-        strip_hold_punct=p.strip_hold_punct,
-    )
+    """The `pool:` section as a PoolConfig, field by field from the dataclass.
+
+    Generic on purpose: a knob added to PoolConfig and the YAML is picked up
+    here without a third edit (and a knob missing from the YAML fails loudly).
+    Lists become tuples and `hold_copies` a sorted tuple of pairs, so the
+    result stays frozen and hashable.
+    """
+    values = {}
+    for f in fields(PoolConfig):
+        value = cfg.pool[f.name]
+        if f.name == "hold_copies":
+            value = tuple(sorted((str(k), int(v)) for k, v in value.items()))
+        elif OmegaConf.is_list(value):
+            value = tuple(value)
+        values[f.name] = value
+    return PoolConfig(**values)
+
+
+# Settings that change WHERE things are read from, not what the pool holds.
+_NOT_IN_SIGNATURE = ("transcript_cache",)
 
 
 def pool_signature(cfg: DictConfig, max_samples: int | None = None) -> dict:
     """Everything that determines a pool's contents, as plain JSON-able data."""
-    return {
-        "dataset_id": cfg.data.dataset_id,
-        "pool": OmegaConf.to_container(cfg.pool, resolve=True),
-        "max_samples": max_samples,
-    }
+    pool = OmegaConf.to_container(cfg.pool, resolve=True)
+    for key in _NOT_IN_SIGNATURE:
+        pool.pop(key, None)
+    return {"dataset_id": cfg.data.dataset_id, "pool": pool, "max_samples": max_samples}
 
 
 def read_signature(pool_dir: Path, split: str) -> dict | None:

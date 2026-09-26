@@ -59,6 +59,16 @@ def _put_text(conn: Connection, text: str, remote: str) -> None:
     conn.put(io.BytesIO(text.encode("utf-8")), remote=remote)
 
 
+def _prepare_session(conn: Connection, session_name: str, force: bool, hf_token: str) -> str:
+    """Shared launch preamble: optionally kill a same-named session, warn on no token."""
+    if force:
+        print(f"Killing existing session '{session_name}' if present...")
+        kill_tmux_session(conn, session_name)
+    if not hf_token:
+        print("Warning: HF_TOKEN is not set; the pod will not be able to pull gated repos.")
+    return session_name
+
+
 def _start_remote_tmux_script(
     conn: Connection,
     host: str,
@@ -747,54 +757,15 @@ sleep infinity
 """
 
 
-# `-e turn_aware` is not a configs/experiments/ preset: it is the standalone
-# Qwen3-ASR recipe (configs/turn_aware/, scripts/turn_aware/). Its presets are
-# Hydra overrides (`+experiment=v2`), passed verbatim to both build-pool and
-# training so the pool and the run resolve the same config.
-TURN_AWARE_EXPERIMENT = "turn_aware"
-# build-pool's base-model transcription is launch-bound at batch 32 on a 0.6B
-# model: per-token kernel launches cost the same at 32 or 128 clips, so a pod
-# gets ~4x the throughput for ~7 GB of KV cache at the 30 s worst case.
-TURN_AWARE_POOL_BATCH_SIZE = 128
-
-
-def _turn_aware_body(extra_args: list[str], pool_batch_size: int) -> str:
-    """build-pool then train, both with the run's Hydra overrides.
-
-    build-pool skips a split whose manifest already matches the resolved pool
-    settings (pool_config.json), so a restart goes straight back to training,
-    and a crash mid-build resumes from the transcript cache. Pool location,
-    mined extras and the transcript cache all come from the config.
-    """
-    overrides = " ".join(shlex.quote(a) for a in extra_args)
-    return f"""
-cd /workspace
-python -m scripts.cli turn-aware build-pool --split train --split validation \\
-    --batch-size {pool_batch_size} {overrides} \\
-    && python -m scripts.turn_aware.train {overrides}"""
-
-
-def build_training_script(
-    experiment: str,
-    hf_token: str,
-    wandb_run_id: str | None,
-    wandb_resume: str | None,
-    extra_args: list[str],
-    pool_batch_size: int = TURN_AWARE_POOL_BATCH_SIZE,
-) -> str:
-    """Generate the training script content.
-
-    `pool_batch_size` only affects `experiment="turn_aware"`.
-    """
+def _training_exports(wandb_run_id: str | None, wandb_resume: str | None) -> str:
+    """The `export` block every remote training script runs under."""
     wandb_exports = ""
     if wandb_run_id:
         wandb_exports += f'export WANDB_RUN_ID="{wandb_run_id}"\n'
     if wandb_resume:
         wandb_exports += f'export WANDB_RESUME="{wandb_resume}"\n'
 
-    extra_args_str = " ".join(extra_args) if extra_args else ""
-
-    extra_exports = (
+    return (
         "export TOKENIZERS_PARALLELISM=false\n"
         'export HF_DATASETS_AUDIO_DECODER="soundfile"\n'
         f"{wandb_exports}"
@@ -814,10 +785,19 @@ def build_training_script(
         "export TORCH_DYNAMO_ALLOW_UNSPEC_INT_ON_NN_MODULE=1\n"
         "export TORCH_CUDA_GRAPHS_ENABLED=0\n"
     )
-    if experiment == TURN_AWARE_EXPERIMENT:
-        body = _turn_aware_body(extra_args, pool_batch_size)
-    else:
-        body = f"""
+
+
+def build_training_script(
+    experiment: str,
+    hf_token: str,
+    wandb_run_id: str | None,
+    wandb_resume: str | None,
+    extra_args: list[str],
+) -> str:
+    """Generate the training script content."""
+    extra_args_str = " ".join(extra_args) if extra_args else ""
+    extra_exports = _training_exports(wandb_run_id, wandb_resume)
+    body = f"""
 cd /workspace
 python -m scripts.train +experiments={experiment} {extra_args_str}"""
     return (
@@ -917,12 +897,7 @@ def train(
     host: HostArg,
     port: PortArg,
     experiment: Annotated[
-        str,
-        typer.Option(
-            "--experiment",
-            "-e",
-            help=f"{EXPERIMENT_HELP}, or '{TURN_AWARE_EXPERIMENT}' for the Qwen3-ASR turn-aware recipe",
-        ),
+        str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
     ] = "granite_qwen",
     session_name: Annotated[
         str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
@@ -946,42 +921,18 @@ def train(
     hf_token: Annotated[
         str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
     ] = "",
-    pool_batch_size: Annotated[
-        int,
-        typer.Option(
-            "--pool-batch-size",
-            help=f"{TURN_AWARE_EXPERIMENT} only: decode batch for build-pool's transcription pass",
-        ),
-    ] = TURN_AWARE_POOL_BATCH_SIZE,
     overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
 ):
     """Start training on a remote RunPod instance in a tmux session."""
     conn = connect(host, port)
 
     overrides = list(overrides or [])
-    if experiment == TURN_AWARE_EXPERIMENT and not any(
-        o.startswith("+experiment=") for o in overrides
-    ):
-        print(
-            "Warning: no +experiment=<v1|v2a|v2> override -- this trains the base recipe under"
-            " the scratch identity (pool data/turn_aware_dev, no Hub push)."
-        )
-    if experiment == TURN_AWARE_EXPERIMENT:
-        # The planner only reads configs/experiments/. This recipe needs ~40 GB
-        # (train turns as parquet + arrow, the model, small LoRA checkpoints).
-        print(f"Disk preflight skipped: the planner cannot size '{experiment}'; budget ~40 GB.")
-    elif not skip_disk_check:
+    if not skip_disk_check:
         _check_remote_disk(conn, experiment, overrides)
 
-    if session_name is None:
-        session_name = _auto_session_name(f"train_{experiment}")
-
-    if force:
-        print(f"Killing existing session '{session_name}' if present...")
-        kill_tmux_session(conn, session_name)
-
-    if not hf_token:
-        print("Warning: HF_TOKEN is not set; the pod will not be able to pull gated repos.")
+    session_name = _prepare_session(
+        conn, session_name or _auto_session_name(f"train_{experiment}"), force, hf_token
+    )
 
     print(f"\nStarting training session '{session_name}' with experiment '{experiment}'...")
     if overrides:
@@ -992,9 +943,7 @@ def train(
         host,
         port,
         session_name,
-        build_training_script(
-            experiment, hf_token, wandb_run_id, wandb_resume, overrides, pool_batch_size
-        ),
+        build_training_script(experiment, hf_token, wandb_run_id, wandb_resume, overrides),
         f"/tmp/train_{session_name}.sh",
         no_attach,
     )
@@ -1157,16 +1106,10 @@ def eval_model(
     """
     conn = connect(host, port)
 
-    if session_name is None:
-        model_short = model.rsplit("/", maxsplit=1)[-1] if "/" in model else model
-        session_name = _auto_session_name(f"eval_{model_short}")
-
-    if force:
-        print(f"Killing existing session '{session_name}' if present...")
-        kill_tmux_session(conn, session_name)
-
-    if not hf_token:
-        print("Warning: HF_TOKEN is not set; the pod will not be able to pull gated repos.")
+    model_short = model.rsplit("/", maxsplit=1)[-1] if "/" in model else model
+    session_name = _prepare_session(
+        conn, session_name or _auto_session_name(f"eval_{model_short}"), force, hf_token
+    )
     if model == "assemblyai" and not assemblyai_api_key:
         raise typer.BadParameter(
             "set ASSEMBLYAI_API_KEY or pass --assemblyai-api-key when --model is assemblyai",
@@ -1207,7 +1150,63 @@ def eval_model(
     )
 
 
-TURN_AWARE_HUB_ID = "mazesmazes/tiny-audio-turn-aware-qwen3-asr"
+# ----------------------------------------------------------- turn-aware recipe
+#
+# The standalone Qwen3-ASR recipe (configs/turn_aware/, scripts/turn_aware/)
+# has its own commands rather than a special case inside `train`: its presets
+# are Hydra overrides (`+experiment=v2`) rather than configs/experiments/
+# entries, its data is built by `build-pool` first, and the disk planner
+# cannot size it. Both scripts pass the SAME overrides to build-pool and the
+# next step, and build-pool skips any split already built with those settings.
+
+# build-pool's base-model transcription is launch-bound at batch 32 on a 0.6B
+# model: per-token kernel launches cost the same at 32 or 128 clips, so a pod
+# gets ~4x the throughput for ~7 GB of KV cache at the 30 s worst case.
+TURN_AWARE_POOL_BATCH_SIZE = 128
+POOL_BATCH_HELP = "Decode batch for build-pool's base-model transcription"
+
+
+def _turn_aware_script(
+    hf_token: str,
+    exports: str,
+    splits: list[str],
+    overrides: list[str],
+    pool_batch_size: int,
+    then: str,
+    label: str,
+) -> str:
+    """Preamble, build-pool for `splits`, then `then` (a command line), epilogue."""
+    quoted = " ".join(shlex.quote(o) for o in overrides)
+    split_args = " ".join(f"--split {s}" for s in splits)
+    body = f"""
+cd /workspace
+python -m scripts.cli turn-aware build-pool {split_args} --batch-size {pool_batch_size} {quoted} \\
+    && {then}"""
+    return (
+        _script_preamble(hf_token, extras=exports)
+        + body
+        + _script_epilogue(label, f"{label} script")
+    )
+
+
+def build_turn_aware_train_script(
+    hf_token: str,
+    wandb_run_id: str | None,
+    wandb_resume: str | None,
+    overrides: list[str],
+    pool_batch_size: int = TURN_AWARE_POOL_BATCH_SIZE,
+) -> str:
+    """build-pool (train + validation) then `scripts.turn_aware.train`, same overrides."""
+    quoted = " ".join(shlex.quote(o) for o in overrides)
+    return _turn_aware_script(
+        hf_token,
+        _training_exports(wandb_run_id, wandb_resume),
+        ["train", "validation"],
+        overrides,
+        pool_batch_size,
+        f"python -m scripts.turn_aware.train {quoted}",
+        "Turn-aware training",
+    )
 
 
 def build_turn_aware_eval_script(
@@ -1216,41 +1215,82 @@ def build_turn_aware_eval_script(
     split: str,
     max_samples: int,
     batch_size: int,
-    pool_batch_size: int,
+    pool_batch_size: int = TURN_AWARE_POOL_BATCH_SIZE,
 ) -> str:
-    """Build the split's pool if missing, then score end-of-turn decisions on it.
+    """Build the recipe-neutral `+experiment=eval` pool for `split`, then score `model` on it.
 
-    The pool's transcripts always come from the BASE model (build-pool's
-    default), whichever model is being scored, so `text_wer` reads drift from
-    the base for every model evaluated against the same manifest.
+    One pool for every model scored: one copy per hold, verbatim base-model
+    targets (so text_wer reads drift from the base), mined pauses included.
+    Results land under the WHOLE model path, flattened -- local checkpoints
+    all end in `final`, so the last component alone would collide.
     """
-    from scripts.turn_aware.config import load_config
-
-    # The recipe-neutral eval preset: one copy per hold, verbatim targets,
-    # mined pauses included -- the same pool for every model scored.
-    eval_overrides = ["+experiment=eval"]
-    pool = shlex.quote(load_config(eval_overrides).data.pool_dir)
-    # The WHOLE model path, flattened: local checkpoints all end in `final`
-    # (outputs/turn_aware/v1/final, .../v2/final), so the last component alone
-    # made every one of them overwrite the same results dir.
+    overrides = ["+experiment=eval"]
     model_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", model.strip("/"))
     out_dir = shlex.quote(f"/workspace/outputs/turn_aware/eval/{model_slug}_{split}")
-    extra_exports = (
+    exports = (
         "export TOKENIZERS_PARALLELISM=false\n"
         'export HF_DATASETS_AUDIO_DECODER="soundfile"\n'
         "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
     )
-    body = f"""
-cd /workspace
-python -m scripts.cli turn-aware build-pool {" ".join(eval_overrides)} --split {split} \\
-    --batch-size {pool_batch_size} \\
-    && python -m scripts.cli turn-aware evaluate -m {shlex.quote(model)} \\
-    --pool-dir {pool} --split {split} -n {max_samples} --batch-size {batch_size} \\
-    -o {out_dir}"""
-    return (
-        _script_preamble(hf_token, extras=extra_exports)
-        + body
-        + _script_epilogue("Turn-aware evaluation", "Eval script")
+    evaluate = (
+        f"python -m scripts.cli turn-aware evaluate -m {shlex.quote(model)} {overrides[0]} "
+        f"--split {split} -n {max_samples} --batch-size {batch_size} -o {out_dir}"
+    )
+    return _turn_aware_script(
+        hf_token, exports, [split], overrides, pool_batch_size, evaluate, "Turn-aware evaluation"
+    )
+
+
+@app.command("train-turn-aware")
+def train_turn_aware(
+    host: HostArg,
+    port: PortArg,
+    session_name: Annotated[
+        str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
+    ] = None,
+    no_attach: Annotated[bool, typer.Option("--no-attach", help=NO_ATTACH_HELP)] = False,
+    force: Annotated[bool, typer.Option("--force", "-f", help=FORCE_HELP)] = False,
+    pool_batch_size: Annotated[
+        int, typer.Option("--pool-batch-size", help=POOL_BATCH_HELP)
+    ] = TURN_AWARE_POOL_BATCH_SIZE,
+    wandb_run_id: Annotated[
+        str | None,
+        typer.Option("--wandb-run-id", envvar="WANDB_RUN_ID", help="W&B run ID to resume"),
+    ] = None,
+    wandb_resume: Annotated[
+        str | None,
+        typer.Option(
+            "--wandb-resume", envvar="WANDB_RESUME", help="W&B resume mode: must, allow, or never"
+        ),
+    ] = None,
+    hf_token: Annotated[
+        str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
+    ] = "",
+    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
+):
+    """Build the pool and train the turn-aware recipe, e.g. `+experiment=v2`.
+
+    Needs ~40 GB on /workspace (train turns as parquet + arrow, the model,
+    LoRA checkpoints); the disk planner only sizes configs/experiments/.
+    """
+    conn = connect(host, port)
+    overrides = list(overrides or [])
+    session_name = _prepare_session(
+        conn, session_name or _auto_session_name("train_turn_aware"), force, hf_token
+    )
+    print(f"\nStarting turn-aware training session '{session_name}'...")
+    if overrides:
+        print(f"Hydra overrides: {' '.join(overrides)}")
+    _start_remote_tmux_script(
+        conn,
+        host,
+        port,
+        session_name,
+        build_turn_aware_train_script(
+            hf_token, wandb_run_id, wandb_resume, overrides, pool_batch_size
+        ),
+        f"/tmp/train_{session_name}.sh",
+        no_attach,
     )
 
 
@@ -1260,7 +1300,7 @@ def eval_turn_aware(
     port: PortArg,
     model: Annotated[
         str, typer.Option("--model", "-m", help="Trained turn-aware model: Hub ID or pod path")
-    ] = TURN_AWARE_HUB_ID,
+    ],
     split: Annotated[str, typer.Option("--split", help="Dataset split to score")] = "test",
     max_samples: Annotated[
         int,
@@ -1268,10 +1308,7 @@ def eval_turn_aware(
     ] = 0,
     batch_size: Annotated[int, typer.Option("--batch-size", help="Decode batch size")] = 64,
     pool_batch_size: Annotated[
-        int,
-        typer.Option(
-            "--pool-batch-size", help="Decode batch for build-pool's transcription pass, if needed"
-        ),
+        int, typer.Option("--pool-batch-size", help=POOL_BATCH_HELP)
     ] = TURN_AWARE_POOL_BATCH_SIZE,
     session_name: Annotated[
         str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
@@ -1284,30 +1321,16 @@ def eval_turn_aware(
 ):
     """Score a turn-aware model's end-of-turn decisions on a RunPod instance.
 
-    Builds the recipe-neutral `+experiment=eval` pool for the split
-    (data/turn_aware_eval, mined pauses included) unless it is up to date, then
-    runs `ta turn-aware evaluate`; metrics.json and predictions.parquet land in
-    /workspace/outputs/turn_aware/eval/<model path, flattened>_<split>/.
-
     Examples:
-        ta runpod eval-turn-aware <HOST> <PORT>
+        ta runpod eval-turn-aware <HOST> <PORT> -m mazesmazes/tiny-audio-turn-aware-qwen3-asr-v2
         ta runpod eval-turn-aware <HOST> <PORT> -m outputs/turn_aware/v2/final -n 2000
     """
     conn = connect(host, port)
-
-    if session_name is None:
-        session_name = _auto_session_name(f"eval_turn_aware_{split}")
-
-    if force:
-        print(f"Killing existing session '{session_name}' if present...")
-        kill_tmux_session(conn, session_name)
-
-    if not hf_token:
-        print("Warning: HF_TOKEN is not set; the pod will not be able to pull gated repos.")
-
+    session_name = _prepare_session(
+        conn, session_name or _auto_session_name(f"eval_turn_aware_{split}"), force, hf_token
+    )
     print(f"\nStarting turn-aware eval session '{session_name}'...")
     print(f"Model: {model}  split: {split}  samples: {max_samples or 'all'}")
-
     _start_remote_tmux_script(
         conn,
         host,

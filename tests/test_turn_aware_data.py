@@ -157,7 +157,7 @@ class TestMetrics:
             {"fire": False, "schema": "silence_only", "kind": "silence_only", "text": ""},
         ]
         preds = [("a b", True), ("c x", False), ("e f", True), ("", False)]
-        m = marker_metrics(rows, preds)
+        m = marker_metrics(rows, [f for _, f in preds], [t for t, _ in preds])
         assert m["fire_precision"] == pytest.approx(0.5)
         assert m["fire_recall"] == pytest.approx(0.5)
         assert m["acc_schema/fire_sil"] == pytest.approx(0.5)

@@ -22,6 +22,7 @@ from pathlib import Path
 import hydra
 import pandas as pd
 import torch
+from hydra.core.hydra_config import HydraConfig
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer, TrainingArguments, set_seed
@@ -31,18 +32,12 @@ from scripts.turn_aware.data import (
     TurnAudioStore,
     TurnAwareCollator,
     TurnAwareDataset,
-    assemble_audio,
     marker_metrics,
+    predict_rows,
     stratified_subset,
 )
 from scripts.turn_aware.model import add_end_of_turn_token, apply_lora
-from tiny_audio.turns import (
-    Decoded,
-    load_model,
-    load_processor,
-    set_end_of_turn_threshold,
-    transcribe,
-)
+from tiny_audio.turns import load_model, register_end_of_turn, set_end_of_turn_threshold
 
 logger = logging.getLogger(__name__)
 
@@ -80,27 +75,6 @@ def check_pool(cfg: DictConfig, split: str) -> None:
         logger.warning("%s pool is a %d-observation sample", split, built["max_samples"])
 
 
-def predict_rows(model, processor, rows, store, batch_size: int, progress: bool = False):
-    """Greedy-decode manifest rows; one `Decoded(text, fired, margin)` per row."""
-    starts = range(0, len(rows), batch_size)
-    if progress:
-        from rich.progress import track
-
-        starts = track(starts, description="decoding")
-    preds: list[Decoded] = []
-    for i in starts:
-        chunk = rows[i : i + batch_size]
-        audios = [assemble_audio(store.get(r["turn_key"]), r) for r in chunk]
-        preds += transcribe(model, processor, audios, [r["ctx"] for r in chunk])
-    return preds
-
-
-def evaluate_markers(model, processor, rows, store, batch_size: int, normalize=None) -> dict:
-    """Greedy-decode `rows` and score them with `marker_metrics`."""
-    preds = predict_rows(model, processor, rows, store, batch_size)
-    return marker_metrics(rows, [(t, f) for t, f, _ in preds], normalize=normalize)
-
-
 class TurnAwareTrainer(Trainer):
     """Trainer whose evaluate() also decodes a balanced subset and scores markers.
 
@@ -117,7 +91,13 @@ class TurnAwareTrainer(Trainer):
         if self.marker_eval and self.is_world_process_zero():
             was_training = self.model.training
             self.model.eval()
-            scores = evaluate_markers(self.model, **self.marker_eval)
+            ev = self.marker_eval
+            preds = predict_rows(
+                self.model, ev["processor"], ev["rows"], ev["store"], ev["batch_size"]
+            )
+            scores = marker_metrics(
+                ev["rows"], [p.fired for p in preds], [p.text for p in preds], ev["normalize"]
+            )
             self.model.train(was_training)
             scores = {f"eval_markers/{k}": v for k, v in scores.items() if k != "n"}
             self.log(scores)
@@ -129,13 +109,25 @@ class TurnAwareTrainer(Trainer):
 def main(cfg: DictConfig) -> None:
     logging.basicConfig(level=logging.INFO)
     set_seed(cfg.training.seed)
+    if HydraConfig.get().runtime.choices.get("experiment") is None:
+        logger.warning(
+            "No +experiment=<v1|v2a|v2> preset: training the base recipe under the scratch "
+            "identity (pool %s, hub_model_id %s).",
+            cfg.data.pool_dir,
+            cfg.hub_model_id,
+        )
     for split in (cfg.data.train_split, cfg.data.eval_split):
         check_pool(cfg, split)
     dtype = getattr(torch, cfg.model.dtype)
 
-    processor = load_processor(cfg.model.model_id)
+    from transformers import AutoProcessor
+
+    processor = AutoProcessor.from_pretrained(cfg.model.model_id)
+    token_is_new = register_end_of_turn(processor)
     model = load_model(cfg.model.model_id, dtype=dtype)
-    token_id = add_end_of_turn_token(model, processor, seed=cfg.training.seed)
+    token_id = add_end_of_turn_token(
+        model, processor, init_row=token_is_new, seed=cfg.training.seed
+    )
     model = apply_lora(
         model, token_id, cfg.model.lora_rank, cfg.model.lora_alpha, cfg.model.lora_dropout
     )

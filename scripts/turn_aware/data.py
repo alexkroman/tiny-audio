@@ -38,13 +38,12 @@ import random
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from functools import lru_cache
 
 import numpy as np
 import soundfile as sf
 import torch
 
-from tiny_audio.turns import END_OF_TURN, LANGUAGE, SAMPLE_RATE
+from tiny_audio.turns import END_OF_TURN, LANGUAGE, SAMPLE_RATE, SILENCE_RMS, transcribe
 
 DATASET_ID = "mazesmazes/turn-end-detection"
 
@@ -55,7 +54,7 @@ DATASET_ID = "mazesmazes/turn-end-detection"
 def trim_tail_silence(
     audio: np.ndarray,
     sample_rate: int = SAMPLE_RATE,
-    threshold: float = 0.005,
+    threshold: float = SILENCE_RMS,
     frame_ms: float = 20.0,
     keep_ms: float = 80.0,
 ) -> int:
@@ -107,9 +106,10 @@ class TurnAudioStore:
     """turn_key -> waveform over one split of the `turns` config.
 
     Loaded with `decode=False` so `datasets` never reaches for torchcodec;
-    the FLAC bytes are decoded here with soundfile. A small LRU cache pays
-    off because several observations (and their silence variants) share a
-    turn.
+    the FLAC bytes are decoded here with soundfile. Only the LAST turn is
+    memoised: callers that walk observations in turn order (pool prep) get
+    every repeat for free, while shuffled training reads would miss a bigger
+    cache anyway and it would only pin decoded audio in every worker.
     """
 
     def __init__(self, split: str, dataset_id: str = DATASET_ID):
@@ -125,14 +125,15 @@ class TurnAudioStore:
             )
         }
 
-    def __contains__(self, turn_key: str) -> bool:
-        return turn_key in self._index
+        self._last: tuple[str, np.ndarray] | None = None
 
-    @lru_cache(maxsize=64)  # noqa: B019 -- one store per process, lives for the run
     def get(self, turn_key: str) -> np.ndarray:
         if not turn_key:
             return np.zeros(0, dtype=np.float32)
-        return decode_flac(self._ds[self._index[turn_key]]["audio"]["bytes"])
+        if self._last is None or self._last[0] != turn_key:
+            audio = decode_flac(self._ds[self._index[turn_key]]["audio"]["bytes"])
+            self._last = (turn_key, audio)
+        return self._last[1]
 
 
 # ---------------------------------------------------------------------- pool
@@ -236,20 +237,10 @@ def build_pool(observations: list[dict], cfg: PoolConfig, seed: int = 0) -> list
             if ex["lead_s"] + ex["speech_end_s"] + ex["tail_s"] <= cfg.max_audio_s:
                 pool.append(ex)
     for i in range(round(cfg.silence_only_frac * len(pool))):
-        pool.append(
-            {
-                "key": f"silence_only_{seed}_{i}",
-                "turn_key": "",
-                "kind": "silence_only",
-                "schema": "silence_only",
-                "speech_end_s": 0.0,
-                "lead_s": 0.0,
-                "tail_s": round(rng.uniform(*cfg.silence_only_s), 3),
-                "text": "",
-                "fire": False,
-                "ctx": "",
-            }
-        )
+        stub = {"key": f"silence_{seed}_{i}", "turn_key": "", "kind": "silence_only"}
+        stub |= {"speech_end_s": 0.0, "target": ""}
+        tail = rng.uniform(*cfg.silence_only_s)
+        pool.append(_example(stub, "silence_only", tail, False, 0.0, ""))
     rng.shuffle(pool)
     return pool
 
@@ -335,6 +326,34 @@ class TurnAwareDataset(torch.utils.data.Dataset):
         return {"audio": audio, "ctx": row["ctx"], "target": target_text(row)}
 
 
+def predict_rows(model, processor, rows, store, batch_size: int, progress: bool = False):
+    """Greedy-decode manifest rows; one `Decoded(text, fired, margin)` per row, in row order.
+
+    Decoded longest-first: rows mix 0.3 s and 30 s clips, and an unsorted
+    batch pads every clip to its longest and runs to its longest transcript.
+    """
+    order = sorted(
+        range(len(rows)),
+        key=lambda i: rows[i]["lead_s"] + rows[i]["speech_end_s"] + rows[i]["tail_s"],
+        reverse=True,
+    )
+    starts = range(0, len(order), batch_size)
+    if progress:
+        from rich.progress import track
+
+        starts = track(starts, description="decoding")
+    preds = [None] * len(rows)
+    for i in starts:
+        idx = order[i : i + batch_size]
+        chunk = [rows[j] for j in idx]
+        audios = [assemble_audio(store.get(r["turn_key"]), r) for r in chunk]
+        for j, decoded in zip(
+            idx, transcribe(model, processor, audios, [r["ctx"] for r in chunk]), strict=True
+        ):
+            preds[j] = decoded
+    return preds
+
+
 def assistant_labels(
     input_ids: torch.Tensor, attention_mask: torch.Tensor, asr_text_id: int, im_end_id: int
 ) -> torch.Tensor:
@@ -403,19 +422,25 @@ class TurnAwareCollator:
 
 
 def marker_metrics(
-    rows: list[dict], preds: list[tuple[str, bool]], normalize=None, text_wer: bool = True
+    rows: list[dict], fired: list[bool], texts: list[str] | None = None, normalize=None
 ) -> dict:
-    """Fire precision/recall/F1, per-schema and per-kind accuracy, transcript drift.
+    """Fire precision/recall/F1, per-schema and per-kind accuracy; transcript drift if `texts`.
 
     `text_wer` is against the row's target transcript. With self-distilled
     targets that is the BASE model's own output, so it measures how far the
     adapter has moved transcription rather than absolute accuracy.
     """
-    import jiwer
-
-    tp = sum(r["fire"] and p for r, (_, p) in zip(rows, preds, strict=True))
-    fp = sum(not r["fire"] and p for r, (_, p) in zip(rows, preds, strict=True))
-    fn = sum(r["fire"] and not p for r, (_, p) in zip(rows, preds, strict=True))
+    tp = fp = fn = 0
+    by = ("schema", "kind")
+    hits = {field: Counter() for field in by}
+    totals = {field: Counter() for field in by}
+    for r, f in zip(rows, fired, strict=True):
+        tp += r["fire"] and f
+        fp += (not r["fire"]) and f
+        fn += r["fire"] and not f
+        for field in by:
+            totals[field][r[field]] += 1
+            hits[field][r[field]] += int(f == r["fire"])
     precision = tp / (tp + fp) if tp + fp else 0.0
     recall = tp / (tp + fn) if tp + fn else 0.0
     out = {
@@ -424,18 +449,18 @@ def marker_metrics(
         "fire_recall": recall,
         "fire_f1": 2 * precision * recall / (precision + recall) if precision + recall else 0.0,
     }
-    for field, prefix in (("schema", "acc_schema"), ("kind", "acc_kind")):
-        hits, totals = Counter(), Counter()
-        for r, (_, p) in zip(rows, preds, strict=True):
-            totals[r[field]] += 1
-            hits[r[field]] += int(p == r["fire"])
-        out.update({f"{prefix}/{k}": hits[k] / totals[k] for k in sorted(totals)})
+    for field in by:
+        out |= {
+            f"acc_{field}/{k}": hits[field][k] / totals[field][k] for k in sorted(totals[field])
+        }
 
-    if not text_wer:
+    if texts is None:
         return out
+    import jiwer
+
     norm = normalize or (lambda s: " ".join(s.lower().split()))
     # Silence-only rows have no reference; WER is undefined there.
-    pairs = [(norm(r["text"]), norm(t)) for r, (t, _) in zip(rows, preds, strict=True)]
+    pairs = [(norm(r["text"]), norm(t)) for r, t in zip(rows, texts, strict=True)]
     pairs = [(ref, hyp) for ref, hyp in pairs if ref]
     if pairs:
         refs, hyps = zip(*pairs, strict=True)
@@ -466,8 +491,7 @@ def threshold_sweep(
     """
     out = []
     for tau in taus:
-        preds = [("", bool(m > tau)) for m in margins]  # NaN > tau is False
-        scores = marker_metrics(rows, preds, text_wer=False)
+        scores = marker_metrics(rows, [m > tau for m in margins])  # NaN > tau is False
         out.append({"tau": tau, **{k: scores[k] for k in metrics if k in scores}})
     return out
 

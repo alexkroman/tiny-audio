@@ -18,8 +18,15 @@ from tiny_audio.turns import END_OF_TURN
 LORA_TARGET_PATTERN = r".*language_model.*\.(q_proj|k_proj|v_proj|o_proj)"
 
 
-def add_end_of_turn_token(model, processor, init_std: float = 0.02, seed: int = 0) -> int:
-    """Initialise the marker's embedding row and return its id.
+def add_end_of_turn_token(
+    model, processor, *, init_row: bool, init_std: float = 0.02, seed: int = 0
+) -> int:
+    """Return the marker's id, initialising its embedding row when `init_row`.
+
+    Pass `register_end_of_turn(processor)`'s result: True for a base model
+    (new token), False when continuing from a turn-aware checkpoint, whose
+    TRAINED row must survive. Deliberately no default -- guessing True would
+    silently wipe a trained marker.
 
     The tokenizer's next free id (151705) already falls inside the checkpoint's
     151,936 reserved rows, so no resize is needed. That id is also the
@@ -29,8 +36,8 @@ def add_end_of_turn_token(model, processor, init_std: float = 0.02, seed: int = 
     contents would otherwise set the marker's initial logit.
     """
     token_id = processor.tokenizer.convert_tokens_to_ids(END_OF_TURN)
-    if not getattr(processor, "end_of_turn_added", True):
-        return token_id  # continuing from a turn-aware checkpoint: keep the trained row
+    if not init_row:
+        return token_id
     embed = model.get_input_embeddings().weight
     if token_id >= embed.shape[0]:
         model.resize_token_embeddings(len(processor.tokenizer))

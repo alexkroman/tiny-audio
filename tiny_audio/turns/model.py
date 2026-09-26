@@ -21,6 +21,9 @@ END_OF_TURN = "<END_OF_TURN>"
 LANGUAGE = "English"
 SAMPLE_RATE = 16000
 MODEL_ID = "Qwen/Qwen3-ASR-0.6B-hf"
+# Frame RMS below this is silence -- for trimming training prefixes back to
+# their last speech AND for the streaming gate, which must agree on it.
+SILENCE_RMS = 0.005
 
 
 class Decoded(NamedTuple):
@@ -41,19 +44,24 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
-def load_processor(model_id: str = MODEL_ID):
-    """Processor with `<END_OF_TURN>` registered (a no-op on a trained checkpoint).
+def register_end_of_turn(processor) -> bool:
+    """Add `<END_OF_TURN>` to the tokenizer if missing; True when it was new.
 
-    `processor.end_of_turn_added` records whether the token was new, so
-    training that continues from a turn-aware checkpoint leaves its trained
-    marker row alone.
+    Training needs the answer: a NEW token's embedding row must be
+    initialised, while a turn-aware checkpoint's trained row must be kept.
     """
+    added = END_OF_TURN not in processor.tokenizer.get_vocab()
+    if added:
+        processor.tokenizer.add_special_tokens({"additional_special_tokens": [END_OF_TURN]})
+    return added
+
+
+def load_processor(model_id: str = MODEL_ID):
+    """Processor with `<END_OF_TURN>` registered (a no-op on a trained checkpoint)."""
     from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(model_id)
-    processor.end_of_turn_added = END_OF_TURN not in processor.tokenizer.get_vocab()
-    if processor.end_of_turn_added:
-        processor.tokenizer.add_special_tokens({"additional_special_tokens": [END_OF_TURN]})
+    register_end_of_turn(processor)
     return processor
 
 
@@ -65,7 +73,7 @@ def load_model(model_id: str = MODEL_ID, dtype: torch.dtype = torch.bfloat16, de
     """
     from transformers import Qwen3ASRForConditionalGeneration
 
-    device = device or pick_device()
+    device = torch.device(device) if device is not None else pick_device()
     attn = "eager" if device.type == "mps" else "sdpa"
     model = Qwen3ASRForConditionalGeneration.from_pretrained(
         model_id, dtype=dtype, attn_implementation=attn
@@ -151,10 +159,12 @@ def transcribe(
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
     prompts = contexts if contexts and any(contexts) else None
     inputs = processor.apply_transcription_request(audios, language=language, prompt=prompts)
-    device = next(model.parameters()).device
-    dtype = next(model.parameters()).dtype
     inputs = {
-        k: v.to(device=device, dtype=dtype) if torch.is_floating_point(v) else v.to(device)
+        k: (
+            v.to(device=model.device, dtype=model.dtype)
+            if v.is_floating_point()
+            else v.to(model.device)
+        )
         for k, v in inputs.items()
     }
     recorder = _PairLogitRecorder([token_id, im_end_id])

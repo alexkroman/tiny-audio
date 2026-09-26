@@ -6,11 +6,14 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from .model import SAMPLE_RATE, transcribe
+from .model import SAMPLE_RATE, SILENCE_RMS, transcribe
 
 
 def trailing_is_silent(
-    audio: np.ndarray, window_s: float, sample_rate: int = SAMPLE_RATE, threshold: float = 0.005
+    audio: np.ndarray,
+    window_s: float,
+    sample_rate: int = SAMPLE_RATE,
+    threshold: float = SILENCE_RMS,
 ) -> bool:
     """True when the last `window_s` of audio is below `threshold` RMS."""
     n = int(window_s * sample_rate)

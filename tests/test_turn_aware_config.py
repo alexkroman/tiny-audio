@@ -85,3 +85,16 @@ def test_signature_diff_names_changed_keys():
     assert "pool.strip_hold_punct: False -> True" in diff
     assert "pool.hold_copies.payload_cut: 1 -> 3" in diff
     assert any(d.startswith("pool.extra: None -> ") for d in diff)
+
+
+def test_base_config_pool_matches_dataclass_defaults():
+    """The YAML is what runs; this keeps PoolConfig's defaults (used by tests) the same recipe."""
+    from scripts.turn_aware.data import PoolConfig
+
+    assert pool_config(load_config()) == PoolConfig()
+
+
+def test_transcript_cache_location_is_not_part_of_the_signature():
+    a = pool_signature(load_config(["pool.transcript_cache=/tmp/a"]))
+    b = pool_signature(load_config(["pool.transcript_cache=/tmp/b"]))
+    assert a == b
