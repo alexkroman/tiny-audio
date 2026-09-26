@@ -747,16 +747,10 @@ sleep infinity
 
 
 # `-e turn_aware` is not a configs/experiments/ preset: it is the standalone
-# Qwen3-ASR recipe (configs/turn_aware.yaml, scripts/turn_aware/), which needs
-# its manifest built before it can train.
+# Qwen3-ASR recipe (configs/turn_aware/, scripts/turn_aware/). Its presets are
+# Hydra overrides (`+experiment=v2`), passed verbatim to both build-pool and
+# training so the pool and the run resolve the same config.
 TURN_AWARE_EXPERIMENT = "turn_aware"
-TURN_AWARE_POOL_DIR = "data/turn_aware_v2"
-# v1's pool dir: its transcripts-{split}.jsonl (~80k base-model transcripts,
-# about an hour of GPU) are reused by every later pool instead of re-decoded.
-TURN_AWARE_TRANSCRIPT_CACHE = "data/turn_aware"
-# Unlabelled mid-sentence pauses mined by `ta turn-aware mine-pauses`, already
-# carrying speech_end_s and base-model targets, merged into the pool as holds.
-TURN_AWARE_EXTRA = "mazesmazes/turn-end-detection-mined-pauses"
 # build-pool's base-model transcription is launch-bound at batch 32 on a 0.6B
 # model: per-token kernel launches cost the same at 32 or 128 clips, so a pod
 # gets ~4x the throughput for ~7 GB of KV cache at the 30 s worst case.
@@ -764,27 +758,19 @@ TURN_AWARE_POOL_BATCH_SIZE = 128
 
 
 def _turn_aware_body(extra_args: list[str], pool_batch_size: int) -> str:
-    """Build the pool unless both manifests exist, then train; overrides go to training.
+    """build-pool then train, both with the run's Hydra overrides.
 
-    The existence check makes a restart cheap: a crash mid-training skips
-    straight back to training, and a crash mid-build resumes from build-pool's
-    own transcript cache. A `data.pool_dir=` override is honoured on both sides.
+    build-pool skips a split whose manifest already matches the resolved pool
+    settings (pool_config.json), so a restart goes straight back to training,
+    and a crash mid-build resumes from the transcript cache. Pool location,
+    mined extras and the transcript cache all come from the config.
     """
-    pool_dir = TURN_AWARE_POOL_DIR
-    for arg in extra_args:
-        if arg.startswith("data.pool_dir="):
-            pool_dir = arg.split("=", 1)[1]
-    pool = shlex.quote(pool_dir)
     overrides = " ".join(shlex.quote(a) for a in extra_args)
     return f"""
 cd /workspace
-if [ -f {pool}/train.parquet ] && [ -f {pool}/validation.parquet ]; then
-    echo "Reusing turn-aware pool in {pool}"
-else
-    python -m scripts.cli turn-aware build-pool --split train --split validation -o {pool} \\
-        --batch-size {pool_batch_size} --transcript-cache {TURN_AWARE_TRANSCRIPT_CACHE} \\
-        --extra {TURN_AWARE_EXTRA}
-fi && python -m scripts.turn_aware.train {overrides}"""
+python -m scripts.cli turn-aware build-pool --split train --split validation \\
+    --batch-size {pool_batch_size} {overrides} \\
+    && python -m scripts.turn_aware.train {overrides}"""
 
 
 def build_training_script(
@@ -972,6 +958,13 @@ def train(
     conn = connect(host, port)
 
     overrides = list(overrides or [])
+    if experiment == TURN_AWARE_EXPERIMENT and not any(
+        o.startswith("+experiment=") for o in overrides
+    ):
+        print(
+            "Warning: no +experiment=<v1|v2a|v2> override -- this trains the base recipe under"
+            " the scratch identity (pool data/turn_aware_dev, no Hub push)."
+        )
     if experiment == TURN_AWARE_EXPERIMENT:
         # The planner only reads configs/experiments/. This recipe needs ~40 GB
         # (train turns as parquet + arrow, the model, small LoRA checkpoints).
@@ -1230,7 +1223,12 @@ def build_turn_aware_eval_script(
     default), whichever model is being scored, so `text_wer` reads drift from
     the base for every model evaluated against the same manifest.
     """
-    pool = shlex.quote(TURN_AWARE_POOL_DIR)
+    from scripts.turn_aware.config import load_config
+
+    # The recipe-neutral eval preset: one copy per hold, verbatim targets,
+    # mined pauses included -- the same pool for every model scored.
+    eval_overrides = ["+experiment=eval"]
+    pool = shlex.quote(load_config(eval_overrides).data.pool_dir)
     model_short = model.rstrip("/").rsplit("/", maxsplit=1)[-1]
     out_dir = shlex.quote(f"/workspace/outputs/turn_aware/eval/{model_short}_{split}")
     extra_exports = (
@@ -1240,13 +1238,9 @@ def build_turn_aware_eval_script(
     )
     body = f"""
 cd /workspace
-if [ -f {pool}/{split}.parquet ]; then
-    echo "Reusing turn-aware {split} pool in {pool}"
-else
-    python -m scripts.cli turn-aware build-pool --split {split} -o {pool} \\
-        --batch-size {pool_batch_size} --transcript-cache {TURN_AWARE_TRANSCRIPT_CACHE} \\
-        --extra {TURN_AWARE_EXTRA}
-fi && python -m scripts.cli turn-aware evaluate -m {shlex.quote(model)} \\
+python -m scripts.cli turn-aware build-pool {" ".join(eval_overrides)} --split {split} \\
+    --batch-size {pool_batch_size} \\
+    && python -m scripts.cli turn-aware evaluate -m {shlex.quote(model)} \\
     --pool-dir {pool} --split {split} -n {max_samples} --batch-size {batch_size} \\
     -o {out_dir}"""
     return (

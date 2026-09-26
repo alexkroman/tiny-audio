@@ -17,7 +17,8 @@ from scripts.turn_aware.data import SAMPLE_RATE
 app = typer.Typer(no_args_is_help=True, help="Turn-aware ASR on Qwen3-ASR (end-of-turn token).")
 console = Console()
 
-DEFAULT_POOL_DIR = "data/turn_aware"
+# `evaluate`'s default: the recipe-neutral pool from `build-pool +experiment=eval`.
+DEFAULT_POOL_DIR = "data/turn_aware_eval"
 
 
 def _print_metrics(title: str, metrics: dict) -> None:
@@ -106,38 +107,17 @@ def _load_extra(source: str, split: str):
 
 @app.command("build-pool")
 def build_pool_cmd(
+    overrides: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="Hydra overrides for configs/turn_aware (e.g. +experiment=v2 pool.ctx_prob=0.8)"
+        ),
+    ] = None,
     splits: Annotated[
         list[str] | None,
         typer.Option(
             "--split",
             help="Dataset split(s) to build; repeat for several (default: train, validation)",
-        ),
-    ] = None,
-    output_dir: Annotated[
-        Path, typer.Option("--output-dir", "-o", help="Where {split}.parquet manifests go")
-    ] = Path(DEFAULT_POOL_DIR),
-    model: Annotated[
-        str, typer.Option("--model", "-m", help="Base model that writes self-distilled targets")
-    ] = "Qwen/Qwen3-ASR-0.6B-hf",
-    target_text: Annotated[
-        str,
-        typer.Option(
-            "--target-text",
-            help="'self': base model's own transcript (default); 'dataset': the observation's text",
-        ),
-    ] = "self",
-    extra: Annotated[
-        str | None,
-        typer.Option(
-            "--extra",
-            help="Prepared extra observations (dir or Hub dataset, e.g. from mine-pauses) to merge",
-        ),
-    ] = None,
-    transcript_cache: Annotated[
-        Path | None,
-        typer.Option(
-            "--transcript-cache",
-            help="Dir holding transcripts-{split}.jsonl to reuse (default: --output-dir)",
         ),
     ] = None,
     max_samples: Annotated[
@@ -147,38 +127,63 @@ def build_pool_cmd(
     batch_size: Annotated[
         int, typer.Option("--batch-size", help="Decode batch size for self-transcription")
     ] = 32,
-    seed: Annotated[int, typer.Option("--seed", help="Seed for sampling and silence draws")] = 0,
+    force: Annotated[
+        bool, typer.Option("--force", "-f", help="Rebuild even if the manifest is up to date")
+    ] = False,
 ):
-    """Build the training manifest from mazesmazes/turn-end-detection."""
+    """Build {split}.parquet manifests in data.pool_dir from configs/turn_aware.
+
+    Every data setting comes from the Hydra config -- pool dir, mined extras,
+    transcript cache, silence/oversampling knobs -- so pass the SAME overrides
+    you train with. A split whose manifest was built with identical settings
+    is skipped; pool_config.json records them.
+    """
     import pandas as pd
 
-    from scripts.turn_aware.data import PoolConfig, TurnAudioStore, build_pool, load_split
+    from scripts.turn_aware.config import (
+        load_config,
+        pool_config,
+        pool_is_current,
+        pool_signature,
+        write_signature,
+    )
+    from scripts.turn_aware.data import TurnAudioStore, build_pool, load_split
 
-    if target_text not in ("self", "dataset"):
-        raise typer.BadParameter("must be 'self' or 'dataset'", param_hint="--target-text")
+    cfg = load_config(overrides)
+    if cfg.pool.target_text not in ("self", "dataset"):
+        raise typer.BadParameter("pool.target_text must be 'self' or 'dataset'")
+    output_dir = Path(cfg.data.pool_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    cache_dir = transcript_cache or output_dir
+    cache_dir = Path(cfg.pool.transcript_cache or output_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    signature = pool_signature(cfg, max_samples)
+    config = pool_config(cfg)
 
     for split in splits or ["train", "validation"]:
-        obs = load_split("observations", split).to_pandas()
+        if not force and pool_is_current(output_dir, split, signature):
+            console.print(f"[green]{split}[/]: {output_dir}/{split}.parquet is up to date")
+            continue
+        obs = load_split("observations", split, cfg.data.dataset_id).to_pandas()
         frac = 1.0
         if max_samples and max_samples < len(obs):
             frac = max_samples / len(obs)
-            obs = obs.sample(n=max_samples, random_state=seed)
-        store = TurnAudioStore(split)
+            obs = obs.sample(n=max_samples, random_state=cfg.pool.seed)
+        store = TurnAudioStore(split, cfg.data.dataset_id)
         cache = cache_dir / f"transcripts-{split}.jsonl"
-        obs = _prepare_observations(obs, store, target_text, model, cache, batch_size)
-        if extra:
-            more = _load_extra(extra, split)
+        obs = _prepare_observations(
+            obs, store, cfg.pool.target_text, cfg.pool.target_model, cache, batch_size
+        )
+        if cfg.pool.extra:
+            more = _load_extra(cfg.pool.extra, split)
             if frac < 1.0:  # keep the extra rows in proportion to a smoke sample
-                more = more.sample(frac=frac, random_state=seed)
+                more = more.sample(frac=frac, random_state=cfg.pool.seed)
             obs = pd.concat([obs, more[more["turn_key"].isin(store.meta)]], ignore_index=True)
-            console.print(f"merged {len(more)} extra observations from {extra}")
+            console.print(f"merged {len(more)} extra observations from {cfg.pool.extra}")
 
-        pool = pd.DataFrame(build_pool(obs.to_dict("records"), PoolConfig(), seed=seed))
+        pool = pd.DataFrame(build_pool(obs.to_dict("records"), config, seed=cfg.pool.seed))
         path = output_dir / f"{split}.parquet"
         pool.to_parquet(path, index=False)
+        write_signature(output_dir, split, signature)
         console.print(
             f"[green]{split}[/]: {len(obs)} observations -> {len(pool)} examples -> {path}"
         )

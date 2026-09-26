@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Turn-aware LoRA training for Qwen3-ASR (config: configs/turn_aware.yaml).
+"""Turn-aware LoRA training for Qwen3-ASR (config: configs/turn_aware/).
 
-    poetry run ta turn-aware build-pool --split train --split validation
-    poetry run python scripts/turn_aware/train.py
-    poetry run python scripts/turn_aware/train.py training.max_steps=50   # smoke
+    poetry run ta turn-aware build-pool +experiment=v2
+    poetry run python -m scripts.turn_aware.train +experiment=v2
+    poetry run python -m scripts.turn_aware.train +experiment=v2 training.max_steps=50  # smoke
+
+Pass the same overrides to both: training refuses a pool whose recorded
+pool_config.json does not match the resolved `pool:` section.
 
 Separate from scripts/train.py on purpose: that script builds ASRModel
 (encoder -> fresh projector -> LLM). Qwen3-ASR is already an aligned
@@ -23,6 +26,7 @@ from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer, TrainingArguments, set_seed
 
+from scripts.turn_aware.config import pool_signature, read_signature, signature_diff
 from scripts.turn_aware.data import (
     TurnAudioStore,
     TurnAwareCollator,
@@ -47,9 +51,33 @@ def read_manifest(pool_dir: str, split: str) -> list[dict]:
     path = Path(to_absolute_path(pool_dir)) / f"{split}.parquet"
     if not path.exists():
         raise FileNotFoundError(
-            f"{path} not found; build it with `ta turn-aware build-pool --split {split}`"
+            f"{path} not found; build it with `ta turn-aware build-pool --split {split}` "
+            "and the same overrides as this run"
         )
     return pd.read_parquet(path).to_dict("records")
+
+
+def check_pool(cfg: DictConfig, split: str) -> None:
+    """Refuse a manifest built with different pool settings than this run's.
+
+    The pool is built by a separate command; without this, a stale
+    data/turn_aware_v2 from an earlier recipe would train silently under the
+    new run's name.
+    """
+    pool_dir = Path(to_absolute_path(cfg.data.pool_dir))
+    built = read_signature(pool_dir, split)
+    if built is None:
+        logger.warning("%s/%s.parquet has no recorded pool settings", pool_dir, split)
+        return
+    diff = signature_diff(built, pool_signature(cfg, built.get("max_samples")))
+    if diff:
+        raise ValueError(
+            f"{pool_dir}/{split}.parquet was built with different pool settings:\n  "
+            + "\n  ".join(diff)
+            + "\nRebuild with `ta turn-aware build-pool` and this run's overrides."
+        )
+    if built.get("max_samples"):
+        logger.warning("%s pool is a %d-observation sample", split, built["max_samples"])
 
 
 def predict_rows(model, processor, rows, store, batch_size: int, progress: bool = False):
@@ -99,10 +127,12 @@ class TurnAwareTrainer(Trainer):
         return metrics
 
 
-@hydra.main(version_base=None, config_path="../../configs", config_name="turn_aware")
+@hydra.main(version_base=None, config_path="../../configs/turn_aware", config_name="config")
 def main(cfg: DictConfig) -> None:
     logging.basicConfig(level=logging.INFO)
     set_seed(cfg.training.seed)
+    for split in (cfg.data.train_split, cfg.data.eval_split):
+        check_pool(cfg, split)
     dtype = getattr(torch, cfg.model.dtype)
 
     processor = load_processor(cfg.model.model_id)
@@ -142,6 +172,20 @@ def main(cfg: DictConfig) -> None:
             "normalize": TextNormalizer().normalize,
         },
     )
+    report_to = cfg.training.report_to
+    if trainer.is_world_process_zero() and "wandb" in (
+        [report_to] if isinstance(report_to, str) else list(report_to)
+    ):
+        import wandb
+
+        # Trainer logs only TrainingArguments; the pool recipe, LoRA shape and
+        # threshold live elsewhere in cfg. An existing run is reused by
+        # Trainer's WandbCallback.
+        wandb.init(
+            name=cfg.training.run_name,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            resume="allow",
+        )
     trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
     trainer.evaluate()
 

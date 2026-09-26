@@ -8,14 +8,21 @@
 # done AND >=0.3 s of silence has been heard; holding is the absence of the
 # token. One greedy decode yields both the transcript and the endpoint.
 #
-#   poetry run ta turn-aware build-pool --split train --split validation   # GPU, ~1h
-#   poetry run python scripts/turn_aware/train.py
-#   poetry run ta turn-aware evaluate -m outputs/turn_aware/final
-#   poetry run ta turn-aware replay -m outputs/turn_aware/final   # vs commercial endpointers
+# A run is this file plus one preset from experiment/ (v1, v2a, v2, eval);
+# the SAME overrides drive the data and the training, so they cannot drift:
 #
-# Standalone config (NOT under experiments/): scripts/train.py builds ASRModel,
-# and Qwen3-ASR is not an encoder + fresh projector + LLM stack. Nothing here
-# inherits from config.yaml.
+#   poetry run ta turn-aware build-pool +experiment=v2              # builds data.pool_dir
+#   poetry run python -m scripts.turn_aware.train +experiment=v2
+#   ta runpod train <host> <port> -e turn_aware +experiment=v2      # both, on a pod
+#   poetry run ta turn-aware evaluate -m outputs/turn_aware/v2/final
+#
+# Without a preset you get the v2 recipe under a scratch identity (pool
+# data/turn_aware_dev, no Hub push) -- presets own pool_dir, output_dir,
+# run_name and hub_model_id so two recipes never share a pool or a repo.
+#
+# Standalone config tree (configs/turn_aware/, NOT configs/experiments/):
+# scripts/train.py builds ASRModel, and Qwen3-ASR is not an encoder + fresh
+# projector + LLM stack. Nothing here inherits from configs/config.yaml.
 #
 # WHY THIS SHAPE
 #
@@ -38,9 +45,46 @@
 #   mean-embedding init, which is a bias against ever firing. 0.0 is also
 #   standard LoRA practice and leaves alpha as the only magnitude control.
 #
-# - One pass. ~80k train observations expand to ~115k examples; at batch 32
-#   that is ~3.6k steps. Cosine to 5% of peak. Watch eval_markers/fire_f1 and
+# - One pass. v1's ~80k train observations expanded to ~119k examples (~3.7k
+#   steps at batch 32); v2's mined pauses and hold copies take it to ~145k
+#   (~4.5k steps). Cosine to 5% of peak. Watch eval_markers/fire_f1 and
 #   text_wer together: F1 still rising at the end is the case for a 2nd epoch.
+
+# How `ta turn-aware build-pool` turns dataset observations into training
+# examples (scripts/turn_aware/data.py:PoolConfig documents each knob). The
+# resolved section is written next to the manifests as pool_config.json;
+# build-pool skips a split whose manifest already matches it, and training
+# refuses a pool built with different settings.
+pool:
+  # Transcripts in every target come from this BASE model (self-distillation),
+  # even when model.model_id continues from a turn-aware checkpoint.
+  target_model: Qwen/Qwen3-ASR-0.6B-hf
+  # self: target_model's own transcript; dataset: the observation's `text`.
+  target_text: self
+  # Mined mid-sentence pauses (`ta turn-aware mine-pauses`) merged as holds:
+  # a Hub dataset or a local dir of {split}.parquet. null = none.
+  extra: mazesmazes/turn-end-detection-mined-pauses
+  # transcripts-{split}.jsonl shared by every pool (keyed by observation, so
+  # only valid for one target_model). v1's pool dir already holds ~80k.
+  transcript_cache: data/turn_aware
+  seed: 0
+  fire_tail_s: [0.3, 1.2]
+  hold_tail_s: [0.3, 2.0]
+  long_tail_s: [2.0, 4.0]
+  long_tail_prob: 0.1
+  nosil_prob: 0.6
+  lead_sil_s: [0.5, 2.0]
+  lead_sil_prob: 0.15
+  silence_only_frac: 0.02
+  silence_only_s: [0.5, 4.0]
+  ctx_prob: 0.5
+  max_audio_s: 30.0
+  # Silenced copies per label-0 observation, by kind (unlisted kinds: 1).
+  # Add a kind with a leading +: `+pool.hold_copies.trailing_frag=2`.
+  hold_copies:
+    payload_cut: 3
+    word_cut: 2
+  strip_hold_punct: true
 
 model:
   model_id: Qwen/Qwen3-ASR-0.6B-hf
@@ -59,8 +103,9 @@ model:
 
 data:
   dataset_id: mazesmazes/turn-end-detection
-  # Written by `ta turn-aware build-pool`: {train,validation}.parquet manifests.
-  pool_dir: data/turn_aware_v2
+  # Written by `ta turn-aware build-pool`: {split}.parquet + pool_config.json.
+  # Each preset sets its own.
+  pool_dir: data/turn_aware_dev
   # Manifest + turns split names. A local smoke can point both at a small
   # validation pool and skip the ~9 GB train split entirely.
   train_split: train
@@ -76,10 +121,10 @@ resume_from_checkpoint: null
 # Deliberately outside `training`: Trainer's own push_to_hub would upload raw
 # PEFT checkpoints at every save. Smoke runs should pass `hub_model_id=null`,
 # or a 30-step model overwrites the real one.
-hub_model_id: mazesmazes/tiny-audio-turn-aware-qwen3-asr-v2
+hub_model_id: null  # presets set their own repo
 
 training:
-  output_dir: outputs/turn_aware
+  output_dir: outputs/turn_aware/dev
   seed: 0
   num_train_epochs: 1
   max_steps: -1
@@ -102,7 +147,7 @@ training:
   save_total_limit: 3
   dataloader_num_workers: 8
   report_to: wandb
-  run_name: turn-aware-qwen3-asr-0.6b-v2
+  run_name: turn-aware-dev
 
 hydra:
   run:

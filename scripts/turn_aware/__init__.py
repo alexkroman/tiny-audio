@@ -7,6 +7,7 @@ transcription and endpointing come out of one greedy decode.
 
     data.py     pool construction from mazesmazes/turn-end-detection
     model.py    base loading, marker token, LoRA, batched decode
-    train.py    Hydra entry point (configs/turn_aware.yaml)
-    cli.py      `ta turn-aware build-pool | evaluate | replay`
+    config.py   Hydra config + pool signatures (configs/turn_aware/, presets in experiment/)
+    train.py    Hydra entry point: `python -m scripts.turn_aware.train +experiment=v2`
+    cli.py      `ta turn-aware build-pool | mine-pauses | evaluate | replay | set-threshold`
 """
