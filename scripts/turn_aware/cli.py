@@ -12,7 +12,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from scripts.turn_aware.data import SAMPLE_RATE
+from tiny_audio.turns import SAMPLE_RATE
 
 app = typer.Typer(no_args_is_help=True, help="Turn-aware ASR on Qwen3-ASR (end-of-turn token).")
 console = Console()
@@ -39,7 +39,7 @@ def _self_transcripts(obs, store, model_id: str, cache: Path, batch_size: int) -
     from rich.progress import track
 
     from scripts.turn_aware.data import assemble_audio
-    from scripts.turn_aware.model import decode_batch, load_model, load_processor
+    from tiny_audio.turns import load_model, load_processor, transcribe
 
     done: dict[str, str] = {}
     if cache.exists():
@@ -69,9 +69,9 @@ def _self_transcripts(obs, store, model_id: str, cache: Path, batch_size: int) -
                 assemble_audio(store.get(r["turn_key"]), {**r, "lead_s": 0.0, "tail_s": 0.0})
                 for r in chunk
             ]
-            for rec, (text, _) in zip(chunk, decode_batch(model, processor, audios), strict=True):
-                done[rec["key"]] = text
-                fh.write(json.dumps({"key": rec["key"], "text": text}) + "\n")
+            for rec, decoded in zip(chunk, transcribe(model, processor, audios), strict=True):
+                done[rec["key"]] = decoded.text
+                fh.write(json.dumps({"key": rec["key"], "text": decoded.text}) + "\n")
             fh.flush()
     return done
 
@@ -309,8 +309,8 @@ def evaluate_cmd(
         stratified_subset,
         threshold_sweep,
     )
-    from scripts.turn_aware.model import load_model, load_processor
     from scripts.turn_aware.train import predict_rows
+    from tiny_audio.turns import load_model, load_processor
 
     rows = stratified_subset(
         pd.read_parquet(pool_dir / f"{split}.parquet").to_dict("records"), max_samples
@@ -377,8 +377,7 @@ def set_threshold_cmd(
     """
     from transformers import GenerationConfig
 
-    from scripts.turn_aware.data import END_OF_TURN
-    from scripts.turn_aware.model import load_processor, set_end_of_turn_threshold
+    from tiny_audio.turns import END_OF_TURN, load_processor, set_end_of_turn_threshold
 
     if output_dir is None and repo_id is None:
         raise typer.BadParameter("pass --output-dir and/or --repo-id", param_hint="--output-dir")
@@ -392,38 +391,6 @@ def set_threshold_cmd(
     if repo_id:
         config.push_to_hub(repo_id, commit_message=f"Set end-of-turn threshold tau={tau:g}")
         console.print(f"pushed generation_config.json to {repo_id}")
-
-
-def _fire_times(
-    net, processor, audio, ctx, hop_s, gate_s, tail_s, batch_size, taus
-) -> dict[float, float | None]:
-    """Stream `audio` + `tail_s` of silence; first window end that fires, per tau.
-
-    Every `hop_s` the model sees the WHOLE prefix so far, as in training. The
-    `gate_s` energy gate only skips decodes that could not fire anyway (a fire
-    needs >=0.3 s of observed silence), which keeps replay affordable. One pass
-    serves every tau: decoding stops once the largest tau has fired, and every
-    smaller tau fired at or before that window.
-    """
-    from scripts.turn_aware.data import first_fire_times, trailing_is_silent
-    from scripts.turn_aware.model import decode_batch
-
-    padded = np.concatenate([audio, np.zeros(int(tail_s * SAMPLE_RATE), dtype=np.float32)])
-    times = np.arange(hop_s, len(padded) / SAMPLE_RATE + 1e-6, hop_s)
-    candidates = [t for t in times if trailing_is_silent(padded[: int(t * SAMPLE_RATE)], gate_s)]
-    seen_t: list[float] = []
-    seen_m: list[float] = []
-    for i in range(0, len(candidates), batch_size):
-        chunk = candidates[i : i + batch_size]
-        prefixes = [padded[: int(t * SAMPLE_RATE)] for t in chunk]
-        preds = decode_batch(
-            net, processor, prefixes, [ctx] * len(chunk), max_new_tokens=160, return_margin=True
-        )
-        seen_t += [float(t) for t in chunk]
-        seen_m += [m for _, _, m in preds]
-        if any(m > max(taus) for _, _, m in preds):
-            break
-    return first_fire_times(seen_t, seen_m, taus)
 
 
 @app.command("replay")
@@ -462,7 +429,7 @@ def replay_cmd(
     from rich.progress import track
 
     from scripts.turn_aware.data import TurnAudioStore, endpoint_summary, load_split
-    from scripts.turn_aware.model import load_model, load_processor
+    from tiny_audio.turns import load_model, load_processor, stream_fire_times
 
     endpoints = load_split("endpoints", "test").to_pandas()
     # A seeded random sample, never the first N: turn keys sort by style, so the
@@ -478,8 +445,11 @@ def replay_cmd(
     results = []
     for key in track(keys, description="replaying"):
         ctx = store.meta[key]["agent_turn"] if context else ""
-        fires = _fire_times(
-            net, processor, store.get(key), ctx, hop_s, gate_s, tail_s, batch_size, taus
+        padded = np.concatenate(
+            [store.get(key), np.zeros(int(tail_s * SAMPLE_RATE), dtype=np.float32)]
+        )
+        fires = stream_fire_times(
+            net, processor, padded, taus, hop_s, gate_s, batch_size, context=ctx
         )
         results.append(
             {

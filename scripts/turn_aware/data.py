@@ -44,10 +44,9 @@ import numpy as np
 import soundfile as sf
 import torch
 
+from tiny_audio.turns import END_OF_TURN, LANGUAGE, SAMPLE_RATE
+
 DATASET_ID = "mazesmazes/turn-end-detection"
-SAMPLE_RATE = 16000
-END_OF_TURN = "<END_OF_TURN>"
-LANGUAGE = "English"
 
 
 # --------------------------------------------------------------------- audio
@@ -75,17 +74,6 @@ def trim_tail_silence(
     if len(active) == 0:
         return 0
     return min(len(audio), (int(active[-1]) + 1) * n + int(sample_rate * keep_ms / 1000))
-
-
-def trailing_is_silent(
-    audio: np.ndarray, window_s: float, sample_rate: int = SAMPLE_RATE, threshold: float = 0.005
-) -> bool:
-    """True when the last `window_s` of audio is below `threshold` RMS."""
-    n = int(window_s * sample_rate)
-    if n <= 0:
-        return True
-    tail = audio[-n:]
-    return len(tail) > 0 and float(np.sqrt(np.mean(tail**2))) < threshold
 
 
 def assemble_audio(turn_audio: np.ndarray, row: dict, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
@@ -482,22 +470,6 @@ def threshold_sweep(
         scores = marker_metrics(rows, preds, text_wer=False)
         out.append({"tau": tau, **{k: scores[k] for k in metrics if k in scores}})
     return out
-
-
-def first_fire_times(
-    times: list[float], margins: list[float], taus: list[float]
-) -> dict[float, float | None]:
-    """First window end whose marker margin exceeds each tau (None = never fired).
-
-    `times` must be chronological. A streaming endpointer commits to its first
-    fire, so later windows are irrelevant once every tau has fired.
-    """
-    first: dict[float, float | None] = dict.fromkeys(taus)
-    for t, m in zip(times, margins, strict=True):
-        for tau in taus:
-            if first[tau] is None and m > tau:  # NaN never fires
-                first[tau] = float(t)
-    return first
 
 
 def endpoint_summary(fire_s, duration_s) -> dict:

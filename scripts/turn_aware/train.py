@@ -35,13 +35,13 @@ from scripts.turn_aware.data import (
     marker_metrics,
     stratified_subset,
 )
-from scripts.turn_aware.model import (
-    add_end_of_turn_token,
-    apply_lora,
-    decode_batch,
+from scripts.turn_aware.model import add_end_of_turn_token, apply_lora
+from tiny_audio.turns import (
+    Decoded,
     load_model,
     load_processor,
     set_end_of_turn_threshold,
+    transcribe,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,19 +81,17 @@ def check_pool(cfg: DictConfig, split: str) -> None:
 
 
 def predict_rows(model, processor, rows, store, batch_size: int, progress: bool = False):
-    """Greedy-decode manifest rows; return (transcript, fired, marker_margin) per row."""
+    """Greedy-decode manifest rows; one `Decoded(text, fired, margin)` per row."""
     starts = range(0, len(rows), batch_size)
     if progress:
         from rich.progress import track
 
         starts = track(starts, description="decoding")
-    preds: list[tuple[str, bool, float]] = []
+    preds: list[Decoded] = []
     for i in starts:
         chunk = rows[i : i + batch_size]
         audios = [assemble_audio(store.get(r["turn_key"]), r) for r in chunk]
-        preds += decode_batch(
-            model, processor, audios, [r["ctx"] for r in chunk], return_margin=True
-        )
+        preds += transcribe(model, processor, audios, [r["ctx"] for r in chunk])
     return preds
 
 
