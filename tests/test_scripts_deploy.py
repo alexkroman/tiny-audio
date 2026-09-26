@@ -237,6 +237,45 @@ class TestBuildTrainingScript:
         assert "training.learning_rate=1e-4" in script
         assert "training.batch_size=8" in script
 
+    def test_turn_aware_builds_pool_then_trains(self, build_script):
+        """`-e turn_aware` runs the standalone recipe, not scripts.train."""
+        script = build_script(
+            experiment="turn_aware",
+            hf_token="token",
+            wandb_run_id=None,
+            wandb_resume=None,
+            extra_args=["training.per_device_train_batch_size=12"],
+        )
+
+        assert "python -m scripts.train " not in script
+        assert "+experiments=" not in script
+        assert (
+            "[ -f data/turn_aware/train.parquet ] && [ -f data/turn_aware/validation.parquet ]"
+            in script
+        )
+        assert "turn-aware build-pool --split train --split validation -o data/turn_aware" in script
+        assert "--batch-size 128" in script
+        assert (
+            "fi && python -m scripts.turn_aware.train training.per_device_train_batch_size=12"
+            in script
+        )
+        # Shared env + epilogue still apply.
+        assert "HF_DATASETS_CACHE=/workspace/datasets" in script
+        assert "EXIT_CODE=$?" in script
+
+    def test_turn_aware_honours_pool_dir_override(self, build_script):
+        script = build_script(
+            experiment="turn_aware",
+            hf_token="token",
+            wandb_run_id=None,
+            wandb_resume=None,
+            extra_args=["data.pool_dir=data/turn_aware_v2"],
+        )
+
+        assert "[ -f data/turn_aware_v2/train.parquet ]" in script
+        assert "-o data/turn_aware_v2" in script
+        assert "scripts.turn_aware.train data.pool_dir=data/turn_aware_v2" in script
+
 
 class TestHandlerLocal:
     """Tests for local handler testing utilities."""
@@ -281,3 +320,41 @@ class TestPackageImports:
 
         module = importlib.import_module(module_path)
         assert module is not None
+
+
+def test_turn_aware_pool_batch_size_is_passed_through():
+    from scripts.deploy.runpod import build_training_script
+
+    script = build_training_script("turn_aware", "token", None, None, [], pool_batch_size=64)
+    assert "--batch-size 64" in script
+
+
+class TestBuildTurnAwareEvalScript:
+    def _script(self, **kw):
+        from scripts.deploy.runpod import build_turn_aware_eval_script
+
+        args = {
+            "hf_token": "token",
+            "model": "mazesmazes/tiny-audio-turn-aware-qwen3-asr",
+            "split": "test",
+            "max_samples": 0,
+            "batch_size": 64,
+            "pool_batch_size": 128,
+        }
+        return build_turn_aware_eval_script(**{**args, **kw})
+
+    def test_builds_missing_pool_then_evaluates(self):
+        script = self._script()
+        assert "if [ -f data/turn_aware/test.parquet ]; then" in script
+        assert "build-pool --split test -o data/turn_aware" in script
+        assert "--batch-size 128" in script
+        assert "turn-aware evaluate -m mazesmazes/tiny-audio-turn-aware-qwen3-asr" in script
+        assert "--split test -n 0 --batch-size 64" in script
+        assert (
+            "-o /workspace/outputs/turn_aware/eval/tiny-audio-turn-aware-qwen3-asr_test" in script
+        )
+        assert "HF_DATASETS_CACHE=/workspace/datasets" in script
+
+    def test_local_model_path_names_the_output_dir(self):
+        script = self._script(model="outputs/turn_aware/final/", split="validation")
+        assert "-o /workspace/outputs/turn_aware/eval/final_validation" in script

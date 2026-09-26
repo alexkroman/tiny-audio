@@ -1,0 +1,221 @@
+"""Tests for scripts.turn_aware.data: pool construction, labels, and metrics."""
+
+from __future__ import annotations
+
+import random
+
+import numpy as np
+import pytest
+import torch
+
+from scripts.turn_aware.data import (
+    END_OF_TURN,
+    SAMPLE_RATE,
+    PoolConfig,
+    assemble_audio,
+    assistant_labels,
+    build_pool,
+    endpoint_summary,
+    expand_observation,
+    marker_metrics,
+    stratified_subset,
+    target_text,
+    trailing_is_silent,
+    trim_tail_silence,
+)
+
+
+def _speech_then_silence(speech_s: float, silence_s: float) -> np.ndarray:
+    rng = np.random.default_rng(0)
+    speech = (0.1 * rng.standard_normal(int(speech_s * SAMPLE_RATE))).astype(np.float32)
+    return np.concatenate([speech, np.zeros(int(silence_s * SAMPLE_RATE), dtype=np.float32)])
+
+
+def _obs(key="k@1.0", label=1, speech_end_s=2.0, kind="complete", agent_turn="What is your name?"):
+    return {
+        "key": key,
+        "turn_key": key.split("@")[0],
+        "kind": kind,
+        "label": label,
+        "speech_end_s": speech_end_s,
+        "target": "my name is jo",
+        "agent_turn": agent_turn,
+    }
+
+
+class TestAudio:
+    def test_trim_keeps_80ms_past_last_speech(self):
+        audio = _speech_then_silence(1.0, 0.5)
+        end = trim_tail_silence(audio)
+        assert end == pytest.approx(1.08 * SAMPLE_RATE, abs=0.02 * SAMPLE_RATE)
+
+    def test_trim_all_silence_is_zero(self):
+        assert trim_tail_silence(np.zeros(SAMPLE_RATE, dtype=np.float32)) == 0
+
+    def test_trailing_is_silent(self):
+        audio = _speech_then_silence(1.0, 0.4)
+        assert trailing_is_silent(audio, 0.3)
+        assert not trailing_is_silent(audio, 0.6)
+
+    def test_assemble_lengths_and_zero_padding(self):
+        turn = _speech_then_silence(3.0, 0.0)
+        row = {"speech_end_s": 1.5, "lead_s": 0.5, "tail_s": 0.7}
+        out = assemble_audio(turn, row)
+        assert len(out) == int(2.7 * SAMPLE_RATE)
+        assert out.dtype == np.float32
+        assert not out[: int(0.5 * SAMPLE_RATE)].any()
+        assert not out[-int(0.7 * SAMPLE_RATE) :].any()
+        np.testing.assert_array_equal(
+            out[int(0.5 * SAMPLE_RATE) : int(2.0 * SAMPLE_RATE)], turn[: int(1.5 * SAMPLE_RATE)]
+        )
+
+
+class TestExpandObservation:
+    def test_negative_is_one_silenced_hold(self):
+        cfg = PoolConfig(lead_sil_prob=0.0)
+        out = expand_observation(_obs(label=0, kind="payload_cut"), cfg, random.Random(0))
+        assert [e["schema"] for e in out] == ["hold_sil"]
+        assert not out[0]["fire"]
+        assert cfg.hold_tail_s[0] <= out[0]["tail_s"] <= cfg.hold_tail_s[1]
+
+    def test_positive_pairs_fire_with_identical_nosil_twin(self):
+        cfg = PoolConfig(nosil_prob=1.0, long_tail_prob=0.0, lead_sil_prob=0.0)
+        fire, nosil = expand_observation(_obs(), cfg, random.Random(0))
+        assert (fire["schema"], fire["fire"]) == ("fire_sil", True)
+        assert (nosil["schema"], nosil["fire"], nosil["tail_s"]) == ("fire_nosil", False, 0.0)
+        # Only the tail may differ between the pair.
+        for field in ("turn_key", "speech_end_s", "lead_s", "text", "ctx"):
+            assert fire[field] == nosil[field]
+
+    def test_long_tail_positive(self):
+        cfg = PoolConfig(nosil_prob=0.0, long_tail_prob=1.0)
+        (ex,) = expand_observation(_obs(), cfg, random.Random(0))
+        assert ex["schema"] == "fire_long"
+        assert ex["fire"]
+        assert cfg.long_tail_s[0] <= ex["tail_s"] <= cfg.long_tail_s[1]
+
+    @pytest.mark.parametrize(("ctx_prob", "expected"), [(1.0, "What is your name?"), (0.0, "")])
+    def test_context_gate(self, ctx_prob, expected):
+        ex, *_ = expand_observation(_obs(), PoolConfig(ctx_prob=ctx_prob), random.Random(0))
+        assert ex["ctx"] == expected
+
+
+class TestBuildPool:
+    def _observations(self, n=200):
+        return [
+            _obs(key=f"t{i}@1.0", label=i % 2, kind="complete" if i % 2 else "word_cut")
+            for i in range(n)
+        ]
+
+    def test_deterministic_in_seed(self):
+        obs = self._observations()
+        assert build_pool(obs, PoolConfig(), seed=3) == build_pool(
+            list(reversed(obs)), PoolConfig(), seed=3
+        )
+        assert build_pool(obs, PoolConfig(), seed=3) != build_pool(obs, PoolConfig(), seed=4)
+
+    def test_filters_long_and_empty_and_adds_silence_only(self):
+        obs = [
+            *self._observations(),
+            _obs(key="long@1", speech_end_s=40.0),
+            _obs(key="empty@1", speech_end_s=0.0),
+        ]
+        pool = build_pool(obs, PoolConfig(silence_only_frac=0.1), seed=0)
+        assert not any(e["turn_key"] in ("long", "empty") for e in pool)
+        silence = [e for e in pool if e["schema"] == "silence_only"]
+        speech = [e for e in pool if e["schema"] != "silence_only"]
+        assert len(silence) == round(0.1 * len(speech))
+        assert all(e["text"] == "" and not e["fire"] and e["turn_key"] == "" for e in silence)
+
+    def test_stratified_subset_balances_schemas(self):
+        pool = build_pool(self._observations(1000), PoolConfig(), seed=0)
+        sub = stratified_subset(pool, 40)
+        counts = {s: sum(e["schema"] == s for e in sub) for s in {e["schema"] for e in sub}}
+        assert len(set(counts.values())) == 1
+
+
+def test_target_text_appends_marker_only_on_fire():
+    assert target_text({"text": "hi there", "fire": True}) == f"hi there{END_OF_TURN}"
+    assert target_text({"text": "hi there", "fire": False}) == "hi there"
+
+
+class TestAssistantLabels:
+    ASR, IM_END, PAD = 50, 51, 0
+
+    def test_supervises_after_asr_text_through_im_end(self):
+        # [pad, prompt..., <asr_text>, t1, t2, <|im_end|>, "\n"]
+        ids = torch.tensor([[self.PAD, 7, 8, self.ASR, 11, 12, self.IM_END, 13]])
+        mask = torch.tensor([[0, 1, 1, 1, 1, 1, 1, 1]])
+        labels = assistant_labels(ids, mask, self.ASR, self.IM_END)
+        assert labels.tolist() == [[-100, -100, -100, -100, 11, 12, self.IM_END, -100]]
+
+    def test_empty_transcript_supervises_im_end_only(self):
+        ids = torch.tensor([[7, self.ASR, self.IM_END, 13]])
+        labels = assistant_labels(ids, torch.ones_like(ids), self.ASR, self.IM_END)
+        assert labels.tolist() == [[-100, -100, self.IM_END, -100]]
+
+
+class TestMetrics:
+    def test_marker_metrics(self):
+        rows = [
+            {"fire": True, "schema": "fire_sil", "kind": "complete", "text": "a b"},
+            {"fire": True, "schema": "fire_sil", "kind": "chunk_cut", "text": "c d"},
+            {"fire": False, "schema": "hold_sil", "kind": "payload_cut", "text": "e f"},
+            {"fire": False, "schema": "silence_only", "kind": "silence_only", "text": ""},
+        ]
+        preds = [("a b", True), ("c x", False), ("e f", True), ("", False)]
+        m = marker_metrics(rows, preds)
+        assert m["fire_precision"] == pytest.approx(0.5)
+        assert m["fire_recall"] == pytest.approx(0.5)
+        assert m["acc_schema/fire_sil"] == pytest.approx(0.5)
+        assert m["acc_kind/payload_cut"] == 0.0
+        assert m["acc_schema/silence_only"] == 1.0
+        assert m["text_wer"] == pytest.approx(1 / 6)
+
+    def test_endpoint_summary(self):
+        s = endpoint_summary([1.0, 5.3, 5.5, float("nan")], [5.0, 5.0, 5.0, 5.0])
+        assert s["n"] == 4
+        assert s["cut_early"] == 0.25
+        assert s["missed"] == 0.25
+        assert s["latency_p50_s"] == pytest.approx(0.4)
+
+
+class TestMarkerThreshold:
+    EOT, IM_END = 9, 7
+
+    def test_margin_read_at_first_eot_or_im_end(self):
+        from scripts.turn_aware.model import marker_margins
+
+        # row 0 fires at step 2; row 1 ends at step 1; row 2 never ends
+        new = torch.tensor([[3, 4, self.EOT, self.IM_END], [3, self.IM_END, 7, 7], [3, 4, 5, 6]])
+        pair = torch.zeros(3, 4, 2)
+        pair[0, 2] = torch.tensor([5.0, 1.5])
+        pair[1, 1] = torch.tensor([-1.0, 2.0])
+        margins = marker_margins(new, pair, self.EOT, self.IM_END)
+        assert margins[0].item() == pytest.approx(3.5)
+        assert margins[1].item() == pytest.approx(-3.0)
+        assert torch.isnan(margins[2])
+
+    def test_sweep_trades_false_fires_for_recall(self):
+        from scripts.turn_aware.data import threshold_sweep
+
+        rows = [
+            {"fire": True, "schema": "fire_sil", "kind": "complete", "text": "a"},
+            {"fire": True, "schema": "fire_sil", "kind": "complete", "text": "b"},
+            {"fire": False, "schema": "hold_sil", "kind": "payload_cut", "text": "c"},
+            {"fire": False, "schema": "hold_sil", "kind": "payload_cut", "text": "d"},
+        ]
+        margins = [6.0, 1.5, 1.0, float("nan")]
+        greedy, strict = threshold_sweep(rows, margins, [0.0, 2.0])
+        assert (greedy["fire_recall"], greedy["acc_kind/payload_cut"]) == (1.0, 0.5)
+        assert (strict["fire_recall"], strict["acc_kind/payload_cut"]) == (0.5, 1.0)
+        assert strict["fire_precision"] == 1.0
+
+
+def test_first_fire_times_per_threshold():
+    from scripts.turn_aware.data import first_fire_times
+
+    times = [0.16, 0.32, 0.48, 0.64]
+    margins = [-5.0, 1.0, float("nan"), 3.5]
+    fires = first_fire_times(times, margins, [-6.0, 0.0, 2.0, 5.0])
+    assert fires == {-6.0: 0.16, 0.0: 0.32, 2.0: 0.64, 5.0: None}

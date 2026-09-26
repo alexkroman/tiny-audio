@@ -177,6 +177,8 @@ checkpoints/
 models/
 outputs/
 samples/
+# `ta turn-aware build-pool` manifests + self-distillation transcript caches
+data/turn_aware*/
 
 # Weights & Biases
 wandb/

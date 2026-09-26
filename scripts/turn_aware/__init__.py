@@ -1,0 +1,12 @@
+"""Turn-aware ASR: teach Qwen3-ASR to emit an end-of-turn token.
+
+The model transcribes as usual and appends `<END_OF_TURN>` when, given only
+the audio heard so far, the speaker has finished AND enough trailing silence
+has been observed. Holding the turn is simply the absence of the token, so
+transcription and endpointing come out of one greedy decode.
+
+    data.py     pool construction from mazesmazes/turn-end-detection
+    model.py    base loading, marker token, LoRA, batched decode
+    train.py    Hydra entry point (configs/turn_aware.yaml)
+    cli.py      `ta turn-aware build-pool | evaluate | replay`
+"""

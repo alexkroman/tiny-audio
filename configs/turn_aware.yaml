@@ -1,0 +1,105 @@
+# TURN-AWARE ASR on Qwen3-ASR-0.6B.
+#
+#   Qwen/Qwen3-ASR-0.6B-hf   audio tower + projector + Qwen3 decoder, all FROZEN
+#   + LoRA r=32 on decoder q/k/v/o          (9.18M, lr 2e-4)
+#   + one trainable <END_OF_TURN> row       (tied: embedding AND lm_head logit)
+#
+# The model keeps transcribing and appends <END_OF_TURN> when the speaker is
+# done AND >=0.3 s of silence has been heard; holding is the absence of the
+# token. One greedy decode yields both the transcript and the endpoint.
+#
+#   poetry run ta turn-aware build-pool --split train --split validation   # GPU, ~1h
+#   poetry run python scripts/turn_aware/train.py
+#   poetry run ta turn-aware evaluate -m outputs/turn_aware/final
+#   poetry run ta turn-aware replay -m outputs/turn_aware/final   # vs commercial endpointers
+#
+# Standalone config (NOT under experiments/): scripts/train.py builds ASRModel,
+# and Qwen3-ASR is not an encoder + fresh projector + LLM stack. Nothing here
+# inherits from config.yaml.
+#
+# WHY THIS SHAPE
+#
+# - LoRA on attention only, decoder only. The marker is a decision about the
+#   decoded text plus the audio tail, read through attention; the MLPs and the
+#   audio tower are where transcription quality lives, and freezing them is
+#   the cheapest insurance against WER drift. alpha/r = 2 at r=32 is 9.18M
+#   params: generous for one new decision, small enough to not re-learn ASR.
+#
+# - Self-distilled targets (build-pool --target-text self, the default). The
+#   transcript part of every label is the base model's own greedy output, so
+#   ~all the loss that is not the marker is already near zero at step 0 and
+#   the gradient concentrates on WHEN to emit the marker. `eval_markers/text_wer`
+#   is WER against those same targets: it reads drift from the base, and it
+#   should stay near 0.
+#
+# - weight_decay 0.0. PEFT trains only a delta for the marker row, not the
+#   whole 151,936-row embedding, so decay could only ever touch LoRA and that
+#   delta. Pulling the delta toward zero pulls the marker back toward its
+#   mean-embedding init, which is a bias against ever firing. 0.0 is also
+#   standard LoRA practice and leaves alpha as the only magnitude control.
+#
+# - One pass. ~80k train observations expand to ~115k examples; at batch 32
+#   that is ~3.6k steps. Cosine to 5% of peak. Watch eval_markers/fire_f1 and
+#   text_wer together: F1 still rising at the end is the case for a 2nd epoch.
+
+model:
+  model_id: Qwen/Qwen3-ASR-0.6B-hf
+  # bfloat16 base on CUDA; LoRA factors are kept fp32 by PEFT's adapter
+  # autocast. On a Mac use `model.dtype=float32` if MPS bf16 misbehaves.
+  dtype: bfloat16
+  lora_rank: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+
+data:
+  dataset_id: mazesmazes/turn-end-detection
+  # Written by `ta turn-aware build-pool`: {train,validation}.parquet manifests.
+  pool_dir: data/turn_aware
+  # Manifest + turns split names. A local smoke can point both at a small
+  # validation pool and skip the ~9 GB train split entirely.
+  train_split: train
+  eval_split: validation
+  # Teacher-forced eval/loss subset (balanced across schemas).
+  eval_samples: 2000
+  # Greedy-decoded subset for eval_markers/* (fire P/R/F1, per-kind accuracy,
+  # text drift). Decoding costs ~10x a loss pass, so it is smaller.
+  marker_eval_samples: 600
+
+resume_from_checkpoint: null
+# The MERGED final model is pushed here after training (null = keep local).
+# Deliberately outside `training`: Trainer's own push_to_hub would upload raw
+# PEFT checkpoints at every save. Smoke runs should pass `hub_model_id=null`,
+# or a 30-step model overwrites the real one.
+hub_model_id: mazesmazes/tiny-audio-turn-aware-qwen3-asr
+
+training:
+  output_dir: outputs/turn_aware
+  seed: 0
+  num_train_epochs: 1
+  max_steps: -1
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 2e-4
+  lr_scheduler_type: cosine_with_min_lr
+  lr_scheduler_kwargs:
+    min_lr_rate: 0.05
+  warmup_steps: 100
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  bf16: true
+  logging_steps: 20
+  eval_strategy: steps
+  eval_steps: 500
+  save_strategy: steps
+  save_steps: 500
+  save_total_limit: 3
+  dataloader_num_workers: 8
+  report_to: wandb
+  run_name: turn-aware-qwen3-asr-0.6b
+
+hydra:
+  run:
+    dir: outputs/turn_aware/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: false
