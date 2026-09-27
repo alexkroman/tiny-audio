@@ -261,3 +261,37 @@ def test_transcript_cache_survives_a_truncated_last_line(tmp_path, monkeypatch):
         "a": "hello"
     }
     assert cache.read_text().endswith("\n")  # next appended record starts cleanly
+
+
+def test_find_intra_pauses_skips_edges_short_gaps_and_boundaries():
+    from scripts.turn_aware.data import find_intra_pauses
+
+    rng = np.random.default_rng(0)
+
+    def speech(s):
+        return (0.1 * rng.standard_normal(int(s * SAMPLE_RATE))).astype(np.float32)
+
+    def sil(s):
+        return np.zeros(int(s * SAMPLE_RATE), dtype=np.float32)
+
+    # lead sil | 1.0 speech | 0.5 pause (t=1.5) | 1.0 speech | 0.2 gap | 0.5 speech
+    # | 0.6 pause at a chunk end (t=3.7) | 1.0 speech | trailing sil
+    audio = np.concatenate(
+        [
+            sil(0.5),
+            speech(1.0),
+            sil(0.5),
+            speech(1.0),
+            sil(0.2),
+            speech(0.5),
+            sil(0.6),
+            speech(1.0),
+            sil(1.0),
+        ]
+    )
+    pauses = find_intra_pauses(audio, avoid_s=[3.8])
+    assert pauses == [pytest.approx(1.5, abs=0.03)]
+    assert find_intra_pauses(audio, avoid_s=[]) == [
+        pytest.approx(1.5, abs=0.03),
+        pytest.approx(3.7, abs=0.03),
+    ]

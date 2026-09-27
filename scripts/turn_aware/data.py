@@ -289,6 +289,47 @@ def mine_pauses(turns: list[dict], labelled: set[tuple[str, float]]) -> list[dic
     return out
 
 
+INTRA_KIND = "intra_chunk_pause"
+
+
+def find_intra_pauses(
+    audio: np.ndarray,
+    avoid_s: list[float],
+    min_pause_s: float = 0.3,
+    margin_s: float = 0.4,
+    sample_rate: int = SAMPLE_RATE,
+    threshold: float = SILENCE_RMS,
+    frame_ms: float = 20.0,
+) -> list[float]:
+    """Start times of silences >= min_pause_s inside the speech, away from `avoid_s`.
+
+    Streaming asks the model to decide at EVERY such pause -- a comma, a
+    hesitation, a sentence break inside one TTS chunk -- but observations and
+    mined pauses sit only at chunk boundaries (`avoid_s`: chunk ends and
+    existing observation cuts), so these moments had no supervision at all.
+    Leading and trailing silence are not pauses.
+    """
+    n = int(sample_rate * frame_ms / 1000)
+    frames = len(audio) // n
+    if frames == 0:
+        return []
+    quiet = np.sqrt(np.mean(audio[: frames * n].reshape(frames, n) ** 2, axis=1)) < threshold
+    speech = np.flatnonzero(~quiet)
+    if len(speech) == 0:
+        return []
+    inner = quiet[speech[0] : speech[-1] + 1].astype(int)
+    edges = np.flatnonzero(np.diff(np.r_[0, inner, 0]))
+    avoid = np.asarray(avoid_s, dtype=float)
+    step = frame_ms / 1000
+    out = []
+    for start, end in zip(edges[::2], edges[1::2], strict=True):
+        t0, t1 = (speech[0] + start) * step, (speech[0] + end) * step
+        near = len(avoid) and np.any((avoid >= t0 - margin_s) & (avoid <= t1 + margin_s))
+        if t1 - t0 >= min_pause_s and not near:
+            out.append(round(float(t0), 2))
+    return out
+
+
 def stratified_subset(rows: list[dict], n: int, seed: int = 0) -> list[dict]:
     """Up to `n` rows spread evenly across schemas, for a cheap balanced eval."""
     if n <= 0 or n >= len(rows):

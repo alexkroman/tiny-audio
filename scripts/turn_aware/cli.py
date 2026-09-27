@@ -272,18 +272,39 @@ def mine_pauses_cmd(
         typer.Option("--repo-id", "-r", help="Also push the prepared splits to this Hub dataset"),
     ] = None,
     seed: Annotated[int, typer.Option("--seed", help="Seed for --max-samples")] = 0,
+    kind: Annotated[
+        str,
+        typer.Option(
+            "--kind",
+            help="'boundary': mid-sentence chunk ends (script text); "
+            "'intra': silences >= 0.3 s inside chunks (base-model transcript as text)",
+        ),
+    ] = "boundary",
 ):
-    """Mine unlabelled mid-sentence pauses as label-0 observations, for `pool.extra`.
+    """Mine unlabelled pauses as label-0 observations, for `pool.extra`.
 
     Must use the same base model as the pool's `pool.target_model`, so mined
-    targets are self-distilled from the same transcriber.
+    targets are self-distilled from the same transcriber. Transcripts are
+    pulled from / pushed to pool.transcript_repo (split `<kind>_<split>`), so
+    an interrupted or repeated run never re-transcribes.
     """
     import pandas as pd
 
-    from scripts.turn_aware.data import TurnAudioStore, load_split, mine_pauses
+    from scripts.turn_aware import transcripts
+    from scripts.turn_aware.config import load_config
+    from scripts.turn_aware.data import (
+        INTRA_KIND,
+        TurnAudioStore,
+        find_intra_pauses,
+        load_split,
+        mine_pauses,
+    )
     from tiny_audio.turns import MODEL_ID
 
+    if kind not in ("boundary", "intra"):
+        raise typer.BadParameter("must be 'boundary' or 'intra'", param_hint="--kind")
     model = model or MODEL_ID
+    mirror = load_config().pool.transcript_repo
 
     output_dir.mkdir(parents=True, exist_ok=True)
     for split in splits or ["train", "validation", "test"]:
@@ -292,15 +313,47 @@ def mine_pauses_cmd(
             (k, round(float(a), 2)) for k, a in zip(obs["turn_key"], obs["at_s"], strict=True)
         }
         turns = load_split("turns", split).remove_columns(["audio"]).to_pandas()
-        mined = pd.DataFrame(mine_pauses(turns.to_dict("records"), labelled))
+        store = TurnAudioStore(split)
+        if kind == "boundary":
+            mined = pd.DataFrame(mine_pauses(turns.to_dict("records"), labelled))
+        else:
+            cuts = obs.groupby("turn_key")["at_s"].apply(list).to_dict()
+            rows = []
+            for turn in turns.itertuples():
+                avoid = list(turn.chunk_ends_s) + cuts.get(turn.turn_key, [])
+                for t in find_intra_pauses(store.get(turn.turn_key), avoid):
+                    rows.append(
+                        {
+                            "key": f"{turn.turn_key}@{t:g}#intra",
+                            "turn_key": turn.turn_key,
+                            # Inside the silence; _prepare_observations trims back to speech.
+                            "at_s": round(t + 0.1, 2),
+                            "label": 0,
+                            "kind": INTRA_KIND,
+                            "style": turn.style,
+                            "domain": turn.domain,
+                        }
+                    )
+            mined = pd.DataFrame(rows)
         if max_samples and max_samples < len(mined):
             mined = mined.sample(n=max_samples, random_state=seed)
-        store = TurnAudioStore(split)
         cache = output_dir / f"transcripts-{split}.jsonl"
+        mirror_split = f"{kind}_{split}"
+        if mirror:
+            n = transcripts.pull(mirror, mirror_split, cache, model)
+            console.print(f"pulled {n} transcripts from {mirror} [{mirror_split}]")
         mined = _prepare_observations(mined, store, "self", model, cache, batch_size)
+        if kind == "intra":  # no script text inside a chunk: the words are the transcript
+            mined["text"] = mined["target"]
+        if mirror:
+            try:
+                transcripts.push(mirror, mirror_split, cache, model)
+                console.print(f"pushed transcripts to {mirror} [{mirror_split}]")
+            except Exception as exc:
+                console.print(f"[yellow]transcript push to {mirror} failed ({exc}); continuing")
         path = output_dir / f"{split}.parquet"
         mined.to_parquet(path, index=False)
-        console.print(f"[green]{split}[/]: {len(mined)} mid-sentence pauses -> {path}")
+        console.print(f"[green]{split}[/]: {len(mined)} {kind} pauses -> {path}")
         if repo_id:
             from datasets import Dataset
 
