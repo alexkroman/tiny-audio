@@ -108,7 +108,8 @@ def test_transcript_cache_location_is_not_part_of_the_signature():
     assert a == b
 
 
-def test_only_v3_filters_mined_pauses_by_label():
-    assert list(load_config(["+experiment=v3"]).pool.extra_labels) == ["incomplete"]
-    for preset in ("v1", "v2a", "v2", "eval"):
+def test_v3_and_eval_filter_mined_pauses_by_label():
+    for preset in ("v3", "eval"):
+        assert list(load_config([f"+experiment={preset}"]).pool.extra_labels) == ["incomplete"]
+    for preset in ("v1", "v2a", "v2"):
         assert load_config([f"+experiment={preset}"]).pool.extra_labels is None
