@@ -17,6 +17,7 @@ exactly the alignment this recipe is meant to keep frozen.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import hydra
@@ -172,6 +173,9 @@ def main(cfg: DictConfig) -> None:
         # threshold live elsewhere in cfg. An existing run is reused by
         # Trainer's WandbCallback.
         wandb.init(
+            # Trainer's WandbCallback default; without it this run landed in
+            # W&B's `uncategorized` while v1 sat in `huggingface`.
+            project=os.environ.get("WANDB_PROJECT", "huggingface"),
             name=cfg.training.run_name,
             config=OmegaConf.to_container(cfg, resolve=True),
             resume="allow",
