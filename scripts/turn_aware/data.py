@@ -33,6 +33,7 @@ is memory-mapped and fork-safe, so workers slice audio on demand.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import random
 import re
@@ -160,6 +161,11 @@ class PoolConfig:
     # Share of examples that see the agent's preceding question as system
     # context. Below 1 so the model still endpoints with no context at all.
     ctx_prob: float = 0.5
+    # Of the examples that get context, the share shown ANOTHER call's agent
+    # question instead, label unchanged -- so the model learns to check the
+    # question against the words rather than copy it. Needs contexts assigned
+    # up front (`assign_contexts`); 0 keeps the original per-example draw.
+    ctx_distractor_prob: float = 0.0
     max_audio_s: float = 30.0
     # Silenced copies per label-0 observation, by kind (default 1). Each copy
     # draws its own tail. The costly holds -- cut just before the requested
@@ -203,8 +209,11 @@ def expand_observation(obs: dict, cfg: PoolConfig, rng: random.Random) -> list[d
     `obs` needs key, turn_key, kind, label, speech_end_s, target, agent_turn.
     """
     lead = rng.uniform(*cfg.lead_sil_s) if rng.random() < cfg.lead_sil_prob else 0.0
-    ctx = obs.get("agent_turn") or ""
-    ctx = ctx if ctx and rng.random() < cfg.ctx_prob else ""
+    if "ctx" in obs:  # assigned up front (assign_contexts), e.g. to transcribe with it
+        ctx = obs["ctx"]
+    else:
+        ctx = obs.get("agent_turn") or ""
+        ctx = ctx if ctx and rng.random() < cfg.ctx_prob else ""
     if not obs["label"]:
         copies = dict(cfg.hold_copies).get(obs["kind"], 1)
         if cfg.strip_hold_punct:
@@ -220,6 +229,44 @@ def expand_observation(obs: dict, cfg: PoolConfig, rng: random.Random) -> list[d
     if rng.random() < cfg.nosil_prob:
         out.append(_example(obs, "fire_nosil", 0.0, False, lead, ctx))
     return out
+
+
+def assign_contexts(observations: list[dict], cfg: PoolConfig, seed: int = 0) -> list[dict]:
+    """Decide each observation's context BEFORE transcription; deterministic in `seed`.
+
+    With probability ctx_prob an observation gets context; of those, a
+    ctx_distractor_prob share get a different call's agent question (a
+    distractor) instead of their own. Labels are untouched: the source labels
+    were decided from the real question, so a mismatched one is pure noise the
+    model should learn to discount. Adds `ctx` and `ctx_distractor`.
+    """
+    rng = random.Random(f"ctx-{seed}")
+    questions = sorted({o.get("agent_turn") or "" for o in observations} - {""})
+    out = []
+    for obs in sorted(observations, key=lambda o: o["key"]):
+        own = obs.get("agent_turn") or ""
+        ctx, distractor = "", False
+        if own and rng.random() < cfg.ctx_prob:
+            ctx = own
+            if len(questions) > 1 and rng.random() < cfg.ctx_distractor_prob:
+                while ctx == own:
+                    ctx = rng.choice(questions)
+                distractor = True
+        out.append({**obs, "ctx": ctx, "ctx_distractor": distractor})
+    return out
+
+
+def transcript_key(obs: dict) -> str:
+    """Cache key for a transcript made WITH the observation's context.
+
+    Context changes what the base model writes (formatting, entity spelling),
+    so a context-conditioned transcript is a different cache entry from the
+    no-context one; an observation without context shares the plain key.
+    """
+    if not obs.get("ctx"):
+        return obs["key"]
+    digest = hashlib.sha1(obs["ctx"].encode(), usedforsecurity=False).hexdigest()
+    return f"{obs['key']}~ctx:{digest[:10]}"
 
 
 def build_pool(observations: list[dict], cfg: PoolConfig, seed: int = 0) -> list[dict]:

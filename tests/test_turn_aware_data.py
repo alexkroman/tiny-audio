@@ -318,3 +318,69 @@ def test_with_context_modes():
     ]
     with pytest.raises(ValueError, match="context mode"):
         with_context(rows, "sometimes", meta)
+
+
+class TestContexts:
+    def _obs(self, n=200):
+        return [_obs(key=f"t{i}@1.0", agent_turn=f"Question {i % 20}?") for i in range(n)]
+
+    def test_own_question_when_no_distractors(self):
+        from scripts.turn_aware.data import assign_contexts
+
+        out = assign_contexts(self._obs(), PoolConfig(ctx_prob=1.0), seed=0)
+        assert all(o["ctx"] == o["agent_turn"] and not o["ctx_distractor"] for o in out)
+
+    def test_distractors_are_other_calls_questions_and_deterministic(self):
+        from scripts.turn_aware.data import assign_contexts
+
+        cfg = PoolConfig(ctx_prob=1.0, ctx_distractor_prob=1.0)
+        out = assign_contexts(self._obs(), cfg, seed=0)
+        assert all(o["ctx_distractor"] and o["ctx"] != o["agent_turn"] for o in out)
+        assert {o["ctx"] for o in out} <= {f"Question {i}?" for i in range(20)}
+        assert out == assign_contexts(list(reversed(self._obs())), cfg, seed=0)
+
+    def test_no_question_means_no_context(self):
+        from scripts.turn_aware.data import assign_contexts
+
+        (o,) = assign_contexts(
+            [_obs(agent_turn="")], PoolConfig(ctx_prob=1.0, ctx_distractor_prob=1.0)
+        )
+        assert (o["ctx"], o["ctx_distractor"]) == ("", False)
+
+    def test_expand_uses_the_preassigned_context(self):
+        obs = {**_obs(), "ctx": "Can I get the claim number?"}
+        out = expand_observation(obs, PoolConfig(ctx_prob=0.0, nosil_prob=1.0), random.Random(0))
+        assert {e["ctx"] for e in out} == {"Can I get the claim number?"}
+
+    def test_transcript_key_separates_context_conditioned_transcripts(self):
+        from scripts.turn_aware.data import transcript_key
+
+        assert transcript_key({"key": "k", "ctx": ""}) == "k"
+        a = transcript_key({"key": "k", "ctx": "Q1?"})
+        assert a.startswith("k~ctx:")
+        assert a != transcript_key({"key": "k", "ctx": "Q2?"})
+
+
+def test_attach_targets_with_context_reads_context_keyed_cache(tmp_path):
+    import json
+
+    import pandas as pd
+
+    import scripts.turn_aware.cli as cli
+    from scripts.turn_aware.data import transcript_key
+
+    rows = [
+        {"key": "a", "turn_key": "t", "speech_end_s": 1.0, "ctx": "Q?"},
+        {"key": "b", "turn_key": "t", "speech_end_s": 1.0, "ctx": ""},
+    ]
+    cache = tmp_path / "transcripts-train.jsonl"
+    cache.write_text(
+        json.dumps({"key": transcript_key(rows[0]), "text": "with ctx"})
+        + "\n"
+        + json.dumps({"key": "b", "text": "plain"})
+        + "\n"
+    )
+    # Every key cached, so no model is loaded.
+    out = cli._attach_targets(pd.DataFrame(rows), None, "self", "x", cache, 1, with_ctx=True)
+    assert list(out["target"]) == ["with ctx", "plain"]
+    assert "tkey" not in out

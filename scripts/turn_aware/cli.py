@@ -20,11 +20,14 @@ app = typer.Typer(no_args_is_help=True, help="Turn-aware ASR on Qwen3-ASR (end-o
 console = Console()
 
 
-def _self_transcripts(obs, store, model_id: str, cache: Path, batch_size: int) -> dict[str, str]:
+def _self_transcripts(
+    obs, store, model_id: str, cache: Path, batch_size: int, key_col: str = "key", with_ctx=False
+) -> dict[str, str]:
     """Base-model transcripts of every trimmed prefix, cached as JSONL and resumable.
 
     Longest-first so each batch pads to similar lengths, and a crash costs at
-    most one batch.
+    most one batch. With `with_ctx`, each prefix is transcribed with its row's
+    `ctx` as the system prompt, cached under `key_col` (see transcript_key).
     """
     from rich.progress import track
 
@@ -33,7 +36,8 @@ def _self_transcripts(obs, store, model_id: str, cache: Path, batch_size: int) -
     from tiny_audio.turns import load_model, load_processor, transcribe
 
     done = read_cache(cache)
-    todo = obs[~obs["key"].isin(done)].sort_values("speech_end_s", ascending=False)
+    todo = obs[~obs[key_col].isin(done)].drop_duplicates(key_col)
+    todo = todo.sort_values("speech_end_s", ascending=False)
     if todo.empty:
         return done
 
@@ -49,15 +53,17 @@ def _self_transcripts(obs, store, model_id: str, cache: Path, batch_size: int) -
                 assemble_audio(store.get(r["turn_key"]), {**r, "lead_s": 0.0, "tail_s": 0.0})
                 for r in chunk
             ]
-            for rec, decoded in zip(chunk, transcribe(model, processor, audios), strict=True):
-                done[rec["key"]] = decoded.text
-                fh.write(json.dumps({"key": rec["key"], "text": decoded.text}) + "\n")
+            contexts = [r["ctx"] for r in chunk] if with_ctx else None
+            decoded_batch = transcribe(model, processor, audios, contexts)
+            for rec, decoded in zip(chunk, decoded_batch, strict=True):
+                done[rec[key_col]] = decoded.text
+                fh.write(json.dumps({"key": rec[key_col], "text": decoded.text}) + "\n")
             fh.flush()
     return done
 
 
-def _prepare_observations(obs, store, target_text, model, cache, batch_size):
-    """Add speech_end_s, agent_turn and target to observation rows (a DataFrame).
+def _trim_observations(obs, store):
+    """Add speech_end_s and agent_turn to observation rows (a DataFrame).
 
     The cut instant is pulled back to the last speech frame, so every example's
     silence is exactly the silence build_pool adds. Rows with no speech left
@@ -72,13 +78,27 @@ def _prepare_observations(obs, store, target_text, model, cache, batch_size):
         for k, at_s in zip(obs["turn_key"], obs["at_s"], strict=True)
     ]
     obs["agent_turn"] = [store.meta[k]["agent_turn"] for k in obs["turn_key"]]
-    obs = obs[obs["speech_end_s"] > 0]
-    if target_text == "self":
-        texts = _self_transcripts(obs, store, model, cache, batch_size)
-        obs["target"] = [texts[k] for k in obs["key"]]
-    else:
+    return obs[obs["speech_end_s"] > 0]
+
+
+def _attach_targets(obs, store, target_text, model, cache, batch_size, with_ctx=False):
+    """Set `target`: the base model's transcript (optionally with each row's ctx) or `text`."""
+    from scripts.turn_aware.data import transcript_key
+
+    obs = obs.copy()
+    if target_text != "self":
         obs["target"] = obs["text"].fillna("")
-    return obs
+        return obs
+    obs["tkey"] = [transcript_key(r) for r in obs.to_dict("records")] if with_ctx else obs["key"]
+    texts = _self_transcripts(obs, store, model, cache, batch_size, "tkey", with_ctx)
+    obs["target"] = [texts[k] for k in obs["tkey"]]
+    return obs.drop(columns=["tkey"])
+
+
+def _prepare_observations(obs, store, target_text, model, cache, batch_size):
+    """_trim_observations then _attach_targets without context (mine-pauses)."""
+    obs = _trim_observations(obs, store)
+    return _attach_targets(obs, store, target_text, model, cache, batch_size)
 
 
 def _load_extra(source: str, split: str):
@@ -136,11 +156,13 @@ def build_pool_cmd(
         pool_signature,
         write_signature,
     )
-    from scripts.turn_aware.data import TurnAudioStore, build_pool, load_split
+    from scripts.turn_aware.data import TurnAudioStore, assign_contexts, build_pool, load_split
 
     cfg = load_config(overrides)
     if cfg.pool.target_text not in ("self", "dataset"):
         raise typer.BadParameter("pool.target_text must be 'self' or 'dataset'")
+    if cfg.pool.target_with_context and cfg.pool.target_text != "self":
+        raise typer.BadParameter("pool.target_with_context needs pool.target_text=self")
     output_dir = Path(cfg.data.pool_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = Path(cfg.pool.transcript_cache or output_dir)
@@ -164,14 +186,10 @@ def build_pool_cmd(
             pulled = transcripts.pull(repo, split, cache, model)
             console.print(f"pulled {pulled} new transcripts for {split} from {repo}")
         before = len(transcripts.read_cache(cache))
-        obs = _prepare_observations(obs, store, cfg.pool.target_text, model, cache, batch_size)
-        added = len(transcripts.read_cache(cache)) - before
-        if repo and added:
-            try:  # a backup, never a reason to fail the build (e.g. read-only token)
-                transcripts.push(repo, split, cache, model)
-                console.print(f"pushed {split} transcripts (+{added}) to {repo}")
-            except Exception as exc:
-                console.print(f"[yellow]transcript push to {repo} failed ({exc}); continuing")
+        obs = _trim_observations(obs, store)
+        with_ctx = bool(cfg.pool.target_with_context)
+        if not with_ctx:  # extras below keep the targets they were prepared with
+            obs = _attach_targets(obs, store, cfg.pool.target_text, model, cache, batch_size)
         if cfg.pool.extra:
             more = _load_extra(cfg.pool.extra, split)
             if cfg.pool.extra_labels:
@@ -185,6 +203,17 @@ def build_pool_cmd(
                 more = more.sample(frac=frac, random_state=cfg.pool.seed)
             obs = pd.concat([obs, more[more["turn_key"].isin(store.meta)]], ignore_index=True)
             console.print(f"merged {len(more)} extra observations from {cfg.pool.extra}")
+        if with_ctx or config.ctx_distractor_prob > 0:
+            obs = pd.DataFrame(assign_contexts(obs.to_dict("records"), config, cfg.pool.seed))
+        if with_ctx:  # every row, extras included, transcribed with the context it shows
+            obs = _attach_targets(obs, store, "self", model, cache, batch_size, with_ctx=True)
+        added = len(transcripts.read_cache(cache)) - before
+        if repo and added:
+            try:  # a backup, never a reason to fail the build (e.g. read-only token)
+                transcripts.push(repo, split, cache, model)
+                console.print(f"pushed {split} transcripts (+{added}) to {repo}")
+            except Exception as exc:
+                console.print(f"[yellow]transcript push to {repo} failed ({exc}); continuing")
 
         pool = pd.DataFrame(build_pool(obs.to_dict("records"), config, seed=cfg.pool.seed))
         path = output_dir / f"{split}.parquet"

@@ -127,3 +127,13 @@ def test_only_v4_trains_with_context_on_every_example():
     assert pool_config(load_config(["+experiment=v4"])).ctx_prob == 1.0
     for preset in ("v1", "v2", "v3"):
         assert pool_config(load_config([f"+experiment={preset}"])).ctx_prob == 0.5
+
+
+def test_v4_borrows_distractor_context_and_context_matched_targets():
+    cfg = load_config(["+experiment=v4"])
+    assert pool_config(cfg).ctx_distractor_prob == 0.2
+    assert cfg.pool.target_with_context is True
+    for preset in ("v1", "v2", "v3", "eval"):
+        c = load_config([f"+experiment={preset}"])
+        assert pool_config(c).ctx_distractor_prob == 0.0
+        assert c.pool.target_with_context is False

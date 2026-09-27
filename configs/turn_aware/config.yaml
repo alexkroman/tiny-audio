@@ -61,6 +61,11 @@ pool:
   target_model: Qwen/Qwen3-ASR-0.6B-hf
   # self: target_model's own transcript; dataset: the observation's `text`.
   target_text: self
+  # Transcribe each observation WITH the context it will be shown (assigned
+  # up front), so targets never ask for the no-context transcript while
+  # context is visible -- context changes what the base model writes. Costs a
+  # second transcription pass, cached/mirrored under separate keys.
+  target_with_context: false
   # Mined mid-sentence pauses (`ta turn-aware mine-pauses`) merged as holds:
   # a Hub dataset or a local dir of {split}.parquet. null = none.
   extra: mazesmazes/turn-end-detection-mined-pauses
@@ -85,6 +90,10 @@ pool:
   silence_only_frac: 0.02
   silence_only_s: [0.5, 4.0]
   ctx_prob: 0.5
+  # Share of context-bearing examples shown ANOTHER call's agent question,
+  # label unchanged, so the model checks the question against the words
+  # instead of copying it (a borrowed idea: distractor profiles for spelling).
+  ctx_distractor_prob: 0.0
   max_audio_s: 30.0
   # Silenced copies per label-0 observation, by kind (unlisted kinds: 1).
   # Add a kind with a leading +: `+pool.hold_copies.trailing_frag=2`.
