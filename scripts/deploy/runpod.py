@@ -1216,6 +1216,7 @@ def build_turn_aware_eval_script(
     max_samples: int,
     batch_size: int,
     pool_batch_size: int = TURN_AWARE_POOL_BATCH_SIZE,
+    context: str = "pool",
 ) -> str:
     """Build the recipe-neutral `+experiment=eval` pool for `split`, then score `model` on it.
 
@@ -1226,7 +1227,8 @@ def build_turn_aware_eval_script(
     """
     overrides = ["+experiment=eval"]
     model_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", model.strip("/"))
-    out_dir = shlex.quote(f"/workspace/outputs/turn_aware/eval/{model_slug}_{split}")
+    suffix = "" if context == "pool" else f"_ctx-{context}"
+    out_dir = shlex.quote(f"/workspace/outputs/turn_aware/eval/{model_slug}_{split}{suffix}")
     exports = (
         "export TOKENIZERS_PARALLELISM=false\n"
         'export HF_DATASETS_AUDIO_DECODER="soundfile"\n'
@@ -1234,7 +1236,8 @@ def build_turn_aware_eval_script(
     )
     evaluate = (
         f"python -m scripts.cli turn-aware evaluate -m {shlex.quote(model)} {overrides[0]} "
-        f"--split {split} -n {max_samples} --batch-size {batch_size} -o {out_dir}"
+        f"--split {split} -n {max_samples} --batch-size {batch_size} --context {context} "
+        f"-o {out_dir}"
     )
     return _turn_aware_script(
         hf_token, exports, [split], overrides, pool_batch_size, evaluate, "Turn-aware evaluation"
@@ -1310,6 +1313,12 @@ def eval_turn_aware(
     pool_batch_size: Annotated[
         int, typer.Option("--pool-batch-size", help=POOL_BATCH_HELP)
     ] = TURN_AWARE_POOL_BATCH_SIZE,
+    context: Annotated[
+        str,
+        typer.Option(
+            "--context", help="Agent question as context: 'pool' (manifest mix), 'always', 'never'"
+        ),
+    ] = "pool",
     session_name: Annotated[
         str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
     ] = None,
@@ -1337,7 +1346,7 @@ def eval_turn_aware(
         port,
         session_name,
         build_turn_aware_eval_script(
-            hf_token, model, split, max_samples, batch_size, pool_batch_size
+            hf_token, model, split, max_samples, batch_size, pool_batch_size, context
         ),
         f"/tmp/eval_{session_name}.sh",
         no_attach,

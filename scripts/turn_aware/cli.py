@@ -512,6 +512,13 @@ def evaluate_cmd(
             "--output-dir", "-o", help="Write metrics.json + per-row predictions.parquet here"
         ),
     ] = None,
+    context: Annotated[
+        str,
+        typer.Option(
+            "--context",
+            help="Agent question as context: 'pool' (manifest's own mix), 'always', or 'never'",
+        ),
+    ] = "pool",
 ):
     """Score end-of-turn firing (P/R/F1, per kind) and transcript drift on a manifest.
 
@@ -532,15 +539,19 @@ def evaluate_cmd(
         predict_rows,
         stratified_subset,
         threshold_sweep,
+        with_context,
     )
     from tiny_audio.turns import load_model, load_processor
 
+    if context not in ("pool", "always", "never"):
+        raise typer.BadParameter("must be pool, always or never", param_hint="--context")
     cfg = load_config(overrides or ["+experiment=eval"])
     manifest = Path(cfg.data.pool_dir) / f"{split}.parquet"
     rows = stratified_subset(pd.read_parquet(manifest).to_dict("records"), max_samples)
     processor = load_processor(model)
     net = load_model(model).eval()
     store = TurnAudioStore(split, cfg.data.dataset_id)
+    rows = with_context(rows, context, store.meta)
     preds = predict_rows(net, processor, rows, store, batch_size, progress=True)
     fired = [p.fired for p in preds]
     margins = [p.margin for p in preds]

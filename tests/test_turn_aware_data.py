@@ -295,3 +295,26 @@ def test_find_intra_pauses_skips_edges_short_gaps_and_boundaries():
         pytest.approx(1.5, abs=0.03),
         pytest.approx(3.7, abs=0.03),
     ]
+
+
+def test_with_context_modes():
+    from scripts.turn_aware.data import with_context
+
+    rows = [
+        {"turn_key": "t1", "ctx": ""},
+        {"turn_key": "t2", "ctx": "Can I get your number?"},
+        {"turn_key": "", "ctx": ""},  # silence-only row
+    ]
+    meta = {
+        "t1": {"agent_turn": "Did that fix it?"},
+        "t2": {"agent_turn": "Can I get your number?"},
+    }
+    assert with_context(rows, "pool", meta) is rows
+    assert [r["ctx"] for r in with_context(rows, "never", meta)] == ["", "", ""]
+    assert [r["ctx"] for r in with_context(rows, "always", meta)] == [
+        "Did that fix it?",
+        "Can I get your number?",
+        "",
+    ]
+    with pytest.raises(ValueError, match="context mode"):
+        with_context(rows, "sometimes", meta)

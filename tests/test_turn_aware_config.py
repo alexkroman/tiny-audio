@@ -46,6 +46,14 @@ MINED = "mazesmazes/turn-end-detection-mined-pauses"
             MINED,
             "mazesmazes/tiny-audio-turn-aware-qwen3-asr-v3",
         ),
+        (
+            "v4",
+            "data/turn_aware_v4",
+            3,
+            True,
+            MINED,
+            "mazesmazes/tiny-audio-turn-aware-qwen3-asr-v4",
+        ),
     ],
 )
 def test_presets_resolve_to_their_recipe(preset, pool_dir, copies, strip, extra, hub):
@@ -109,7 +117,13 @@ def test_transcript_cache_location_is_not_part_of_the_signature():
 
 
 def test_v3_and_eval_filter_mined_pauses_by_label():
-    for preset in ("v3", "eval"):
+    for preset in ("v3", "v4", "eval"):
         assert list(load_config([f"+experiment={preset}"]).pool.extra_labels) == ["incomplete"]
     for preset in ("v1", "v2a", "v2"):
         assert load_config([f"+experiment={preset}"]).pool.extra_labels is None
+
+
+def test_only_v4_trains_with_context_on_every_example():
+    assert pool_config(load_config(["+experiment=v4"])).ctx_prob == 1.0
+    for preset in ("v1", "v2", "v3"):
+        assert pool_config(load_config([f"+experiment={preset}"])).ctx_prob == 0.5

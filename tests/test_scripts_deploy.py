@@ -346,3 +346,14 @@ class TestBuildTurnAwareEvalScript:
         v2 = self._script(model="outputs/turn_aware/v2/final", split="validation")
         assert "-o /workspace/outputs/turn_aware/eval/outputs_turn_aware_v1_final_validation" in v1
         assert "-o /workspace/outputs/turn_aware/eval/outputs_turn_aware_v2_final_validation" in v2
+
+
+def test_turn_aware_eval_script_passes_context_mode_and_separates_outputs():
+    from scripts.deploy.runpod import build_turn_aware_eval_script
+
+    script = build_turn_aware_eval_script("t", "mazesmazes/m-v4", "test", 0, 64, context="always")
+    assert "--context always" in script
+    assert "eval/mazesmazes_m-v4_test_ctx-always" in script
+    default = build_turn_aware_eval_script("t", "mazesmazes/m-v4", "test", 0, 64)
+    assert "--context pool" in default
+    assert "eval/mazesmazes_m-v4_test_ctx" not in default

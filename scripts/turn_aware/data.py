@@ -367,6 +367,33 @@ class TurnAwareDataset(torch.utils.data.Dataset):
         return {"audio": audio, "ctx": row["ctx"], "target": target_text(row)}
 
 
+CONTEXT_MODES = ("pool", "always", "never")
+
+
+def with_context(rows: list[dict], mode: str, agent_turns: dict[str, dict]) -> list[dict]:
+    """Rows with `ctx` set per `mode`: the manifest's own mix, always the agent's question, or none.
+
+    `agent_turns` is TurnAudioStore.meta (turn_key -> {"agent_turn": ...}). A
+    model trained with the question on every example (v4) should be scored
+    with it on every example, and one trained without it without.
+    """
+    if mode not in CONTEXT_MODES:
+        raise ValueError(f"context mode must be one of {CONTEXT_MODES}, got {mode!r}")
+    if mode == "pool":
+        return rows
+    if mode == "never":
+        return [{**r, "ctx": ""} for r in rows]
+    return [
+        {
+            **r,
+            "ctx": (
+                agent_turns.get(r["turn_key"], {}).get("agent_turn", "") if r["turn_key"] else ""
+            ),
+        }
+        for r in rows
+    ]
+
+
 def predict_rows(model, processor, rows, store, batch_size: int, progress: bool = False):
     """Greedy-decode manifest rows; one `Decoded(text, fired, margin)` per row, in row order.
 
