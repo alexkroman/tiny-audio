@@ -70,6 +70,10 @@ pool:
   # transcripts-{split}.jsonl shared by every pool (keyed by observation, so
   # only valid for one target_model). v1's pool dir already holds ~80k.
   transcript_cache: data/turn_aware
+  # Private Hub mirror of that cache (`ta turn-aware push-transcripts`).
+  # build-pool pulls it before transcribing and pushes what it adds, so a
+  # fresh pod never repeats the ~1 h transcription pass. null = local only.
+  transcript_repo: mazesmazes/turn-end-detection-transcripts
   seed: 0
   fire_tail_s: [0.3, 1.2]
   hold_tail_s: [0.3, 2.0]

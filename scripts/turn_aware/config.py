@@ -50,7 +50,7 @@ def pool_config(cfg: DictConfig) -> PoolConfig:
 
 
 # Settings that change WHERE things are read from, not what the pool holds.
-_NOT_IN_SIGNATURE = ("transcript_cache",)
+_NOT_IN_SIGNATURE = ("transcript_cache", "transcript_repo")
 
 
 def pool_signature(cfg: DictConfig, max_samples: int | None = None) -> dict:

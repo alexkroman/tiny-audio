@@ -103,8 +103,8 @@ def test_base_config_pool_matches_dataclass_defaults():
 
 
 def test_transcript_cache_location_is_not_part_of_the_signature():
-    a = pool_signature(load_config(["pool.transcript_cache=/tmp/a"]))
-    b = pool_signature(load_config(["pool.transcript_cache=/tmp/b"]))
+    a = pool_signature(load_config(["pool.transcript_cache=/tmp/a", "pool.transcript_repo=x/a"]))
+    b = pool_signature(load_config(["pool.transcript_cache=/tmp/b", "pool.transcript_repo=null"]))
     assert a == b
 
 

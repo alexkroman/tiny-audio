@@ -29,20 +29,10 @@ def _self_transcripts(obs, store, model_id: str, cache: Path, batch_size: int) -
     from rich.progress import track
 
     from scripts.turn_aware.data import assemble_audio
+    from scripts.turn_aware.transcripts import read_cache
     from tiny_audio.turns import load_model, load_processor, transcribe
 
-    done: dict[str, str] = {}
-    if cache.exists():
-        raw = cache.read_text()
-        for line in raw.splitlines():
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # a write cut off by a kill: that clip is simply redone
-            done[rec["key"]] = rec["text"]
-        if raw and not raw.endswith("\n"):
-            with cache.open("a") as fh:  # so the next record starts on its own line
-                fh.write("\n")
+    done = read_cache(cache)
     todo = obs[~obs["key"].isin(done)].sort_values("speech_end_s", ascending=False)
     if todo.empty:
         return done
@@ -138,6 +128,7 @@ def build_pool_cmd(
     """
     import pandas as pd
 
+    from scripts.turn_aware import transcripts
     from scripts.turn_aware.config import (
         load_config,
         pool_config,
@@ -168,9 +159,19 @@ def build_pool_cmd(
             obs = obs.sample(n=max_samples, random_state=cfg.pool.seed)
         store = TurnAudioStore(split, cfg.data.dataset_id)
         cache = cache_dir / f"transcripts-{split}.jsonl"
-        obs = _prepare_observations(
-            obs, store, cfg.pool.target_text, cfg.pool.target_model, cache, batch_size
-        )
+        repo, model = cfg.pool.transcript_repo, cfg.pool.target_model
+        if repo and cfg.pool.target_text == "self":
+            pulled = transcripts.pull(repo, split, cache, model)
+            console.print(f"pulled {pulled} new transcripts for {split} from {repo}")
+        before = len(transcripts.read_cache(cache))
+        obs = _prepare_observations(obs, store, cfg.pool.target_text, model, cache, batch_size)
+        added = len(transcripts.read_cache(cache)) - before
+        if repo and added:
+            try:  # a backup, never a reason to fail the build (e.g. read-only token)
+                transcripts.push(repo, split, cache, model)
+                console.print(f"pushed {split} transcripts (+{added}) to {repo}")
+            except Exception as exc:
+                console.print(f"[yellow]transcript push to {repo} failed ({exc}); continuing")
         if cfg.pool.extra:
             more = _load_extra(cfg.pool.extra, split)
             if cfg.pool.extra_labels:
@@ -193,6 +194,50 @@ def build_pool_cmd(
             f"[green]{split}[/]: {len(obs)} observations -> {len(pool)} examples -> {path}"
         )
         console.print(pool["schema"].value_counts().to_string())
+
+
+@app.command("push-transcripts")
+def push_transcripts_cmd(
+    overrides: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="Hydra overrides (pool.transcript_cache / transcript_repo / target_model)"
+        ),
+    ] = None,
+    splits: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--split", help="Split(s) to push (default: every transcripts-*.jsonl present)"
+        ),
+    ] = None,
+):
+    """Back up the base-model transcript cache to pool.transcript_repo on the Hub.
+
+    Pulls first, so rows another machine pushed are kept rather than
+    overwritten. build-pool pulls this repo before transcribing, so a fresh
+    pod skips the ~1 h transcription pass entirely.
+    """
+    from scripts.turn_aware import transcripts
+    from scripts.turn_aware.config import load_config
+
+    cfg = load_config(overrides)
+    repo, model = cfg.pool.transcript_repo, cfg.pool.target_model
+    if not repo:
+        raise typer.BadParameter("pool.transcript_repo is not set")
+    cache_dir = Path(cfg.pool.transcript_cache)
+    found = sorted(
+        p.stem.removeprefix("transcripts-") for p in cache_dir.glob("transcripts-*.jsonl")
+    )
+    for split in splits or found:
+        cache = cache_dir / f"transcripts-{split}.jsonl"
+        if not cache.exists():
+            console.print(f"[yellow]{cache} missing; skipped")
+            continue
+        pulled = transcripts.pull(repo, split, cache, model)
+        n = transcripts.push(repo, split, cache, model)
+        console.print(
+            f"[green]{split}[/]: pushed {n} transcripts to {repo} ({pulled} merged from it first)"
+        )
 
 
 @app.command("mine-pauses")
