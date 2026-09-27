@@ -173,6 +173,13 @@ def build_pool_cmd(
         )
         if cfg.pool.extra:
             more = _load_extra(cfg.pool.extra, split)
+            if cfg.pool.extra_labels:
+                if "completeness" not in more:
+                    raise typer.BadParameter(
+                        f"pool.extra_labels is set but {cfg.pool.extra} has no `completeness` "
+                        "column; run `ta turn-aware label-pauses` first"
+                    )
+                more = more[more["completeness"].isin(list(cfg.pool.extra_labels))]
             if frac < 1.0:  # keep the extra rows in proportion to a smoke sample
                 more = more.sample(frac=frac, random_state=cfg.pool.seed)
             obs = pd.concat([obs, more[more["turn_key"].isin(store.meta)]], ignore_index=True)
@@ -276,6 +283,115 @@ def _print_columns(title: str, columns: dict[str, dict], metrics) -> None:
             *("-" if v is None else f"{v:.4f}" if isinstance(v, float) else str(v) for v in cells),
         )
     console.print(table)
+
+
+@app.command("label-pauses")
+def label_pauses_cmd(
+    pauses_dir: Annotated[
+        Path, typer.Option("--dir", help="mine-pauses output: {split}.parquet files")
+    ] = Path("data/turn_aware_pauses"),
+    splits: Annotated[
+        list[str] | None,
+        typer.Option("--split", help="Split(s) to label (default: train, validation, test)"),
+    ] = None,
+    pilot: Annotated[
+        int,
+        typer.Option(
+            "--pilot", help="Label N random rows with direct calls, print them, write nothing"
+        ),
+    ] = 0,
+    repo_id: Annotated[
+        str | None,
+        typer.Option("--repo-id", "-r", help="Push the labelled splits to this Hub dataset"),
+    ] = None,
+    poll_s: Annotated[int, typer.Option("--poll-s", help="Seconds between batch polls")] = 60,
+):
+    """Add a Claude `completeness` label (incomplete/complete/ambiguous) to mined pauses.
+
+    Runs one Message Batch (50% price, usually < 1 h). The batch id is saved in
+    <dir>/label_batch.json, so rerunning after an interruption resumes polling
+    instead of paying twice. Rows the batch failed on are retried directly.
+    Needs the `anthropic` package and credentials (ANTHROPIC_API_KEY).
+    """
+    import time
+
+    import anthropic
+    import pandas as pd
+    from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+    from anthropic.types.messages.batch_create_params import Request
+
+    from scripts.turn_aware.label import parse_label, request_params
+
+    client = anthropic.Anthropic()
+    splits = splits or ["train", "validation", "test"]
+    frames = {s: pd.read_parquet(pauses_dir / f"{s}.parquet") for s in splits}
+
+    if pilot:
+        sample = pd.concat(frames.values()).sample(n=pilot, random_state=0)
+        rows = []
+        for r in sample.itertuples():
+            msg = client.messages.create(**request_params(r.agent_turn, r.text))
+            rows.append(
+                {"label": parse_label(msg), "caller": r.text[-90:], "agent": r.agent_turn[:50]}
+            )
+        table = Table(title=f"pilot: {pilot} mined pauses")
+        for col in ("label", "caller so far (tail)", "agent asked"):
+            table.add_column(col)
+        for r in rows:
+            table.add_row(str(r["label"]), r["caller"], r["agent"])
+        console.print(table)
+        console.print(pd.Series([r["label"] for r in rows]).value_counts().to_string())
+        return
+
+    # custom_id must match ^[a-zA-Z0-9_-]{1,64}$, so rows are addressed by position.
+    state_path = pauses_dir / "label_batch.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    if state.get("splits") != splits:
+        requests = [
+            Request(
+                custom_id=f"{s}-{i}",
+                params=MessageCreateParamsNonStreaming(**request_params(r.agent_turn, r.text)),
+            )
+            for s, df in frames.items()
+            for i, r in enumerate(df.itertuples())
+        ]
+        batch = client.messages.batches.create(requests=requests)
+        state = {"batch_id": batch.id, "splits": splits}
+        state_path.write_text(json.dumps(state))
+        console.print(f"submitted batch {batch.id} with {len(requests)} requests")
+
+    while (
+        batch := client.messages.batches.retrieve(state["batch_id"])
+    ).processing_status != "ended":
+        c = batch.request_counts
+        console.print(
+            f"{batch.processing_status}: {c.succeeded} ok, {c.errored} err, {c.processing} left"
+        )
+        time.sleep(poll_s)
+
+    labels: dict[str, str | None] = {}
+    for result in client.messages.batches.results(state["batch_id"]):
+        ok = result.result.type == "succeeded"
+        labels[result.custom_id] = parse_label(result.result.message) if ok else None
+    for s, df in frames.items():
+        todo = [i for i in range(len(df)) if labels.get(f"{s}-{i}") is None]
+        for i in todo:  # batch failures / refusals / unparsable: retry directly
+            r = df.iloc[i]
+            labels[f"{s}-{i}"] = parse_label(
+                client.messages.create(**request_params(r.agent_turn, r.text))
+            )
+        df["completeness"] = [labels.get(f"{s}-{i}") or "unlabelled" for i in range(len(df))]
+        df.to_parquet(pauses_dir / f"{s}.parquet", index=False)
+        console.print(
+            f"[green]{s}[/] ({len(todo)} retried): {df['completeness'].value_counts().to_dict()}"
+        )
+        if repo_id:
+            from datasets import Dataset
+
+            Dataset.from_pandas(df, preserve_index=False).push_to_hub(
+                repo_id, split=s, private=True
+            )
+            console.print(f"pushed {s} to {repo_id}")
 
 
 @app.command("evaluate")

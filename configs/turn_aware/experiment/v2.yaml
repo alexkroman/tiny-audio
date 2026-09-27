@@ -5,7 +5,9 @@
 #   - 3x payload_cut / 2x word_cut holds, each with its own silence draw
 #   - final . ? ! stripped from hold targets (the base model closes 96-100%
 #     of truncated transcripts with one, so every hold looked finished)
-# Nothing to override here beyond identity: the base config IS v2.
+# Beyond identity, only pins what later presets changed in the base config.
+pool:
+  extra_labels: null
 data:
   pool_dir: data/turn_aware_v2
 training:

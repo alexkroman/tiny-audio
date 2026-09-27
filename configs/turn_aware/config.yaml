@@ -64,6 +64,9 @@ pool:
   # Mined mid-sentence pauses (`ta turn-aware mine-pauses`) merged as holds:
   # a Hub dataset or a local dir of {split}.parquet. null = none.
   extra: mazesmazes/turn-end-detection-mined-pauses
+  # Keep only extra rows whose `completeness` (`ta turn-aware label-pauses`)
+  # is one of these; null keeps every row (v2's behavior, before labels).
+  extra_labels: null
   # transcripts-{split}.jsonl shared by every pool (keyed by observation, so
   # only valid for one target_model). v1's pool dir already holds ~80k.
   transcript_cache: data/turn_aware
