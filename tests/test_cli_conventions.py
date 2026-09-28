@@ -79,6 +79,7 @@ def test_every_subcommand_is_reachable():
         "debug",
         "demo",
         "dev",
+        "turn-aware",
     }
 
 

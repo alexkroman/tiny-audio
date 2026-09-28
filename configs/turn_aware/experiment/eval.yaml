@@ -1,0 +1,17 @@
+# @package _global_
+# eval: a recipe-neutral pool for scoring ANY model (`ta runpod eval-turn-aware`
+# builds its split with this). One copy per hold so no kind is over-weighted,
+# targets verbatim so text_wer reads drift from the base, and the mined
+# mid-sentence pauses included so acc_kind/mid_sentence_pause is reported --
+# only those judged `incomplete` (label-pauses): the ~9% judged complete or
+# ambiguous are not holds, and scoring them as holds charged v2 with 40% of
+# its "false fires" for firing on finished sentences (58% of those rows).
+pool:
+  extra_labels: [incomplete]
+  hold_copies:
+    payload_cut: 1
+    word_cut: 1
+  strip_hold_punct: false
+data:
+  pool_dir: data/turn_aware_eval
+hub_model_id: null

@@ -281,3 +281,79 @@ class TestPackageImports:
 
         module = importlib.import_module(module_path)
         assert module is not None
+
+
+class TestBuildTurnAwareTrainScript:
+    def test_same_overrides_reach_build_pool_and_training(self):
+        from scripts.deploy.runpod import build_turn_aware_train_script
+
+        overrides = ["+experiment=v2", "training.per_device_train_batch_size=12"]
+        script = build_turn_aware_train_script("token", "abc123", "must", overrides)
+        joined = " ".join(overrides)
+        assert "python -m scripts.train " not in script
+        assert f"build-pool --split train --split validation --batch-size 128 {joined}" in script
+        assert f"&& python -m scripts.turn_aware.train {joined}" in script
+        # Same environment as every other training script.
+        assert 'WANDB_RUN_ID="abc123"' in script
+        assert "PYTORCH_CUDA_ALLOC_CONF" in script
+        assert "HF_DATASETS_CACHE=/workspace/datasets" in script
+        assert "EXIT_CODE=$?" in script
+
+    def test_pool_batch_size_is_passed_through(self):
+        from scripts.deploy.runpod import build_turn_aware_train_script
+
+        assert "--batch-size 64" in build_turn_aware_train_script("t", None, None, [], 64)
+
+
+def test_generic_training_script_has_no_turn_aware_logic():
+    from scripts.deploy.runpod import build_training_script
+
+    script = build_training_script("granite_qwen", "token", None, None, [])
+    assert "python -m scripts.train +experiments=granite_qwen" in script
+    assert "build-pool" not in script
+
+
+class TestBuildTurnAwareEvalScript:
+    def _script(self, **kw):
+        from scripts.deploy.runpod import build_turn_aware_eval_script
+
+        args = {
+            "hf_token": "token",
+            "model": "mazesmazes/tiny-audio-turn-aware-qwen3-asr",
+            "split": "test",
+            "max_samples": 0,
+            "batch_size": 64,
+            "pool_batch_size": 128,
+        }
+        return build_turn_aware_eval_script(**{**args, **kw})
+
+    def test_builds_eval_pool_then_evaluates(self):
+        script = self._script()
+        assert "turn-aware build-pool --split test --batch-size 128 +experiment=eval" in script
+        # evaluate resolves the same preset instead of being handed a pool dir.
+        assert (
+            "turn-aware evaluate -m mazesmazes/tiny-audio-turn-aware-qwen3-asr +experiment=eval "
+            "--split test -n 0 --batch-size 64" in script
+        )
+        assert (
+            "-o /workspace/outputs/turn_aware/eval/mazesmazes_tiny-audio-turn-aware-qwen3-asr_test"
+            in script
+        )
+        assert "HF_DATASETS_CACHE=/workspace/datasets" in script
+
+    def test_local_checkpoints_get_distinct_output_dirs(self):
+        v1 = self._script(model="outputs/turn_aware/v1/final/", split="validation")
+        v2 = self._script(model="outputs/turn_aware/v2/final", split="validation")
+        assert "-o /workspace/outputs/turn_aware/eval/outputs_turn_aware_v1_final_validation" in v1
+        assert "-o /workspace/outputs/turn_aware/eval/outputs_turn_aware_v2_final_validation" in v2
+
+
+def test_turn_aware_eval_script_passes_context_mode_and_separates_outputs():
+    from scripts.deploy.runpod import build_turn_aware_eval_script
+
+    script = build_turn_aware_eval_script("t", "mazesmazes/m-v4", "test", 0, 64, context="always")
+    assert "--context always" in script
+    assert "eval/mazesmazes_m-v4_test_ctx-always" in script
+    default = build_turn_aware_eval_script("t", "mazesmazes/m-v4", "test", 0, 64)
+    assert "--context pool" in default
+    assert "eval/mazesmazes_m-v4_test_ctx" not in default

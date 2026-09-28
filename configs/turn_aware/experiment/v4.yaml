@@ -1,0 +1,31 @@
+# @package _global_
+# v4: v3 with the agent's question on EVERY training example (ctx_prob 1.0).
+#
+# v3's remaining false fires are dominated by openers ("Yes.", "Yes, of
+# course.", "Good afternoon. This is Robert.") and complete-sounding entity
+# answers, whose turn status depends on what the agent asked: "Yes." ends the
+# turn after "Did that fix it?" but not after "Can I get your account
+# number?". The labels were decided with that question in mind, yet v1-v3
+# saw it on only a random half of examples, so the same "Yes." appeared as a
+# hold with no question present -- and context HURT at eval (v3 holds 0.984
+# without it, 0.959 with). v4 makes the question always present, in training
+# and at inference (`evaluate --context always`). Otherwise v3.
+#
+# Pool build note: target_with_context re-transcribes every observation with
+# its context -- about as long as the first pass on a fresh cache (~1 h on an
+# A100 at batch 128), mirrored to pool.transcript_repo like the rest.
+pool:
+  extra_labels: [incomplete]
+  ctx_prob: 1.0
+  # Borrowed from the reference recipe's context training:
+  # 20% of examples see another call's question (label unchanged) so the
+  # model cannot just copy the question -- 0.2 is a guess, not measured;
+  ctx_distractor_prob: 0.2
+  # and every target transcript is made WITH the context the example shows.
+  target_with_context: true
+data:
+  pool_dir: data/turn_aware_v4
+training:
+  output_dir: outputs/turn_aware/v4
+  run_name: turn-aware-qwen3-asr-0.6b-v4
+hub_model_id: mazesmazes/tiny-audio-turn-aware-qwen3-asr-v4

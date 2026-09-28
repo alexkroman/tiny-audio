@@ -1,0 +1,16 @@
+# @package _global_
+# v2: the base config's pool recipe, aimed at v1's false fires (mid-sentence
+# and just-before-the-requested-detail cutoffs):
+#   - ~13.6k mined mid-sentence pauses as holds (pool.extra)
+#   - 3x payload_cut / 2x word_cut holds, each with its own silence draw
+#   - final . ? ! stripped from hold targets (the base model closes 96-100%
+#     of truncated transcripts with one, so every hold looked finished)
+# Beyond identity, only pins what later presets changed in the base config.
+pool:
+  extra_labels: null
+data:
+  pool_dir: data/turn_aware_v2
+training:
+  output_dir: outputs/turn_aware/v2
+  run_name: turn-aware-qwen3-asr-0.6b-v2
+hub_model_id: mazesmazes/tiny-audio-turn-aware-qwen3-asr-v2
