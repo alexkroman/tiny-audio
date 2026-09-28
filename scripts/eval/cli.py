@@ -425,11 +425,21 @@ def main(
             "and downstream `ta analysis` matching (otherwise derived from --model).",
         ),
     ] = None,
+    run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--run-id",
+            help="Reuse an existing sweep's Run ID (from its metrics.txt) to finish "
+            "datasets a crashed or truncated sweep never reached, so `ta analysis` "
+            "groups the new results with the old ones. Must match that sweep's "
+            "--model and --max-samples.",
+        ),
+    ] = None,
 ):
     """Evaluate ASR models on standard datasets."""
     # One id for the whole sweep, written into every dataset's metrics.txt.
     # See save_results for why `ta analysis` needs it.
-    run_id = uuid.uuid4().hex[:12]
+    run_id = run_id or uuid.uuid4().hex[:12]
 
     # Built once, before the loop: model load / Swift build / API client setup
     # is per-model, not per-dataset. See _build_evaluator.
