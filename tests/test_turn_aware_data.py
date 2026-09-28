@@ -384,3 +384,19 @@ def test_attach_targets_with_context_reads_context_keyed_cache(tmp_path):
     out = cli._attach_targets(pd.DataFrame(rows), None, "self", "x", cache, 1, with_ctx=True)
     assert list(out["target"]) == ["with ctx", "plain"]
     assert "tkey" not in out
+
+
+def test_silence_ctx_gives_silence_examples_a_question_without_changing_other_draws():
+    obs = [_obs(key=f"t{i}@1.0", agent_turn=f"Q{i}?") for i in range(100)]
+    base = PoolConfig(ctx_prob=1.0, silence_only_frac=0.1)
+    off = build_pool(obs, base, seed=0)
+    on = build_pool(obs, PoolConfig(ctx_prob=1.0, silence_only_frac=0.1, silence_ctx=True), seed=0)
+    sil_off = [e for e in off if e["schema"] == "silence_only"]
+    sil_on = [e for e in on if e["schema"] == "silence_only"]
+    assert all(e["ctx"] == "" for e in sil_off)
+    assert all(e["ctx"].startswith("Q") for e in sil_on)
+
+    def strip(pool):
+        return [{**e, "ctx": ""} if e["schema"] == "silence_only" else e for e in pool]
+
+    assert strip(on) == strip(off)  # only the silence examples' context differs

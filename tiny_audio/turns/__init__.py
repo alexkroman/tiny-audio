@@ -26,7 +26,7 @@ from .model import (
     set_end_of_turn_threshold,
     transcribe,
 )
-from .streaming import first_fire_times, stream_fire_times, trailing_is_silent
+from .streaming import first_fire_times, speech_onset_s, stream_fire_times, trailing_is_silent
 
 __all__ = [
     "END_OF_TURN",
@@ -42,6 +42,7 @@ __all__ = [
     "pick_device",
     "register_end_of_turn",
     "set_end_of_turn_threshold",
+    "speech_onset_s",
     "stream_fire_times",
     "trailing_is_silent",
     "transcribe",

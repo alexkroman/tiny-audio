@@ -94,6 +94,8 @@ pool:
   # label unchanged, so the model checks the question against the words
   # instead of copying it (a borrowed idea: distractor profiles for spelling).
   ctx_distractor_prob: 0.0
+  # Silence-only examples get an agent question too (see PoolConfig).
+  silence_ctx: false
   max_audio_s: 30.0
   # Silenced copies per label-0 observation, by kind (unlisted kinds: 1).
   # Add a kind with a leading +: `+pool.hold_copies.trailing_frag=2`.

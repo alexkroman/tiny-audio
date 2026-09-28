@@ -99,3 +99,17 @@ def test_register_end_of_turn_reports_whether_token_was_new():
     assert register_end_of_turn(processor) is True
     assert END_OF_TURN in processor.tokenizer.vocab
     assert register_end_of_turn(processor) is False  # a turn-aware checkpoint already has it
+
+
+def test_speech_onset():
+    from tiny_audio.turns import speech_onset_s
+
+    rng = np.random.default_rng(0)
+    audio = np.concatenate(
+        [
+            np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32),
+            (0.1 * rng.standard_normal(SAMPLE_RATE)).astype(np.float32),
+        ]
+    )
+    assert speech_onset_s(audio) == pytest.approx(0.5, abs=0.02)
+    assert speech_onset_s(np.zeros(SAMPLE_RATE, dtype=np.float32)) is None

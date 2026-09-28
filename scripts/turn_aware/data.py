@@ -166,6 +166,11 @@ class PoolConfig:
     # question against the words rather than copy it. Needs contexts assigned
     # up front (`assign_contexts`); 0 keeps the original per-example draw.
     ctx_distractor_prob: float = 0.0
+    # Give silence-only examples an agent question too (with prob ctx_prob).
+    # v4 had context on every SPEECH example and never on silence, so it
+    # learned "context present => write something": on pure silence it wrote
+    # the question itself and fired. With this, context + silence => "".
+    silence_ctx: bool = False
     max_audio_s: float = 30.0
     # Silenced copies per label-0 observation, by kind (default 1). Each copy
     # draws its own tail. The costly holds -- cut just before the requested
@@ -283,11 +288,16 @@ def build_pool(observations: list[dict], cfg: PoolConfig, seed: int = 0) -> list
         for ex in expand_observation(obs, cfg, rng):
             if ex["lead_s"] + ex["speech_end_s"] + ex["tail_s"] <= cfg.max_audio_s:
                 pool.append(ex)
+    questions = sorted({o.get("agent_turn") or "" for o in observations} - {""})
+    ctx_rng = random.Random(f"silence-ctx-{seed}")  # separate stream: v1-v4 draws unchanged
     for i in range(round(cfg.silence_only_frac * len(pool))):
         stub = {"key": f"silence_{seed}_{i}", "turn_key": "", "kind": "silence_only"}
         stub |= {"speech_end_s": 0.0, "target": ""}
         tail = rng.uniform(*cfg.silence_only_s)
-        pool.append(_example(stub, "silence_only", tail, False, 0.0, ""))
+        ctx = ""
+        if cfg.silence_ctx and questions and ctx_rng.random() < cfg.ctx_prob:
+            ctx = ctx_rng.choice(questions)
+        pool.append(_example(stub, "silence_only", tail, False, 0.0, ctx))
     rng.shuffle(pool)
     return pool
 

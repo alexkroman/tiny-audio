@@ -23,6 +23,20 @@ def trailing_is_silent(
     return len(tail) > 0 and float(np.sqrt(np.mean(tail**2))) < threshold
 
 
+def speech_onset_s(
+    audio: np.ndarray, sample_rate: int = SAMPLE_RATE, threshold: float = SILENCE_RMS
+) -> float | None:
+    """Start of the first 20 ms frame above `threshold` RMS (None if all silent)."""
+    n = int(0.02 * sample_rate)
+    frames = len(audio) // n
+    if frames == 0:
+        return None
+    loud = np.flatnonzero(
+        np.sqrt(np.mean(audio[: frames * n].reshape(frames, n) ** 2, axis=1)) > threshold
+    )
+    return float(loud[0] * n / sample_rate) if len(loud) else None
+
+
 def first_fire_times(
     times: Sequence[float], margins: Sequence[float], taus: Sequence[float]
 ) -> dict[float, float | None]:
@@ -56,11 +70,19 @@ def stream_fire_times(
     `gate_s` energy gate skips decodes that could not fire anyway (a fire needs
     observed silence), which keeps replay affordable. One pass serves every
     tau: decoding stops once the largest tau has fired, and every smaller tau
-    fired at or before that window. Pad `audio` with trailing zeros to give the
+    fired at or before that window. No window is decoded before speech onset. Pad `audio` with trailing zeros to give the
     speaker's last words a chance to be endpointed.
     """
+    # Nothing to endpoint before anyone has spoken -- and a model trained with
+    # context on every speech example (v4) answers context + pure silence by
+    # writing the question itself and firing. Windows start after speech onset.
+    onset = speech_onset_s(audio)
+    if onset is None:
+        return dict.fromkeys(taus)
     times = np.arange(hop_s, len(audio) / SAMPLE_RATE + 1e-6, hop_s)
-    candidates = [t for t in times if trailing_is_silent(audio[: int(t * SAMPLE_RATE)], gate_s)]
+    candidates = [
+        t for t in times if t > onset and trailing_is_silent(audio[: int(t * SAMPLE_RATE)], gate_s)
+    ]
     seen_t: list[float] = []
     seen_m: list[float] = []
     for i in range(0, len(candidates), batch_size):
