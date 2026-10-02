@@ -1174,13 +1174,14 @@ def _turn_aware_script(
     pool_batch_size: int,
     then: str,
     label: str,
+    recipe: str = "turn-aware",
 ) -> str:
-    """Preamble, build-pool for `splits`, then `then` (a command line), epilogue."""
+    """Preamble, `ta <recipe> build-pool` for `splits`, then `then` (a command line), epilogue."""
     quoted = " ".join(shlex.quote(o) for o in overrides)
     split_args = " ".join(f"--split {s}" for s in splits)
     body = f"""
 cd /workspace
-python -m scripts.cli turn-aware build-pool {split_args} --batch-size {pool_batch_size} {quoted} \\
+python -m scripts.cli {recipe} build-pool {split_args} --batch-size {pool_batch_size} {quoted} \\
     && {then}"""
     return (
         _script_preamble(hf_token, extras=exports)
@@ -1349,6 +1350,87 @@ def eval_turn_aware(
             hf_token, model, split, max_samples, batch_size, pool_batch_size, context
         ),
         f"/tmp/eval_{session_name}.sh",
+        no_attach,
+    )
+
+
+# ---------------------------------------------------------- speaker-asr recipe
+#
+# Same shape as turn-aware (configs/speaker_asr/, scripts/speaker_asr/):
+# build-pool self-transcribes every AMI utterance used in a window, then
+# training runs with the same overrides.
+
+
+def build_speaker_asr_train_script(
+    hf_token: str,
+    wandb_run_id: str | None,
+    wandb_resume: str | None,
+    overrides: list[str],
+    pool_batch_size: int = TURN_AWARE_POOL_BATCH_SIZE,
+) -> str:
+    """build-pool (train + validation) then `scripts.speaker_asr.train`, same overrides."""
+    quoted = " ".join(shlex.quote(o) for o in overrides)
+    return _turn_aware_script(
+        hf_token,
+        _training_exports(wandb_run_id, wandb_resume),
+        ["train", "validation"],
+        overrides,
+        pool_batch_size,
+        f"python -m scripts.speaker_asr.train {quoted}",
+        "Speaker-ASR training",
+        recipe="speaker-asr",
+    )
+
+
+@app.command("train-speaker-asr")
+def train_speaker_asr(
+    host: HostArg,
+    port: PortArg,
+    session_name: Annotated[
+        str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
+    ] = None,
+    no_attach: Annotated[bool, typer.Option("--no-attach", help=NO_ATTACH_HELP)] = False,
+    force: Annotated[bool, typer.Option("--force", "-f", help=FORCE_HELP)] = False,
+    pool_batch_size: Annotated[
+        int, typer.Option("--pool-batch-size", help=POOL_BATCH_HELP)
+    ] = TURN_AWARE_POOL_BATCH_SIZE,
+    wandb_run_id: Annotated[
+        str | None,
+        typer.Option("--wandb-run-id", envvar="WANDB_RUN_ID", help="W&B run ID to resume"),
+    ] = None,
+    wandb_resume: Annotated[
+        str | None,
+        typer.Option(
+            "--wandb-resume", envvar="WANDB_RESUME", help="W&B resume mode: must, allow, or never"
+        ),
+    ] = None,
+    hf_token: Annotated[
+        str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
+    ] = "",
+    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
+):
+    """Build the AMI window pool and train the speaker-ASR recipe, e.g. `+experiment=v1`.
+
+    Needs ~40 GB on /workspace (AMI ihm train + validation parquet and arrow,
+    the model, LoRA checkpoints); the disk planner only sizes configs/experiments/.
+    """
+    conn = connect(host, port)
+    overrides = list(overrides or [])
+    session_name = _prepare_session(
+        conn, session_name or _auto_session_name("train_speaker_asr"), force, hf_token
+    )
+    print(f"\nStarting speaker-ASR training session '{session_name}'...")
+    if overrides:
+        print(f"Hydra overrides: {' '.join(overrides)}")
+    _start_remote_tmux_script(
+        conn,
+        host,
+        port,
+        session_name,
+        build_speaker_asr_train_script(
+            hf_token, wandb_run_id, wandb_resume, overrides, pool_batch_size
+        ),
+        f"/tmp/train_{session_name}.sh",
         no_attach,
     )
 

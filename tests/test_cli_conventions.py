@@ -80,6 +80,7 @@ def test_every_subcommand_is_reachable():
         "demo",
         "dev",
         "turn-aware",
+        "speaker-asr",
     }
 
 
