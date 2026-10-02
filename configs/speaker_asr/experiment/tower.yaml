@@ -1,0 +1,15 @@
+# @package _global_
+# tower: v1 plus LoRA on the audio tower's attention (18 layers, q/k/v/out_proj).
+# Tests whether the frozen ASR encoder already carries enough speaker identity
+# for the decoder to tell voices apart, or whether it has to be adapted.
+# Compare cpwer_3spk / cpwer_4spk against v1: that is where identity matters.
+model:
+  lora_target_modules: (.*language_model.*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj))|(.*audio_tower\.layers.*\.(q_proj|k_proj|v_proj|out_proj))
+pool:
+  hub_repo: mazesmazes/speaker-asr-pool
+data:
+  pool_dir: data/speaker_asr
+training:
+  output_dir: outputs/speaker_asr/tower
+  run_name: speaker-asr-qwen3-asr-0.6b-tower
+hub_model_id: mazesmazes/tiny-audio-speaker-asr-qwen3-asr-tower

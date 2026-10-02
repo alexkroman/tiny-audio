@@ -27,6 +27,7 @@ from scripts.eval.evaluators import (
     Evaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
+    SpeakerASREvaluator,
     SwiftSDKEvaluator,
 )
 
@@ -36,9 +37,11 @@ console = Console()
 
 # `--datasets` choices, built from the registry so Click validates them and the
 # help text lists them. "all" expands to every ASR dataset (expresso is
-# TTS-style, opt in by name).
+# TTS-style, ami-speakers a speaker-attribution set; opt in by name).
 Dataset = StrEnum("Dataset", {name: name for name in ("all", *DATASET_REGISTRY)})
-ALL_DATASETS = [name for name in DATASET_REGISTRY if name != "expresso"]
+ALL_DATASETS = [
+    name for name in DATASET_REGISTRY if name != "expresso" and not DATASET_REGISTRY[name].speakers
+]
 
 
 def get_model_name(model_path: str) -> str:
@@ -170,6 +173,12 @@ def print_asr_metrics(dataset_name: str, metrics: dict):
     table.add_column("Value", style="green")
 
     table.add_row("WER", f"{metrics['wer']:.2f}%")
+    if "cpwer" in metrics:
+        table.add_row("cpWER", f"{metrics['cpwer']:.2f}%")
+        table.add_row("Attribution gap", f"{metrics['attribution_gap']:.2f}%")
+        table.add_row("Speaker count acc", f"{metrics['speaker_count_acc']:.3f}")
+        for key in sorted(k for k in metrics if k.startswith("cpwer_")):
+            table.add_row(f"cpWER ({key.removeprefix('cpwer_')})", f"{metrics[key]:.2f}%")
     table.add_row("Samples", str(metrics["num_samples"]))
     table.add_row("Avg Time", f"{metrics['avg_time']:.2f}s")
 
@@ -194,6 +203,22 @@ def expand_datasets(datasets: list[str]) -> list[str]:
 # --model values that dispatch to a non-PyTorch backend (hosted API, Swift
 # binary, on-device Apple recognizer) rather than loading an ASRModel here.
 _NON_LOCAL_MODELS = frozenset({"assemblyai", "deepgram", "elevenlabs", "apple-speech", "swift"})
+
+
+def _is_qwen3_asr(model: str) -> bool:
+    """True for a Qwen3-ASR checkpoint (base or `ta speaker-asr` trained), not an ASRModel.
+
+    Reads config.json alone (no remote code): Qwen3-ASR is a stock
+    transformers architecture, while ASRModel checkpoints declare their own
+    model_type through auto_map.
+    """
+    try:
+        from transformers import PretrainedConfig
+
+        config, _ = PretrainedConfig.get_config_dict(model)
+    except Exception:  # not a transformers checkpoint, or no config to read
+        return False
+    return config.get("model_type") == "qwen3_asr"
 
 
 def _build_evaluator(
@@ -231,7 +256,12 @@ def _build_evaluator(
     # no-op would be the worse failure: --local-code exists to make a working
     # tree edit visible in the WER, and ignoring it on a backend that has no
     # local code at all would read as "my change did nothing".
-    if local_code and (endpoint or model in _NON_LOCAL_MODELS or model.startswith("swift://")):
+    if local_code and (
+        endpoint
+        or model in _NON_LOCAL_MODELS
+        or model.startswith("swift://")
+        or _is_qwen3_asr(model)
+    ):
         raise typer.BadParameter(
             f"--local-code has no meaning for --model {model!r}: it swaps the "
             "modeling code bundled with a checkpoint for this checkout's, and "
@@ -315,6 +345,14 @@ def _build_evaluator(
         evaluator = EndpointEvaluator(
             endpoint_url=model,
         )
+    elif _is_qwen3_asr(model):
+        if streaming:
+            raise typer.BadParameter(
+                "Qwen3-ASR checkpoints (base or speaker-ASR) are evaluated offline: "
+                "drop --streaming."
+            )
+        model_id = get_model_name(model)
+        evaluator = SpeakerASREvaluator(model_path=model)
     elif streaming:
         model_id = get_model_name(model)
         evaluator = LocalStreamingEvaluator(
@@ -469,6 +507,7 @@ def main(
             max_samples,
             audio_field=cfg.audio_field,
             text_field=cfg.text_field,
+            speakers=cfg.speakers,
         )
         metrics = evaluator.compute_metrics()
         save_results(

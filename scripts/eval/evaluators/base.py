@@ -61,6 +61,18 @@ class EvalResult:
     )
 
 
+def _scoring_text(text: str) -> str:
+    """Text WER is computed on: speaker tokens (`<SPK_n>`) dropped, if present.
+
+    Speaker-labelled references (`ami-speakers`) are scored for words here and
+    for attribution by cpWER in `compute_metrics`; a system that emits no
+    speaker tokens is scored on the same words.
+    """
+    from scripts.speaker_asr.metrics import has_speakers, plain_text
+
+    return plain_text(text) if has_speakers(text) else text
+
+
 def _is_skipped_reference(reference) -> bool:
     """Filter out unscoreable samples (TEDLIUM markers, inaudible)."""
     if not isinstance(reference, str):
@@ -75,6 +87,9 @@ class Evaluator:
         self.audio_field = audio_field
         self.text_field = text_field
         self.num_workers = num_workers
+        # Set per `evaluate` call: the dataset's references are `<SPK_n>`
+        # speaker-attributed, so evaluators that can should emit speakers too.
+        self.speakers = False
         self.normalizer = TextNormalizer()
         self.results: list[EvalResult] = []
 
@@ -100,8 +115,8 @@ class Evaluator:
             print(f"Error on sample {idx}: {e}")
             prediction, inference_time = "", 0.0
 
-        norm_pred = self.normalizer.normalize(prediction)
-        norm_ref = self.normalizer.normalize(reference)
+        norm_pred = self.normalizer.normalize(_scoring_text(prediction))
+        norm_ref = self.normalizer.normalize(_scoring_text(reference))
         sample_wer = jiwer.wer(norm_ref, norm_pred) * 100 if norm_ref else 0.0
         confidence = confidence or {}
 
@@ -135,6 +150,7 @@ class Evaluator:
         *,
         audio_field: str | None = None,
         text_field: str | None = None,
+        speakers: bool = False,
     ) -> list[EvalResult]:
         """Run evaluation loop on dataset.
 
@@ -144,8 +160,13 @@ class Evaluator:
         authorized SFSpeechRecognizer -- can be reused across datasets whose
         columns differ (`wav` vs `audio`, `text` vs `sentence` vs
         `transcript`). Omit both to keep the constructor's values.
+
+        `speakers` marks a dataset whose references are speaker-attributed
+        (`<SPK_1>text<SPK_2>text`): evaluators that can label speakers do so,
+        and `compute_metrics` adds cpWER.
         """
         self._reset_run_state()
+        self.speakers = speakers
         if audio_field is not None:
             self.audio_field = audio_field
         if text_field is not None:
@@ -292,7 +313,34 @@ class Evaluator:
         # AMI/TEDLIUM/Peoples are mono-case), rather than reporting a
         # meaningless 0.0. See scripts/eval/formatting.py.
         metrics.update(
-            compute_formatting_metrics([(r.reference, r.prediction) for r in self.results])
+            compute_formatting_metrics(
+                [(_scoring_text(r.reference), _scoring_text(r.prediction)) for r in self.results]
+            )
         )
+        metrics.update(self._speaker_metrics())
 
         return metrics
+
+    def _speaker_metrics(self) -> dict:
+        """cpWER and speaker-count accuracy, when the references carry speakers.
+
+        cpWER matches hypothesis to reference speakers one-to-one to minimise
+        word errors, so labels are permutation-free; `attribution_gap` is
+        cpWER - WER, what speaker mistakes cost on top of recognition. Rates
+        in percent, like `wer`.
+        """
+        from scripts.speaker_asr.metrics import has_speakers, speaker_metrics
+
+        if not any(has_speakers(r.reference) for r in self.results):
+            return {}
+        scores = speaker_metrics(
+            [r.reference for r in self.results],
+            [r.prediction for r in self.results],
+            self.normalizer.normalize,
+        )
+        out = {}
+        for key, value in scores.items():
+            if key in ("n", "wer"):
+                continue
+            out[key] = value if key.startswith("speaker_count") else value * 100
+        return out

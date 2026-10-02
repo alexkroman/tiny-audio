@@ -26,6 +26,7 @@ SUBCOMMANDS: dict[str, str] = {
     "demo": "demo.app",
     "dev": "scripts.dev",
     "turn-aware": "scripts.turn_aware.cli",
+    "speaker-asr": "scripts.speaker_asr.cli",
 }
 
 

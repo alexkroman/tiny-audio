@@ -459,20 +459,78 @@ class EndpointEvaluator(Evaluator):
 
 
 class AssemblyAIEvaluator(Evaluator):
-    """Evaluator for AssemblyAI API."""
+    """Evaluator for AssemblyAI API.
+
+    On a speaker-attributed dataset (`evaluate(..., speakers=True)`) requests
+    run with `speaker_labels=True` and the utterances are written as
+    `<SPK_1>text<SPK_2>text`, speakers numbered by first appearance -- the
+    format the references and cpWER use.
+    """
 
     def __init__(
         self, api_key: str, model: str = "universal-3-pro", base_url: str | None = None, **kwargs
     ):
         super().__init__(**kwargs)
         self.transcriber = setup_assemblyai(api_key, model, base_url=base_url)
+        self.speaker_transcriber = setup_assemblyai(
+            api_key, model, speaker_labels=True, base_url=base_url
+        )
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
         wav_bytes = prepare_wav_bytes(audio)
+        transcriber = self.speaker_transcriber if self.speakers else self.transcriber
         start = time.time()
-        transcript = self.transcriber.transcribe(io.BytesIO(wav_bytes))
+        transcript = transcriber.transcribe(io.BytesIO(wav_bytes))
         elapsed = time.time() - start
+        if self.speakers:
+            return speaker_text(transcript), elapsed, None
         return transcript.text or "", elapsed, None
+
+
+def speaker_text(transcript) -> str:
+    """An AssemblyAI transcript's utterances as `<SPK_n>` text (plain text if none)."""
+    from scripts.speaker_asr.metrics import serialize_turns
+
+    utterances = transcript.utterances or []
+    if not utterances:
+        return transcript.text or ""
+    return serialize_turns((u.speaker, u.text) for u in utterances)
+
+
+class SpeakerASREvaluator(Evaluator):
+    """A Qwen3-ASR checkpoint, base or speaker-ASR (scripts/speaker_asr).
+
+    A speaker-ASR checkpoint writes `<SPK_n>` turns; the base model writes
+    plain text, which scores as one speaker -- the "no diarization" floor for
+    cpWER on `ami-speakers`. The number of speaker tokens is read off the
+    checkpoint's tokenizer.
+    """
+
+    MAX_NEW_TOKENS = 320
+
+    def __init__(self, model_path: str, **kwargs):
+        super().__init__(**kwargs)
+        from transformers import AutoProcessor
+
+        from scripts.speaker_asr.metrics import speaker_tokens
+        from scripts.speaker_asr.model import register_speaker_tokens
+        from tiny_audio.turns import load_model
+
+        self.processor = AutoProcessor.from_pretrained(model_path)
+        vocab = self.processor.tokenizer.get_vocab()
+        self.n_speakers = sum(t in vocab for t in speaker_tokens(16)) or 4
+        register_speaker_tokens(self.processor, self.n_speakers)  # base model: never emitted
+        self.model = load_model(model_path).eval()
+
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+        from scripts.speaker_asr.model import transcribe_speakers
+
+        array = np.asarray(as_16k_array(audio), dtype=np.float32)
+        start = time.time()
+        (text,) = transcribe_speakers(
+            self.model, self.processor, [array], self.n_speakers, self.MAX_NEW_TOKENS
+        )
+        return text, time.time() - start, None
 
 
 class AssemblyAIStreamingEvaluator(Evaluator):
