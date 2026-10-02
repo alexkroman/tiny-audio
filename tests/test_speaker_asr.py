@@ -472,3 +472,15 @@ def test_store_refuses_parts_whose_row_moved():
         store.verify([{"parts": json.dumps([{"row": 0, "id": "u1"}])}])
     with pytest.raises(ValueError, match="different utterance"):
         store.verify([{"parts": json.dumps([{"row": 5, "id": "u1"}])}])
+
+
+def test_runpod_pool_script_builds_every_split_and_stops():
+    from scripts.deploy.runpod import build_speaker_asr_pool_script
+
+    script = build_speaker_asr_pool_script("t", ["train", "test"], ["+experiment=v1"], 128)
+    assert (
+        "speaker-asr build-pool --split train --split test --batch-size 128 +experiment=v1\n"
+        in script
+    )
+    assert "scripts.speaker_asr.train" not in script
+    assert "&&" not in script.split("build-pool")[1].split("EXIT_CODE")[0]

@@ -1172,17 +1172,20 @@ def _turn_aware_script(
     splits: list[str],
     overrides: list[str],
     pool_batch_size: int,
-    then: str,
+    then: str | None,
     label: str,
     recipe: str = "turn-aware",
 ) -> str:
-    """Preamble, `ta <recipe> build-pool` for `splits`, then `then` (a command line), epilogue."""
+    """Preamble, `ta <recipe> build-pool` for `splits`, then `then` (a command line), epilogue.
+
+    `then=None` stops after the pool (`build-speaker-asr-pool`).
+    """
     quoted = " ".join(shlex.quote(o) for o in overrides)
     split_args = " ".join(f"--split {s}" for s in splits)
+    after = f" \\\n    && {then}" if then else ""
     body = f"""
 cd /workspace
-python -m scripts.cli {recipe} build-pool {split_args} --batch-size {pool_batch_size} {quoted} \\
-    && {then}"""
+python -m scripts.cli {recipe} build-pool {split_args} --batch-size {pool_batch_size} {quoted}{after}"""
     return (
         _script_preamble(hf_token, extras=exports)
         + body
@@ -1379,6 +1382,81 @@ def build_speaker_asr_train_script(
         f"python -m scripts.speaker_asr.train {quoted}",
         "Speaker-ASR training",
         recipe="speaker-asr",
+    )
+
+
+def build_speaker_asr_pool_script(
+    hf_token: str,
+    splits: list[str],
+    overrides: list[str],
+    pool_batch_size: int = TURN_AWARE_POOL_BATCH_SIZE,
+) -> str:
+    """`ta speaker-asr build-pool` for `splits` and nothing else."""
+    exports = (
+        "export TOKENIZERS_PARALLELISM=false\n"
+        'export HF_DATASETS_AUDIO_DECODER="soundfile"\n'
+        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+    )
+    return _turn_aware_script(
+        hf_token,
+        exports,
+        splits,
+        overrides,
+        pool_batch_size,
+        None,
+        "Speaker-ASR pool build",
+        recipe="speaker-asr",
+    )
+
+
+@app.command("build-speaker-asr-pool")
+def build_speaker_asr_pool(
+    host: HostArg,
+    port: PortArg,
+    splits: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--split",
+            help="Split(s) to build; repeat for several (default: train, validation, test)",
+        ),
+    ] = None,
+    session_name: Annotated[
+        str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
+    ] = None,
+    no_attach: Annotated[bool, typer.Option("--no-attach", help=NO_ATTACH_HELP)] = False,
+    force: Annotated[bool, typer.Option("--force", "-f", help=FORCE_HELP)] = False,
+    pool_batch_size: Annotated[
+        int, typer.Option("--pool-batch-size", help=POOL_BATCH_HELP)
+    ] = TURN_AWARE_POOL_BATCH_SIZE,
+    hf_token: Annotated[
+        str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
+    ] = "",
+    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
+):
+    """Build (and, with pool.hub_repo, publish) the speaker-ASR pool on a pod; no training.
+
+    The self-transcription pass is the GPU-bound step. With the presets'
+    pool.hub_repo the result is pushed to the Hub, so any later
+    `build-pool` or `train-speaker-asr` with the same overrides pulls it.
+    HF_TOKEN needs write access to that repo.
+    """
+    conn = connect(host, port)
+    overrides = list(overrides or [])
+    splits = list(splits or ["train", "validation", "test"])
+    session_name = _prepare_session(
+        conn, session_name or _auto_session_name("speaker_asr_pool"), force, hf_token
+    )
+    print(f"\nStarting speaker-ASR pool build '{session_name}' ({', '.join(splits)})...")
+    if overrides:
+        print(f"Hydra overrides: {' '.join(overrides)}")
+    _start_remote_tmux_script(
+        conn,
+        host,
+        port,
+        session_name,
+        build_speaker_asr_pool_script(hf_token, splits, overrides, pool_batch_size),
+        f"/tmp/pool_{session_name}.sh",
+        no_attach,
     )
 
 
