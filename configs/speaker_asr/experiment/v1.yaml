@@ -1,6 +1,8 @@
 # @package _global_
 # v1: decoder LoRA (attention + MLP) on AMI ihm windows, frozen audio tower.
 # The baseline every later recipe is compared against.
+pool:
+  hub_repo: mazesmazes/speaker-asr-pool
 data:
   pool_dir: data/speaker_asr
 training:

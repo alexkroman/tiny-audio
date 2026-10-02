@@ -20,21 +20,15 @@ from __future__ import annotations
 import io
 import json
 import random
-import re
 from dataclasses import dataclass
 
 import numpy as np
 import soundfile as sf
 import torch
 
+from scripts.speaker_asr.metrics import serialize_turns
+
 SAMPLE_RATE = 16000
-SPEAKER_TOKEN = "<SPK_{}>"
-_SPEAKER_RE = re.compile(r"<SPK_(\d+)>")
-
-
-def speaker_tokens(n: int) -> list[str]:
-    """`<SPK_1>` .. `<SPK_n>`."""
-    return [SPEAKER_TOKEN.format(i) for i in range(1, n + 1)]
 
 
 # --------------------------------------------------------------------- audio
@@ -79,6 +73,24 @@ class UtteranceStore:
 
     def get(self, row: int) -> np.ndarray:
         return decode_audio(self._ds[int(row)]["audio"])
+
+    def verify(self, rows: list[dict]) -> None:
+        """Refuse manifest rows whose parts point at a different utterance.
+
+        Parts address audio by dataset row index, which is only stable while
+        the source parquet is unchanged; a manifest pulled from the Hub could
+        otherwise silently pair one utterance's audio with another's words.
+        """
+        ids = self.meta["id"].to_numpy()
+        for row in rows:
+            for part in json.loads(row["parts"]):
+                r = int(part["row"])
+                if r >= len(ids) or ids[r] != part["id"]:
+                    raise ValueError(
+                        f"pool part {part['id']} is row {r} in its manifest, but that row of "
+                        "the source dataset is a different utterance; the dataset changed "
+                        "since the pool was built. Rebuild with `ta speaker-asr build-pool -f`."
+                    )
 
 
 def mix_window(parts: list[dict], store: UtteranceStore, tail_s: float = 0.0) -> np.ndarray:
@@ -188,19 +200,10 @@ def format_target(parts: list[dict], texts: dict[str, str]) -> tuple[str, int]:
     whose transcript is empty contributes nothing, not even a speaker number,
     since the model cannot be asked to label a voice it was given no words for.
     """
-    labels: dict[str, int] = {}
-    turns: list[list] = []
-    for part in sorted(parts, key=lambda p: (p["offset_s"], p["dur_s"])):
-        text = texts.get(part["id"], "").strip()
-        if not text:
-            continue
-        label = labels.setdefault(part["speaker"], len(labels) + 1)
-        if turns and turns[-1][0] == label:
-            turns[-1][1] += " " + text
-        else:
-            turns.append([label, text])
-    target = "".join(SPEAKER_TOKEN.format(label) + text for label, text in turns)
-    return target, len(labels)
+    ordered = sorted(parts, key=lambda p: (p["offset_s"], p["dur_s"]))
+    turns = [(p["speaker"], texts.get(p["id"], "")) for p in ordered]
+    speakers = {speaker for speaker, text in turns if text.strip()}
+    return serialize_turns(turns), len(speakers)
 
 
 def build_pool(windows: list[dict], texts: dict[str, str]) -> list[dict]:
@@ -246,6 +249,7 @@ class SpeakerASRDataset(torch.utils.data.Dataset):
     """Manifest rows -> {"audio", "ctx", "target"} (TurnAwareCollator's item shape)."""
 
     def __init__(self, rows: list[dict], store: UtteranceStore):
+        store.verify(rows)
         self.rows = rows
         self.store = store
 
@@ -258,94 +262,3 @@ class SpeakerASRDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         return {"audio": self.audio(idx), "ctx": "", "target": self.rows[idx]["target"]}
-
-
-# ------------------------------------------------------------------- metrics
-
-
-def parse_turns(text: str) -> list[tuple[int, str]]:
-    """'<SPK_1>a<SPK_2>b' -> [(1, 'a'), (2, 'b')]. Text before any token is speaker 0."""
-    pieces = _SPEAKER_RE.split(text)
-    turns = [(0, pieces[0].strip())] if pieces[0].strip() else []
-    for label, chunk in zip(pieces[1::2], pieces[2::2], strict=True):
-        if chunk.strip():
-            turns.append((int(label), chunk.strip()))
-    return turns
-
-
-def plain_text(text: str) -> str:
-    """The transcript with speaker tokens removed."""
-    return " ".join(t for _, t in parse_turns(text))
-
-
-def word_errors(ref: list[str], hyp: list[str]) -> int:
-    """Word-level Levenshtein distance (substitutions + deletions + insertions)."""
-    prev = list(range(len(hyp) + 1))
-    for i, r in enumerate(ref, 1):
-        cur = [i] + [0] * len(hyp)
-        for j, h in enumerate(hyp, 1):
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (r != h))
-        prev = cur
-    return prev[-1]
-
-
-def _speaker_words(text: str, normalize) -> dict[int, list[str]]:
-    words: dict[int, list[str]] = {}
-    for label, chunk in parse_turns(text):
-        words.setdefault(label, []).extend(normalize(chunk).split())
-    return words
-
-
-def cp_errors(ref: str, hyp: str, normalize=lambda s: s) -> tuple[int, int]:
-    """(errors, reference words) of concatenated minimum-permutation WER.
-
-    Each speaker's words are concatenated, and reference and hypothesis
-    speakers are matched one-to-one to minimise total word errors (unmatched
-    speakers count against empty), so speaker labels are permutation-free and
-    a word given to the wrong voice costs a deletion plus an insertion.
-    """
-    from scipy.optimize import linear_sum_assignment
-
-    r = list(_speaker_words(ref, normalize).values())
-    h = list(_speaker_words(hyp, normalize).values())
-    n = max(len(r), len(h), 1)
-    r += [[]] * (n - len(r))
-    h += [[]] * (n - len(h))
-    cost = np.array([[word_errors(a, b) for b in h] for a in r])
-    rows, cols = linear_sum_assignment(cost)
-    return int(cost[rows, cols].sum()), sum(len(a) for a in r)
-
-
-def speaker_metrics(refs: list[str], hyps: list[str], normalize=lambda s: s) -> dict:
-    """WER (speakers ignored), cpWER, their gap, and speaker-count accuracy.
-
-    `cpwer - wer` is what speaker attribution costs on top of recognition;
-    by speaker count (`cpwer_<k>spk`) shows where it breaks down.
-    """
-    wer_err = cp_err = n_words = count_hits = count_abs = 0
-    by_count: dict[int, list[int]] = {}
-    for ref, hyp in zip(refs, hyps, strict=True):
-        ref_words = normalize(plain_text(ref)).split()
-        wer_err += word_errors(ref_words, normalize(plain_text(hyp)).split())
-        errors, words = cp_errors(ref, hyp, normalize)
-        cp_err += errors
-        n_words += words
-        n_ref = len({label for label, _ in parse_turns(ref)})
-        n_hyp = len({label for label, _ in parse_turns(hyp)})
-        count_hits += n_ref == n_hyp
-        count_abs += abs(n_ref - n_hyp)
-        bucket = by_count.setdefault(n_ref, [0, 0])
-        bucket[0] += errors
-        bucket[1] += words
-    n = max(len(refs), 1)
-    out = {
-        "wer": wer_err / max(n_words, 1),
-        "cpwer": cp_err / max(n_words, 1),
-        "speaker_count_acc": count_hits / n,
-        "speaker_count_mae": count_abs / n,
-        "n": len(refs),
-    }
-    out["attribution_gap"] = out["cpwer"] - out["wer"]
-    for k in sorted(by_count):
-        out[f"cpwer_{k}spk"] = by_count[k][0] / max(by_count[k][1], 1)
-    return out

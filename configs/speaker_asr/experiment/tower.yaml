@@ -5,6 +5,8 @@
 # Compare cpwer_3spk / cpwer_4spk against v1: that is where identity matters.
 model:
   lora_target_modules: (.*language_model.*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj))|(.*audio_tower\.layers.*\.(q_proj|k_proj|v_proj|out_proj))
+pool:
+  hub_repo: mazesmazes/speaker-asr-pool
 data:
   pool_dir: data/speaker_asr
 training:

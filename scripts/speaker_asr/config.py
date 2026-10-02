@@ -18,7 +18,7 @@ from scripts.utils import get_project_root
 CONFIG_DIR = get_project_root() / "configs" / "speaker_asr"
 
 # Settings that change WHERE things are read from, not what the pool holds.
-_NOT_IN_SIGNATURE = ("transcript_cache",)
+_NOT_IN_SIGNATURE = ("transcript_cache", "hub_repo")
 
 
 def load_config(overrides: list[str] | None = None) -> DictConfig:

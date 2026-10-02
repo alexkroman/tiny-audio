@@ -14,6 +14,9 @@ class DatasetConfig:
     text_field: str = "text"
     config: str | None = None
     default_split: str = "test"
+    # References are speaker-attributed `<SPK_1>text<SPK_2>text`: evaluators
+    # label speakers where they can, and metrics add cpWER.
+    speakers: bool = False
 
 
 DATASET_REGISTRY: dict[str, DatasetConfig] = {
@@ -41,6 +44,15 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         config="sdm",
         audio_field="audio",
         text_field="text",
+    ),
+    # Multi-speaker AMI windows (headset segments re-mixed on the meeting
+    # timeline) with AMI's human transcripts as `<SPK_n>` references. Built by
+    # `ta speaker-asr export-windows --split test -r mazesmazes/ami-speaker-windows`.
+    "ami-speakers": DatasetConfig(
+        path="mazesmazes/ami-speaker-windows",
+        audio_field="audio",
+        text_field="text",
+        speakers=True,
     ),
     "gigaspeech": DatasetConfig(
         path="fixie-ai/gigaspeech",

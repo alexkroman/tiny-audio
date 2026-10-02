@@ -14,14 +14,18 @@ from scripts.speaker_asr.data import (
     SAMPLE_RATE,
     WindowConfig,
     build_pool,
-    cp_errors,
     format_target,
     mix_window,
+    plan_windows,
+    subset,
+)
+from scripts.speaker_asr.metrics import (
+    cp_errors,
+    has_speakers,
     parse_turns,
     plain_text,
-    plan_windows,
+    serialize_turns,
     speaker_metrics,
-    subset,
     word_errors,
 )
 
@@ -303,3 +307,168 @@ def test_runpod_script_runs_speaker_asr_pool_then_training_with_same_overrides()
     )
     assert f"&& python -m scripts.speaker_asr.train {joined}" in script
     assert "turn-aware" not in script
+
+
+# ----------------------------------------------------------------- ta eval
+
+
+def test_serialize_turns_renumbers_by_first_appearance_and_merges():
+    turns = [("B", "Hi."), ("A", "Hello."), ("A", "How are you?"), ("C", ""), ("B", "Fine.")]
+    assert serialize_turns(turns) == "<SPK_1>Hi.<SPK_2>Hello. How are you?<SPK_1>Fine."
+    assert has_speakers("<SPK_3>x")
+    assert not has_speakers("plain text")
+
+
+def test_assemblyai_utterances_become_speaker_text():
+    from scripts.eval.evaluators.asr import speaker_text
+
+    utt = SimpleNamespace
+    transcript = SimpleNamespace(
+        text="so yes", utterances=[utt(speaker="B", text="So"), utt(speaker="A", text="yes")]
+    )
+    assert speaker_text(transcript) == "<SPK_1>So<SPK_2>yes"
+    assert speaker_text(SimpleNamespace(text="hi", utterances=None)) == "hi"
+
+
+class _FixedEvaluator:
+    """An Evaluator whose transcript per sample comes from a list."""
+
+    @staticmethod
+    def make(predictions):
+        from scripts.eval.evaluators.base import Evaluator
+
+        class Fixed(Evaluator):
+            def transcribe(self, audio):
+                return predictions[audio], 0.0, None
+
+        evaluator = Fixed()
+        # Whisper's normalizer downloads a spelling table; lowercasing is all
+        # these references need.
+        evaluator.normalizer = SimpleNamespace(normalize=str.lower)
+        return evaluator
+
+
+def test_eval_scores_words_without_tokens_and_adds_cpwer():
+    evaluator = _FixedEvaluator.make(["<SPK_1>hello there good morning", "<SPK_1>okay"])
+    dataset = [
+        {"audio": 0, "text": "<SPK_1>HELLO THERE<SPK_2>GOOD MORNING"},
+        {"audio": 1, "text": "<SPK_1>OKAY"},
+    ]
+    results = evaluator.evaluate(dataset, speakers=True)
+    assert [r.wer for r in results] == [0.0, 0.0]  # words are right; tokens never count
+    m = evaluator.compute_metrics()
+    assert m["wer"] == 0.0
+    assert m["cpwer"] == pytest.approx(100 * 4 / 5)  # 'good morning': 2 ins + 2 del
+    assert m["attribution_gap"] == pytest.approx(m["cpwer"])
+    assert m["speaker_count_acc"] == 0.5
+
+
+def test_plain_datasets_get_no_speaker_metrics():
+    evaluator = _FixedEvaluator.make(["hello"])
+    evaluator.evaluate([{"audio": 0, "text": "hello"}])
+    assert "cpwer" not in evaluator.compute_metrics()
+
+
+def test_ami_speakers_is_registered_but_not_in_all():
+    from scripts.eval.cli import ALL_DATASETS
+    from scripts.eval.datasets import DATASET_REGISTRY
+
+    assert DATASET_REGISTRY["ami-speakers"].speakers
+    assert "ami-speakers" not in ALL_DATASETS
+    assert not DATASET_REGISTRY["ami"].speakers
+
+
+def test_qwen3_asr_checkpoints_are_detected_from_config(tmp_path):
+    from scripts.eval.cli import _is_qwen3_asr
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_asr"}))
+    assert _is_qwen3_asr(str(tmp_path))
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "asr_model"}))
+    assert not _is_qwen3_asr(str(tmp_path))
+    assert not _is_qwen3_asr(str(tmp_path / "missing"))
+
+
+# ----------------------------------------------------------------- pool on the Hub
+
+
+def _fake_hub(monkeypatch, files: dict[str, str], tmp_path):
+    from scripts.speaker_asr import hub
+
+    def download(repo, filename):
+        if filename not in files:
+            return None
+        path = tmp_path / "remote" / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(files[filename])
+        return path
+
+    monkeypatch.setattr(hub, "_download", download)
+    return hub
+
+
+def test_pull_takes_a_matching_pool_and_records_its_signature(monkeypatch, tmp_path):
+    from scripts.speaker_asr.config import load_config, pool_signature
+    from scripts.turn_aware.config import pool_is_current
+
+    sig = json.loads(json.dumps(pool_signature(load_config())))
+    hub = _fake_hub(
+        monkeypatch,
+        {
+            "signatures/train.json": json.dumps(sig),
+            "train.parquet": "PARQUET",
+            "transcripts-train.jsonl": json.dumps({"key": "u1", "text": "Hi."}) + "\n",
+        },
+        tmp_path,
+    )
+    pool_dir, cache = tmp_path / "pool", tmp_path / "pool" / "transcripts-train.jsonl"
+    pool_dir.mkdir()
+    assert hub.pull("repo", "train", pool_dir, cache, sig) == "pulled"
+    assert (pool_dir / "train.parquet").read_text() == "PARQUET"
+    assert pool_is_current(pool_dir, "train", sig)
+    assert "u1" in cache.read_text()
+
+
+def test_pull_reuses_only_transcripts_when_settings_differ(monkeypatch, tmp_path):
+    from scripts.speaker_asr.config import load_config, pool_signature
+
+    remote = json.loads(json.dumps(pool_signature(load_config(["pool.max_gap_s=3.0"]))))
+    wanted = json.loads(json.dumps(pool_signature(load_config())))
+    files = {
+        "signatures/train.json": json.dumps(remote),
+        "train.parquet": "PARQUET",
+        "transcripts-train.jsonl": json.dumps({"key": "u1", "text": "Hi."}) + "\n",
+    }
+    hub = _fake_hub(monkeypatch, files, tmp_path)
+    cache = tmp_path / "transcripts-train.jsonl"
+    cache.write_text(json.dumps({"key": "u0", "text": "Yes."}) + "\n")
+    assert hub.pull("repo", "train", tmp_path, cache, wanted) == "transcripts"
+    assert not (tmp_path / "train.parquet").exists()
+    assert [json.loads(line)["key"] for line in cache.read_text().splitlines()] == ["u0", "u1"]
+
+    other_model = json.loads(json.dumps(remote))
+    other_model["pool"]["target_model"] = "someone/else"
+    files["signatures/train.json"] = json.dumps(other_model)
+    assert hub.pull("repo", "train", tmp_path, cache, wanted) == "none"
+
+
+def test_hub_repo_is_not_part_of_the_pool_signature():
+    from scripts.speaker_asr.config import load_config, pool_signature
+
+    assert pool_signature(load_config(["+experiment=v1"])) == pool_signature(
+        load_config(["+experiment=v1", "pool.hub_repo=null"])
+    )
+
+
+def test_store_refuses_parts_whose_row_moved():
+    import pandas as pd
+
+    from scripts.speaker_asr.data import UtteranceStore
+
+    store = UtteranceStore.__new__(UtteranceStore)
+    store.meta = pd.DataFrame({"id": ["u0", "u1"]})
+    good = {"parts": json.dumps([{"row": 1, "id": "u1"}])}
+    store.verify([good])
+    with pytest.raises(ValueError, match="different utterance"):
+        store.verify([{"parts": json.dumps([{"row": 0, "id": "u1"}])}])
+    with pytest.raises(ValueError, match="different utterance"):
+        store.verify([{"parts": json.dumps([{"row": 5, "id": "u1"}])}])

@@ -98,11 +98,15 @@ def build_pool_cmd(
     """Build {split}.parquet window manifests in data.pool_dir from configs/speaker_asr.
 
     Pass the SAME overrides you train with; a split already built with
-    identical settings is skipped (pool_config.json records them).
+    identical settings is skipped (pool_config.json records them). With
+    pool.hub_repo set (the presets set it), a split built elsewhere with the
+    same settings is pulled instead of rebuilt, and every split built here is
+    pushed -- so build locally, then `ta runpod train-speaker-asr` reuses it.
     """
     import pandas as pd
     from omegaconf import OmegaConf
 
+    from scripts.speaker_asr import hub
     from scripts.speaker_asr.config import load_config, pool_signature, window_config
     from scripts.speaker_asr.data import UtteranceStore, build_pool, plan_windows
     from scripts.turn_aware.config import pool_is_current, write_signature
@@ -117,10 +121,19 @@ def build_pool_cmd(
     signature = pool_signature(cfg, max_samples)
     columns = OmegaConf.to_container(cfg.data.columns)
 
+    repo = cfg.pool.hub_repo
     for split in splits or ["train", "validation"]:
         if not force and pool_is_current(output_dir, split, signature):
             console.print(f"[green]{split}[/]: {output_dir}/{split}.parquet is up to date")
             continue
+        cache = cache_dir / f"transcripts-{split}.jsonl"
+        if repo and not force:
+            pulled = hub.pull(repo, split, output_dir, cache, signature)
+            if pulled == "pulled":
+                console.print(f"[green]{split}[/]: pulled the matching pool from {repo}")
+                continue
+            if pulled == "transcripts":
+                console.print(f"{split}: merged {repo}'s transcripts; settings differ, rebuilding")
         store = UtteranceStore(cfg.data.dataset_id, cfg.data.data_files, split, columns)
         utts = store.meta
         if max_samples and max_samples < len(utts):
@@ -128,7 +141,6 @@ def build_pool_cmd(
         windows = plan_windows(utts.to_dict("records"), window_config(cfg), cfg.pool.seed)
         parts = [p for w in windows for p in w["parts"]]
         if cfg.pool.target_text == "self":
-            cache = cache_dir / f"transcripts-{split}.jsonl"
             texts = _self_transcripts(parts, store, cfg.pool.target_model, cache, batch_size)
         else:
             texts = dict(zip(utts["id"], utts["text"].fillna(""), strict=True))
@@ -141,6 +153,103 @@ def build_pool_cmd(
             f"({pool['duration_s'].sum() / 3600:.1f} h) -> {path}"
         )
         console.print(pool["n_speakers"].value_counts().sort_index().to_string())
+        if repo:
+            try:  # a mirror, never a reason to fail the build (e.g. read-only token)
+                hub.push(repo, split, output_dir, cache, signature)
+                console.print(f"pushed {split} pool to {repo}")
+            except Exception as exc:
+                console.print(f"[yellow]pool push to {repo} failed ({exc}); continuing")
+
+
+@app.command("export-windows")
+def export_windows_cmd(
+    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
+    split: Annotated[
+        str, typer.Option("--split", help="Pool split to export (build it first)")
+    ] = "test",
+    max_samples: Annotated[
+        int,
+        typer.Option("--max-samples", "-n", help="Windows, balanced by speaker count (0 = all)"),
+    ] = 0,
+    repo_id: Annotated[
+        str | None,
+        typer.Option("--repo-id", "-r", help="Push to this Hub dataset (private), as `split`"),
+    ] = None,
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", "-o", help="Also write {split}.parquet here"),
+    ] = None,
+):
+    """Export a pool split as mixed audio + references, for `ta eval -d ami-speakers`.
+
+    Columns: `audio` (16 kHz mix), `text` (AMI's HUMAN transcripts as
+    `<SPK_n>` turns -- the reference `ta eval` scores, fair to any system),
+    `text_self` (the training-style self-distilled target), `key`,
+    `n_speakers`, `duration_s`. AMI references are uppercase and unpunctuated;
+    WER and cpWER are computed after normalisation, so that costs nothing.
+    """
+    import pandas as pd
+    from datasets import Audio, Dataset, Features, Value
+    from omegaconf import OmegaConf
+
+    from scripts.speaker_asr.config import load_config
+    from scripts.speaker_asr.data import (
+        SAMPLE_RATE,
+        UtteranceStore,
+        format_target,
+        mix_window,
+        subset,
+    )
+
+    if not repo_id and not output_dir:
+        raise typer.BadParameter("pass --repo-id and/or --output-dir")
+    cfg = load_config(overrides)
+    path = Path(cfg.data.pool_dir) / f"{split}.parquet"
+    if not path.exists():
+        raise typer.BadParameter(
+            f"{path} not found; run `ta speaker-asr build-pool --split {split}`"
+        )
+    rows = subset(pd.read_parquet(path).to_dict("records"), max_samples)
+    columns = OmegaConf.to_container(cfg.data.columns)
+    store = UtteranceStore(cfg.data.dataset_id, cfg.data.data_files, split, columns)
+    store.verify(rows)
+    human = dict(zip(store.meta["id"], store.meta["text"].fillna(""), strict=True))
+
+    def examples():
+        for row in rows:
+            parts = json.loads(row["parts"])
+            text, n_speakers = format_target(parts, human)
+            if not text:
+                continue
+            audio = mix_window(parts, store, row["tail_s"])
+            yield {
+                "audio": {"array": audio, "sampling_rate": SAMPLE_RATE},
+                "text": text,
+                "text_self": row["target"],
+                "key": row["key"],
+                "n_speakers": n_speakers,
+                "duration_s": len(audio) / SAMPLE_RATE,
+            }
+
+    features = Features(
+        {
+            "audio": Audio(sampling_rate=SAMPLE_RATE),
+            "text": Value("string"),
+            "text_self": Value("string"),
+            "key": Value("string"),
+            "n_speakers": Value("int32"),
+            "duration_s": Value("float32"),
+        }
+    )
+    ds = Dataset.from_generator(examples, features=features)
+    console.print(f"{split}: {len(ds)} windows, {sum(ds['duration_s']) / 3600:.1f} h")
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ds.to_parquet(str(output_dir / f"{split}.parquet"))
+        console.print(f"wrote {output_dir / f'{split}.parquet'}")
+    if repo_id:
+        ds.push_to_hub(repo_id, split=split, private=True)
+        console.print(f"pushed {split} to {repo_id}")
 
 
 def _metrics_table(scores: dict, title: str) -> Table:
@@ -182,7 +291,8 @@ def evaluate_cmd(
 
     from scripts.eval.audio import TextNormalizer
     from scripts.speaker_asr.config import load_config
-    from scripts.speaker_asr.data import SpeakerASRDataset, UtteranceStore, speaker_metrics, subset
+    from scripts.speaker_asr.data import SpeakerASRDataset, UtteranceStore, subset
+    from scripts.speaker_asr.metrics import speaker_metrics
     from scripts.speaker_asr.model import predict_rows, register_speaker_tokens
     from tiny_audio.turns import load_model
 

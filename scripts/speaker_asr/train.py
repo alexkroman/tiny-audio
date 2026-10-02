@@ -25,7 +25,8 @@ from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer, TrainingArguments, set_seed
 
 from scripts.speaker_asr.config import pool_signature
-from scripts.speaker_asr.data import SpeakerASRDataset, UtteranceStore, speaker_metrics, subset
+from scripts.speaker_asr.data import SpeakerASRDataset, UtteranceStore, subset
+from scripts.speaker_asr.metrics import speaker_metrics
 from scripts.speaker_asr.model import (
     apply_lora,
     init_speaker_rows,
