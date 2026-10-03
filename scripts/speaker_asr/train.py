@@ -24,8 +24,15 @@ from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer, TrainingArguments, set_seed
 
-from scripts.speaker_asr.config import pool_signature
-from scripts.speaker_asr.data import SpeakerASRDataset, UtteranceStore, subset
+from scripts.speaker_asr.config import context_config, n_speaker_tokens, pool_signature
+from scripts.speaker_asr.context import build_context_rows
+from scripts.speaker_asr.data import (
+    SpeakerASRCollator,
+    SpeakerASRDataset,
+    UtteranceStore,
+    load_texts,
+    subset,
+)
 from scripts.speaker_asr.metrics import speaker_metrics
 from scripts.speaker_asr.model import (
     apply_lora,
@@ -67,6 +74,18 @@ def check_pool(cfg: DictConfig, split: str) -> None:
         logger.warning("%s pool is a %d-utterance sample", split, built["max_samples"])
 
 
+def context_rows(cfg: DictConfig, split: str, rows: list[dict], stores: dict) -> list[dict]:
+    """Pool rows -> context-prefixed rows (scripts/speaker_asr/context.py)."""
+    meta = stores[split].meta
+    starts = dict(zip(meta["id"], meta["start"].astype(float), strict=True))
+    out = build_context_rows(
+        rows, starts, load_texts(cfg, split, meta), context_config(cfg), cfg.pool.seed
+    )
+    with_memory = sum(r["n_memory"] > 0 for r in out)
+    logger.info("%s: %d context rows (%d with voice samples)", split, len(out), with_memory)
+    return out
+
+
 class SpeakerASRTrainer(Trainer):
     """Trainer whose evaluate() also decodes a subset and scores cpWER.
 
@@ -94,7 +113,7 @@ class SpeakerASRTrainer(Trainer):
                 ev["max_new_tokens"],
             )
             refs = [r["target"] for r in ev["dataset"].rows]
-            scores = speaker_metrics(refs, preds, ev["normalize"])
+            scores = speaker_metrics(refs, preds, ev["normalize"], ev["fixed_labels"])
             self.model.train(was_training)
             scores = {f"eval_speakers/{k}": v for k, v in scores.items() if k != "n"}
             self.log(scores)
@@ -118,16 +137,16 @@ def main(cfg: DictConfig) -> None:
 
     from transformers import AutoProcessor
 
-    from scripts.turn_aware.data import TurnAwareCollator
     from tiny_audio.turns import load_model
 
-    n_speakers = cfg.pool.max_speakers
+    context = bool(cfg.context.enabled)
+    n_speakers = n_speaker_tokens(cfg)
     processor = AutoProcessor.from_pretrained(cfg.model.model_id)
-    tokens_are_new = register_speaker_tokens(processor, n_speakers)
-    token_ids = speaker_token_ids(processor, n_speakers)
+    new_ids = register_speaker_tokens(processor, n_speakers, context)
+    token_ids = speaker_token_ids(processor, n_speakers, context)
     model = load_model(cfg.model.model_id, dtype=getattr(torch, cfg.model.dtype))
-    if tokens_are_new:  # continuing from a speaker-ASR checkpoint keeps its trained rows
-        init_speaker_rows(model, token_ids, seed=cfg.training.seed)
+    if new_ids:  # continuing from a speaker-ASR checkpoint keeps its trained rows
+        init_speaker_rows(model, new_ids, seed=cfg.training.seed)
     model = apply_lora(
         model,
         token_ids,
@@ -144,7 +163,11 @@ def main(cfg: DictConfig) -> None:
         for split in (cfg.data.train_split, cfg.data.eval_split)
     }
     train_rows = read_manifest(cfg.data.pool_dir, cfg.data.train_split)
-    eval_rows = subset(read_manifest(cfg.data.pool_dir, cfg.data.eval_split), cfg.data.eval_samples)
+    eval_rows = read_manifest(cfg.data.pool_dir, cfg.data.eval_split)
+    if context:
+        train_rows = context_rows(cfg, cfg.data.train_split, train_rows, stores)
+        eval_rows = context_rows(cfg, cfg.data.eval_split, eval_rows, stores)
+    eval_rows = subset(eval_rows, cfg.data.eval_samples)
     logger.info("pool: %d train windows, %d eval windows", len(train_rows), len(eval_rows))
 
     from scripts.eval.audio import TextNormalizer
@@ -160,8 +183,8 @@ def main(cfg: DictConfig) -> None:
         train_dataset=SpeakerASRDataset(train_rows, stores[cfg.data.train_split]),
         eval_dataset=SpeakerASRDataset(eval_rows, eval_store),
         # Same chat layout and transcript-only labels as turn-aware; the
-        # target simply carries speaker tokens instead of an end-of-turn one.
-        data_collator=TurnAwareCollator(processor),
+        # target carries speaker tokens, and a context prefix is unsupervised.
+        data_collator=SpeakerASRCollator(processor),
         decode_eval={
             "processor": processor,
             "dataset": SpeakerASRDataset(
@@ -171,6 +194,7 @@ def main(cfg: DictConfig) -> None:
             "batch_size": cfg.training.per_device_eval_batch_size,
             "max_new_tokens": cfg.model.max_new_tokens,
             "normalize": TextNormalizer().normalize,
+            "fixed_labels": context,
         },
     )
     report_to = cfg.training.report_to

@@ -1,0 +1,24 @@
+# @package _global_
+# context: v1 plus labelled context prefixes, for recordings of any length.
+# Every training row starts with voice samples of the meeting's earlier
+# speakers and (80%) the previous window's tail, labelled; the model learns to
+# keep those labels and open new ones only for new voices. Same pool as v1.
+#
+# Window-level eval reports eval_speakers/sawer: errors with labels compared
+# AS GIVEN, i.e. did it keep the prefix's numbering. Recording-level cpWER:
+#   ta speaker-asr evaluate-long -m outputs/speaker_asr/context/final +experiment=context
+context:
+  enabled: true
+pool:
+  hub_repo: mazesmazes/speaker-asr-pool
+data:
+  pool_dir: data/speaker_asr
+training:
+  output_dir: outputs/speaker_asr/context
+  run_name: speaker-asr-qwen3-asr-0.6b-context
+  # Rows run to ~80 s of audio (prefix + window): half the batch, same
+  # effective batch of 32.
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 4
+hub_model_id: mazesmazes/tiny-audio-speaker-asr-qwen3-asr-context

@@ -54,6 +54,16 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         text_field="text",
         speakers=True,
     ),
+    # Whole AMI test meetings (~20-50 min each) re-mixed from headset
+    # segments, references as `<SPK_n>` turns over the meeting: cpWER here
+    # measures linking speakers across an entire recording. Built by
+    # `ta speaker-asr export-meetings --split test -r mazesmazes/ami-speaker-meetings`.
+    "ami-speakers-long": DatasetConfig(
+        path="mazesmazes/ami-speaker-meetings",
+        audio_field="audio",
+        text_field="text",
+        speakers=True,
+    ),
     "gigaspeech": DatasetConfig(
         path="fixie-ai/gigaspeech",
         config="dev",

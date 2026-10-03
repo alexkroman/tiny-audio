@@ -272,7 +272,7 @@ def test_split_at_speakers_keeps_speaker_tokens_only():
     assert split_at_speakers([1, 2, 9], speakers, decode) == "Hi there"
 
 
-def test_register_speaker_tokens_reports_whether_any_was_new():
+def test_register_speaker_tokens_returns_only_the_new_ids():
     from scripts.speaker_asr.model import register_speaker_tokens
 
     class Tok:
@@ -287,10 +287,16 @@ def test_register_speaker_tokens_reports_whether_any_was_new():
             for t in tokens:
                 self.vocab[t] = len(self.vocab)
 
+        def convert_tokens_to_ids(self, tokens):
+            return [self.vocab[t] for t in tokens]
+
     processor = SimpleNamespace(tokenizer=Tok())
-    assert register_speaker_tokens(processor, 3) is True
+    assert register_speaker_tokens(processor, 3) == [1, 2, 3]
     assert {"<SPK_1>", "<SPK_2>", "<SPK_3>", "<asr_text>"} == set(processor.tokenizer.vocab)
-    assert register_speaker_tokens(processor, 3) is False
+    assert register_speaker_tokens(processor, 3) == []
+    # A context-trained run adds <CONTINUE> (and only that) to the same tokenizer.
+    assert register_speaker_tokens(processor, 3, context=True) == [4]
+    assert "<CONTINUE>" in processor.tokenizer.vocab
 
 
 # ----------------------------------------------------------------- deploy
