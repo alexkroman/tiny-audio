@@ -12,6 +12,7 @@ from dataclasses import fields
 
 from omegaconf import DictConfig, OmegaConf
 
+from scripts.speaker_asr.context import ContextConfig
 from scripts.speaker_asr.data import WindowConfig
 from scripts.utils import get_project_root
 
@@ -36,6 +37,22 @@ def window_config(cfg: DictConfig) -> WindowConfig:
         value = cfg.pool[f.name]
         values[f.name] = tuple(value) if OmegaConf.is_list(value) else value
     return WindowConfig(**values)
+
+
+def context_config(cfg: DictConfig) -> ContextConfig:
+    """The `context:` section as a ContextConfig, field by field."""
+    values = {}
+    for f in fields(ContextConfig):
+        value = cfg.context[f.name]
+        values[f.name] = tuple(value) if OmegaConf.is_list(value) else value
+    return ContextConfig(**values)
+
+
+def n_speaker_tokens(cfg: DictConfig) -> int:
+    """Speaker tokens a run registers: per window, or per recording with context."""
+    if cfg.context.enabled:
+        return max(cfg.pool.max_speakers, cfg.context.max_speakers_total)
+    return cfg.pool.max_speakers
 
 
 def pool_signature(cfg: DictConfig, max_samples: int | None = None) -> dict:
