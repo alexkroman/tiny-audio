@@ -107,7 +107,8 @@ def best_span(words: list[tuple], lo: float, hi: float) -> tuple[float, float, s
         if i > j:  # this word alone is longer than hi
             continue
         dur = words[j][2] - words[i][1]
-        if dur >= lo and (best is None or dur > best[1] - best[0]):
+        # 1 ms margin: equal-length spans differ by float noise; keep the first.
+        if dur >= lo and (best is None or dur > best[1] - best[0] + 1e-3):
             best = (words[i][1], words[j][2], " ".join(w for w, _, _ in words[i : j + 1]))
     return best
 
