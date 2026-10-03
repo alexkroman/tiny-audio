@@ -14,7 +14,13 @@
 # ASR model. Labels are relative ("first voice", "second voice"), so no
 # speaker inventory is needed and the metric is permutation-free (cpWER).
 #
-# A run is this file plus one preset from experiment/ (v1, tower); the SAME
+# Long recordings (experiment/context): the model is also trained to read a
+# labelled CONTEXT PREFIX -- one voice sample per speaker heard so far plus
+# the previous chunk's tail -- and keep those speakers' labels, so chunked
+# decoding links speakers across an hour (scripts/speaker_asr/context.py,
+# longform.py; `ta speaker-asr transcribe-long | evaluate-long`).
+#
+# A run is this file plus one preset from experiment/ (v1, tower, context); the SAME
 # overrides drive the data and the training, so they cannot drift:
 #
 #   poetry run ta speaker-asr build-pool +experiment=v1          # builds + pushes the pool
@@ -113,6 +119,25 @@ data:
   eval_samples: 1000
   # Greedy-decoded subset for eval_speakers/* (cpWER, WER, speaker count).
   decode_eval_samples: 400
+
+# Context prefixes (training rows + long-form decoding). Built from the pool
+# at load time, so this section is NOT part of the pool signature: every
+# preset shares one published pool. Fields mirror
+# scripts/speaker_asr/context.py:ContextConfig, which documents them.
+context:
+  enabled: false
+  # Speaker tokens to register: labels in a context prefix are numbered over
+  # the whole recording so far, not just one window.
+  max_speakers_total: 8
+  memory_s: [2.0, 6.0]
+  memory_gap_s: 0.4
+  max_memory: 6
+  carry_s: 8.0
+  carry_prob: 0.8
+  live_gap_s: 0.3
+  max_audio_s: 90.0
+  min_chunk_s: 10.0
+  chunk_s: 25.0
 
 resume_from_checkpoint: null
 # The MERGED final model is pushed here after training (null = keep local).
