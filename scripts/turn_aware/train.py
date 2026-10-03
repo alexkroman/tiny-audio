@@ -26,9 +26,14 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
-from transformers import Trainer, TrainingArguments, set_seed
+from transformers import Trainer, set_seed
 
-from scripts.turn_aware.config import pool_signature, read_signature, signature_diff
+from scripts.turn_aware.config import (
+    pool_signature,
+    read_signature,
+    signature_diff,
+    training_arguments,
+)
 from scripts.turn_aware.data import (
     TurnAudioStore,
     TurnAwareCollator,
@@ -37,7 +42,11 @@ from scripts.turn_aware.data import (
     predict_rows,
     stratified_subset,
 )
-from scripts.turn_aware.model import add_end_of_turn_token, apply_lora
+from scripts.turn_aware.model import (
+    add_end_of_turn_token,
+    apply_lora,
+    cut_grad_into_frozen_audio_tower,
+)
 from tiny_audio.turns import load_model, register_end_of_turn, set_end_of_turn_threshold
 
 logger = logging.getLogger(__name__)
@@ -133,6 +142,7 @@ def main(cfg: DictConfig) -> None:
         model, token_id, cfg.model.lora_rank, cfg.model.lora_alpha, cfg.model.lora_dropout
     )
     model.print_trainable_parameters()
+    cut_grad_into_frozen_audio_tower(model)
 
     train_rows = read_manifest(cfg.data.pool_dir, cfg.data.train_split)
     eval_rows = stratified_subset(
@@ -147,11 +157,7 @@ def main(cfg: DictConfig) -> None:
     marker_rows = stratified_subset(eval_rows, cfg.data.marker_eval_samples, seed=1)
     trainer = TurnAwareTrainer(
         model=model,
-        args=TrainingArguments(
-            **OmegaConf.to_container(cfg.training, resolve=True),
-            remove_unused_columns=False,
-            label_names=["labels"],
-        ),
+        args=training_arguments(cfg, remove_unused_columns=False, label_names=["labels"]),
         train_dataset=TurnAwareDataset(train_rows, train_store),
         eval_dataset=TurnAwareDataset(eval_rows, eval_store),
         data_collator=TurnAwareCollator(processor),

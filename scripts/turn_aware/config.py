@@ -95,3 +95,29 @@ def signature_diff(built: dict, wanted: dict, prefix: str = "") -> list[str]:
         elif a != b:
             out.append(f"{prefix}{key}: {a!r} -> {b!r}")
     return out
+
+
+def training_arguments(cfg: DictConfig, **extra):
+    """`cfg.training` -> TrainingArguments, with Mac (MPS) defaults that let it run.
+
+    - Workers: on MPS with more than one worker, TrainingArguments defaults
+      the start method to "fork". A forked worker segfaults in its first CPU
+      matmul (the collator's mel features): Accelerate's SGEMM runs on
+      libdispatch, which does not survive fork. Spawn the workers instead.
+    - Memory: speaker-ASR context rows (~80 s of audio, batch 8) need more
+      than MPS's ~48 GiB cap for activations; gradient checkpointing fits
+      them without changing the batch, so the run is the same recipe.
+
+    Pods (CUDA) are untouched, and an explicit `training.*` value always wins.
+    """
+    import torch
+    from transformers import TrainingArguments
+
+    args = OmegaConf.to_container(cfg.training, resolve=True)
+    if torch.backends.mps.is_available() and not torch.cuda.is_available():
+        args.setdefault("dataloader_multiprocessing_context", "spawn")
+        args.setdefault("gradient_checkpointing", True)
+        # Reentrant checkpointing drops LoRA grads when the inputs (frozen
+        # embeddings) do not require grad.
+        args.setdefault("gradient_checkpointing_kwargs", {"use_reentrant": False})
+    return TrainingArguments(**args, **extra)

@@ -22,7 +22,7 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
-from transformers import Trainer, TrainingArguments, set_seed
+from transformers import Trainer, set_seed
 
 from scripts.speaker_asr.config import context_config, n_speaker_tokens, pool_signature
 from scripts.speaker_asr.context import build_context_rows
@@ -41,7 +41,8 @@ from scripts.speaker_asr.model import (
     register_speaker_tokens,
     speaker_token_ids,
 )
-from scripts.turn_aware.config import read_signature, signature_diff
+from scripts.turn_aware.config import read_signature, signature_diff, training_arguments
+from scripts.turn_aware.model import cut_grad_into_frozen_audio_tower
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,7 @@ def main(cfg: DictConfig) -> None:
         cfg.model.lora_dropout,
     )
     model.print_trainable_parameters()
+    cut_grad_into_frozen_audio_tower(model)
 
     columns = OmegaConf.to_container(cfg.data.columns)
     stores = {
@@ -175,11 +177,7 @@ def main(cfg: DictConfig) -> None:
     eval_store = stores[cfg.data.eval_split]
     trainer = SpeakerASRTrainer(
         model=model,
-        args=TrainingArguments(
-            **OmegaConf.to_container(cfg.training, resolve=True),
-            remove_unused_columns=False,
-            label_names=["labels"],
-        ),
+        args=training_arguments(cfg, remove_unused_columns=False, label_names=["labels"]),
         train_dataset=SpeakerASRDataset(train_rows, stores[cfg.data.train_split]),
         eval_dataset=SpeakerASRDataset(eval_rows, eval_store),
         # Same chat layout and transcript-only labels as turn-aware; the
