@@ -13,6 +13,10 @@ import numpy as np
 
 SPEAKER_TOKEN = "<SPK_{}>"
 _SPEAKER_RE = re.compile(r"<SPK_(\d+)>")
+# Ends a labelled prefix (voice samples + the previous chunk's tail) in the
+# assistant turn; everything after it is the new audio's transcript. See
+# scripts/speaker_asr/context.py.
+CONTEXT_END = "<CONTINUE>"
 
 
 def speaker_tokens(n: int) -> list[str]:
@@ -25,20 +29,26 @@ def has_speakers(text: str) -> bool:
     return bool(_SPEAKER_RE.search(text or ""))
 
 
-def serialize_turns(turns) -> str:
+def serialize_turns(turns, labels: dict | None = None) -> str:
     """[(speaker, text), ...] in time order -> '<SPK_1>text<SPK_2>text'.
 
     Speakers (any hashable label, e.g. AssemblyAI's "A"/"B") are renumbered
     by first appearance and consecutive turns of one speaker merged -- the
-    same convention the training targets use.
+    same convention the training targets use. `labels` pins speakers that
+    already have a number (a context prefix's); others continue after the
+    largest pinned number. It is not modified.
     """
-    labels: dict = {}
+    labels = dict(labels or {})
+    first_new = max(labels.values(), default=0) + 1
     merged: list[list] = []
     for speaker, raw in turns:
         text = (raw or "").strip()
         if not text:
             continue
-        label = labels.setdefault(speaker, len(labels) + 1)
+        if speaker not in labels:
+            labels[speaker] = first_new
+            first_new += 1
+        label = labels[speaker]
         if merged and merged[-1][0] == label:
             merged[-1][1] += " " + text
         else:
@@ -48,7 +58,7 @@ def serialize_turns(turns) -> str:
 
 def parse_turns(text: str) -> list[tuple[int, str]]:
     """'<SPK_1>a<SPK_2>b' -> [(1, 'a'), (2, 'b')]. Text before any token is speaker 0."""
-    pieces = _SPEAKER_RE.split(text)
+    pieces = _SPEAKER_RE.split(text.replace(CONTEXT_END, " "))
     turns = [(0, pieces[0].strip())] if pieces[0].strip() else []
     for label, chunk in zip(pieces[1::2], pieces[2::2], strict=True):
         if chunk.strip():
@@ -62,14 +72,14 @@ def plain_text(text: str) -> str:
 
 
 def word_errors(ref: list[str], hyp: list[str]) -> int:
-    """Word-level Levenshtein distance (substitutions + deletions + insertions)."""
-    prev = list(range(len(hyp) + 1))
-    for i, r in enumerate(ref, 1):
-        cur = [i] + [0] * len(hyp)
-        for j, h in enumerate(hyp, 1):
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (r != h))
-        prev = cur
-    return prev[-1]
+    """Word-level Levenshtein distance (substitutions + deletions + insertions).
+
+    rapidfuzz (C++, already a jiwer dependency): a whole meeting is ~1-2k
+    words per speaker, and cpWER compares every speaker pair.
+    """
+    from rapidfuzz.distance import Levenshtein
+
+    return Levenshtein.distance(ref, hyp)
 
 
 def _speaker_words(text: str, normalize) -> dict[int, list[str]]:
@@ -99,13 +109,30 @@ def cp_errors(ref: str, hyp: str, normalize=lambda s: s) -> tuple[int, int]:
     return int(cost[rows, cols].sum()), sum(len(a) for a in r)
 
 
-def speaker_metrics(refs: list[str], hyps: list[str], normalize=lambda s: s) -> dict:
+def sa_errors(ref: str, hyp: str, normalize=lambda s: s) -> tuple[int, int]:
+    """(errors, reference words) with labels taken AS GIVEN: SPK_k vs SPK_k.
+
+    Unlike cpWER this does not search for the best pairing, so it measures
+    whether a model kept the labels a context prefix assigned -- the point of
+    long-form decoding -- not just whether it separated the voices.
+    """
+    r = _speaker_words(ref, normalize)
+    h = _speaker_words(hyp, normalize)
+    errors = sum(word_errors(r.get(k, []), h.get(k, [])) for k in set(r) | set(h))
+    return errors, sum(len(words) for words in r.values())
+
+
+def speaker_metrics(
+    refs: list[str], hyps: list[str], normalize=lambda s: s, fixed_labels: bool = False
+) -> dict:
     """WER (speakers ignored), cpWER, their gap, and speaker-count accuracy.
 
     `cpwer - wer` is what speaker attribution costs on top of recognition;
-    by speaker count (`cpwer_<k>spk`) shows where it breaks down.
+    by speaker count (`cpwer_<k>spk`) shows where it breaks down. With
+    `fixed_labels`, also `sawer`: errors with labels compared as given (see
+    `sa_errors`), for references whose numbering a context prefix fixed.
     """
-    wer_err = cp_err = n_words = count_hits = count_abs = 0
+    wer_err = cp_err = sa_err = n_words = count_hits = count_abs = 0
     by_count: dict[int, list[int]] = {}
     for ref, hyp in zip(refs, hyps, strict=True):
         ref_words = normalize(plain_text(ref)).split()
@@ -113,6 +140,8 @@ def speaker_metrics(refs: list[str], hyps: list[str], normalize=lambda s: s) -> 
         errors, words = cp_errors(ref, hyp, normalize)
         cp_err += errors
         n_words += words
+        if fixed_labels:
+            sa_err += sa_errors(ref, hyp, normalize)[0]
         n_ref = len({label for label, _ in parse_turns(ref)})
         n_hyp = len({label for label, _ in parse_turns(hyp)})
         count_hits += n_ref == n_hyp
@@ -129,6 +158,8 @@ def speaker_metrics(refs: list[str], hyps: list[str], normalize=lambda s: s) -> 
         "n": len(refs),
     }
     out["attribution_gap"] = out["cpwer"] - out["wer"]
+    if fixed_labels:
+        out["sawer"] = sa_err / max(n_words, 1)
     for k in sorted(by_count):
         out[f"cpwer_{k}spk"] = by_count[k][0] / max(by_count[k][1], 1)
     return out

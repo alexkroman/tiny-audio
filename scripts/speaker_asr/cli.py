@@ -283,15 +283,18 @@ def evaluate_cmd(
     """Decode a pool split and report WER, cpWER and speaker-count accuracy.
 
     A base Qwen3-ASR scores too: it emits no speaker tokens, so all its words
-    land on one voice -- the "no diarization" floor for cpWER.
+    land on one voice -- the "no diarization" floor for cpWER. With
+    `+experiment=context` the windows carry context prefixes and `sawer`
+    (labels compared as given) is reported too.
     """
     import pandas as pd
     from omegaconf import OmegaConf
     from transformers import AutoProcessor
 
     from scripts.eval.audio import TextNormalizer
-    from scripts.speaker_asr.config import load_config
-    from scripts.speaker_asr.data import SpeakerASRDataset, UtteranceStore, subset
+    from scripts.speaker_asr.config import context_config, load_config, n_speaker_tokens
+    from scripts.speaker_asr.context import build_context_rows
+    from scripts.speaker_asr.data import SpeakerASRDataset, UtteranceStore, load_texts, subset
     from scripts.speaker_asr.metrics import speaker_metrics
     from scripts.speaker_asr.model import predict_rows, register_speaker_tokens
     from tiny_audio.turns import load_model
@@ -302,19 +305,27 @@ def evaluate_cmd(
         raise typer.BadParameter(
             f"{path} not found; run `ta speaker-asr build-pool --split {split}`"
         )
-    rows = subset(pd.read_parquet(path).to_dict("records"), max_samples)
+    rows = pd.read_parquet(path).to_dict("records")
     columns = OmegaConf.to_container(cfg.data.columns)
     store = UtteranceStore(cfg.data.dataset_id, cfg.data.data_files, split, columns)
+    context = bool(cfg.context.enabled)
+    if context:  # prefixes need the whole meeting's history, so before subsetting
+        starts = dict(zip(store.meta["id"], store.meta["start"].astype(float), strict=True))
+        texts = load_texts(cfg, split, store.meta)
+        rows = build_context_rows(rows, starts, texts, context_config(cfg), cfg.pool.seed)
+    rows = subset(rows, max_samples)
     dataset = SpeakerASRDataset(rows, store)
 
-    n_speakers = cfg.pool.max_speakers
+    n_speakers = n_speaker_tokens(cfg)
     processor = AutoProcessor.from_pretrained(model)
-    register_speaker_tokens(processor, n_speakers)  # no-op on a trained checkpoint
+    register_speaker_tokens(processor, n_speakers, context)  # no-op on a trained checkpoint
     net = load_model(model).eval()
     preds = predict_rows(
         net, processor, dataset, n_speakers, batch_size, cfg.model.max_new_tokens, progress=True
     )
-    scores = speaker_metrics([r["target"] for r in rows], preds, TextNormalizer().normalize)
+    scores = speaker_metrics(
+        [r["target"] for r in rows], preds, TextNormalizer().normalize, fixed_labels=context
+    )
     console.print(_metrics_table(scores, f"{model} on {split} ({len(rows)} windows)"))
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -330,3 +341,239 @@ def evaluate_cmd(
                 fh.write(json.dumps(record) + "\n")
         (output_dir / "metrics.json").write_text(json.dumps(scores, indent=2))
         console.print(f"wrote {output_dir}/predictions.jsonl and metrics.json")
+
+
+# ------------------------------------------------------------- long recordings
+
+MAX_MINUTES_HELP = "Keep only each meeting's first N minutes (0 = whole meeting)"
+
+
+def _meetings(cfg, split: str, max_samples: int, max_minutes: float):
+    """(store, [(meeting id, parts at real time)]) for the first `max_samples` meetings."""
+    from omegaconf import OmegaConf
+
+    from scripts.speaker_asr.data import UtteranceStore, meeting_parts
+
+    columns = OmegaConf.to_container(cfg.data.columns)
+    store = UtteranceStore(cfg.data.dataset_id, cfg.data.data_files, split, columns)
+    groups = sorted(store.meta["group"].unique())
+    if max_samples:
+        groups = groups[:max_samples]
+    max_s = max_minutes * 60 if max_minutes else None
+    return store, [(g, meeting_parts(store.meta, g, max_s)) for g in groups]
+
+
+def _reference(parts: list[dict], texts: dict[str, str]) -> str:
+    """A whole meeting's `<SPK_n>` reference, turns in start-time order."""
+    from scripts.speaker_asr.metrics import serialize_turns
+
+    ordered = sorted(parts, key=lambda p: (p["offset_s"], p["dur_s"]))
+    return serialize_turns((p["speaker"], texts.get(p["id"], "")) for p in ordered)
+
+
+def _load_checkpoint(model: str):
+    """Processor + model for any Qwen3-ASR checkpoint (base, v1, context)."""
+    from transformers import AutoProcessor
+
+    from tiny_audio.turns import load_model
+
+    return AutoProcessor.from_pretrained(model), load_model(model).eval()
+
+
+@app.command("export-meetings")
+def export_meetings_cmd(
+    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
+    split: Annotated[str, typer.Option("--split", help="AMI split to export")] = "test",
+    max_samples: Annotated[
+        int, typer.Option("--max-samples", "-n", help="Meetings to export (0 = all)")
+    ] = 0,
+    max_minutes: Annotated[float, typer.Option("--max-minutes", help=MAX_MINUTES_HELP)] = 0,
+    repo_id: Annotated[
+        str | None,
+        typer.Option("--repo-id", "-r", help="Push to this Hub dataset (private), as `split`"),
+    ] = None,
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", "-o", help="Also write {split}.parquet here"),
+    ] = None,
+):
+    """Export whole AMI meetings as long recordings, for `ta eval -d ami-speakers-long`.
+
+    Each row is one meeting: every headset segment mixed at its real time
+    (`audio`, ~20-50 min) and the meeting's `<SPK_n>` reference over AMI's
+    human transcripts (`text`). cpWER on it scores linking speakers across
+    the whole recording -- for this model's long-form decoding and for
+    AssemblyAI alike. No pool is needed.
+    """
+    from datasets import Audio, Dataset, Features, Value
+
+    from scripts.speaker_asr.config import load_config
+    from scripts.speaker_asr.data import SAMPLE_RATE, mix_window
+
+    if not repo_id and not output_dir:
+        raise typer.BadParameter("pass --repo-id and/or --output-dir")
+    cfg = load_config(overrides)
+    store, meetings = _meetings(cfg, split, max_samples, max_minutes)
+    human = dict(zip(store.meta["id"], store.meta["text"].fillna(""), strict=True))
+
+    def examples():
+        for group, parts in meetings:
+            audio = mix_window(parts, store)
+            yield {
+                "audio": {"array": audio, "sampling_rate": SAMPLE_RATE},
+                "text": _reference(parts, human),
+                "key": group,
+                "n_speakers": len({p["speaker"] for p in parts if human.get(p["id"], "").strip()}),
+                "duration_s": len(audio) / SAMPLE_RATE,
+            }
+
+    features = Features(
+        {
+            "audio": Audio(sampling_rate=SAMPLE_RATE),
+            "text": Value("string"),
+            "key": Value("string"),
+            "n_speakers": Value("int32"),
+            "duration_s": Value("float32"),
+        }
+    )
+    ds = Dataset.from_generator(examples, features=features)
+    console.print(f"{split}: {len(ds)} meetings, {sum(ds['duration_s']) / 3600:.1f} h")
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ds.to_parquet(str(output_dir / f"{split}.parquet"))
+        console.print(f"wrote {output_dir / f'{split}.parquet'}")
+    if repo_id:
+        ds.push_to_hub(repo_id, split=split, private=True)
+        console.print(f"pushed {split} to {repo_id}")
+
+
+def _turns_json(result) -> list[dict]:
+    return [
+        {"speaker": t.speaker, "start": t.start, "end": t.end, "text": t.text} for t in result.turns
+    ]
+
+
+@app.command("evaluate-long")
+def evaluate_long_cmd(
+    model: Annotated[
+        str, typer.Option("--model", "-m", help="Qwen3-ASR checkpoint (Hub ID or local path)")
+    ],
+    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
+    split: Annotated[str, typer.Option("--split", help="AMI split to score")] = "test",
+    max_samples: Annotated[
+        int, typer.Option("--max-samples", "-n", help="Meetings to score (0 = all)")
+    ] = 0,
+    max_minutes: Annotated[float, typer.Option("--max-minutes", help=MAX_MINUTES_HELP)] = 0,
+    reference: Annotated[
+        str,
+        typer.Option(
+            "--reference", help="'human' (AMI transcripts) or 'self' (the pool's transcripts)"
+        ),
+    ] = "human",
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", "-o", help="Write predictions.jsonl and metrics.json here"),
+    ] = None,
+):
+    """Recording-level cpWER: decode whole AMI meetings with long-form decoding.
+
+    Each meeting is rebuilt as one recording (headset segments at their real
+    times) and decoded chunk by chunk (scripts/speaker_asr/longform.py), so
+    cpWER over the meeting scores whether a speaker keeps one label across
+    the whole recording. A checkpoint without context training decodes chunks
+    independently -- the no-linking baseline to compare against.
+    """
+    from scripts.eval.audio import TextNormalizer
+    from scripts.speaker_asr.config import context_config, load_config
+    from scripts.speaker_asr.data import load_texts, mix_window
+    from scripts.speaker_asr.longform import transcribe_long
+    from scripts.speaker_asr.metrics import cp_errors, speaker_metrics
+
+    if reference not in ("human", "self"):
+        raise typer.BadParameter("--reference must be 'human' or 'self'")
+    cfg = load_config(overrides)
+    store, meetings = _meetings(cfg, split, max_samples, max_minutes)
+    if reference == "human":
+        texts = dict(zip(store.meta["id"], store.meta["text"].fillna(""), strict=True))
+    else:
+        texts = load_texts(cfg, split, store.meta)
+    processor, net = _load_checkpoint(model)
+    normalize = TextNormalizer().normalize
+    ccfg = context_config(cfg)
+
+    refs, preds, records = [], [], []
+    for group, parts in meetings:
+        audio = mix_window(parts, store)
+        result = transcribe_long(
+            net, processor, audio, ccfg, max_new_tokens=cfg.model.max_new_tokens
+        )
+        ref = _reference(parts, texts)
+        errors, words = cp_errors(ref, result.text, normalize)
+        console.print(
+            f"{group}: {len(audio) / 16000 / 60:.1f} min, {len(result.chunks)} chunks, "
+            f"cpWER {errors / max(words, 1):.3f}, speakers "
+            f"{len({t.speaker for t in result.turns})} (ref {len({p['speaker'] for p in parts})})"
+        )
+        refs.append(ref)
+        preds.append(result.text)
+        records.append(
+            {"key": group, "target": ref, "prediction": result.text, "turns": _turns_json(result)}
+        )
+    scores = speaker_metrics(refs, preds, normalize)
+    console.print(_metrics_table(scores, f"{model} on {split} ({len(refs)} meetings)"))
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with (output_dir / "predictions.jsonl").open("w") as fh:
+            for record in records:
+                fh.write(json.dumps(record) + "\n")
+        (output_dir / "metrics.json").write_text(json.dumps(scores, indent=2))
+        console.print(f"wrote {output_dir}/predictions.jsonl and metrics.json")
+
+
+@app.command("transcribe-long")
+def transcribe_long_cmd(
+    audio: Annotated[Path, typer.Argument(help="Audio file of any length (resampled to 16 kHz)")],
+    model: Annotated[
+        str, typer.Option("--model", "-m", help="Qwen3-ASR checkpoint (Hub ID or local path)")
+    ],
+    overrides: Annotated[
+        list[str] | None, typer.Argument(help="Hydra overrides for the context: section")
+    ] = None,
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", "-o", help="Write <name>.json (timed turns) and <name>.txt"),
+    ] = None,
+):
+    """Speaker-attributed transcript of one audio file, minutes to hours long.
+
+    Prints `[start-end] SPEAKER n: text` per turn; speakers are numbered by
+    first appearance over the whole recording.
+    """
+    import librosa
+
+    from scripts.speaker_asr.config import context_config, load_config
+    from scripts.speaker_asr.longform import transcribe_long
+
+    cfg = load_config(overrides)
+    wav, _ = librosa.load(str(audio), sr=16000, mono=True)
+    processor, net = _load_checkpoint(model)
+    result = transcribe_long(
+        net, processor, wav, context_config(cfg), max_new_tokens=cfg.model.max_new_tokens
+    )
+    order = {}
+    for t in result.turns:
+        order.setdefault(t.speaker, len(order) + 1)
+
+    def clock(seconds):
+        return "  ?  " if seconds is None else f"{int(seconds // 60):02d}:{seconds % 60:04.1f}"
+
+    for t in result.turns:
+        console.print(f"[{clock(t.start)}-{clock(t.end)}] SPEAKER {order[t.speaker]}: {t.text}")
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        turns = [{**turn, "speaker": order[turn["speaker"]]} for turn in _turns_json(result)]
+        (output_dir / f"{audio.stem}.json").write_text(
+            json.dumps({"audio": str(audio), "chunks": result.chunks, "turns": turns}, indent=2)
+        )
+        (output_dir / f"{audio.stem}.txt").write_text(result.text + "\n")
+        console.print(f"wrote {output_dir / audio.stem}.json and .txt")

@@ -26,7 +26,8 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from scripts.speaker_asr.metrics import serialize_turns
+from scripts.speaker_asr.metrics import CONTEXT_END, serialize_turns
+from scripts.turn_aware.data import TurnAwareCollator
 
 SAMPLE_RATE = 16000
 
@@ -245,8 +246,78 @@ def subset(rows: list[dict], n: int, seed: int = 0) -> list[dict]:
 # ------------------------------------------------------------------ training
 
 
+def meeting_parts(meta, group: str, max_s: float | None = None) -> list[dict]:
+    """Every utterance of one meeting at its REAL time (no gap squeezing).
+
+    `meta` is UtteranceStore.meta. Mixing these gives the whole meeting as
+    one long recording -- the long-form evaluation input. With `max_s`, only
+    utterances that end within the first `max_s` seconds are kept.
+    """
+    rows = meta[meta["group"] == group].sort_values(["start", "end", "id"])
+    t0 = float(rows["start"].min())
+    parts = [
+        {
+            "row": int(r["row"]),
+            "id": r["id"],
+            "speaker": r["speaker"],
+            "offset_s": round(float(r["start"]) - t0, 3),
+            "dur_s": round(float(r["end"]) - float(r["start"]), 3),
+        }
+        for r in rows.to_dict("records")
+    ]
+    if max_s:
+        parts = [p for p in parts if p["offset_s"] + p["dur_s"] <= max_s]
+    return parts
+
+
+def load_texts(cfg, split: str, meta) -> dict[str, str]:
+    """Utterance id -> transcript the pool was built with (self or dataset text).
+
+    Context rows need every utterance's own text, not just window targets:
+    self-distilled ones come from the pool's transcripts-{split}.jsonl (pulled
+    with the pool from pool.hub_repo).
+    """
+    from pathlib import Path
+
+    from scripts.turn_aware.transcripts import read_cache
+
+    if cfg.pool.target_text != "self":
+        return dict(zip(meta["id"], meta["text"].fillna(""), strict=True))
+    cache = Path(cfg.pool.transcript_cache or cfg.data.pool_dir) / f"transcripts-{split}.jsonl"
+    texts = read_cache(cache)
+    if not texts:
+        raise FileNotFoundError(
+            f"{cache} is missing or empty; `ta speaker-asr build-pool --split {split}` "
+            "writes (or pulls) it"
+        )
+    return texts
+
+
+class SpeakerASRCollator(TurnAwareCollator):
+    """TurnAwareCollator's chat layout, with an optional context prefix unsupervised.
+
+    The assistant turn is `language English<asr_text>` + prefix + target;
+    labels start after the prefix's `<CONTINUE>`, so the prefix -- which
+    decoding pre-fills -- is context, never a prediction.
+    """
+
+    def __init__(self, processor):
+        super().__init__(processor)
+        self.context_end_id = processor.tokenizer.get_vocab().get(CONTEXT_END)
+
+    def __call__(self, batch: list[dict]) -> dict:
+        batch = [{**item, "target": item.get("prefix", "") + item["target"]} for item in batch]
+        enc = super().__call__(batch)
+        if self.context_end_id is not None:
+            for i, row in enumerate(enc["input_ids"]):
+                hits = (row == self.context_end_id).nonzero()
+                if len(hits):
+                    enc["labels"][i, : int(hits[-1]) + 1] = -100
+        return enc
+
+
 class SpeakerASRDataset(torch.utils.data.Dataset):
-    """Manifest rows -> {"audio", "ctx", "target"} (TurnAwareCollator's item shape)."""
+    """Manifest rows -> {"audio", "ctx", "prefix", "target"} for SpeakerASRCollator."""
 
     def __init__(self, rows: list[dict], store: UtteranceStore):
         store.verify(rows)
@@ -261,4 +332,10 @@ class SpeakerASRDataset(torch.utils.data.Dataset):
         return mix_window(json.loads(row["parts"]), self.store, row["tail_s"])
 
     def __getitem__(self, idx: int) -> dict:
-        return {"audio": self.audio(idx), "ctx": "", "target": self.rows[idx]["target"]}
+        row = self.rows[idx]
+        return {
+            "audio": self.audio(idx),
+            "ctx": "",
+            "prefix": row.get("prefix") or "",
+            "target": row["target"],
+        }

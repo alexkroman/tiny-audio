@@ -504,6 +504,11 @@ class SpeakerASREvaluator(Evaluator):
     plain text, which scores as one speaker -- the "no diarization" floor for
     cpWER on `ami-speakers`. The number of speaker tokens is read off the
     checkpoint's tokenizer.
+
+    Audio longer than one chunk (`ami-speakers-long`, any recording) goes
+    through long-form decoding (scripts/speaker_asr/longform.py): chunks
+    linked by a context prefix on a context-trained checkpoint, decoded
+    independently (no cross-chunk linking) otherwise.
     """
 
     MAX_NEW_TOKENS = 320
@@ -512,24 +517,30 @@ class SpeakerASREvaluator(Evaluator):
         super().__init__(**kwargs)
         from transformers import AutoProcessor
 
-        from scripts.speaker_asr.metrics import speaker_tokens
-        from scripts.speaker_asr.model import register_speaker_tokens
+        from scripts.speaker_asr.context import ContextConfig
+        from scripts.speaker_asr.model import n_speaker_tokens, register_speaker_tokens
         from tiny_audio.turns import load_model
 
         self.processor = AutoProcessor.from_pretrained(model_path)
-        vocab = self.processor.tokenizer.get_vocab()
-        self.n_speakers = sum(t in vocab for t in speaker_tokens(16)) or 4
+        self.n_speakers = n_speaker_tokens(self.processor) or 4
         register_speaker_tokens(self.processor, self.n_speakers)  # base model: never emitted
         self.model = load_model(model_path).eval()
+        self.context = ContextConfig()
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
+        from scripts.speaker_asr.longform import transcribe_long
         from scripts.speaker_asr.model import transcribe_speakers
 
         array = np.asarray(as_16k_array(audio), dtype=np.float32)
         start = time.time()
-        (text,) = transcribe_speakers(
-            self.model, self.processor, [array], self.n_speakers, self.MAX_NEW_TOKENS
-        )
+        if len(array) > self.context.chunk_s * 16000:
+            text = transcribe_long(
+                self.model, self.processor, array, self.context, max_new_tokens=self.MAX_NEW_TOKENS
+            ).text
+        else:
+            (text,) = transcribe_speakers(
+                self.model, self.processor, [array], self.n_speakers, self.MAX_NEW_TOKENS
+            )
         return text, time.time() - start, None
 
 
