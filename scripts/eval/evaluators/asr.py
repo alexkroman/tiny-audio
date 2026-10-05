@@ -525,6 +525,9 @@ class SpeakerASREvaluator(Evaluator):
         self.n_speakers = n_speaker_tokens(self.processor) or 4
         register_speaker_tokens(self.processor, self.n_speakers)  # base model: never emitted
         self.model = load_model(model_path).eval()
+        # Every decode here is batch 1 (no left padding, so no fully-masked
+        # rows): sdpa is safe on MPS despite load_model's eager default.
+        self.model.set_attn_implementation("sdpa")
         self.context = ContextConfig()
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:

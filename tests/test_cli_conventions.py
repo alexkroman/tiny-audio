@@ -71,6 +71,7 @@ def _arguments(command):
 
 def test_every_subcommand_is_reachable():
     assert {path[0] for path, _ in _LEAVES} == {
+        "train",
         "eval",
         "analysis",
         "deploy",

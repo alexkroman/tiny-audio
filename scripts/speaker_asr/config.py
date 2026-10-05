@@ -14,6 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from scripts.speaker_asr.context import ContextConfig
 from scripts.speaker_asr.data import WindowConfig
+from scripts.speaker_asr.junction import JunctionConfig
 from scripts.utils import get_project_root
 
 CONFIG_DIR = get_project_root() / "configs" / "speaker_asr"
@@ -46,6 +47,15 @@ def context_config(cfg: DictConfig) -> ContextConfig:
         value = cfg.context[f.name]
         values[f.name] = tuple(value) if OmegaConf.is_list(value) else value
     return ContextConfig(**values)
+
+
+def junction_config(cfg: DictConfig) -> JunctionConfig:
+    """The `junction:` section as a JunctionConfig, field by field."""
+    values = {}
+    for f in fields(JunctionConfig):
+        value = cfg.junction[f.name]
+        values[f.name] = tuple(value) if OmegaConf.is_list(value) else value
+    return JunctionConfig(**values)
 
 
 def n_speaker_tokens(cfg: DictConfig) -> int:

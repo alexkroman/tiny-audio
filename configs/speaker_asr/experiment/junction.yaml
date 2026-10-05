@@ -1,0 +1,20 @@
+# @package _global_
+# junction: v1 plus junction windows -- whole utterances drawn >= 60 s apart in
+# one meeting, half continuing a speaker already in the window and half
+# opening a new one -- so the labeller learns to verify a voice heard minutes
+# earlier (scripts/speaker_asr/junction.py). Same pool, tokens and objective
+# as v1; long-form decoding links independently decoded chunks by asking the
+# model whether two clips share a speaker.
+#
+# Extra eval: eval_junction/* decodes junction windows; speaker_count_acc
+# there is how often each same/new decision came out right.
+junction:
+  enabled: true
+pool:
+  hub_repo: mazesmazes/speaker-asr-pool
+data:
+  pool_dir: data/speaker_asr
+training:
+  output_dir: outputs/speaker_asr/junction
+  run_name: speaker-asr-qwen3-asr-0.6b-junction
+hub_model_id: mazesmazes/tiny-audio-speaker-asr-qwen3-asr-junction

@@ -137,3 +137,77 @@ def test_v4_borrows_distractor_context_and_context_matched_targets():
         c = load_config([f"+experiment={preset}"])
         assert pool_config(c).ctx_distractor_prob == 0.0
         assert c.pool.target_with_context is False
+
+
+class TestTrainingArgumentsMac:
+    """Qwen3-ASR recipes spawn workers and checkpoint activations on a Mac."""
+
+    @staticmethod
+    def _args(monkeypatch, mps: bool, **training):
+        import torch
+        import transformers.training_args
+        from omegaconf import OmegaConf
+
+        from scripts.turn_aware.config import training_arguments
+
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(transformers.training_args, "is_torch_mps_available", lambda: mps)
+        cfg = OmegaConf.create(
+            {"training": {"output_dir": "/tmp/ta-test", "dataloader_num_workers": 8, **training}}
+        )
+        return training_arguments(cfg, remove_unused_columns=False)
+
+    def test_mps_spawns_and_checkpoints(self, monkeypatch):
+        args = self._args(monkeypatch, mps=True)
+        assert args.dataloader_multiprocessing_context == "spawn"
+        assert args.gradient_checkpointing
+        assert args.gradient_checkpointing_kwargs == {"use_reentrant": False}
+
+    def test_explicit_context_wins(self, monkeypatch):
+        args = self._args(monkeypatch, mps=True, dataloader_multiprocessing_context="forkserver")
+        assert args.dataloader_multiprocessing_context == "forkserver"
+
+    def test_no_mps_keeps_default(self, monkeypatch):
+        args = self._args(monkeypatch, mps=False)
+        assert args.dataloader_multiprocessing_context is None
+        assert not args.gradient_checkpointing
+
+
+class TestCutGradIntoFrozenAudioTower:
+    """Backprop stops at the projector input only while the tower is frozen."""
+
+    @staticmethod
+    def _model(tower_trainable: bool):
+        import torch
+
+        class Inner(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.audio_tower = torch.nn.Linear(4, 4)
+                self.multi_modal_projector = torch.nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.multi_modal_projector(self.audio_tower(x))
+
+        model = torch.nn.Module()
+        model.model = Inner()
+        model.model.audio_tower.requires_grad_(tower_trainable)
+        return model
+
+    def test_frozen_tower_output_is_detached(self):
+        import torch
+
+        from scripts.turn_aware.model import cut_grad_into_frozen_audio_tower
+
+        model = self._model(tower_trainable=False)
+        assert cut_grad_into_frozen_audio_tower(model)
+        x = torch.randn(2, 4, requires_grad=True)  # what the conv2d1 hook does
+        model.model(x).sum().backward()
+        assert x.grad is None
+        assert model.model.multi_modal_projector.weight.grad is not None
+
+    def test_trainable_tower_is_left_alone(self):
+        from scripts.turn_aware.model import cut_grad_into_frozen_audio_tower
+
+        assert not cut_grad_into_frozen_audio_tower(self._model(tower_trainable=True))

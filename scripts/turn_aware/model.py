@@ -63,3 +63,26 @@ def apply_lora(model, token_id: int, rank: int, alpha: int, dropout: float):
         bias="none",
     )
     return get_peft_model(model, config)
+
+
+def cut_grad_into_frozen_audio_tower(model) -> bool:
+    """Stop backprop at the projector's input while the audio tower is frozen.
+
+    Gradient checkpointing (on by default on a Mac, see
+    `training_arguments`) makes transformers hook every sub-model's input
+    embeddings to require grad, the audio tower's `conv2d1` included. The
+    frozen tower then builds an autograd graph, and the backward that flows
+    into it through `masked_scatter` fails on MPS ("shape '[3817, 1024]' is
+    invalid for input of size ..."). Nothing upstream of the projector is
+    trained, so cut the graph there. A no-op when the tower is trainable.
+    Returns whether the cut was installed.
+    """
+    modules = dict(model.named_modules())
+    tower = next((m for n, m in modules.items() if n.endswith("audio_tower")), None)
+    projector = next((m for n, m in modules.items() if n.endswith("multi_modal_projector")), None)
+    if tower is None or projector is None or any(p.requires_grad for p in tower.parameters()):
+        return False
+    projector.register_forward_pre_hook(
+        lambda _module, args: tuple(a.detach() if torch.is_tensor(a) else a for a in args)
+    )
+    return True
