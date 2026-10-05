@@ -8,7 +8,7 @@ import typer.core
 import typer.main
 
 # Subcommands, as name -> module. Each module exposes a Typer named `app`: a
-# multi-command module (analysis, runpod, debug, dev) mounts as a group, and a
+# multi-command module (train, analysis, runpod, debug, dev) mounts as a group, and a
 # module with one `@app.command()` (eval, demo, deploy, push) mounts as a plain
 # command. Help text comes from the module itself, so it is written once.
 #
@@ -17,6 +17,7 @@ import typer.main
 # pure-shell commands like `ta dev lint` would otherwise pay in full. LazyGroup
 # therefore imports a module only when its command is looked up.
 SUBCOMMANDS: dict[str, str] = {
+    "train": "scripts.train_cli",
     "eval": "scripts.eval.cli",
     "analysis": "scripts.analysis",
     "deploy": "scripts.deploy.hf_space",

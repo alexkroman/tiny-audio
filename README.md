@@ -207,6 +207,7 @@ poetry run ta --help  # Show all commands
 
 | Command | Description |
 |---------|-------------|
+| `ta train` | Train locally: `asr`, `turn-aware`, `speaker-asr` (`-e <preset>`, Hydra overrides pass through) |
 | `ta eval` | Evaluate ASR models on datasets |
 | `ta analysis` | WER analysis (high-wer, entity-errors, extract-entities, compare) |
 | `ta deploy` | Deploy demo to HuggingFace Space |
