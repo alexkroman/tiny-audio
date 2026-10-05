@@ -12,6 +12,7 @@ from .asr import (
     EndpointEvaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
+    SmallestEvaluator,
     SpeakerASREvaluator,
     SwiftSDKEvaluator,
 )
@@ -36,6 +37,7 @@ __all__ = [
     # ASR evaluators
     "LocalEvaluator",
     "LocalStreamingEvaluator",
+    "SmallestEvaluator",
     "SpeakerASREvaluator",
     "SwiftSDKEvaluator",
     "TextNormalizer",

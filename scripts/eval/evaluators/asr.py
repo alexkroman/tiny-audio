@@ -10,6 +10,9 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -703,6 +706,68 @@ class DeepgramEvaluator(Evaluator):
 
         text = response.results.channels[0].alternatives[0].transcript
         return text, elapsed, None
+
+
+class _SmallestHTTPError(RuntimeError):
+    def __init__(self, status: int, body: str):
+        super().__init__(f"Smallest.ai HTTP {status}: {body[:200]}")
+        self.status = status
+
+
+class SmallestEvaluator(Evaluator):
+    """Evaluator for the Smallest.ai Pulse pre-recorded STT API.
+
+    Plain urllib rather than the `smallestai` SDK: the endpoint is one POST of
+    raw WAV bytes, and stdlib keeps poetry.lock untouched.
+    """
+
+    URL = "https://waves-api.smallest.ai/api/v1/pulse/get_text"
+    # 429 / 5xx retried here because the base Evaluator turns any exception into
+    # an empty prediction -- a rate limit under -w N would read as 100% WER rows.
+    _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+    def __init__(self, api_key: str, model: str = "pulse", language: str = "en", **kwargs):
+        super().__init__(**kwargs)
+        self.api_key = api_key
+        self.model = model
+        self.language = language
+
+    @staticmethod
+    def _is_retryable(exc: BaseException) -> bool:
+        if isinstance(exc, _SmallestHTTPError):
+            return exc.status in SmallestEvaluator._RETRYABLE_STATUSES
+        return isinstance(exc, (urllib.error.URLError, TimeoutError))
+
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential_jitter(initial=1.0, max=30.0),
+        reraise=True,
+    )
+    def _post(self, wav_bytes: bytes) -> dict:
+        query = urllib.parse.urlencode({"model": self.model, "language": self.language})
+        request = urllib.request.Request(
+            f"{self.URL}?{query}",
+            data=wav_bytes,
+            method="POST",
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "audio/wav"},
+        )
+        try:
+            # B310 guards file:// schemes; the URL is the fixed https constant above.
+            with urllib.request.urlopen(request, timeout=120) as response:  # nosec B310
+                return json.loads(response.read())
+        except urllib.error.HTTPError as e:
+            raise _SmallestHTTPError(e.code, e.read().decode(errors="replace")) from e
+
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+        wav_bytes = prepare_wav_bytes(audio)
+        start = time.time()
+        payload = self._post(wav_bytes)
+        elapsed = time.time() - start
+
+        if payload.get("status") != "success":
+            raise RuntimeError(f"Smallest.ai returned non-success payload: {payload}")
+        return payload.get("transcription") or "", elapsed, None
 
 
 class ElevenLabsEvaluator(Evaluator):
