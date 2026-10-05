@@ -27,6 +27,7 @@ from scripts.eval.evaluators import (
     Evaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
+    SmallestEvaluator,
     SpeakerASREvaluator,
     SwiftSDKEvaluator,
 )
@@ -202,7 +203,9 @@ def expand_datasets(datasets: list[str]) -> list[str]:
 
 # --model values that dispatch to a non-PyTorch backend (hosted API, Swift
 # binary, on-device Apple recognizer) rather than loading an ASRModel here.
-_NON_LOCAL_MODELS = frozenset({"assemblyai", "deepgram", "elevenlabs", "apple-speech", "swift"})
+_NON_LOCAL_MODELS = frozenset(
+    {"assemblyai", "deepgram", "elevenlabs", "smallest", "apple-speech", "swift"}
+)
 
 
 def _is_qwen3_asr(model: str) -> bool:
@@ -230,6 +233,7 @@ def _build_evaluator(
     assemblyai_api_key: str | None,
     deepgram_api_key: str | None,
     elevenlabs_api_key: str | None,
+    smallest_api_key: str | None,
     base_url: str | None,
     locale: str,
     num_workers: int,
@@ -296,6 +300,13 @@ def _build_evaluator(
         api_key = _require_api_key(elevenlabs_api_key, "--elevenlabs-api-key", "ELEVENLABS_API_KEY")
         model_id = "scribe-v2"
         evaluator = ElevenLabsEvaluator(
+            api_key=api_key,
+            num_workers=num_workers,
+        )
+    elif model == "smallest":
+        api_key = _require_api_key(smallest_api_key, "--smallest-api-key", "SMALLEST_API_KEY")
+        model_id = "smallest-pulse"
+        evaluator = SmallestEvaluator(
             api_key=api_key,
             num_workers=num_workers,
         )
@@ -378,7 +389,7 @@ def main(
         typer.Option(
             "--model",
             "-m",
-            help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', or 'apple-speech'",
+            help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', 'smallest', or 'apple-speech'",
         ),
     ],
     datasets: Annotated[
@@ -436,6 +447,10 @@ def main(
             "--elevenlabs-api-key", envvar="ELEVENLABS_API_KEY", help="ElevenLabs API key"
         ),
     ] = None,
+    smallest_api_key: Annotated[
+        str | None,
+        typer.Option("--smallest-api-key", envvar="SMALLEST_API_KEY", help="Smallest.ai API key"),
+    ] = None,
     locale: Annotated[
         str,
         typer.Option("--locale", help="Locale for apple-speech (e.g. en-US, es-ES, fr-FR)"),
@@ -489,6 +504,7 @@ def main(
         assemblyai_api_key=assemblyai_api_key,
         deepgram_api_key=deepgram_api_key,
         elevenlabs_api_key=elevenlabs_api_key,
+        smallest_api_key=smallest_api_key,
         base_url=base_url,
         locale=locale,
         num_workers=num_workers,
