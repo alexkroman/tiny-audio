@@ -20,7 +20,12 @@
 # decoding links speakers across an hour (scripts/speaker_asr/context.py,
 # longform.py; `ta speaker-asr transcribe-long | evaluate-long`).
 #
-# A run is this file plus one preset from experiment/ (v1, tower, context); the SAME
+# Junction windows (experiment/junction) instead teach the labeller to VERIFY:
+# utterances minutes apart in one window, same voice or not, so long-form
+# decoding can link chunks by asking the model itself whether two clips share
+# a speaker (scripts/speaker_asr/junction.py).
+#
+# A run is this file plus one preset from experiment/ (v1, tower, context, junction); the SAME
 # overrides drive the data and the training, so they cannot drift:
 #
 #   poetry run ta speaker-asr build-pool +experiment=v1          # builds + pushes the pool
@@ -138,6 +143,22 @@ context:
   max_audio_s: 90.0
   min_chunk_s: 10.0
   chunk_s: 25.0
+
+# Junction windows (experiment/junction): whole utterances drawn minutes
+# apart in one meeting, half continuing a speaker already in the window and
+# half opening a new one, so the labeller learns to tell whether a voice was
+# heard before -- the decision long-form linking asks it to make. Built from
+# the utterance index at load time, so NOT part of the pool signature. Fields
+# mirror scripts/speaker_asr/junction.py:JunctionConfig, which documents them.
+junction:
+  enabled: false
+  ratio: 0.35
+  clips: [2, 4]
+  clip_s: [2.0, 6.0]
+  gap_s: [0.3, 1.0]
+  min_separation_s: 60.0
+  same_prob: 0.5
+  eval_rows: 200
 
 resume_from_checkpoint: null
 # The MERGED final model is pushed here after training (null = keep local).

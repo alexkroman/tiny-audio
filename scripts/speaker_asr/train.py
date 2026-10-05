@@ -22,9 +22,14 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
-from transformers import Trainer, TrainingArguments, set_seed
+from transformers import Trainer, set_seed
 
-from scripts.speaker_asr.config import context_config, n_speaker_tokens, pool_signature
+from scripts.speaker_asr.config import (
+    context_config,
+    junction_config,
+    n_speaker_tokens,
+    pool_signature,
+)
 from scripts.speaker_asr.context import build_context_rows
 from scripts.speaker_asr.data import (
     SpeakerASRCollator,
@@ -33,6 +38,7 @@ from scripts.speaker_asr.data import (
     load_texts,
     subset,
 )
+from scripts.speaker_asr.junction import build_junction_rows, junction_count
 from scripts.speaker_asr.metrics import speaker_metrics
 from scripts.speaker_asr.model import (
     apply_lora,
@@ -41,7 +47,8 @@ from scripts.speaker_asr.model import (
     register_speaker_tokens,
     speaker_token_ids,
 )
-from scripts.turn_aware.config import read_signature, signature_diff
+from scripts.turn_aware.config import read_signature, signature_diff, training_arguments
+from scripts.turn_aware.model import cut_grad_into_frozen_audio_tower
 
 logger = logging.getLogger(__name__)
 
@@ -86,24 +93,48 @@ def context_rows(cfg: DictConfig, split: str, rows: list[dict], stores: dict) ->
     return out
 
 
+def junction_rows(cfg: DictConfig, split: str, n_rows: int, stores: dict, seed: int) -> list[dict]:
+    """`n_rows` junction windows over one split's utterances (scripts/speaker_asr/junction.py)."""
+    meta = stores[split].meta
+    utts = meta[["row", "id", "group", "speaker", "start", "end"]].to_dict("records")
+    out = build_junction_rows(
+        utts,
+        load_texts(cfg, split, meta),
+        junction_config(cfg),
+        n_rows,
+        max_speakers=cfg.pool.max_speakers,
+        max_audio_s=cfg.pool.max_audio_s,
+        seed=seed,
+    )
+    same = sum(r["n_same"] for r in out)
+    new = sum(r["n_new"] for r in out)
+    logger.info(
+        "%s: %d junction windows (%d same-speaker / %d new-speaker junctions)",
+        split, len(out), same, new,
+    )  # fmt: skip
+    return out
+
+
 class SpeakerASRTrainer(Trainer):
-    """Trainer whose evaluate() also decodes a subset and scores cpWER.
+    """Trainer whose evaluate() also decodes subsets and scores cpWER.
 
     eval/loss is dominated by transcript tokens the base model already gets
     right; whether the speaker tokens land on the right voice only shows up
-    in a free-running decode.
+    in a free-running decode. Each entry of `decode_evals` is logged under its
+    own `prefix` (eval_speakers/*, eval_junction/*).
     """
 
-    def __init__(self, *args, decode_eval: dict | None = None, **kwargs):
+    def __init__(self, *args, decode_evals: list[dict] | None = None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.decode_eval = decode_eval
+        self.decode_evals = decode_evals or []
 
     def evaluate(self, *args, **kwargs):
         metrics = super().evaluate(*args, **kwargs)
-        if self.decode_eval and self.is_world_process_zero():
+        if not self.is_world_process_zero():
+            return metrics
+        for ev in self.decode_evals:
             was_training = self.model.training
             self.model.eval()
-            ev = self.decode_eval
             preds = predict_rows(
                 self.model,
                 ev["processor"],
@@ -115,7 +146,7 @@ class SpeakerASRTrainer(Trainer):
             refs = [r["target"] for r in ev["dataset"].rows]
             scores = speaker_metrics(refs, preds, ev["normalize"], ev["fixed_labels"])
             self.model.train(was_training)
-            scores = {f"eval_speakers/{k}": v for k, v in scores.items() if k != "n"}
+            scores = {f"{ev['prefix']}/{k}": v for k, v in scores.items() if k != "n"}
             self.log(scores)
             metrics.update(scores)
         return metrics
@@ -127,7 +158,7 @@ def main(cfg: DictConfig) -> None:
     set_seed(cfg.training.seed)
     if HydraConfig.get().runtime.choices.get("experiment") is None:
         logger.warning(
-            "No +experiment=<v1|tower> preset: training under the scratch identity "
+            "No +experiment=<v1|tower|context|junction> preset: training under the scratch identity "
             "(pool %s, hub_model_id %s).",
             cfg.data.pool_dir,
             cfg.hub_model_id,
@@ -140,6 +171,9 @@ def main(cfg: DictConfig) -> None:
     from tiny_audio.turns import load_model
 
     context = bool(cfg.context.enabled)
+    junction = bool(cfg.junction.enabled)
+    if context and junction:
+        raise ValueError("context and junction windows are separate recipes; enable one")
     n_speakers = n_speaker_tokens(cfg)
     processor = AutoProcessor.from_pretrained(cfg.model.model_id)
     new_ids = register_speaker_tokens(processor, n_speakers, context)
@@ -156,6 +190,7 @@ def main(cfg: DictConfig) -> None:
         cfg.model.lora_dropout,
     )
     model.print_trainable_parameters()
+    cut_grad_into_frozen_audio_tower(model)
 
     columns = OmegaConf.to_container(cfg.data.columns)
     stores = {
@@ -168,34 +203,55 @@ def main(cfg: DictConfig) -> None:
         train_rows = context_rows(cfg, cfg.data.train_split, train_rows, stores)
         eval_rows = context_rows(cfg, cfg.data.eval_split, eval_rows, stores)
     eval_rows = subset(eval_rows, cfg.data.eval_samples)
+    junction_eval = []
+    if junction:
+        jcfg = junction_config(cfg)
+        n_junction = junction_count(len(train_rows), jcfg.ratio)
+        train_rows = train_rows + junction_rows(
+            cfg, cfg.data.train_split, n_junction, stores, cfg.pool.seed
+        )
+        junction_eval = junction_rows(
+            cfg, cfg.data.eval_split, jcfg.eval_rows, stores, cfg.pool.seed + 1
+        )
     logger.info("pool: %d train windows, %d eval windows", len(train_rows), len(eval_rows))
 
     from scripts.eval.audio import TextNormalizer
 
     eval_store = stores[cfg.data.eval_split]
+    decode_spec = {
+        "processor": processor,
+        "n_speakers": n_speakers,
+        "batch_size": cfg.training.per_device_eval_batch_size,
+        "max_new_tokens": cfg.model.max_new_tokens,
+        "normalize": TextNormalizer().normalize,
+        "fixed_labels": context,
+    }
+    decode_evals = [
+        {
+            **decode_spec,
+            "prefix": "eval_speakers",
+            "dataset": SpeakerASRDataset(
+                subset(eval_rows, cfg.data.decode_eval_samples, seed=1), eval_store
+            ),
+        }
+    ]
+    if junction_eval:
+        decode_evals.append(
+            {
+                **decode_spec,
+                "prefix": "eval_junction",
+                "dataset": SpeakerASRDataset(junction_eval, eval_store),
+            }
+        )
     trainer = SpeakerASRTrainer(
         model=model,
-        args=TrainingArguments(
-            **OmegaConf.to_container(cfg.training, resolve=True),
-            remove_unused_columns=False,
-            label_names=["labels"],
-        ),
+        args=training_arguments(cfg, remove_unused_columns=False, label_names=["labels"]),
         train_dataset=SpeakerASRDataset(train_rows, stores[cfg.data.train_split]),
         eval_dataset=SpeakerASRDataset(eval_rows, eval_store),
         # Same chat layout and transcript-only labels as turn-aware; the
         # target carries speaker tokens, and a context prefix is unsupervised.
         data_collator=SpeakerASRCollator(processor),
-        decode_eval={
-            "processor": processor,
-            "dataset": SpeakerASRDataset(
-                subset(eval_rows, cfg.data.decode_eval_samples, seed=1), eval_store
-            ),
-            "n_speakers": n_speakers,
-            "batch_size": cfg.training.per_device_eval_batch_size,
-            "max_new_tokens": cfg.model.max_new_tokens,
-            "normalize": TextNormalizer().normalize,
-            "fixed_labels": context,
-        },
+        decode_evals=decode_evals,
     )
     report_to = cfg.training.report_to
     if trainer.is_world_process_zero() and "wandb" in (
