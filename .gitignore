@@ -177,8 +177,8 @@ checkpoints/
 models/
 outputs/
 samples/
-# `ta turn-aware build-pool` manifests + self-distillation transcript caches
-data/turn_aware*/
+# local dataset caches: turn-aware pools + transcript caches, speaker-ASR alignments
+/data/
 
 # Weights & Biases
 wandb/
