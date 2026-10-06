@@ -543,6 +543,14 @@ def transcribe_long_cmd(
         Path | None,
         typer.Option("--output-dir", "-o", help="Write <name>.json (timed turns) and <name>.txt"),
     ] = None,
+    method: Annotated[
+        str,
+        typer.Option(
+            "--method",
+            help="clustered: short chunks + ECAPA + spectral clustering (best); "
+            "prefix: context-prefix chunk linking",
+        ),
+    ] = "clustered",
 ):
     """Speaker-attributed transcript of one audio file, minutes to hours long.
 
@@ -552,14 +560,24 @@ def transcribe_long_cmd(
     import librosa
 
     from scripts.speaker_asr.config import context_config, load_config
-    from scripts.speaker_asr.longform import transcribe_long
 
+    if method not in ("clustered", "prefix"):
+        raise typer.BadParameter("--method must be 'clustered' or 'prefix'")
     cfg = load_config(overrides)
     wav, _ = librosa.load(str(audio), sr=16000, mono=True)
     processor, net = _load_checkpoint(model)
-    result = transcribe_long(
-        net, processor, wav, context_config(cfg), max_new_tokens=cfg.model.max_new_tokens
-    )
+    if method == "clustered":
+        from scripts.speaker_asr.clustered import ClusterConfig, transcribe_clustered
+
+        result = transcribe_clustered(
+            net, processor, wav, ClusterConfig(max_new_tokens=cfg.model.max_new_tokens)
+        )
+    else:
+        from scripts.speaker_asr.longform import transcribe_long
+
+        result = transcribe_long(
+            net, processor, wav, context_config(cfg), max_new_tokens=cfg.model.max_new_tokens
+        )
     order = {}
     for t in result.turns:
         order.setdefault(t.speaker, len(order) + 1)

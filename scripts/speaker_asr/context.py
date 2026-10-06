@@ -151,6 +151,8 @@ def build_context_rows(
                     "target": target,
                     "n_speakers": len({s for s, t in ((p["speaker"], text(p)) for p in live) if t}),
                     "n_memory": len(known),
+                    # the live window's utterances: the target's turns come from these alone
+                    "live_ids": json.dumps([p["id"] for p in live]),
                 }
             )
     return out
