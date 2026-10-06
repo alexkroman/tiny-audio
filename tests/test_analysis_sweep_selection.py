@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.analysis import _latest_sweep, _recompute_matched_corpus, collect_model_metrics
+from scripts.analysis import (
+    _dataset_wer,
+    _latest_sweep,
+    _match_dataset_rows,
+    _recompute_matched_corpus,
+    collect_model_metrics,
+)
 
 
 def _write(root: Path, ts: str, model: str, ds: str, run_id: str | None, pairs, wer: float):
@@ -107,6 +113,62 @@ class TestMatchedCorpus:
         assert mm["a"]["corpus_datasets"] == []
         assert "ami" in mm["a"]["corpus_excluded"]
         assert "corpus_wer" not in mm["a"]
+
+
+class TestMatchedDatasetColumns:
+    """Each dataset column compares models on the rows they all have."""
+
+    def test_column_truncates_to_the_shared_row_count(self, tmp_path):
+        """The regression: an n=100 sweep beside n=1000 showed the full-sweep
+        WER in the column but the first-100 WER in the corpus cell."""
+        # modelA: 5 matching rows, then 15 misses. Full sweep 25%, first 5 0%.
+        _write(tmp_path, "20260102_000000", "modelA", "ami", "ra", MATCH + MISS * 3, 25.0)
+        _write(tmp_path, "20260102_010000", "modelB", "ami", "rb", MISS, 33.3)
+        mm = {
+            "a": collect_model_metrics("modelA", tmp_path, []),
+            "b": collect_model_metrics("modelB", tmp_path, []),
+        }
+        assert _dataset_wer(mm["a"]["datasets"]["ami"]) == pytest.approx(25.0, abs=0.2)
+        truncated, unmatched = _match_dataset_rows(mm)
+        assert truncated == {"ami": [5, 20]}
+        assert unmatched == {}
+        assert _dataset_wer(mm["a"]["datasets"]["ami"]) == pytest.approx(0.0, abs=0.01)
+        assert len(mm["a"]["datasets"]["ami"]["refs"]) == 20, "rows stay whole"
+        _recompute_matched_corpus(mm, {})
+        assert mm["a"]["corpus_wer"] == pytest.approx(
+            _dataset_wer(mm["a"]["datasets"]["ami"]), abs=0.01
+        )
+
+    def test_missing_model_does_not_shrink_the_column(self, tmp_path):
+        """modelC has no tedlium; A and B keep their full shared tedlium rows."""
+        _write(tmp_path, "20260102_000000", "modelA", "tedlium", "ra", MATCH * 4, 0.0)
+        _write(tmp_path, "20260102_000100", "modelA", "ami", "ra", MATCH, 0.0)
+        _write(tmp_path, "20260102_010000", "modelB", "tedlium", "rb", MATCH * 4, 0.0)
+        _write(tmp_path, "20260102_010100", "modelB", "ami", "rb", MATCH, 0.0)
+        _write(tmp_path, "20260102_020000", "modelC", "ami", "rc", MATCH[:2], 0.0)
+        mm = {k: collect_model_metrics(f"model{k}", tmp_path, []) for k in "ABC"}
+        truncated, _ = _match_dataset_rows(mm)
+        assert truncated == {"ami": [2, 5]}, "tedlium is 20 vs 20, nothing to truncate"
+
+    def test_different_rows_keep_full_sweeps_and_are_reported(self, tmp_path):
+        _write(tmp_path, "20260102_000000", "modelA", "ami", "ra", MISS * 2, 33.3)
+        _write(
+            tmp_path,
+            "20260102_010000",
+            "modelB",
+            "ami",
+            "rb",
+            [("totally different text here", "totally different text here")] * 5,
+            0.0,
+        )
+        mm = {
+            "a": collect_model_metrics("modelA", tmp_path, []),
+            "b": collect_model_metrics("modelB", tmp_path, []),
+        }
+        truncated, unmatched = _match_dataset_rows(mm)
+        assert truncated == {}
+        assert unmatched == {"ami": "references differ (different eval rows)"}
+        assert _dataset_wer(mm["a"]["datasets"]["ami"]) == pytest.approx(33.3, abs=0.2)
 
 
 def _write_drifted(root: Path, ts: str, model: str, ds: str, run_id: str, rows):

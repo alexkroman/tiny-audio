@@ -588,14 +588,7 @@ def collect_model_metrics(
                 )
                 metrics["by_length"][word_count]["wers"].append(sample_wer)
 
-        if ds_metrics["refs"]:
-            output = jiwer.process_words(ds_metrics["refs"], ds_metrics["preds"])
-            total = output.hits + output.substitutions + output.deletions
-            if total > 0:
-                ds_metrics["wer_calculated"] = output.wer * 100
-                ds_metrics["ins_rate"] = output.insertions / total * 100
-                ds_metrics["del_rate"] = output.deletions / total * 100
-                ds_metrics["sub_rate"] = output.substitutions / total * 100
+        ds_metrics.update(_error_rates(ds_metrics["refs"], ds_metrics["preds"]))
 
         metrics["datasets"][dataset] = ds_metrics
 
@@ -654,6 +647,65 @@ def _sort_key_desc(value: str) -> tuple[int, float]:
         return (0, -float(value.rstrip("%")))
     except ValueError:
         return (1, 0.0)
+
+
+def _error_rates(refs: list[str], preds: list[str]) -> dict:
+    """WER and insertion/deletion/substitution rates, in percent, over a row set."""
+    import jiwer
+
+    if not refs:
+        return {}
+    output = jiwer.process_words(refs, preds)
+    total = output.hits + output.substitutions + output.deletions
+    if total == 0:
+        return {}
+    return {
+        "wer_calculated": output.wer * 100,
+        "ins_rate": output.insertions / total * 100,
+        "del_rate": output.deletions / total * 100,
+        "sub_rate": output.substitutions / total * 100,
+    }
+
+
+def _match_dataset_rows(model_metrics: dict) -> tuple[dict, dict]:
+    """Rescore each dataset column over the rows every model in it shares.
+
+    The corpus column was already row-matched; the per-dataset columns beside
+    it were not. Measured case: smallest-pulse swept Loquacious at n=100 while
+    tiny-audio had 1,000 rows, so the Loquacious column read 5.82 for tiny
+    against a 6.29 corpus cell that was the same model on the same dataset --
+    the first 100 rows -- and smallest's 12.15 sat beside a number from 10x
+    the data.
+
+    Unlike the corpus, a dataset only needs the models that HAVE it: a model
+    missing a dataset shows "-" there and does not shrink the column for the
+    rest. Rows are matched by the same prefix rule as
+    `_recompute_matched_corpus` (the eval draw is a fixed-seed prefix), and a
+    dataset whose references disagree keeps each model's full-sweep number and
+    is reported, rather than silently compared across different rows.
+
+    The rates are overwritten in place; `refs`/`preds` stay whole. Returns
+    (truncated: ds -> sorted per-model row counts, unmatched: ds -> reason).
+    """
+    datasets = set().union(*(m["datasets"] for m in model_metrics.values()))
+    truncated, unmatched = {}, {}
+    for ds in sorted(datasets):
+        per_model = [
+            m["datasets"][ds]
+            for m in model_metrics.values()
+            if ds in m["datasets"] and m["datasets"][ds]["refs"]
+        ]
+        counts = sorted({len(d["refs"]) for d in per_model})
+        if len(counts) < 2:
+            continue
+        n = counts[0]
+        if any(d["refs"][:n] != per_model[0]["refs"][:n] for d in per_model):
+            unmatched[ds] = "references differ (different eval rows)"
+            continue
+        for d in per_model:
+            d.update(_error_rates(d["refs"][:n], d["preds"][:n]))
+        truncated[ds] = counts
+    return truncated, unmatched
 
 
 def _dataset_wer(ds_data: dict) -> float | None:
@@ -942,19 +994,17 @@ def compare(
     if sample.get("corpus_excluded"):
         for ds, why in sorted(sample["corpus_excluded"].items()):
             console.print(f"[yellow]Corpus excludes {ds}: {why}[/yellow]")
-    mixed = {
-        ds: sorted(
-            {len(m["datasets"][ds]["refs"]) for m in model_metrics.values() if ds in m["datasets"]}
-        )
-        for ds in sample.get("corpus_datasets", [])
-    }
-    ragged = {ds: ns for ds, ns in mixed.items() if len(ns) > 1}
-    if ragged:
+    # Same for every dataset column: rescored over the rows the models in that
+    # column share, so a column never compares an n=100 sweep against n=1000.
+    truncated, unmatched = _match_dataset_rows(model_metrics)
+    if truncated:
         console.print(
-            "[yellow]Corpus truncated to the shared row count on: "
-            + ", ".join(f"{ds} {ns}" for ds, ns in sorted(ragged.items()))
+            "[yellow]Truncated to the shared row count on: "
+            + ", ".join(f"{ds} {ns}" for ds, ns in truncated.items())
             + "[/yellow]"
         )
+    for ds, why in unmatched.items():
+        console.print(f"[yellow]{ds} not row-matched, full sweeps shown: {why}[/yellow]")
 
     # Get all datasets present across models (excluding certain datasets)
     all_datasets = set()
