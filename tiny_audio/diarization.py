@@ -10,6 +10,15 @@ import warnings
 import numpy as np
 import torch
 
+# The ECAPA SpeakerDiarizer's packages, imported inside try blocks: transformers
+# scans every bundled file's imports before loading the model and refuses to load
+# if one is missing, and it skips imports inside `try`. The pipeline diarizes with
+# NemotronDiarizer, so these stay optional.
+_ECAPA_EXTRAS = (
+    "SpeakerDiarizer (ECAPA) needs extra packages: "
+    "pip install speechbrain ten-vad scikit-learn scipy librosa"
+)
+
 
 def _get_device() -> torch.device:
     """Get best available device for inference."""
@@ -80,7 +89,10 @@ class SpectralCluster:
 
     def get_sim_mat(self, embeddings: np.ndarray) -> np.ndarray:
         """Compute cosine similarity matrix."""
-        from sklearn.metrics.pairwise import cosine_similarity
+        try:
+            from sklearn.metrics.pairwise import cosine_similarity
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         return cosine_similarity(embeddings, embeddings)
 
@@ -99,7 +111,10 @@ class SpectralCluster:
 
     def get_laplacian(self, sim_mat: np.ndarray) -> np.ndarray:
         """Compute unnormalized Laplacian matrix."""
-        from scipy.sparse.csgraph import laplacian
+        try:
+            from scipy.sparse.csgraph import laplacian
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         np.fill_diagonal(sim_mat, 0)
         return laplacian(sim_mat, normed=False)
@@ -108,7 +123,10 @@ class SpectralCluster:
         self, laplacian: np.ndarray, k_oracle: int | None = None
     ) -> tuple[np.ndarray, int]:
         """Extract spectral embeddings from Laplacian."""
-        from scipy.linalg import eigh
+        try:
+            from scipy.linalg import eigh
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         lambdas, eig_vecs = eigh(laplacian)
 
@@ -125,7 +143,10 @@ class SpectralCluster:
 
     def cluster_embs(self, emb: np.ndarray, k: int) -> np.ndarray:
         """Cluster spectral embeddings using k-means."""
-        from sklearn.cluster._kmeans import k_means
+        try:
+            from sklearn.cluster._kmeans import k_means
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         _, labels, _ = k_means(emb, k, n_init=10)
         return labels
@@ -187,7 +208,10 @@ class SpeakerClusterer:
             return np.zeros(embeddings.shape[0], dtype=int)
 
         # Normalize embeddings and replace NaN/inf
-        from sklearn.preprocessing import normalize
+        try:
+            from sklearn.preprocessing import normalize
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
         embeddings = normalize(embeddings)
@@ -220,8 +244,14 @@ class SpeakerClusterer:
 
     def _merge_by_cos(self, labels: np.ndarray, embs: np.ndarray, cos_thr: float) -> np.ndarray:
         """Merge similar speakers by cosine similarity of centroids."""
-        from sklearn.cluster import AgglomerativeClustering
-        from sklearn.preprocessing import normalize
+        try:
+            from sklearn.cluster import AgglomerativeClustering
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
+        try:
+            from sklearn.preprocessing import normalize
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         unique_labels, inverse = np.unique(labels, return_inverse=True)
         if len(unique_labels) <= 1:
@@ -300,7 +330,10 @@ class SpeakerDiarizer:
     def _get_ten_vad_model(cls):
         """Lazy-load TEN-VAD model (singleton)."""
         if cls._ten_vad_model is None:
-            from ten_vad import TenVad
+            try:
+                from ten_vad import TenVad
+            except ImportError as e:
+                raise ImportError(_ECAPA_EXTRAS) from e
 
             cls._ten_vad_model = TenVad(hop_size=256, threshold=cls.VAD_THRESHOLD)
         return cls._ten_vad_model
@@ -319,7 +352,10 @@ class SpeakerDiarizer:
             # Suppress torchaudio deprecation warning from SpeechBrain
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="torchaudio._backend")
-                from speechbrain.inference.speaker import EncoderClassifier
+                try:
+                    from speechbrain.inference.speaker import EncoderClassifier
+                except ImportError as e:
+                    raise ImportError(_ECAPA_EXTRAS) from e
 
                 device = cls._get_device()
                 cls._ecapa_model = EncoderClassifier.from_hparams(
@@ -353,13 +389,19 @@ class SpeakerDiarizer:
         """
         # Handle file path input
         if isinstance(audio, str):
-            import librosa
+            try:
+                import librosa
+            except ImportError as e:
+                raise ImportError(_ECAPA_EXTRAS) from e
 
             audio, sample_rate = librosa.load(audio, sr=16000)
 
         # Ensure correct sample rate
         if sample_rate != 16000:
-            import librosa
+            try:
+                import librosa
+            except ImportError as e:
+                raise ImportError(_ECAPA_EXTRAS) from e
 
             audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=16000)
             sample_rate = 16000
@@ -518,7 +560,10 @@ class SpeakerDiarizer:
 
         # Normalize all embeddings at once
         if embeddings:
-            from sklearn.preprocessing import normalize
+            try:
+                from sklearn.preprocessing import normalize
+            except ImportError as e:
+                raise ImportError(_ECAPA_EXTRAS) from e
 
             return normalize(np.array(embeddings)), window_segments
         return np.array([]), []
