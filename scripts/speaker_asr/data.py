@@ -118,6 +118,16 @@ def mix_window(parts: list[dict], store: UtteranceStore, tail_s: float = 0.0) ->
     return out / peak * 0.99 if peak > 1.0 else out
 
 
+def read_slice(path, start_s: float, end_s: float) -> np.ndarray:
+    """[start_s, end_s) of a 16 kHz recording, mono float32, without reading the whole file."""
+    with sf.SoundFile(str(path)) as f:
+        if f.samplerate != SAMPLE_RATE:
+            raise ValueError(f"{path} is {f.samplerate} Hz; recordings must be stored at 16 kHz")
+        f.seek(round(start_s * SAMPLE_RATE))
+        wav = f.read(round((end_s - start_s) * SAMPLE_RATE), dtype="float32")
+    return wav.mean(axis=1) if wav.ndim > 1 else wav
+
+
 # --------------------------------------------------------------------- pool
 
 
@@ -350,11 +360,19 @@ class SpeakerASRDataset(torch.utils.data.Dataset):
     """Manifest rows -> {"audio", "ctx", "prefix", "target"} for SpeakerASRCollator."""
 
     def __init__(
-        self, rows: list[dict], store: UtteranceStore, augment_prob: float = 0.0, seed: int = 0
+        self,
+        rows: list[dict],
+        store: UtteranceStore,
+        augment_prob: float = 0.0,
+        seed: int = 0,
+        recordings_root: str | None = None,
     ):
         store.verify(rows)
         self.rows = rows
         self.store = store
+        # Rows with `recording` (chunks.plan_recording_chunks) read a slice of a real
+        # recording under this directory instead of mixing utterances from `store`.
+        self.recordings_root = recordings_root
         # Short real-chunk rows (scripts/speaker_asr/chunks.py) may get gain + noise.
         self.augment_prob = augment_prob
         self.rng = np.random.default_rng(seed)
@@ -364,6 +382,11 @@ class SpeakerASRDataset(torch.utils.data.Dataset):
 
     def audio(self, idx: int) -> np.ndarray:
         row = self.rows[idx]
+        if row.get("recording"):
+            from pathlib import Path
+
+            path = Path(self.recordings_root or ".") / row["recording"]
+            return read_slice(path, row["start_s"], row["end_s"])
         return mix_window(json.loads(row["parts"]), self.store, row["tail_s"])
 
     def __getitem__(self, idx: int) -> dict:

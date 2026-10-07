@@ -198,6 +198,24 @@ short_chunks:
   # where self-transcription is wrong: "mm-hmm" -> "Yeah."). 0 = self-transcripts only.
   human_text_below_s: 1.0
 
+# NOTSOFAR-1 far-field meetings as extra short chunks (needs short_chunks.enabled).
+# Real room audio -- reverb, distance, crosstalk, real overlap -- and unscripted
+# office meetings, where AMI rows are summed headset clips of mostly role-played
+# design meetings. CC BY 4.0 (cite Vinnikov et al., Interspeech 2024); fields mirror
+# scripts/speaker_asr/notsofar.py:NotsofarConfig.
+notsofar:
+  enabled: false
+  repo_id: microsoft/NOTSOFAR
+  # 72 meetings, 7.4 h, 4-8 speakers each; every single-channel device is a recording.
+  train_version: train_set/240825.1_train
+  # Held-out decode eval (eval_notsofar/*): speakers disjoint from train. null = none.
+  # Never dev_set/240415.2_dev: Dev-set-2 is licensed for the challenge only.
+  eval_version: eval_set/240629.1_eval_small_with_GT
+  # Transcripts + sc_*/ch0.wav only (~4 GB for train), fetched on first use.
+  local_dir: data/notsofar
+  devices: sc_*
+  eval_rows: 400
+
 resume_from_checkpoint: null
 # The MERGED final model is pushed here after training (null = keep local).
 hub_model_id: null

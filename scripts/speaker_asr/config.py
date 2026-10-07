@@ -17,6 +17,7 @@ from scripts.speaker_asr.context import ContextConfig
 from scripts.speaker_asr.data import WindowConfig
 from scripts.speaker_asr.embedding import EmbeddingConfig
 from scripts.speaker_asr.junction import JunctionConfig
+from scripts.speaker_asr.notsofar import NotsofarConfig
 from scripts.utils import get_project_root
 
 CONFIG_DIR = get_project_root() / "configs" / "speaker_asr"
@@ -67,6 +68,15 @@ def short_chunk_config(cfg: DictConfig) -> ShortChunkConfig:
         value = cfg.short_chunks[f.name]
         values[f.name] = tuple(value) if OmegaConf.is_list(value) else value
     return ShortChunkConfig(**values)
+
+
+def notsofar_config(cfg: DictConfig) -> NotsofarConfig:
+    """The `notsofar:` section as a NotsofarConfig, local_dir resolved against the project."""
+    from hydra.utils import to_absolute_path
+
+    values = {f.name: cfg.notsofar[f.name] for f in fields(NotsofarConfig)}
+    values["local_dir"] = to_absolute_path(values["local_dir"])
+    return NotsofarConfig(**values)
 
 
 def embedding_config(cfg: DictConfig) -> EmbeddingConfig:
