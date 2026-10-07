@@ -115,10 +115,12 @@ def test_link_units_reassigns_a_stray_cluster_instead_of_merging_two_speakers():
     units, words = [], []
     for chunk in range(40):  # 4 real speakers, ~10 units each
         k = chunk % 4
-        units.append({"chunk": chunk, "label": 1, "emb": _unit_vec(k, noise=0.05, rng=rng)})
+        units.append(
+            {"chunk": chunk, "label": 1, "emb": _unit_vec(k, noise=0.05, rng=rng), "dur": 4.0}
+        )
         words.append(30.0)
     units.append(
-        {"chunk": 40, "label": 1, "emb": _unit_vec(6, noise=0.05, rng=rng)}
+        {"chunk": 40, "label": 1, "emb": _unit_vec(6, noise=0.05, rng=rng), "dur": 1.5}
     )  # one stray fragment
     words.append(2.0)
     labels = link_units(units, np.array(words), ClusterConfig())
@@ -126,6 +128,51 @@ def test_link_units_reassigns_a_stray_cluster_instead_of_merging_two_speakers():
     assert len(set(real)) == 4  # the four real speakers stay apart
     assert all(real[i] == real[i % 4] for i in range(40))
     assert labels[40] in set(real)  # the stray unit joins a real speaker
+
+
+def test_short_units_do_not_choose_the_speaker_count_and_stay_distinct_in_their_chunk():
+    rng = np.random.default_rng(1)
+    units, words = [], []
+    for chunk in range(40):  # 3 real speakers with long units
+        units.append(
+            {
+                "chunk": chunk,
+                "label": 1,
+                "emb": _unit_vec(chunk % 3, noise=0.05, rng=rng),
+                "dur": 4.0,
+            }
+        )
+        words.append(30.0)
+    # many sub-second fragments with noisy voices in a few chunks: under the old linker
+    # they could pull the eigengap toward an extra speaker
+    for chunk in range(0, 40, 2):
+        units.append(
+            {
+                "chunk": chunk,
+                "label": 2,
+                "emb": _unit_vec(chunk % 3, noise=0.6, rng=rng),
+                "dur": 0.4,
+            }
+        )
+        words.append(1.0)
+    labels = link_units(units, np.array(words), ClusterConfig())
+    assert len(set(labels[:40].tolist())) == 3
+    assert set(labels[40:].tolist()) <= set(labels[:40].tolist())  # no new speaker
+    for k, u in enumerate(units[40:], start=40):  # a fragment never takes its chunk's speaker
+        assert labels[k] != labels[u["chunk"]]
+
+
+def test_place_units_falls_back_to_best_match_when_the_chunk_has_used_every_speaker():
+    from scripts.speaker_asr.clustered import place_units
+
+    units = [{"chunk": 0}, {"chunk": 0}, {"chunk": 0}]
+    labels = np.array([0, 1, -1])
+    sims = np.array([[1.0, 0.0], [0.0, 1.0], [0.2, 0.9]])
+    assert place_units(units, labels, sims, [0, 1]).tolist() == [0, 1, 1]
+    labels = np.array([0, -1, -1])
+    sims = np.array([[1.0, 0.0, 0.0], [0.9, 0.5, 0.1], [0.8, 0.1, 0.4]])
+    # free units avoid speaker 0 (held by the chunk) and each other
+    assert place_units(units, labels, sims, [0, 1, 2]).tolist() == [0, 1, 2]
 
 
 def _synthetic_meeting(rng):

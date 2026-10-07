@@ -13,12 +13,16 @@
 5. Units = chunk-local speakers, split when their long turns clearly sound like
    different people; units with almost no speech join the previous speaker.
 6. Link units across the recording: tiny_audio.diarization.SpectralCluster on cosine
-   affinities (speaker count by eigengap), labels of one chunk kept distinct, then
-   clusters holding < `tiny_share` of the words are set aside and the rest re-clustered
-   (a stray cluster would otherwise force two real speakers to share one).
+   affinities (speaker count by eigengap) over units with >= `cluster_min_s` of speech,
+   labels of one chunk kept distinct, then clusters holding < `tiny_share` of the words
+   are set aside and the rest re-clustered (a stray cluster would otherwise force two
+   real speakers to share one). Short and set-aside units are then placed on the
+   nearest speaker their chunk does not already use.
 
 Compared with context-prefix linking (longform.transcribe_long) on all 16
-ami-speakers-long test meetings: cpWER 23.35 vs 104 for prefix linking (WER 20.48).
+ami-speakers-long test meetings: cpWER 23.28 vs 104 for prefix linking (WER 20.48;
+U3-Pro 23.58). On 6 untouched AMI IB meetings: 24.14 with the `short` labeller,
+24.24 with `context` (U3-Pro 27.55).
 Model, aligner and embedder are injectable, so the logic is testable without them.
 """
 
@@ -55,6 +59,12 @@ class ClusterConfig:
     pval: float = 0.06
     # Clusters holding less than this share of the words are re-assigned after re-clustering.
     tiny_share: float = 0.03
+    # Only units with at least this much speech choose the speaker count and centroids;
+    # shorter ones are placed afterwards. Sub-second units (a "Yes.", an "Okay.") carry
+    # too little voice to cluster on and tip the eigengap: on 6 untouched AMI IB meetings
+    # this took cpWER 25.66 -> 24.14 for the short labeller (24.53 -> 24.24 for context);
+    # 0.75-1.5 s is a plateau.
+    cluster_min_s: float = 1.0
     max_new_tokens: int = 320
 
 
@@ -242,23 +252,27 @@ def keep_chunks_distinct(units: list[dict], a: np.ndarray, labels: np.ndarray) -
 
 
 def link_units(units: list[dict], words_per_unit: np.ndarray, cfg: ClusterConfig) -> np.ndarray:
-    """Cluster label per unit: spectral + chunk constraint, minus tiny clusters, re-clustered."""
+    """Cluster label per unit.
+
+    Units with >= cfg.cluster_min_s of speech are clustered (spectral + chunk constraint,
+    minus tiny clusters, re-clustered); every other unit is then placed on a centroid,
+    within each chunk on speakers no other unit of that chunk already holds.
+    """
     if not units:
         return np.zeros(0, dtype=int)
-    a = affinity(units)
-    keep = list(range(len(units)))
+    keep = [i for i, u in enumerate(units) if u["dur"] >= cfg.cluster_min_s]
+    if len(keep) < 6:  # too little reliable speech to choose a speaker count from
+        keep = list(range(len(units)))
     labels = np.full(len(units), -1)
-    labels[keep] = keep_chunks_distinct(units, a, spectral(a, cfg))
+    labels[keep] = _cluster([units[i] for i in keep], cfg)
     if cfg.tiny_share:
         total = words_per_unit[keep].sum() or 1.0
         tiny = {c for c in set(labels[keep].tolist())
                 if words_per_unit[[i for i in keep if labels[i] == c]].sum() / total < cfg.tiny_share}  # fmt: skip
         if tiny and len(set(labels[keep].tolist())) > len(tiny):
             keep = [i for i in keep if labels[i] not in tiny]
-            sub = [units[i] for i in keep]
-            sa = affinity(sub)
             labels = np.full(len(units), -1)
-            labels[keep] = keep_chunks_distinct(sub, sa, spectral(sa, cfg))
+            labels[keep] = _cluster([units[i] for i in keep], cfg)
     embs = np.stack([u["emb"] for u in units])
     centroids = {}
     for c in set(labels[keep].tolist()):
@@ -266,10 +280,39 @@ def link_units(units: list[dict], words_per_unit: np.ndarray, cfg: ClusterConfig
         v = (embs[m] * words_per_unit[m, None]).sum(0)
         centroids[c] = v / (np.linalg.norm(v) + 1e-9)
     ids = sorted(centroids)
-    cm = np.stack([centroids[c] for c in ids])
-    for i in range(len(units)):  # set-aside units -> nearest speaker
-        if labels[i] < 0:
-            labels[i] = ids[int(np.argmax(cm @ embs[i]))]
+    return place_units(units, labels, embs @ np.stack([centroids[c] for c in ids]).T, ids)
+
+
+def _cluster(units: list[dict], cfg: ClusterConfig) -> np.ndarray:
+    a = affinity(units)
+    return keep_chunks_distinct(units, a, spectral(a, cfg))
+
+
+def place_units(units: list[dict], labels: np.ndarray, sims: np.ndarray, ids: list) -> np.ndarray:
+    """Give every unlabelled unit (-1) a speaker from `ids`, by similarity `sims` [unit, speaker].
+
+    Within a chunk, unlabelled units take distinct speakers that the chunk's labelled
+    units do not hold (Hungarian); when there are not enough of those, the best match.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    labels = labels.copy()
+    by_chunk: dict[int, list[int]] = {}
+    for i, u in enumerate(units):
+        by_chunk.setdefault(u["chunk"], []).append(i)
+    for idx in by_chunk.values():
+        free = [i for i in idx if labels[i] < 0]
+        if not free:
+            continue
+        taken = {int(labels[i]) for i in idx if labels[i] >= 0}
+        cols = [k for k, c in enumerate(ids) if c not in taken]
+        if len(cols) < len(free):
+            for i in free:
+                labels[i] = ids[int(np.argmax(sims[i]))]
+            continue
+        rows, picked = linear_sum_assignment(-sims[np.ix_(free, cols)])
+        for x, y in zip(rows, picked, strict=True):
+            labels[free[x]] = ids[cols[y]]
     return labels
 
 
