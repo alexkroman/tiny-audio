@@ -282,6 +282,15 @@ class LocalEvaluator(Evaluator):
         local_code: bool = False,
         **kwargs,
     ):
+        # PyTorch's MPS backend is not thread-safe: concurrent threads encode
+        # into a shared Metal command encoder and segfault in the AGX driver
+        # (setComputePipelineState). `-w 4` on frozen-4 crashed within 3 minutes.
+        if kwargs.get("num_workers", 1) > 1 and _resolve_local_runtime()[0] == "mps":
+            console.print(
+                "[yellow]Warning: LocalEvaluator forces num_workers=1 on MPS "
+                "(concurrent Metal kernel encoding segfaults)[/yellow]"
+            )
+            kwargs["num_workers"] = 1
         super().__init__(**kwargs)
         self.pipe = _build_local_pipeline(model_path, local_code=local_code)
         # Explicit, not incidental. LocalStreamingEvaluator has always done

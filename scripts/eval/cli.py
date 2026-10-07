@@ -387,10 +387,13 @@ def _build_evaluator(
         )
     else:
         model_id = get_model_name(model)
+        # Threads share one model, each making batch-1 calls. LocalEvaluator
+        # clamps this to 1 on MPS, where concurrent Metal encoding segfaults.
         evaluator = LocalEvaluator(
             model_path=model,
             user_prompt=user_prompt,
             local_code=local_code,
+            num_workers=num_workers,
         )
 
     return model_id, evaluator
@@ -471,7 +474,12 @@ def main(
     ] = "en-US",
     num_workers: Annotated[
         int,
-        typer.Option("--num-workers", "-w", help="Number of parallel workers for API evaluations"),
+        typer.Option(
+            "--num-workers",
+            "-w",
+            help="Number of parallel workers for API and local-model evaluations "
+            "(local models on a Mac are forced to 1: MPS is not thread-safe)",
+        ),
     ] = 1,
     local_code: Annotated[
         bool,
