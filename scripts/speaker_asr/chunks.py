@@ -159,6 +159,35 @@ def align_utterances(store, texts: dict[str, str], ids: list[str], cache: Path, 
     return known
 
 
+def chunk_turns(utts, cs: float, ce: float, edge_keep: float) -> tuple[list, int, int]:
+    """The target turns of the chunk [cs, ce) and its (kept, aligned) word counts.
+
+    `utts` are (speaker, start_s, timed words relative to start_s), ordered by start
+    (first-in first-out, as data.format_target). A word is kept when at least
+    `edge_keep` of it lies inside the chunk; a zero-length word when it starts inside.
+    """
+    turns, kept, aligned = [], 0, 0
+    for speaker, start, words in utts:
+        inside = []
+        for w, ws, we, ok in words:
+            a, b = start + ws, start + we
+            frac = 1.0 if b <= a else max(0.0, min(b, ce) - max(a, cs)) / (b - a)
+            if frac >= edge_keep and (b > a or cs <= a < ce):
+                inside.append(w)
+                kept += 1
+                aligned += ok
+        if inside:
+            turns.append((speaker, " ".join(inside)))
+    return turns, kept, aligned
+
+
+def keep_chunk(turns: list, kept: int, aligned: int, cfg: ShortChunkConfig) -> bool:
+    """Drop chunks whose edge words are unreliably timed, and empty ones unless keep_empty."""
+    if kept and aligned < cfg.min_aligned * kept:
+        return False  # word times unreliable: the target could be wrong at the edges
+    return bool(turns) or cfg.keep_empty
+
+
 def plan_meeting_chunks(
     parts: list[dict],
     words: dict,
@@ -182,7 +211,7 @@ def plan_meeting_chunks(
             (p for p in parts if p["offset_s"] < ce and p["offset_s"] + p["dur_s"] > cs),
             key=lambda p: (p["offset_s"], p["dur_s"]),
         )
-        mix_parts, turns, kept, aligned = [], [], 0, 0
+        mix_parts = []
         for p in overlapping:
             clip_start = max(0.0, cs - p["offset_s"])
             clip_end = min(p["dur_s"], ce - p["offset_s"])
@@ -192,19 +221,11 @@ def plan_meeting_chunks(
                 "dur_s": round(clip_end - clip_start, 3),
                 "clip_start_s": round(clip_start, 3), "clip_end_s": round(clip_end, 3),
             })  # fmt: skip
-            inside = []
-            for w, ws, we, ok in words.get(p["id"], []):
-                a, b = p["offset_s"] + ws, p["offset_s"] + we
-                frac = 1.0 if b <= a else max(0.0, min(b, ce) - max(a, cs)) / (b - a)
-                if frac >= cfg.edge_keep and (b > a or cs <= a < ce):
-                    inside.append(w)
-                    kept += 1
-                    aligned += ok
-            if inside:
-                turns.append((p["speaker"], " ".join(inside)))
-        if kept and aligned < cfg.min_aligned * kept:
-            continue  # word times unreliable: the target could be wrong at the edges
-        if not turns and not cfg.keep_empty:
+        turns, kept, aligned = chunk_turns(
+            [(p["speaker"], p["offset_s"], words.get(p["id"], [])) for p in overlapping],
+            cs, ce, cfg.edge_keep,
+        )  # fmt: skip
+        if not keep_chunk(turns, kept, aligned, cfg):
             continue
         # No words at all (breath, noise, bleed, silence) -> an EMPTY target: about a quarter
         # of real 3-8 s inference chunks look like this, and a model never shown one
@@ -222,6 +243,61 @@ def plan_meeting_chunks(
                 "target": target,
                 "n_speakers": len({spk for spk, _ in turns}),
                 "n_parts": len(mix_parts),
+                "n_turns": target.count("<SPK_"),
+                "short": True,
+            }
+        )
+    return rows
+
+
+def plan_recording_chunks(
+    utts: list[dict],
+    audio: np.ndarray,
+    cfg: ShortChunkConfig,
+    group: str,
+    recording: str,
+    rng: random.Random,
+    max_speakers: int = 4,
+) -> list[dict]:
+    """Rows for one REAL recording (far-field meeting audio, not a headset mix).
+
+    The audio is the recording itself, so a chunk is just its [start_s, end_s) slice:
+    the row carries `recording` (a path the dataset resolves) instead of `parts`.
+    `utts` are {"speaker", "start", "words"} with word times relative to `start`, on
+    the recording's timeline. Chunks with more than `max_speakers` voices are dropped
+    (there are only that many speaker tokens; NOTSOFAR meetings seat up to 8).
+    """
+    from scripts.speaker_asr.longform import chunk_bounds
+
+    utts = sorted(
+        utts, key=lambda u: (u["start"], u["start"] + (u["words"][-1][2] if u["words"] else 0.0))
+    )
+    min_s, max_s = rng.uniform(*cfg.min_s), rng.uniform(*cfg.max_s)
+    rows = []
+    for k, (s, e) in enumerate(chunk_bounds(audio, max_s, min_s)):
+        cs, ce = s / SAMPLE_RATE, e / SAMPLE_RATE
+        turns, kept, aligned = chunk_turns(
+            [(u["speaker"], u["start"], u["words"]) for u in utts], cs, ce, cfg.edge_keep
+        )
+        if not keep_chunk(turns, kept, aligned, cfg):
+            continue
+        n_speakers = len({spk for spk, _ in turns})
+        if n_speakers > max_speakers:
+            continue
+        target = serialize_turns(turns)
+        rows.append(
+            {
+                "key": f"rec:{group}:{k}",
+                "group": group,
+                "recording": recording,
+                "start_s": round(cs, 3),
+                "end_s": round(ce, 3),
+                "parts": "[]",
+                "tail_s": 0.0,
+                "duration_s": round(ce - cs, 3),
+                "target": target,
+                "n_speakers": n_speakers,
+                "n_parts": 0,
                 "n_turns": target.count("<SPK_"),
                 "short": True,
             }

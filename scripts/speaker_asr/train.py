@@ -31,6 +31,7 @@ from scripts.speaker_asr.config import (
     embedding_config,
     junction_config,
     n_speaker_tokens,
+    notsofar_config,
     pool_signature,
     short_chunk_config,
 )
@@ -213,6 +214,27 @@ def short_rows(cfg: DictConfig, split: str, stores: dict, seed: int) -> list[dic
     logger.info(
         "%s: %d short real chunks (%d with >= 2 speakers, %d with no words)",
         split, len(rows), sum(int(r["n_speakers"]) >= 2 for r in rows),
+        sum(not r["target"] for r in rows),
+    )  # fmt: skip
+    return rows
+
+
+def notsofar_rows(cfg: DictConfig, version: str, seed: int) -> list[dict]:
+    """NOTSOFAR short chunk rows for one subset, cached next to its audio in local_dir."""
+    from scripts.speaker_asr.notsofar import build_notsofar_rows
+
+    ncfg, scfg = notsofar_config(cfg), short_chunk_config(cfg)
+    tag = version.replace("/", "-") + ("-e" if scfg.keep_empty else "")
+    cache = Path(ncfg.local_dir) / f"rows-{tag}.parquet"
+    if cache.exists():
+        rows = pd.read_parquet(cache).to_dict("records")
+    else:
+        rows = build_notsofar_rows(ncfg, scfg, version, int(cfg.pool.max_speakers), seed)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(rows).to_parquet(cache)
+    logger.info(
+        "notsofar %s: %d chunks (%d with >= 2 speakers, %d with no words)",
+        version, len(rows), sum(int(r["n_speakers"]) >= 2 for r in rows),
         sum(not r["target"] for r in rows),
     )  # fmt: skip
     return rows
@@ -466,6 +488,9 @@ def main(cfg: DictConfig) -> None:
     eval_rows = subset(eval_rows, cfg.data.eval_samples)
     short = bool(cfg.short_chunks.enabled)
     short_eval, sample_weights, speaker_loss, augment_prob = [], None, None, 0.0
+    notsofar_eval, recordings_root = [], None
+    if cfg.notsofar.enabled and not short:
+        raise ValueError("notsofar.enabled adds short chunks: set short_chunks.enabled=true too")
     if short:
         import random as _random
 
@@ -475,6 +500,18 @@ def main(cfg: DictConfig) -> None:
             {**r, "prefix": prefix}
             for r in short_rows(cfg, cfg.data.train_split, stores, cfg.pool.seed)
         ]
+        if cfg.notsofar.enabled:
+            ncfg = notsofar_config(cfg)
+            recordings_root = ncfg.local_dir
+            short_train += [
+                {**r, "prefix": prefix}
+                for r in notsofar_rows(cfg, ncfg.train_version, cfg.pool.seed)
+            ]
+            if ncfg.eval_version:
+                held_nsf = notsofar_rows(cfg, ncfg.eval_version, cfg.pool.seed + 1)
+                notsofar_eval = subset(
+                    [{**r, "prefix": prefix} for r in held_nsf], ncfg.eval_rows, seed=2
+                )
         n_rehearsal = min(
             len(train_rows), round(len(short_train) * scfg.rehearsal / (1 - scfg.rehearsal))
         )
@@ -526,6 +563,16 @@ def main(cfg: DictConfig) -> None:
                 "dataset": SpeakerASRDataset(short_eval, eval_store),
             }
         )
+    if notsofar_eval:
+        decode_evals.append(
+            {
+                **decode_spec,
+                "prefix": "eval_notsofar",
+                "dataset": SpeakerASRDataset(
+                    notsofar_eval, eval_store, recordings_root=recordings_root
+                ),
+            }
+        )
     if junction_eval:
         decode_evals.append(
             {
@@ -559,6 +606,7 @@ def main(cfg: DictConfig) -> None:
             stores[cfg.data.train_split],
             augment_prob=augment_prob,
             seed=cfg.training.seed,
+            recordings_root=recordings_root,
         ),
         eval_dataset=SpeakerASRDataset(eval_rows, eval_store),
         # Same chat layout and transcript-only labels as turn-aware; the

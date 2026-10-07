@@ -15,6 +15,7 @@ from scripts.speaker_asr.chunks import (
     augment,
     busy_weights,
     plan_meeting_chunks,
+    plan_recording_chunks,
     timed_words,
 )
 from scripts.speaker_asr.metrics import parse_turns
@@ -253,3 +254,61 @@ def test_wordless_chunks_are_kept_with_an_empty_target():
         random.Random(0),
     )
     assert all(r["target"] for r in dropped)
+
+
+def _recording_utts(parts, words):
+    return [
+        {"speaker": p["speaker"], "start": p["offset_s"], "words": words[p["id"]]} for p in parts
+    ]
+
+
+def test_recording_chunks_slice_the_recording_and_match_the_mixed_meeting_targets():
+    parts, words, audio = _meeting()
+    cfg = ShortChunkConfig(min_s=(3.0, 3.0), max_s=(7.0, 7.0))
+    mixed = plan_meeting_chunks(parts, words, audio, cfg, "m1", random.Random(0))
+    rec = plan_recording_chunks(
+        _recording_utts(parts, words), audio, cfg, "m1", "m1/ch0.wav", random.Random(0)
+    )
+    # same cut points, same targets: only where the audio comes from differs
+    assert [r["target"] for r in rec] == [r["target"] for r in mixed]
+    for r in rec:
+        assert r["recording"] == "m1/ch0.wav"
+        assert r["parts"] == "[]"
+        assert r["end_s"] - r["start_s"] == pytest.approx(r["duration_s"])
+
+
+def test_recording_chunks_with_more_voices_than_speaker_tokens_are_dropped():
+    utts = [
+        {"speaker": f"S{i}", "start": 0.5 * i, "words": [(f"w{i}", 0.0, 0.3, True)]}
+        for i in range(6)
+    ]
+    audio = np.full(4 * SR, 0.3, np.float32)
+    cfg = ShortChunkConfig(min_s=(3.5, 3.5), max_s=(4.0, 4.0))
+    assert (
+        plan_recording_chunks(utts, audio, cfg, "m", "m.wav", random.Random(0), max_speakers=4)
+        == []
+    )
+    kept = plan_recording_chunks(utts, audio, cfg, "m", "m.wav", random.Random(0), max_speakers=6)
+    assert kept
+    assert kept[0]["n_speakers"] == 6
+
+
+def test_dataset_reads_a_recording_row_as_a_slice(tmp_path):
+    import soundfile as sf
+
+    from scripts.speaker_asr.data import SpeakerASRDataset, read_slice
+
+    wav = np.arange(3 * SR, dtype=np.float32) / (3 * SR)
+    (tmp_path / "m").mkdir()
+    sf.write(tmp_path / "m" / "ch0.wav", wav, SR, subtype="FLOAT")
+    assert np.allclose(read_slice(tmp_path / "m" / "ch0.wav", 1.0, 2.0), wav[SR : 2 * SR])
+
+    class _Store:
+        def verify(self, rows):
+            pass
+
+    row = {"recording": "m/ch0.wav", "start_s": 0.5, "end_s": 1.5, "parts": "[]", "tail_s": 0.0,
+           "target": "<SPK_1>hi"}  # fmt: skip
+    item = SpeakerASRDataset([row], _Store(), recordings_root=str(tmp_path))[0]
+    assert np.allclose(item["audio"], wav[SR // 2 : 3 * SR // 2])
+    assert item["target"] == "<SPK_1>hi"

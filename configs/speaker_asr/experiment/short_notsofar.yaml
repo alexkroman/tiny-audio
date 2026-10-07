@@ -1,0 +1,20 @@
+# @package _global_
+# short_notsofar: the `short` recipe plus NOTSOFAR-1 far-field meetings
+# (scripts/speaker_asr/notsofar.py). Same warm start, rehearsal, loss weighting
+# and evals as `short`; the short-chunk pool gains ~25k real-room chunks from 72
+# unscripted office meetings (every single-channel device a separate recording),
+# next to AMI's summed-headset chunks. Adds eval_notsofar/* on eval_small_with_GT.
+#
+#   ta runpod train-speaker-asr <host> <port> +experiment=short_notsofar
+#
+# First run downloads ~4 GB (train) + ~2 GB (eval) of transcripts and single-channel
+# audio into data/notsofar and caches the chunk rows there.
+defaults:
+  - short
+
+notsofar:
+  enabled: true
+training:
+  output_dir: outputs/speaker_asr/short_notsofar
+  run_name: speaker-asr-qwen3-asr-0.6b-short-notsofar
+hub_model_id: mazesmazes/tiny-audio-speaker-asr-qwen3-asr-short-notsofar
