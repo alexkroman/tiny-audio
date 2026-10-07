@@ -207,7 +207,8 @@ The training recipe is [`configs/experiments/granite_qwen_frozen.yaml`](https://
 
 - **English only**: Not trained on other languages.
 - **Sample rate**: Expects 16kHz audio (other rates are resampled automatically).
-- **Audio length**: Best for clips under 30 seconds. Chunk longer audio.
+- **Audio length**: A plain `pipe(audio)` call decodes the clip in one pass and works best up to about 19 seconds (the training length). For longer audio pass `return_timestamps=True` or `return_speakers=True`, which transcribe in 8-18 s chunks automatically.
+- **Speaker diarization**: At most 8 speakers per recording. The count is detected automatically; `num_speakers` and `max_speakers` can cap it, but `min_speakers` is not supported (passing it raises a `ValueError`). Needs transformers `main` until a release includes Nemotron-3-Diarization.
 - **Accuracy**: May degrade on:
   - Far-field and overlapping speech (see AMI SDM)
   - Noisy or low-quality audio
@@ -256,6 +257,8 @@ If you use this model, please cite:
 
 - [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) for the audio encoder
 - [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-2B) for the language model
+- [Qwen3-ForcedAligner](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf) for word timestamps
+- [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) for speaker diarization
 - The LibriHeavy, People's Speech, Common Voice, GigaSpeech, SPGISpeech, VoxPopuli, AMI, and TED-LIUM teams for training data
 
 ## License
