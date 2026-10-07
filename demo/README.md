@@ -5,7 +5,7 @@ colorFrom: purple
 colorTo: blue
 sdk: gradio
 sdk_version: "6.26.0"
-python_version: "3.11"
+python_version: "3.10"
 app_file: app.py
 pinned: false
 license: mit
@@ -19,7 +19,7 @@ tags:
   - qwen3.5
   - lora
   - mlp
-suggested_hardware: cpu-basic
+suggested_hardware: zero-a10g
 preload_from_hub:
   - mazesmazes/tiny-audio
   - ibm-granite/granite-speech-5.0-470m-turboctc
@@ -55,11 +55,12 @@ The model bridges audio and text with a trained projector and LoRA adapters:
 1. **Upload an audio file** (WAV, MP3, etc.) or **record directly** using your microphone
 2. Click **"Transcribe"** to convert speech to text
 3. The transcription will appear in the output box
-4. Optionally tick **Word Timestamps** or **Speaker Diarization**. If you know how many people are speaking, set **Number of Speakers**: auto-detection can split one voice into several speakers on short clips
+4. Optionally tick **Word Timestamps** or **Speaker Diarization**. If you know how many people are speaking, set **Number of Speakers**: it caps how many speakers are kept
 
 ## Limitations
 
-- Best results on clips under 30 seconds
+- Plain transcription works best on clips up to about 19 seconds (the training length); with timestamps or diarization on, longer audio is transcribed in chunks automatically
+- Each request gets up to 120 seconds of GPU time
 - Optimized for English language
 - Best performance with clear speech and minimal background noise
 
