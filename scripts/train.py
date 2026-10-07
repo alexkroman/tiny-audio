@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 import hydra
 import numpy as np
 import torch
+import wandb
 from datasets import (
     Audio,
     ClassLabel,
@@ -43,7 +44,6 @@ from transformers import (
 )
 from trl.experimental.utils import DataCollatorForChatML  # pyright: ignore[reportMissingImports]
 
-import wandb
 from tiny_audio.asr_config import (
     DEFAULT_ENCODER_CONV_LAYERS,
     ASRConfig,

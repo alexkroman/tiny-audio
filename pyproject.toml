@@ -344,6 +344,11 @@ extend-ignore = [
     "PERF401",  # manual-list-comprehension
 ]
 
+[tool.ruff.lint.isort]
+# A local `wandb/` run directory at the repo root makes ruff classify `wandb`
+# as first-party, so local `--fix` and CI disagree on import order.
+known-third-party = ["wandb"]
+
 [tool.ruff.lint.per-file-ignores]
 # Mathematical notation (A, B, W, S for matrices) is conventional in LoRA analysis
 "scripts/debug/analyze_lora.py" = ["N806"]
