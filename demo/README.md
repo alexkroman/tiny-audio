@@ -24,7 +24,8 @@ preload_from_hub:
   - mazesmazes/tiny-audio
   - ibm-granite/granite-speech-5.0-470m-turboctc
   - Qwen/Qwen3.5-2B
-  - speechbrain/spkrec-ecapa-voxceleb
+  - Qwen/Qwen3-ForcedAligner-0.6B-hf
+  - nvidia/Nemotron-3-Diarization
 ---
 
 ## Demo Overview

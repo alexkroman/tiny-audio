@@ -1,4 +1,4 @@
-"""Speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
+"""Speaker diarization: Nemotron-3-Diarization, and TEN-VAD + ECAPA-TDNN + spectral clustering.
 
 Spectral clustering implementation adapted from FunASR/3D-Speaker:
 https://github.com/alibaba-damo-academy/FunASR
@@ -662,4 +662,126 @@ class SpeakerDiarizer:
 
             word["speaker"] = best_speaker
 
+        return words
+
+
+class NemotronDiarizer:
+    """Speaker activity from NVIDIA Nemotron-3-Diarization, per 10 ms frame.
+
+    One offline pass over the whole recording: the model chunks internally
+    (27.2 s + 3.2 s look-ahead) and carries a speaker cache across chunks, so
+    speaker ids are recording-level for audio of any length, with no
+    embedding or clustering step. Overlap is native (several speakers can be
+    active in one frame). Tracks at most 8 speakers, numbered by arrival.
+
+    Needs a transformers build with `nemotron3_diarization` (main as of
+    2026-10, after 5.17).
+
+    Example:
+        >>> activity = NemotronDiarizer.activity(audio)  # (frames, 8) probabilities
+        >>> keep = NemotronDiarizer.top_speakers(activity, max_speakers=2)
+        >>> segments = NemotronDiarizer.segments(activity, keep)
+        >>> words = NemotronDiarizer.assign_speakers_to_words(words, activity, keep)
+    """
+
+    MODEL_ID = "nvidia/Nemotron-3-Diarization"
+    FRAME_S = 0.01
+    SEGMENT_THRESHOLD = 0.5  # a speaker's segment = frames above this
+    MIN_WORD_ACTIVITY = 0.1  # below this nobody is heard: the word inherits its neighbour
+    _model = None
+    _processor = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._model is None:
+            import importlib.util
+
+            if importlib.util.find_spec("transformers.models.nemotron3_diarization") is None:
+                raise ImportError(
+                    "Speaker diarization uses Nemotron-3-Diarization, which needs a transformers "
+                    "build with `nemotron3_diarization`: "
+                    "pip install git+https://github.com/huggingface/transformers"
+                )
+            from transformers import AutoModelForAudioFrameClassification, AutoProcessor
+
+            model = AutoModelForAudioFrameClassification.from_pretrained(cls.MODEL_ID)
+            cls._model = model.to(_get_device()).eval()
+            cls._processor = AutoProcessor.from_pretrained(cls.MODEL_ID)
+        return cls._model, cls._processor
+
+    @classmethod
+    @torch.inference_mode()
+    def activity(cls, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
+        """(frames, 8) speech probabilities at 10 ms; columns in arrival order."""
+        if sample_rate != 16000:
+            import torchaudio
+
+            audio = torchaudio.functional.resample(
+                torch.as_tensor(audio, dtype=torch.float32), sample_rate, 16000
+            ).numpy()
+        model, processor = cls.get_instance()
+        inputs = processor(np.asarray(audio, dtype=np.float32), sampling_rate=16000)
+        inputs = inputs.to(model.device, dtype=model.dtype)
+        return model(**inputs).logits[0].float().sigmoid().cpu().numpy()
+
+    @classmethod
+    def top_speakers(
+        cls,
+        activity: np.ndarray,
+        num_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> list[int]:
+        """Columns that count as speakers, in arrival order.
+
+        Every column that is ever above SEGMENT_THRESHOLD, capped by
+        `num_speakers` (exact, when known) or `max_speakers` to the columns
+        with the most speech. Capping is how a known count is applied:
+        a dropped column's words go to the most active remaining speaker.
+        """
+        active = [
+            c for c in range(activity.shape[1]) if (activity[:, c] > cls.SEGMENT_THRESHOLD).any()
+        ]
+        cap = num_speakers or max_speakers
+        if cap is not None and len(active) > cap:
+            mass = activity.sum(axis=0)
+            active = sorted(sorted(active, key=lambda c: -mass[c])[:cap])
+        return active or [0]
+
+    @classmethod
+    def segments(cls, activity: np.ndarray, keep: list[int]) -> list[dict]:
+        """Speaker turns `{"speaker", "start", "end"}` by start time; overlaps allowed."""
+        names = {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
+        out = []
+        for c in keep:
+            for on, s, e in _label_runs(activity[:, c] > cls.SEGMENT_THRESHOLD):
+                if on:
+                    out.append(
+                        {"speaker": names[c], "start": s * cls.FRAME_S, "end": e * cls.FRAME_S}
+                    )
+        return sorted(out, key=lambda seg: (seg["start"], seg["end"]))
+
+    @classmethod
+    def assign_speakers_to_words(
+        cls, words: list[dict], activity: np.ndarray, keep: list[int]
+    ) -> list[dict]:
+        """Give each word the kept speaker most active over its span.
+
+        A word where no kept speaker reaches MIN_WORD_ACTIVITY (aligner put it
+        in a pause) takes the previous word's speaker -- the next word's at
+        the start of the recording.
+        """
+        names = {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
+        cols = np.asarray(keep)
+        picked: list[str | None] = []
+        for word in words:
+            lo = min(int(word["start"] / cls.FRAME_S), len(activity) - 1)
+            hi = max(lo + 1, min(int(np.ceil(word["end"] / cls.FRAME_S)), len(activity)))
+            mean = activity[lo:hi, cols].mean(axis=0)
+            best = int(mean.argmax())
+            picked.append(names[keep[best]] if mean[best] >= cls.MIN_WORD_ACTIVITY else None)
+        known = [p for p in picked if p is not None]
+        last = known[0] if known else names[keep[0]]
+        for word, p in zip(words, picked):
+            last = p if p is not None else last
+            word["speaker"] = last
         return words

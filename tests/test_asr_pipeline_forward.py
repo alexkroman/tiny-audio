@@ -158,11 +158,13 @@ class TestCallPromptHandling:
     def test_prompt_is_restored_after_an_exception(self, pipeline, monkeypatch):
         seen = {}
 
-        def failing_transcribe(inputs, **kwargs):
+        def failing_call(self, inputs, **kwargs):
             seen["prompt_during_call"] = pipeline.model.TRANSCRIBE_PROMPT
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(pipeline, "_transcribe", failing_transcribe)
+        monkeypatch.setattr(
+            transformers.AutomaticSpeechRecognitionPipeline, "__call__", failing_call
+        )
         with pytest.raises(RuntimeError, match="boom"):
             pipeline({"array": np.zeros(16)}, user_prompt="custom")
 
@@ -170,121 +172,40 @@ class TestCallPromptHandling:
         assert pipeline.model.TRANSCRIBE_PROMPT == "default prompt"
 
     def test_no_user_prompt_leaves_model_untouched(self, pipeline, monkeypatch):
-        monkeypatch.setattr(pipeline, "_transcribe", lambda inputs, **kw: {"text": "x"})
+        monkeypatch.setattr(
+            transformers.AutomaticSpeechRecognitionPipeline,
+            "__call__",
+            lambda self, inputs, **kw: {"text": "x"},
+        )
         pipeline({"array": np.zeros(16)})
         assert pipeline.model.TRANSCRIBE_PROMPT == "default prompt"
 
     def test_return_speakers_implies_timestamps(self, pipeline, monkeypatch):
         seen = {}
 
-        def fake_transcribe(inputs, **kwargs):
+        def fake_timed(inputs, **kwargs):
             seen.update(kwargs)
             return {"text": "x"}
 
-        monkeypatch.setattr(pipeline, "_transcribe", fake_transcribe)
+        monkeypatch.setattr(pipeline, "_transcribe_timed", fake_timed)
         pipeline({"array": np.zeros(16)}, return_speakers=True, num_speakers=2)
-        assert seen["return_timestamps"] is True
         assert seen["return_speakers"] is True
-        assert seen["diarization_params"] == {
-            "num_speakers": 2,
-            "min_speakers": None,
-            "max_speakers": None,
-        }
+        assert seen["diarization_params"] == {"num_speakers": 2, "max_speakers": None}
 
 
-class TestTranscribeOrchestration:
-    """Alignment and diarization are attached to the parent's transcript."""
+class TestTranscribeTimed:
+    def test_empty_transcript_never_loads_the_aligner(self, pipeline, monkeypatch):
+        from tiny_audio.alignment import QwenForcedAligner
 
-    @pytest.fixture(autouse=True)
-    def parent_call(self, monkeypatch):
-        seen = {}
-
-        def fake_call(self, inputs, **kwargs):
-            seen["inputs"] = inputs
-            return {"text": "hello world"}
-
-        monkeypatch.setattr(transformers.AutomaticSpeechRecognitionPipeline, "__call__", fake_call)
-        return seen
-
-    def test_decoded_audio_is_handed_to_parent_once(self, pipeline, parent_call, monkeypatch):
-        monkeypatch.setattr(
-            "tiny_audio.asr_pipeline.ForcedAligner.align",
-            lambda audio, text, sample_rate: [{"word": "hello", "start": 0.0, "end": 0.5}],
-        )
-        audio = np.zeros(16000, dtype=np.float32)
-        result = pipeline._transcribe(
-            {"array": audio, "sampling_rate": 16000},
-            return_timestamps=True,
-            return_speakers=False,
-            diarization_params={},
-        )
-        assert parent_call["inputs"]["array"] is audio
-        assert result["words"] == [{"word": "hello", "start": 0.0, "end": 0.5}]
-
-    def test_diarization_failure_is_recorded_not_raised(self, pipeline, monkeypatch):
-        monkeypatch.setattr(
-            "tiny_audio.asr_pipeline.ForcedAligner.align",
-            lambda audio, text, sample_rate: [{"word": "hello", "start": 0.0, "end": 0.5}],
-        )
-
-        def failing_diarize(audio, sample_rate, **kw):
-            raise RuntimeError("no ecapa")
-
-        monkeypatch.setattr("tiny_audio.asr_pipeline.SpeakerDiarizer.diarize", failing_diarize)
-        result = pipeline._transcribe(
-            {"array": np.zeros(16000, dtype=np.float32)},
-            return_timestamps=True,
-            return_speakers=True,
-            diarization_params={"num_speakers": None},
-        )
-        assert result["speaker_segments"] == []
-        assert result["diarization_error"] == "no ecapa"
-        # Alignment still succeeded and is kept.
-        assert result["words"][0]["word"] == "hello"
-
-    def test_speakers_are_assigned_to_words(self, pipeline, monkeypatch):
-        monkeypatch.setattr(
-            "tiny_audio.asr_pipeline.ForcedAligner.align",
-            lambda audio, text, sample_rate: [
-                {"word": "hello", "start": 0.0, "end": 0.5},
-                {"word": "world", "start": 2.0, "end": 2.5},
-            ],
-        )
-        seen = {}
-
-        def fake_diarize(audio, sample_rate, **kw):
-            seen.update(kw)
-            return [
-                {"speaker": "SPEAKER_0", "start": 0.0, "end": 1.0},
-                {"speaker": "SPEAKER_1", "start": 1.5, "end": 3.0},
-            ]
-
-        monkeypatch.setattr("tiny_audio.asr_pipeline.SpeakerDiarizer.diarize", fake_diarize)
-        result = pipeline._transcribe(
-            {"array": np.zeros(48000, dtype=np.float32)},
-            return_timestamps=True,
-            return_speakers=True,
-            diarization_params={"num_speakers": 2, "min_speakers": None, "max_speakers": None},
-        )
-        # Only the non-None diarization params are forwarded.
-        assert seen == {"num_speakers": 2}
-        assert [w["speaker"] for w in result["words"]] == ["SPEAKER_0", "SPEAKER_1"]
-
-    def test_empty_transcript_skips_alignment(self, pipeline, monkeypatch):
         monkeypatch.setattr(
             transformers.AutomaticSpeechRecognitionPipeline,
             "__call__",
             lambda self, inputs, **kw: {"text": ""},
         )
 
-        def must_not_run(*a, **kw):
-            raise AssertionError("aligner should not run on empty text")
+        def must_not_load():
+            raise AssertionError("aligner should not load for empty text")
 
-        monkeypatch.setattr("tiny_audio.asr_pipeline.ForcedAligner.align", must_not_run)
-        result = pipeline._transcribe(
-            {"array": np.zeros(160, dtype=np.float32)},
-            return_timestamps=True,
-            return_speakers=False,
-            diarization_params={},
-        )
-        assert result["words"] == []
+        monkeypatch.setattr(QwenForcedAligner, "get_instance", must_not_load)
+        result = pipeline({"array": np.zeros(160, dtype=np.float32)}, return_timestamps=True)
+        assert result == {"text": "", "words": []}
