@@ -550,6 +550,46 @@ class SpeakerASREvaluator(Evaluator):
         return text, time.time() - start, None
 
 
+class NemotronQwenEvaluator(Evaluator):
+    """Stock Qwen3-ASR words, speakers from Nemotron-3-Diarization.
+
+    See scripts/speaker_asr/nemotron.py. Short windows and whole meetings go
+    through the same path: Nemotron is recording-level, so no linking.
+    """
+
+    ASR_MODEL_ID = "Qwen/Qwen3-ASR-0.6B-hf"
+    MAX_NEW_TOKENS = 320
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        from transformers import AutoProcessor
+
+        from scripts.speaker_asr.nemotron import Diarizer, QwenAligner
+        from tiny_audio.turns import load_model
+
+        self.processor = AutoProcessor.from_pretrained(self.ASR_MODEL_ID)
+        self.model = load_model(self.ASR_MODEL_ID).eval()
+        # Batch 1, no left padding: sdpa is safe on MPS (see SpeakerASREvaluator).
+        self.model.set_attn_implementation("sdpa")
+        self.diarizer = Diarizer.load()
+        self.aligner = QwenAligner.load()
+
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+        from scripts.speaker_asr.nemotron import transcribe_diarized
+
+        array = np.asarray(as_16k_array(audio), dtype=np.float32)
+        start = time.time()
+        result = transcribe_diarized(
+            self.model,
+            self.processor,
+            self.diarizer,
+            array,
+            align=self.aligner.align,
+            max_new_tokens=self.MAX_NEW_TOKENS,
+        )
+        return result.text, time.time() - start, None
+
+
 class AssemblyAIStreamingEvaluator(Evaluator):
     """Evaluator for AssemblyAI Streaming API (Universal-Streaming model).
 

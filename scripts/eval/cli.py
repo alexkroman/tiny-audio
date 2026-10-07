@@ -27,6 +27,7 @@ from scripts.eval.evaluators import (
     Evaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
+    NemotronQwenEvaluator,
     SmallestEvaluator,
     SpeakerASREvaluator,
     SwiftSDKEvaluator,
@@ -204,7 +205,15 @@ def expand_datasets(datasets: list[str]) -> list[str]:
 # --model values that dispatch to a non-PyTorch backend (hosted API, Swift
 # binary, on-device Apple recognizer) rather than loading an ASRModel here.
 _NON_LOCAL_MODELS = frozenset(
-    {"assemblyai", "deepgram", "elevenlabs", "smallest", "apple-speech", "swift"}
+    {
+        "assemblyai",
+        "deepgram",
+        "elevenlabs",
+        "smallest",
+        "apple-speech",
+        "swift",
+        "nemotron-qwen3-asr",
+    }
 )
 
 
@@ -356,6 +365,11 @@ def _build_evaluator(
         evaluator = EndpointEvaluator(
             endpoint_url=model,
         )
+    elif model == "nemotron-qwen3-asr":
+        if streaming:
+            raise typer.BadParameter("nemotron-qwen3-asr is evaluated offline: drop --streaming.")
+        model_id = model
+        evaluator = NemotronQwenEvaluator()
     elif _is_qwen3_asr(model):
         if streaming:
             raise typer.BadParameter(
@@ -389,7 +403,7 @@ def main(
         typer.Option(
             "--model",
             "-m",
-            help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', 'smallest', or 'apple-speech'",
+            help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', 'smallest', 'apple-speech', or 'nemotron-qwen3-asr'",
         ),
     ],
     datasets: Annotated[
