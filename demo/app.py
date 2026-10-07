@@ -13,12 +13,8 @@ import os
 # transformers). It is preinstalled on Spaces; locally the decorator is a no-op.
 try:
     import spaces
-
-    gpu = spaces.GPU(duration=120)
 except ImportError:
-
-    def gpu(fn):
-        return fn
+    spaces = None
 
 
 # Fix OpenMP environment variable if invalid
@@ -40,6 +36,30 @@ import gradio as gr
 import torch
 import typer
 from transformers import pipeline
+
+
+def gpu_seconds(audio, kwargs):
+    """GPU time to reserve for one request, from the audio's length.
+
+    ZeroGPU charges each visitor's daily quota the RESERVED duration up front,
+    not the time used, so a flat 120 s locked visitors out after a request or
+    two. Measured on the A10G: about 0.2 s of GPU per second of audio with
+    timestamps and diarization (46 s of speech in 8.7 s). Reserve twice that
+    plus load overhead, within ZeroGPU's 20-120 s.
+    """
+    import soundfile
+
+    try:
+        seconds = soundfile.info(audio).duration
+    except Exception:  # unreadable here: let the pipeline report it, reserve the cap
+        return 120
+    per_second = 0.4 if kwargs.get("return_timestamps") or kwargs.get("return_speakers") else 0.2
+    return int(min(120, max(20, 10 + per_second * seconds)))
+
+
+def gpu(fn):
+    return spaces.GPU(duration=gpu_seconds)(fn) if spaces else fn
+
 
 app = typer.Typer(add_completion=False)
 
