@@ -95,8 +95,21 @@ class UtteranceStore:
 
 
 def mix_window(parts: list[dict], store: UtteranceStore, tail_s: float = 0.0) -> np.ndarray:
-    """Sum each part's audio at its offset; rescale only if the sum clips."""
-    clips = [(round(p["offset_s"] * SAMPLE_RATE), store.get(p["row"])) for p in parts]
+    """Sum each part's audio at its offset; rescale only if the sum clips.
+
+    A part with `clip_start_s` / `clip_end_s` contributes only that span of its
+    utterance (short real-timeline chunks cut utterances at the chunk edges).
+    """
+
+    def audio(p: dict) -> np.ndarray:
+        clip = store.get(p["row"])
+        if "clip_start_s" in p:
+            clip = clip[
+                round(p["clip_start_s"] * SAMPLE_RATE) : round(p["clip_end_s"] * SAMPLE_RATE)
+            ]
+        return clip
+
+    clips = [(round(p["offset_s"] * SAMPLE_RATE), audio(p)) for p in parts]
     end = max((start + len(c) for start, c in clips), default=0)
     out = np.zeros(end + round(tail_s * SAMPLE_RATE), dtype=np.float32)
     for start, clip in clips:
@@ -303,9 +316,16 @@ class SpeakerASRCollator(TurnAwareCollator):
 
     def __init__(self, processor):
         super().__init__(processor)
-        self.context_end_id = processor.tokenizer.get_vocab().get(CONTEXT_END)
+        tokenizer = processor.tokenizer
+        self.context_end_id = tokenizer.get_vocab().get(CONTEXT_END)
+        self.speaker_ids = {
+            i for t, i in tokenizer.get_vocab().items() if t.startswith("<SPK_") and t.endswith(">")
+        }
+        end_ids = (getattr(self, "im_end_id", None), getattr(tokenizer, "eos_token_id", None))
+        self.end_ids = {i for i in end_ids if i is not None}
 
     def __call__(self, batch: list[dict]) -> dict:
+        rows = batch
         batch = [{**item, "target": item.get("prefix", "") + item["target"]} for item in batch]
         enc = super().__call__(batch)
         if self.context_end_id is not None:
@@ -313,16 +333,31 @@ class SpeakerASRCollator(TurnAwareCollator):
                 hits = (row == self.context_end_id).nonzero()
                 if len(hits):
                     enc["labels"][i, : int(hits[-1]) + 1] = -100
+        if any(item.get("turn_speakers") for item in rows):
+            # Speaker-embedding head (scripts/speaker_asr/embedding.py): which turn
+            # each token belongs to, and who said it. The trainer pops these keys.
+            from scripts.speaker_asr.embedding import turn_metadata
+
+            meta = turn_metadata(
+                enc["input_ids"], enc["labels"], self.speaker_ids, self.end_ids, rows
+            )
+            if meta is not None:
+                enc.update(meta)
         return enc
 
 
 class SpeakerASRDataset(torch.utils.data.Dataset):
     """Manifest rows -> {"audio", "ctx", "prefix", "target"} for SpeakerASRCollator."""
 
-    def __init__(self, rows: list[dict], store: UtteranceStore):
+    def __init__(
+        self, rows: list[dict], store: UtteranceStore, augment_prob: float = 0.0, seed: int = 0
+    ):
         store.verify(rows)
         self.rows = rows
         self.store = store
+        # Short real-chunk rows (scripts/speaker_asr/chunks.py) may get gain + noise.
+        self.augment_prob = augment_prob
+        self.rng = np.random.default_rng(seed)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -333,9 +368,21 @@ class SpeakerASRDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         row = self.rows[idx]
-        return {
-            "audio": self.audio(idx),
+        audio = self.audio(idx)
+        if row.get("short") and self.augment_prob and self.rng.random() < self.augment_prob:
+            from scripts.speaker_asr.chunks import augment
+
+            audio = augment(audio, self.rng)
+        item = {
+            "audio": audio,
             "ctx": "",
             "prefix": row.get("prefix") or "",
             "target": row["target"],
         }
+        if row.get("turn_speakers"):  # speaker-embedding rows (scripts/speaker_asr/embedding.py)
+            item.update(
+                turn_speakers=row["turn_speakers"],
+                group=row.get("group"),
+                turn_ecapa=row.get("turn_ecapa"),
+            )
+        return item

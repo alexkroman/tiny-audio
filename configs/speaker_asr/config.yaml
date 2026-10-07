@@ -160,6 +160,44 @@ junction:
   same_prob: 0.5
   eval_rows: 200
 
+# Speaker-embedding head (experiment/embed): one vector per decoded turn from
+# the decoder's own hidden states, trained so a person's vector stays put
+# across chunks (within-meeting contrastive loss) and, optionally, distilled
+# from ECAPA-TDNN embeddings of the turn's clean headset audio. Long-form
+# decoding then links chunks by clustering these vectors. Fields mirror
+# scripts/speaker_asr/embedding.py:EmbeddingConfig, which documents them.
+embedding:
+  enabled: false
+  dim: 256
+  weight: 0.1
+  temperature: 0.1
+  distill_weight: 0.0
+  meetings_per_batch: 2
+  eval_rows: 200
+
+# Short real-timeline chunks (experiment/short): meetings mixed at their real
+# timeline and cut with the SAME quiet-point chunking clustered long-form decoding
+# uses (3-8 s), targets from word-aligned utterances. Built once per split and
+# cached in the pool dir (words-<split>.jsonl, short-<split>.parquet). Fields
+# mirror scripts/speaker_asr/chunks.py:ShortChunkConfig, which documents them.
+short_chunks:
+  enabled: false
+  min_s: [2.5, 3.5]
+  max_s: [6.5, 9.0]
+  edge_keep: 0.5
+  min_aligned: 0.8
+  rehearsal: 0.15
+  speaker_loss_weight: 3.0
+  busy_oversample: 2.0
+  eval_rows: 400
+  augment_prob: 0.3
+  # Keep word-less chunks with an EMPTY target: a model never shown one hallucinates a
+  # word into every quiet chunk (the first short run wrote "yeah" into ~1/4 of them).
+  keep_empty: true
+  # Segments shorter than this use AMI's human transcript (isolated short clips are
+  # where self-transcription is wrong: "mm-hmm" -> "Yeah."). 0 = self-transcripts only.
+  human_text_below_s: 1.0
+
 resume_from_checkpoint: null
 # The MERGED final model is pushed here after training (null = keep local).
 hub_model_id: null

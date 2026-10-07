@@ -12,8 +12,10 @@ from dataclasses import fields
 
 from omegaconf import DictConfig, OmegaConf
 
+from scripts.speaker_asr.chunks import ShortChunkConfig
 from scripts.speaker_asr.context import ContextConfig
 from scripts.speaker_asr.data import WindowConfig
+from scripts.speaker_asr.embedding import EmbeddingConfig
 from scripts.speaker_asr.junction import JunctionConfig
 from scripts.utils import get_project_root
 
@@ -56,6 +58,20 @@ def junction_config(cfg: DictConfig) -> JunctionConfig:
         value = cfg.junction[f.name]
         values[f.name] = tuple(value) if OmegaConf.is_list(value) else value
     return JunctionConfig(**values)
+
+
+def short_chunk_config(cfg: DictConfig) -> ShortChunkConfig:
+    """The `short_chunks:` section as a ShortChunkConfig, field by field."""
+    values = {}
+    for f in fields(ShortChunkConfig):
+        value = cfg.short_chunks[f.name]
+        values[f.name] = tuple(value) if OmegaConf.is_list(value) else value
+    return ShortChunkConfig(**values)
+
+
+def embedding_config(cfg: DictConfig) -> EmbeddingConfig:
+    """The `embedding:` section as an EmbeddingConfig, field by field."""
+    return EmbeddingConfig(**{f.name: cfg.embedding[f.name] for f in fields(EmbeddingConfig)})
 
 
 def n_speaker_tokens(cfg: DictConfig) -> int:

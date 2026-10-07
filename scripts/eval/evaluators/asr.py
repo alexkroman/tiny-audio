@@ -509,9 +509,10 @@ class SpeakerASREvaluator(Evaluator):
     checkpoint's tokenizer.
 
     Audio longer than one chunk (`ami-speakers-long`, any recording) goes
-    through long-form decoding (scripts/speaker_asr/longform.py): chunks
-    linked by a context prefix on a context-trained checkpoint, decoded
-    independently (no cross-chunk linking) otherwise.
+    through clustered long-form decoding (scripts/speaker_asr/clustered.py):
+    3-8 s chunks labelled by the model, linked across the recording by ECAPA
+    embeddings + spectral clustering. On the 16 ami-speakers-long test
+    meetings: cpWER 23.35 (WER 20.48), vs 104 for context-prefix linking.
     """
 
     MAX_NEW_TOKENS = 320
@@ -534,15 +535,14 @@ class SpeakerASREvaluator(Evaluator):
         self.context = ContextConfig()
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
-        from scripts.speaker_asr.longform import transcribe_long
+        from scripts.speaker_asr.clustered import ClusterConfig, transcribe_clustered
         from scripts.speaker_asr.model import transcribe_speakers
 
         array = np.asarray(as_16k_array(audio), dtype=np.float32)
         start = time.time()
         if len(array) > self.context.chunk_s * 16000:
-            text = transcribe_long(
-                self.model, self.processor, array, self.context, max_new_tokens=self.MAX_NEW_TOKENS
-            ).text
+            cfg = ClusterConfig(max_new_tokens=self.MAX_NEW_TOKENS)
+            text = transcribe_clustered(self.model, self.processor, array, cfg).text
         else:
             (text,) = transcribe_speakers(
                 self.model, self.processor, [array], self.n_speakers, self.MAX_NEW_TOKENS
