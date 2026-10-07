@@ -619,10 +619,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     # PEFT handles Hub downloads and caching internally
                     from peft import PeftModel
 
+                    # Adapter weights load onto the base model's device. Left to
+                    # PEFT they go straight to "cuda" whenever CUDA reports
+                    # available, which ZeroGPU Spaces do at startup without a
+                    # GPU attached ("No CUDA GPUs are available").
+                    base_device = next(model.language_model.parameters()).device
                     model.language_model = PeftModel.from_pretrained(
                         model.language_model,
                         pretrained_model_name_or_path,
                         is_trainable=True,
+                        torch_device=str(base_device),
                         **cache_kwargs,
                     )
                 else:
