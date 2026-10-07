@@ -3,23 +3,33 @@ license: mit
 language:
 - en
 datasets:
-- speechbrain/LoquaciousSet
+- mythicinfinity/libriheavy
+- MLCommons/peoples_speech
+- fixie-ai/common_voice_17_0
+- speechcolab/gigaspeech
+- kensho/spgispeech
+- facebook/voxpopuli
+- edinburghcstr/ami
+- sanchit-gandhi/tedlium-data
 base_model:
-- zai-org/GLM-ASR-Nano-2512
-- Qwen/Qwen3-0.6B
+- ibm-granite/granite-speech-5.0-470m-turboctc
+- Qwen/Qwen3.5-2B
 pipeline_tag: automatic-speech-recognition
 tags:
 - asr
 - speech-recognition
 - audio
 - qwen
-- glm-asr
+- granite-speech
+- lora
 library_name: transformers
 ---
 
 # Tiny Audio
 
-A speech recognition model trained in 24 hours on a single GPU for ~$12. Built with [Tiny Audio](https://github.com/alexkroman/tiny-audio)—a minimal, hackable ASR framework.
+An English speech recognition model that outputs punctuated, capitalized, formatted text. Built with [Tiny Audio](https://github.com/alexkroman/tiny-audio)—a minimal, hackable ASR framework.
+
+A frozen Granite Speech encoder is connected to a frozen Qwen3.5-2B decoder through a trained MLP projector, with LoRA adapters on the decoder. Only ~80M parameters are trained.
 
 ## Quick Start
 
@@ -29,6 +39,7 @@ from transformers import pipeline
 pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
 result = pipe("audio.wav")
 print(result["text"])
+# The quarterly revenue grew by 12% according to Dr. Smith.
 ```
 
 ## Usage Examples
@@ -56,7 +67,6 @@ result = pipe(audio)
 ### Batch Processing
 
 ```python
-# Process multiple files
 files = ["audio1.wav", "audio2.wav", "audio3.wav"]
 results = pipe(files, batch_size=4)
 for r in results:
@@ -65,66 +75,52 @@ for r in results:
 
 ### Word-Level Timestamps
 
-```python
-result = pipe("audio.wav", return_timestamps="word")
-# Returns:
-# {
-#   "text": "hello world",
-#   "chunks": [
-#     {"text": "hello", "timestamp": (0.0, 0.5)},
-#     {"text": "world", "timestamp": (0.6, 1.0)}
-#   ]
-# }
-```
-
-### Streaming Inference
+Timestamps come from forced alignment of the transcript against the audio and are returned under a `words` key:
 
 ```python
-from tiny_audio import ASRModel, ASRProcessor
-import torch
-
-model = ASRModel.from_pretrained("mazesmazes/tiny-audio")
-processor = ASRProcessor.from_pretrained("mazesmazes/tiny-audio")
-
-# Load and process audio
-import librosa
-audio, sr = librosa.load("audio.wav", sr=16000)
-inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
-
-# Stream tokens
-for token in model.generate_streaming(inputs["input_features"]):
-    print(token, end="", flush=True)
+result = pipe("audio.wav", return_timestamps=True)
+print(result["text"])
+for word in result["words"]:
+    print(word)
 ```
 
-### Using with torch directly
+### Speaker Diarization
+
+`return_speakers=True` adds speaker labels. It first transcribes and aligns words (it implies `return_timestamps=True`). It then splits the audio into speech regions with [TEN VAD](https://github.com/TEN-framework/ten-vad), embeds each region with [ECAPA-TDNN](https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb), and clusters the embeddings into speakers. Each word is assigned to the speaker whose segment it overlaps.
+
+Diarization needs a few extra packages:
+
+```bash
+pip install speechbrain ten-vad scikit-learn scipy
+```
 
 ```python
-from tiny_audio import ASRModel, ASRProcessor
-import torch
-import librosa
+result = pipe("meeting.wav", return_speakers=True, num_speakers=2)
 
-# Load model and processor
-model = ASRModel.from_pretrained("mazesmazes/tiny-audio")
-processor = ASRProcessor.from_pretrained("mazesmazes/tiny-audio")
+print(result["text"])
 
-# Load audio (16kHz)
-audio, sr = librosa.load("audio.wav", sr=16000)
+# Speaker turns
+for seg in result["speaker_segments"]:
+    print(f"{seg['start']:6.2f}-{seg['end']:6.2f}  {seg['speaker']}")
+#   0.00-  2.90  SPEAKER_0
+#   3.36-  6.47  SPEAKER_1
+#   6.93-  9.81  SPEAKER_0
 
-# Process
-inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
-
-# Generate
-with torch.no_grad():
-    output = model.generate(
-        input_features=inputs["input_features"],
-        attention_mask=inputs["attention_mask"],
-        max_new_tokens=256
-    )
-
-# Decode
-text = processor.batch_decode(output, skip_special_tokens=True)[0]
-print(text)
+# Words with timestamps and speakers
+for w in result["words"]:
+    print(f"{w['start']:6.2f}-{w['end']:6.2f}  {w['speaker']}  {w['word']}")
+#   0.00-  0.19  SPEAKER_0  Hi,
+#   0.22-  0.69  SPEAKER_0  Daniel.
+#   ...
 ```
+
+**Setting the speaker count.** Pass `num_speakers` when you know it. Otherwise the number of speakers is estimated from the audio, and on short clips that estimate tends to split one voice into several speakers. You can also bound the estimate with `min_speakers` / `max_speakers`:
+
+```python
+result = pipe("panel.wav", return_speakers=True, min_speakers=2, max_speakers=4)
+```
+
+If diarization fails (for example, a missing package), transcription still succeeds. The error is returned under `result["diarization_error"]` instead of raising.
 
 ### GPU Inference
 
@@ -135,106 +131,107 @@ pipe = pipeline(
     "automatic-speech-recognition",
     model="mazesmazes/tiny-audio",
     trust_remote_code=True,
-    device="cuda"  # or device=0
+    device="cuda",
+    torch_dtype=torch.bfloat16,
 )
 ```
 
-### Half Precision
+## Benchmarks
 
-```python
-pipe = pipeline(
-    "automatic-speech-recognition",
-    model="mazesmazes/tiny-audio",
-    trust_remote_code=True,
-    torch_dtype=torch.float16,
-    device="cuda"
-)
-```
+Word error rate (%, lower is better) on 1,000 samples per dataset, scored with the [Tiny Audio eval harness](https://github.com/alexkroman/tiny-audio/tree/main/scripts/eval) (`ta eval`) after text normalization.
+
+| Dataset | WER |
+|---------|----:|
+| LibriSpeech test-clean | 1.80 |
+| SPGISpeech | 2.24 |
+| LibriSpeech test-other | 3.09 |
+| TED-LIUM | 3.74 |
+| LoquaciousSet † | 6.10 |
+| Common Voice | 6.62 |
+| VoxPopuli | 6.96 |
+| AMI (IHM) | 8.88 |
+| GigaSpeech | 9.07 |
+| Earnings22 † | 10.54 |
+| People's Speech | 17.69 |
+| AMI (SDM) | 23.59 |
+| **Mean (12 sets)** | **8.36** |
+
+† Held out: no data from this source was used in training.
 
 ## Architecture
 
 ```
-Audio (16kHz) → GLM-ASR Encoder (frozen) → MLP Projector (trained) → Qwen3 (frozen) → Text
+Audio (16kHz) → Granite Speech encoder (frozen) → MLP projector (trained) → Qwen3.5-2B + LoRA (trained adapters) → Text
 ```
-
-Only the projector is trained (~12M params). The encoder and decoder remain frozen, leveraging their pretrained knowledge.
 
 | Component | Model | Parameters | Status |
 |-----------|-------|------------|--------|
-| Audio Encoder | GLM-ASR-Nano-2512 | ~600M | Frozen |
-| Projector | 2-layer MLP | ~12M | Trained |
-| Language Model | Qwen3-0.6B | ~600M | Frozen |
+| Audio Encoder | [granite-speech-5.0-470m-turboctc](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) | ~470M | Frozen |
+| Projector | 2-layer MLP (hidden 4096) | 12.6M | Trained |
+| Language Model | [Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B) | ~2B | Frozen |
+| LoRA adapters | r=64, alpha=64, all linear layers | 67.3M | Trained |
 
 ### How It Works
 
-1. **Audio Encoder**: GLM-ASR converts 16kHz audio into frame-level embeddings (768-dim)
-2. **Projector**: A 2-layer MLP with frame stacking bridges the audio and text embedding spaces
-3. **Language Model**: Qwen3 generates text autoregressively, conditioned on the projected audio
+1. **Audio encoder**: Granite Speech turns 16kHz audio into frame-level embeddings.
+2. **Projector**: A 2-layer MLP maps those embeddings into the decoder's embedding space. Each projected frame replaces an `<audio>` placeholder token in the prompt.
+3. **Language model**: Qwen3.5-2B, adapted with LoRA, generates the transcript conditioned on the projected audio and the prompt *"Transcribe the speech with proper punctuation and capitalization"*.
 
-The projector reduces sequence length via frame stacking: `output_len = (input_len - 5) // 5 + 1`
+At inference, 0.25s of silence is prepended to each clip (`inference_lead_in_seconds`). This keeps the first word from being dropped on clips that start mid-speech.
 
 ## Model Specifications
 
 | Specification | Value |
 |---------------|-------|
 | Input | Audio (16kHz mono) |
-| Output | Text transcription |
-| Max Audio Length | ~30 seconds (limited by encoder) |
-| Vocabulary | Qwen3 tokenizer |
+| Output | Punctuated, capitalized text with formatted numbers |
+| Max Audio Length | ~30 seconds per call |
+| Vocabulary | Qwen3.5 tokenizer |
 | Languages | English only |
-| Generation | Greedy decoding (num_beams=1, do_sample=False) |
+| Generation | Greedy decoding (num_beams=1, do_sample=False), max 256 new tokens |
 
 ## Training Details
 
 | | |
 |---|---|
-| **Dataset** | LoquaciousSet (25,000 hours) |
-| **Hardware** | Single NVIDIA A40 |
-| **Time** | ~24 hours |
-| **Cost** | ~$12 |
-| **Optimizer** | AdamW |
-| **Learning Rate** | 1e-4 |
-| **Batch Size** | 4 |
-| **Steps** | 50,000 |
+| **Data** | LibriHeavy (medium), People's Speech (clean), Common Voice 17, GigaSpeech (M), SPGISpeech (M), VoxPopuli, AMI (IHM + SDM), TED-LIUM: one pass, ~3.8M utterances |
+| **Hardware** | Single NVIDIA H100 80GB |
+| **Steps** | 58,861 |
+| **Batch Size** | 64 |
+| **Optimizer** | AdamW (fused), cosine schedule, 1,000 warmup steps, no weight decay |
+| **Learning Rate** | 1e-3 (projector), 1e-4 (LoRA) |
+| **Precision** | bf16 (projector held in fp32) |
+
+The training recipe is [`configs/experiments/granite_qwen_frozen.yaml`](https://github.com/alexkroman/tiny-audio/blob/main/configs/experiments/granite_qwen_frozen.yaml).
 
 ## Limitations
 
-- **English only**: Not trained on other languages
-- **Sample rate**: Expects 16kHz audio (other rates resampled automatically)
-- **Audio length**: Best for clips under 30 seconds
+- **English only**: Not trained on other languages.
+- **Sample rate**: Expects 16kHz audio (other rates are resampled automatically).
+- **Audio length**: Best for clips under 30 seconds. Chunk longer audio.
 - **Accuracy**: May degrade on:
-  - Heavily accented speech
+  - Far-field and overlapping speech (see AMI SDM)
   - Noisy or low-quality audio
-  - Domain-specific terminology
-  - Overlapping speakers
-- **No punctuation**: Output is lowercase without punctuation by default
-
-## Requirements
-
-```
-transformers>=4.40.0
-torch>=2.0.0
-torchaudio>=2.0.0
-```
-
-Optional for streaming:
-```
-librosa
-soundfile
-```
+  - Rare names and domain-specific terminology
 
 ## Files
 
 | File | Description |
 |------|-------------|
 | `config.json` | Model configuration |
-| `model.safetensors` | Projector weights (~48MB) |
+| `model.safetensors` | Projector weights (~50MB) |
+| `adapter_config.json` / `adapter_model.safetensors` | LoRA adapters for the decoder (~270MB) |
 | `preprocessor_config.json` | Audio preprocessing config |
-| `tokenizer.json` | Tokenizer |
-| `tokenizer_config.json` | Tokenizer config |
-| `special_tokens_map.json` | Special tokens |
+| `tokenizer.json` / `tokenizer_config.json` / `chat_template.jinja` | Tokenizer |
+| `asr_*.py`, `projectors.py`, `alignment.py`, `diarization.py` | Custom model code (loaded with `trust_remote_code=True`) |
 
-Note: Only the projector weights are stored. The encoder (GLM-ASR) and decoder (Qwen3) are loaded from their respective HuggingFace repos.
+Only the projector and LoRA weights are stored here. The encoder (Granite Speech) and decoder (Qwen3.5-2B) are downloaded from their own Hugging Face repos.
+
+The previous GLM-ASR + Qwen3-0.6B model is still available at revision `glm-asr-qwen3-0.6b`:
+
+```python
+pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", revision="glm-asr-qwen3-0.6b", trust_remote_code=True)
+```
 
 ## Citation
 
@@ -258,9 +255,9 @@ If you use this model, please cite:
 
 ## Acknowledgments
 
-- [GLM-ASR](https://huggingface.co/zai-org/GLM-ASR-Nano-2512) for the audio encoder
-- [Qwen3](https://huggingface.co/Qwen/Qwen3-0.6B) for the language model
-- [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) for training data
+- [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) for the audio encoder
+- [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-2B) for the language model
+- The LibriHeavy, People's Speech, Common Voice, GigaSpeech, SPGISpeech, VoxPopuli, AMI, and TED-LIUM teams for training data
 
 ## License
 

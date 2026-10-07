@@ -87,7 +87,7 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         device=device,
     )
 
-    def process_audio(audio, show_timestamps, show_diarization):
+    def process_audio(audio, show_timestamps, show_diarization, num_speakers=0):
         """Process audio file for transcription."""
         if audio is None:
             return "Please provide audio input", "", ""
@@ -98,6 +98,10 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
             kwargs["return_timestamps"] = True
         if show_diarization:
             kwargs["return_speakers"] = True
+            # Auto-detection tends to over-split short clips; a known count
+            # pins the clustering. 0 means auto.
+            if num_speakers and int(num_speakers) > 0:
+                kwargs["num_speakers"] = int(num_speakers)
 
         # Transcribe the audio
         result = pipe(audio, **kwargs)
@@ -145,6 +149,13 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
                         label="Speaker Diarization",
                         value=False,
                     )
+                    num_speakers = gr.Number(
+                        label="Number of Speakers (0 = auto)",
+                        value=0,
+                        minimum=0,
+                        maximum=10,
+                        precision=0,
+                    )
 
                 process_btn = gr.Button("Transcribe", variant="primary")
 
@@ -165,7 +176,7 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         # Wire up events
         process_btn.click(
             fn=process_audio,
-            inputs=[audio_input, show_timestamps, show_diarization],
+            inputs=[audio_input, show_timestamps, show_diarization, num_speakers],
             outputs=[output_text, timestamps_output, diarization_output],
         )
 
