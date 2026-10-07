@@ -476,7 +476,8 @@ training:
   #   - `ta runpod deploy` does the dance that avoids both: install tilelang,
   #     install fla, evaluate fla's own IS_NVIDIA_HOPPER / TRITON_ABOVE_*
   #     predicates, and uninstall fla when the gated path would raise
-  #     (scripts/deploy/runpod.py). Hub kernels take priority at runtime.
+  #     (scripts/deploy/runpod.py). These packages are the only fast path;
+  #     Hub kernels are not requested.
   #
   # Nothing currently GATES the run on kernel availability -- every outcome in
   # deploy is a WARN scrolling past in tmux and the runtime fallbacks are

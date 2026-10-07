@@ -1266,118 +1266,6 @@ TRAINING_MODEL_PARAMS = [
 ]
 
 
-# transformers pins kernels-community/mamba-ssm at `version=2`
-# (integrations/hub_kernels.py), and that revision's build set starts at torch
-# 2.11. RunPod's base image is on torch 2.8, so Hub-kernel dispatch resolves
-# the repo, then raises FileNotFoundError when it looks for a matching variant
-# -- ASRModel.train catches it and falls back to the torch reference path for
-# Qwen3.5's causal depthwise conv.
-#
-# That fallback is avoidable. Released tags DO carry torch 2.8 builds, checked
-# against the Hub rather than inferred:
-#   v0.0.4  torch28, torch29                       torch28-cxx11-cu{126,128,129}-x86_64-linux
-#   v0.0.3  torch25..29                            same
-#   v0.0.2  torch25..28                            same
-#   main    torch28, 29, 210, 211, 212             same
-# Newest released tag first, `main` last, so the pin stays reproducible unless
-# only main has a matching build (which is what a future torch upgrade looks
-# like).
-_CONV1D_KERNEL_REPO = "kernels-community/mamba-ssm"
-_CONV1D_KERNEL_REVISIONS = ("v0.0.4", "v0.0.3", "v0.0.2", "main")
-_CONV1D_KERNEL_LAYERS = ("causal_conv1d_fn", "causal_conv1d_update")
-
-
-def _kernel_revision_for(torch_tag: str, arch: str, revisions=_CONV1D_KERNEL_REVISIONS):
-    """First revision carrying a build variant for this torch + CPU, else None.
-
-    Build directories are named `build/torch28-cxx11-cu126-x86_64-linux/...`,
-    so the match is prefix on the torch tag plus the machine arch.
-    """
-    from huggingface_hub import HfApi
-
-    api = HfApi()
-    for revision in revisions:
-        try:
-            files = api.list_repo_files(_CONV1D_KERNEL_REPO, revision=revision)
-        except Exception as exc:  # unknown tag, offline, rate limited
-            logger.debug("Could not list %s@%s: %s", _CONV1D_KERNEL_REPO, revision, exc)
-            continue
-        variants = {f.split("/")[1] for f in files if f.startswith("build/") and f.count("/") >= 2}
-        if any(
-            v.startswith(f"{torch_tag}-") and arch in v and v.endswith("linux") for v in variants
-        ):
-            return revision
-    return None
-
-
-def _repin_causal_conv1d_kernel() -> None:
-    """Point the causal-conv1d Hub kernels at a revision built for this torch.
-
-    Must run AFTER the model is constructed: transformers calls
-    `register_kernel_mapping_transformers()` inside `from_pretrained`, and
-    `register_kernel_mapping` merges with `inherit_mapping=True`, so anything
-    registered earlier would be overwritten by the defaults. Registering here
-    overrides only these two layer names and leaves the kernels-community/fla
-    entries (the gated delta-net fast path, 18 of 24 layers) untouched.
-
-    Entirely best-effort. Every failure path leaves the previous behaviour
-    intact, because ASRModel.train still catches an unresolvable kernel and
-    disables Hub dispatch.
-    """
-    if not torch.cuda.is_available():
-        return
-    try:
-        import platform
-
-        from kernels import LayerRepository, Mode
-        from transformers.integrations.hub_kernels import register_kernel_mapping_transformers
-
-        version = torch.__version__.split("+")[0].split(".")
-        torch_tag = f"torch{version[0]}{version[1]}"
-        arch = platform.machine()
-        revision = _kernel_revision_for(torch_tag, arch)
-        if revision is None:
-            logger.warning(
-                "No %s revision carries a build for %s/%s; leaving the default "
-                "pin in place. The causal-conv1d fast path will fall back to "
-                "the torch reference implementation (same numerics, slower).",
-                _CONV1D_KERNEL_REPO,
-                torch_tag,
-                arch,
-            )
-            return
-        register_kernel_mapping_transformers(
-            {
-                name: {
-                    "cuda": {
-                        mode: LayerRepository(
-                            repo_id=_CONV1D_KERNEL_REPO, layer_name=name, revision=revision
-                        )
-                        for mode in (Mode.TRAINING, Mode.INFERENCE)
-                    }
-                }
-                for name in _CONV1D_KERNEL_LAYERS
-            }
-        )
-        logger.info(
-            "Re-pinned %s to %s (has a %s-%s build); transformers' default "
-            "version=2 pin starts at torch 2.11.",
-            ", ".join(_CONV1D_KERNEL_LAYERS),
-            revision,
-            torch_tag,
-            arch,
-        )
-    except ImportError:
-        return  # `kernels` not installed; nothing dispatches from the Hub
-    except Exception as exc:
-        logger.warning(
-            "Could not re-pin the causal-conv1d Hub kernel (%s: %s). Continuing "
-            "with transformers' default pin.",
-            type(exc).__name__,
-            exc,
-        )
-
-
 def _require_fused_cross_entropy(model, cfg) -> None:
     """Fail at startup when fused CE is unavailable on a GPU run.
 
@@ -1541,7 +1429,6 @@ def main(cfg: DictConfig) -> None:
     model = ASRModel(asr_config)
 
     _require_fused_cross_entropy(model, cfg)
-    _repin_causal_conv1d_kernel()
 
     # Disable the KV cache for training on the decoder's own config, NOT on the
     # ASRConfig. ASRConfig.use_cache is an inference setting: __init__ copies it

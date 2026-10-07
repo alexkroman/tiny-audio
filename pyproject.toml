@@ -90,22 +90,12 @@ bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 # launches. A floor that admits seven versions lacking the architecture this
 # repo trains is a silent 29 GiB regression waiting for a fresh resolve.
 liger-kernel = {version = ">=0.8.0", markers = "sys_platform == 'linux'"}
-# NOTE: `kernels` (Hub kernel loader for Qwen3.5's linear-attention fast path)
-# is deliberately NOT a dependency here. transformers gates it to a version
-# WINDOW (KERNELS_MIN_VERSION <= v < KERNELS_MAX_VERSION) and raises inside
-# from_pretrained when the installed version falls outside it. Pinning a range
-# in this file couples the lock to one transformers release and gets it wrong
-# on the next upgrade -- it was briefly pinned ">=0.6.0", poetry resolved
-# 0.17.1 against a transformers wanting <0.17.0, and every pod died at model
-# construction. scripts/deploy/runpod.py reads the window off the installed
-# transformers and installs to match, the same way flash-attn and
-# causal-conv1d are handled.
 # NOTE: the Qwen3.5 linear-attention fast path (flash-linear-attention +
 # tilelang + causal-conv1d) is deliberately NOT a main dependency -- see the
 # `hybrid-kernels` group below for why installing it unconditionally can turn a
-# slow run into a crashed one. The Hub-kernel route installed by
-# scripts/deploy/runpod.py is lower-risk and takes priority at runtime; this
-# group remains as the fallback for pods that have nvcc or want the upstream
+# slow run into a crashed one. scripts/deploy/runpod.py installs and verifies
+# these on pods (Hub kernels are not used -- see _load_language_model); this
+# group remains for local pods that have nvcc or want the upstream
 # packages specifically.
 pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
 fabric = ">=3.0.0"
@@ -353,6 +343,11 @@ extend-ignore = [
     # `extend(...)` over a comprehension; the perf difference is negligible here.
     "PERF401",  # manual-list-comprehension
 ]
+
+[tool.ruff.lint.isort]
+# A local `wandb/` run directory at the repo root makes ruff classify `wandb`
+# as first-party, so local `--fix` and CI disagree on import order.
+known-third-party = ["wandb"]
 
 [tool.ruff.lint.per-file-ignores]
 # Mathematical notation (A, B, W, S for matrices) is conventional in LoRA analysis

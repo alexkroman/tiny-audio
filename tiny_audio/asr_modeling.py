@@ -21,7 +21,6 @@ from transformers import (
 )
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.utils import is_kernels_available
 
 try:
     from .asr_config import ASRConfig, compute_encoder_output_length
@@ -532,28 +531,29 @@ def _assert_projector_loaded(incompatible_keys, projector_type: str) -> None:
     )
 
 
-def disable_hub_kernels(root: nn.Module) -> list[str]:
-    """Switch off transformers' Hub-kernel dispatch everywhere it is enabled.
+def _log_linear_attention_backends() -> None:
+    """Say which fast paths Qwen3.5-style hybrid layers will get on this box.
 
-    Returns the names of the submodules that were carrying it, so a caller can
-    tell "kernels were on, now they are off" from "kernels had nothing to do
-    with this failure" and re-raise in the second case.
-
-    Writes `_use_kernels` directly instead of going through the public
-    `use_kernels` setter. The setter does the same assignment but first logs
-    "Disabling kernels at runtime is a no-op as there is no 'unkernelize'
-    routine; keeping current kernels active" -- true of the layers already
-    swapped, misleading as an explanation of what this call accomplishes. What
-    it accomplishes is stopping the *next* kernelize: `PreTrainedModel.train`
-    re-runs `set_use_kernels(True)` on every mode flip, and that is the call
-    that raises.
+    Logged rather than enforced: a missing package means the torch reference
+    path (same numerics, slower), and decoders without linear attention never
+    touch these functions at all.
     """
-    disabled = []
-    for name, module in root.named_modules():
-        if getattr(module, "_use_kernels", False):
-            module._use_kernels = False
-            disabled.append(name or type(module).__name__)
-    return disabled
+    import importlib.util
+
+    found = {
+        pkg: importlib.util.find_spec(mod) is not None
+        for pkg, mod in (("causal-conv1d", "causal_conv1d"), ("flash-linear-attention", "fla"))
+    }
+    missing = [pkg for pkg, ok in found.items() if not ok]
+    if missing:
+        logger.warning(
+            "Linear-attention fast path incomplete: %s not installed. Qwen3.5-style "
+            "hybrid layers will use the torch reference path for those functions "
+            "(same numerics, slower). `ta runpod deploy` installs both.",
+            ", ".join(missing),
+        )
+    else:
+        logger.info("Linear-attention fast path: causal-conv1d + flash-linear-attention packages.")
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -949,44 +949,25 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             "dtype": dtype,
         }
 
-        # Opt into transformers' hub-kernel dispatch. For Qwen3.5 this is the
-        # difference between the gated-delta-net fast path and the torch
-        # reference: 18 of its 24 layers are linear_attention, and upstream
-        # measures "more than an order of magnitude on an H100" for
-        # chunk_gated_delta_rule alone. Numerics are unaffected -- the
-        # decorator's fallback chain (hub -> original package -> torch) picks
-        # an implementation, not a different computation.
+        # Hub kernels are deliberately NOT requested (no `use_kernels=True`).
+        # Qwen3.5's linear-attention functions resolve, per transformers'
+        # @use_kernel_func_from_hub_with_fallback, in the order
+        #   Hub kernel (only if use_kernels) -> installed package -> torch
+        # and scripts/deploy/runpod.py installs and verifies the packages
+        # (causal-conv1d compiled against the pod's torch, flash-linear-attention
+        # + tilelang). Measured on a torch 2.8 A100 pod: with Hub kernels off,
+        # causal_conv1d_fn resolves to causal_conv1d.causal_conv1d_interface and
+        # chunk_gated_delta_rule to fla.ops.gated_delta_rule.chunk -- the fast
+        # path, picked once at import.
         #
-        # Gated rather than unconditional: the kernels are CUDA binaries, so
-        # asking for them on mps/cpu only buys resolution failures and log
-        # noise. Absent `kernels`, from_pretrained pops the flag and proceeds.
-        # Gate on transformers' OWN predicate, not on whether the package
-        # imports. transformers accepts `kernels` only inside a version window
-        # (KERNELS_MIN_VERSION <= v < KERNELS_MAX_VERSION) and
-        # set_use_kernels RAISES inside from_pretrained when the installed
-        # version is outside it -- so a presence check like find_spec() turns a
-        # would-be speedup into a hard crash at model construction. That is
-        # precisely what an earlier revision did: it saw kernels 0.17.1
-        # installed, asked for them, and died against a transformers wanting
-        # <0.17.0. is_kernels_available() checks presence AND the window, so a
-        # mismatch now degrades to the torch reference path.
-        #
-        # The gate is necessary but not sufficient: it says the `kernels`
-        # PACKAGE is usable, not that the Hub has a build of each mapped repo
-        # for this torch/CUDA/arch. That second failure cannot be checked here
-        # -- resolution happens lazily on the first cuda-side kernelize, which
-        # is the first `train()` -- so it is handled there, in `ASRModel.train`.
-        kernels_ok = is_kernels_available()
-        if torch.cuda.is_available() and kernels_ok:
-            decoder_kwargs["use_kernels"] = True
-        else:
-            logger.info(
-                "Hub kernels not requested (cuda=%s, kernels usable=%s) — "
-                "Qwen3.5-style linear-attention layers will use the slower "
-                "torch reference path.",
-                torch.cuda.is_available(),
-                kernels_ok,
-            )
+        # The Hub route bought nothing on top of that and broke every run from
+        # f001a061 on: transformers pins kernels-community/mamba-ssm at a
+        # version whose builds start at torch 2.11, the first `model.train()`
+        # raised, and a catch-and-retry here disabled Hub dispatch anyway. A
+        # re-pin could not hold either, because `PreTrainedModel.train()`
+        # re-registers transformers' default mapping on every mode flip.
+        if torch.cuda.is_available():
+            _log_linear_attention_backends()
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
 
@@ -1294,69 +1275,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         on modules with `requires_grad_(False)`. The frozen encoder (and the LM
         when `freeze_language_model=True`) should always run deterministically;
         train-mode dropout only adds noise that can't improve a frozen network.
-
-        Also the place where Hub-kernel dispatch is caught and switched off.
-        `use_kernels=True` (see `_load_language_model`) is resolved lazily, per
-        device and per mode: `from_pretrained` kernelizes while the decoder is
-        still on CPU, where the mapping has no entry and the pass no-ops, so a
-        load that "succeeded" proves nothing. Trainer then moves the model to
-        CUDA and calls this method, `PreTrainedModel.train` re-runs
-        `set_use_kernels(True)`, and only now does `kernels` go and fetch the
-        repo the mapping names for (cuda, TRAINING). A repo with no build
-        variant for this box raises FileNotFoundError there -- step 0 of the
-        run, after the dataset and the model are already up. Qwen3.5's conv
-        functions hit exactly this: they map to kernels-community/mamba-ssm,
-        which transformers pins at `version=2` (integrations/hub_kernels.py),
-        and THAT REVISION's build set starts at torch 2.11 while the RunPod
-        base image is on torch 2.8.
-
-        An earlier version of this comment concluded that no branch of the
-        repo had a torch 2.8 build and there was nothing to move to. That was
-        wrong: it read "the pinned revision has no matching build" as "no
-        build exists". Checked against the Hub -- tags v0.0.2, v0.0.3 and
-        v0.0.4 all ship torch28-cxx11-cu{126,128,129}-x86_64-linux, and so
-        does main. `scripts/train._repin_causal_conv1d_kernel` re-registers
-        these two layers against the newest revision carrying a build for the
-        local torch, so on a correctly provisioned pod the fast path resolves
-        and this fallback is not reached.
-
-        The fallback stays because it still covers what the re-pin cannot:
-        `kernels` absent, the Hub unreachable at startup, or a torch version
-        nobody has built a variant for.
-
-        `kernels`' own `use_fallback=True` does not cover this. It guards the
-        mapping lookups only; once a repo is selected, `_get_layer_memoize` ->
-        `repo.load()` is unguarded and a missing variant is fatal. Nor can the
-        `is_kernels_available()` gate see it -- that checks the `kernels`
-        package version window, not what the Hub built.
-
-        So catch it here, at the one call site that triggers it, and retry with
-        kernels off. Layers swapped before the raise keep their kernels: they
-        resolved for the mode being requested and are drop-in equivalents, so a
-        partial swap is slower-in-places, never wrong. The retry is safe
-        because `super().train(mode)` is idempotent, and it terminates because
-        the flag that drives the kernelize is now False.
         """
-        try:
-            self._apply_train_mode(mode)
-        except Exception as exc:  # re-raised below unless kernels explain it
-            disabled = disable_hub_kernels(self)
-            if not disabled:
-                raise
-            logger.warning(
-                "Hub kernel dispatch failed switching to %s mode (%s: %s). "
-                "Disabled it on %s; the run continues on the torch reference "
-                "path -- same numerics, slower hybrid/linear-attention layers.",
-                "train" if mode else "eval",
-                type(exc).__name__,
-                exc,
-                ", ".join(disabled),
-            )
-            self._apply_train_mode(mode)
+        self._apply_train_mode(mode)
         return self
 
     def _apply_train_mode(self, mode: bool) -> None:
-        """The actual mode switch, factored out so `train` can retry it."""
+        """The actual mode switch; named so configs can point at the BN/dropout policy."""
         super().train(mode)
         if getattr(self.config, "freeze_audio_encoder", True):
             self.audio_tower.train(False)
