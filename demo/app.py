@@ -96,21 +96,34 @@ def speaker_turns(words):
 
 
 def conversation_html(words):
-    """Speaker-attributed transcript: one color-coded block per speaker turn."""
+    """Speaker-attributed transcript: one color-coded block per speaker turn.
+
+    Styled inline rather than through the app's CSS: on Spaces this block
+    rendered without the stylesheet's rules (only inline colors survived).
+    """
     turns = speaker_turns(words)
     if not turns:
-        return '<p class="empty">Turn on speaker diarization to see who said what.</p>'
+        return (
+            '<p style="color:var(--body-text-color-subdued)">'
+            "Turn on speaker diarization to see who said what.</p>"
+        )
     colors = {}
     for speaker, *_ in turns:
         colors.setdefault(speaker, SPEAKER_COLORS[len(colors) % len(SPEAKER_COLORS)])
     blocks = [
-        f'<div class="turn" style="border-left-color:{colors[s]}">'
-        f'<div class="who" style="color:{colors[s]}">{html.escape(speaker_label(s))}'
-        f'<span class="when">{format_timestamp(start)} – {format_timestamp(end)}</span></div>'
+        f'<div style="border-left:4px solid {colors[s]};padding:0.35rem 0.75rem;'
+        'background:var(--background-fill-secondary);border-radius:0 6px 6px 0">'
+        f'<div style="color:{colors[s]};font-weight:600;font-size:0.85rem;margin-bottom:0.15rem">'
+        f"{html.escape(speaker_label(s))}"
+        '<span style="font-weight:400;color:var(--body-text-color-subdued);margin-left:0.5rem">'
+        f"{format_timestamp(start)} – {format_timestamp(end)}</span></div>"
         f"<div>{html.escape(text)}</div></div>"
         for s, start, end, text in turns
     ]
-    return '<div class="conversation">' + "".join(blocks) + "</div>"
+    return (
+        '<div style="display:flex;flex-direction:column;gap:0.6rem;'
+        'max-height:420px;overflow-y:auto">' + "".join(blocks) + "</div>"
+    )
 
 
 def segment_rows(segments):
@@ -135,11 +148,6 @@ CSS = """
 .gradio-container { max-width: 1120px !important; margin: 0 auto !important; }
 #header h1 { margin-bottom: 0.25rem; }
 #header p { color: var(--body-text-color-subdued); margin-top: 0; }
-.conversation { display: flex; flex-direction: column; gap: 0.6rem; max-height: 420px; overflow-y: auto; }
-.turn { border-left: 4px solid; padding: 0.35rem 0.75rem; background: var(--background-fill-secondary); border-radius: 0 6px 6px 0; }
-.turn .who { font-weight: 600; font-size: 0.85rem; margin-bottom: 0.15rem; }
-.turn .when { font-weight: 400; color: var(--body-text-color-subdued); margin-left: 0.5rem; }
-.empty { color: var(--body-text-color-subdued); }
 """
 
 EXAMPLE = Path(__file__).parent / "examples" / "ami_meeting.wav"
