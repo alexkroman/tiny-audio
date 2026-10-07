@@ -10,18 +10,49 @@ import transformers
 from transformers.pipelines.audio_utils import ffmpeg_read
 
 try:
-    from .alignment import ForcedAligner
+    from .alignment import ForcedAligner, QwenForcedAligner
     from .asr_modeling import ASRModel
     from .asr_processing import prepend_lead_in
-    from .diarization import SpeakerDiarizer
+    from .diarization import NemotronDiarizer, SpeakerDiarizer
 except ImportError:
-    from alignment import ForcedAligner  # type: ignore[no-redef]
+    from alignment import ForcedAligner, QwenForcedAligner  # type: ignore[no-redef]
     from asr_modeling import ASRModel  # type: ignore[no-redef]
     from asr_processing import prepend_lead_in  # type: ignore[no-redef]
-    from diarization import SpeakerDiarizer  # type: ignore[no-redef]
+    from diarization import NemotronDiarizer, SpeakerDiarizer  # type: ignore[no-redef]
 
 # Re-export for backwards compatibility
-__all__ = ["ASRPipeline", "ForcedAligner", "SpeakerDiarizer"]
+__all__ = [
+    "ASRPipeline",
+    "ForcedAligner",
+    "NemotronDiarizer",
+    "QwenForcedAligner",
+    "SpeakerDiarizer",
+]
+
+# Timestamps and speakers transcribe in chunks cut at the quietest point between
+# these lengths. The model trained on clips of at most 19 s; 18 leaves room for
+# the inference lead-in. Short clips are one chunk, so their text is unchanged.
+CHUNK_MAX_S = 18.0
+CHUNK_MIN_S = 8.0
+
+
+def chunk_bounds(
+    audio: np.ndarray, sample_rate: int, max_s: float = CHUNK_MAX_S, min_s: float = CHUNK_MIN_S
+) -> list[tuple[int, int]]:
+    """Sample ranges of at most `max_s`, each cut at the quietest 100 ms frame after `min_s`."""
+    frame = int(0.1 * sample_rate)
+    bounds, start, n = [], 0, len(audio)
+    while n - start > max_s * sample_rate:
+        lo = start + int(min_s * sample_rate)
+        hi = start + int(max_s * sample_rate)
+        k = (hi - lo) // frame
+        rms = np.sqrt(np.mean(np.square(audio[lo : lo + k * frame].reshape(k, frame)), axis=1))
+        cut = lo + int(np.argmin(rms)) * frame + frame // 2
+        bounds.append((start, cut))
+        start = cut
+    bounds.append((start, n))
+    return bounds
+
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
 _MIN_REPEATS = 3
@@ -73,25 +104,28 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         Args:
             inputs: Audio input (file path, dict with array/sampling_rate, etc.)
-            return_timestamps: If True, return word-level timestamps using forced alignment
-            return_speakers: If True, return speaker labels for each word
+            return_timestamps: If True, return word-level timestamps (Qwen3-ForcedAligner)
+            return_speakers: If True, label every word with a speaker (Nemotron-3-Diarization)
             user_prompt: Custom transcription prompt (default: "Transcribe: ")
-            num_speakers: Exact number of speakers (if known, for diarization)
-            min_speakers: Minimum number of speakers (for diarization)
-            max_speakers: Maximum number of speakers (for diarization)
+            num_speakers: Exact number of speakers, if known
+            max_speakers: Upper bound on the number of speakers
             **kwargs: Additional arguments passed to the pipeline
 
         Returns:
             Dict with 'text' key, 'words' key if return_timestamps=True,
-            and speaker labels on words if return_speakers=True
+            and speaker labels on words plus 'speaker_segments' if return_speakers=True
         """
         # Extract our params before super().__call__ (which will also call _sanitize_parameters)
         return_timestamps = kwargs.pop("return_timestamps", False)
         return_speakers = kwargs.pop("return_speakers", False)
         user_prompt = kwargs.pop("user_prompt", None)
+        if kwargs.pop("min_speakers", None) is not None:
+            raise ValueError(
+                "min_speakers is not supported: Nemotron-3-Diarization decides how many "
+                "speakers it hears. Pass num_speakers (exact) or max_speakers instead."
+            )
         diarization_params = {
             "num_speakers": kwargs.pop("num_speakers", None),
-            "min_speakers": kwargs.pop("min_speakers", None),
             "max_speakers": kwargs.pop("max_speakers", None),
         }
 
@@ -109,9 +143,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             self.model.TRANSCRIBE_PROMPT = user_prompt
 
         try:
-            return self._transcribe(
+            if not return_timestamps:
+                return super().__call__(inputs, **kwargs)
+            return self._transcribe_timed(
                 inputs,
-                return_timestamps=return_timestamps,
                 return_speakers=return_speakers,
                 diarization_params=diarization_params,
                 **kwargs,
@@ -120,60 +155,59 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             if original_prompt is not None:
                 self.model.TRANSCRIBE_PROMPT = original_prompt
 
-    def _transcribe(
+    def _transcribe_timed(
         self,
         inputs,
         *,
-        return_timestamps: bool,
         return_speakers: bool,
         diarization_params: dict,
         **kwargs,
     ):
-        """Transcribe, then attach timestamps and speakers if requested."""
-        # Decode once for timestamp alignment and diarization, then hand the
-        # decoded array to the parent so it doesn't run ffmpeg over the same
-        # input a second time.
-        current_audio = (
-            self._extract_audio(inputs) if (return_timestamps or return_speakers) else None
-        )
+        """Transcribe in chunks, time every word, and label speakers if requested.
 
-        # Run standard transcription
-        result = super().__call__(current_audio if current_audio is not None else inputs, **kwargs)
+        Chunks of 8-18 s cut at quiet points are transcribed one by one and each
+        is aligned against its own transcript (batched), then offset onto the
+        recording's timeline -- so audio of any length gets every word timed,
+        and the model never sees a clip longer than it trained on. Speakers come
+        from ONE Nemotron pass over the whole recording, so labels are
+        recording-level: chunking never touches speaker identity.
+        """
+        audio = self._extract_audio(inputs)
+        if audio is None:
+            raise ValueError(f"Cannot read audio from {type(inputs).__name__} for timestamps")
+        array = np.asarray(audio["array"], dtype=np.float32)
+        sr = audio.get("sampling_rate", 16000)
 
-        # Add timestamps if requested
-        if return_timestamps and current_audio is not None:
-            text = result.get("text", "")
-            if text:
-                try:
-                    words = ForcedAligner.align(
-                        current_audio["array"],
-                        text,
-                        sample_rate=current_audio.get("sampling_rate", 16000),
-                    )
-                    result["words"] = words
-                except Exception as e:
-                    result["words"] = []
-                    result["timestamp_error"] = str(e)
-            else:
-                result["words"] = []
+        bounds = chunk_bounds(array, sr)
+        texts = [
+            super(ASRPipeline, self).__call__({"raw": array[s:e], "sampling_rate": sr}, **kwargs)[
+                "text"
+            ]
+            for s, e in bounds
+        ]
+        result: dict[str, Any] = {"text": " ".join(t for t in texts if t)}
 
-        # Add speaker diarization if requested
-        if return_speakers and current_audio is not None:
+        try:
+            aligned = QwenForcedAligner.align_chunks(
+                [(array[s:e], text) for (s, e), text in zip(bounds, texts)], sample_rate=sr
+            )
+            result["words"] = [
+                {**w, "start": w["start"] + s / sr, "end": w["end"] + s / sr}
+                for (s, _), chunk_words in zip(bounds, aligned)
+                for w in chunk_words
+            ]
+        except Exception as e:
+            result["words"] = []
+            result["timestamp_error"] = str(e)
+
+        if return_speakers:
             try:
-                # Run diarization
-                speaker_segments = SpeakerDiarizer.diarize(
-                    current_audio["array"],
-                    sample_rate=current_audio.get("sampling_rate", 16000),
-                    **{k: v for k, v in diarization_params.items() if v is not None},
+                activity = NemotronDiarizer.activity(array, sample_rate=sr)
+                keep = NemotronDiarizer.top_speakers(activity, **diarization_params)
+                result["speaker_segments"] = NemotronDiarizer.segments(activity, keep)
+                result["words"] = NemotronDiarizer.assign_speakers_to_words(
+                    result["words"], activity, keep
                 )
-                result["speaker_segments"] = speaker_segments
-
-                # Assign speakers to words
-                if result.get("words"):
-                    result["words"] = SpeakerDiarizer.assign_speakers_to_words(
-                        result["words"],
-                        speaker_segments,
-                    )
             except Exception as e:
                 result["speaker_segments"] = []
                 result["diarization_error"] = str(e)

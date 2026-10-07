@@ -1,12 +1,10 @@
-transformers>=5.17.0  # Qwen3.5 + GraniteSpeech5Encoder
+# Speaker diarization uses Nemotron-3-Diarization, in transformers main after 5.17.
+# Pinned to the commit the pipeline was verified on; move to a release once one ships it.
+transformers @ git+https://github.com/huggingface/transformers@91ea1192a00e0ebb684400434375fbd2345c8449
 torch
 torchaudio
 peft
 safetensors
 numpy
-scipy
-scikit-learn
 librosa
 soundfile
-speechbrain
-ten-vad>=1.0.6

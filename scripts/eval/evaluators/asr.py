@@ -304,6 +304,8 @@ class LocalEvaluator(Evaluator):
         print_generation_config(self.pipe.model, model_path)
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
+        if self.speakers:
+            return self._transcribe_speakers(audio)
         start = time.time()
         # Request per-step top-1/top-2 logprobs. The Hub-loaded pipeline may be
         # an older version without scores support, in which case the kwarg is
@@ -327,6 +329,24 @@ class LocalEvaluator(Evaluator):
                     "num_tokens": n,
                 }
         return text, elapsed, confidence
+
+    def _transcribe_speakers(self, audio) -> tuple[str, float, dict | None]:
+        """The pipeline's own diarization (`return_speakers=True`) as `<SPK_n>` turns.
+
+        Whatever the checkpoint's pipeline does for speakers is what gets
+        scored -- the same call a user makes. An alignment or diarization
+        error is raised, not scored as an unlabelled transcript.
+        """
+        from scripts.speaker_asr.metrics import serialize_turns
+
+        start = time.time()
+        result = self.pipe(audio, user_prompt=self.user_prompt, return_speakers=True)
+        elapsed = time.time() - start
+        for key in ("timestamp_error", "diarization_error"):
+            if result.get(key):
+                raise RuntimeError(f"{key}: {result[key]}")
+        text = serialize_turns((w["speaker"], w["word"]) for w in result["words"])
+        return text, elapsed, None
 
 
 class LocalStreamingEvaluator(Evaluator):
@@ -560,9 +580,11 @@ class SpeakerASREvaluator(Evaluator):
 
 
 class NemotronQwenEvaluator(Evaluator):
-    """Stock Qwen3-ASR words, speakers from Nemotron-3-Diarization.
+    """Stock Qwen3-ASR words, speakers from Nemotron-3-Diarization: the off-the-shelf baseline.
 
-    See scripts/speaker_asr/nemotron.py. Short windows and whole meetings go
+    See scripts/speaker_asr/nemotron.py. A tiny-audio checkpoint needs no
+    evaluator of its own for this: LocalEvaluator calls its pipeline with
+    `return_speakers=True` on speaker datasets. Short windows and whole meetings go
     through the same path: Nemotron is recording-level, so no linking.
     """
 
@@ -573,29 +595,21 @@ class NemotronQwenEvaluator(Evaluator):
         super().__init__(**kwargs)
         from transformers import AutoProcessor
 
-        from scripts.speaker_asr.nemotron import Diarizer, QwenAligner
+        from scripts.speaker_asr.nemotron import qwen3_asr_transcriber
         from tiny_audio.turns import load_model
 
-        self.processor = AutoProcessor.from_pretrained(self.ASR_MODEL_ID)
-        self.model = load_model(self.ASR_MODEL_ID).eval()
+        processor = AutoProcessor.from_pretrained(self.ASR_MODEL_ID)
+        model = load_model(self.ASR_MODEL_ID).eval()
         # Batch 1, no left padding: sdpa is safe on MPS (see SpeakerASREvaluator).
-        self.model.set_attn_implementation("sdpa")
-        self.diarizer = Diarizer.load()
-        self.aligner = QwenAligner.load()
+        model.set_attn_implementation("sdpa")
+        self.asr = qwen3_asr_transcriber(model, processor, self.MAX_NEW_TOKENS)
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
         from scripts.speaker_asr.nemotron import transcribe_diarized
 
         array = np.asarray(as_16k_array(audio), dtype=np.float32)
         start = time.time()
-        result = transcribe_diarized(
-            self.model,
-            self.processor,
-            self.diarizer,
-            array,
-            align=self.aligner.align,
-            max_new_tokens=self.MAX_NEW_TOKENS,
-        )
+        result = transcribe_diarized(self.asr, array)
         return result.text, time.time() - start, None
 
 
