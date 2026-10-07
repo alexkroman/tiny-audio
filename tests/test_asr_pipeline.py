@@ -257,69 +257,108 @@ class TestPipelineCall:
         result = pipeline({"array": audio, "sampling_rate": 16000})
         assert "text" in result
 
-    def test_call_with_timestamps_calls_aligner(self, pipeline):
-        """return_timestamps=True invokes ForcedAligner.align."""
-        from unittest.mock import patch
+    @pytest.fixture
+    def chunked(self, monkeypatch):
+        """Stub per-chunk transcription: chunk k transcribes as "w{k}a w{k}b"."""
+        import transformers
 
-        audio = np.zeros(16000, dtype=np.float32)
-        fake_words = [{"word": "hello", "start": 0.0, "end": 0.5}]
+        calls = []
 
-        with patch(
-            "tiny_audio.asr_pipeline.ForcedAligner.align", return_value=fake_words
-        ) as mock_align:
-            result = pipeline(
-                {"array": audio, "sampling_rate": 16000},
-                return_timestamps=True,
-            )
+        def fake_call(self, inputs, **kwargs):
+            calls.append(len(inputs.get("raw", inputs.get("array"))))
+            k = len(calls) - 1
+            return {"text": f"w{k}a w{k}b"}
 
-        # If model produced any text, align should have been called
-        if result.get("text"):
-            mock_align.assert_called_once()
-            assert result["words"] == fake_words
+        monkeypatch.setattr(transformers.AutomaticSpeechRecognitionPipeline, "__call__", fake_call)
+        return calls
 
-    def test_call_alignment_failure_recorded(self, pipeline):
-        """If alignment raises, error is captured in result['timestamp_error']."""
-        from unittest.mock import patch
+    @staticmethod
+    def _speech(seconds: float, quiet_at: float) -> np.ndarray:
+        """Noise with one silent 200 ms gap at `quiet_at`, so the chunk cut is predictable."""
+        audio = np.random.default_rng(0).normal(0, 0.1, int(seconds * 16000)).astype(np.float32)
+        audio[int(quiet_at * 16000) : int((quiet_at + 0.2) * 16000)] = 0.0
+        return audio
 
-        audio = np.zeros(16000, dtype=np.float32)
+    def test_timestamps_chunk_align_and_offset(self, pipeline, chunked, monkeypatch):
+        """Long audio is transcribed per chunk; word times land on the recording timeline."""
+        from tiny_audio.asr_pipeline import QwenForcedAligner
 
-        with patch(
-            "tiny_audio.asr_pipeline.ForcedAligner.align",
-            side_effect=RuntimeError("model not loadable"),
-        ):
-            result = pipeline(
-                {"array": audio, "sampling_rate": 16000},
-                return_timestamps=True,
-            )
+        def fake_align(chunks, sample_rate=16000):
+            return [
+                [{"word": w, "start": 1.0, "end": 1.5} for w in text.split()] for _, text in chunks
+            ]
 
-        # Either text was empty (so words=[]) or alignment failed and was recorded
-        if result.get("text"):
-            assert result["words"] == []
-            assert "timestamp_error" in result
-            assert "model not loadable" in result["timestamp_error"]
+        monkeypatch.setattr(QwenForcedAligner, "align_chunks", fake_align)
+        audio = self._speech(30.0, quiet_at=12.0)
+        result = pipeline({"array": audio, "sampling_rate": 16000}, return_timestamps=True)
 
-    def test_call_with_speakers_calls_diarizer(self, pipeline):
-        """return_speakers=True invokes SpeakerDiarizer.diarize."""
-        from unittest.mock import patch
+        assert len(chunked) == 2  # 30 s > 18 s: one cut, in the 8-18 s window
+        cut_s = chunked[0] / 16000
+        assert 12.0 <= cut_s <= 12.2
+        assert result["text"] == "w0a w0b w1a w1b"
+        assert [w["start"] for w in result["words"]] == pytest.approx(
+            [1.0, 1.0, 1.0 + cut_s, 1.0 + cut_s]
+        )
 
-        audio = np.zeros(16000, dtype=np.float32)
-        fake_segments = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0}]
-        fake_words = [{"word": "hello", "start": 0.1, "end": 0.4}]
+    def test_plain_call_does_not_chunk_or_align(self, pipeline, chunked, monkeypatch):
+        from tiny_audio.asr_pipeline import QwenForcedAligner
 
-        with (
-            patch("tiny_audio.asr_pipeline.ForcedAligner.align", return_value=fake_words),
-            patch(
-                "tiny_audio.asr_pipeline.SpeakerDiarizer.diarize", return_value=fake_segments
-            ) as mock_diarize,
-        ):
-            result = pipeline(
-                {"array": audio, "sampling_rate": 16000},
+        monkeypatch.setattr(
+            QwenForcedAligner, "align_chunks", lambda *a, **k: pytest.fail("aligner called")
+        )
+        result = pipeline({"array": self._speech(30.0, 12.0), "sampling_rate": 16000})
+        assert len(chunked) == 1
+        assert "words" not in result
+
+    def test_alignment_failure_recorded(self, pipeline, chunked, monkeypatch):
+        from tiny_audio.asr_pipeline import QwenForcedAligner
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("model not loadable")
+
+        monkeypatch.setattr(QwenForcedAligner, "align_chunks", boom)
+        result = pipeline(
+            {"array": self._speech(5.0, 2.0), "sampling_rate": 16000}, return_timestamps=True
+        )
+        assert result["text"] == "w0a w0b"
+        assert result["words"] == []
+        assert "model not loadable" in result["timestamp_error"]
+
+    def test_speakers_from_one_nemotron_pass(self, pipeline, chunked, monkeypatch):
+        """Words take the Nemotron speaker active at their time; segments come back too."""
+        from tiny_audio.asr_pipeline import NemotronDiarizer, QwenForcedAligner
+
+        monkeypatch.setattr(
+            QwenForcedAligner,
+            "align_chunks",
+            lambda chunks, sample_rate=16000: [
+                [
+                    {"word": "w0a", "start": 0.5, "end": 0.9},
+                    {"word": "w0b", "start": 3.1, "end": 3.5},
+                ]
+            ],
+        )
+        activity = np.zeros((500, 8), dtype=np.float32)
+        activity[0:250, 3] = 0.9  # arrives first -> SPEAKER_0
+        activity[250:500, 5] = 0.9
+        monkeypatch.setattr(NemotronDiarizer, "activity", lambda audio, sample_rate=16000: activity)
+
+        result = pipeline(
+            {"array": self._speech(5.0, 2.0), "sampling_rate": 16000}, return_speakers=True
+        )
+        assert [w["speaker"] for w in result["words"]] == ["SPEAKER_0", "SPEAKER_1"]
+        assert result["speaker_segments"] == [
+            {"speaker": "SPEAKER_0", "start": 0.0, "end": 2.5},
+            {"speaker": "SPEAKER_1", "start": 2.5, "end": 5.0},
+        ]
+
+    def test_min_speakers_rejected(self, pipeline):
+        with pytest.raises(ValueError, match="min_speakers"):
+            pipeline(
+                {"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000},
                 return_speakers=True,
+                min_speakers=2,
             )
-
-        if result.get("text"):
-            mock_diarize.assert_called_once()
-            assert result["speaker_segments"] == fake_segments
 
     def test_call_user_prompt_overrides_default(self, pipeline):
         """user_prompt kwarg temporarily replaces TRANSCRIBE_PROMPT."""

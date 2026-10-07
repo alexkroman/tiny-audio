@@ -9,6 +9,18 @@ Gradio app for ASR model with support for:
 
 import os
 
+# ZeroGPU: `spaces` must be imported before anything that touches CUDA (torch,
+# transformers). It is preinstalled on Spaces; locally the decorator is a no-op.
+try:
+    import spaces
+
+    gpu = spaces.GPU(duration=120)
+except ImportError:
+
+    def gpu(fn):
+        return fn
+
+
 # Fix OpenMP environment variable if invalid
 if not os.environ.get("OMP_NUM_THREADS", "").isdigit():
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -19,6 +31,7 @@ os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 # Disable tokenizer parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+import sys
 from typing import Annotated
 
 import gradio as gr
@@ -91,6 +104,16 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         trust_remote_code=True,
         device=device,
     )
+    # Load the aligner and diarizer now, not on the first request: on ZeroGPU
+    # each request runs in a forked worker, so a model first loaded there is
+    # thrown away afterwards and reloaded on every call.
+    pipeline_module = sys.modules[type(pipe).__module__]
+    pipeline_module.QwenForcedAligner.get_instance()
+    pipeline_module.NemotronDiarizer.get_instance()
+
+    @gpu
+    def run_pipeline(audio, kwargs):
+        return pipe(audio, **kwargs)
 
     def process_audio(audio, show_timestamps, show_diarization, num_speakers=0):
         """Process audio file for transcription."""
@@ -103,12 +126,12 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
             kwargs["return_timestamps"] = True
         if show_diarization:
             kwargs["return_speakers"] = True
-            # Auto-detection tends to over-split short clips; a known count
-            # pins the clustering. 0 means auto.
+            # A known count caps the speakers Nemotron keeps. 0 means auto.
             if num_speakers and int(num_speakers) > 0:
                 kwargs["num_speakers"] = int(num_speakers)
 
-        result = pipe(audio, **kwargs)
+        # Transcribe the audio (on the GPU, on ZeroGPU)
+        result = run_pipeline(audio, kwargs)
 
         if "timestamp_error" in result:
             gr.Warning(f"Word timestamps failed: {result['timestamp_error']}")

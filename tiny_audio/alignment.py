@@ -1,4 +1,4 @@
-"""Forced alignment for word-level timestamps using Wav2Vec2."""
+"""Forced alignment for word-level timestamps: Qwen3-ForcedAligner, wav2vec2 as fallback."""
 
 import numpy as np
 import torch
@@ -240,3 +240,112 @@ class ForcedAligner:
             )
 
         return word_timestamps
+
+
+class QwenForcedAligner:
+    """Word timestamps from Qwen3-ForcedAligner-0.6B (transformers >= 5.17).
+
+    Trained for timestamping rather than repurposed from CTC ASR, it aligns
+    cased, punctuated text with numbers directly. One forward pass covers up to
+    5 minutes of speech, so long recordings are aligned as chunks, each against
+    its own transcript (`align_chunks`), batched.
+
+    Returns `[{"word", "start", "end"}]` for every word it can align, in order,
+    with the ORIGINAL word (punctuation, casing) as "word". The aligner itself
+    sees words with punctuation stripped and drops any that strip to nothing
+    ("--"); the split is mirrored word by word so the pairing stays exact.
+    """
+
+    MODEL_ID = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
+    MAX_SECONDS = 300.0
+    BATCH_SIZE = 8
+    _model = None
+    _processor = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._model is None:
+            from transformers import AutoProcessor, Qwen3ASRForTokenClassification
+
+            device = _get_device()
+            # Batches are padded, and Metal sdpa returns NaN for fully masked rows.
+            attn = "eager" if device == "mps" else "sdpa"
+            model = Qwen3ASRForTokenClassification.from_pretrained(
+                cls.MODEL_ID, dtype=torch.bfloat16, attn_implementation=attn
+            )
+            cls._model = model.to(device).eval()
+            cls._processor = AutoProcessor.from_pretrained(cls.MODEL_ID)
+        return cls._model, cls._processor
+
+    @staticmethod
+    def _to_16k(audio, sample_rate: int) -> np.ndarray:
+        if isinstance(audio, torch.Tensor):
+            audio = audio.cpu().numpy()
+        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if sample_rate != 16000:
+            import torchaudio
+
+            audio = torchaudio.functional.resample(
+                torch.from_numpy(audio), sample_rate, 16000
+            ).numpy()
+        return audio
+
+    @classmethod
+    @torch.inference_mode()
+    def align_chunks(
+        cls,
+        chunks: list[tuple[np.ndarray, str]],
+        sample_rate: int = 16000,
+        language: str = "English",
+    ) -> list[list[dict]]:
+        """Align each `(audio, text)` pair (each <= 5 min); one word list per pair."""
+        from transformers.models.qwen3_asr.processing_qwen3_asr import _clean_tokens
+
+        results: list[list[dict]] = [[] for _ in chunks]
+        todo = []
+        for i, (raw, text) in enumerate(chunks):
+            kept = [w for w in text.split() if _clean_tokens([w])]
+            if not kept:
+                continue
+            audio = cls._to_16k(raw, sample_rate)
+            if len(audio) / 16000 > cls.MAX_SECONDS:
+                raise ValueError(
+                    f"chunk {i} is {len(audio) / 16000:.0f} s; Qwen3-ForcedAligner takes at most "
+                    f"{cls.MAX_SECONDS:.0f} s -- cut the audio first"
+                )
+            todo.append((i, audio, kept))
+        if not todo:  # nothing to time: don't load the model
+            return results
+        model, processor = cls.get_instance()
+        for b in range(0, len(todo), cls.BATCH_SIZE):
+            batch = todo[b : b + cls.BATCH_SIZE]
+            inputs, word_lists = processor.prepare_forced_aligner_inputs(
+                [audio for _, audio, _ in batch],
+                [" ".join(kept) for _, _, kept in batch],
+                language=language,
+                return_tensors="pt",
+                processor_kwargs={"padding": True},
+            )
+            inputs = {
+                k: (
+                    v.to(model.device, dtype=model.dtype)
+                    if v.is_floating_point()
+                    else v.to(model.device)
+                )
+                for k, v in inputs.items()
+            }
+            logits = model(**inputs).logits
+            timed = processor.decode_forced_alignment(
+                logits, inputs["input_ids"], word_lists, model.config.timestamp_token_id
+            )
+            for (i, _, kept), words in zip(batch, timed, strict=True):
+                results[i] = [
+                    {"word": w, "start": float(t["start_time"]), "end": float(t["end_time"])}
+                    for w, t in zip(kept, words, strict=True)
+                ]
+        return results
+
+    @classmethod
+    def align(cls, audio, text: str, sample_rate: int = 16000, language: str = "English"):
+        """ForcedAligner.align's interface for one clip of at most 5 minutes."""
+        return cls.align_chunks([(audio, text)], sample_rate, language)[0]

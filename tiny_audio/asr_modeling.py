@@ -531,12 +531,13 @@ def _assert_projector_loaded(incompatible_keys, projector_type: str) -> None:
     )
 
 
-def _log_linear_attention_backends() -> None:
+def _log_linear_attention_backends(level: int = logging.WARNING) -> None:
     """Say which fast paths Qwen3.5-style hybrid layers will get on this box.
 
     Logged rather than enforced: a missing package means the torch reference
     path (same numerics, slower), and decoders without linear attention never
-    touch these functions at all.
+    touch these functions at all. `level` is INFO for an inference load
+    (`from_pretrained`), where the slower path is not something to act on.
     """
     import importlib.util
 
@@ -546,7 +547,8 @@ def _log_linear_attention_backends() -> None:
     }
     missing = [pkg for pkg, ok in found.items() if not ok]
     if missing:
-        logger.warning(
+        logger.log(
+            level,
             "Linear-attention fast path incomplete: %s not installed. Qwen3.5-style "
             "hybrid layers will use the torch reference path for those functions "
             "(same numerics, slower). `ta runpod deploy` installs both.",
@@ -619,10 +621,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     # PEFT handles Hub downloads and caching internally
                     from peft import PeftModel
 
+                    # Adapter weights load onto the base model's device. Left to
+                    # PEFT they go straight to "cuda" whenever CUDA reports
+                    # available, which ZeroGPU Spaces do at startup without a
+                    # GPU attached ("No CUDA GPUs are available").
+                    base_device = next(model.language_model.parameters()).device
                     model.language_model = PeftModel.from_pretrained(
                         model.language_model,
                         pretrained_model_name_or_path,
                         is_trainable=True,
+                        torch_device=str(base_device),
                         **cache_kwargs,
                     )
                 else:
@@ -666,14 +674,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             "skip_logits" in inspect.signature(type(self.language_model).forward).parameters
         )
         if not self._lm_accepts_skip_logits:
-            # Say so once, loudly. Without the fused path every labelled
+            # Say so once, loudly -- when building a model to train. A
+            # `from_pretrained` load is almost always inference, where no
+            # loss is computed and this is noise; it stays at INFO there.
+            # Without the fused path every labelled
             # forward builds a (B, T, vocab) tensor plus its fp32 upcast and
             # its gradient, which on a large-vocab decoder is the difference
             # between fitting on the card and not -- and the ways to end up
             # here are all quiet: no liger patcher mapped for this
             # text_model_id, liger missing (it is linux-only), or a patcher
             # that patched a different class than the one that got loaded.
-            logger.warning(
+            logger.log(
+                logging.INFO if type(self)._is_loading_from_pretrained else logging.WARNING,
                 "%s's forward does not accept `skip_logits` — liger's fused "
                 "linear cross-entropy is NOT active, so every training step "
                 "materializes a (batch, seq, %s) logits tensor. Check for an "
@@ -967,7 +979,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # re-pin could not hold either, because `PreTrainedModel.train()`
         # re-registers transformers' default mapping on every mode flip.
         if torch.cuda.is_available():
-            _log_linear_attention_backends()
+            _log_linear_attention_backends(
+                logging.INFO if cls._is_loading_from_pretrained else logging.WARNING
+            )
 
         decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
 

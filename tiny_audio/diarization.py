@@ -1,4 +1,4 @@
-"""Speaker diarization using TEN-VAD + ECAPA-TDNN + spectral clustering.
+"""Speaker diarization: Nemotron-3-Diarization, and TEN-VAD + ECAPA-TDNN + spectral clustering.
 
 Spectral clustering implementation adapted from FunASR/3D-Speaker:
 https://github.com/alibaba-damo-academy/FunASR
@@ -9,6 +9,15 @@ import warnings
 
 import numpy as np
 import torch
+
+# The ECAPA SpeakerDiarizer's packages, imported inside try blocks: transformers
+# scans every bundled file's imports before loading the model and refuses to load
+# if one is missing, and it skips imports inside `try`. The pipeline diarizes with
+# NemotronDiarizer, so these stay optional.
+_ECAPA_EXTRAS = (
+    "SpeakerDiarizer (ECAPA) needs extra packages: "
+    "pip install speechbrain ten-vad scikit-learn scipy librosa"
+)
 
 
 def _get_device() -> torch.device:
@@ -80,7 +89,10 @@ class SpectralCluster:
 
     def get_sim_mat(self, embeddings: np.ndarray) -> np.ndarray:
         """Compute cosine similarity matrix."""
-        from sklearn.metrics.pairwise import cosine_similarity
+        try:
+            from sklearn.metrics.pairwise import cosine_similarity
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         return cosine_similarity(embeddings, embeddings)
 
@@ -99,7 +111,10 @@ class SpectralCluster:
 
     def get_laplacian(self, sim_mat: np.ndarray) -> np.ndarray:
         """Compute unnormalized Laplacian matrix."""
-        from scipy.sparse.csgraph import laplacian
+        try:
+            from scipy.sparse.csgraph import laplacian
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         np.fill_diagonal(sim_mat, 0)
         return laplacian(sim_mat, normed=False)
@@ -108,7 +123,10 @@ class SpectralCluster:
         self, laplacian: np.ndarray, k_oracle: int | None = None
     ) -> tuple[np.ndarray, int]:
         """Extract spectral embeddings from Laplacian."""
-        from scipy.linalg import eigh
+        try:
+            from scipy.linalg import eigh
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         lambdas, eig_vecs = eigh(laplacian)
 
@@ -125,7 +143,10 @@ class SpectralCluster:
 
     def cluster_embs(self, emb: np.ndarray, k: int) -> np.ndarray:
         """Cluster spectral embeddings using k-means."""
-        from sklearn.cluster._kmeans import k_means
+        try:
+            from sklearn.cluster._kmeans import k_means
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         _, labels, _ = k_means(emb, k, n_init=10)
         return labels
@@ -187,7 +208,10 @@ class SpeakerClusterer:
             return np.zeros(embeddings.shape[0], dtype=int)
 
         # Normalize embeddings and replace NaN/inf
-        from sklearn.preprocessing import normalize
+        try:
+            from sklearn.preprocessing import normalize
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
         embeddings = normalize(embeddings)
@@ -220,8 +244,14 @@ class SpeakerClusterer:
 
     def _merge_by_cos(self, labels: np.ndarray, embs: np.ndarray, cos_thr: float) -> np.ndarray:
         """Merge similar speakers by cosine similarity of centroids."""
-        from sklearn.cluster import AgglomerativeClustering
-        from sklearn.preprocessing import normalize
+        try:
+            from sklearn.cluster import AgglomerativeClustering
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
+        try:
+            from sklearn.preprocessing import normalize
+        except ImportError as e:
+            raise ImportError(_ECAPA_EXTRAS) from e
 
         unique_labels, inverse = np.unique(labels, return_inverse=True)
         if len(unique_labels) <= 1:
@@ -300,7 +330,10 @@ class SpeakerDiarizer:
     def _get_ten_vad_model(cls):
         """Lazy-load TEN-VAD model (singleton)."""
         if cls._ten_vad_model is None:
-            from ten_vad import TenVad
+            try:
+                from ten_vad import TenVad
+            except ImportError as e:
+                raise ImportError(_ECAPA_EXTRAS) from e
 
             cls._ten_vad_model = TenVad(hop_size=256, threshold=cls.VAD_THRESHOLD)
         return cls._ten_vad_model
@@ -319,7 +352,10 @@ class SpeakerDiarizer:
             # Suppress torchaudio deprecation warning from SpeechBrain
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="torchaudio._backend")
-                from speechbrain.inference.speaker import EncoderClassifier
+                try:
+                    from speechbrain.inference.speaker import EncoderClassifier
+                except ImportError as e:
+                    raise ImportError(_ECAPA_EXTRAS) from e
 
                 device = cls._get_device()
                 cls._ecapa_model = EncoderClassifier.from_hparams(
@@ -353,13 +389,19 @@ class SpeakerDiarizer:
         """
         # Handle file path input
         if isinstance(audio, str):
-            import librosa
+            try:
+                import librosa
+            except ImportError as e:
+                raise ImportError(_ECAPA_EXTRAS) from e
 
             audio, sample_rate = librosa.load(audio, sr=16000)
 
         # Ensure correct sample rate
         if sample_rate != 16000:
-            import librosa
+            try:
+                import librosa
+            except ImportError as e:
+                raise ImportError(_ECAPA_EXTRAS) from e
 
             audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=16000)
             sample_rate = 16000
@@ -518,7 +560,10 @@ class SpeakerDiarizer:
 
         # Normalize all embeddings at once
         if embeddings:
-            from sklearn.preprocessing import normalize
+            try:
+                from sklearn.preprocessing import normalize
+            except ImportError as e:
+                raise ImportError(_ECAPA_EXTRAS) from e
 
             return normalize(np.array(embeddings)), window_segments
         return np.array([]), []
@@ -662,4 +707,126 @@ class SpeakerDiarizer:
 
             word["speaker"] = best_speaker
 
+        return words
+
+
+class NemotronDiarizer:
+    """Speaker activity from NVIDIA Nemotron-3-Diarization, per 10 ms frame.
+
+    One offline pass over the whole recording: the model chunks internally
+    (27.2 s + 3.2 s look-ahead) and carries a speaker cache across chunks, so
+    speaker ids are recording-level for audio of any length, with no
+    embedding or clustering step. Overlap is native (several speakers can be
+    active in one frame). Tracks at most 8 speakers, numbered by arrival.
+
+    Needs a transformers build with `nemotron3_diarization` (main as of
+    2026-10, after 5.17).
+
+    Example:
+        >>> activity = NemotronDiarizer.activity(audio)  # (frames, 8) probabilities
+        >>> keep = NemotronDiarizer.top_speakers(activity, max_speakers=2)
+        >>> segments = NemotronDiarizer.segments(activity, keep)
+        >>> words = NemotronDiarizer.assign_speakers_to_words(words, activity, keep)
+    """
+
+    MODEL_ID = "nvidia/Nemotron-3-Diarization"
+    FRAME_S = 0.01
+    SEGMENT_THRESHOLD = 0.5  # a speaker's segment = frames above this
+    MIN_WORD_ACTIVITY = 0.1  # below this nobody is heard: the word inherits its neighbour
+    _model = None
+    _processor = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._model is None:
+            import importlib.util
+
+            if importlib.util.find_spec("transformers.models.nemotron3_diarization") is None:
+                raise ImportError(
+                    "Speaker diarization uses Nemotron-3-Diarization, which needs a transformers "
+                    "build with `nemotron3_diarization`: "
+                    "pip install git+https://github.com/huggingface/transformers"
+                )
+            from transformers import AutoModelForAudioFrameClassification, AutoProcessor
+
+            model = AutoModelForAudioFrameClassification.from_pretrained(cls.MODEL_ID)
+            cls._model = model.to(_get_device()).eval()
+            cls._processor = AutoProcessor.from_pretrained(cls.MODEL_ID)
+        return cls._model, cls._processor
+
+    @classmethod
+    @torch.inference_mode()
+    def activity(cls, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
+        """(frames, 8) speech probabilities at 10 ms; columns in arrival order."""
+        if sample_rate != 16000:
+            import torchaudio
+
+            audio = torchaudio.functional.resample(
+                torch.as_tensor(audio, dtype=torch.float32), sample_rate, 16000
+            ).numpy()
+        model, processor = cls.get_instance()
+        inputs = processor(np.asarray(audio, dtype=np.float32), sampling_rate=16000)
+        inputs = inputs.to(model.device, dtype=model.dtype)
+        return model(**inputs).logits[0].float().sigmoid().cpu().numpy()
+
+    @classmethod
+    def top_speakers(
+        cls,
+        activity: np.ndarray,
+        num_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> list[int]:
+        """Columns that count as speakers, in arrival order.
+
+        Every column that is ever above SEGMENT_THRESHOLD, capped by
+        `num_speakers` (exact, when known) or `max_speakers` to the columns
+        with the most speech. Capping is how a known count is applied:
+        a dropped column's words go to the most active remaining speaker.
+        """
+        active = [
+            c for c in range(activity.shape[1]) if (activity[:, c] > cls.SEGMENT_THRESHOLD).any()
+        ]
+        cap = num_speakers or max_speakers
+        if cap is not None and len(active) > cap:
+            mass = activity.sum(axis=0)
+            active = sorted(sorted(active, key=lambda c: -mass[c])[:cap])
+        return active or [0]
+
+    @classmethod
+    def segments(cls, activity: np.ndarray, keep: list[int]) -> list[dict]:
+        """Speaker turns `{"speaker", "start", "end"}` by start time; overlaps allowed."""
+        names = {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
+        out = []
+        for c in keep:
+            for on, s, e in _label_runs(activity[:, c] > cls.SEGMENT_THRESHOLD):
+                if on:
+                    out.append(
+                        {"speaker": names[c], "start": s * cls.FRAME_S, "end": e * cls.FRAME_S}
+                    )
+        return sorted(out, key=lambda seg: (seg["start"], seg["end"]))
+
+    @classmethod
+    def assign_speakers_to_words(
+        cls, words: list[dict], activity: np.ndarray, keep: list[int]
+    ) -> list[dict]:
+        """Give each word the kept speaker most active over its span.
+
+        A word where no kept speaker reaches MIN_WORD_ACTIVITY (aligner put it
+        in a pause) takes the previous word's speaker -- the next word's at
+        the start of the recording.
+        """
+        names = {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
+        cols = np.asarray(keep)
+        picked: list[str | None] = []
+        for word in words:
+            lo = min(int(word["start"] / cls.FRAME_S), len(activity) - 1)
+            hi = max(lo + 1, min(int(np.ceil(word["end"] / cls.FRAME_S)), len(activity)))
+            mean = activity[lo:hi, cols].mean(axis=0)
+            best = int(mean.argmax())
+            picked.append(names[keep[best]] if mean[best] >= cls.MIN_WORD_ACTIVITY else None)
+        known = [p for p in picked if p is not None]
+        last = known[0] if known else names[keep[0]]
+        for word, p in zip(words, picked):
+            last = p if p is not None else last
+            word["speaker"] = last
         return words

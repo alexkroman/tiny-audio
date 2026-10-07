@@ -75,52 +75,51 @@ for r in results:
 
 ### Word-Level Timestamps
 
-Timestamps come from forced alignment of the transcript against the audio and are returned under a `words` key:
+`return_timestamps=True` times every word with [Qwen3-ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf) and returns them under a `words` key. Audio of any length works: the pipeline transcribes it in 8-18 s chunks cut at pauses (the model trained on clips up to 19 s), aligns each chunk against its own transcript in batches, and places every word on the recording's timeline.
 
 ```python
 result = pipe("audio.wav", return_timestamps=True)
 print(result["text"])
 for word in result["words"]:
     print(word)
+#   {'word': 'Hi,', 'start': 0.0, 'end': 0.24}
 ```
 
 ### Speaker Diarization
 
-`return_speakers=True` adds speaker labels. It first transcribes and aligns words (it implies `return_timestamps=True`). It then splits the audio into speech regions with [TEN VAD](https://github.com/TEN-framework/ten-vad), embeds each region with [ECAPA-TDNN](https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb), and clusters the embeddings into speakers. Each word is assigned to the speaker whose segment it overlaps.
+`return_speakers=True` labels every word with a speaker (it implies `return_timestamps=True`). Speakers come from [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization), run once over the whole recording, so labels stay consistent across hour-long meetings; it handles overlapping speech and up to 8 speakers. Each word goes to the speaker most active while it was spoken.
 
-Diarization needs a few extra packages:
+Nemotron-3-Diarization is in transformers `main`, not yet a release:
 
 ```bash
-pip install speechbrain ten-vad scikit-learn scipy
+pip install git+https://github.com/huggingface/transformers
 ```
 
 ```python
-result = pipe("meeting.wav", return_speakers=True, num_speakers=2)
+result = pipe("meeting.wav", return_speakers=True)
 
 print(result["text"])
 
-# Speaker turns
+# Speaker turns (may overlap)
 for seg in result["speaker_segments"]:
     print(f"{seg['start']:6.2f}-{seg['end']:6.2f}  {seg['speaker']}")
 #   0.00-  2.90  SPEAKER_0
 #   3.36-  6.47  SPEAKER_1
-#   6.93-  9.81  SPEAKER_0
 
 # Words with timestamps and speakers
 for w in result["words"]:
     print(f"{w['start']:6.2f}-{w['end']:6.2f}  {w['speaker']}  {w['word']}")
 #   0.00-  0.19  SPEAKER_0  Hi,
 #   0.22-  0.69  SPEAKER_0  Daniel.
-#   ...
 ```
 
-**Setting the speaker count.** Pass `num_speakers` when you know it. Otherwise the number of speakers is estimated from the audio, and on short clips that estimate tends to split one voice into several speakers. You can also bound the estimate with `min_speakers` / `max_speakers`:
+Speakers are numbered by when they first speak. The number of speakers is detected automatically. If you know it, pass `num_speakers` (exact) or `max_speakers` (an upper bound); any extra voices' words go to the closest kept speaker:
 
 ```python
-result = pipe("panel.wav", return_speakers=True, min_speakers=2, max_speakers=4)
+result = pipe("call.wav", return_speakers=True, num_speakers=2)
 ```
 
-If diarization fails (for example, a missing package), transcription still succeeds. The error is returned under `result["diarization_error"]` instead of raising.
+If alignment or diarization fails (for example, transformers without Nemotron), the transcript is still returned and the error is reported under `result["timestamp_error"]` or `result["diarization_error"]`.
 
 ### GPU Inference
 
@@ -208,7 +207,8 @@ The training recipe is [`configs/experiments/granite_qwen_frozen.yaml`](https://
 
 - **English only**: Not trained on other languages.
 - **Sample rate**: Expects 16kHz audio (other rates are resampled automatically).
-- **Audio length**: Best for clips under 30 seconds. Chunk longer audio.
+- **Audio length**: A plain `pipe(audio)` call decodes the clip in one pass and works best up to about 19 seconds (the training length). For longer audio pass `return_timestamps=True` or `return_speakers=True`, which transcribe in 8-18 s chunks automatically.
+- **Speaker diarization**: At most 8 speakers per recording. The count is detected automatically; `num_speakers` and `max_speakers` can cap it, but `min_speakers` is not supported (passing it raises a `ValueError`). Needs transformers `main` until a release includes Nemotron-3-Diarization.
 - **Accuracy**: May degrade on:
   - Far-field and overlapping speech (see AMI SDM)
   - Noisy or low-quality audio
@@ -257,6 +257,8 @@ If you use this model, please cite:
 
 - [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) for the audio encoder
 - [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-2B) for the language model
+- [Qwen3-ForcedAligner](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf) for word timestamps
+- [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) for speaker diarization
 - The LibriHeavy, People's Speech, Common Voice, GigaSpeech, SPGISpeech, VoxPopuli, AMI, and TED-LIUM teams for training data
 
 ## License

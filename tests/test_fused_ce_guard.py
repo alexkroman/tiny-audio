@@ -73,3 +73,14 @@ class TestEscapeHatches:
         """The logits tensor is not the dominant term below ~100k."""
         with patch("torch.cuda.is_available", return_value=True):
             _require_fused_cross_entropy(_model(False, vocab=49152), _cfg())
+
+
+def test_linear_attention_notice_is_info_on_inference_load(caplog):
+    """A from_pretrained load is inference: the slower torch path is not actionable there."""
+    import logging
+
+    from tiny_audio import asr_modeling
+
+    caplog.set_level(logging.INFO, logger=asr_modeling.logger.name)
+    asr_modeling._log_linear_attention_backends(logging.INFO)
+    assert all(r.levelno < logging.WARNING for r in caplog.records)
