@@ -4,31 +4,35 @@ emoji: 🎤
 colorFrom: purple
 colorTo: blue
 sdk: gradio
-sdk_version: "5.49.1"
+sdk_version: "6.26.0"
 python_version: "3.11"
 app_file: app.py
 pinned: false
 license: mit
-short_description: ASR with a GLM-ASR encoder and Qwen3-0.6B decoder
+short_description: ASR with a Granite Speech encoder and Qwen3.5-2B decoder
 models:
   - mazesmazes/tiny-audio
 tags:
   - audio
   - automatic-speech-recognition
-  - glm-asr
-  - qwen3
+  - granite-speech
+  - qwen3.5
+  - lora
   - mlp
 suggested_hardware: cpu-basic
 preload_from_hub:
   - mazesmazes/tiny-audio
+  - ibm-granite/granite-speech-5.0-470m-turboctc
+  - Qwen/Qwen3.5-2B
+  - speechbrain/spkrec-ecapa-voxceleb
 ---
 
 ## Demo Overview
 
 This Space demonstrates an Automatic Speech Recognition (ASR) model that combines:
 
-- **GLM-ASR-Nano-2512 encoder** for audio feature extraction
-- **Qwen3-0.6B decoder** for text generation
+- **Granite Speech 5.0 470M encoder** for audio feature extraction
+- **Qwen3.5-2B decoder** with LoRA adapters for text generation
 
 ## Features
 
@@ -39,17 +43,18 @@ This Space demonstrates an Automatic Speech Recognition (ASR) model that combine
 
 ## Model Architecture
 
-The model bridges audio and text with a small trained projector:
+The model bridges audio and text with a trained projector and LoRA adapters:
 
-1. **Audio Encoder**: GLM-ASR-Nano-2512 encoder (frozen)
-2. **Projection Layer**: 2-layer MLP with frame stacking, mapping audio features into the decoder's embedding space (~6.3M params)
-3. **Text Decoder**: Qwen3-0.6B, fine-tuned jointly with the projector
+1. **Audio Encoder**: Granite Speech 5.0 470M TurboCTC encoder (frozen)
+2. **Projection Layer**: 2-layer MLP mapping audio features into the decoder's embedding space (~12.6M params)
+3. **Text Decoder**: Qwen3.5-2B (frozen) with rank-64 LoRA adapters (~67M params), trained jointly with the projector
 
 ## Usage
 
 1. **Upload an audio file** (WAV, MP3, etc.) or **record directly** using your microphone
 2. Click **"Transcribe"** to convert speech to text
 3. The transcription will appear in the output box
+4. Optionally tick **Word Timestamps** or **Speaker Diarization**. If you know how many people are speaking, set **Number of Speakers**: auto-detection can split one voice into several speakers on short clips
 
 ## Limitations
 

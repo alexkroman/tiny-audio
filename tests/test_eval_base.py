@@ -241,3 +241,46 @@ class TestEvaluatorReuseAcrossDatasets:
         evaluator.evaluate([{"audio": "a", "text": "a"} for _ in range(3)])
         evaluator.evaluate([{"audio": "b", "text": "b"}])
         assert evaluator.ttfb_times == [0.2]
+
+
+class TestLocalEvaluatorNumWorkers:
+    """`-w` must reach LocalEvaluator; `_build_evaluator` used to drop it silently."""
+
+    def test_num_workers_forwarded(self, monkeypatch):
+        import scripts.eval.cli as cli
+
+        captured = {}
+
+        class StubLocalEvaluator:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(cli, "LocalEvaluator", StubLocalEvaluator)
+        cli._build_evaluator(
+            model="some/checkpoint",
+            endpoint=False,
+            streaming=False,
+            assemblyai_model=cli.AssemblyAIModel("universal-3-pro"),
+            assemblyai_api_key=None,
+            deepgram_api_key=None,
+            elevenlabs_api_key=None,
+            smallest_api_key=None,
+            base_url=None,
+            locale="en-US",
+            num_workers=2,
+            user_prompt=None,
+        )
+        assert captured["num_workers"] == 2
+
+    @pytest.mark.parametrize(("device", "expected"), [("mps", 1), (0, 2)])
+    def test_mps_clamps_to_one_worker(self, monkeypatch, device, expected):
+        """MPS segfaults under concurrent Metal encoding, so -w must not thread there."""
+        from unittest.mock import MagicMock
+
+        import scripts.eval.evaluators.asr as asr
+
+        monkeypatch.setattr(asr, "_resolve_local_runtime", lambda: (device, "bfloat16"))
+        monkeypatch.setattr(asr, "_build_local_pipeline", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(asr, "print_generation_config", lambda *a, **k: None)
+        evaluator = asr.LocalEvaluator(model_path="some/checkpoint", num_workers=2)
+        assert evaluator.num_workers == expected
