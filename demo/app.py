@@ -49,36 +49,41 @@ def format_timestamp(seconds):
     return f"{mins:02d}:{secs:05.2f}"
 
 
-def format_words_with_timestamps(words):
-    """Format word timestamps as readable text."""
-    if not words:
-        return ""
-
-    lines = []
-    for w in words:
-        start = format_timestamp(w["start"])
-        end = format_timestamp(w["end"])
-        speaker = w.get("speaker", "")
-        if speaker:
-            lines.append(f"[{start} - {end}] ({speaker}) {w['word']}")
-        else:
-            lines.append(f"[{start} - {end}] {w['word']}")
-
-    return "\n".join(lines)
+def word_rows(words):
+    """Word timestamps as table rows: start, end, speaker, word."""
+    return [
+        [format_timestamp(w["start"]), format_timestamp(w["end"]), w.get("speaker", ""), w["word"]]
+        for w in words or []
+    ]
 
 
-def format_speaker_segments(segments):
-    """Format speaker segments as readable text."""
-    if not segments:
-        return ""
+def segment_rows(segments):
+    """Speaker segments as table rows: start, end, speaker."""
+    return [
+        [format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["speaker"]]
+        for seg in segments or []
+    ]
 
-    lines = []
-    for seg in segments:
-        start = format_timestamp(seg["start"])
-        end = format_timestamp(seg["end"])
-        lines.append(f"[{start} - {end}] {seg['speaker']}")
 
-    return "\n".join(lines)
+THEME = gr.themes.Soft(
+    primary_hue="indigo",
+    neutral_hue="slate",
+    font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"],
+)
+
+CSS = """
+.gradio-container { max-width: 1120px !important; margin: 0 auto !important; }
+#header h1 { margin-bottom: 0.25rem; }
+#header p { color: var(--body-text-color-subdued); margin-top: 0; }
+"""
+
+HEADER = """
+<div id="header">
+<h1>Tiny Audio</h1>
+<p>Speech recognition with optional word timestamps and speaker diarization.
+Model: <a href="https://huggingface.co/{model}" target="_blank">{model}</a></p>
+</div>
+"""
 
 
 def create_demo(model_path="mazesmazes/tiny-audio"):
@@ -113,7 +118,7 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
     def process_audio(audio, show_timestamps, show_diarization, num_speakers=0):
         """Process audio file for transcription."""
         if audio is None:
-            return "Please provide audio input", "", ""
+            raise gr.Error("Record or upload some audio first.")
 
         # Build kwargs
         kwargs = {}
@@ -128,78 +133,83 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         # Transcribe the audio (on the GPU, on ZeroGPU)
         result = run_pipeline(audio, kwargs)
 
-        # Format outputs
-        transcript = result.get("text", "")
+        if "timestamp_error" in result:
+            gr.Warning(f"Word timestamps failed: {result['timestamp_error']}")
+        if "diarization_error" in result:
+            gr.Warning(f"Diarization failed: {result['diarization_error']}")
 
-        # Format timestamps
-        if show_timestamps and "words" in result:
-            timestamps_text = format_words_with_timestamps(result["words"])
-        elif "timestamp_error" in result:
-            timestamps_text = f"Error: {result['timestamp_error']}"
-        else:
-            timestamps_text = ""
+        words = word_rows(result.get("words")) if show_timestamps else []
+        segments = segment_rows(result.get("speaker_segments")) if show_diarization else []
+        return result.get("text", ""), words, segments
 
-        # Format diarization
-        if show_diarization and "speaker_segments" in result:
-            diarization_text = format_speaker_segments(result["speaker_segments"])
-        elif "diarization_error" in result:
-            diarization_text = f"Error: {result['diarization_error']}"
-        else:
-            diarization_text = ""
-
-        return transcript, timestamps_text, diarization_text
-
-    # Create Gradio interface
     with gr.Blocks(title="Tiny Audio") as demo:
-        gr.Markdown("# Tiny Audio")
-        gr.Markdown("Speech recognition with optional word timestamps and speaker diarization.")
+        gr.HTML(HEADER.format(model=model_path))
 
-        with gr.Row():
-            with gr.Column(scale=2):
+        with gr.Row(equal_height=False):
+            with gr.Column(scale=2, min_width=320):
                 audio_input = gr.Audio(
                     sources=["microphone", "upload"],
                     type="filepath",
-                    label="Audio Input",
+                    label="Audio",
                 )
 
-                with gr.Row():
+                with gr.Group():
                     show_timestamps = gr.Checkbox(
-                        label="Word Timestamps",
+                        label="Word timestamps",
+                        info="Align each word to the audio",
                         value=False,
                     )
                     show_diarization = gr.Checkbox(
-                        label="Speaker Diarization",
+                        label="Speaker diarization",
+                        info="Label who spoke when",
                         value=False,
                     )
-                    num_speakers = gr.Number(
-                        label="Number of Speakers (0 = auto)",
+                    num_speakers = gr.Slider(
+                        label="Number of speakers",
+                        info="0 detects the count automatically",
                         value=0,
                         minimum=0,
                         maximum=10,
-                        precision=0,
+                        step=1,
+                        visible=False,
                     )
 
-                process_btn = gr.Button("Transcribe", variant="primary")
+                process_btn = gr.Button("Transcribe", variant="primary", size="lg")
 
-            with gr.Column(scale=3):
-                output_text = gr.Textbox(
-                    label="Transcript",
-                    lines=5,
-                )
-                timestamps_output = gr.Textbox(
-                    label="Word Timestamps",
-                    lines=8,
-                )
-                diarization_output = gr.Textbox(
-                    label="Speaker Segments",
-                    lines=5,
-                )
+            with gr.Column(scale=3, min_width=400), gr.Tabs():
+                with gr.Tab("Transcript"):
+                    output_text = gr.Textbox(
+                        show_label=False,
+                        placeholder="Your transcript will appear here.",
+                        lines=12,
+                        buttons=["copy"],
+                    )
+                with gr.Tab("Words"):
+                    timestamps_output = gr.Dataframe(
+                        headers=["Start", "End", "Speaker", "Word"],
+                        show_label=False,
+                        interactive=False,
+                        max_height=420,
+                    )
+                with gr.Tab("Speakers"):
+                    diarization_output = gr.Dataframe(
+                        headers=["Start", "End", "Speaker"],
+                        show_label=False,
+                        interactive=False,
+                        max_height=420,
+                    )
 
-        # Wire up events
+        # The speaker count only matters when diarization is on
+        show_diarization.change(
+            fn=lambda on: gr.update(visible=on),
+            inputs=show_diarization,
+            outputs=num_speakers,
+        )
         process_btn.click(
             fn=process_audio,
             inputs=[audio_input, show_timestamps, show_diarization, num_speakers],
             outputs=[output_text, timestamps_output, diarization_output],
+            api_name="transcribe",
         )
 
     return demo
@@ -216,7 +226,7 @@ def main(
 ):
     """Launch ASR Gradio demo."""
     demo = create_demo(model)
-    demo.launch(server_port=port, share=share, server_name="0.0.0.0")
+    demo.launch(server_port=port, share=share, server_name="0.0.0.0", theme=THEME, css=CSS)
 
 
 if __name__ == "__main__":
