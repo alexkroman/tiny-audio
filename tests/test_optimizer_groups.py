@@ -7,8 +7,13 @@ tied embedding table does not error, it just slowly degrades rare-token
 prediction over tens of thousands of steps.
 """
 
+from collections.abc import Callable
+from typing import Any, cast
+
 import pytest
-from transformers import TrainingArguments
+import torch
+from torch import nn
+from transformers import PreTrainedModel, TrainingArguments
 
 from scripts.train import ASRTrainer
 from tiny_audio.asr_config import ASRConfig
@@ -16,7 +21,7 @@ from tiny_audio.asr_modeling import ASRModel
 
 
 @pytest.fixture(scope="module")
-def joint_asr_model():
+def joint_asr_model() -> ASRModel:
     """ASRModel with the decoder unfrozen.
 
     The session-scoped `base_asr_model` fixture leaves `freeze_language_model`
@@ -36,7 +41,9 @@ def joint_asr_model():
 
 
 @pytest.fixture(scope="module")
-def optimizer(joint_asr_model, tmp_path_factory):
+def optimizer(
+    joint_asr_model: ASRModel, tmp_path_factory: pytest.TempPathFactory
+) -> torch.optim.Optimizer:
     args = TrainingArguments(
         output_dir=str(tmp_path_factory.mktemp("optimizer_groups")),
         learning_rate=1e-3,
@@ -52,7 +59,7 @@ def optimizer(joint_asr_model, tmp_path_factory):
     return trainer.create_optimizer()
 
 
-def _group_of(optimizer, tensor):
+def _group_of(optimizer: torch.optim.Optimizer, tensor: torch.Tensor) -> dict[str, Any]:
     """The param group holding `tensor`, matched by identity.
 
     Identity matching matters: under tie_word_embeddings the embedding table
@@ -66,7 +73,18 @@ def _group_of(optimizer, tensor):
     raise AssertionError(msg)
 
 
-def _named_param(model, predicate):
+def _input_embedding(lm: PreTrainedModel) -> torch.Tensor:
+    return cast(nn.Embedding, lm.get_input_embeddings()).weight
+
+
+def _output_embedding(lm: PreTrainedModel) -> torch.Tensor:
+    head = lm.get_output_embeddings()  # type: ignore[no-untyped-call]
+    return cast(nn.Linear, head).weight
+
+
+def _named_param(
+    model: torch.nn.Module, predicate: Callable[[str], bool]
+) -> tuple[str, torch.nn.Parameter]:
     for name, param in model.named_parameters():
         if param.requires_grad and predicate(name):
             return name, param
@@ -84,21 +102,27 @@ class TestEmbeddingWeightDecay:
     projection.
     """
 
-    def test_embedding_is_tied_in_this_fixture(self, joint_asr_model):
+    def test_embedding_is_tied_in_this_fixture(self, joint_asr_model: ASRModel) -> None:
         """Guard: if tying ever breaks, the test below stops being meaningful."""
         lm = joint_asr_model.language_model
-        assert lm.get_input_embeddings().weight is lm.get_output_embeddings().weight
+        assert _input_embedding(lm) is _output_embedding(lm)
 
-    def test_embed_tokens_is_not_decayed(self, joint_asr_model, optimizer):
-        embed = joint_asr_model.language_model.get_input_embeddings().weight
+    def test_embed_tokens_is_not_decayed(
+        self, joint_asr_model: ASRModel, optimizer: torch.optim.Optimizer
+    ) -> None:
+        embed = _input_embedding(joint_asr_model.language_model)
         assert _group_of(optimizer, embed)["weight_decay"] == 0.0
 
-    def test_embed_tokens_still_gets_the_decoder_lr(self, joint_asr_model, optimizer):
+    def test_embed_tokens_still_gets_the_decoder_lr(
+        self, joint_asr_model: ASRModel, optimizer: torch.optim.Optimizer
+    ) -> None:
         """No-decay must not cost the embedding its component LR routing."""
-        embed = joint_asr_model.language_model.get_input_embeddings().weight
+        embed = _input_embedding(joint_asr_model.language_model)
         assert _group_of(optimizer, embed)["lr"] == pytest.approx(2e-5)
 
-    def test_exclusion_survives_output_head_traversal_order(self, joint_asr_model, optimizer):
+    def test_exclusion_survives_output_head_traversal_order(
+        self, joint_asr_model: ASRModel, optimizer: torch.optim.Optimizer
+    ) -> None:
         """The tied tensor is excluded whichever name named_parameters() yields.
 
         get_parameter_names walks the module tree and emits both
@@ -109,14 +133,16 @@ class TestEmbeddingWeightDecay:
         first; identity matching is order-invariant.
         """
         lm = joint_asr_model.language_model
-        for tensor in (lm.get_input_embeddings().weight, lm.get_output_embeddings().weight):
+        for tensor in (_input_embedding(lm), _output_embedding(lm)):
             assert _group_of(optimizer, tensor)["weight_decay"] == 0.0
 
 
 class TestDecayGroupStillPopulated:
     """The exclusions must stay narrow — ordinary matmul weights still decay."""
 
-    def test_decoder_linear_weights_are_decayed(self, joint_asr_model, optimizer):
+    def test_decoder_linear_weights_are_decayed(
+        self, joint_asr_model: ASRModel, optimizer: torch.optim.Optimizer
+    ) -> None:
         _, param = _named_param(
             joint_asr_model,
             lambda n: n.startswith("language_model.") and n.endswith("q_proj.weight"),
@@ -125,7 +151,9 @@ class TestDecayGroupStillPopulated:
         assert group["weight_decay"] == pytest.approx(0.01)
         assert group["lr"] == pytest.approx(2e-5)
 
-    def test_norm_gains_are_not_decayed(self, joint_asr_model, optimizer):
+    def test_norm_gains_are_not_decayed(
+        self, joint_asr_model: ASRModel, optimizer: torch.optim.Optimizer
+    ) -> None:
         _, param = _named_param(
             joint_asr_model,
             lambda n: n.startswith("language_model.") and "layernorm" in n.lower(),
@@ -136,7 +164,9 @@ class TestDecayGroupStillPopulated:
 class TestProjectorRouting:
     """Projector keeps its own weight decay and the base LR."""
 
-    def test_projector_uses_override_weight_decay_and_base_lr(self, joint_asr_model, optimizer):
+    def test_projector_uses_override_weight_decay_and_base_lr(
+        self, joint_asr_model: ASRModel, optimizer: torch.optim.Optimizer
+    ) -> None:
         _, param = _named_param(
             joint_asr_model,
             lambda n: n.startswith("projector.") and n.endswith("weight"),
@@ -145,7 +175,9 @@ class TestProjectorRouting:
         assert group["weight_decay"] == 0.0
         assert group["lr"] == pytest.approx(1e-3)
 
-    def test_frozen_encoder_contributes_no_groups(self, joint_asr_model, optimizer):
+    def test_frozen_encoder_contributes_no_groups(
+        self, joint_asr_model: ASRModel, optimizer: torch.optim.Optimizer
+    ) -> None:
         """freeze_audio_encoder defaults True, so audio_tower never enters."""
         in_optimizer = {id(p) for g in optimizer.param_groups for p in g["params"]}
         encoder_params = [

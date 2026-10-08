@@ -4,7 +4,10 @@ Module-level functions are called directly; instance methods that only touch
 the tokenizer or projector are invoked unbound against a stand-in `self`.
 """
 
+from collections.abc import Callable, Iterator
+from pathlib import Path
 from types import SimpleNamespace
+from typing import NoReturn, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,12 +28,12 @@ class TestResolveAttnImplementation:
     """FA2 degrades to sdpa off-CUDA, and everything degrades to eager on MPS."""
 
     @pytest.fixture(autouse=True)
-    def no_accelerators(self, monkeypatch):
+    def no_accelerators(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     @pytest.mark.parametrize("requested", [None, "eager", "sdpa"])
-    def test_non_fa2_requests_pass_through(self, requested) -> None:
+    def test_non_fa2_requests_pass_through(self, requested: str | None) -> None:
         assert _resolve_attn_implementation(requested) == requested
 
     def test_fa2_without_cuda_is_sdpa(self) -> None:
@@ -47,33 +50,36 @@ class TestResolveAttnImplementation:
         assert _resolve_attn_implementation("flash_attention_2") == "flash_attention_2"
 
     @pytest.mark.parametrize("requested", [None, "sdpa", "flash_attention_2"])
-    def test_mps_forces_eager(self, monkeypatch: pytest.MonkeyPatch, requested) -> None:
+    def test_mps_forces_eager(self, monkeypatch: pytest.MonkeyPatch, requested: str | None) -> None:
         """Without a model id there is nothing to check, so MPS stays conservative."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
         assert _resolve_attn_implementation(requested) == "eager"
 
     @pytest.mark.parametrize("requested", [None, "sdpa"])
-    def test_mps_keeps_request_without_sliding_window(self, monkeypatch: pytest.MonkeyPatch, requested) -> None:
+    def test_mps_keeps_request_without_sliding_window(
+        self, monkeypatch: pytest.MonkeyPatch, requested: str | None
+    ) -> None:
         """Qwen3.5's case: no sliding-window layer, so eager is not needed."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        monkeypatch.setattr(
-            "tiny_audio.asr_modeling._has_sliding_window_attention", lambda _: False
-        )
+        no_window: Callable[[str], bool] = lambda _: False
+        monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", no_window)
         assert _resolve_attn_implementation(requested, "some/model") == requested
 
     @pytest.mark.parametrize("requested", [None, "sdpa"])
-    def test_mps_forces_eager_with_sliding_window(self, monkeypatch: pytest.MonkeyPatch, requested) -> None:
+    def test_mps_forces_eager_with_sliding_window(
+        self, monkeypatch: pytest.MonkeyPatch, requested: str | None
+    ) -> None:
         """Gemma 4's case: Metal sdpa is wrong for cached sliding-window decode."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", lambda _: True)
+        window: Callable[[str], bool] = lambda _: True
+        monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", window)
         assert _resolve_attn_implementation(requested, "some/model") == "eager"
 
     def test_mps_fa2_still_degrades_to_sdpa(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A config pinning FA2 must not survive just because eager was skipped."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        monkeypatch.setattr(
-            "tiny_audio.asr_modeling._has_sliding_window_attention", lambda _: False
-        )
+        no_window: Callable[[str], bool] = lambda _: False
+        monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", no_window)
         assert _resolve_attn_implementation("flash_attention_2", "some/model") == "sdpa"
 
 
@@ -81,17 +87,21 @@ class TestHasSlidingWindowAttention:
     """Read from the config, since the answer is needed before the model loads."""
 
     @pytest.fixture(autouse=True)
-    def clear_cache(self):
+    def clear_cache(self) -> Iterator[None]:
         _has_sliding_window_attention.cache_clear()
         yield
         _has_sliding_window_attention.cache_clear()
 
     @staticmethod
-    def _patch(monkeypatch, **attrs):
+    def _patch(monkeypatch: pytest.MonkeyPatch, **attrs: object) -> None:
         config = SimpleNamespace(**attrs)
+
+        def from_pretrained(*a: object, **k: object) -> SimpleNamespace:
+            return config
+
         monkeypatch.setattr(
             "tiny_audio.asr_modeling.AutoConfig.from_pretrained",
-            lambda *a, **k: config,
+            from_pretrained,
         )
 
     def test_gemma4_style_layer_types(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,7 +122,9 @@ class TestHasSlidingWindowAttention:
         )
         assert _has_sliding_window_attention("qwen35") is False
 
-    def test_inert_window_is_vetoed_by_use_sliding_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_inert_window_is_vetoed_by_use_sliding_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Qwen2 style: a non-null window that the model never actually applies."""
         self._patch(monkeypatch, sliding_window=4096, use_sliding_window=False)
         assert _has_sliding_window_attention("qwen2") is False
@@ -124,7 +136,7 @@ class TestHasSlidingWindowAttention:
     def test_unreadable_config_is_treated_as_sliding(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Unknown architecture keeps the conservative eager path."""
 
-        def boom(*_a, **_k):
+        def boom(*_a: object, **_k: object) -> NoReturn:
             msg = "no network"
             raise OSError(msg)
 
@@ -139,12 +151,15 @@ class _MaskOnDevice:
     `_assert_sdpa_safe_on_mps` only needs `.device`, `.shape` and `== 0`.
     """
 
-    def __init__(self, rows, device):
+    def __init__(self, rows: list[list[int]], device: str) -> None:
         self._tensor = torch.tensor(rows)
         self.device = torch.device(device)
         self.shape = self._tensor.shape
 
-    def __eq__(self, other):
+    # Elementwise like Tensor.__eq__, which object.__eq__'s signature cannot express.
+    def __eq__(  # type: ignore[override]
+        self, other: torch.Tensor | int
+    ) -> torch.Tensor:  # pyright: ignore[reportIncompatibleMethodOverride]
         return self._tensor == other
 
     # Like a real Tensor, hash by identity even though __eq__ is elementwise.
@@ -155,11 +170,11 @@ class TestAssertSdpaSafeOnMps:
     """Metal's sdpa NaNs any left-padded row; refuse rather than emit '!!!!!!'."""
 
     @staticmethod
-    def _call(impl, mask):
+    def _call(impl: str, mask: _MaskOnDevice | None) -> None:
         model = stub(
             language_model=SimpleNamespace(config=SimpleNamespace(_attn_implementation=impl))
         )
-        ASRModel._assert_sdpa_safe_on_mps(model, mask)
+        ASRModel._assert_sdpa_safe_on_mps(model, cast(torch.Tensor | None, mask))
 
     def test_padded_batch_on_mps_with_sdpa_raises(self) -> None:
         mask = _MaskOnDevice([[1, 1, 1], [0, 1, 1]], "mps")
@@ -203,9 +218,12 @@ class TestAssertAudioTokenCounts:
     """The per-sample count check that guards masked_scatter."""
 
     @staticmethod
-    def projector():
+    def projector() -> MagicMock:
+        def output_length(n: int) -> int:
+            return (n - 4) // 4 + 1
+
         proj = MagicMock()
-        proj.get_output_length.side_effect = lambda n: (n - 4) // 4 + 1
+        proj.get_output_length.side_effect = output_length
         return proj
 
     def test_consistent_counts_pass(self) -> None:
@@ -264,8 +282,8 @@ class TestLeftPadPromptRows:
         ids, mask = ASRModel._left_pad_prompt_rows(
             fake, [torch.tensor([1, 2]), torch.tensor([3])], torch.device("cpu")
         )
-        assert ids.tolist() == [[1, 2], [9, 3]]
-        assert mask.tolist() == [[1, 1], [0, 1]]
+        assert ids.tolist() == [[1, 2], [9, 3]]  # pyright: ignore[reportUnknownMemberType]  # Tensor.tolist() -> list[Unknown]
+        assert mask.tolist() == [[1, 1], [0, 1]]  # pyright: ignore[reportUnknownMemberType]  # Tensor.tolist() -> list[Unknown]
 
     def test_falls_back_to_eos_then_zero(self) -> None:
         fake = stub(tokenizer=SimpleNamespace(pad_token_id=None, eos_token_id=2))
@@ -295,7 +313,7 @@ class TestRenderAudioPrompt:
         assert call.args[0] == [{"role": "user", "content": "<audio><audio><audio> Transcribe"}]
         assert call.kwargs["add_generation_prompt"] is True
         assert call.kwargs["enable_thinking"] is False
-        assert row.tolist() == [1, 2, 3]
+        assert row.tolist() == [1, 2, 3]  # pyright: ignore[reportUnknownMemberType]  # Tensor.tolist() -> list[Unknown]
         assert row.dtype == torch.long
 
     def test_empty_instruction_leaves_placeholders_alone(self) -> None:
@@ -310,9 +328,13 @@ class TestGetNumAudioTokens:
     """The batch-max token count chains encoder lengths into the projector."""
 
     def test_uses_longest_sample(self) -> None:
+        encoder_lengths: Callable[[torch.Tensor], torch.Tensor] = lambda mask: torch.tensor(
+            [10, 20]
+        )
+        output_length: Callable[[int], int] = lambda n: (n - 4) // 4 + 1
         fake = stub(
-            _compute_encoder_output_lengths=lambda mask: torch.tensor([10, 20]),
-            projector=SimpleNamespace(get_output_length=lambda n: (n - 4) // 4 + 1),
+            _compute_encoder_output_lengths=encoder_lengths,
+            projector=SimpleNamespace(get_output_length=output_length),
         )
         assert ASRModel._get_num_audio_tokens(fake, torch.ones(2, 40)) == 5
 

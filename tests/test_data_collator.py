@@ -21,6 +21,10 @@ def _decode(
     return cast(_TokenDecoder, tokenizer).decode(token_ids, skip_special_tokens=skip_special_tokens)
 
 
+def _token_id(tokenizer: PreTrainedTokenizerBase, token: str) -> int:
+    return cast(int, tokenizer.convert_tokens_to_ids(token))
+
+
 class MockProjector:
     """Mock projector that mimics stride-2 downsampling."""
 
@@ -53,7 +57,9 @@ def tokenizer() -> PreTrainedTokenizerBase:
 @pytest.fixture
 def feature_extractor() -> WhisperFeatureExtractor:
     """Load Whisper feature extractor."""
-    return WhisperFeatureExtractor.from_pretrained("openai/whisper-tiny")
+    return WhisperFeatureExtractor.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
+        "openai/whisper-tiny"
+    )
 
 
 @pytest.fixture
@@ -126,7 +132,7 @@ class TestLabelMasking:
         labels = _int_list(batch["labels"][0])
         input_ids = _int_list(batch["input_ids"][0])
 
-        im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        im_end_id = _token_id(tokenizer, "<|im_end|>")
 
         # Find <|im_end|> tokens that are unmasked
         unmasked_im_end = [
@@ -159,7 +165,7 @@ class TestLabelMasking:
 
         # Verify that user section (audio tokens) is masked
         # Find audio token positions and verify they're masked
-        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        audio_token_id = _token_id(tokenizer, "<audio>")
         audio_positions = [i for i, tok in enumerate(input_ids) if tok == audio_token_id]
         assert len(audio_positions) > 0, "No audio tokens found"
         assert all(labels[i] == -100 for i in audio_positions), "Audio tokens should be masked"
@@ -195,7 +201,7 @@ class TestAudioTokens:
         batch = collator(samples)
 
         # Get the audio token ID
-        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        audio_token_id = _token_id(tokenizer, "<audio>")
 
         # Count audio tokens in input_ids
         num_audio_tokens = (batch["input_ids"] == audio_token_id).sum().item()
@@ -218,7 +224,7 @@ class TestAudioTokens:
 
         batch = collator(samples)
 
-        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        audio_token_id = _token_id(tokenizer, "<audio>")
         num_audio_tokens = (batch["input_ids"] == audio_token_id).sum().item()
 
         # Should have many audio tokens (Whisper outputs ~1500 for 30s, ~50 for 1s)
@@ -235,7 +241,7 @@ class TestAudioTokens:
 
         batch = collator(samples)
 
-        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        audio_token_id = _token_id(tokenizer, "<audio>")
         labels = batch["labels"][0]
         input_ids = batch["input_ids"][0]
 
