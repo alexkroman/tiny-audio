@@ -43,6 +43,51 @@ else:
         from asr_types import AudioInput
 
 
+# The instruction the model trained on (scripts/train_collator.py); the model
+# and processor both default to it.
+DEFAULT_TRANSCRIBE_PROMPT = "Transcribe the speech to text"
+
+
+def render_audio_prompt(
+    tokenizer: PreTrainedTokenizerBase,
+    audio_token: str,
+    num_audio_tokens: int,
+    prompt: str | None,
+    text: str | None = None,
+) -> torch.Tensor:
+    """Tokenize one chat prompt carrying exactly `num_audio_tokens` placeholders.
+
+    The user turn is the placeholders, then `prompt` (if any); `text`, when
+    given, is the assistant's reply, otherwise the generation prompt is added.
+    """
+    if num_audio_tokens > 0:
+        user_content = audio_token * num_audio_tokens
+        if prompt:
+            user_content += " " + prompt
+    else:
+        user_content = prompt or ""
+
+    messages = [{"role": "user", "content": user_content}]
+    if text is not None:
+        messages.append({"role": "assistant", "content": text})
+
+    # With `tokenize=True, return_tensors="pt"` the ids come back as tensors.
+    tokenized = cast(
+        "torch.Tensor | Mapping[str, torch.Tensor]",
+        tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=(text is None),
+            return_tensors="pt",
+            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
+        ),
+    )
+
+    # apply_chat_template returns a bare tensor or a BatchEncoding/mapping.
+    ids = tokenized if isinstance(tokenized, torch.Tensor) else tokenized["input_ids"]
+    return (ids[0] if ids.dim() > 1 else ids).to(torch.long)
+
+
 def left_pad_prompt_rows(
     rows: list[torch.Tensor], tokenizer: PreTrainedTokenizerBase
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -123,7 +168,7 @@ class ASRProcessor(ProcessorMixin):
     # never added to that vocab, so it tokenizes into ordinary subwords and
     # the prompt ends up with zero scatter positions for N audio embeddings.
     AUDIO_TOKEN = "<audio>"
-    TRANSCRIBE_PROMPT = "Transcribe the speech to text"
+    TRANSCRIBE_PROMPT = DEFAULT_TRANSCRIBE_PROMPT
 
     def __init__(
         self,
@@ -159,32 +204,9 @@ class ASRProcessor(ProcessorMixin):
 
     def _render_prompt(self, num_audio_tokens: int, text: str | None) -> torch.Tensor:
         """Tokenize one chat prompt carrying exactly `num_audio_tokens` placeholders."""
-        if num_audio_tokens > 0:
-            user_content = self.audio_token * num_audio_tokens
-            if self.TRANSCRIBE_PROMPT:
-                user_content += " " + self.TRANSCRIBE_PROMPT
-        else:
-            user_content = self.TRANSCRIBE_PROMPT or ""
-
-        messages = [{"role": "user", "content": user_content}]
-        if text is not None:
-            messages.append({"role": "assistant", "content": text})
-
-        # With `tokenize=True, return_tensors="pt"` the ids come back as tensors.
-        tokenized = cast(
-            "torch.Tensor | Mapping[str, torch.Tensor]",
-            self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=(text is None),
-                return_tensors="pt",
-                enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
-            ),
+        return render_audio_prompt(
+            self.tokenizer, self.audio_token, num_audio_tokens, self.TRANSCRIBE_PROMPT, text
         )
-
-        # apply_chat_template returns a bare tensor or a BatchEncoding/mapping.
-        ids = tokenized if isinstance(tokenized, torch.Tensor) else tokenized["input_ids"]
-        return (ids[0] if ids.dim() > 1 else ids).to(torch.long)
 
     def _stack_prompt_rows(self, rows: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Stack per-sample prompt rows into a batch (see `left_pad_prompt_rows`)."""
@@ -226,7 +248,7 @@ class ASRProcessor(ProcessorMixin):
             extract = cast("AudioFeatureExtractor", self.feature_extractor)
             audio_inputs = extract(
                 padded_audio,
-                sampling_rate=getattr(self.feature_extractor, "sampling_rate", 16000),
+                sampling_rate=sr,
                 return_attention_mask=True,
                 return_tensors=return_tensors,
                 **kwargs,
@@ -249,11 +271,9 @@ class ASRProcessor(ProcessorMixin):
             # silently. This is the same failure `_prepare_audio_inputs`
             # documents as fixed on the model side, and it only shows up on a
             # ragged batch, so batch-1 eval never sees it.
-            mel_lengths = audio_inputs["attention_mask"].sum(dim=-1).reshape(-1)
-            token_counts = [
-                int(self.projector.get_output_length(self._compute_encoder_output_length(int(m))))
-                for m in mel_lengths
-            ]
+            mel_lengths = audio_inputs["attention_mask"].sum(dim=-1).reshape(-1).long()
+            encoder_lengths = compute_encoder_output_length(mel_lengths, self.encoder_conv_layers)
+            token_counts = self.projector.get_output_length(encoder_lengths).tolist()
 
         rows = [self._render_prompt(n, text) for n in token_counts]
         input_ids, attention_mask = self._stack_prompt_rows(rows)

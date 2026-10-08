@@ -15,4 +15,4 @@ def test_get_device_prefers_cuda_then_mps(
 ) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
-    assert alignment._get_device() == expected
+    assert alignment.get_device() == torch.device(expected)

@@ -1,3 +1,4 @@
+import contextlib
 import functools
 import importlib.util
 import inspect
@@ -22,7 +23,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
-    BatchEncoding,
     PreTrainedModel,
     PreTrainedTokenizerBase,
     SequenceFeatureExtractor,
@@ -47,7 +47,12 @@ if TYPE_CHECKING:
     from .asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
     from .asr_config import ASRConfig, compute_encoder_output_length
     from .asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
-    from .asr_processing import ASRProcessor, left_pad_prompt_rows
+    from .asr_processing import (
+        DEFAULT_TRANSCRIBE_PROMPT,
+        ASRProcessor,
+        left_pad_prompt_rows,
+        render_audio_prompt,
+    )
     from .asr_types import (
         DecoderLoadKwargs,
         GenerativeDecoder,
@@ -67,14 +72,24 @@ else:
         from .asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
         from .asr_config import ASRConfig, compute_encoder_output_length
         from .asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
-        from .asr_processing import ASRProcessor, left_pad_prompt_rows
+        from .asr_processing import (
+            DEFAULT_TRANSCRIBE_PROMPT,
+            ASRProcessor,
+            left_pad_prompt_rows,
+            render_audio_prompt,
+        )
         from .asr_types import LoadStateDictResult, OutputLengthProjector, StateDictT
         from .projectors import PROJECTOR_CLASSES
     except ImportError:  # flat layout on the Hub: sibling modules, no package
         from asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
         from asr_config import ASRConfig, compute_encoder_output_length
         from asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
-        from asr_processing import ASRProcessor, left_pad_prompt_rows
+        from asr_processing import (
+            DEFAULT_TRANSCRIBE_PROMPT,
+            ASRProcessor,
+            left_pad_prompt_rows,
+            render_audio_prompt,
+        )
         from asr_types import LoadStateDictResult, OutputLengthProjector, StateDictT
         from projectors import PROJECTOR_CLASSES
 
@@ -86,10 +101,8 @@ else:
     except ImportError:  # transformers < 5.16: no native granite_speech5
         GraniteSpeech5Encoder = None
     try:
-        from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
         from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
     except ImportError:  # transformers without the gemma4 architecture
-        Gemma4TextConfig = None
         Gemma4ForCausalLM = None
 
 
@@ -195,6 +208,16 @@ def _assert_audio_token_counts(
             "deficit, silently feeding the decoder zero vectors in place of audio."
         )
         raise ValueError(msg)
+
+
+def _splice_audio(
+    inputs_embeds: torch.Tensor, is_audio_token: torch.Tensor, audio_embeds: torch.Tensor
+) -> torch.Tensor:
+    """Scatter `audio_embeds` into `inputs_embeds` at the audio-placeholder positions."""
+    dev = inputs_embeds.device
+    return inputs_embeds.masked_scatter(
+        is_audio_token.unsqueeze(-1).to(dev), audio_embeds.to(dev, dtype=inputs_embeds.dtype)
+    )
 
 
 def _patch_gemma_decode_loop(model: "GenerativeDecoder") -> None:
@@ -321,7 +344,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     supports_gradient_checkpointing = True
     _is_loading_from_pretrained: bool = False
 
-    TRANSCRIBE_PROMPT = "Transcribe the speech to text"
+    TRANSCRIBE_PROMPT = DEFAULT_TRANSCRIBE_PROMPT
 
     @classmethod
     def from_pretrained(
@@ -481,9 +504,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Setup LoRA if enabled (Stage 2 fine-tuning)
         # Skip if loading from pretrained - from_pretrained will handle adapter loading
-        if getattr(config, "use_lora", False) and not getattr(
-            self.__class__, "_is_loading_from_pretrained", False
-        ):
+        if getattr(config, "use_lora", False) and not type(self)._is_loading_from_pretrained:
             self._setup_lora(config)
 
         # Freeze projector if specified (for Stage 2 LoRA-only training)
@@ -757,7 +778,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             raise ImportError(msg)
 
         # Only reached for gemma-4 checkpoints, whose text config is Gemma4TextConfig.
-        text_config = cast(Gemma4TextConfig, loaded.config.get_text_config())
+        text_config = cast("Gemma4TextConfig", loaded.config.get_text_config())
         with torch.device("meta"):
             shell = Gemma4ForCausalLM(text_config)
 
@@ -766,17 +787,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         shell.generation_config = loaded.generation_config
         shell.tie_weights()
 
-        # Gemma4ForCausalLM does not drop `per_layer_inputs` between decode
-        # steps, while the multimodal wrapper does. Without the drop, step 2
-        # of generation passes PLE alongside `input_ids` and forward raises
-        # "You cannot specify per_layer_inputs if input_ids is provided". The
-        # drop is semantically right, not a workaround: PLE describes the
-        # prompt, and from step 2 on generation feeds one freshly sampled
-        # token whose PLE Gemma derives itself from that token's id.
-        #
-        # Patched on the instance rather than via a subclass: subclassing
-        # Gemma4ForCausalLM trips transformers' experts-implementation check
-        # ("does not support setting experts implementation") during __init__.
+        # See _patch_gemma_decode_loop for why PLE is dropped after step 1.
         # Gemma4ForCausalLM is a PreTrainedModel with GenerationMixin, which is
         # all `GenerativeDecoder` describes.
         decoder = cast("GenerativeDecoder", shell)
@@ -1171,11 +1182,22 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         to the projector); includes the encoder only when it's trainable.
         """
         targets: list[nn.Module] = [self.language_model]
-        # Autograd state again, not the flag: a partially unfrozen encoder has
-        # an activation tape worth checkpointing even though the flag is True.
-        if any(p.requires_grad for p in self.audio_tower.parameters()):
+        if self._encoder_has_trainable_params():
             targets.append(self.audio_tower)
         return targets
+
+    def _encoder_has_trainable_params(self) -> bool:
+        """True if any encoder parameter requires grad.
+
+        Keyed on autograd state, NOT on `freeze_audio_encoder`. The documented
+        partial-unfreeze recipe is `freeze_audio_encoder: true` PLUS
+        `encoder_trainable_top_layers: N` (see ASRConfig), which leaves the flag
+        True while `_load_audio_encoder` switches the top N blocks back on.
+        Reading the flag instead once wrapped those blocks in no_grad (so the
+        run paid ~1.6 GiB of AdamW state for 198M params that could never
+        move) and kept them out of the checkpoint.
+        """
+        return any(p.requires_grad for p in self.audio_tower.parameters())
 
     def get_input_embeddings(self) -> nn.Module:
         """Return the decoder's token embedding module."""
@@ -1381,22 +1403,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         ):
             tower_kwargs["attention_mask"] = audio_attention_mask.to(audio_features.device)
 
-        # Gate on autograd state, NOT on `freeze_audio_encoder` alone. The
-        # documented partial-unfreeze recipe is `freeze_audio_encoder: true`
-        # PLUS `encoder_trainable_top_layers: N` (see ASRConfig), which leaves
-        # the flag True while `_load_audio_encoder` switches the top N blocks
-        # back on. Reading the flag here then wrapped those blocks in no_grad
-        # and zeroed their gradients -- exactly the failure the comment above
-        # warns about -- so the run paid ~1.6 GiB of AdamW state for 198M
-        # params that could never move, with nothing in the logs saying so.
-        encoder_frozen = not any(p.requires_grad for p in self.audio_tower.parameters())
-        if encoder_frozen:
-            with torch.no_grad():
-                encoder_out = self.audio_tower(**tower_kwargs)
-                hidden_states = encoder_out.last_hidden_state
-        else:
+        grad_ctx = (
+            contextlib.nullcontext() if self._encoder_has_trainable_params() else torch.no_grad()
+        )
+        with grad_ctx:
             encoder_out = self.audio_tower(**tower_kwargs)
-            hidden_states = encoder_out.last_hidden_state
+        hidden_states = encoder_out.last_hidden_state
 
         # Conformer encoders (Granite) return their own validity mask, halved
         # alongside each subsampling block. That is the encoder's arithmetic
@@ -1613,11 +1625,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 input_features, audio_token_counts, audio_attention_mask
             )
 
-            audio_token_mask = is_audio_token.unsqueeze(-1)
-            inputs_embeds = inputs_embeds.masked_scatter(
-                audio_token_mask.to(inputs_embeds.device),
-                audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
-            )
+            inputs_embeds = _splice_audio(inputs_embeds, is_audio_token, audio_embeds)
 
         # Forward label_smoothing to the LM's loss_function via **kwargs.
         # transformers.loss.loss_utils.ForCausalLMLoss → fixed_cross_entropy
@@ -1705,43 +1713,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         return model_inputs
 
-    def _get_num_audio_tokens(
-        self,
-        audio_attention_mask: torch.Tensor,
-    ) -> int:
-        """Audio token count for the LONGEST sample in the batch.
-
-        mel_frames -> encoder_frames (via conv formulas) -> projector tokens.
-
-        Do not build a shared prompt from this. Every row shorter than the
-        batch max needs fewer placeholders than this returns; see
-        `_prepare_audio_inputs`, which renders one prompt per sample.
-        """
-        encoder_lengths = self._compute_encoder_output_lengths(audio_attention_mask)
-        encoder_output_len = int(encoder_lengths.max().item())
-        return int(self.projector.get_output_length(encoder_output_len))
-
     def _render_audio_prompt(self, num_audio_tokens: int) -> torch.Tensor:
         """Tokenize one chat prompt carrying exactly `num_audio_tokens` placeholders."""
-        messages: list[dict[str, str]] = []
-        # Audio tokens only (instruction-free) unless a transcribe prompt is set
-        user_content = self.audio_token * num_audio_tokens
-        if self.TRANSCRIBE_PROMPT:
-            user_content += " " + self.TRANSCRIBE_PROMPT
-        messages.append({"role": "user", "content": user_content})
-
-        chat_result = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
+        return render_audio_prompt(
+            self.tokenizer, self.audio_token, num_audio_tokens, self.TRANSCRIBE_PROMPT
         )
-        if not isinstance(chat_result, BatchEncoding):
-            msg = f"apply_chat_template returned {type(chat_result).__name__}, not BatchEncoding"
-            raise TypeError(msg)
-        ids = chat_result["input_ids"]
-        return (ids[0] if ids.dim() > 1 else ids).to(torch.long)
 
     def _left_pad_prompt_rows(
         self,
@@ -1794,11 +1770,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             input_ids, attention_mask = self._left_pad_prompt_rows(rows, device)
 
         # Get text embeddings and replace audio tokens with audio embeddings
-        inputs_embeds = self._embed_tokens(input_ids)
-        audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
-        inputs_embeds = inputs_embeds.masked_scatter(
-            audio_token_mask.to(inputs_embeds.device),
-            audio_embeds.to(inputs_embeds.device, dtype=inputs_embeds.dtype),
+        inputs_embeds = _splice_audio(
+            self._embed_tokens(input_ids), input_ids == self.audio_token_id, audio_embeds
         )
         return input_ids, attention_mask, inputs_embeds
 
@@ -2115,14 +2088,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Copy source files for auto-loading
         src_dir = Path(__file__).parent
-        for asr_file in src_dir.glob("asr_*.py"):
-            shutil.copy(asr_file, save_dir / asr_file.name)
-        # Copy projectors module
-        shutil.copy(src_dir / "projectors.py", save_dir / "projectors.py")
-        # Copy alignment module
-        shutil.copy(src_dir / "alignment.py", save_dir / "alignment.py")
-        # Copy diarization module
-        shutil.copy(src_dir / "diarization.py", save_dir / "diarization.py")
+        siblings = ("projectors.py", "alignment.py", "diarization.py")
+        for src in [*src_dir.glob("asr_*.py"), *(src_dir / name for name in siblings)]:
+            shutil.copy(src, save_dir / src.name)
 
     def create_or_update_model_card(self, output_dir: str | Path) -> None:
         """Re-apply the PEFT card metadata to `output_dir/README.md`.

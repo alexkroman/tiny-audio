@@ -139,7 +139,7 @@ class TestProcessorCall:
         tok.apply_chat_template.return_value = torch.tensor([[1, 2, 3, 4, 5]])
 
         proj = mocker.MagicMock()
-        proj.get_output_length.return_value = 50
+        proj.get_output_length.side_effect = lambda n: torch.full_like(n, 50)
 
         return ASRProcessor(fe, tok, proj)
 
@@ -335,7 +335,7 @@ class TestProcessorAudioToken:
         mock_projector: MagicMock,
     ) -> None:
         """The prompt must repeat the configured token, or masked_scatter mismatches."""
-        mock_projector.get_output_length.return_value = 3
+        mock_projector.get_output_length.side_effect = lambda n: torch.full_like(n, 3)
         mock_tokenizer.apply_chat_template.return_value = torch.tensor([[1, 2, 3]])
 
         processor = ASRProcessor(

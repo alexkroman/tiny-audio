@@ -15,7 +15,11 @@ import torch
 from conftest import stub
 from transformers import BatchEncoding
 
-from tiny_audio.asr_attention import _has_sliding_window_attention, resolve_attn_implementation
+from tiny_audio.asr_attention import (
+    _has_sliding_window_attention,
+    _text_config,
+    resolve_attn_implementation,
+)
 from tiny_audio.asr_modeling import ASRModel, _assert_audio_token_counts, _gather_audio_embeds
 
 
@@ -93,8 +97,10 @@ class TestHasSlidingWindowAttention:
     @pytest.fixture(autouse=True)
     def clear_cache(self) -> Iterator[None]:
         _has_sliding_window_attention.cache_clear()
+        _text_config.cache_clear()
         yield
         _has_sliding_window_attention.cache_clear()
+        _text_config.cache_clear()
 
     @staticmethod
     def _patch(monkeypatch: pytest.MonkeyPatch, **attrs: object) -> None:
@@ -326,23 +332,6 @@ class TestRenderAudioPrompt:
         fake = stub(tokenizer=tokenizer, audio_token="<a>", TRANSCRIBE_PROMPT="")
         ASRModel._render_audio_prompt(fake, 2)
         assert tokenizer.apply_chat_template.call_args.args[0][0]["content"] == "<a><a>"
-
-
-class TestGetNumAudioTokens:
-    """The batch-max token count chains encoder lengths into the projector."""
-
-    def test_uses_longest_sample(self) -> None:
-        def encoder_lengths(mask: torch.Tensor) -> torch.Tensor:
-            return torch.tensor([10, 20])
-
-        def output_length(n: int) -> int:
-            return (n - 4) // 4 + 1
-
-        fake = stub(
-            _compute_encoder_output_lengths=encoder_lengths,
-            projector=SimpleNamespace(get_output_length=output_length),
-        )
-        assert ASRModel._get_num_audio_tokens(fake, torch.ones(2, 40)) == 5
 
 
 class TestCreateOrUpdateModelCard:

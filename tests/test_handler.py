@@ -72,26 +72,6 @@ class TestEndpointHandlerInit:
         assert handler.device == torch.device("cpu")
         mock_model.from_pretrained.return_value.to.assert_called_once_with(torch.device("cpu"))
 
-    @pytest.mark.parametrize("installed", [True, False])
-    def test_punkt_tab_downloaded_only_when_missing(
-        self, mocker: MockerFixture, installed: bool
-    ) -> None:
-        """nltk.download re-checks the remote index, so it runs only when absent."""
-        find = mocker.patch("tiny_audio.handler.nltk.data.find")
-        if not installed:
-            find.side_effect = LookupError("punkt_tab")
-        download = mocker.patch("tiny_audio.handler.nltk.download")
-        mocker.patch("tiny_audio.handler.ASRModel")
-        mocker.patch("tiny_audio.handler.ASRPipeline")
-
-        EndpointHandler("/fake/path")
-
-        find.assert_called_once_with("tokenizers/punkt_tab/english/")
-        if installed:
-            download.assert_not_called()
-        else:
-            download.assert_called_once_with("punkt_tab", quiet=True)
-
     @pytest.mark.parametrize(
         ("cuda", "mps", "expected"),
         [

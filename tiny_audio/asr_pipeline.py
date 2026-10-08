@@ -14,7 +14,6 @@ from transformers.pipelines.audio_utils import ffmpeg_read
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase, SequenceFeatureExtractor
 
-if TYPE_CHECKING:
     from .alignment import QwenForcedAligner
     from .asr_modeling import ASRModel
     from .asr_processing import prepend_lead_in
@@ -102,8 +101,19 @@ _TRAILING_WORD_RE = re.compile(rf"\b(\w+)(?:\s+\1){{{_MIN_REPEATS - 1},}}\s*$", 
 class _RawAudio(TypedDict):
     """A waveform and its sampling rate, as `_extract_audio` reads them."""
 
-    array: npt.ArrayLike
+    array: npt.NDArray[np.float32]
     sampling_rate: int
+
+
+# `__call__` keywords this pipeline handles itself; the parent never sees them.
+_CUSTOM_PARAMS = (
+    "return_speakers",
+    "num_speakers",
+    "min_speakers",
+    "max_speakers",
+    "hf_token",
+    "user_prompt",
+)
 
 
 class _DiarizationParams(TypedDict):
@@ -154,12 +164,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # `return_timestamps` means word timestamps here (handled in __call__),
         # not the parent's CTC/Whisper timestamps, so it is dropped too.
         del return_timestamps
-        kwargs.pop("return_speakers", None)
-        kwargs.pop("num_speakers", None)
-        kwargs.pop("min_speakers", None)
-        kwargs.pop("max_speakers", None)
-        kwargs.pop("hf_token", None)
-        kwargs.pop("user_prompt", None)
+        for name in _CUSTOM_PARAMS:
+            kwargs.pop(name, None)
 
         return super()._sanitize_parameters(
             chunk_length_s=chunk_length_s,
@@ -260,8 +266,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         audio = self._extract_audio(inputs)
         if audio is None:
             return super().__call__(inputs, **kwargs)
-        array = np.asarray(audio["array"], dtype=np.float32)
-        sr = audio.get("sampling_rate", 16000)
+        array, sr = audio["array"], audio["sampling_rate"]
 
         bounds = chunk_bounds(array, sr)
         if len(bounds) == 1:
@@ -310,8 +315,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if audio is None:
             msg = f"Cannot read audio from {type(inputs).__name__} for timestamps"
             raise ValueError(msg)
-        array = np.asarray(audio["array"], dtype=np.float32)
-        sr = audio.get("sampling_rate", 16000)
+        array, sr = audio["array"], audio["sampling_rate"]
         if return_speakers:
             return self._transcribe_streams(array, sr, diarization_params, **kwargs)
         return self._transcribe_aligned(array, sr, **kwargs)
@@ -367,15 +371,16 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             result["diarization_error"] = str(e)
             return result
 
+        # `top_speakers` keeps only columns that are ever active, so every
+        # mask has speech -- except its `[0]` fallback when nobody spoke.
         masks = {c: activity[:, c] > NemotronDiarizer.SEGMENT_THRESHOLD for c in keep}
-        talking = [c for c in keep if masks[c].any()]
-        if len(talking) <= 1:
+        if len(keep) <= 1:
             result = self._transcribe_aligned(array, sr, **kwargs)
-            name = f"SPEAKER_{keep.index(talking[0]) if talking else 0}"
+            name = NemotronDiarizer.speaker_names(keep)[keep[0]]
             result["words"] = [{**w, "speaker": name} for w in result["words"]]
         else:
             chunks: list[StreamChunk] = []
-            for c in talking:
+            for c in keep:
                 spans = NemotronDiarizer.sample_spans(masks[c], sr, len(array))
                 chunks.extend(
                     {"col": c, "start": s, "audio": masked_audio(array, spans, s, e)}
@@ -415,31 +420,21 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         return {"text": " ".join(w["word"] for w in words), "words": words}
 
     def _extract_audio(self, inputs: object) -> _RawAudio | None:
-        """Extract audio array from various input formats using HF utilities."""
+        """Extract a float32 audio array and its rate from various input formats."""
         if isinstance(inputs, dict):
-            sample = inputs
-            if "array" in sample:
-                return {
-                    "array": sample["array"],
-                    "sampling_rate": sample.get("sampling_rate", 16000),
-                }
-            if "raw" in sample:
-                return {
-                    "array": sample["raw"],
-                    "sampling_rate": sample.get("sampling_rate", 16000),
-                }
-        elif isinstance(inputs, str):
-            # File path - load audio using ffmpeg (same as HF pipeline)
-            with Path(inputs).open("rb") as f:
-                audio = ffmpeg_read(f.read(), sampling_rate=16000)
-            return {"array": audio, "sampling_rate": 16000}
-        elif isinstance(inputs, bytes):
-            audio = ffmpeg_read(inputs, sampling_rate=16000)
-            return {"array": audio, "sampling_rate": 16000}
+            key = "array" if "array" in inputs else "raw" if "raw" in inputs else None
+            if key is None:
+                return None
+            array, sr = inputs[key], inputs.get("sampling_rate", 16000)
+        elif isinstance(inputs, (str, bytes)):
+            # File path or encoded bytes - decode with ffmpeg (same as HF pipeline)
+            data = Path(inputs).read_bytes() if isinstance(inputs, str) else inputs
+            array, sr = ffmpeg_read(data, sampling_rate=16000), 16000
         elif isinstance(inputs, np.ndarray):
-            return {"array": inputs, "sampling_rate": 16000}
-
-        return None
+            array, sr = inputs, 16000
+        else:
+            return None
+        return {"array": np.asarray(array, dtype=np.float32), "sampling_rate": sr}
 
     def preprocess(self, *args: Any, **preprocess_params: Any) -> Iterator[dict[str, Any]]:
         """Preprocess audio inputs for the model.
@@ -556,13 +551,11 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         top1_logprobs: list[float] = []
         top2_logprobs: list[float] = []
         if scores:
-            # Reduce each step on-device, then transfer every step in one go.
-            # Calling .item() per step would block on the device 2x per token.
-            per_step = [
-                torch.topk(torch.log_softmax(step_logits[0].float(), dim=-1), k=2).values
-                for step_logits in scores
-            ]
-            steps: list[list[float]] = np.asarray(torch.stack(per_step).cpu()).tolist()
+            # One batched reduction over every step, then one device transfer.
+            logits = torch.stack([step_logits[0] for step_logits in scores]).float()
+            steps: list[list[float]] = (
+                logits.log_softmax(dim=-1).topk(k=2, dim=-1).values.cpu().tolist()
+            )
             for top1, top2 in steps:
                 top1_logprobs.append(top1)
                 top2_logprobs.append(top2)
