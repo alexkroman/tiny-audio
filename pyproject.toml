@@ -77,8 +77,6 @@ trl = ">=0.26.0"
 peft = ">=0.13.0"  # LoRA adapters for Stage 2 fine-tuning
 torchaudio = "~2.8.0"  # torchaudio's major.minor must match torch's
 torchvision = ">=0.23.0,<0.24.0"  # Pairs with torch 2.8.x
-pyannote-core = ">=6.0.0"  # For DER metric calculation
-pyannote-metrics = ">=4.0.0"  # For DER metric calculation
 bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 # >=0.8.0, NOT the previous >=0.5.0. `apply_liger_kernel_to_qwen3_5` first
 # ships in 0.8.0 (verified against the wheels: 0.7.0 does not export it), and
@@ -100,24 +98,17 @@ liger-kernel = {version = ">=0.8.0", markers = "sys_platform == 'linux'"}
 pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
 fabric = ">=3.0.0"
 tenacity = ">=8.2"  # Retry/backoff policy for the AssemblyAI streaming evaluator
-pipecat-ai = {extras = ["openai", "silero"], version = "^0.0.98"}
-spacy = "^3.8.11"
-# spaCy ships the library on PyPI but not its pipelines, so `spacy` alone
-# resolves fine and `spacy.load("en_core_web_sm")` still raises E050 (the NER
-# model behind `ta analysis extract-entities`). `python -m spacy download` fixes
-# one machine and nothing else; the release wheel keeps it in the lock file.
-# Model minor must track spacy's -- en_core_web_sm 3.8.0 requires spacy <3.9.
-en-core-web-sm = {url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"}
-ten-vad = ">=1.0.6"
-speechbrain = {git = "https://github.com/speechbrain/speechbrain.git"}
+# cpWER for speaker-labelled eval sets (scripts/eval/speaker_metrics.py).
+scipy = "*"
+rapidfuzz = "*"
 truecase = ">=0.0.14"  # Statistical re-casing for ASR label normalization
 ftfy = ">=6.0"  # Unicode cleanup (mojibake, smart quotes) + NFKC before normalize
 # nltk 3.10 tokenizes a leading apostrophe as its own token ("'em" -> "'", "em"),
 # and truecase's TreebankWordDetokenizer re-glues that bare "'" onto the PREVIOUS
 # word. Training labels from mono-case corpora then come out as "get' em" and
 # "in' 99" instead of "get 'em" / "in '99" (tests/test_label_normalization.py).
-# Transitive via truecase (unbounded) and pipecat-ai (>=3.9.1,<4); pinned here
-# because nothing in this repo needs 3.10. Revisit if truecase gains a fix.
+# Transitive via truecase (unbounded); pinned here because nothing in this repo
+# needs 3.10. Revisit if truecase gains a fix.
 nltk = "<3.10"
 
 [project.optional-dependencies]
@@ -145,12 +136,6 @@ elevenlabs = "^2.31.0"
 # doesn't fail-import when running tests/CLI flows that touch the backend.
 pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
 torchcodec = ">=0.5.0,<0.8"  # 0.7.x is the last line built against torch 2.8 ABI; 0.8+ requires torch 2.9+
-
-[tool.poetry.group.pipecat]
-optional = true
-
-[tool.poetry.group.pipecat.dependencies]
-pipecat-ai = {extras = ["silero", "openai"], version = ">=0.0.40"}
 
 # Optional fast path for Qwen3.5's hybrid linear-attention layers (three of
 # every four). Without these, transformers logs `causal_conv1d_fn` and
@@ -266,9 +251,7 @@ markers = ["slow: marks tests as slow (deselected by default)"]
 
 # Filter out third-party warnings
 filterwarnings = [
-    "ignore::DeprecationWarning:onnxruntime.*",
     "ignore:builtin type.*has no __module__ attribute:DeprecationWarning",
-    "ignore:Specified provider.*is not in available provider names:UserWarning",
 ]
 
 [tool.ruff]
