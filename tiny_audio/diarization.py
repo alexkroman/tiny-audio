@@ -97,9 +97,8 @@ class NemotronDiarizer:
             model: PreTrainedModel = AutoModelForAudioFrameClassification.from_pretrained(
                 cls.MODEL_ID
             )
-            model.to(
-                get_device()
-            )  # pyright: ignore[reportArgumentType]  # `to` is functools.wraps'd
+            # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
+            model.to(get_device())  # pyright: ignore[reportArgumentType]
             model.eval()
             cls._model = model
             processor: _AudioProcessor = AutoProcessor.from_pretrained(cls.MODEL_ID)

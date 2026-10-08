@@ -660,9 +660,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # trainable blocks; it must be fp32 for Adam's step to survive
         # rounding. See ASRConfig.encoder_dtype for the arithmetic.
         encoder_dtype = _resolve_dtype(getattr(config, "encoder_dtype", None), dtype)
-        encoder = encoder.to(
-            dtype=encoder_dtype
-        )  # pyright: ignore[reportCallIssue]  # wraps'd `to`
+        # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
+        encoder = encoder.to(dtype=encoder_dtype)  # pyright: ignore[reportCallIssue]
         if getattr(config, "freeze_audio_encoder", True):
             encoder.requires_grad_(False)
             encoder.train(False)  # equivalent to .eval(); avoids a security hook false-positive
@@ -763,7 +762,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # FA2 "current dype is fp32" warning when from_pretrained's dtype kwarg
         # isn't fully propagated to every submodule.
         # `to` returns the module itself, so the cast happens in place.
-        decoder.to(dtype=dtype)  # pyright: ignore[reportCallIssue]  # `to` is functools.wraps'd
+        # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
+        decoder.to(dtype=dtype)  # pyright: ignore[reportCallIssue]
         decoder.config.use_cache = getattr(config, "use_cache", True)
         if getattr(config, "freeze_language_model", True):
             decoder.requires_grad_(False)

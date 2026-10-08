@@ -51,9 +51,8 @@ class EndpointHandler:
         # flash_attn is missing.
         self.model = ASRModel.from_pretrained(path)
         self.device = _best_device()
-        self.model.to(
-            self.device
-        )  # pyright: ignore[reportArgumentType]  # `to` is functools.wraps'd
+        # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
+        self.model.to(self.device)  # pyright: ignore[reportArgumentType]
         self.model.eval()
 
         self.pipe = ASRPipeline(

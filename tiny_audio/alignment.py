@@ -79,7 +79,8 @@ class QwenForcedAligner:
             model = Qwen3ASRForTokenClassification.from_pretrained(
                 cls.MODEL_ID, dtype=torch.bfloat16, attn_implementation=attn
             )
-            model.to(device)  # pyright: ignore[reportArgumentType]  # `to` is functools.wraps'd
+            # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
+            model.to(device)  # pyright: ignore[reportArgumentType]
             model.eval()
             cls._model = model
             cls._processor = Qwen3ASRProcessor.from_pretrained(cls.MODEL_ID)
