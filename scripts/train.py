@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import fields
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Protocol, cast
+from typing import Any
 
 import hydra
 import torch
@@ -92,44 +92,6 @@ def _resolve_transcribe_prompt(
     return None
 
 
-# `get_parameter_names` ships without annotations; this is its signature as used here.
-_get_parameter_names = cast(
-    Callable[[torch.nn.Module, list[type[torch.nn.Module]]], list[str]], get_parameter_names
-)
-
-
-class _DatasetTransforms(Protocol):
-    """The `Dataset` transforms used here, with the signatures they run with.
-
-    The library's own annotations are lost behind its untyped
-    @transmit_format / @fingerprint_transform decorators. `add_column` also
-    annotates `new_fingerprint: str` as a required argument, but its
-    @fingerprint_transform wrapper computes the fingerprint whenever the caller
-    leaves it out, which is how it is meant to be called.
-    """
-
-    def add_column(self, name: str, column: list[Any]) -> Dataset: ...
-
-    def filter(
-        self,
-        function: Callable[..., bool],
-        *,
-        num_proc: int | None = ...,
-        input_columns: str | list[str] | None = ...,
-    ) -> Dataset: ...
-
-    def select(self, indices: Iterable[int]) -> Dataset: ...
-
-    def shuffle(self, *, seed: int | None = ...) -> Dataset: ...
-
-    def cast_column(self, column: str, feature: Audio) -> Dataset: ...
-
-
-def _transforms(ds: Dataset) -> _DatasetTransforms:
-    """`ds`, typed by the transform signatures in `_DatasetTransforms`."""
-    return cast(_DatasetTransforms, ds)
-
-
 class DatasetLoader:
     """Loads and prepares datasets for training.
 
@@ -187,7 +149,11 @@ class DatasetLoader:
                     f"got {text_case!r} for {dataset_path}"
                 )
                 raise ValueError(msg)
-            ds = _transforms(ds).add_column("_text_case", [text_case] * len(ds))
+            # @fingerprint_transform computes `new_fingerprint` when it is omitted,
+            # though `add_column` annotates it as a required argument.
+            ds = ds.add_column(  # pyright: ignore[reportCallIssue]
+                "_text_case", [text_case] * len(ds)
+            )
 
         # text_punct: declares whether this source's transcripts carry
         # punctuation. Deliberately separate from text_case -- they are not the
@@ -199,7 +165,11 @@ class DatasetLoader:
             if not isinstance(text_punct, bool):
                 msg = f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
                 raise ValueError(msg)
-            ds = _transforms(ds).add_column("_text_punct", [text_punct] * len(ds))
+            # @fingerprint_transform computes `new_fingerprint` when it is omitted,
+            # though `add_column` annotates it as a required argument.
+            ds = ds.add_column(  # pyright: ignore[reportCallIssue]
+                "_text_punct", [text_punct] * len(ds)
+            )
 
         # CommonVoice strict-validated filter: Mozilla's `train` split is
         # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
@@ -214,7 +184,7 @@ class DatasetLoader:
             def _no_down_votes(dv: int) -> bool:
                 return dv == 0
 
-            ds = _transforms(ds).filter(
+            ds = ds.filter(
                 _no_down_votes,
                 num_proc=self.num_proc,
                 input_columns="down_votes",
@@ -265,8 +235,7 @@ class DatasetLoader:
             # against the human-readable names matches nothing and silently
             # dropped 0 of 910,140 rows. Resolve names -> ids so the config
             # stays readable, and reject a name the column does not define.
-            # `Features` subclasses a bare `dict`; its values are feature types.
-            feature = cast(Mapping[str, object], ds.features or {}).get(column)
+            feature = (ds.features or {}).get(column)
             wanted: set[object] | None = None
             if names:
                 if isinstance(feature, ClassLabel):
@@ -299,7 +268,7 @@ class DatasetLoader:
             # `input_columns` keeps this from materialising the audio column --
             # it matters for a duration filter over ~1.1M rows, which would
             # otherwise decode every clip to answer a float comparison.
-            ds = _transforms(ds).filter(
+            ds = ds.filter(
                 _keep,
                 num_proc=self.num_proc,
                 input_columns=column,
@@ -338,7 +307,7 @@ class DatasetLoader:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
 
-        ds = _transforms(ds).cast_column("audio", Audio(sampling_rate=self.sample_rate))
+        ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
         keep_cols = {"audio", "text"}
         # Preserve the declared casing policy so normalize_label can use it.
@@ -364,7 +333,7 @@ class DatasetLoader:
             def filter_ignore_marker(text: str) -> bool:
                 return text.strip().lower() != "ignore_time_segment_in_scoring"
 
-            ds = _transforms(ds).filter(
+            ds = ds.filter(
                 filter_ignore_marker, num_proc=self.num_proc, input_columns="text"
             )
 
@@ -386,8 +355,8 @@ class DatasetLoader:
         if current == target:
             return ds
         if current > target:
-            shuffled = _transforms(ds).shuffle(seed=self.seed)
-            return _transforms(shuffled).select(range(target))
+            shuffled = ds.shuffle(seed=self.seed)
+            return shuffled.select(range(target))
         # Upsampling repeats rows verbatim, so the extra "samples" carry no
         # new signal. That is intended for small sources, but it is also what
         # happens when a filter (e.g. exclude_where) cuts a large source below
@@ -401,7 +370,7 @@ class DatasetLoader:
         )
         repeats = (target // current) + 1
         indices = list(range(current)) * repeats
-        return _transforms(ds).select(indices[:target])
+        return ds.select(indices[:target])
 
     @staticmethod
     def _expand_epochs(ds: Dataset, times: int) -> Dataset:
@@ -502,11 +471,11 @@ class DatasetLoader:
             for val_split in val_splits:
                 ds = self._prepare_split(d_cfg, val_split)
                 if eval_cap_per_dataset:
-                    ds = _transforms(ds).select(range(min(len(ds), eval_cap_per_dataset)))
+                    ds = ds.select(range(min(len(ds), eval_cap_per_dataset)))
                 val_datasets.append(ds)
 
         train_ds = (
-            _transforms(concatenate_datasets(train_datasets)).shuffle(seed=self.seed)
+            concatenate_datasets(train_datasets).shuffle(seed=self.seed)
             if train_datasets
             else None
         )
@@ -517,14 +486,9 @@ class DatasetLoader:
         # comes in under the global limit).
         if val_ds and self.config.get("max_eval_samples"):
             n_samples = min(len(val_ds), self.config.max_eval_samples)
-            val_ds = _transforms(val_ds).select(range(n_samples))
+            val_ds = val_ds.select(range(n_samples))
 
         return train_ds, val_ds
-
-
-def _trainer_model(trainer: Trainer) -> torch.nn.Module | None:
-    """`trainer.model`, whose declared union includes one unannotated assignment."""
-    return trainer.model
 
 
 def decay_parameter_ids(model: torch.nn.Module) -> set[int]:
@@ -552,7 +516,7 @@ def decay_parameter_ids(model: torch.nn.Module) -> set[int]:
     # exists to prevent.
     norm_modules = [type(m) for m in model.modules() if "Norm" in type(m).__name__]
     forbidden = list(ALL_LAYERNORM_LAYERS) + norm_modules
-    decay_parameters = set(_get_parameter_names(model, forbidden))
+    decay_parameters = set(get_parameter_names(model, forbidden))
     decay_parameters = {n for n in decay_parameters if "bias" not in n}
 
     # State-space / gated-delta-rule tensors are excluded by convention in
@@ -643,7 +607,7 @@ class ASRTrainer(Trainer):
 
         # Same model resolution as Trainer.create_optimizer, which train() calls
         # with the accelerator-prepared model when optimizer creation is delayed.
-        opt_model = _trainer_model(self) if model is None else model
+        opt_model = self.model if model is None else model
         if opt_model is None:
             msg = "ASRTrainer.create_optimizer needs a model"
             raise ValueError(msg)
@@ -870,7 +834,7 @@ def main(cfg: DictConfig) -> None:
         cfg_container = OmegaConf.to_container(cfg, resolve=True)
         assert isinstance(cfg_container, dict)
         # The root config's keys are the group names (model/data/training).
-        wandb_config = {str(k): v for k, v in cast(dict[Any, Any], cfg_container).items()}
+        wandb_config = {str(k): v for k, v in cfg_container.items()}
         git_commit, git_dirty = _git_state()
         if git_commit:
             # Surface the commit in the run config so it's queryable/filterable
@@ -935,7 +899,7 @@ def main(cfg: DictConfig) -> None:
     model_container = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_container, dict), "model config must be a dict"
     # Keys are ModelConfig field names (scripts/train_config.py), i.e. strings.
-    model_config_dict = {str(k): v for k, v in cast(dict[Any, Any], model_container).items()}
+    model_config_dict = {str(k): v for k, v in model_container.items()}
     for param in TRAINING_MODEL_PARAMS:
         val = cfg.training.get(param)
         if val is None:
@@ -987,11 +951,7 @@ def main(cfg: DictConfig) -> None:
 
     # Workaround: TRL's DataCollatorForChatML doesn't pass enable_thinking=False to Qwen3.
     # See https://github.com/huggingface/trl/issues/3387
-    # transformers assigns `chat_template` from an unannotated kwargs.pop.
-    chat_template = cast(
-        str | dict[str, str] | None,
-        model.tokenizer.chat_template,
-    )
+    chat_template = model.tokenizer.chat_template
     if isinstance(chat_template, str) and "enable_thinking" in chat_template:
         model.tokenizer.chat_template = chat_template.replace(
             "enable_thinking is defined and enable_thinking is false",
@@ -1016,7 +976,7 @@ def main(cfg: DictConfig) -> None:
     training_container = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_container, dict)
     # Keys are TrainingConfig field names (scripts/train_config.py), i.e. strings.
-    training_config = cast(dict[str, Any], training_container)
+    training_config = training_container
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
     encoder_learning_rate = training_config.pop("encoder_learning_rate", None)
