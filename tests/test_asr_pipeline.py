@@ -123,9 +123,8 @@ class TestPostprocess:
 
     def test_strips_think_tags(self, mock_pipeline: ASRPipeline) -> None:
         """Should strip <think>...</think> tags from output."""
-        cast(
-            MagicMock, mock_pipeline.tokenizer
-        ).decode.return_value = "<think>reasoning</think> hello world"
+        tokenizer = cast(MagicMock, mock_pipeline.tokenizer)
+        tokenizer.decode.return_value = "<think>reasoning</think> hello world"
 
         result = mock_pipeline.postprocess({"tokens": torch.tensor([1, 2, 3])})
         assert "<think>" not in result["text"]
