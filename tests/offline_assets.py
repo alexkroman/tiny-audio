@@ -96,7 +96,11 @@ assert not {"huggingface_hub", "nltk"} & sys.modules.keys(), (
     "which read their cache locations only at import time."
 )
 os.environ["NLTK_DATA"] = str(_NLTK_DATA)
-_CACHE = Path(tempfile.gettempdir()) / "tiny-audio-test-hub" / _cache_key()
+# A per-user cache dir, not the shared temp dir: on linux /tmp is world-writable,
+# so a fixed path there could be pre-seeded by another user with files the
+# tests would then load.
+_CACHE_ROOT = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+_CACHE = _CACHE_ROOT / "tiny-audio-test-hub" / _cache_key()
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["HF_HUB_CACHE"] = str(_CACHE)
 if not _CACHE.is_dir():
