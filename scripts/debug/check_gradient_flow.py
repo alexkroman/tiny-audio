@@ -25,14 +25,13 @@ import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from enum import StrEnum
-from typing import Annotated, Any, Protocol, TypedDict, cast
+from typing import Annotated, Any, TypedDict, cast
 
 import numpy as np
 import numpy.typing as npt
 import torch
 import typer
 from omegaconf import OmegaConf
-from transformers import BatchFeature
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
@@ -43,26 +42,12 @@ from transformers.trainer_pt_utils import (
 from scripts.utils import get_project_root
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
+from tiny_audio.asr_types import AudioFeatureExtractor
 
 # `get_parameter_names` ships without annotations; this is its signature as used here.
 _get_parameter_names = cast(
     Callable[[torch.nn.Module, list[type[torch.nn.Module]]], list[str]], get_parameter_names
 )
-
-
-class _AudioFeatureExtractor(Protocol):
-    """The feature-extractor call made below (every concrete extractor is callable)."""
-
-    def __call__(
-        self,
-        raw_speech: list[npt.NDArray[np.float32]],
-        /,
-        *,
-        sampling_rate: int,
-        padding: str,
-        return_attention_mask: bool,
-        return_tensors: str,
-    ) -> BatchFeature: ...
 
 
 class ParamGroup(TypedDict):
@@ -255,7 +240,7 @@ def synthetic_batch(
     audio_seconds: float = 4.0,
     response: str = "hello world this is a gradient flow test",
 ) -> dict[str, torch.Tensor]:
-    """Build a batch shaped exactly like train.DataCollator output."""
+    """Build a batch shaped exactly like train_collator.DataCollator output."""
     sr = model.feature_extractor.sampling_rate
     n_samples = int(audio_seconds * sr)
     audio_arrays: list[npt.NDArray[np.float32]] = [
@@ -263,7 +248,7 @@ def synthetic_batch(
         torch.randn(n_samples).numpy()  # pyright: ignore[reportUnknownMemberType]
         for _ in range(batch_size)
     ]
-    feature_extractor = cast(_AudioFeatureExtractor, model.feature_extractor)
+    feature_extractor = cast(AudioFeatureExtractor, model.feature_extractor)
     audio_out = feature_extractor(
         audio_arrays,
         sampling_rate=sr,

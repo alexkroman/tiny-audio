@@ -1,7 +1,7 @@
 """Pytest configuration and fixtures."""
 
 import os
-from typing import TypedDict
+from typing import Any, Protocol, TypedDict, cast
 from unittest.mock import MagicMock, NonCallableMock
 
 import pytest
@@ -165,6 +165,51 @@ def lora_asr_config() -> ASRConfig:
 def lora_asr_model(lora_asr_config: ASRConfig) -> ASRModel:
     """Session-scoped LoRA ASR model - loaded once per test session."""
     return ASRModel(lora_asr_config)
+
+
+# =============================================================================
+# ASRModel Test Utilities - typed accessors and stubs for test_asr_modeling.py
+# =============================================================================
+
+
+class GenerationSettings(Protocol):
+    """The GenerationConfig fields the ASR tests read, typed for strict mode."""
+
+    eos_token_id: list[int] | None
+    no_repeat_ngram_size: int
+
+
+def generation_settings(model: ASRModel) -> GenerationSettings:
+    return model.generation_config
+
+
+def eos_ids(model: ASRModel) -> list[int]:
+    return cast(list[int], generation_settings(model).eos_token_id)
+
+
+def input_embedding_rows(model: ASRModel) -> int:
+    return cast(torch.nn.Embedding, model.language_model.get_input_embeddings()).weight.shape[0]
+
+
+def gemma_decode_loop_stub() -> Any:
+    """Minimal causal LM exposing Gemma's ``prepare_inputs_for_generation`` signature."""
+
+    class Stub:
+        def prepare_inputs_for_generation(
+            self,
+            input_ids: object,
+            inputs_embeds: object = None,
+            per_layer_inputs: object = None,
+            is_first_iteration: bool = False,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            return {
+                "input_ids": input_ids,
+                "inputs_embeds": inputs_embeds,
+                "per_layer_inputs": per_layer_inputs,
+            }
+
+    return Stub()
 
 
 # =============================================================================

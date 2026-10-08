@@ -331,7 +331,7 @@ class TestUseSdpaWhereSafe:
             return value
 
         monkeypatch.setattr(
-            "tiny_audio.asr_modeling._has_sliding_window_attention", has_sliding_window
+            "tiny_audio.asr_attention._has_sliding_window_attention", has_sliding_window
         )
 
     def test_corrects_a_stale_eager_decoder_to_sdpa(

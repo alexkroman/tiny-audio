@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         ConvLayerSpec,
         compute_encoder_output_length,
     )
+    from .asr_types import AudioFeatureExtractor, AudioInput, Waveform
 else:
     try:
         from .asr_config import (
@@ -30,6 +31,7 @@ else:
             ConvLayerSpec,
             compute_encoder_output_length,
         )
+        from .asr_types import AudioInput
     except ImportError:  # flat layout on the Hub: sibling modules, no package
         from asr_config import (
             DEFAULT_ENCODER_CONV_LAYERS,
@@ -37,10 +39,7 @@ else:
             ConvLayerSpec,
             compute_encoder_output_length,
         )
-
-# One waveform (array, tensor or list of samples), or a batch of them.
-Waveform = npt.ArrayLike | torch.Tensor
-AudioInput = Waveform | Sequence[Waveform]
+        from asr_types import AudioInput
 
 
 class _OutputLengthProjector(Protocol):
@@ -48,22 +47,6 @@ class _OutputLengthProjector(Protocol):
 
     def get_output_length(self, input_length: int) -> int:
         """Number of audio embeddings for `input_length` encoder frames."""
-        ...
-
-
-class _CallableFeatureExtractor(Protocol):
-    """A concrete feature extractor's `__call__` (`SequenceFeatureExtractor` declares none)."""
-
-    def __call__(
-        self,
-        raw_speech: AudioInput,
-        *,
-        sampling_rate: int,
-        return_attention_mask: bool,
-        return_tensors: str,
-        **kwargs: Any,
-    ) -> BatchFeature:
-        """Featurize raw audio."""
         ...
 
 
@@ -274,7 +257,7 @@ class ASRProcessor(ProcessorMixin):
         if audio is not None:
             sr = getattr(self.feature_extractor, "sampling_rate", 16000)
             padded_audio = prepend_lead_in(audio, sr, self.lead_in_seconds)
-            extract = cast("_CallableFeatureExtractor", self.feature_extractor)
+            extract = cast("AudioFeatureExtractor", self.feature_extractor)
             audio_inputs = extract(
                 padded_audio,
                 sampling_rate=getattr(self.feature_extractor, "sampling_rate", 16000),

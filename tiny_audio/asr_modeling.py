@@ -1,16 +1,15 @@
 import functools
-import importlib
 import importlib.util
 import inspect
 import json
 import logging
 import shutil
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from copy import copy
 from os import PathLike
 from pathlib import Path
 from threading import Thread
-from typing import TYPE_CHECKING, Any, Protocol, Self, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Self, cast, overload
 
 import torch
 import torch.nn as nn
@@ -18,14 +17,12 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file  # pyright: ignore[reportUnknownVariableType]
 from torch.nn import functional
 from transformers import (
-    AutoConfig,
     AutoFeatureExtractor,
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
     BatchEncoding,
-    PretrainedConfig,
     PreTrainedModel,
     PreTrainedTokenizerBase,
     SequenceFeatureExtractor,
@@ -47,6 +44,7 @@ if TYPE_CHECKING:
     )
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
 
+    from .asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
     from .asr_config import ASRConfig, compute_encoder_output_length, text_config_of
     from .asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
     from .asr_processing import ASRProcessor, left_pad_prompt_rows
@@ -55,7 +53,13 @@ if TYPE_CHECKING:
         GenerativeDecoder,
         HubFileKwargs,
         LoadKwargs,
+        LoadStateDictResult,
+        OutputLengthProjector,
         PerLayerInputsTextModel,
+        StateDictT,
+        apply_chat_template,
+        int_list,
+        module_to_dtype,
     )
     from .projectors import PROJECTOR_CLASSES, MLPAudioProjector
 
@@ -64,6 +68,7 @@ if TYPE_CHECKING:
     Gemma4ForCausalLM: type[_Gemma4ForCausalLM] | None
 else:
     try:
+        from .asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
         from .asr_config import (
             ASRConfig,
             compute_encoder_output_length,
@@ -71,9 +76,18 @@ else:
         )
         from .asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
         from .asr_processing import ASRProcessor, left_pad_prompt_rows
-        from .asr_types import DecoderLoadKwargs, HubFileKwargs, LoadKwargs, PerLayerInputsTextModel
+        from .asr_types import (
+            LoadStateDictResult,
+            OutputLengthProjector,
+            PerLayerInputsTextModel,
+            StateDictT,
+            apply_chat_template,
+            int_list,
+            module_to_dtype,
+        )
         from .projectors import PROJECTOR_CLASSES
     except ImportError:  # flat layout on the Hub: sibling modules, no package
+        from asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
         from asr_config import (
             ASRConfig,
             compute_encoder_output_length,
@@ -81,7 +95,15 @@ else:
         )
         from asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
         from asr_processing import ASRProcessor, left_pad_prompt_rows
-        from asr_types import DecoderLoadKwargs, HubFileKwargs, LoadKwargs, PerLayerInputsTextModel
+        from asr_types import (
+            LoadStateDictResult,
+            OutputLengthProjector,
+            PerLayerInputsTextModel,
+            StateDictT,
+            apply_chat_template,
+            int_list,
+            module_to_dtype,
+        )
         from projectors import PROJECTOR_CLASSES
 
     # Architectures newer than the transformers floor in pyproject.toml. Kept
@@ -100,9 +122,6 @@ else:
 
 
 logger = logging.getLogger(__name__)
-
-# FlashAttention's kernels are compiled for head dimensions up to 256.
-FLASH_ATTENTION_MAX_HEAD_DIM = 256
 
 # Vocab dimension the embedding table is padded to after adding the audio
 # token. 128 is what transformers' own `pad_to_multiple_of` docs recommend for
@@ -126,136 +145,6 @@ def _resolve_dtype(name: object, fallback: torch.dtype) -> torch.dtype:
     return (
         resolved if isinstance(resolved, torch.dtype) and resolved.is_floating_point else fallback
     )
-
-
-def _max_attention_head_dim(text_config: object) -> int | None:
-    """Largest attention head dim across layers, or None if undeterminable.
-
-    Has to cope with heterogeneous configs: Gemma 4 varies head_dim per layer,
-    and reading `config.head_dim` on one of those raises
-    AmbiguousGlobalPerLayerAttributeError instead of returning a number, so the
-    per-layer list must be consulted explicitly.
-    """
-    per_layer = getattr(text_config, "per_layer_config", None)
-    dims: list[object] = []
-    if per_layer:
-        dims = [getattr(layer, "head_dim", None) for layer in per_layer]
-    else:
-        try:
-            dims = [getattr(text_config, "head_dim", None)]
-        except Exception:
-            # Raised by the heterogeneity guard; treated as "unknown".
-            dims = []
-    usable = [d for d in dims if isinstance(d, int) and d > 0]
-    return max(usable) if usable else None
-
-
-@functools.lru_cache(maxsize=16)
-def _has_sliding_window_attention(model_id: str) -> bool:
-    """Whether `model_id`'s text stack has any sliding-window attention layer.
-
-    Read from the config rather than the loaded module so the answer is
-    available before `from_pretrained` picks an attn implementation.
-
-    Two independent spellings, because transformers has both. Gemma 4 declares
-    `sliding_window: 512` AND `layer_types: [full_attention,
-    sliding_attention]` (verified against google/gemma-4-E2B-it); Qwen2-style
-    configs carry a non-null `sliding_window` that is inert unless
-    `use_sliding_window` is true, so that flag has to veto the window.
-
-    Returns True when the config can't be read, so an unknown architecture
-    keeps the conservative eager path on MPS.
-    """
-    try:
-        probe = cast(
-            PretrainedConfig,
-            AutoConfig.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                model_id, trust_remote_code=True
-            ),
-        )
-        text_config = text_config_of(probe) if hasattr(probe, "get_text_config") else probe
-    except Exception:
-        logger.warning(
-            "Could not read the config for %s to check for sliding-window "
-            "attention; assuming it has some and using eager attention on MPS.",
-            model_id,
-        )
-        return True
-
-    layer_types: list[object] = getattr(text_config, "layer_types", None) or []
-    if any("sliding" in str(layer_type) for layer_type in layer_types):
-        return True
-    if getattr(text_config, "use_sliding_window", None) is False:
-        return False
-    return bool(getattr(text_config, "sliding_window", None))
-
-
-def resolve_attn_implementation(requested: str | None, model_id: str | None = None) -> str | None:
-    """Coerce flash_attention_2 to sdpa when CUDA isn't available, and avoid sdpa on MPS.
-
-    FA2 is CUDA-only. On MPS/CPU, requesting it either errors at load or
-    silently falls back to a slower path; either way the user pays the FA2
-    install + import cost for no win. Coerce here so a saved config that
-    pins flash_attention_2 still loads on Mac / CPU-only Linux boxes.
-
-    MPS needs eager for SOME models. PyTorch's Metal sdpa kernel returns wrong
-    results for cached single-token decode against a sliding-window mask, which
-    is exactly Gemma 4's layout (`sliding_window=512`, four sliding layers per
-    full-attention layer). A full-sequence forward is fine, so the damage shows
-    up only during generation: greedy decode with no cache transcribed
-    correctly while the identical cached decode produced "Mr. and a".
-
-    The mask is the trigger, so the coercion is scoped to models that actually
-    build one. `model_id` opts into that check; without it every MPS load falls
-    back to eager, which is what this function used to do unconditionally. That
-    blanket version taxed the models it was never protecting: Qwen3.5-2B
-    declares `sliding_window: None` and cannot hit the bug, and eager cost it
-    41% of decode throughput on an M4 Max (19.9 -> 28.1 tok/s, bf16, 64 tokens
-    from a 200-token prompt). Audio encoders are likewise unaffected -- they run
-    full-sequence forwards with no cache at all, and the Granite branch below
-    has been pinning sdpa on MPS for every granite_qwen run to date.
-
-    SECOND, SEPARATE MPS sdpa HAZARD, and the reason `generate` carries a guard:
-    Metal's sdpa returns NaN for a row containing any fully-masked position, so
-    a LEFT-PADDED batch comes back as NaN logits, argmax 0, and a transcript of
-    "!!!!!!". One pad token is enough. Measured on bare transformers with no
-    tiny_audio code involved (Qwen3.5-2B, bf16): the identical forward is exact
-    to 0.000 on CPU/fp32, and eager is correct on MPS at any padding. Batch 1
-    pads nothing, which is why the eval harness is safe under sdpa -- but this
-    is what the blanket eager was accidentally also protecting, so anything
-    that batches ragged audio on a Mac must ask for eager explicitly. See
-    `_assert_sdpa_safe_on_mps`.
-    """
-    if (
-        torch.backends.mps.is_available()
-        and requested in (None, "sdpa", "flash_attention_2")
-        and (model_id is None or _has_sliding_window_attention(model_id))
-    ):
-        return "eager"
-    # Otherwise fall through: on MPS, sdpa and None (let transformers pick,
-    # which is sdpa where available) are both safe for a model with no
-    # sliding-window layer, and a config pinning flash_attention_2 is still
-    # downgraded to sdpa below.
-    if requested != "flash_attention_2":
-        return requested
-    if not torch.cuda.is_available():
-        return "sdpa"
-    # CUDA alone isn't enough -- the flash_attn package must actually be
-    # importable, and new enough for transformers. It is a source build that
-    # routinely fails on RunPod images (its metadata hook imports torch, so any
-    # broken torch install takes it down with it). Without this check a CUDA
-    # box with no flash-attn raises at from_pretrained instead of quietly
-    # using sdpa, which is the same numerics at lower throughput.
-    #
-    # Looked up on `transformers.utils` at call time rather than bound at
-    # import, so patching it there (as the tests do) reaches this probe.
-    if not importlib.import_module("transformers.utils").is_flash_attn_2_available():
-        logger.warning(
-            "flash_attention_2 requested but flash_attn is not installed or too old; "
-            "falling back to sdpa."
-        )
-        return "sdpa"
-    return requested
 
 
 def _gather_audio_embeds(
@@ -284,37 +173,10 @@ def _gather_audio_embeds(
     return audio_embeds[mask]
 
 
-def _int_list(values: torch.Tensor) -> list[int]:
-    """`values.tolist()` for an integer tensor, typed as the ints it holds."""
-    return cast(list[int], values.tolist())  # pyright: ignore[reportUnknownMemberType]
-
-
-class _OutputLengthProjector(Protocol):
-    """The projector surface the token-count check needs."""
-
-    def get_output_length(self, input_length: torch.Tensor) -> torch.Tensor:
-        """Projector output length for encoder output length `input_length`."""
-        ...
-
-
-class _LoadStateDictResult(Protocol):
-    """What `load_state_dict` reports back (torch's `_IncompatibleKeys`)."""
-
-    @property
-    def missing_keys(self) -> Sequence[str]:
-        """Model keys the state dict did not provide."""
-        ...
-
-    @property
-    def unexpected_keys(self) -> Sequence[str]:
-        """State-dict keys the model has no slot for."""
-        ...
-
-
 def _assert_audio_token_counts(
     audio_embeds: torch.Tensor,
     token_counts: torch.Tensor,
-    projector: _OutputLengthProjector,
+    projector: OutputLengthProjector,
     encoder_valid_lengths: torch.Tensor | None = None,
     max_tokens: int | None = None,
 ) -> None:
@@ -340,11 +202,11 @@ def _assert_audio_token_counts(
         actual = projector.get_output_length(encoder_valid_lengths)
         actual = torch.as_tensor(actual, device=token_counts.device).to(torch.long).reshape(-1)
         if actual.shape == token_counts.shape and not torch.equal(actual, token_counts):
-            rows = _int_list((actual != token_counts).nonzero().flatten()[:8])
+            rows = int_list((actual != token_counts).nonzero().flatten()[:8])
             msg = (
                 "Audio token count mismatch between prompt and projector. Rows "
-                f"{rows}: prompt expects {_int_list(token_counts[rows])}, encoder+projector "
-                f"produced {_int_list(actual[rows])}. A wrong `encoder_conv_layers` for this "
+                f"{rows}: prompt expects {int_list(token_counts[rows])}, encoder+projector "
+                f"produced {int_list(actual[rows])}. A wrong `encoder_conv_layers` for this "
                 "encoder is the usual cause."
             )
             raise ValueError(msg)
@@ -361,25 +223,6 @@ def _assert_audio_token_counts(
             "deficit, silently feeding the decoder zero vectors in place of audio."
         )
         raise ValueError(msg)
-
-
-def _apply_chat_template(
-    tokenizer: PreTrainedTokenizerBase, conversation: list[dict[str, str]], **kwargs: Any
-) -> object:
-    """`tokenizer.apply_chat_template`; callers narrow the result to what they asked for."""
-    return tokenizer.apply_chat_template(  # pyright: ignore[reportUnknownMemberType]
-        conversation, **kwargs
-    )
-
-
-def _module_to_dtype(module: nn.Module, dtype: torch.dtype) -> nn.Module:
-    """Return `module.to(dtype=dtype)`, typed through `nn.Module.to`.
-
-    PreTrainedModel declares `to` via functools.wraps, which type checkers
-    cannot bind to an instance. The call still dispatches to the module's own
-    `to` (PreTrainedModel's included), so this is only a typing boundary.
-    """
-    return module.to(dtype=dtype)
 
 
 def _patch_gemma_decode_loop(model: "GenerativeDecoder") -> None:
@@ -419,7 +262,7 @@ def _patch_gemma_decode_loop(model: "GenerativeDecoder") -> None:
     model.prepare_inputs_for_generation = prepare_inputs_for_generation  # type: ignore[method-assign]
 
 
-def _assert_projector_loaded(incompatible_keys: _LoadStateDictResult, projector_type: str) -> None:
+def _assert_projector_loaded(incompatible_keys: LoadStateDictResult, projector_type: str) -> None:
     """Fail loudly when a checkpoint's projector doesn't match the built one.
 
     `save_pretrained` serializes `projector.*` (plus the language model when
@@ -494,9 +337,6 @@ def _log_linear_attention_backends(level: int = logging.WARNING) -> None:
         )
     else:
         logger.info("Linear-attention fast path: causal-conv1d + flash-linear-attention packages.")
-
-
-_StateDictT = TypeVar("_StateDictT", bound=dict[str, Any])
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-call]
@@ -862,7 +702,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # `encoder_dtype` overrides the stack dtype when the encoder has
         # trainable blocks; it must be fp32 for Adam's step to survive
         # rounding. See ASRConfig.encoder_dtype for the arithmetic.
-        encoder = _module_to_dtype(
+        encoder = module_to_dtype(
             encoder, _resolve_dtype(getattr(config, "encoder_dtype", None), dtype)
         )
         if getattr(config, "freeze_audio_encoder", True):
@@ -908,37 +748,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
     @classmethod
     def _load_language_model(cls, config: ASRConfig, dtype: torch.dtype) -> "GenerativeDecoder":
         """Load and freeze the language model."""
-        attn_implementation = resolve_attn_implementation(
-            config.attn_implementation, config.text_model_id
-        )
-
-        # FlashAttention only has kernels for head_dim <= 256, and it fails at
-        # the first forward rather than at load. Gemma 4 E2B trips this: 7 of
-        # its 35 layers use head_dim=512 (the other 28 use 256), so FA2 can
-        # never run this architecture regardless of flash-attn version. Detect
-        # it from the config and fall back instead of dying a step into
-        # training.
-        if attn_implementation == "flash_attention_2":
-            probe = cast(
-                PretrainedConfig,
-                AutoConfig.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                    config.text_model_id, trust_remote_code=True
-                ),
-            )
-            text_probe = text_config_of(probe) if hasattr(probe, "get_text_config") else probe
-            head_dim = _max_attention_head_dim(text_probe)
-            if head_dim is not None and head_dim > FLASH_ATTENTION_MAX_HEAD_DIM:
-                logger.warning(
-                    "%s has max head_dim=%d, above FlashAttention's limit of %d; "
-                    "using sdpa for the decoder.",
-                    config.text_model_id,
-                    head_dim,
-                    FLASH_ATTENTION_MAX_HEAD_DIM,
-                )
-                attn_implementation = "sdpa"
-
         decoder_kwargs: DecoderLoadKwargs = {
-            "attn_implementation": attn_implementation,
+            "attn_implementation": resolve_decoder_attn_implementation(
+                config.attn_implementation, config.text_model_id
+            ),
             "trust_remote_code": True,
             "low_cpu_mem_usage": True,
             "dtype": dtype,
@@ -994,7 +807,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # FA2 "current dype is fp32" warning when from_pretrained's dtype kwarg
         # isn't fully propagated to every submodule.
         # `to` returns the module itself, so the cast happens in place.
-        _module_to_dtype(decoder, dtype)
+        module_to_dtype(decoder, dtype)
         decoder.config.use_cache = getattr(config, "use_cache", True)
         if getattr(config, "freeze_language_model", True):
             decoder.requires_grad_(False)
@@ -1246,7 +1059,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # trim/strip the template applies to assistant content.
         sentinel = "⁣turnendprobe⁣"
         try:
-            rendered = _apply_chat_template(
+            rendered = apply_chat_template(
                 self.tokenizer,
                 [
                     {"role": "user", "content": "x"},
@@ -1441,8 +1254,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
     @overload
     def state_dict(
-        self, *, destination: _StateDictT, prefix: str = ..., keep_vars: bool = ...
-    ) -> _StateDictT: ...
+        self, *, destination: StateDictT, prefix: str = ..., keep_vars: bool = ...
+    ) -> StateDictT: ...
 
     @overload
     def state_dict(self, *, prefix: str = ..., keep_vars: bool = ...) -> dict[str, Any]: ...
@@ -1966,7 +1779,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             user_content += " " + self.TRANSCRIBE_PROMPT
         messages.append({"role": "user", "content": user_content})
 
-        chat_result = _apply_chat_template(
+        chat_result = apply_chat_template(
             self.tokenizer,
             messages,
             tokenize=True,
@@ -2027,7 +1840,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # zero-fills the difference. Silent, and it scales with how ragged the
         # batch is, so batch-1 eval never sees it.
         if input_ids is None:
-            rows = [self._render_audio_prompt(int(n)) for n in _int_list(token_counts)]
+            rows = [self._render_audio_prompt(int(n)) for n in int_list(token_counts)]
             input_ids, attention_mask = self._left_pad_prompt_rows(rows, device)
 
         # Get text embeddings and replace audio tokens with audio embeddings

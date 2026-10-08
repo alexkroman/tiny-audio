@@ -1,9 +1,7 @@
 """Tests for resolving the inference prompt a checkpoint is saved with."""
 
-from scripts.train import (
-    TRANSCRIBE_PROMPT_PUNCT,
-    _resolve_transcribe_prompt,
-)
+from scripts.train import _resolve_transcribe_prompt
+from scripts.train_collator import TRANSCRIBE_PROMPT_PUNCT
 
 
 class TestResolveTranscribePrompt:

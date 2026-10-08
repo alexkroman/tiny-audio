@@ -24,15 +24,23 @@ import subprocess
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Protocol
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
-from huggingface_hub import dataset_info, get_safetensors_metadata, model_info
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
 from tenacity import RetryError, retry, retry_if_result, stop_after_delay, wait_fixed
 
 from scripts.deploy import gpu_catalog
+from scripts.deploy.hub_sizes import (
+    NON_LM_TOWER_PREFIXES,
+    ConfigLoader,
+    hidden_dim,
+    lora_trainable_params,
+    repo_weight_bytes,
+    safetensors_params,
+    vocab_table_params,
+)
 from scripts.train_config import register_configs
 from scripts.utils import get_project_root
 
@@ -131,144 +139,6 @@ class Plan:
     disk: dict[str, float] = field(default_factory=dict[str, float])
 
 
-class _HubConfig(Protocol):
-    def get_text_config(self) -> object: ...
-
-
-class _ConfigLoader(Protocol):
-    def from_pretrained(self, pretrained_model_name_or_path: str, /) -> _HubConfig: ...
-
-
-def _safetensors_params(repo_id: str, exclude_prefixes: tuple[str, ...] = ()) -> tuple[int, str]:
-    """Exact parameter count from the safetensors header (no weight download).
-
-    `exclude_prefixes` drops towers that live in the checkpoint but that the
-    loader never instantiates. Pass `_NON_LM_TOWER_PREFIXES` for a decoder:
-    `meta.parameter_count` is a whole-repo total, so without it Qwen3.5-2B is
-    charged 2.2741B where AutoModelForCausalLM builds 1.8818B -- the 0.3314B
-    `visual.` tower and the 0.0608B `mtp.` head are counted but never loaded.
-    That 0.3922B overstatement propagated into weights, gradients and
-    optimizer state, i.e. it was charged four times over.
-
-    Do NOT pass it for an audio encoder: `audio_tower.` is one of the
-    prefixes, and for a checkpoint that IS the audio tower that would zero out
-    the thing being measured.
-    """
-    meta = get_safetensors_metadata(repo_id)
-    counts: dict[str, int]
-    if not exclude_prefixes:
-        counts = dict(meta.parameter_count.items())
-    else:
-        # parameter_count is pre-aggregated by dtype, so filtering by name
-        # means re-deriving it from the per-tensor headers.
-        counts = {}
-        for f in meta.files_metadata.values():
-            for name, info in f.tensors.items():
-                if any(name.startswith(p) or f".{p}" in name for p in exclude_prefixes):
-                    continue
-                numel = 1
-                for dim in info.shape:
-                    numel *= dim
-                counts[info.dtype] = counts.get(info.dtype, 0) + numel
-    # Ignore integer buffers (rotary caches, position ids); they aren't params.
-    total = sum(n for dtype, n in counts.items() if not dtype.startswith("I"))
-    dominant = max(counts.items(), key=lambda kv: kv[1])[0] if counts else "?"
-    return total, dominant
-
-
-# Towers that live in a multimodal checkpoint but that AutoModelForCausalLM
-# does not load, so neither LoRA nor the memory model ever sees them.
-# Qwen3.5-2B ships an `mtp.` multi-token-prediction head (0.0608B) beside a
-# `visual.` tower (0.3314B); counting the former added a phantom 25th layer
-# and overstated a rank-64 estimate by 2.55M, and counting both overstated the
-# decoder's parameter count by 0.3922B.
-#
-# Applies to the DECODER only -- `audio_tower.` is in the list, so filtering an
-# audio-encoder repo with it would discard the encoder itself.
-_NON_LM_TOWER_PREFIXES = ("mtp.", "visual.", "audio_tower.", "vision_tower.")
-
-
-def _lora_trainable_params(
-    repo_id: str, rank: int, target_modules: str | Sequence[str] | None
-) -> int:
-    """Exact LoRA parameter count from safetensors headers (no weight download).
-
-    A rank-r adapter on a linear of shape (out, in) adds r*(in+out). Reading the
-    real shapes beats deriving them from the config: Qwen3.5 is hybrid, so its
-    24 layers carry five differently-shaped linear-attention projections plus
-    MLP, and only 6 of them have q/k/v/o at all.
-
-    `target_modules` follows peft: the string "all-linear" means every 2-D
-    weight in the transformer body except the embedding and the output head;
-    a list matches against the module-name suffix.
-
-    Validated against peft 0.20.0 on the real checkpoint: r=64 / "all-linear"
-    on Qwen3.5-2B gives 67.28M over 186 matrices here and 67.28M there.
-    """
-    meta = get_safetensors_metadata(repo_id)
-    shapes = {
-        name: info.shape for f in meta.files_metadata.values() for name, info in f.tensors.items()
-    }
-    all_linear = isinstance(target_modules, str) and target_modules == "all-linear"
-    names = list(target_modules or []) if not all_linear else []
-
-    total = 0
-    for name, shape in shapes.items():
-        if len(shape) != 2 or ".layers." not in name:
-            continue
-        if any(name.startswith(p) or f".{p}" in name for p in _NON_LM_TOWER_PREFIXES):
-            continue
-        # lm_head and the embedding table are never adapted by "all-linear",
-        # and adapting lm_head would be wrong here anyway -- it is tied to the
-        # frozen embed_tokens.
-        if "embed" in name or "lm_head" in name:
-            continue
-        if not all_linear and not any(f".{n}.weight" == name[-len(n) - 8 :] for n in names):
-            continue
-        out_f, in_f = shape
-        total += rank * (in_f + out_f)
-    return total
-
-
-def _vocab_table_params(text_cfg: object) -> dict[str, int]:
-    """Per-token lookup-table sizes for a decoder, computed from its config.
-
-    These can be frozen independently of the rest of the decoder
-    (`freeze_text_embed_tokens`), and on Gemma 4 they are the majority of the
-    checkpoint -- so counting them as trainable overstates AdamW state badly.
-    Empty entries are omitted, so decoders without a per-layer table simply
-    don't report one.
-    """
-    tables: dict[str, int] = {}
-    vocab = int(getattr(text_cfg, "vocab_size", 0) or 0)
-    hidden = int(getattr(text_cfg, "hidden_size", 0) or 0)
-    if vocab and hidden:
-        tables["embed_tokens"] = vocab * hidden
-    ple_vocab = int(getattr(text_cfg, "vocab_size_per_layer_input", 0) or 0)
-    ple_hidden = int(getattr(text_cfg, "hidden_size_per_layer_input", 0) or 0)
-    layers = int(getattr(text_cfg, "num_hidden_layers", 0) or 0)
-    if ple_vocab and ple_hidden and layers:
-        tables["embed_tokens_per_layer"] = ple_vocab * layers * ple_hidden
-    return tables
-
-
-def _repo_weight_bytes(repo_id: str, repo_type: str = "model", name: str | None = None) -> int:
-    """Total bytes the Hub will hand us for a repo, optionally one config only.
-
-    Multi-config dataset repos (libriheavy ships small/medium/large) would be
-    wildly overcounted by summing every shard, so when a config `name` is given
-    we keep only files whose path mentions it. Falls back to the full repo when
-    nothing matches, since a silent zero would be worse than an overestimate.
-    """
-    info = (model_info if repo_type == "model" else dataset_info)(repo_id, files_metadata=True)
-    siblings = [s for s in (info.siblings or []) if (s.size or 0) > 0]
-    if name:
-        scoped = [s for s in siblings if name.lower() in s.rfilename.lower()]
-        if scoped:
-            siblings = scoped
-    return sum(s.size or 0 for s in siblings)
-
-
 def _load_cfg(experiment: str, overrides: list[str]) -> DictConfig:
     # Registers the `base_config` structured-config schema the experiment
     # configs compose against (idempotent; train_config also does it on import).
@@ -289,19 +159,11 @@ def _get(node: DictConfig, key: str, default: Any) -> Any:
     return default if val is None else val
 
 
-def _hidden(cfg_obj: object) -> int | None:
-    for attr in ("hidden_size", "d_model"):
-        if getattr(cfg_obj, attr, None):
-            dim: int = getattr(cfg_obj, attr)
-            return dim
-    return None
-
-
 def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # Imported lazily: transformers + tiny_audio cost several seconds, which
     # every `ta runpod` command would otherwise pay because runpod.py imports
     # this module.
-    auto_config: _ConfigLoader = importlib.import_module("transformers").AutoConfig
+    auto_config: ConfigLoader = importlib.import_module("transformers").AutoConfig
     asr_config_cls: type[ASRConfig] = importlib.import_module("tiny_audio.asr_config").ASRConfig
     projector_classes: dict[str, type[MLPAudioProjector]] = importlib.import_module(
         "tiny_audio.projectors"
@@ -318,7 +180,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     text_id = str(cfg.model.text_model_id)
 
     # ---- encoder -----------------------------------------------------------
-    enc_params, enc_dtype = _safetensors_params(audio_id)
+    enc_params, enc_dtype = safetensors_params(audio_id)
     enc_cfg_probe = auto_config.from_pretrained(audio_id)
     enc_probe_inner = getattr(enc_cfg_probe, "encoder_config", None) or enc_cfg_probe
     enc_depth = int(getattr(enc_probe_inner, "num_hidden_layers", 0) or 0)
@@ -345,7 +207,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         Component(
             f"encoder ({audio_id})",
             enc_params - enc_trainable_params,
-            _repo_weight_bytes(audio_id),
+            repo_weight_bytes(audio_id),
             False,
             f"checkpoint {enc_dtype}",
         )
@@ -357,7 +219,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         )
 
     # ---- decoder -----------------------------------------------------------
-    dec_params, dec_dtype = _safetensors_params(text_id, _NON_LM_TOWER_PREFIXES)
+    dec_params, dec_dtype = safetensors_params(text_id, NON_LM_TOWER_PREFIXES)
     dec_trainable = not _get(train, "freeze_language_model", True)
     dec_cfg = auto_config.from_pretrained(text_id)
     text_cfg = dec_cfg.get_text_config() if hasattr(dec_cfg, "get_text_config") else dec_cfg
@@ -367,7 +229,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # state for parameters that never see the optimizer on this recipe.
     frozen_tables: dict[str, int] = {}
     if dec_trainable:
-        tables = _vocab_table_params(text_cfg)
+        tables = vocab_table_params(text_cfg)
         if _get(train, "freeze_text_embed_tokens", False) and tables.get("embed_tokens"):
             frozen_tables["embed_tokens"] = tables["embed_tokens"]
     frozen_table_params = sum(frozen_tables.values())
@@ -376,7 +238,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         Component(
             f"decoder ({text_id})",
             dec_params - frozen_table_params,
-            _repo_weight_bytes(text_id),
+            repo_weight_bytes(text_id),
             dec_trainable,
             f"checkpoint {dec_dtype}",
         )
@@ -387,7 +249,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # AdamW state look 6x smaller than it is. The adapters are freshly
     # initialised, so they add optimizer state but nothing to download.
     if _get(cfg.model, "use_lora", False):
-        lora_params = _lora_trainable_params(
+        lora_params = lora_trainable_params(
             text_id,
             int(_get(cfg.model, "lora_rank", 8)),
             cfg.model.get("lora_target_modules") or ["q_proj", "v_proj"],
@@ -419,8 +281,8 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # ---- projector ---------------------------------------------------------
     enc_cfg = auto_config.from_pretrained(audio_id)
     enc_inner = getattr(enc_cfg, "encoder_config", None) or enc_cfg
-    encoder_dim = _hidden(enc_inner)
-    llm_dim = _hidden(text_cfg)
+    encoder_dim = hidden_dim(enc_inner)
+    llm_dim = hidden_dim(text_cfg)
     proj_params = 0
     if encoder_dim and llm_dim:
         shim = asr_config_cls(
@@ -448,7 +310,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         if not entry.get("train_splits") and not entry.get("eval_splits"):
             continue
         try:
-            size = _repo_weight_bytes(path, "dataset", str(name) if name else None)
+            size = repo_weight_bytes(path, "dataset", str(name) if name else None)
         except Exception as exc:  # gated repos, renames, network
             plan.warnings.append(f"dataset {path}: size unknown ({type(exc).__name__})")
             continue
@@ -604,7 +466,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             "weights and gradients at projector_dtype even though the decoder "
             "trains at model_dtype. Expect real usage at or below the figure "
             "above. (Multimodal towers the loader discards -- visual./mtp./"
-            "audio_tower. -- are no longer counted; see _NON_LM_TOWER_PREFIXES.)"
+            "audio_tower. -- are no longer counted; see NON_LM_TOWER_PREFIXES.)"
         )
 
     if not dec_trainable and trainable_params and not ckpt:

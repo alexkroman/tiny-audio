@@ -15,13 +15,8 @@ import torch
 from conftest import stub
 from transformers import BatchEncoding
 
-from tiny_audio.asr_modeling import (
-    ASRModel,
-    _assert_audio_token_counts,
-    _gather_audio_embeds,
-    _has_sliding_window_attention,
-    resolve_attn_implementation,
-)
+from tiny_audio.asr_attention import _has_sliding_window_attention, resolve_attn_implementation
+from tiny_audio.asr_modeling import ASRModel, _assert_audio_token_counts, _gather_audio_embeds
 
 
 class TestResolveAttnImplementation:
@@ -65,7 +60,7 @@ class TestResolveAttnImplementation:
         def no_window(_: str) -> bool:
             return False
 
-        monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", no_window)
+        monkeypatch.setattr("tiny_audio.asr_attention._has_sliding_window_attention", no_window)
         assert resolve_attn_implementation(requested, "some/model") == requested
 
     @pytest.mark.parametrize("requested", [None, "sdpa"])
@@ -78,7 +73,7 @@ class TestResolveAttnImplementation:
         def window(_: str) -> bool:
             return True
 
-        monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", window)
+        monkeypatch.setattr("tiny_audio.asr_attention._has_sliding_window_attention", window)
         assert resolve_attn_implementation(requested, "some/model") == "eager"
 
     def test_mps_fa2_still_degrades_to_sdpa(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,7 +83,7 @@ class TestResolveAttnImplementation:
         def no_window(_: str) -> bool:
             return False
 
-        monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", no_window)
+        monkeypatch.setattr("tiny_audio.asr_attention._has_sliding_window_attention", no_window)
         assert resolve_attn_implementation("flash_attention_2", "some/model") == "sdpa"
 
 
@@ -109,7 +104,7 @@ class TestHasSlidingWindowAttention:
             return config
 
         monkeypatch.setattr(
-            "tiny_audio.asr_modeling.AutoConfig.from_pretrained",
+            "tiny_audio.asr_attention.AutoConfig.from_pretrained",
             from_pretrained,
         )
 
@@ -149,7 +144,7 @@ class TestHasSlidingWindowAttention:
             msg = "no network"
             raise OSError(msg)
 
-        monkeypatch.setattr("tiny_audio.asr_modeling.AutoConfig.from_pretrained", boom)
+        monkeypatch.setattr("tiny_audio.asr_attention.AutoConfig.from_pretrained", boom)
         assert _has_sliding_window_attention("missing/model") is True
 
 

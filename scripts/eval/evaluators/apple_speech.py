@@ -1,5 +1,7 @@
 """Apple SFSpeechRecognizer evaluator (on-device, macOS only)."""
 
+from __future__ import annotations
+
 import contextlib
 import os
 import shutil
@@ -108,7 +110,7 @@ class AppleSpeechEvaluator(Evaluator):
             )
             raise RuntimeError(msg)
 
-    def _build_recognizer(self, locale: str) -> "SFSpeechRecognizer":
+    def _build_recognizer(self, locale: str) -> SFSpeechRecognizer:
         ns_locale = self._apple.foundation.NSLocale.alloc().initWithLocaleIdentifier_(locale)
         recognizer: SFSpeechRecognizer | None = (
             self._apple.speech.SFSpeechRecognizer.alloc().initWithLocale_(ns_locale)
@@ -140,9 +142,7 @@ class AppleSpeechEvaluator(Evaluator):
             text_box = [""]
             error_box: list[str | None] = [None]
 
-            def handler(
-                result: "SFSpeechRecognitionResult | None", error: "NSError | None"
-            ) -> None:
+            def handler(result: SFSpeechRecognitionResult | None, error: NSError | None) -> None:
                 if error is not None:
                     error_box[0] = str(error)
                     done_event.set()
