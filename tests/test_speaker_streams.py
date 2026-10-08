@@ -253,6 +253,35 @@ class TestStreamsPipeline:
         pipeline(self.speech(60.0), return_speakers=True)
         assert [len(a) for a in asr_inputs] == [SR, SR]
 
+    def test_turn_longer_than_a_chunk_is_split_and_offset(
+        self,
+        pipeline: ASRPipeline,
+        asr_inputs: list[npt.NDArray[np.float32]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A 30 s turn becomes two ASR calls; the second piece's words land at absolute times."""
+        audio = self.speech(40.0)
+        # The quietest 100 ms inside the turn's 8-18 s cut window (10-20 s absolute):
+        # chunk_bounds cuts mid-frame, at 14.05 s.
+        audio["array"][14 * SR : int(14.2 * SR)] = 0.0
+        self.script = ["a1", "a2", "b1"]
+        self.stub_aligner(monkeypatch, {"a1": (1.0, 1.4), "a2": (5.0, 5.4), "b1": (0.5, 0.9)})
+        self.stub_activity(
+            monkeypatch, activity([(0, 2.0, 32.0, 0.9), (1, 34.0, 36.0, 0.9)], seconds=40)
+        )
+
+        result = pipeline(audio, return_speakers=True)
+
+        assert [len(a) for a in asr_inputs] == [int(12.05 * SR), int(17.95 * SR), 2 * SR]
+        assert [(w["word"], w["speaker"]) for w in result["words"]] == [
+            ("a1", "SPEAKER_0"),
+            ("a2", "SPEAKER_0"),
+            ("b1", "SPEAKER_1"),
+        ]
+        # a2 is 5.0 s into the second piece, which starts at the 14.05 s cut.
+        assert [w["start"] for w in result["words"]] == pytest.approx([3.0, 19.05, 34.5])
+        assert result["text"] == "a1 a2 b1"
+
     def test_words_inside_masked_audio_are_dropped(
         self,
         pipeline: ASRPipeline,
