@@ -31,6 +31,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import html
 import sys
+from itertools import groupby
+from operator import itemgetter
 from pathlib import Path
 from typing import Annotated, Any, cast
 
@@ -108,12 +110,9 @@ SPEAKER_COLORS = [
 def speaker_turns(words):
     """Consecutive words of one speaker as turns: (speaker, start, end, text)."""
     turns: list[tuple[str, float, float, str]] = []
-    for w in words or []:
-        if turns and turns[-1][0] == w["speaker"]:
-            speaker, start, _, text = turns[-1]
-            turns[-1] = (speaker, start, w["end"], f"{text} {w['word']}")
-        else:
-            turns.append((w["speaker"], w["start"], w["end"], w["word"]))
+    for speaker, group in groupby(words or [], key=itemgetter("speaker")):
+        run = list(group)
+        turns.append((speaker, run[0]["start"], run[-1]["end"], " ".join(w["word"] for w in run)))
     return turns
 
 

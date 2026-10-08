@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -122,8 +123,7 @@ class QwenForcedAligner:
         if not todo:  # nothing to time: don't load the model
             return results
         model, processor = cls.get_instance()
-        for b in range(0, len(todo), cls.BATCH_SIZE):
-            batch = todo[b : b + cls.BATCH_SIZE]
+        for batch in itertools.batched(todo, cls.BATCH_SIZE):
             features, word_lists = processor.prepare_forced_aligner_inputs(
                 [audio for _, audio, _ in batch],
                 [" ".join(kept) for _, _, kept in batch],

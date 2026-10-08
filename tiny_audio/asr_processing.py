@@ -71,7 +71,7 @@ def prepend_lead_in(audio, sampling_rate: int, seconds: float):
     if pad <= 0:
         return audio
     arr = np.asarray(audio)
-    return np.concatenate([np.zeros(pad, dtype=arr.dtype), arr])
+    return np.pad(arr, (pad, 0))
 
 
 class ASRProcessor(ProcessorMixin):
