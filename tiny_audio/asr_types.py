@@ -1,19 +1,17 @@
-"""Static types shared by the asr_* modules: loader kwargs, protocols, typed wrappers.
+"""Static types shared by the asr_* modules: audio aliases, loader kwargs, protocols.
 
 Typing scaffolding with no behaviour of its own: the `TypedDict`s describe
 the keyword arguments ASRModel forwards to `from_pretrained` / `cached_file`,
-the protocol classes describe the third-party surfaces the asr_* modules call,
-and the small wrappers at the bottom only restate a library call with the
-types its own annotations leave out.
+and the protocol classes describe surfaces with several implementations (or
+test fakes) and no common library base that declares them.
 """
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, TypeVar
 
 import numpy.typing as npt
 import torch
-import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import BatchFeature, PreTrainedModel
 from transformers.generation.utils import GenerateOutput, GenerationMixin
 
 # One waveform (array, tensor or list of samples), or a batch of them.
@@ -66,18 +64,6 @@ class HubFileKwargs(TypedDict, total=False):
     revision: str
 
 
-class PerLayerInputsTextModel(Protocol):
-    """A Gemma 4 style text model, which builds its per-layer inputs (PLE) itself."""
-
-    config: PretrainedConfig
-
-    def get_per_layer_inputs(
-        self, input_ids: torch.Tensor, inputs_embeds: torch.Tensor | None
-    ) -> torch.Tensor:
-        """Per-layer embeddings for `input_ids` (or recovered from `inputs_embeds`)."""
-        ...
-
-
 class AudioFeatureExtractor(Protocol):
     """A concrete audio feature extractor's `__call__` (e.g. Whisper's).
 
@@ -120,25 +106,3 @@ class LoadStateDictResult(Protocol):
     def unexpected_keys(self) -> Sequence[str]:
         """State-dict keys the model has no slot for."""
         ...
-
-
-def int_list(values: torch.Tensor) -> list[int]:
-    """`values.tolist()` for an integer tensor, typed as the ints it holds."""
-    return cast(list[int], values.tolist())
-
-
-def apply_chat_template(
-    tokenizer: PreTrainedTokenizerBase, conversation: list[dict[str, str]], **kwargs: Any
-) -> object:
-    """`tokenizer.apply_chat_template`; callers narrow the result to what they asked for."""
-    return tokenizer.apply_chat_template(conversation, **kwargs)
-
-
-def module_to_dtype(module: nn.Module, dtype: torch.dtype) -> nn.Module:
-    """Return `module.to(dtype=dtype)`, typed through `nn.Module.to`.
-
-    PreTrainedModel declares `to` via functools.wraps, which type checkers
-    cannot bind to an instance. The call still dispatches to the module's own
-    `to` (PreTrainedModel's included), so this is only a typing boundary.
-    """
-    return module.to(dtype=dtype)

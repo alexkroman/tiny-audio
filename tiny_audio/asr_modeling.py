@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
 
     from .asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
-    from .asr_config import ASRConfig, compute_encoder_output_length, text_config_of
+    from .asr_config import ASRConfig, compute_encoder_output_length
     from .asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
     from .asr_processing import ASRProcessor, left_pad_prompt_rows
     from .asr_types import (
@@ -55,11 +55,7 @@ if TYPE_CHECKING:
         LoadKwargs,
         LoadStateDictResult,
         OutputLengthProjector,
-        PerLayerInputsTextModel,
         StateDictT,
-        apply_chat_template,
-        int_list,
-        module_to_dtype,
     )
     from .projectors import PROJECTOR_CLASSES, MLPAudioProjector
 
@@ -69,41 +65,17 @@ if TYPE_CHECKING:
 else:
     try:
         from .asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
-        from .asr_config import (
-            ASRConfig,
-            compute_encoder_output_length,
-            text_config_of,
-        )
+        from .asr_config import ASRConfig, compute_encoder_output_length
         from .asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
         from .asr_processing import ASRProcessor, left_pad_prompt_rows
-        from .asr_types import (
-            LoadStateDictResult,
-            OutputLengthProjector,
-            PerLayerInputsTextModel,
-            StateDictT,
-            apply_chat_template,
-            int_list,
-            module_to_dtype,
-        )
+        from .asr_types import LoadStateDictResult, OutputLengthProjector, StateDictT
         from .projectors import PROJECTOR_CLASSES
     except ImportError:  # flat layout on the Hub: sibling modules, no package
         from asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
-        from asr_config import (
-            ASRConfig,
-            compute_encoder_output_length,
-            text_config_of,
-        )
+        from asr_config import ASRConfig, compute_encoder_output_length
         from asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
         from asr_processing import ASRProcessor, left_pad_prompt_rows
-        from asr_types import (
-            LoadStateDictResult,
-            OutputLengthProjector,
-            PerLayerInputsTextModel,
-            StateDictT,
-            apply_chat_template,
-            int_list,
-            module_to_dtype,
-        )
+        from asr_types import LoadStateDictResult, OutputLengthProjector, StateDictT
         from projectors import PROJECTOR_CLASSES
 
     # Architectures newer than the transformers floor in pyproject.toml. Kept
@@ -202,11 +174,11 @@ def _assert_audio_token_counts(
         actual = projector.get_output_length(encoder_valid_lengths)
         actual = torch.as_tensor(actual, device=token_counts.device).to(torch.long).reshape(-1)
         if actual.shape == token_counts.shape and not torch.equal(actual, token_counts):
-            rows = int_list((actual != token_counts).nonzero().flatten()[:8])
+            rows = (actual != token_counts).nonzero().flatten()[:8].tolist()
             msg = (
                 "Audio token count mismatch between prompt and projector. Rows "
-                f"{rows}: prompt expects {int_list(token_counts[rows])}, encoder+projector "
-                f"produced {int_list(actual[rows])}. A wrong `encoder_conv_layers` for this "
+                f"{rows}: prompt expects {token_counts[rows].tolist()}, encoder+projector "
+                f"produced {actual[rows].tolist()}. A wrong `encoder_conv_layers` for this "
                 "encoder is the usual cause."
             )
             raise ValueError(msg)
@@ -582,9 +554,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
     def _create_feature_extractor(self, config: ASRConfig) -> SequenceFeatureExtractor:
         """Create the appropriate feature extractor for the audio encoder."""
-        feature_extractor = cast(
-            SequenceFeatureExtractor,
-            AutoFeatureExtractor.from_pretrained(config.audio_model_id),  # type: ignore[no-untyped-call]
+        feature_extractor: SequenceFeatureExtractor = AutoFeatureExtractor.from_pretrained(
+            config.audio_model_id
         )
         # Whisper's encoder requires a fixed 3000 mel frames (30s) and the
         # feature extractor pads to that by default — leave it alone. Other
@@ -615,7 +586,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         encoder: nn.Module
         if "whisper" in config.audio_model_id.lower():
             full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
-            encoder = cast(nn.Module, full_model.encoder)
+            encoder = full_model.encoder
             del full_model
         elif "granite-speech" in config.audio_model_id.lower():
             # Granite Speech 5.0 TurboCTC is encoder-only (Conformer blocks +
@@ -653,11 +624,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             # flat checkpoints hung them off the top-level model. Resolve the
             # owner instead of assuming, so neither layout AttributeErrors
             # at load.
-            glm_model = cast(
-                nn.Module,
-                AutoModelForSeq2SeqLM.from_pretrained(
-                    config.audio_model_id, trust_remote_code=True, **encoder_kwargs
-                ),
+            glm_model = AutoModelForSeq2SeqLM.from_pretrained(
+                config.audio_model_id, trust_remote_code=True, **encoder_kwargs
             )
             inner = getattr(glm_model, "model", None)
             holder: Any = (
@@ -680,10 +648,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             holder.multi_modal_projector = None
             del glm_model
         else:
-            encoder = cast(
-                nn.Module,
-                AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs),
-            )
+            encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
         # Explicit cast: from_pretrained's `dtype=` kwarg is honored
         # inconsistently across loader paths (especially trust_remote_code
@@ -694,9 +659,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # `encoder_dtype` overrides the stack dtype when the encoder has
         # trainable blocks; it must be fp32 for Adam's step to survive
         # rounding. See ASRConfig.encoder_dtype for the arithmetic.
-        encoder = module_to_dtype(
-            encoder, _resolve_dtype(getattr(config, "encoder_dtype", None), dtype)
-        )
+        encoder_dtype = _resolve_dtype(getattr(config, "encoder_dtype", None), dtype)
+        encoder = encoder.to(
+            dtype=encoder_dtype
+        )  # pyright: ignore[reportCallIssue]  # wraps'd `to`
         if getattr(config, "freeze_audio_encoder", True):
             encoder.requires_grad_(False)
             encoder.train(False)  # equivalent to .eval(); avoids a security hook false-positive
@@ -797,7 +763,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # FA2 "current dype is fp32" warning when from_pretrained's dtype kwarg
         # isn't fully propagated to every submodule.
         # `to` returns the module itself, so the cast happens in place.
-        module_to_dtype(decoder, dtype)
+        decoder.to(dtype=dtype)  # pyright: ignore[reportCallIssue]  # `to` is functools.wraps'd
         decoder.config.use_cache = getattr(config, "use_cache", True)
         if getattr(config, "freeze_language_model", True):
             decoder.requires_grad_(False)
@@ -839,7 +805,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             raise ImportError(msg)
 
         # Only reached for gemma-4 checkpoints, whose text config is Gemma4TextConfig.
-        text_config = cast(Gemma4TextConfig, text_config_of(loaded.config))
+        text_config = cast(Gemma4TextConfig, loaded.config.get_text_config())
         with torch.device("meta"):
             shell = Gemma4ForCausalLM(text_config)
 
@@ -891,7 +857,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             # Composite configs (Gemma 4) keep hidden_size on `text_config`;
             # get_text_config() returns self for plain decoders like Qwen3.
             if hasattr(dec_cfg, "get_text_config"):
-                dec_cfg = text_config_of(dec_cfg)
+                dec_cfg = dec_cfg.get_text_config()
             config.llm_dim = getattr(dec_cfg, "hidden_size", None) or getattr(
                 dec_cfg, "d_model", None
             )
@@ -944,9 +910,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
     def _init_tokenizer(self, config: ASRConfig) -> None:
         """Initialize tokenizer with audio token."""
-        self.tokenizer = cast(
-            PreTrainedTokenizerBase,
-            AutoTokenizer.from_pretrained(config.text_model_id, trust_remote_code=True),
+        self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
+            config.text_model_id, trust_remote_code=True
         )
 
         # Set pad token. Prefer a dedicated pad token if the tokenizer has one
@@ -967,9 +932,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # `unk_token_id` is the sentinel convert_tokens_to_ids returns for an
         # unknown token, so it means "not in vocab" rather than a usable id.
         self.audio_token = getattr(config, "audio_token", None) or "<audio>"
-        existing_id = cast(
-            "int | list[int] | None", self.tokenizer.convert_tokens_to_ids(self.audio_token)
-        )
+        existing_id = self.tokenizer.convert_tokens_to_ids(self.audio_token)
         already_in_vocab = existing_id is not None and existing_id != self.tokenizer.unk_token_id
 
         if not already_in_vocab:
@@ -1047,8 +1010,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # trim/strip the template applies to assistant content.
         sentinel = "⁣turnendprobe⁣"
         try:
-            rendered = apply_chat_template(
-                self.tokenizer,
+            rendered = self.tokenizer.apply_chat_template(
                 [
                     {"role": "user", "content": "x"},
                     {"role": "assistant", "content": sentinel},
@@ -1221,10 +1183,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
     def get_output_embeddings(self) -> nn.Module | None:
         """Return the decoder's LM head (None for a decoder without one)."""
-        return cast(
-            "nn.Module | None",
-            self.language_model.get_output_embeddings(),  # type: ignore[no-untyped-call]
-        )
+        return self.language_model.get_output_embeddings()  # type: ignore[no-untyped-call]
 
     def set_output_embeddings(self, new_embeddings: nn.Module) -> None:
         """Replace the decoder's LM head."""
@@ -1316,7 +1275,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         destination.update({f"{prefix}{k}": v for k, v in sd.items()})
         return destination
 
-    def _ple_text_model(self) -> PerLayerInputsTextModel | None:
+    def _ple_text_model(self) -> "Gemma4TextModel | None":
         """Locate the submodule owning `get_per_layer_inputs`, or None.
 
         Only Gemma 4 style decoders have one. The attribute sits on
@@ -1331,7 +1290,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         for candidate in candidates:
             if candidate is not None and hasattr(candidate, "get_per_layer_inputs"):
                 # Checked just above; only Gemma 4 text models define it.
-                return cast("PerLayerInputsTextModel", candidate)
+                return cast("Gemma4TextModel", candidate)
         return None
 
     def _per_layer_kwargs(self, input_ids: torch.Tensor | None) -> dict[str, torch.Tensor]:
@@ -1767,8 +1726,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             user_content += " " + self.TRANSCRIBE_PROMPT
         messages.append({"role": "user", "content": user_content})
 
-        chat_result = apply_chat_template(
-            self.tokenizer,
+        chat_result = self.tokenizer.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=True,
@@ -1778,7 +1736,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         if not isinstance(chat_result, BatchEncoding):
             msg = f"apply_chat_template returned {type(chat_result).__name__}, not BatchEncoding"
             raise TypeError(msg)
-        ids = cast(torch.Tensor, chat_result["input_ids"])
+        ids = chat_result["input_ids"]
         return (ids[0] if ids.dim() > 1 else ids).to(torch.long)
 
     def _left_pad_prompt_rows(
@@ -1828,7 +1786,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # zero-fills the difference. Silent, and it scales with how ragged the
         # batch is, so batch-1 eval never sees it.
         if input_ids is None:
-            rows = [self._render_audio_prompt(int(n)) for n in int_list(token_counts)]
+            rows = [self._render_audio_prompt(int(n)) for n in token_counts.tolist()]
             input_ids, attention_mask = self._left_pad_prompt_rows(rows, device)
 
         # Get text embeddings and replace audio tokens with audio embeddings
@@ -2023,7 +1981,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         in_think_block = False
         buffer = ""
 
-        for text in cast(Iterator[str], streamer):
+        for text in streamer:
             buffer += text
 
             # Check for think block start (in case model outputs think blocks)
@@ -2068,7 +2026,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # save, i.e. after the run had already spent real training time.
         lm_config = self.language_model.config
         if hasattr(lm_config, "get_text_config"):
-            lm_config = text_config_of(lm_config)
+            lm_config = lm_config.get_text_config()
         vocab_size = getattr(lm_config, "vocab_size", None)
         if vocab_size is not None:
             self.config.vocab_size = vocab_size

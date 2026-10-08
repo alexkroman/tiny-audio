@@ -8,7 +8,6 @@ import torch
 from transformers import AutoTokenizer, PreTrainedTokenizerBase, WhisperFeatureExtractor
 
 from scripts.train_collator import DataCollator
-from tiny_audio.asr_types import int_list
 
 
 class _TokenDecoder(Protocol):
@@ -96,8 +95,8 @@ class TestLabelMasking:
 
         batch = collator(samples)
 
-        labels = int_list(batch["labels"][0])
-        input_ids = int_list(batch["input_ids"][0])
+        labels = batch["labels"][0].tolist()
+        input_ids = batch["input_ids"][0].tolist()
 
         # Find non-masked positions (excluding padding)
         pad_id = tokenizer.pad_token_id
@@ -126,8 +125,8 @@ class TestLabelMasking:
 
         batch = collator(samples)
 
-        labels = int_list(batch["labels"][0])
-        input_ids = int_list(batch["input_ids"][0])
+        labels = batch["labels"][0].tolist()
+        input_ids = batch["input_ids"][0].tolist()
 
         im_end_id = _token_id(tokenizer, "<|im_end|>")
 
@@ -150,8 +149,8 @@ class TestLabelMasking:
 
         batch = collator(samples)
 
-        labels = int_list(batch["labels"][0])
-        input_ids = int_list(batch["input_ids"][0])
+        labels = batch["labels"][0].tolist()
+        input_ids = batch["input_ids"][0].tolist()
 
         # Decode full input to verify structure
         full_text = _decode(tokenizer, input_ids, skip_special_tokens=False)
@@ -176,8 +175,8 @@ class TestLabelMasking:
 
         batch = collator(samples)
 
-        labels = int_list(batch["labels"][0])
-        input_ids = int_list(batch["input_ids"][0])
+        labels = batch["labels"][0].tolist()
+        input_ids = batch["input_ids"][0].tolist()
 
         # For every unmasked position, label should equal input_id
         for i, (label, input_id) in enumerate(zip(labels, input_ids, strict=True)):

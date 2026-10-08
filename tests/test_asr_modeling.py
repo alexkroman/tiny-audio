@@ -35,7 +35,7 @@ from tiny_audio.asr_modeling import (
     _patch_gemma_decode_loop,
 )
 from tiny_audio.asr_processing import ASRProcessor
-from tiny_audio.asr_types import LoadStateDictResult, apply_chat_template
+from tiny_audio.asr_types import LoadStateDictResult
 from tiny_audio.projectors import MLPAudioProjector
 
 if TYPE_CHECKING:
@@ -620,8 +620,7 @@ class TestEosTokenResolution:
         sentinel = "⁣turnendprobe⁣"
         rendered = cast(
             str,
-            apply_chat_template(
-                tok,
+            tok.apply_chat_template(
                 [
                     {"role": "user", "content": "x"},
                     {"role": "assistant", "content": sentinel},
