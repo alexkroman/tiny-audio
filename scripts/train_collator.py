@@ -8,7 +8,7 @@ batch ASRModel.forward consumes.
 import logging
 import warnings
 from collections.abc import Sequence
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -22,7 +22,7 @@ from tiny_audio.asr_config import (
     ConvLayerSpec,
     compute_encoder_output_length,
 )
-from tiny_audio.asr_types import AudioFeatureExtractor
+from tiny_audio.asr_types import AudioFeatureExtractor, OutputLengthProjector
 
 # trl.experimental warns (TRLExperimentalWarning) the first time it is
 # imported; DataCollatorForChatML is the only thing used from it.
@@ -61,12 +61,6 @@ TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 TRANSCRIBE_PROMPT_PUNCT = "Transcribe the speech with proper punctuation and capitalization"
 
 
-class _OutputLengthProjector(Protocol):
-    """Maps encoder output lengths to audio-token counts."""
-
-    def get_output_length(self, input_length: torch.Tensor) -> torch.Tensor: ...
-
-
 ChatSample = dict[str, list[dict[str, str]]]
 
 
@@ -78,7 +72,7 @@ class DataCollator:
         tokenizer: PreTrainedTokenizerBase,
         feature_extractor: SequenceFeatureExtractor,
         sample_rate: int,
-        projector: _OutputLengthProjector | None = None,
+        projector: OutputLengthProjector | None = None,
         encoder_conv_layers: Sequence[ConvLayerSpec] | None = None,
         audio_token: str = "<audio>",
     ) -> None:

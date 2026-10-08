@@ -85,6 +85,8 @@ DEAD_CODE_COMMAND = [
     "vulture",
     "tiny_audio",
     "scripts",
+    # Protocol / type-stub parameter names; see the file's docstring.
+    "quality/vulture_whitelist.py",
     "--min-confidence",
     DEAD_CODE_MIN_CONFIDENCE,
 ]
