@@ -8,3 +8,4 @@ safetensors
 numpy
 librosa
 soundfile
+spaces
