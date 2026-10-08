@@ -1,6 +1,6 @@
 """Conventions every `ta` command follows, checked against the built Click tree.
 
-The rules (also documented in README's "CLI conventions"):
+The rules (also documented in CONTRIBUTING.md's "CLI conventions"):
 
 * every option declares an explicit `--long-name` and a help string;
 * a short flag (`-x`) means one thing across the whole CLI;
