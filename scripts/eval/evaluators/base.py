@@ -13,7 +13,7 @@ from rich.console import Console
 from scripts.eval.audio import TextNormalizer
 from scripts.eval.constants import ASSEMBLYAI_MODELS
 from scripts.eval.formatting import compute_formatting_metrics
-from scripts.eval.speaker_metrics import has_speakers, plain_text, speaker_metrics
+from scripts.eval.speaker_metrics import has_speakers, scoring_text, speaker_metrics
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
@@ -94,16 +94,6 @@ class EvalResult:
     )
 
 
-def _scoring_text(text: str) -> str:
-    """Text WER is computed on: speaker tokens (`<SPK_n>`) dropped, if present.
-
-    Speaker-labelled references (`ami-speakers`) are scored for words here and
-    for attribution by cpWER in `compute_metrics`; a system that emits no
-    speaker tokens is scored on the same words.
-    """
-    return plain_text(text) if has_speakers(text) else text
-
-
 def _is_skipped_reference(reference: object) -> bool:
     """Filter out unscoreable samples (TEDLIUM markers, inaudible)."""
     if not isinstance(reference, str):
@@ -133,9 +123,8 @@ class Evaluator:
         """
         raise NotImplementedError
 
-    def _process_sample(self, sample_data: tuple[int, Sample]) -> tuple[int, EvalResult]:
-        """Process a single sample. Returns (index, result) for ordering."""
-        idx, sample = sample_data
+    def _process_sample(self, idx: int, sample: Sample) -> EvalResult:
+        """Transcribe and score a single sample; `idx` is only for error logs."""
         reference = sample["reference"]
         audio = sample["audio"]
 
@@ -146,12 +135,12 @@ class Evaluator:
             print(f"Error on sample {idx}: {e}")
             prediction, inference_time = "", 0.0
 
-        norm_pred = self.normalizer.normalize(_scoring_text(prediction))
-        norm_ref = self.normalizer.normalize(_scoring_text(reference))
+        norm_pred = self.normalizer.normalize(scoring_text(prediction))
+        norm_ref = self.normalizer.normalize(scoring_text(reference))
         sample_wer = jiwer.wer(norm_ref, norm_pred) * 100 if norm_ref else 0.0
         stats: Confidence = confidence or {}
 
-        return idx, EvalResult(
+        return EvalResult(
             prediction,
             reference,
             sample_wer,
@@ -266,7 +255,7 @@ class Evaluator:
     ) -> None:
         """Run sequential evaluation lazily (no pre-collection)."""
         for idx, sample_data in enumerate(self._iter_dataset_samples(dataset), start=1):
-            _, result = self._process_sample((idx, sample_data))
+            result = self._process_sample(idx, sample_data)
             self.results.append(result)
             self._print_sample_log("", idx, result)
 
@@ -290,12 +279,13 @@ class Evaluator:
 
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
             futures = {
-                executor.submit(self._process_sample, (idx, sample)): idx
+                executor.submit(self._process_sample, idx, sample): idx
                 for idx, sample in enumerate(samples, 1)
             }
 
             for future in as_completed(futures):
-                idx, result = future.result()
+                idx = futures[future]
+                result = future.result()
                 results_map[idx] = result
                 completed += 1
 
@@ -347,7 +337,7 @@ class Evaluator:
         # meaningless 0.0. See scripts/eval/formatting.py.
         metrics.update(
             compute_formatting_metrics(
-                [(_scoring_text(r.reference), _scoring_text(r.prediction)) for r in self.results]
+                [(scoring_text(r.reference), scoring_text(r.prediction)) for r in self.results]
             )
         )
         metrics.update(self._speaker_metrics())

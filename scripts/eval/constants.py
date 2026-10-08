@@ -1,8 +1,8 @@
 """Light-weight constants shared by the local and remote eval CLIs.
 
 Kept free of torch/transformers imports so `ta runpod eval` can offer the same
-`--assemblyai-model` choices as `ta eval` without paying for the evaluator
-stack it never runs locally.
+`--assemblyai-model` choices, default dataset and run naming as `ta eval`
+without paying for the evaluator stack it never runs locally.
 """
 
 from enum import StrEnum
@@ -20,3 +20,15 @@ class AssemblyAIModel(StrEnum):
 
 # Valid `model` values accepted by setup_assemblyai; the enum is the source.
 ASSEMBLYAI_MODELS = {m.value for m in AssemblyAIModel}
+
+DEFAULT_DATASET = "loquacious"
+
+
+def get_model_name(model_path: str) -> str:
+    """Extract model name from a HuggingFace model path.
+
+    Examples:
+        - mazesmazes/tiny-audio -> tiny-audio
+        - /path/to/checkpoint -> checkpoint
+    """
+    return model_path.rstrip("/").split("/")[-1]

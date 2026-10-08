@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import fields
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, NamedTuple
 
 import hydra
 import torch
@@ -594,6 +594,77 @@ def decay_parameter_ids(model: torch.nn.Module) -> set[int]:
     }
 
 
+class ParamGroupSpec(NamedTuple):
+    """One optimizer param group: a component crossed with decay / no-decay."""
+
+    component: str  # "other" (projector + auxiliary), "decoder" or "encoder"
+    decay: bool
+    names: list[str]
+    params: list[torch.nn.Parameter]
+    lr: float | None
+    weight_decay: float | None
+
+
+def optimizer_param_groups(
+    model: torch.nn.Module,
+    *,
+    lr: float | None,
+    weight_decay: float | None,
+    decoder_lr: float | None = None,
+    projector_wd: float | None = None,
+    encoder_lr: float | None = None,
+    encoder_wd: float | None = None,
+) -> list[ParamGroupSpec]:
+    """Route trainable params into the six component x decay groups, in order.
+
+    Parameters under `audio_tower.` get the encoder LR / WD, under
+    `language_model.` the decoder LR, and everything else (projector) the
+    projector WD; each override falls back to `lr` / `weight_decay`, and
+    no-decay groups always get 0.0. Names are checked against fixed prefixes
+    so the routing matches the freeze flags exactly. Empty groups are kept.
+
+    Shared by ASRTrainer.create_optimizer and scripts/debug/check_gradient_flow.py
+    so the probe audits the routing the trainer actually uses.
+    """
+    decay_ids = decay_parameter_ids(model)
+    settings = {
+        "other": (lr, weight_decay if projector_wd is None else projector_wd),
+        "decoder": (lr if decoder_lr is None else decoder_lr, weight_decay),
+        "encoder": (
+            lr if encoder_lr is None else encoder_lr,
+            weight_decay if encoder_wd is None else encoder_wd,
+        ),
+    }
+    buckets: dict[tuple[str, bool], list[tuple[str, torch.nn.Parameter]]] = {
+        (component, decay): [] for component in settings for decay in (True, False)
+    }
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.startswith("audio_tower."):
+            component = "encoder"
+        elif name.startswith("language_model."):
+            component = "decoder"
+        else:
+            component = "other"
+        buckets[(component, id(param) in decay_ids)].append((name, param))
+
+    groups: list[ParamGroupSpec] = []
+    for (component, decay), items in buckets.items():
+        group_lr, group_wd = settings[component]
+        groups.append(
+            ParamGroupSpec(
+                component,
+                decay,
+                [n for n, _ in items],
+                [p for _, p in items],
+                group_lr,
+                group_wd if decay else 0.0,
+            )
+        )
+    return groups
+
+
 class ASRTrainer(Trainer):
     """Trainer subclass for ASR models."""
 
@@ -644,74 +715,19 @@ class ASRTrainer(Trainer):
         if opt_model is None:
             msg = "ASRTrainer.create_optimizer needs a model"
             raise ValueError(msg)
-        decay_ids = decay_parameter_ids(opt_model)
-
-        # Three-way component split. Names are checked against fixed prefixes
-        # so the routing matches the freeze flags exactly: `audio_tower.*`,
-        # `language_model.*`, and everything else (projector + auxiliary).
-        groups: dict[tuple[str, bool], list[torch.nn.Parameter]] = {
-            ("encoder", True): [],
-            ("encoder", False): [],
-            ("decoder", True): [],
-            ("decoder", False): [],
-            ("other", True): [],
-            ("other", False): [],
-        }
-        for name, param in opt_model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if name.startswith("audio_tower."):
-                component = "encoder"
-            elif name.startswith("language_model."):
-                component = "decoder"
-            else:
-                component = "other"
-            decay = id(param) in decay_ids
-            groups[(component, decay)].append(param)
-
-        base_wd = self.args.weight_decay
-        base_lr = self.args.learning_rate
-        dec_lr = self.decoder_learning_rate if self.decoder_learning_rate is not None else base_lr
-        dec_wd = base_wd
-        proj_wd = (
-            self.projector_weight_decay if self.projector_weight_decay is not None else base_wd
-        )
-        enc_lr = self.encoder_learning_rate if self.encoder_learning_rate is not None else base_lr
-        enc_wd = self.encoder_weight_decay if self.encoder_weight_decay is not None else base_wd
-
         optimizer_grouped_parameters: list[dict[str, Any]] = [
-            {
-                "params": groups[("other", True)],
-                "weight_decay": proj_wd,
-                "lr": base_lr,
-            },
-            {
-                "params": groups[("other", False)],
-                "weight_decay": 0.0,
-                "lr": base_lr,
-            },
-            {
-                "params": groups[("decoder", True)],
-                "weight_decay": dec_wd,
-                "lr": dec_lr,
-            },
-            {
-                "params": groups[("decoder", False)],
-                "weight_decay": 0.0,
-                "lr": dec_lr,
-            },
-            {
-                "params": groups[("encoder", True)],
-                "weight_decay": enc_wd,
-                "lr": enc_lr,
-            },
-            {
-                "params": groups[("encoder", False)],
-                "weight_decay": 0.0,
-                "lr": enc_lr,
-            },
+            {"params": g.params, "weight_decay": g.weight_decay, "lr": g.lr}
+            for g in optimizer_param_groups(
+                opt_model,
+                lr=self.args.learning_rate,
+                weight_decay=self.args.weight_decay,
+                decoder_lr=self.decoder_learning_rate,
+                projector_wd=self.projector_weight_decay,
+                encoder_lr=self.encoder_learning_rate,
+                encoder_wd=self.encoder_weight_decay,
+            )
+            if g.params
         ]
-        optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
 
         optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
             self.args, opt_model if isinstance(opt_model, PreTrainedModel) else None

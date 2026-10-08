@@ -13,6 +13,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from scripts.eval.constants import DEFAULT_DATASET, get_model_name
 from scripts.eval.datasets import (
     DATASET_REGISTRY,
     load_eval_dataset,
@@ -47,20 +48,9 @@ if TYPE_CHECKING:
     Dataset = StrEnum
 else:
     Dataset = StrEnum("Dataset", {name: name for name in ("all", *DATASET_REGISTRY)})
-DEFAULT_DATASET = "loquacious"
 ALL_DATASETS = [
     name for name in DATASET_REGISTRY if name != "expresso" and not DATASET_REGISTRY[name].speakers
 ]
-
-
-def get_model_name(model_path: str) -> str:
-    """Extract model name from a HuggingFace model path.
-
-    Examples:
-        - mazesmazes/tiny-audio -> tiny-audio
-        - /path/to/checkpoint -> checkpoint
-    """
-    return model_path.rstrip("/").split("/")[-1]
 
 
 def _require_api_key(api_key: str | None, option: str, env_var: str) -> str:
@@ -208,20 +198,6 @@ def expand_datasets(datasets: list[str]) -> list[str]:
     return datasets
 
 
-# --model values that dispatch to a non-PyTorch backend (hosted API, Swift
-# binary, on-device Apple recognizer) rather than loading an ASRModel here.
-_NON_LOCAL_MODELS = frozenset(
-    {
-        "assemblyai",
-        "deepgram",
-        "elevenlabs",
-        "smallest",
-        "apple-speech",
-        "swift",
-    }
-)
-
-
 class _HostedBackend(NamedTuple):
     """A hosted-API backend that needs only an API key and a worker count."""
 
@@ -242,6 +218,11 @@ _HOSTED_BACKENDS: dict[str, _HostedBackend] = {
         "smallest-pulse", SmallestEvaluator, "--smallest-api-key", "SMALLEST_API_KEY"
     ),
 }
+
+
+# --model values that dispatch to a non-PyTorch backend (hosted API, Swift
+# binary, on-device Apple recognizer) rather than loading an ASRModel here.
+_NON_LOCAL_MODELS = frozenset({"assemblyai", "apple-speech", "swift", *_HOSTED_BACKENDS})
 
 
 def _reject_local_code(model: str, endpoint: bool) -> None:

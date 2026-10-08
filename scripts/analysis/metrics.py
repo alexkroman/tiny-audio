@@ -16,7 +16,7 @@ from scripts.analysis.common import (
     normalize_text,
 )
 from scripts.eval.audio import TextNormalizer
-from scripts.eval.speaker_metrics import cp_errors, has_speakers, parse_turns, plain_text
+from scripts.eval.speaker_metrics import cp_errors, has_speakers, scoring_text, speaker_count
 from scripts.itn import merge_scores, score_sample
 from scripts.utils import ResultSample, extract_model_from_dir, find_model_dirs, parse_results_file
 
@@ -189,15 +189,6 @@ def set_error_rates(ds: DatasetMetrics, n: int | None = None) -> None:
     _set_speaker_rates(ds, n)
 
 
-def _words_only(text: str) -> str:
-    """Drop `<SPK_n>` tokens, as the harness does before scoring words.
-
-    Speaker-attributed runs (`ami-speakers-long`) store them in the raw lines;
-    left in, they became extra words and pushed WER up ~4.5 points.
-    """
-    return plain_text(text) if has_speakers(text) else text
-
-
 def _raw_pair(sample: ResultSample) -> tuple[str, str] | None:
     gt, pred = sample["ground_truth_raw"], sample["prediction_raw"]
     return None if gt is None or pred is None else (gt, pred)
@@ -206,9 +197,7 @@ def _raw_pair(sample: ResultSample) -> tuple[str, str] | None:
 def _speaker_row(ref: str, hyp: str, normalizer: TextNormalizer) -> SpeakerRow:
     """Score one speaker-labelled pair the way `ta eval`'s `_speaker_metrics` does."""
     errors, words = cp_errors(ref, hyp, normalizer.normalize)
-    n_ref = len({label for label, _ in parse_turns(ref)})
-    n_hyp = len({label for label, _ in parse_turns(hyp)})
-    return SpeakerRow(errors, words, n_ref == n_hyp)
+    return SpeakerRow(errors, words, speaker_count(ref) == speaker_count(hyp))
 
 
 def _add_sample(sample: ResultSample, ds: DatasetMetrics, by_length: dict[int, list[float]]):
@@ -230,7 +219,7 @@ def _add_sample(sample: ResultSample, ds: DatasetMetrics, by_length: dict[int, l
     WER on earnings22.
     """
     tagged = _raw_pair(sample)
-    pair = None if tagged is None else (_words_only(tagged[0]), _words_only(tagged[1]))
+    pair = None if tagged is None else (scoring_text(tagged[0]), scoring_text(tagged[1]))
     if pair is not None:
         ds["raw_pairs"].append(pair)
     normalizer = current_normalizer() if pair is not None else None
