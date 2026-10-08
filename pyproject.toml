@@ -94,7 +94,7 @@ liger-kernel = {version = ">=0.8.0", markers = "sys_platform == 'linux'"}
 # packages specifically.
 pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
 fabric = ">=3.0.0"
-tenacity = ">=8.2"  # Retry/backoff policy for the AssemblyAI streaming evaluator
+tenacity = ">=8.2"  # Retry/backoff policy for eval API clients and RunPod/SSH deploy polling
 # cpWER for speaker-labelled eval sets (scripts/eval/speaker_metrics.py).
 scipy = "*"
 rapidfuzz = "*"

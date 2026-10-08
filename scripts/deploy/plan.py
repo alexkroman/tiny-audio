@@ -1050,10 +1050,15 @@ def wait_command(
     perfectly healthy pod look hung for the 5-10 minutes the image pull takes.
     """
     import subprocess
-    import time
 
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
+    from tenacity import RetryError, retry, retry_if_result, stop_after_delay, wait_fixed
+
+    @retry(
+        retry=retry_if_result(lambda ep: ep is None),
+        stop=stop_after_delay(timeout_s),
+        wait=wait_fixed(15),
+    )
+    def poll() -> tuple[str, int] | None:
         out = subprocess.run(
             ["runpodctl", "pod", "get", pod_id, "-o", "json"],
             check=False,
@@ -1062,13 +1067,17 @@ def wait_command(
             timeout=120,
         ).stdout
         try:
-            pod = json.loads(out[out.index("{") :])
-            ssh = pod.get("ssh") or {}
-            if ssh.get("ip") and ssh.get("port"):
-                print(f"{ssh['ip']} {ssh['port']}")
-                return
-        except Exception:
-            pass
-        time.sleep(15)
-    print(f"Pod {pod_id} exposed no SSH endpoint within {timeout_s}s.")
-    raise typer.Exit(1)
+            ssh = json.loads(out[out.index("{") :]).get("ssh") or {}
+        except (ValueError, AttributeError):
+            # No JSON yet (or a partial write) -- same as "not ready", poll again.
+            return None
+        if ssh.get("ip") and ssh.get("port"):
+            return ssh["ip"], ssh["port"]
+        return None
+
+    try:
+        ip, port = poll()
+    except RetryError:
+        print(f"Pod {pod_id} exposed no SSH endpoint within {timeout_s}s.")
+        raise typer.Exit(1) from None
+    print(f"{ip} {port}")
