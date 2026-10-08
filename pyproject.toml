@@ -204,18 +204,18 @@ strict = true
 warn_unused_configs = true
 follow_imports = "normal"
 # Installed packages that ship neither stubs nor a py.typed marker (datasets,
-# soundfile, torchaudio, fabric, nltk, ...) are analysed from source instead of
+# soundfile, torchaudio, nltk, ...) are analysed from source instead of
 # being silently treated as Any.
 follow_untyped_imports = true
-# Minimal stubs for modules that cannot be installed here: the Spaces runtime's
-# `spaces` and PyObjC's macOS-only frameworks.
+# Minimal stubs for modules that cannot be installed here (the Spaces runtime's
+# `spaces`, PyObjC's macOS-only frameworks) and for fabric, whose source is untyped.
 mypy_path = "typings"
 
 # Untyped packages analysed from source (follow_untyped_imports) re-export their
 # public API through bare `from .x import y` in __init__.py. Strict mode's
 # no_implicit_reexport would hide that API; it is a rule for our code, not theirs.
 [[tool.mypy.overrides]]
-module = ["datasets", "datasets.*", "fabric", "fabric.*", "nltk", "nltk.*"]
+module = ["datasets", "datasets.*", "nltk", "nltk.*"]
 implicit_reexport = true
 
 [tool.pyright]
@@ -223,7 +223,7 @@ include = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
 typeCheckingMode = "strict"
 stubPath = "typings"
-# Packages without stubs or py.typed (datasets, soundfile, torchaudio, fabric,
+# Packages without stubs or py.typed (datasets, soundfile, torchaudio,
 # nltk, ...) are still analysed from source (`useLibraryCodeForTypes`); this
 # rule only reports that a package ships no stubs, which is not ours to fix.
 reportMissingTypeStubs = "none"
