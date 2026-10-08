@@ -5,7 +5,7 @@ import json
 import platform
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pytest
@@ -37,7 +37,7 @@ class FakeCompleted:
 class FakeProc:
     """A `subprocess.Popen` stand-in whose stdout replays canned JSON lines."""
 
-    instances: list["FakeProc"] = []
+    instances: ClassVar[list["FakeProc"]] = []
     stdout_text = '{"ready": true}\n'
 
     def __init__(self, cmd: list[str], **kwargs: Any) -> None:
@@ -67,9 +67,7 @@ class FakeProc:
 
 
 @pytest.fixture(autouse=True)
-def _offline_normalizer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:  # pyright: ignore[reportUnusedFunction]
+def offline_normalizer(monkeypatch: pytest.MonkeyPatch) -> None:
     """The base Evaluator builds a Whisper normalizer, which downloads from the Hub."""
     monkeypatch.setattr(base, "TextNormalizer", lambda: None)
 
@@ -151,9 +149,10 @@ def test_run_swift_build_success_passes_args(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_run_swift_build_failure_includes_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        subprocess, "run", lambda **_: FakeCompleted(1, stdout="compiling", stderr="error: x")
-    )
+    def failing_run(**_: Any) -> FakeCompleted:
+        return FakeCompleted(1, stdout="compiling", stderr="error: x")
+
+    monkeypatch.setattr(subprocess, "run", failing_run)
     with pytest.raises(RuntimeError, match="build broke") as exc:
         _run_swift_build(["swift", "build"], "build broke")
     assert "compiling" in str(exc.value)
@@ -261,8 +260,12 @@ def test_ensure_metallib_raises_without_any_source(
 ) -> None:
     binary = swift_dir / ".build" / "release" / "tiny-audio-swift-eval"
     (binary.parent / "mlx.metallib").unlink()
-    monkeypatch.setattr(swift_sdk, "_fallback_metallib", lambda arch: None)
-    with pytest.raises(RuntimeError, match="mlx.metallib not found"):
+
+    def no_fallback(arch: str) -> None:
+        assert arch == platform.machine()
+
+    monkeypatch.setattr(swift_sdk, "_fallback_metallib", no_fallback)
+    with pytest.raises(RuntimeError, match=r"mlx\.metallib not found"):
         _ensure_metallib(binary, swift_dir)
 
 

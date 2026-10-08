@@ -1,7 +1,7 @@
 """Tests for scripts.hub.push with the Hub calls faked out."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import typer
@@ -13,8 +13,8 @@ from scripts.hub import push
 class FakeHfApi:
     """Records the token and `create_commit` calls instead of hitting the Hub."""
 
-    tokens: list[str | None] = []
-    commits: list[dict[str, Any]] = []
+    tokens: ClassVar[list[str | None]] = []
+    commits: ClassVar[list[dict[str, Any]]] = []
 
     def __init__(self, token: str | None = None) -> None:
         FakeHfApi.tokens.append(token)
