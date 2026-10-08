@@ -328,7 +328,7 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
                 inputs=inputs,
                 outputs=outputs,
                 fn=process_audio,
-                label="Try a three-person meeting (AMI Meeting Corpus, CC BY 4.0)",
+                label="Try a two-person meeting (AMI Meeting Corpus, CC BY 4.0)",
                 cache_examples=False,
             )
 
