@@ -42,6 +42,7 @@ import re
 import unicodedata
 
 import jiwer
+from rapidfuzz.distance import Levenshtein
 
 # A metric computed over a handful of samples is noise dressed as a number.
 # Observed without this floor: AMI-SDM reported punct_f1 85.71 for us and 0.00
@@ -115,22 +116,31 @@ def _aligned_word_pairs(reference: str, hypothesis: str) -> list[tuple[str, str]
     Alignment runs on punctuation-stripped, lowercased tokens so that a casing
     or punctuation difference cannot itself perturb the alignment — otherwise
     the metric would partly measure its own noise.
+
+    Punctuation-only tokens (key "") are left out of the alignment entirely and
+    never appear in a pair. Pairing one with a word would record a missed or
+    spurious trailing mark against a word that carries none of its own — the
+    same tokenization artifact `light_normalize` exists to remove — and Levenshtein
+    would happily do it, since substituting "" for "hello" is cheaper than a
+    delete plus an insert. They also must not reach the aligner as joined text:
+    jiwer's split drops the empty word, which shifted every later index by one
+    (`'... Hello World.'` paired `'Hello'` with `'world.'`).
     """
-    ref_w = reference.split()
-    hyp_w = hypothesis.split()
+    ref_w = [w for w in reference.split() if _strip_punct(w)]
+    hyp_w = [w for w in hypothesis.split() if _strip_punct(w)]
     if not ref_w or not hyp_w:
         return []
     ref_key = [_strip_punct(w).lower() for w in ref_w]
     hyp_key = [_strip_punct(w).lower() for w in hyp_w]
-    out = jiwer.process_words([" ".join(ref_key)], [" ".join(hyp_key)])
     pairs: list[tuple[str, str]] = []
-    for chunk in out.alignments[0]:
-        if chunk.type not in ("equal", "substitute"):
+    for op in Levenshtein.opcodes(ref_key, hyp_key):
+        if op.tag not in ("equal", "replace"):
             continue
+        # equal/replace blocks are always the same length on both sides.
         for i, j in zip(
-            range(chunk.ref_start_idx, chunk.ref_end_idx),
-            range(chunk.hyp_start_idx, chunk.hyp_end_idx),
-            strict=False,
+            range(op.src_start, op.src_end),
+            range(op.dest_start, op.dest_end),
+            strict=True,
         ):
             pairs.append((ref_w[i], hyp_w[j]))
     return pairs

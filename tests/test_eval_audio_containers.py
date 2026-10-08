@@ -38,6 +38,25 @@ class TestAudioToWavBytes:
         array, _ = decode(audio_to_wav_bytes(tone[None, :], 16000))
         assert array.ndim == 1
 
+    def test_channels_first_stereo_is_averaged(self, tone: npt.NDArray[np.float32]) -> None:
+        """Squeezing alone left (2, n), which sf.write reads as 2 frames of n channels."""
+        array, _ = decode(audio_to_wav_bytes(np.stack([tone, np.zeros_like(tone)]), 16000))
+        assert array.shape == (16000,)
+        assert np.allclose(array, tone / 2, atol=1e-3)
+
+    def test_stereo_file_is_averaged(self, tone: npt.NDArray[np.float32], tmp_path: Path) -> None:
+        """soundfile is frames-first, so the file path averages over axis 1."""
+        path = tmp_path / "stereo.wav"
+        sf.write(path, np.stack([tone, np.zeros_like(tone)], axis=1), 16000)
+        array, _ = decode(prepare_wav_bytes({"path": str(path)}))
+        assert array.shape == (16000,)
+        assert np.allclose(array, tone / 2, atol=1e-3)
+
+    def test_multichannel_int16_keeps_its_dtype(self) -> None:
+        pcm = np.full((2, 100), 16384, dtype=np.int16)
+        array, _ = decode(audio_to_wav_bytes(pcm, 16000))
+        assert np.allclose(array, 0.5, atol=1e-3)
+
 
 class TestPrepareWavBytes:
     """Each container shape `datasets` / torchcodec can hand us."""
@@ -97,6 +116,21 @@ class TestAs16kArray:
         assert out.shape == (16000,)
         assert np.allclose(out, tone, atol=1e-3)
 
+    def test_torchcodec_decoder_skips_the_pcm16_round_trip(
+        self, tone: npt.NDArray[np.float32]
+    ) -> None:
+        """Exact float samples back, not a 16-bit-quantized copy."""
+        samples = SimpleNamespace(data=torch.as_tensor(tone)[None, :], sample_rate=16000.0)
+        out = as_16k_array(SimpleNamespace(get_all_samples=lambda: samples))
+        assert out.shape == (16000,)
+        assert np.array_equal(out, tone)
+
+    def test_torchcodec_stereo_is_averaged_then_resampled(self) -> None:
+        stereo = torch.stack([torch.full((8000,), 0.5), torch.zeros(8000)])
+        out = as_16k_array(SimpleNamespace(data=stereo, sample_rate=8000.0))
+        assert out.shape == (16000,)
+        assert np.allclose(out[1000:-1000], 0.25, atol=1e-3)
+
 
 class _LowercaseNormalizer(EnglishTextNormalizer):
     """Stand-in for Whisper's normalizer: lowercases, loads no spelling table."""
@@ -115,3 +149,22 @@ class TestTextNormalizerFixes:
         normalizer = object.__new__(TextNormalizer)
         normalizer._normalizer = _LowercaseNormalizer()
         assert normalizer.normalize("Okay, ALL RIGHT kinda") == "ok, alright kind of"
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            # Regression: raw substring replacement corrupted these.
+            ("the overall rights", "the overall rights"),
+            ("okayed", "okayed"),
+            ("kindaish", "kindaish"),
+            ("ball rightly", "ball rightly"),
+            # Whole words still map, including at string edges.
+            ("okay okay", "ok ok"),
+            ("it's all right now", "it's alright now"),
+            ("all   right", "alright"),
+        ],
+    )
+    def test_spelling_fixes_are_word_bounded(self, text: str, expected: str) -> None:
+        normalizer = object.__new__(TextNormalizer)
+        normalizer._normalizer = _LowercaseNormalizer()
+        assert normalizer.normalize(text) == expected
