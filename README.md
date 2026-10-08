@@ -7,7 +7,7 @@
   />
 </div>
 
-**Build your own speech recognition model by teaching an LLM to listen.**
+**A tiny, hackable, open-source speech LLM.**
 
 Tiny Audio connects a frozen, pretrained speech encoder to a pretrained LLM with a small trainable
 projector. The model published from this repo gets **1.8% WER on LibriSpeech test-clean and 8.4%

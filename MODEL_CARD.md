@@ -27,14 +27,11 @@ library_name: transformers
 
 # Tiny Audio
 
-**English speech recognition from an LLM that learned to listen.** 1.8% WER on LibriSpeech
-test-clean, 8.4% averaged over 12 benchmarks, with punctuated, capitalized, formatted output, word
-timestamps, and speaker labels.
+**A tiny, hackable, open-source speech LLM.**
 
-A frozen Granite Speech encoder feeds a frozen Qwen3.5-2B through a small MLP projector, with LoRA
-adapters on the decoder. Only ~80M parameters were trained, on a single GPU, with
-[Tiny Audio](https://github.com/alexkroman/tiny-audio): a small, hackable codebase you can use to
-train your own.
+It transcribes English with punctuation, capitalization, word timestamps, and speaker labels: 1.8%
+WER on LibriSpeech test-clean and 8.4% averaged over 12 benchmarks. Built and trained with
+[Tiny Audio](https://github.com/alexkroman/tiny-audio).
 
 **[Try the live demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)** ·
 **[Train your own](https://github.com/alexkroman/tiny-audio)** ·
