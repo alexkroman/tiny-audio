@@ -1,7 +1,7 @@
 """Custom inference handler for HuggingFace Inference Endpoints."""
 
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import nltk
 import torch
@@ -33,6 +33,23 @@ def _module_to(module: torch.nn.Module, device: torch.device) -> None:
     module.to(device)
 
 
+def _module_eval(module: torch.nn.Module) -> None:
+    """`module.eval()`, in place.
+
+    transformers leaves `PreTrainedModel.eval` unannotated; typed as
+    `nn.Module` the call resolves. Same method at runtime.
+    """
+    module.eval()
+
+
+class _NltkDownloader(Protocol):
+    """`nltk.download`, as called here (nltk leaves `info_or_id` unannotated)."""
+
+    def download(self, info_or_id: str, *, quiet: bool) -> bool:
+        """Fetch an nltk data package if it is not already installed."""
+        ...
+
+
 class EndpointHandler:
     """HuggingFace Inference Endpoints handler for ASR model.
 
@@ -46,7 +63,7 @@ class EndpointHandler:
         Args:
             path: Path to model directory or HuggingFace model ID
         """
-        nltk.download("punkt_tab", quiet=True)
+        cast("_NltkDownloader", nltk).download("punkt_tab", quiet=True)
 
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -63,7 +80,7 @@ class EndpointHandler:
         self.model = ASRModel.from_pretrained(path)
         self.device = _best_device()
         _module_to(self.model, self.device)
-        self.model.eval()
+        _module_eval(self.model)
 
         self.pipe = ASRPipeline(
             model=self.model,
@@ -89,4 +106,5 @@ class EndpointHandler:
         # Pass through any parameters from request, let model config provide defaults
         params = data.get("parameters", {})
 
-        return self.pipe(inputs, **params)
+        result: dict[str, Any] | list[dict[str, Any]] = self.pipe(inputs, **params)
+        return result

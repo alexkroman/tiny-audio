@@ -1,23 +1,58 @@
 """Speaker diarization with NVIDIA Nemotron-3-Diarization."""
 
 import importlib.util
-from typing import Protocol, cast
+from collections.abc import KeysView
+from typing import Any, Protocol, TypedDict, TypeVar, cast
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torchaudio
 from transformers import (
     AutoModelForAudioFrameClassification,
     AutoProcessor,
-    BatchFeature,
     PreTrainedModel,
 )
+
+_T_co = TypeVar("_T_co", covariant=True)
+
+
+class SpeakerSegment(TypedDict):
+    """One speaker turn, in seconds."""
+
+    speaker: str
+    start: float
+    end: float
+
+
+class _Loader(Protocol[_T_co]):
+    """A class with `from_pretrained`, as called here."""
+
+    def from_pretrained(self, pretrained_model_name_or_path: str, /) -> _T_co:
+        """Load from the Hub or a local directory."""
+        ...
+
+
+class _ModelInputs(Protocol):
+    """What `activity` uses of the processor's `BatchFeature`."""
+
+    def to(self, device: torch.device, *, dtype: torch.dtype) -> "_ModelInputs":
+        """Move tensors to `device`, casting floating ones to `dtype`."""
+        ...
+
+    def keys(self) -> KeysView[str]:
+        """Input names."""
+        ...
+
+    def __getitem__(self, key: str, /) -> torch.Tensor:
+        """One input tensor."""
+        ...
 
 
 class _AudioProcessor(Protocol):
     """What `activity` uses of the Nemotron processor (its class ships after 5.17)."""
 
-    def __call__(self, audio: np.ndarray, *, sampling_rate: int) -> BatchFeature:
+    def __call__(self, audio: npt.NDArray[np.float32], *, sampling_rate: int) -> _ModelInputs:
         """Turn 16 kHz mono audio into model inputs."""
         ...
 
@@ -31,7 +66,7 @@ def _get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def _label_runs(labels: np.ndarray) -> list[tuple[int, int, int]]:
+def _label_runs(labels: npt.NDArray[np.generic]) -> list[tuple[int, int, int]]:
     """Split a 1-D label array into maximal constant runs.
 
     Returns `(value, start, end)` triples with `end` exclusive, in order. This
@@ -56,6 +91,15 @@ def _module_to(module: torch.nn.Module, device: torch.device) -> None:
     at runtime: it moves the module in place and returns it.
     """
     module.to(device)
+
+
+def _module_eval(module: torch.nn.Module) -> None:
+    """`module.eval()`, in place.
+
+    transformers leaves `PreTrainedModel.eval` unannotated; typed as
+    `nn.Module` the call resolves. Same method at runtime.
+    """
+    module.eval()
 
 
 class NemotronDiarizer:
@@ -95,31 +139,36 @@ class NemotronDiarizer:
                     "pip install git+https://github.com/huggingface/transformers"
                 )
                 raise ImportError(msg)
-            model: PreTrainedModel = AutoModelForAudioFrameClassification.from_pretrained(
-                cls.MODEL_ID
-            )
+            model_loader = cast("_Loader[PreTrainedModel]", AutoModelForAudioFrameClassification)
+            model = model_loader.from_pretrained(cls.MODEL_ID)
             _module_to(model, _get_device())
-            cls._model = model.eval()
-            cls._processor = cast("_AudioProcessor", AutoProcessor.from_pretrained(cls.MODEL_ID))
+            _module_eval(model)
+            cls._model = model
+            processor_loader = cast("_Loader[_AudioProcessor]", AutoProcessor)
+            cls._processor = processor_loader.from_pretrained(cls.MODEL_ID)
         return cls._model, cls._processor
 
     @classmethod
     @torch.inference_mode()
-    def activity(cls, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
+    def activity(cls, audio: npt.ArrayLike, sample_rate: int = 16000) -> npt.NDArray[np.float32]:
         """(frames, 8) speech probabilities at 10 ms; columns in arrival order."""
         if sample_rate != 16000:
-            audio = torchaudio.functional.resample(
-                torch.as_tensor(audio, dtype=torch.float32), sample_rate, 16000
-            ).numpy()
+            audio = np.asarray(
+                torchaudio.functional.resample(
+                    torch.as_tensor(audio, dtype=torch.float32), sample_rate, 16000
+                ),
+                dtype=np.float32,
+            )
         model, processor = cls.get_instance()
         inputs = processor(np.asarray(audio, dtype=np.float32), sampling_rate=16000)
         inputs = inputs.to(model.device, dtype=model.dtype)
-        return model(**inputs).logits[0].float().sigmoid().cpu().numpy()
+        probs: npt.NDArray[np.float32] = model(**inputs).logits[0].float().sigmoid().cpu().numpy()
+        return probs
 
     @classmethod
     def top_speakers(
         cls,
-        activity: np.ndarray,
+        activity: npt.NDArray[np.float32],
         num_speakers: int | None = None,
         max_speakers: int | None = None,
     ) -> list[int]:
@@ -140,10 +189,10 @@ class NemotronDiarizer:
         return active or [0]
 
     @classmethod
-    def segments(cls, activity: np.ndarray, keep: list[int]) -> list[dict]:
+    def segments(cls, activity: npt.NDArray[np.float32], keep: list[int]) -> list[SpeakerSegment]:
         """Speaker turns `{"speaker", "start", "end"}` by start time; overlaps allowed."""
         names = {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
-        out = []
+        out: list[SpeakerSegment] = []
         for c in keep:
             for on, s, e in _label_runs(activity[:, c] > cls.SEGMENT_THRESHOLD):
                 if on:
@@ -156,7 +205,7 @@ class NemotronDiarizer:
     def speaker_columns(
         cls,
         spans: list[tuple[float | None, float | None]],
-        activity: np.ndarray,
+        activity: npt.NDArray[np.float32],
         keep: list[int],
     ) -> list[int]:
         """The kept activity column that said each `(start_s, end_s)` word.
@@ -179,7 +228,7 @@ class NemotronDiarizer:
             picked.append(int(cols[best]) if mean[best] >= cls.MIN_WORD_ACTIVITY else None)
         known = [p for p in picked if p is not None]
         last = known[0] if known else keep[0]
-        out = []
+        out: list[int] = []
         for p in picked:
             last = p if p is not None else last
             out.append(last)
@@ -187,8 +236,8 @@ class NemotronDiarizer:
 
     @classmethod
     def assign_speakers_to_words(
-        cls, words: list[dict], activity: np.ndarray, keep: list[int]
-    ) -> list[dict]:
+        cls, words: list[dict[str, Any]], activity: npt.NDArray[np.float32], keep: list[int]
+    ) -> list[dict[str, Any]]:
         """Label each `{"start", "end"}` word `SPEAKER_i` by `speaker_columns`."""
         names = {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
         spans = [(w["start"], w["end"]) for w in words]
