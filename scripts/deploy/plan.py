@@ -325,7 +325,9 @@ def _add_projector(
             projector_hidden_dim=model.get("projector_hidden_dim"),
         )
         cls = projector_classes[shim.projector_type]
-        proj_params = sum(p.numel() for p in cls(shim).parameters())
+        # Meta device: shapes without storage or init, all a numel count needs.
+        with importlib.import_module("torch").device("meta"):
+            proj_params = sum(p.numel() for p in cls(shim).parameters())
     else:
         plan.warnings.append("Could not resolve encoder/llm dims; projector excluded.")
     plan.components.append(

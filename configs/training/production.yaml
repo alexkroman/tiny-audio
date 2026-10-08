@@ -117,7 +117,15 @@ greater_is_better: false
 # Hub
 push_to_hub: true
 hub_model_id: "mazesmazes/tiny-audio-next-multiasr"
-hub_strategy: every_save
+# `end`, not `every_save`: scripts/train.py's PushToHubCallback already pushes
+# on every save via ASRModel.push_to_hub, which is the push that matters -- it
+# ships preprocessor_config.json and the custom modeling code, which Trainer's
+# own push (an upload_folder of output_dir) omits. Under `every_save`,
+# Trainer._push_from_checkpoint uploaded the same multi-GB weights a second
+# time on every save; `end` makes it return early. The final push is
+# unaffected: train.py calls save_model(_internal_call=True), which skips
+# Trainer's push regardless of hub_strategy, then pushes via ASRModel.
+hub_strategy: end
 hub_token: null
 hub_private_repo: false
 

@@ -3,7 +3,6 @@
 
 import contextlib
 import logging
-import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import fields
@@ -21,6 +20,7 @@ from datasets import (
     concatenate_datasets,
     load_dataset,
 )
+from huggingface_hub import get_token
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 from transformers import (
@@ -351,11 +351,12 @@ class DatasetLoader:
         # Preserve the declared casing policy so normalize_label can use it, and
         # the declared punctuation policy so _build_sample can pick the
         # matching prompt.
-        keep_cols = {"audio", "text"} | ({"_text_case", "_text_punct"} & set(ds.column_names))
-        extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
-
-        if extra_cols:
-            ds = ds.remove_columns(extra_cols)
+        keep_cols = {"audio", "text", "_text_case", "_text_punct"}
+        # Iterate ds.column_names, not keep_cols: select_columns orders the
+        # result by its argument, and this keeps the source's column order.
+        kept = [c for c in ds.column_names if c in keep_cols]
+        if len(kept) < len(ds.column_names):
+            ds = ds.select_columns(kept)
         return ds
 
     def _filter_ignore_markers(self, ds: Dataset, dataset_path: str) -> Dataset:
@@ -403,9 +404,13 @@ class DatasetLoader:
             current,
             target / current,
         )
+        # Same row sequence as `ds.select((list(range(current)) * repeats)[:target])`,
+        # built without that `target`-long Python index list. `repeat` is a
+        # concatenation over the same memory-mapped blocks, and selecting a
+        # leading contiguous range of it is a zero-copy slice that attaches no
+        # indices mapping (for a source that had none to begin with).
         repeats = (target // current) + 1
-        indices = list(range(current)) * repeats
-        return ds.select(indices[:target])
+        return ds.repeat(repeats).select(range(target))
 
     @staticmethod
     def _expand_epochs(ds: Dataset, times: int) -> Dataset:
@@ -417,22 +422,15 @@ class DatasetLoader:
         multiplied target instead, which spends the multiplier on FRESH rows
         first and only repeat-pads what the pool cannot cover.
 
-        Built with concatenate_datasets rather than the equivalent
-        `ds.select(list(range(len(ds))) * times)`. The two yield the identical
-        row sequence; they do not carry the identical disk cost. `select`
-        attaches an indices mapping, and the concatenate_datasets in load()
-        flattens any dataset carrying one -- materializing a full verbatim
-        copy, embedded audio bytes and all. At epoch_expansion=2 that wrote
-        roughly 620 GB of duplicate audio for the uncapped sources and is what
-        exhausted the network volume mid-run. Concatenating builds a
-        ConcatenationTable over the same memory-mapped blocks instead: same
-        rows, same order, nothing written. (A source that already has an
-        indices mapping from a _prepare_split filter still flattens once here,
-        but once rather than `times` over.)
+        `Dataset.repeat` is `concatenate_datasets([ds] * times)` under the hood:
+        a ConcatenationTable over the same memory-mapped blocks, so the
+        repeats write nothing to disk. Preferred over the equivalent
+        `ds.select(list(range(len(ds))) * times)`, which yields the identical
+        row sequence but materializes a `len(ds) * times` indices mapping.
         """
         if times <= 1:
             return ds
-        return concatenate_datasets([ds] * times)
+        return ds.repeat(times)
 
     def load(self) -> tuple[Dataset | None, Dataset | None]:
         train_datasets: list[Dataset] = []
@@ -761,6 +759,7 @@ class PushToHubCallback(TrainerCallback):
                 repo_id=args.hub_model_id,
                 commit_message=f"Training in progress - step {state.global_step}",
                 private=args.hub_private_repo,
+                token=args.hub_token,
             )
 
 
@@ -943,8 +942,12 @@ def _apply_liger_kernels(cfg: DictConfig) -> None:
         )
 
 
-def _build_asr_config(cfg: DictConfig) -> ASRConfig:
-    """Merge `model:` with the TRAINING_MODEL_PARAMS set under `training:` into an ASRConfig."""
+def build_asr_config(cfg: DictConfig) -> ASRConfig:
+    """Merge `model:` with the TRAINING_MODEL_PARAMS set under `training:` into an ASRConfig.
+
+    Shared with scripts/debug/check_gradient_flow.py so the probe builds the
+    model an experiment config actually trains.
+    """
     model_container = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_container, dict), "model config must be a dict"
     # Keys are ModelConfig field names (scripts/train_config.py), i.e. strings.
@@ -984,8 +987,12 @@ def _build_asr_config(cfg: DictConfig) -> ASRConfig:
     return ASRConfig(**{k: v for k, v in model_config_dict.items() if v is not None})
 
 
-def _disable_chat_template_thinking(model: ASRModel) -> None:
-    """Rewrite an `enable_thinking` chat template (Qwen3) so thinking is always off."""
+def disable_chat_template_thinking(model: ASRModel) -> None:
+    """Rewrite an `enable_thinking` chat template (Qwen3) so thinking is always off.
+
+    Shared with scripts/debug/check_gradient_flow.py, whose batch goes through
+    the same DataCollator and so needs the same rewritten template.
+    """
     # Workaround: TRL's DataCollatorForChatML doesn't pass enable_thinking=False to Qwen3.
     # See https://github.com/huggingface/trl/issues/3387
     chat_template = model.tokenizer.chat_template
@@ -999,10 +1006,16 @@ def _disable_chat_template_thinking(model: ASRModel) -> None:
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     push_to_hub = cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id")
-    if push_to_hub and not os.environ.get("HF_TOKEN"):
+    # Fail before model load and data prep: Trainer's own repo creation would
+    # only raise after both, and PushToHubCallback swallows push errors, so
+    # a missing token would otherwise surface at the final push, after the
+    # whole run. huggingface_hub resolves HF_TOKEN and the
+    # `hf auth login` cache itself (get_token checks both); an explicit
+    # training.hub_token is passed to every push below and to Trainer's.
+    if push_to_hub and get_token() is None and not cfg.training.get("hub_token"):
         msg = (
-            "HF_TOKEN environment variable is required when push_to_hub is enabled. "
-            "Set it with: export HF_TOKEN=your_token"
+            "push_to_hub is enabled but no Hugging Face token was found: set "
+            "HF_TOKEN, run `hf auth login`, or set training.hub_token"
         )
         raise ValueError(msg)
 
@@ -1012,7 +1025,7 @@ def main(cfg: DictConfig) -> None:
     if cfg.training.get("use_liger", True):
         _apply_liger_kernels(cfg)
 
-    model = ASRModel(_build_asr_config(cfg))
+    model = ASRModel(build_asr_config(cfg))
 
     _require_fused_cross_entropy(model, cfg)
 
@@ -1027,7 +1040,7 @@ def main(cfg: DictConfig) -> None:
     if hub_model_id := cfg.training.get("hub_model_id"):
         model.config.pretrained_model_path = hub_model_id
 
-    _disable_chat_template_thinking(model)
+    disable_chat_template_thinking(model)
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
@@ -1099,6 +1112,7 @@ def main(cfg: DictConfig) -> None:
             cfg.training.hub_model_id,
             commit_message="Training complete - final model",
             private=cfg.training.get("hub_private_repo", False),
+            token=cfg.training.get("hub_token"),
         )
 
 

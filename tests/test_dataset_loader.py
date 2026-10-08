@@ -52,6 +52,19 @@ class TestColumnPruning:
 
         assert set(ds.column_names) == {"audio", "text"}
 
+    def test_kept_columns_retain_source_order(self) -> None:
+        fake = _fake_dataset(audio_seconds=1.0, text="hi", speaker="spk1")
+        cfg = {
+            "path": "fake/dataset",
+            "audio_column": "audio",
+            "text_column": "text",
+            "text_punct": True,
+        }
+        ds = _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
+
+        # _text_punct is attached before the rename/cast, after audio.
+        assert ds.column_names == ["audio", "text", "_text_punct"]
+
 
 class TestTextCaseColumn:
     """`text_case` declares a source's casing policy for normalize_label.
@@ -334,6 +347,24 @@ class TestEpochExpansion:
         train = self._load(fake, entry, expansion=3)
         assert len(train) == 21
         assert len(set(train["text"])) == 7
+
+    def test_expand_epochs_row_order_is_verbatim_repeat(self) -> None:
+        ds = Dataset.from_dict({"text": [f"r{i}" for i in range(5)]})
+        out = DatasetLoader._expand_epochs(ds, 3)
+        assert out["text"] == ds["text"] * 3
+        assert out._indices is None, "repeating must not attach an indices mapping"
+        assert DatasetLoader._expand_epochs(ds, 1) is ds
+
+    @pytest.mark.parametrize("target", [6, 7, 10, 13])
+    def test_upsample_row_order_matches_index_repeat(self, target: int) -> None:
+        """Same rows, in the same order, as the select-over-repeated-indices it
+        replaced -- built as a contiguous slice with no indices mapping."""
+        ds = Dataset.from_dict({"text": [f"r{i}" for i in range(5)]})
+        loader = DatasetLoader(_make_cfg([]))
+        out = loader._resample_to_target(ds, target)
+        expected = (list(range(5)) * ((target // 5) + 1))[:target]
+        assert out["text"] == [f"r{i}" for i in expected]
+        assert out._indices is None
 
     def test_expansion_preserves_relative_mix_share(self) -> None:
         """Every source is multiplied by the same factor, so per-step mix
