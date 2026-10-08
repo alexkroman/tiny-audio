@@ -55,6 +55,13 @@ pipe("audio.wav", return_timestamps=True)
 pipe("meeting.wav", return_speakers=True, num_speakers=2)
 ```
 
+Each speaker Nemotron-3-Diarization finds is transcribed separately, on a copy of the audio where
+everyone else is silenced, and each word belongs to the stream it came from. This is a zero-shot
+port of NeMo's `masked_asr` recipe; a word two streams both heard at once is kept once. Each speaker
+costs roughly their own talk time in ASR, and single-speaker audio is transcribed unmasked. Overlap
+is only partly handled: another person's speech inside a speaker's turn stays in that speaker's
+stream.
+
 Speaker diarization needs `transformers` installed from `main`
 (`pip install git+https://github.com/huggingface/transformers`) until the next release. For
 token-by-token streaming output, see [`ASRModel.generate_streaming`](tiny_audio/asr_modeling.py).

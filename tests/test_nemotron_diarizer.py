@@ -1,4 +1,4 @@
-"""NemotronDiarizer's post-processing: speaker selection, segments, word assignment."""
+"""NemotronDiarizer's post-processing: speaker selection and segments."""
 
 from itertools import pairwise
 
@@ -33,7 +33,7 @@ class TestTopSpeakers:
         assert NemotronDiarizer.top_speakers(activity([])) == [0]
 
 
-class TestSegmentsAndWords:
+class TestSegments:
     def test_overlap_produces_overlapping_segments(self) -> None:
         act = activity([(0, 0, 2, 0.9), (1, 1.5, 3, 0.9)])
         segs = NemotronDiarizer.segments(act, [0, 1])
@@ -41,29 +41,6 @@ class TestSegmentsAndWords:
             {"speaker": "SPEAKER_0", "start": 0.0, "end": 2.0},
             {"speaker": "SPEAKER_1", "start": 1.5, "end": 3.0},
         ]
-
-    def test_word_in_silence_inherits_previous_speaker(self) -> None:
-        act = activity([(0, 0, 1, 0.9), (1, 2, 3, 0.9)])
-        words = [
-            {"word": "a", "start": 0.2, "end": 0.5},
-            {"word": "b", "start": 1.3, "end": 1.6},  # nobody active
-            {"word": "c", "start": 2.2, "end": 2.6},
-        ]
-        out = NemotronDiarizer.assign_speakers_to_words(words, act, [0, 1])
-        assert [w["speaker"] for w in out] == ["SPEAKER_0", "SPEAKER_0", "SPEAKER_1"]
-
-    def test_dropped_column_words_go_to_a_kept_speaker(self) -> None:
-        act = activity([(0, 0, 2, 0.9), (1, 2, 4, 0.9), (2, 1, 1.5, 0.6)])
-        words = [{"word": "x", "start": 1.1, "end": 1.4}]
-        out = NemotronDiarizer.assign_speakers_to_words(words, act, [0, 1])
-        assert out[0]["speaker"] == "SPEAKER_0"
-
-
-class TestSpeakerColumns:
-    def test_untimed_and_silent_words_inherit(self) -> None:
-        act = activity([(0, 0, 1, 0.9)])
-        spans: list[tuple[float | None, float | None]] = [(0.2, 0.5), (2.5, 3.0), (None, None)]
-        assert NemotronDiarizer.speaker_columns(spans, act, [0]) == [0, 0, 0]
 
 
 class TestChunkBounds:
