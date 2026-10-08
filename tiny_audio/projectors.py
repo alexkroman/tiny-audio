@@ -4,7 +4,7 @@ This module contains all projector architectures:
 - MLPAudioProjector: Simple 2-layer MLP with frame stacking downsampling
 """
 
-from typing import overload
+from typing import cast, overload
 
 import torch
 import torch.nn as nn
@@ -92,22 +92,22 @@ class MLPAudioProjector(nn.Module):
     path from encoder to decoder and a frozen encoder that cannot adapt to it.
     """
 
-    def __init__(self, config):
+    def __init__(self, config: object) -> None:
         """Initialize MLP projector.
 
         Args:
             config: ASRConfig with encoder_dim, llm_dim, projector_pool_stride
         """
-        super().__init__()
+        super().__init__()  # pyright: ignore[reportUnknownMemberType]  # untyped *args
 
-        encoder_dim = getattr(config, "encoder_dim", 768)
-        llm_dim = getattr(config, "llm_dim", 2048)
-        self.k = getattr(config, "projector_pool_stride", 4)
+        encoder_dim: int = getattr(config, "encoder_dim", 768)
+        llm_dim: int = getattr(config, "llm_dim", 2048)
+        self.k: int = getattr(config, "projector_pool_stride", 4)
 
         # Frame stacking: concat k adjacent frames then project
         in_dim = encoder_dim * self.k
         # Hidden dim defaults to llm_dim, can be overridden via config
-        hidden_dim = getattr(config, "projector_hidden_dim", None) or llm_dim
+        hidden_dim: int = getattr(config, "projector_hidden_dim", None) or llm_dim
         self.input_norm = LlamaRMSNorm(in_dim, eps=1e-6)
         self.linear_1 = nn.Linear(in_dim, hidden_dim)
         self.act = nn.GELU()
@@ -134,7 +134,7 @@ class MLPAudioProjector(nn.Module):
         x = self.input_norm(x)
         x = self.linear_1(x)
         x = self.act(x)
-        return self.linear_2(x)
+        return cast(torch.Tensor, self.linear_2(x))
 
 
 # =============================================================================

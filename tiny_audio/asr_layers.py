@@ -10,6 +10,8 @@ loaded sub-models:
 """
 
 import math
+from collections.abc import Iterator
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -58,7 +60,7 @@ class ChunkedEmbedding(nn.Module):
 
     def __init__(self, embedding: nn.Embedding) -> None:
         """Split `embedding`'s table into MPS-safe column chunks, keeping its metadata."""
-        super().__init__()
+        super().__init__()  # pyright: ignore[reportUnknownMemberType]  # untyped *args
         self.num_embeddings = embedding.num_embeddings
         self.embedding_dim = embedding.embedding_dim
         self.padding_idx = embedding.padding_idx
@@ -193,7 +195,8 @@ def chunk_oversized_embeddings(root: nn.Module) -> list[str]:
     pass finds nothing.
     """
     replaced: list[str] = []
-    for module_name, module in list(root.named_modules()):
+    modules = cast(Iterator[tuple[str, nn.Module]], root.named_modules())
+    for module_name, module in list(modules):
         for child_name, child in list(module.named_children()):
             if isinstance(child, nn.Embedding) and child.weight.numel() > MPS_MAX_TENSOR_ELEMENTS:
                 setattr(module, child_name, ChunkedEmbedding(child))
