@@ -165,30 +165,6 @@ If alignment or diarization fails (for example, on a transformers release withou
 support), the transcript is still returned and the error is reported under
 `result["timestamp_error"]` or `result["diarization_error"]`.
 
-## How It Works
-
-```text
-Audio (16kHz) → Granite Speech encoder (frozen) → MLP projector (trained)
-  → Qwen3.5-2B + LoRA (trained adapters) → Text
-```
-
-1. **Audio encoder**: Granite Speech turns 16kHz audio into frame-level embeddings.
-1. **Projector**: A 2-layer MLP maps those embeddings into the decoder's embedding space. Each
-   projected frame replaces an `<audio>` placeholder token in the prompt.
-1. **Language model**: Qwen3.5-2B, adapted with LoRA, generates the transcript conditioned on the
-   projected audio and the prompt *"Transcribe the speech with proper punctuation and
-   capitalization"*.
-
-| Component      | Model                                                                                                   | Parameters | Status  |
-| -------------- | ------------------------------------------------------------------------------------------------------- | ---------- | ------- |
-| Audio Encoder  | [granite-speech-5.0-470m-turboctc](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) | ~470M      | Frozen  |
-| Projector      | 2-layer MLP (hidden 4096)                                                                               | 12.6M      | Trained |
-| Language Model | [Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B)                                                    | ~2B        | Frozen  |
-| LoRA adapters  | r=64, alpha=64, all linear layers                                                                       | 67.3M      | Trained |
-
-At inference, 0.25s of silence is prepended to each clip (`inference_lead_in_seconds`). This keeps
-the first word from being dropped on clips that start mid-speech.
-
 ## Train Your Own
 
 Everything that produced this model is open: the code, the data mix, and the recipe. Swap the
