@@ -27,60 +27,90 @@ library_name: transformers
 
 # Tiny Audio
 
-An English speech recognition model that outputs punctuated, capitalized, formatted text. Built with
-[Tiny Audio](https://github.com/alexkroman/tiny-audio)—a minimal, hackable ASR framework.
+**English speech recognition from an LLM that learned to listen.** 1.8% WER on LibriSpeech
+test-clean, 8.4% averaged over 12 benchmarks, with punctuated, capitalized, formatted output, word
+timestamps, and speaker labels.
 
-A frozen Granite Speech encoder is connected to a frozen Qwen3.5-2B decoder through a trained MLP
-projector, with LoRA adapters on the decoder. Only ~80M parameters are trained.
+A frozen Granite Speech encoder feeds a frozen Qwen3.5-2B through a small MLP projector, with LoRA
+adapters on the decoder. Only ~80M parameters were trained, on a single GPU, with
+[Tiny Audio](https://github.com/alexkroman/tiny-audio): a small, hackable codebase you can use to
+train your own.
+
+**[Try the live demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)** ·
+**[Train your own](https://github.com/alexkroman/tiny-audio)** ·
+**[Free 3.5-hour course](https://github.com/alexkroman/tiny-audio/blob/main/docs/course/0-course-overview.md)**
 
 ## Quick Start
 
+```bash
+pip install "transformers>=5.0" peft torch torchaudio librosa
+```
+
 ```python
 from transformers import pipeline
 
 pipe = pipeline(
     "automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True
 )
-result = pipe("audio.wav")
-print(result["text"])
+print(pipe("audio.wav")["text"])
 # The quarterly revenue grew by 12% according to Dr. Smith.
 ```
 
-## Usage Examples
+The input can be a file path, a URL, or a 16 kHz float32 numpy array. No post-processing is needed:
+the model writes punctuation, capitalization, and numbers itself.
 
-### Basic Transcription
+## Benchmarks
 
-```python
-from transformers import pipeline
+Word error rate (%, lower is better) on 1,000 samples per dataset, scored with the
+[Tiny Audio eval harness](https://github.com/alexkroman/tiny-audio/tree/main/scripts/eval)
+(`ta eval`) after text normalization.
 
-pipe = pipeline(
-    "automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True
-)
+| Dataset                |      WER |
+| ---------------------- | -------: |
+| LibriSpeech test-clean |     1.80 |
+| SPGISpeech             |     2.24 |
+| LibriSpeech test-other |     3.09 |
+| TED-LIUM               |     3.74 |
+| LoquaciousSet †        |     6.10 |
+| Common Voice           |     6.62 |
+| VoxPopuli              |     6.96 |
+| AMI (IHM)              |     8.88 |
+| GigaSpeech             |     9.07 |
+| Earnings22 †           |    10.54 |
+| People's Speech        |    17.69 |
+| AMI (SDM)              |    23.59 |
+| **Mean (12 sets)**     | **8.36** |
 
-# From file
-result = pipe("audio.wav")
-print(result["text"])
+† Held out: no data from this source was used in training.
 
-# From URL
-result = pipe("https://example.com/audio.mp3")
+To reproduce a row, or score AssemblyAI, Deepgram, ElevenLabs, or Apple's on-device recognizer on
+the same samples:
 
-# From numpy array (must be 16kHz)
-import numpy as np
-
-audio = np.random.randn(16000).astype(np.float32)  # 1 second
-result = pipe(audio)
+```bash
+git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio && poetry install
+poetry run ta eval -m mazesmazes/tiny-audio -d loquacious -n 100
+ASSEMBLYAI_API_KEY=... poetry run ta eval -m assemblyai -d loquacious -n 100
 ```
 
-### Batch Processing
+## More Than Plain Text
+
+### Batches and GPU
 
 ```python
-files = ["audio1.wav", "audio2.wav", "audio3.wav"]
-results = pipe(files, batch_size=4)
-for r in results:
+import torch
+
+pipe = pipeline(
+    "automatic-speech-recognition",
+    model="mazesmazes/tiny-audio",
+    trust_remote_code=True,
+    device="cuda",
+    torch_dtype=torch.bfloat16,
+)
+for r in pipe(["audio1.wav", "audio2.wav", "audio3.wav"], batch_size=4):
     print(r["text"])
 ```
 
-### Word-Level Timestamps
+### Word-level timestamps
 
 `return_timestamps=True` times every word with
 [Qwen3-ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf) and returns them
@@ -96,7 +126,7 @@ for word in result["words"]:
 #   {'word': 'Hi,', 'start': 0.0, 'end': 0.24}
 ```
 
-### Speaker Diarization
+### Speaker diarization
 
 `return_speakers=True` labels every word with a speaker (it implies `return_timestamps=True`).
 Speakers come from [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization),
@@ -140,59 +170,12 @@ If alignment or diarization fails (for example, transformers without Nemotron), 
 still returned and the error is reported under `result["timestamp_error"]` or
 `result["diarization_error"]`.
 
-### GPU Inference
-
-```python
-import torch
-
-pipe = pipeline(
-    "automatic-speech-recognition",
-    model="mazesmazes/tiny-audio",
-    trust_remote_code=True,
-    device="cuda",
-    torch_dtype=torch.bfloat16,
-)
-```
-
-## Benchmarks
-
-Word error rate (%, lower is better) on 1,000 samples per dataset, scored with the
-[Tiny Audio eval harness](https://github.com/alexkroman/tiny-audio/tree/main/scripts/eval)
-(`ta eval`) after text normalization.
-
-| Dataset                |      WER |
-| ---------------------- | -------: |
-| LibriSpeech test-clean |     1.80 |
-| SPGISpeech             |     2.24 |
-| LibriSpeech test-other |     3.09 |
-| TED-LIUM               |     3.74 |
-| LoquaciousSet †        |     6.10 |
-| Common Voice           |     6.62 |
-| VoxPopuli              |     6.96 |
-| AMI (IHM)              |     8.88 |
-| GigaSpeech             |     9.07 |
-| Earnings22 †           |    10.54 |
-| People's Speech        |    17.69 |
-| AMI (SDM)              |    23.59 |
-| **Mean (12 sets)**     | **8.36** |
-
-† Held out: no data from this source was used in training.
-
-## Architecture
+## How It Works
 
 ```text
 Audio (16kHz) → Granite Speech encoder (frozen) → MLP projector (trained)
   → Qwen3.5-2B + LoRA (trained adapters) → Text
 ```
-
-| Component      | Model                                                                                                   | Parameters | Status  |
-| -------------- | ------------------------------------------------------------------------------------------------------- | ---------- | ------- |
-| Audio Encoder  | [granite-speech-5.0-470m-turboctc](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) | ~470M      | Frozen  |
-| Projector      | 2-layer MLP (hidden 4096)                                                                               | 12.6M      | Trained |
-| Language Model | [Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B)                                                    | ~2B        | Frozen  |
-| LoRA adapters  | r=64, alpha=64, all linear layers                                                                       | 67.3M      | Trained |
-
-### How It Works
 
 1. **Audio encoder**: Granite Speech turns 16kHz audio into frame-level embeddings.
 1. **Projector**: A 2-layer MLP maps those embeddings into the decoder's embedding space. Each
@@ -201,8 +184,31 @@ Audio (16kHz) → Granite Speech encoder (frozen) → MLP projector (trained)
    projected audio and the prompt *"Transcribe the speech with proper punctuation and
    capitalization"*.
 
+| Component      | Model                                                                                                   | Parameters | Status  |
+| -------------- | ------------------------------------------------------------------------------------------------------- | ---------- | ------- |
+| Audio Encoder  | [granite-speech-5.0-470m-turboctc](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) | ~470M      | Frozen  |
+| Projector      | 2-layer MLP (hidden 4096)                                                                               | 12.6M      | Trained |
+| Language Model | [Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B)                                                    | ~2B        | Frozen  |
+| LoRA adapters  | r=64, alpha=64, all linear layers                                                                       | 67.3M      | Trained |
+
 At inference, 0.25s of silence is prepended to each clip (`inference_lead_in_seconds`). This keeps
 the first word from being dropped on clips that start mid-speech.
+
+## Train Your Own
+
+Everything that produced this model is open: the code, the data mix, and the recipe. Swap the
+encoder, the LLM, or the projector from config and train on your own data. A smoke test runs on a
+laptop in about five minutes:
+
+```bash
+git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio && poetry install
+poetry run python scripts/train.py +experiments=mps_smoke
+```
+
+The
+[free course](https://github.com/alexkroman/tiny-audio/blob/main/docs/course/0-course-overview.md)
+walks through how the pieces fit, training a model, evaluating it, and publishing it with a demo
+like [this one](https://huggingface.co/spaces/mazesmazes/tiny-audio).
 
 ## Model Specifications
 
@@ -210,7 +216,7 @@ the first word from being dropped on clips that start mid-speech.
 | ---------------- | ------------------------------------------------------------------ |
 | Input            | Audio (16kHz mono)                                                 |
 | Output           | Punctuated, capitalized text with formatted numbers                |
-| Max Audio Length | ~30 seconds per call                                               |
+| Max Audio Length | ~19 s per plain call; any length with timestamps or speakers       |
 | Vocabulary       | Qwen3.5 tokenizer                                                  |
 | Languages        | English only                                                       |
 | Generation       | Greedy decoding (num_beams=1, do_sample=False), max 256 new tokens |
@@ -283,13 +289,6 @@ If you use this model, please cite:
   url = {https://github.com/alexkroman/tiny-audio}
 }
 ```
-
-## Links
-
-- [GitHub Repository](https://github.com/alexkroman/tiny-audio) - Train your own model
-- [Free 3.5-hour Course](https://github.com/alexkroman/tiny-audio/blob/main/docs/course/0-course-overview.md)
-  \- Learn ASR from scratch
-- [Live Demo](https://huggingface.co/spaces/mazesmazes/tiny-audio) - Try it in your browser
 
 ## Acknowledgments
 
