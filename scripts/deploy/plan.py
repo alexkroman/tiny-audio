@@ -21,7 +21,7 @@ from __future__ import annotations
 import importlib
 import json
 import subprocess
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -45,7 +45,7 @@ from scripts.train_config import register_configs
 from scripts.utils import get_project_root
 
 if TYPE_CHECKING:
-    from tiny_audio.asr_config import ASRConfig
+    from tiny_audio.asr_config import ASRConfig, ConvLayerSpec
     from tiny_audio.projectors import MLPAudioProjector
 
 GIB = 1024**3
@@ -403,9 +403,14 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         # encoder_conv_layers halves twice to ~237. Using seq_len here instead
         # gave 82 and undercounted the tape ~3x.
         enc_seq = int(MAX_AUDIO_SECONDS * ENCODER_FRAME_RATE_HZ)
-        conv_layers: Iterable[Sequence[int]] = cfg.model.get("encoder_conv_layers") or []
-        for pad, kernel, stride in conv_layers:
-            enc_seq = (enc_seq + 2 * pad - (kernel - 1) - 1) // stride + 1
+        # Same default as ASRConfig: unset means DEFAULT_ENCODER_CONV_LAYERS,
+        # not "no subsampling".
+        # Lazy, like the transformers/tiny_audio imports in build_plan.
+        asr_config = importlib.import_module("tiny_audio.asr_config")
+        encoder_output_length: Callable[[int, Sequence[ConvLayerSpec] | None], int] = (
+            asr_config.compute_encoder_output_length
+        )
+        enc_seq = encoder_output_length(enc_seq, cfg.model.get("encoder_conv_layers") or None)
         if enc_layers:
             per_tok_enc = (
                 act_bytes_per * (6 * encoder_dim + 3 * 4 * encoder_dim) * ACTIVATION_CALIBRATION

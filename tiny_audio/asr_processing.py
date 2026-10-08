@@ -142,7 +142,7 @@ def prepend_lead_in(audio: AudioInput, sampling_rate: int, seconds: float | None
     if pad <= 0:
         return waveform
     arr: npt.NDArray[Any] = np.asarray(waveform)
-    padded: npt.NDArray[Any] = np.concatenate([np.zeros(pad, dtype=arr.dtype), arr])
+    padded: npt.NDArray[Any] = np.pad(arr, (pad, 0))
     return padded
 
 

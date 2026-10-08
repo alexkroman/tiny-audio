@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Annotated, Any, TypedDict, cast
 
@@ -32,22 +32,13 @@ import numpy.typing as npt
 import torch
 import typer
 from omegaconf import OmegaConf
-from transformers.models.llama.modeling_llama import LlamaRMSNorm
-from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
-from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-from transformers.trainer_pt_utils import (
-    get_parameter_names,  # pyright: ignore[reportUnknownVariableType]
-)
+from torch.nn.utils.rnn import pad_sequence
 
+from scripts.train import decay_parameter_ids
 from scripts.utils import get_project_root
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_types import AudioFeatureExtractor
-
-# `get_parameter_names` ships without annotations; this is its signature as used here.
-_get_parameter_names = cast(
-    Callable[[torch.nn.Module, list[type[torch.nn.Module]]], list[str]], get_parameter_names
-)
 
 
 class ParamGroup(TypedDict):
@@ -100,18 +91,12 @@ def build_param_groups(
 
     Groups: (is_decoder, decay) for is_decoder in {False, True} and
     decay in {True, False}. is_decoder = name.startswith("language_model.").
-    decay = name in get_parameter_names(model, ALL_LAYERNORM_LAYERS) and
-    "bias" not in name. Each group dict also carries `param_names` for the
+    decay comes from scripts/train.py's decay_parameter_ids, the same rule
+    the trainer applies. Each group dict also carries `param_names` for the
     routing audit and the configured `lr` / `wd` that ASRTrainer would
     apply under embedded.yaml's knobs.
     """
-    forbidden: list[type[torch.nn.Module]] = [
-        *list(ALL_LAYERNORM_LAYERS),
-        Qwen3RMSNorm,
-        LlamaRMSNorm,
-    ]
-    decay_set = set(_get_parameter_names(model, forbidden))
-    decay_set = {n for n in decay_set if "bias" not in n}
+    decay_ids = decay_parameter_ids(model)
 
     base_lr = knobs["learning_rate"]
     base_wd = knobs["weight_decay"]
@@ -132,7 +117,7 @@ def build_param_groups(
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        key = (name.startswith("language_model."), name in decay_set)
+        key = (name.startswith("language_model."), id(param) in decay_ids)
         buckets[key].append((name, param))
 
     labels = {
@@ -293,16 +278,16 @@ def synthetic_batch(
         samples_input_ids.append(list(full_ids))
         samples_labels.append(sample_labels)
 
-    max_len = max(len(x) for x in samples_input_ids)
     pad_id = tok.pad_token_id
     assert isinstance(pad_id, int)
-    input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
-    attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
-    labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
-    for i, (ids, lab) in enumerate(zip(samples_input_ids, samples_labels, strict=True)):
-        input_ids[i, : len(ids)] = torch.tensor(ids)
-        attention_mask[i, : len(ids)] = 1
-        labels[i, : len(lab)] = torch.tensor(lab)
+    ids_t = [torch.tensor(ids, dtype=torch.long) for ids in samples_input_ids]
+    input_ids = pad_sequence(ids_t, batch_first=True, padding_value=pad_id)
+    attention_mask = pad_sequence([torch.ones_like(t) for t in ids_t], batch_first=True)
+    labels = pad_sequence(
+        [torch.tensor(lab, dtype=torch.long) for lab in samples_labels],
+        batch_first=True,
+        padding_value=-100,
+    )
 
     return {
         "input_ids": input_ids,

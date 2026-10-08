@@ -60,7 +60,7 @@ def _load(path: Path) -> dict[str, Any]:
 
 def _save(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(sorted(data.items())), indent=2) + "\n")
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def _tracked_python_files() -> list[str]:
