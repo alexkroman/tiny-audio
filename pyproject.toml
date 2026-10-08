@@ -211,8 +211,8 @@ follow_imports = "normal"
 # soundfile, torchaudio, fabric, nltk, ...) are analysed from source instead of
 # being silently treated as Any.
 follow_untyped_imports = true
-# Minimal stubs for modules that cannot be installed here: the Spaces runtime's
-# `spaces` and PyObjC's macOS-only frameworks.
+# Minimal stubs for modules that cannot be installed everywhere: the Spaces
+# runtime's `spaces`, PyObjC's macOS-only frameworks, and linux-only liger.
 mypy_path = "typings"
 
 [tool.pyright]
