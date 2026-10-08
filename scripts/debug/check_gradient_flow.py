@@ -1,14 +1,15 @@
-"""Gradient-flow probe for the embedded.yaml recipe.
+"""Gradient-flow probe for a training experiment config.
 
-Builds the ASRModel exactly as configs/experiments/embedded.yaml does
-(GLM-ASR-Nano-2512 encoder, Qwen3-0.6B decoder, MLP projector, full-decoder
-fine-tune i.e. freeze_language_model=False), runs one synthetic forward +
-backward, and reports:
+Builds the ASRModel exactly as an experiment config does -- by default
+configs/experiments/stage_1.yaml (GLM-ASR-Nano-2512 encoder, Qwen3-0.6B
+decoder, MLP projector, full-decoder fine-tune i.e. freeze_language_model=False)
+-- runs one synthetic forward + backward through the real training
+DataCollator, and reports:
 
   - which submodules have requires_grad=True/False
-  - per-module gradient norms (encoder must be None; projector + LM must be
-    finite, non-zero)
-  - whether the frozen encoder accidentally received gradient
+  - per-module gradient norms (every trainable param must get a finite,
+    non-zero grad; frozen ones none)
+  - whether a frozen component (e.g. the encoder) accidentally received gradient
   - the projector vs LM gradient-norm ratio (sanity check for the split LR)
   - whether the <audio> embed_tokens / lm_head row sees any gradient (it
     shouldn't on the input side since masked_scatter replaces it; on the
@@ -16,7 +17,7 @@ backward, and reports:
   - any NaN/Inf in grads or activations
 
 Usage:
-    poetry run python scripts/debug/check_gradient_flow.py
+    poetry run python scripts/debug/check_gradient_flow.py [--experiment stage_1]
 """
 
 from __future__ import annotations
@@ -27,18 +28,21 @@ from collections.abc import Iterable
 from enum import StrEnum
 from typing import Annotated, Any, NamedTuple, TypedDict, cast
 
-import numpy as np
-import numpy.typing as npt
 import torch
 import typer
-from omegaconf import OmegaConf
-from torch.nn.utils.rnn import pad_sequence
+from hydra import compose, initialize_config_dir
+from omegaconf import DictConfig
+from transformers import set_seed
 
-from scripts.train import optimizer_param_groups
+from scripts.train import (
+    build_asr_config,
+    disable_chat_template_thinking,
+    optimizer_param_groups,
+)
+from scripts.train_collator import DataCollator
+from scripts.train_config import register_configs
 from scripts.utils import get_project_root
-from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.asr_types import AudioFeatureExtractor
 
 
 class ParamGroup(TypedDict):
@@ -51,34 +55,46 @@ class ParamGroup(TypedDict):
     wd: float | None
 
 
-def load_embedded_training_knobs() -> dict[str, float | None]:
-    """Read training LR/WD knobs from configs/experiments/embedded.yaml.
+def load_experiment_config(experiment: str) -> DictConfig:
+    """Compose configs/config.yaml + `+experiments=<experiment>` as training does.
 
-    Returns a dict with keys: learning_rate, decoder_learning_rate,
-    weight_decay, projector_weight_decay. Missing keys map to None;
-    the caller falls back to printing actuals without the mismatch check.
+    Composed rather than read from the experiment file alone: experiments
+    inherit every key they do not set from config.yaml and its defaults
+    (training/production.yaml), so the file by itself is missing knobs the
+    trainer uses. Attention is forced to eager so the probe does not depend
+    on flash-attn being importable locally; gradient flow is independent of
+    the attention implementation.
     """
-    repo_root = get_project_root()
-    yaml_path = repo_root / "configs" / "experiments" / "embedded.yaml"
-    if not yaml_path.exists():
-        return {
-            "learning_rate": None,
-            "decoder_learning_rate": None,
-            "weight_decay": None,
-            "projector_weight_decay": None,
-        }
-    cfg = OmegaConf.to_container(OmegaConf.load(yaml_path))
-    root = cfg if isinstance(cfg, dict) else {}
-    training: dict[str, Any] = root.get("training") or {}
+    register_configs()
+    configs = get_project_root() / "configs"
+    with initialize_config_dir(config_dir=str(configs), version_base=None):
+        return compose(
+            config_name="config",
+            overrides=[f"+experiments={experiment}", "training.attn_implementation=eager"],
+        )
+
+
+def training_knobs(cfg: DictConfig) -> dict[str, float | None]:
+    """The LR / WD knobs ASRTrainer.create_optimizer reads from `training:`.
+
+    Unset keys map to None, which optimizer_param_groups resolves the same way
+    the trainer does (component overrides fall back to the base values).
+    """
+    training = cfg.training
 
     def _to_float(v: Any) -> float | None:
         return float(v) if v is not None else None
 
     return {
-        "learning_rate": _to_float(training.get("learning_rate")),
-        "decoder_learning_rate": _to_float(training.get("decoder_learning_rate")),
-        "weight_decay": _to_float(training.get("weight_decay")),
-        "projector_weight_decay": _to_float(training.get("projector_weight_decay")),
+        key: _to_float(training.get(key))
+        for key in (
+            "learning_rate",
+            "decoder_learning_rate",
+            "encoder_learning_rate",
+            "weight_decay",
+            "projector_weight_decay",
+            "encoder_weight_decay",
+        )
     }
 
 
@@ -93,7 +109,7 @@ def build_param_groups(
 
     Built by scripts/train.py's optimizer_param_groups, the same routing the
     trainer applies; each group also carries `param_names` and the configured
-    `lr` / `wd` under embedded.yaml's knobs (encoder knobs fall back to base).
+    `lr` / `wd` under the experiment's knobs.
     """
     return [
         {
@@ -109,6 +125,8 @@ def build_param_groups(
             weight_decay=knobs["weight_decay"],
             decoder_lr=knobs["decoder_learning_rate"],
             projector_wd=knobs["projector_weight_decay"],
+            encoder_lr=knobs["encoder_learning_rate"],
+            encoder_wd=knobs["encoder_weight_decay"],
         )
     ]
 
@@ -141,29 +159,21 @@ def effective_update_norms(groups: list[ParamGroup]) -> dict[str, float]:
     }
 
 
-def build_model(dtype: torch.dtype, device: str, model_id: str | None = None) -> ASRModel:
-    """Build the model used by configs/experiments/embedded.yaml.
+def build_model(
+    dtype: torch.dtype, device: str, cfg: DictConfig, model_id: str | None = None
+) -> ASRModel:
+    """Build the model the experiment config `cfg` trains.
 
     If `model_id` is provided, load the trained checkpoint from the Hub or a
-    local path; otherwise build a fresh model with base-LM weights and a
-    randomly-initialized projector. Gradient flow (which params get grads)
+    local path; otherwise build a fresh model through scripts/train.py's own
+    build_asr_config (base-LM weights, a randomly-initialized projector, the
+    experiment's freeze settings). Gradient flow (which params get grads)
     is independent of weights, but absolute gradient magnitudes — and the
     projector/decoder ratio — depend on the trained state, so checkpoint
     loading matters for the "is the projector dominating?" diagnostic.
     """
     if model_id is None:
-        cfg = ASRConfig(
-            audio_model_id="zai-org/GLM-ASR-Nano-2512",
-            text_model_id="Qwen/Qwen3-0.6B",
-            projector_type="mlp",
-            projector_pool_stride=4,
-            projector_hidden_dim=2048,
-            freeze_language_model=False,
-            # Use eager so we don't depend on flash-attn being importable on the
-            # local box; gradient flow is independent of attention impl.
-            attn_implementation="eager",
-        )
-        model = ASRModel(cfg)
+        model = ASRModel(build_asr_config(cfg))
     else:
         model = ASRModel.from_pretrained(
             model_id,
@@ -173,6 +183,9 @@ def build_model(dtype: torch.dtype, device: str, model_id: str | None = None) ->
         # saved config; force it off so the LM gets gradient as in training.
         for p in model.language_model.parameters():
             p.requires_grad_(True)
+    # Training applies this before building its DataCollator; the probe's
+    # batch goes through the same collator, so it needs the same template.
+    disable_chat_template_thinking(model)
     # PreTrainedModel.to is decorated with functools.wraps(nn.Module.to), which
     # type checkers read as the unbound function (missing `self`). Calling it
     # through the nn.Module type still dispatches to the same override.
@@ -193,123 +206,80 @@ def parameter_summary(model: ASRModel) -> dict[str, tuple[int, int]]:
 
 def synthetic_batch(
     model: ASRModel,
-    batch_size: int = 2,
-    audio_seconds: float = 4.0,
+    audio_seconds: tuple[float, ...] = (4.0, 3.0),
     response: str = "hello world this is a gradient flow test",
 ) -> dict[str, torch.Tensor]:
-    """Build a batch shaped exactly like train_collator.DataCollator output."""
+    """Collate random-noise rows through the real training DataCollator.
+
+    Built with scripts/train_collator.DataCollator, configured as
+    scripts/train.py configures it, rather than by hand: the collator pads
+    text on the left (trl's DataCollatorForChatML), emits `model.audio_token`
+    rather than a literal "<audio>", and masks labels its own way, and a
+    probe that diverges on any of those audits a batch training never sees.
+    The clip lengths differ so the batch actually carries padding.
+    """
     sr = model.feature_extractor.sampling_rate
-    n_samples = int(audio_seconds * sr)
-    audio_arrays: list[npt.NDArray[np.float32]] = [
-        torch.randn(n_samples).numpy() for _ in range(batch_size)
+    collator = DataCollator(
+        tokenizer=model.tokenizer,
+        feature_extractor=model.feature_extractor,
+        sample_rate=sr,
+        projector=model.projector,
+        encoder_conv_layers=model.config.encoder_conv_layers,
+        audio_token=model.audio_token,
+    )
+    features: list[dict[str, Any]] = [
+        {
+            "audio": {"array": torch.randn(int(seconds * sr)).numpy(), "sampling_rate": sr},
+            "text": response,
+        }
+        for seconds in audio_seconds
     ]
-    feature_extractor = cast(AudioFeatureExtractor, model.feature_extractor)
-    audio_out = feature_extractor(
-        audio_arrays,
-        sampling_rate=sr,
-        padding="longest",
-        return_attention_mask=True,
-        return_tensors="pt",
-    )
-
-    audio_attention_mask: torch.Tensor = audio_out["attention_mask"]
-    input_features: torch.Tensor = audio_out["input_features"]
-    # A probe of ASRModel internals: it reproduces what forward() computes.
-    encoder_lengths = model._compute_encoder_output_lengths  # pyright: ignore[reportPrivateUsage]
-    enc_lengths = encoder_lengths(audio_attention_mask)
-    token_counts = model.projector.get_output_length(enc_lengths).to(torch.long)
-
-    tok = model.tokenizer
-    samples_input_ids: list[list[int]] = []
-    samples_labels: list[list[int]] = []
-    for i in range(batch_size):
-        n_audio = int(token_counts[i].item())
-        user = ("<audio>" * n_audio) + " " + ASRModel.TRANSCRIBE_PROMPT
-        messages = [
-            {"role": "user", "content": user},
-            {"role": "assistant", "content": response},
-        ]
-        full_text = tok.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False, enable_thinking=False
-        )
-        prompt_text = tok.apply_chat_template(
-            messages[:1],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        assert isinstance(full_text, str)
-        assert isinstance(prompt_text, str)
-        full_ids = tok(full_text, add_special_tokens=False)["input_ids"]
-        prompt_ids = tok(prompt_text, add_special_tokens=False)["input_ids"]
-        sample_labels = [-100] * len(prompt_ids) + list(full_ids[len(prompt_ids) :])
-        sample_labels = sample_labels[: len(full_ids)]
-        samples_input_ids.append(list(full_ids))
-        samples_labels.append(sample_labels)
-
-    pad_id = tok.pad_token_id
-    assert isinstance(pad_id, int)
-    ids_t = [torch.tensor(ids, dtype=torch.long) for ids in samples_input_ids]
-    input_ids = pad_sequence(ids_t, batch_first=True, padding_value=pad_id)
-    attention_mask = pad_sequence([torch.ones_like(t) for t in ids_t], batch_first=True)
-    labels = pad_sequence(
-        [torch.tensor(lab, dtype=torch.long) for lab in samples_labels],
-        batch_first=True,
-        padding_value=-100,
-    )
-
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "labels": labels,
-        "input_features": input_features,
-        "audio_attention_mask": audio_attention_mask,
-        "audio_token_counts": token_counts,
-    }
+    batch = collator(features)
+    if len(batch["input_ids"]) != len(features):
+        msg = f"DataCollator dropped {len(features) - len(batch['input_ids'])} probe row(s)"
+        raise RuntimeError(msg)
+    return batch
 
 
 def grad_norm(params: Iterable[torch.nn.Parameter]) -> float:
-    total = 0.0
-    for p in params:
-        if p.grad is None:
-            continue
-        total += float(p.grad.detach().float().pow(2).sum().item())
-    return math.sqrt(total)
+    """L2 norm over every present .grad, as one flattened vector (0.0 if none)."""
+    grads = [p.grad.detach().float() for p in params if p.grad is not None]
+    return float(torch.nn.utils.get_total_norm(grads))
 
 
 def projector_submodule_norms(model: ASRModel) -> dict[str, float]:
     """Per-named-submodule grad norms for the MLP projector."""
-    norms: dict[str, float] = {}
-    for name, param in model.projector.named_parameters():
-        if param.grad is None:
-            continue
-        norms[name] = float(param.grad.detach().float().pow(2).sum().sqrt().item())
-    return norms
+    return {
+        name: float(param.grad.detach().float().norm())
+        for name, param in model.projector.named_parameters()
+        if param.grad is not None
+    }
 
 
 class _Component(NamedTuple):
     """.grad coverage and gradient norm of one top-level component."""
 
     with_grad: int
+    trainable: int
     total: int
     norm: float
 
 
 def _component_grads(module: torch.nn.Module) -> _Component:
-    """Count a module's params that got .grad, and their combined grad norm."""
+    """Count a module's params that got .grad / are trainable, and their grad norm."""
     params = list(module.parameters())
     with_grad = sum(1 for p in params if p.grad is not None)
-    return _Component(with_grad, len(params), grad_norm(params))
+    trainable = sum(1 for p in params if p.requires_grad)
+    return _Component(with_grad, trainable, len(params), grad_norm(params))
 
 
 class _Routing(NamedTuple):
     """Optimizer param groups plus the routing-audit counts from section [9]."""
 
-    knobs: dict[str, float | None]
     groups: list[ParamGroup]
     total_routed: int
     expected_trainable: int
-    encoder_in_groups: int
+    frozen_in_groups: int
 
 
 def _print_parameter_summary(model: ASRModel) -> None:
@@ -354,10 +324,18 @@ def _forward_pass(model: ASRModel, dtype: torch.dtype, device: str) -> torch.Ten
 
 
 def _print_grad_coverage(enc: _Component, proj: _Component, lm: _Component) -> None:
-    """[3] (after backward) How many params of each component received .grad."""
-    print(f"    encoder   params with .grad: {enc.with_grad}/{enc.total} (expected 0 — frozen)")
-    print(f"    projector params with .grad: {proj.with_grad}/{proj.total} (expected all)")
-    print(f"    decoder   params with .grad: {lm.with_grad}/{lm.total} (expected all)")
+    """[3] (after backward) How many params of each component received .grad.
+
+    Expected = the component's trainable (requires_grad) params, which the
+    experiment's freeze settings decide -- 0 for a frozen encoder, all of the
+    decoder for a full fine-tune, all but embed_tokens under
+    freeze_text_embed_tokens.
+    """
+    for label, comp in (("encoder  ", enc), ("projector", proj), ("decoder  ", lm)):
+        print(
+            f"    {label} params with .grad: {comp.with_grad}/{comp.total} "
+            f"(expected {comp.trainable} trainable)"
+        )
     print()
 
 
@@ -451,10 +429,9 @@ def _scan_nonfinite_grads(model: ASRModel) -> int:
     return bad
 
 
-def _print_optimizer_routing(model: ASRModel) -> _Routing:
+def _print_optimizer_routing(model: ASRModel, knobs: dict[str, float | None]) -> _Routing:
     """[9] Build ASRTrainer-style param groups and audit their coverage."""
     print("[9] Optimizer param-group routing (mirrors scripts/train.py ASRTrainer):")
-    knobs = load_embedded_training_knobs()
     groups = build_param_groups(model, knobs)
     print(
         f"    {'group':22s} {'params':>6s} {'numel':>14s}  "
@@ -478,14 +455,11 @@ def _print_optimizer_routing(model: ASRModel) -> _Routing:
         f"({'no orphans' if total_routed == expected_trainable else 'ORPHANS PRESENT'})"
     )
 
-    encoder_param_ptrs = {p.data_ptr() for p in model.audio_tower.parameters()}
-    encoder_in_groups = sum(
-        1 for g in groups for p in g["params"] if p.data_ptr() in encoder_param_ptrs
-    )
-    if encoder_in_groups:
-        print(f"    !! encoder params in optimizer groups: {encoder_in_groups} (should be 0)")
+    frozen_in_groups = sum(1 for g in groups for p in g["params"] if not p.requires_grad)
+    if frozen_in_groups:
+        print(f"    !! frozen params in optimizer groups: {frozen_in_groups} (should be 0)")
     print()
-    return _Routing(knobs, groups, total_routed, expected_trainable, encoder_in_groups)
+    return _Routing(groups, total_routed, expected_trainable, frozen_in_groups)
 
 
 def _print_effective_update(groups: list[ParamGroup]) -> None:
@@ -501,17 +475,26 @@ def _print_effective_update(groups: list[ParamGroup]) -> None:
     print()
 
 
+def _coverage_issue(label: str, comp: _Component) -> str | None:
+    """Why `comp`'s gradients disagree with its freeze settings, or None."""
+    if comp.trainable == 0:
+        if comp.with_grad or comp.norm != 0.0:
+            return f"{label} is receiving gradient (should be frozen)"
+        return None
+    if comp.with_grad != comp.trainable or comp.norm == 0.0:
+        return f"{label} grads incomplete or zero ({comp.with_grad}/{comp.trainable} trainable)"
+    return None
+
+
 def _verdict_issues(
     enc: _Component, proj: _Component, lm: _Component, bad: int, routing: _Routing
 ) -> list[str]:
     """Hard failures: wrong grad flow, non-finite grads, or misrouted params."""
-    issues: list[str] = []
-    if enc.with_grad != 0 or enc.norm != 0.0:
-        issues.append("encoder is receiving gradient (should be frozen)")
-    if proj.with_grad != proj.total or proj.norm == 0.0:
-        issues.append("projector grads incomplete or zero")
-    if lm.with_grad != lm.total or lm.norm == 0.0:
-        issues.append("decoder grads incomplete or zero")
+    issues = [
+        issue
+        for label, comp in (("encoder", enc), ("projector", proj), ("decoder", lm))
+        if (issue := _coverage_issue(label, comp)) is not None
+    ]
     if bad:
         issues.append(f"{bad} param(s) have non-finite grads")
     # Optimizer-routing audit (relies on the counts from [9])
@@ -520,16 +503,16 @@ def _verdict_issues(
             f"optimizer group routing: {routing.total_routed} routed "
             f"vs {routing.expected_trainable} trainable (orphans)"
         )
-    if routing.encoder_in_groups:
+    if routing.frozen_in_groups:
         issues.append(
-            f"optimizer group routing: {routing.encoder_in_groups} frozen "
-            "encoder param(s) ended up in an optimizer group"
+            f"optimizer group routing: {routing.frozen_in_groups} frozen "
+            "param(s) ended up in an optimizer group"
         )
     return issues
 
 
-def _verdict_warnings(sub_norms: dict[str, float], knobs: dict[str, float | None]) -> list[str]:
-    """Soft findings: a starved projector linear_1, or LRs off the designed values."""
+def _verdict_warnings(sub_norms: dict[str, float]) -> list[str]:
+    """Soft findings: a starved projector linear_1."""
     warnings: list[str] = []
     # Projector linear_1 starvation check (relies on [4b])
     if sub_norms:
@@ -540,21 +523,10 @@ def _verdict_warnings(sub_norms: dict[str, float], knobs: dict[str, float | None
                 "projector linear_1 < 1% of max submodule grad — RMSNorm-init "
                 "claim at projectors.py:30 may be wrong; verify before relying on it"
             )
-    # LR/WD mismatch vs embedded.yaml. Only check when knobs were readable.
-    if knobs["learning_rate"] is not None and knobs["learning_rate"] != 1e-3:
-        warnings.append(
-            f"embedded.yaml learning_rate={knobs['learning_rate']} "
-            "differs from the 1e-3 this probe was designed against"
-        )
-    if knobs["decoder_learning_rate"] is not None and knobs["decoder_learning_rate"] != 1e-4:
-        warnings.append(
-            f"embedded.yaml decoder_learning_rate={knobs['decoder_learning_rate']} "
-            "differs from the 1e-4 this probe was designed against"
-        )
     return warnings
 
 
-def _print_verdict(issues: list[str], warnings: list[str]) -> None:
+def _print_verdict(experiment: str, issues: list[str], warnings: list[str]) -> None:
     """[11] FAIL/WARN lines, or the all-clear summary when nothing failed."""
     print("[11] Verdict:")
     for s in issues:
@@ -562,16 +534,21 @@ def _print_verdict(issues: list[str], warnings: list[str]) -> None:
     for w in warnings:
         print(f"    [WARN] {w}")
     if not issues:
-        print("    [OK] gradient flow matches embedded.yaml's intent:")
-        print("         - encoder frozen (no grad)")
-        print("         - projector + decoder fully trainable, all params got grad")
+        print(f"    [OK] gradient flow matches {experiment}'s freeze settings:")
+        print("         - every trainable param got a non-zero grad, no frozen one did")
         print("         - all grads finite")
         print("         - optimizer groups route every trainable param exactly once")
 
 
-def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
+def report(
+    model: ASRModel,
+    dtype: torch.dtype,
+    device: str,
+    experiment: str,
+    knobs: dict[str, float | None],
+) -> None:
     """Run one forward + backward and print every audit section, then a verdict."""
-    print(f"== embedded.yaml gradient flow probe ({dtype}, {device}) ==\n")
+    print(f"== {experiment} gradient flow probe ({dtype}, {device}) ==\n")
     _print_parameter_summary(model)
     loss = _forward_pass(model, dtype, device)
 
@@ -587,12 +564,13 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     _print_decoder_breakdown(model)
     _print_audio_token_rows(model)
     bad = _scan_nonfinite_grads(model)
-    routing = _print_optimizer_routing(model)
+    routing = _print_optimizer_routing(model, knobs)
     _print_effective_update(routing.groups)
 
     _print_verdict(
+        experiment,
         _verdict_issues(enc, proj, lm, bad, routing),
-        _verdict_warnings(sub_norms, routing.knobs),
+        _verdict_warnings(sub_norms),
     )
 
 
@@ -615,16 +593,25 @@ def main(
     ] = None,
     dtype: Annotated[Dtype, typer.Option("--dtype", help="Torch dtype to run in")] = Dtype.float32,
     device: Annotated[str, typer.Option("--device", help="cpu / cuda / mps")] = "cpu",
+    experiment: Annotated[
+        str,
+        typer.Option(
+            "--experiment",
+            "-e",
+            help="configs/experiments/ name: builds the fresh model and supplies "
+            "the optimizer LR / WD knobs",
+        ),
+    ] = "stage_1",
 ) -> None:
     """Probe gradient flow on a checkpoint (per-component grad norms)."""
-    torch_dtype = {
-        Dtype.float32: torch.float32,
-        Dtype.bfloat16: torch.bfloat16,
-        Dtype.float16: torch.float16,
-    }[Dtype(dtype)]
-    torch.manual_seed(0)
-    built = build_model(torch_dtype, device, model_id=model)
-    report(built, torch_dtype, device)
+    # Dtype's values are torch attribute names by construction.
+    torch_dtype: torch.dtype = getattr(torch, Dtype(dtype).value)
+    # Seeds python, numpy and torch (CPU + CUDA): the fresh projector init and
+    # the probe's noise audio both draw from them.
+    set_seed(0)
+    cfg = load_experiment_config(experiment)
+    built = build_model(torch_dtype, device, cfg, model_id=model)
+    report(built, torch_dtype, device, experiment, training_knobs(cfg))
 
 
 if __name__ == "__main__":

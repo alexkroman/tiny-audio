@@ -11,6 +11,7 @@ from hydra.errors import ConfigCompositionException
 from omegaconf import DictConfig, OmegaConf
 from transformers import TrainingArguments
 
+from scripts import train as train_module
 from scripts.train import TRAINING_MODEL_PARAMS
 from scripts.train_config import ModelConfig, TrainingConfig
 from tiny_audio.asr_config import ASRConfig
@@ -92,3 +93,45 @@ def test_wrong_type_rejected() -> None:
 def test_append_syntax_adds_undeclared_key() -> None:
     cfg = _compose(["+training.warmup_ratio=0.05"])
     assert cfg.training.warmup_ratio == 0.05
+
+
+class _ReachedModelBuildError(Exception):
+    """Raised in place of ASRModel: main() got past its startup checks."""
+
+
+class TestHubTokenPreflight:
+    """main() refuses push_to_hub only when huggingface_hub has no token at all."""
+
+    @staticmethod
+    def _run_main(monkeypatch: pytest.MonkeyPatch, token: str | None, *overrides: str) -> None:
+        def no_model(*_a: object, **_k: object) -> None:
+            raise _ReachedModelBuildError
+
+        monkeypatch.setattr(train_module, "get_token", lambda: token)
+        monkeypatch.setattr(train_module, "ASRModel", no_model)
+        cfg = _compose(
+            [
+                "training.push_to_hub=true",
+                "training.hub_model_id=me/model",
+                "training.report_to=none",
+                "training.use_liger=false",
+                *overrides,
+            ]
+        )
+        # Bypass @hydra.main's argv parsing; the undecorated body takes the cfg.
+        train_module.main.__wrapped__(cfg)
+
+    def test_no_token_anywhere_fails_before_model_load(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with pytest.raises(ValueError, match="no Hugging Face token"):
+            self._run_main(monkeypatch, None)
+
+    def test_cached_login_is_enough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`hf auth login` with no HF_TOKEN in the env used to be rejected."""
+        with pytest.raises(_ReachedModelBuildError):
+            self._run_main(monkeypatch, "hf_cached")
+
+    def test_explicit_hub_token_is_enough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with pytest.raises(_ReachedModelBuildError):
+            self._run_main(monkeypatch, None, "training.hub_token=hf_cfg")

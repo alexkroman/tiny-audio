@@ -9,8 +9,6 @@ from typing import Annotated, TypedDict
 import typer
 from rich.console import Console
 
-from scripts.itn import contains_subsequence
-
 console = Console()
 
 # Written by the (since removed) `ta analysis extract-entities`: spaCy entities
@@ -61,12 +59,13 @@ def normalize_text(text: str) -> str:
 
 
 def entity_in_text(entity_text: str, text: str) -> bool:
-    """Check if entity appears in text (normalized comparison)."""
-    norm_entity = normalize_text(entity_text)
-    norm_text = normalize_text(text)
-    if norm_entity in norm_text:
-        return True
-    return contains_subsequence(norm_text.split(), norm_entity.split())
+    """Check if entity appears in text (normalized comparison).
+
+    A plain substring test. `normalize_text` collapses whitespace on both
+    sides, so a contiguous token-run match is already a substring match; a
+    token-level subsequence fallback here could never fire.
+    """
+    return normalize_text(entity_text) in normalize_text(text)
 
 
 def load_ref_entities() -> dict[str, list[Entity]]:

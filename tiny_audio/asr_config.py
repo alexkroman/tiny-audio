@@ -76,9 +76,10 @@ def compute_encoder_output_length(
 
 def _config_from_dict(model_type: str, values: dict[str, Any]) -> transformers.PretrainedConfig:
     """Rebuild a serialized sub-config as the config class registered for `model_type`."""
-    auto_config = transformers.AutoConfig
-    default = auto_config.for_model(model_type)
-    return default.__class__(**values)
+    # Serialized configs carry their own `model_type`, which would collide with
+    # for_model's positional argument; the config class already sets it.
+    kwargs = {key: value for key, value in values.items() if key != "model_type"}
+    return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 
 class ASRConfig(transformers.PretrainedConfig):
